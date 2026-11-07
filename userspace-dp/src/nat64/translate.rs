@@ -78,54 +78,6 @@ pub(super) fn rfc1191_plateau_mtu(quoted_total_len: u32) -> u32 {
 /// `1280 + 20`.
 pub(super) const MAX_EMBEDDED_LEN: usize = 1280 + NAT64_HEADER_DELTA as usize;
 
-/// Process-global IPv4 Identification generator for header-less translated
-/// datagrams that leave DF clear. RFC 7915 §5.1 requires it for translated
-/// IPv4 packets up to 1260 bytes; the local no-v6-frag-header option also uses
-/// it when explicitly keeping larger packets fragmentable.
-///
-/// RFC 6864 §4.1 requires a source emitting non-atomic datagrams (DF=0) not
-/// to repeat IDs for a given source/destination/protocol tuple within one
-/// Maximum Datagram Lifetime. A monotonically incrementing counter is a cheap
-/// generator; atomic datagrams (DF=1) are exempt and keep ID=0.
-static NAT64_FRAG_ID: AtomicU32 = AtomicU32::new(0);
-
-/// Return the next non-zero 16-bit Fragment Identification value for a
-/// fragmentable translated datagram. The value cycles over the full non-zero
-/// 16-bit space `1..=65535` with no two consecutive values equal WITHIN the
-/// 65535-value cycle (the value after 65535 is 1, a jump, not a repeat).
-/// Skipping 0 keeps the all-zero ID reserved (by convention) for the atomic
-/// DF=1 path.
-///
-/// CAVEAT: at the outer `AtomicU32` counter wrap — once per 2^32 fragmentable
-/// translations — two ADJACENT values do collide: `(2^32 - 1) % 65535 == 0`
-/// and the wrapped `0 % 65535 == 0` both map to ID 1. This is deliberately
-/// accepted (#2014 r3, Codex+AGY): IPv4's 16-bit Identification inherently
-/// repeats every 65535 packets regardless, so one extra adjacent duplicate per
-/// ~4.3e9 translations is operationally negligible and not worth replacing the
-/// lock-free `fetch_add` with a CAS/modulo-65535 counter that would bounce a
-/// cache line on this path.
-pub(super) fn next_frag_id() -> u16 {
-    // Relaxed is sufficient: we only need a distinct, non-repeating sequence,
-    // not ordering against other memory. Map the monotonic 32-bit counter onto
-    // 1..=65535 via `(raw % 65535) + 1`. This is what makes the sequence
-    // collision-free for RFC 6864 4.1: a naive `truncate-to-u16 then remap 0->1`
-    // maps BOTH raw=0 and raw=1 to 1, so two back-to-back DF=0 translations
-    // would share an Identification (and the same dup recurs at every 16-bit
-    // wrap). `% 65535 + 1` instead yields 1,2,...,65535,1,2,... — every adjacent
-    // pair differs.
-    let raw = NAT64_FRAG_ID.fetch_add(1, Ordering::Relaxed);
-    map_frag_id(raw)
-}
-
-/// Pure mapping from a monotonic 32-bit counter value to the 1..=65535
-/// Identification space. Factored out of `next_frag_id` so the cycle invariant
-/// (non-zero, in-range, no consecutive duplicates within the 65535-value cycle
-/// — see the `next_frag_id` caveat for the accepted 2^32-boundary edge) can be
-/// unit-tested deterministically without touching the process-global counter.
-#[inline]
-pub(super) fn map_frag_id(raw: u32) -> u16 {
-    (raw % 65535) as u16 + 1
-}
 
 /// Translate an IPv6 packet to IPv4 (forward direction: client→server).
 ///
@@ -140,10 +92,10 @@ pub(super) fn map_frag_id(raw: u32) -> u16 {
 /// (with Identification 0). If an IPv6 Fragment Header is present, its
 /// Identification and fragment geometry are preserved regardless of the option.
 ///
-/// Whichever path clears DF, the Identification MUST be consistent with it: a
-/// DF=0 datagram is non-atomic, so RFC 6864 §4.1 forbids a constant/repeated ID;
-/// header-less outputs use the per-translator generator so downstream fragments
-/// remain reassemblable rather than colliding on a constant ID.
+/// The Identification MUST be consistent with the DF policy: a DF=0 datagram
+/// is non-atomic, so RFC 6864 §4.1 forbids a constant/repeated ID. Header-less
+/// outputs use the shared datagram Identification sequence so downstream
+/// fragments remain reassemblable rather than colliding on a constant ID.
 ///
 /// Returns the translated IPv4 packet (L3 only, no Ethernet header).
 ///
@@ -741,7 +693,11 @@ pub(super) fn write_v6_to_v4_translate(
             let mf = if info.more { 0x2000u16 } else { 0 };
             (mf | (info.offset_units & 0x1FFF), (info.ident & 0xFFFF) as u16)
         }
-        None if no_v6_frag_header || ipv4_total_len <= 1260 => (0x0000, next_frag_id()),
+        None if no_v6_frag_header || ipv4_total_len <= 1260 => {
+            (0x0000, crate::afxdp::frame::map_ipv4_identification(
+                crate::afxdp::frame::next_datagram_identification(),
+            ))
+        }
         None => (0x4000, 0),
     };
     out[4..6].copy_from_slice(&identification.to_be_bytes());

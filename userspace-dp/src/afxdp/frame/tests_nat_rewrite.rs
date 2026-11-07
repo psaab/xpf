@@ -2634,7 +2634,7 @@ fn nat64_15956_spare_capacity_build_is_byte_identical_with_poisoned_tail() {
     // Poison the pool: recycle a 0xEE-filled buffer at the build capacity,
     // then rebuild. The published prefix must not contain the poison. The
     // IPv4 Identification (frame bytes 18..20) and its header checksum
-    // (24..26) are process-global `next_frag_id()` output for this
+    // (24..26) come from the shared datagram Identification sequence for this
     // fragmentable size, so they legitimately differ between two builds;
     // mask them exactly like the existing differential test does.
     let capacity = frame.len() + 4;

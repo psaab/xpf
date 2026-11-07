@@ -156,6 +156,49 @@ fn ipv4_tunnel_header_honors_selected_df_policy() {
     }
 }
 
+#[test]
+fn ipv4_tunnel_header_df_set_id_is_constant_and_df_clear_ids_are_unique_17266() {
+    // #17266: a DF-set (atomic, RFC 6864) tunnel outer must carry the
+    // constant ID 0 regardless of call order — interleaved fragmentable
+    // (DF-clear) calls must not move it — and DF-clear calls must stay
+    // unique across sequential calls. Pre-fix the DF path unconditionally
+    // fetch_added the tunnel-ID counter, so the ID depended on prior calls.
+    let id_of = |df: bool| -> u16 {
+        let mut buf = [0xffu8; 20];
+        write_ipv4_tunnel_header(
+            &mut buf,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            47,
+            0,
+            64,
+            120,
+            df,
+        )
+        .expect("write_ipv4_tunnel_header");
+        assert_eq!(checksum16(&buf), 0, "header checksum must remain valid");
+        u16::from_be_bytes([buf[4], buf[5]])
+    };
+    let first = id_of(true);
+    let frag_a = id_of(false);
+    let frag_b = id_of(false);
+    let second = id_of(true);
+    assert_eq!(first, 0, "DF-set outer must carry constant ID 0 (RFC 6864 atomic)");
+    assert_eq!(second, 0, "DF-set ID must not depend on call order");
+    assert_ne!(frag_a, frag_b, "DF-clear IDs must stay unique across sequential calls");
+}
+
+#[test]
+fn shared_ipv4_identification_mapping_prevents_cross_site_wrap_collision_17266() {
+    // Before both IPv4 writers used the same mapping, raw=65534 mapped to
+    // 65535 in NAT64 while raw=65535 narrowed directly to 65535 in tunnels.
+    let nat64_id = map_ipv4_identification(65534);
+    let tunnel_id = map_ipv4_identification(65535);
+    assert_eq!(nat64_id, 65535);
+    assert_eq!(tunnel_id, 1);
+    assert_ne!(nat64_id, tunnel_id);
+}
+
 // ---- IPv6 outer / GRE pattern ----
 
 #[test]

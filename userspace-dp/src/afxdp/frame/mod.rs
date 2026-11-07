@@ -41,6 +41,7 @@ pub(in crate::afxdp) use headers::{
     TxVlanTag, write_eth_header, write_eth_header_tagged, write_ipv4_header,
     write_ipv4_tunnel_header, write_ipv6_header,
 };
+pub(crate) use headers::{map_ipv4_identification, next_datagram_identification};
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.
 pub(crate) use headers::write_eth_header_slice;
@@ -551,9 +552,7 @@ fn fragment_nat64_ipv6_frame(
             48,
         )
     } else {
-        static NAT64_V6_FRAGMENT_ID: std::sync::atomic::AtomicU32 =
-            std::sync::atomic::AtomicU32::new(1);
-        (base_next, 0, false, NAT64_V6_FRAGMENT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed), 40)
+        (base_next, 0, false, next_datagram_identification(), 40)
     };
     let data = ip.get(data_offset..total_len)?;
     let max_data = mtu.saturating_sub(48) / 8 * 8;

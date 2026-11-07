@@ -196,7 +196,6 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP};
-use std::sync::atomic::AtomicU32;
 
 // ---------------------------------------------------------------------------
 // #16188: nat64.rs split into the nat64/ module (motion-only).
@@ -235,7 +234,6 @@ use std::sync::atomic::AtomicU32;
 //                ICMP_DEST_UNREACHABLE, ICMP_TIME_EXCEEDED,
 //                ICMP_PARAMETER_PROBLEM, IPV6_MIN_MTU,
 //                NAT64_HEADER_DELTA, MAX_EMBEDDED_LEN,
-//                rfc1191_plateau_mtu, next_frag_id, map_frag_id,
 //                ipv6_l4_offset_and_protocol,
 //                nat64_v6_translation_ineligible,
 //                ipv6_is_non_first_fragment, write_v6_to_v4_translate,
@@ -273,11 +271,10 @@ use std::sync::atomic::AtomicU32;
 // head), the map_icmpv6_error_to_icmpv4 doc (translate tail -> icmp
 // head), and the write_v6_to_v4_nonfirst_translate doc (checksum tail
 // -> frames head). Their text is verbatim; only their file changed.
-// The two mid-file `use` lines that sat inside the translate seam
-// (crate::ip_proto::* and AtomicU32, pre-split lines 2736-2737) now
-// sit in this root's import block: a submodule's private `use` is
-// NOT forwarded by a sibling's `use super::*` glob, so leaving them
-// in translate.rs starved icmp/checksum/frames of PROTO_*.
+// The `crate::ip_proto::*` mid-file `use` that sat inside the translate seam
+// (pre-split line 2736) now sits in this root's import block: a submodule's
+// private `use` is NOT forwarded by a sibling's `use super::*` glob, so leaving
+// it in translate.rs starved icmp/checksum/frames of PROTO_*.
 //
 // The tests module's #[path] is respelled ../nat64_tests.rs for the
 // new depth, and its #2211 source scan now reads nat64/checksum.rs

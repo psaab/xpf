@@ -529,10 +529,10 @@ pub(super) fn translate_embedded_v6_to_v4(
     // Fragment Header geometry reaches the copy below.
     //
     // The unfragmented case is byte-identical to before (0x4000, ID 0), and
-    // deliberately does NOT borrow the outer translator's `next_frag_id()`
-    // arm: that mints a fresh Identification for a datagram this box is about
-    // to send, whereas a quote describes a packet that already exists on the
-    // wire. Inventing an ID for it would be a fabrication, not a translation.
+    // deliberately does NOT borrow the outer translator's non-atomic ID
+    // generator: that mints a fresh Identification for a datagram this box is
+    // about to send, whereas a quote describes a packet that already exists on
+    // the wire. Inventing an ID for it would be a fabrication, not a translation.
     let embedded_frag_word = layout.fragment_word;
     let embedded_ident = layout.identification;
     out[4..6].copy_from_slice(&embedded_ident.to_be_bytes()); // identification

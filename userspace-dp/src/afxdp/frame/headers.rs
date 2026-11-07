@@ -25,12 +25,13 @@
 //   - `write_ipv4_header` sets DF=1 (Flags+FragOffset = 0x4000) while
 //     retaining ID=0. RFC 6864 §4 / §5.3.1 permits a constant ID for
 //     atomic datagrams (DF=1, MF=0, FragOffset=0).
-//   - `write_ipv4_tunnel_header` accepts an explicit DF choice and uses an
-//     advancing Identification. GRE copies inner IPv4 DF by default or
-//     clears it when configured; WireGuard always clears it. A clear-DF
-//     outer can be fragmented by a downstream router when the underlay path
-//     is smaller than the local link. Generated ICMP errors and other header
-//     users retain the default DF-set behavior.
+//   - `write_ipv4_tunnel_header` accepts an explicit DF choice. It writes
+//     constant ID=0 for DF-set atomic datagrams (RFC 6864) and advances the
+//     shared Identification sequence only when DF is clear. GRE copies inner
+//     IPv4 DF by default or clears it when configured; WireGuard always clears
+//     it. A clear-DF outer can be fragmented by a downstream router when the
+//     underlay path is smaller than the local link. Generated ICMP errors and
+//     other header users retain the default DF-set behavior.
 //   - `write_ipv6_header` writes the IPv6 fixed header with
 //     caller-supplied traffic-class / flow-label / hop-limit.
 //   - `write_udp_header` accepts a plain `u16` checksum (not
@@ -40,11 +41,28 @@
 use super::checksum::checksum16;
 use super::super::ethernet::ETHERTYPE_VLAN;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-// RFC 6864 requires unique IDs for non-atomic IPv4 datagrams. When a tunnel
-// outer clears DF, its downstream fragments need distinct IDs for reassembly.
-static IPV4_TUNNEL_ID: AtomicU16 = AtomicU16::new(1);
+// Shared process-wide Identification sequence for generated fragmentable
+// datagrams. Atomic IPv4 datagrams (DF=1, MF=0, FragOffset=0) use ID=0 and do
+// not advance this counter.
+static DATAGRAM_IDENTIFICATION: AtomicU32 = AtomicU32::new(1);
+
+/// Get the next raw value from the shared generated-datagram Identification
+/// sequence. Callers narrow or map it to their wire field as needed.
+#[inline]
+pub(crate) fn next_datagram_identification() -> u32 {
+    DATAGRAM_IDENTIFICATION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Map a raw shared sequence value into the non-zero IPv4 Identification
+/// space. Every generated IPv4 datagram uses this same mapping so different
+/// output paths cannot collide by mapping adjacent raw values differently.
+/// At the `u32` source wrap, raw `u32::MAX` and 0 both map to 1.
+#[inline]
+pub(crate) fn map_ipv4_identification(raw: u32) -> u16 {
+    (raw % 65535) as u16 + 1
+}
 
 /// An egress 802.1Q/802.1ad tag carrying the full TCI (PCP, DEI, VID)
 /// plus the TPID and a presence flag.
@@ -258,9 +276,9 @@ pub(in crate::afxdp) fn write_ipv4_header(
     Some(20)
 }
 
-/// Write a tunnel outer IPv4 header with caller-selected DF and an
-/// advancing Identification, preserving the RFC 6864 requirement for
-/// fragmented datagrams when DF is clear.
+/// Write a tunnel outer IPv4 header with caller-selected DF. DF-set atomic
+/// datagrams use constant ID=0; DF-clear datagrams advance the shared
+/// Identification sequence as required for downstream fragmentation.
 #[inline]
 pub(in crate::afxdp) fn write_ipv4_tunnel_header(
     buf: &mut [u8],
@@ -276,7 +294,12 @@ pub(in crate::afxdp) fn write_ipv4_tunnel_header(
     ip[0] = 0x45;
     ip[1] = tos;
     ip[2..4].copy_from_slice(&total_len.to_be_bytes());
-    ip[4..6].copy_from_slice(&IPV4_TUNNEL_ID.fetch_add(1, Ordering::Relaxed).to_be_bytes());
+    let identification = if df {
+        0
+    } else {
+        map_ipv4_identification(next_datagram_identification())
+    };
+    ip[4..6].copy_from_slice(&identification.to_be_bytes());
     ip[6..8].copy_from_slice(&(if df { 0x4000u16 } else { 0 }).to_be_bytes()); // DF, FragOffset=0
     ip[8] = if ttl == 0 { 64 } else { ttl };
     ip[9] = protocol;

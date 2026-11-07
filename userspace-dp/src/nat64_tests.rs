@@ -4,6 +4,7 @@
 // `#[path = "nat64_tests.rs"]` from nat64.rs.
 
 use super::*;
+use crate::afxdp::frame::map_ipv4_identification;
 // #7899: the fragment-association cache moved to `crate::fragment_assoc`. The
 // 55 frag tests in this file were NOT moved with it -- they are interleaved with
 // 119 non-frag NAT64 tests across 7000 lines, and extracting them is a separate
@@ -1802,14 +1803,14 @@ fn translate_v6_to_v4_no_v6_frag_header_overrides_size_keyed_df() {
 fn translate_v6_to_v4_no_v6_frag_header_identification_is_unique() {
     // RFC 6864 4.1: a source emitting non-atomic (DF=0) datagrams MUST NOT
     // repeat the Identification for a given src/dst/proto tuple within one MDL.
-    // The per-translator generator advances on every fragmentable translation,
-    // so successive DF=0 translations must carry DISTINCT non-zero IDs.
+    // The shared generator advances on fragmentable outputs, so successive
+    // DF=0 translations must carry DISTINCT non-zero IDs.
     //
-    // This test is DETERMINISTIC and robust to the process-global counter's
-    // start value (it does not assume the generator begins at any particular
-    // raw value): it exercises the pure mapping `map_frag_id` over a CONTROLLED
-    // consecutive sequence that crosses the 0/1 boundary AND a full 16-bit wrap,
-    // and asserts the cycle invariants directly. The old test passed only by
+    // This test is DETERMINISTIC and robust to the shared counter's start value
+    // (it does not assume the generator begins at any particular raw value): it
+    // exercises the shared pure mapping `map_ipv4_identification` over a CONTROLLED consecutive
+    // sequence that crosses the 0/1 boundary AND a full 16-bit wrap, and
+    // asserts the cycle invariants directly. The old test passed only by
     // accident — other tests advanced the shared atomic before it ran, so it
     // FAILED in isolation (`cargo test <name> -- --exact`).
     //
@@ -1823,7 +1824,7 @@ fn translate_v6_to_v4_no_v6_frag_header_identification_is_unique() {
     // a step proves there is no consecutive duplicate ANYWHERE, including the
     // 65535 -> 1 jump.
     for raw in 0u32..=65536 {
-        let id = map_frag_id(raw);
+        let id = map_ipv4_identification(raw);
         assert_ne!(id, 0, "Identification must be non-zero (raw={raw})");
         assert!(
             (1..=65535).contains(&id),
@@ -1839,11 +1840,11 @@ fn translate_v6_to_v4_no_v6_frag_header_identification_is_unique() {
         prev = Some(id);
     }
     // Spot-check the boundary and wrap values the pre-fix mapping got wrong.
-    assert_eq!(map_frag_id(0), 1);
-    assert_eq!(map_frag_id(1), 2, "raw=1 must NOT collide with raw=0 (the bug)");
-    assert_eq!(map_frag_id(65534), 65535, "top of the cycle");
-    assert_eq!(map_frag_id(65535), 1, "wrap is a jump 65535 -> 1, not a repeat");
-    assert_eq!(map_frag_id(65536), 2);
+    assert_eq!(map_ipv4_identification(0), 1);
+    assert_eq!(map_ipv4_identification(1), 2, "raw=1 must NOT collide with raw=0 (the bug)");
+    assert_eq!(map_ipv4_identification(65534), 65535, "top of the cycle");
+    assert_eq!(map_ipv4_identification(65535), 1, "wrap is a jump 65535 -> 1, not a repeat");
+    assert_eq!(map_ipv4_identification(65536), 2);
 
     // End-to-end smoke: two back-to-back fragmentable translations both carry
     // non-zero IDs and stay DF=0 with valid checksums. (The no-consecutive-dup
@@ -10786,9 +10787,8 @@ fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
         assert!(!got.contains(&0xEE), "#15956 {name}: poison in output");
     };
     // Outer IPv4 Identification (frame bytes 18..20) + header checksum
-    // (24..26) for header-less v6->v4 outputs are process-global
-    // `next_frag_id()` output; two builds legitimately differ there.
-    // Mask those four bytes on copies before comparing.
+    // (24..26) for header-less v6->v4 outputs come from the shared datagram
+    // Identification sequence; two builds legitimately differ there.
     let mask_outer_id = |v: &[u8]| -> Vec<u8> {
         let mut v = v.to_vec();
         if v.len() >= 26 && v[14] >> 4 == 4 {
@@ -10807,8 +10807,8 @@ fn nat64_15956_into_builders_byte_identical_with_poisoned_dst() {
         let want = build_nat64_v6_to_v4_frame(&frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("ref v6to4");
         let mut dst = vec![0xEEu8; frame.len() + 4];
         let n = build_nat64_v6_to_v4_frame_into(&mut dst, &frame, snat, dst4, [0x11; 6], [0x22; 6], 0, false).expect("into v6to4");
-        // Identification (L3 bytes 4..6) + header checksum (10..12) are
-        // process-global next_frag_id() output here; mask like the
+        // Identification (L3 bytes 4..6) + header checksum (10..12) come from
+        // the shared datagram Identification sequence here; mask like the
         // existing differential test.
         check("v6to4", &mask_outer_id(&want), &mask_outer_id(&dst[..n]));
 
