@@ -34,28 +34,37 @@ func (c *CLI) configModeEntryAllowed() bool {
 }
 
 // operationalShowConfigurationCompare identifies the compare handler pipe
-// that belongs to operational `show configuration`, not config-mode `show`.
-// A foreign/global config lock does not change this console's prompt; routing
-// this command through dispatchConfig would compare the dirty candidate.
+// for `show configuration` on an operational prompt. It resolves the command
+// prefix the same way as dispatchOperational and accepts both spaced and
+// glued pipe spellings so malformed forms cannot fall through to config show.
 func operationalShowConfigurationCompare(line string) bool {
 	parts := strings.Fields(line)
-	if len(parts) < 3 {
+	if len(parts) < 2 {
 		return false
 	}
 	verb, err := resolveCommand(parts[0], operationalCommands)
 	if err != nil || verb != "show" {
 		return false
 	}
+	subcommandToken := parts[1]
+	gluedCompare := false
+	if before, after, hasPipe := strings.Cut(subcommandToken, "|"); hasPipe {
+		subcommandToken = before
+		gluedCompare = after == "compare"
+	}
 	showTree := operationalTree["show"].Children
-	subcommand, err := resolveCommand(parts[1], keysFromTree(showTree))
+	subcommand, err := resolveCommand(subcommandToken, keysFromTree(showTree))
 	if err != nil || subcommand != "configuration" {
 		return false
+	}
+	if gluedCompare {
+		return true
 	}
 	for i := 2; i < len(parts); i++ {
 		if parts[i] == "|" {
 			return i+1 < len(parts) && parts[i+1] == "compare"
 		}
-		if parts[i] == "|compare" {
+		if parts[i] == "|compare" || strings.HasSuffix(parts[i], "|compare") {
 			return true
 		}
 	}
@@ -117,13 +126,16 @@ func (c *CLI) dispatch(line string) error {
 		if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID {
 			foreign = true
 		}
-		if !c.configModeEntryAllowed() || foreign {
-			// Operational show compares are read-only handler pipes. Route them
-			// before checkConfigModePerm so accepted command prefixes like `sh`
+		// The prompt is operational unless this CLI owns the edit session.
+		// Preserve owned config-mode candidate compares; only operational
+		// compare shapes use the active-baseline handler, including the legacy
+		// no-RBAC ownerless window.
+		if !c.configOwnedNow() && operationalShowConfigurationCompare(line) {
+			// Route before checkConfigModePerm so accepted prefixes like `sh`
 			// are resolved and priced by dispatchOperational.
-			if operationalShowConfigurationCompare(line) {
-				return c.dispatchOperational(line)
-			}
+			return c.dispatchOperational(line)
+		}
+		if !c.configModeEntryAllowed() || foreign {
 			if err := c.checkConfigModePerm(line); err != nil {
 				return err
 			}

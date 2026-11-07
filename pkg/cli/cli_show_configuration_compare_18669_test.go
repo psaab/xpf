@@ -298,6 +298,136 @@ func TestCLIShowConfigurationCompareDispatchAcrossConfigHolders18669(t *testing.
 		}
 	}
 }
+func TestCLIShowConfigurationCompareDispatchOwnerlessNoRBAC18669(t *testing.T) {
+	newCLI := func(t *testing.T) (*CLI, *configstore.Store) {
+		t.Helper()
+		store := showCompareStore18669(t)
+		c := &CLI{store: store}
+		if c.UserClass() != "" {
+			t.Fatalf("UserClass() = %q, want empty legacy no-RBAC class", c.UserClass())
+		}
+		if c.configOwnedNow() {
+			t.Fatal("legacy no-RBAC CLI unexpectedly owns config mode")
+		}
+		if holder, _ := store.ConfigHolder(); holder != "" {
+			t.Fatalf("ConfigHolder() = %q, want no holder", holder)
+		}
+		if !store.InConfigMode() {
+			t.Fatal("fixture is not in config mode")
+		}
+		if got, want := c.promptForCurrentMode(), c.operationalPrompt(); got != want {
+			t.Fatalf("promptForCurrentMode() = %q, want operational prompt %q", got, want)
+		}
+		return c, store
+	}
+
+	for _, tc := range []struct {
+		name    string
+		line    string
+		wantIn  []string
+		wantOut []string
+	}{
+		{
+			name:    "global",
+			line:    "show configuration | compare rollback 1",
+			wantIn:  []string{activeDomain18669, activeInterface18669},
+			wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
+		},
+		{
+			name:    "scoped",
+			line:    "show configuration system | compare rollback 1",
+			wantIn:  []string{activeDomain18669},
+			wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, store := newCLI(t)
+			if !store.IsDirty() {
+				t.Fatal("fixture candidate is not dirty")
+			}
+			var err error
+			out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+			if err != nil {
+				t.Fatalf("dispatch(%q): %v", tc.line, err)
+			}
+			for _, value := range tc.wantIn {
+				if !strings.Contains(out, value) {
+					t.Errorf("dispatch(%q) output missing active-baseline value %q:\n%s", tc.line, value, out)
+				}
+			}
+			for _, value := range tc.wantOut {
+				if strings.Contains(out, value) {
+					t.Errorf("dispatch(%q) output contains candidate value %q:\n%s", tc.line, value, out)
+				}
+			}
+		})
+	}
+
+	t.Run("bare", func(t *testing.T) {
+		c, _ := newCLI(t)
+		var err error
+		out := captureStdout(t, func() { err = c.dispatch("show configuration | compare") })
+		if err == nil || err.Error() != "syntax error: | compare on operational show configuration requires rollback <N>" {
+			t.Fatalf("dispatch(bare compare) = (%q, %v); want operational compare refusal", out, err)
+		}
+		if out != "" {
+			t.Errorf("bare compare printed before refusing: %q", out)
+		}
+	})
+	t.Run("mutation-routing-unchanged", func(t *testing.T) {
+		c, store := newCLI(t)
+		const hostname = "legacy-no-rbac-mutation-18669"
+		if err := c.dispatch("set system host-name " + hostname); err != nil {
+			t.Fatalf("dispatch(no-RBAC mutation): %v", err)
+		}
+		if candidate := store.ShowCandidateSet(); !strings.Contains(candidate, hostname) {
+			t.Fatalf("no-RBAC mutation did not update the config candidate:\n%s", candidate)
+		}
+	})
+}
+
+func TestCLIShowConfigurationOwnedCompareKeepsCandidateBaseline18669(t *testing.T) {
+	store := showCompareStore18669(t)
+	store.ExitConfigure()
+	if err := store.EnterConfigureSession(localConfigSessionID); err != nil {
+		t.Fatalf("EnterConfigureSession(local): %v", err)
+	}
+	if _, err := store.LoadSet(strings.Join([]string{
+		"set system domain-name candidate-18669.invalid",
+		"set system host-name " + candidateCanary18669,
+	}, "\n")); err != nil {
+		t.Fatalf("LoadSet(candidate): %v", err)
+	}
+	c := &CLI{store: store}
+	c.setConfigOwned(true)
+	if got, want := c.promptForCurrentMode(), c.configPrompt(); got != want {
+		t.Fatalf("promptForCurrentMode() = %q, want config prompt %q", got, want)
+	}
+	var err error
+	out := captureStdout(t, func() { err = c.dispatch("show | compare rollback 1") })
+	if err != nil {
+		t.Fatalf("owned config compare: %v", err)
+	}
+	if !strings.Contains(out, candidateCanary18669) {
+		t.Fatalf("owned config compare omitted candidate canary %q:\n%s", candidateCanary18669, out)
+	}
+}
+
+func TestCLIShowConfigurationGluedCompareRollbackRefusedUnderForeignHolder18669(t *testing.T) {
+	store := foreignShowCompareStore18669(t)
+	c := &CLI{store: store, userClass: "super-user"}
+	var err error
+	out := captureStdout(t, func() { err = c.dispatch("show configuration|compare rollback 1") })
+	if err == nil {
+		t.Fatalf("dispatch(glued compare rollback) returned nil, output %q", out)
+	}
+	if out != "" {
+		t.Errorf("glued compare rollback printed before refusing: %q", out)
+	}
+	if candidate := store.ShowCandidateSet(); !strings.Contains(candidate, candidateCanary18669) {
+		t.Errorf("glued compare changed the foreign candidate:\n%s", candidate)
+	}
+}
 
 func TestCLIShowConfigurationForeignCompareRoutingKeepsLockGuards18669(t *testing.T) {
 	store := foreignShowCompareStore18669(t)
