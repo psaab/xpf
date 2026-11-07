@@ -469,6 +469,13 @@ impl PuntSeedDirectory {
         let mut keys = Vec::with_capacity(reserved_capacity);
         let mut candidate = 0u64;
         while keys.len() < reserved_capacity {
+            // The search expects ~14.7M draws; a pathological
+            // seed/hasher interaction must fail loudly, not spin
+            // past the 2^32 (src,dst) space forever (GLM seat).
+            assert!(
+                candidate < (1u64 << 33),
+                "collision search exceeded its candidate space"
+            );
             let key = SessionKey {
                 src_port: candidate as u16,
                 dst_port: (candidate >> 16) as u16,
