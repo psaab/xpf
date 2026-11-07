@@ -480,3 +480,31 @@ func TestRedactionOverlapSecretBeatsURL17270(t *testing.T) {
 		t.Fatalf("overlapping site not masked at all:\n%s", out)
 	}
 }
+
+func TestRedactionCompareFingerprintEquality17270(t *testing.T) {
+	// Kimi #17270: compare must distinguish DIFFERENT credentials and
+	// equate the SAME one — the fingerprint suffixes are load-bearing.
+	secretA := buildRedactTree(t, []string{"set system login user u1 class c password SECRET-A-17270"})
+	secretB := buildRedactTree(t, []string{"set system login user u1 class c password SECRET-B-17270"})
+	urlA := buildRedactTree(t, []string{`set system services dynamic-dns provider p1 server "https://userA:pwA-17270@upd.example.com/update"`})
+	urlB := buildRedactTree(t, []string{`set system services dynamic-dns provider p1 server "https://userB:pwB-17270@upd.example.com/update"`})
+
+	if got := FormatCompareRedacted(secretA, secretA); strings.Contains(got, "SECRET-A-17270") {
+		t.Fatalf("same-secret compare leaked: %s", got)
+	}
+	sameSecret := FormatCompareRedacted(secretA, secretA)
+	changedSecret := FormatCompareRedacted(secretA, secretB)
+	if sameSecret == changedSecret {
+		t.Fatalf("changed secret compares equal to same secret:\n%s\n---\n%s", sameSecret, changedSecret)
+	}
+	sameURL := FormatCompareRedacted(urlA, urlA)
+	changedURL := FormatCompareRedacted(urlA, urlB)
+	if sameURL == changedURL {
+		t.Fatalf("changed URL credential compares equal to same URL:\n%s\n---\n%s", sameURL, changedURL)
+	}
+	for _, out := range []string{changedSecret, changedURL} {
+		if strings.Contains(out, "SECRET-B-17270") || strings.Contains(out, "pwB-17270") || strings.Contains(out, "pwA-17270") {
+			t.Fatalf("compare leaked a credential: %s", out)
+		}
+	}
+}

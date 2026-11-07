@@ -1,4 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
+  * Config: redaction site traversal is unified behind one walk
+    (#17270). Behaviour note: a mixed embedded change-configuration
+    payload (redacted URL in an earlier command, secret placeholder in
+    a later one) now yields the secret-placeholder refusal category, so
+    tolerant load/HA sync hard-refuses it instead of warning through —
+    a fail-closed security correction.
+
   * Config: NAT64 `match source-address-name` now uses the shared NAT
     reference resolver, rejecting defined-empty closures like SNAT while
     retaining the inherited direct-feed carve-out (#16550) and DNS-only
