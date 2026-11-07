@@ -1312,9 +1312,35 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(c.commands, [])
         self.assertNotIn("restore", result["preflight"])
         self.assertIn("owner unreadable", "\n".join(logs))
-        self.assertEqual(c.status_reads, {0: 3, 1: 3})
+        self.assertEqual(c.status_reads, {0: 4, 1: 4})
         v0, v1 = soak.parse_status(c.status(0)), soak.parse_status(c.status(1))
         self.assertEqual(soak.rg_ownership(2, v0, v1).owner, 1)
+
+
+    def test_unreadable_then_changed_owner_retries_and_restores_18631(self):
+        class UnreadableThenChanged(FakeCluster):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.status_reads = {0: 0, 1: 0}
+
+            def status(self, node):
+                self.status_reads[node] += 1
+                if node == 1 and self.status_reads[node] == 3:
+                    self.owner[2] = 1
+                    return ""
+                return super().status(node)
+
+        clock = FakeClock()
+        c = UnreadableThenChanged(
+            clock, {2: 0}, stale_iperf_ports={5211: 88}, iperf_reset_fail=True)
+        rc, result, logs = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("iperf socket preflight", result["void"])
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(c.owner[2], 0)
+        self.assertIn("retrying before restore decision", "\n".join(logs))
+        self.assertIn("restored", result["preflight"]["restore"])
+        self.assertEqual([cmd.rsplit(" ", 1)[-1] for _, cmd in c.commands], ["0"])
 
 
     def test_preflight_timeout_voids_without_moving_rg_18631(self):

@@ -1312,17 +1312,25 @@ class Soak:
                     self.sleep(1.0)
                 self.stop_traffic()
             if cfg.restore and not self.terminated:
-                owner_changed = False
-                try:
-                    current_owners = self._refresh_owners(rgs)
+                def read_current_owners():
+                    try:
+                        return self._refresh_owners(rgs)
+                    except Exception as e:
+                        self.log(f"WARNING: could not read current RG owners before restore decision: {e}")
+                        return {rg: None for rg in rgs}
+
+                current_owners = read_current_owners()
+                unknown_rgs = [rg for rg in rgs if current_owners.get(rg) is None]
+                if unknown_rgs:
+                    self.log(f"WARNING: current owner unreadable for RG(s) {unknown_rgs}; retrying before restore decision")
+                    self.sleep(0.2)
+                    current_owners = read_current_owners()
                     unknown_rgs = [rg for rg in rgs if current_owners.get(rg) is None]
                     if unknown_rgs:
-                        self.log(f"WARNING: current owner unreadable for RG(s) {unknown_rgs}; "
+                        self.log(f"WARNING: current owner remains unreadable for RG(s) {unknown_rgs}; "
                                  "unknown is not treated as an ownership change")
-                    owner_changed = any(current_owners.get(rg) is not None
-                                        and current_owners[rg] != initial_owners.get(rg) for rg in rgs)
-                except Exception as e:
-                    self.log(f"WARNING: could not read current RG owners before restore decision: {e}")
+                owner_changed = any(current_owners.get(rg) is not None
+                                    and current_owners[rg] != initial_owners.get(rg) for rg in rgs)
                 if self.move_commands_issued or owner_changed:
                     info["restore"] = self.restore_node0(rgs)
                     self.log(f"restore: {info['restore']}")
