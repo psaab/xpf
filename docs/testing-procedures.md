@@ -93,6 +93,15 @@ Tests:
 - IPv4 TCP throughput (iperf3)
 - mtr path validation (traffic traverses firewall)
 
+- Cluster NTP health (#18629): reads `show configuration system ntp` on each
+  firewall independently, then takes one min-RTT clock measurement and reads
+  both chrony Leap statuses. Both synchronised and within the 5 s skew bound
+  PASS; one unsynchronised node FAILs; both unsynchronised FAIL if any
+  configured server answers off-path or the probe is unavailable; a completed
+  probe with no answers is a lab outage and VOID. Missing/unreadable stanza or
+  noisy/unreadable clock measurement is VOID. This cell never waits for
+  convergence or sets a clock.
+
 Prerequisites:
 - Cluster VMs running (`make cluster-create && make cluster-deploy`)
 - iperf3 server at 172.16.100.200 (for TCP tests)

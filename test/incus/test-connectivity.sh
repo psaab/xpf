@@ -34,6 +34,8 @@ source "${SCRIPT_DIR}/cluster-env.sh"
 source "${SCRIPT_DIR}/cluster-lock.sh"
 # shellcheck source=test/incus/ha-assurance-lib.sh
 source "${SCRIPT_DIR}/ha-assurance-lib.sh"
+# shellcheck source=test/incus/failover-clock-lib.sh
+source "${SCRIPT_DIR}/failover-clock-lib.sh"
 
 PASS=0
 FAIL=0
@@ -511,7 +513,12 @@ test_cluster() {
 
 	# Service health
 	service_check "$FW0" "cluster: xpfd service active on fw0"
+
 	service_check "$FW1" "cluster: xpfd service active on fw1"
+	# #18629: a single operator-time NTP health cell. The shared helper reads
+	# each stanza independently and measures once; it never waits for sync or
+	# changes either clock.
+	failover_clock_ntp_cell "cluster: NTP health" "$FW0" "$FW1" || true
 
 	# Heartbeat/fabric peer addresses come from the cluster conf:
 	# each `groups { nodeN { ... } }` block's peer-address is the

@@ -296,38 +296,59 @@ _failover_clock_verdict() {
 	return 1
 }
 
-# _failover_clock_ntp_config <node>... -- `show configuration system ntp` from
-# the first node whose CLI answers: _FC_NTP_STATE present (with
-# _FC_NTP_SERVERS), absent, or unknown when no node's CLI answered.
+# _failover_clock_ntp_config_one <node> -- `show configuration system ntp` on
+# ONE node: _FC_NODE_NTP_STATE present (with _FC_NODE_NTP_SERVERS when the
+# stanza names servers), absent, or unknown when the node's CLI did not
+# answer. Unlike _failover_clock_ntp_config this never falls through to
+# another node, so a per-node caller sees each node's own stanza (#18629).
+_failover_clock_ntp_config_one() {
+	local out rc
+	_FC_NODE_NTP_STATE=unknown _FC_NODE_NTP_SERVERS=""
+	if out=$(timeout 20 incus exec "$1" -- cli -c 'show configuration system ntp' 2>&1); then
+		rc=0
+	else
+		rc=$?
+	fi
+	if ((rc != 0)); then
+		if grep -q 'configuration path not found' <<<"$out"; then
+			_FC_NODE_NTP_STATE=absent
+		fi
+		return 0
+	fi
+	_FC_NODE_NTP_SERVERS=$(sed -nE 's/^[[:space:]]*server[[:space:]]+([^[:space:]{;]+).*/\1/p' <<<"$out" | tr '\n' ' ')
+	_FC_NODE_NTP_SERVERS="${_FC_NODE_NTP_SERVERS% }"
+	if [[ -n "$_FC_NODE_NTP_SERVERS" ]]; then
+		_FC_NODE_NTP_STATE=present
+		return 0
+	fi
+	if grep -qE 'configuration path not found|^[[:space:]]*ntp[[:space:]]*\{' <<<"$out"; then
+		_FC_NODE_NTP_STATE=absent
+	fi
+	return 0
+}
+
+# _failover_clock_ntp_config <node>... -- legacy crash-gate view of the first
+# answered stanza. Per-node parsing stays centralized in the one-node reader.
 _failover_clock_ntp_config() {
-	local n out rc
+	local n
 	_FC_NTP_STATE=unknown _FC_NTP_SERVERS=""
 	for n in "$@"; do
-		if out=$(timeout 20 incus exec "$n" -- cli -c 'show configuration system ntp' 2>&1); then
-			rc=0
-		else
-			rc=$?
-		fi
-		if ((rc != 0)); then
-			if grep -q 'configuration path not found' <<<"$out"; then
-				_FC_NTP_STATE=absent
-				return 0
-			fi
-			continue
-		fi
-		_FC_NTP_SERVERS=$(sed -nE 's/^[[:space:]]*server[[:space:]]+([^[:space:]{;]+).*/\1/p' <<<"$out" | tr '\n' ' ')
-		_FC_NTP_SERVERS="${_FC_NTP_SERVERS% }"
-		if [[ -n "$_FC_NTP_SERVERS" ]]; then
+		_failover_clock_ntp_config_one "$n"
+		case "$_FC_NODE_NTP_STATE" in
+		present)
 			_FC_NTP_STATE=present
+			_FC_NTP_SERVERS="$_FC_NODE_NTP_SERVERS"
 			return 0
-		fi
-		if grep -qE 'configuration path not found|^[[:space:]]*ntp[[:space:]]*\{' <<<"$out"; then
+			;;
+		absent)
 			_FC_NTP_STATE=absent
 			return 0
-		fi
+			;;
+		esac
 	done
 	return 0
 }
+
 
 _failover_clock_ntp_text() {
 	case "${_FC_NTP_STATE:-unknown}" in
@@ -366,6 +387,113 @@ _failover_clock_offpath() {
 	else
 		_FC_OFFPATH=none
 	fi
+}
+
+# failover_clock_ntp_cell <label> <node0> <node1>
+#   One instantaneous operator-health check: read each node's own NTP stanza,
+#   measure both clocks/Leap statuses once, and never wait or resync. Different
+#   server sets are valid; the union is used only for the off-path control
+#   when neither node is synchronised. Returns 0 PASS, 1 FAIL, or 2 VOID.
+failover_clock_ntp_cell() {
+	local label="${1:-}" n0="${2:-}" n1="${3:-}" bound=5 verdict=VOID why=""
+	local synced0=0 synced1=0 servers="" unreadable="" server
+	local -a server_list=() node_servers=()
+	local -A seen_servers=()
+	FAILOVER_CLOCK_DETAIL=""
+	if (($# != 3)); then
+		verdict=VOID
+		why="refused (harness): usage: failover_clock_ntp_cell <label> <node0> <node1>"
+	else
+		_failover_clock_ntp_config_one "$n0"
+		local state0="$_FC_NODE_NTP_STATE" servers0="$_FC_NODE_NTP_SERVERS"
+		_failover_clock_ntp_config_one "$n1"
+		local state1="$_FC_NODE_NTP_STATE" servers1="$_FC_NODE_NTP_SERVERS"
+		if [[ "$state0" == unknown || "$state1" == unknown ]]; then
+			[[ "$state0" == unknown ]] && unreadable="$n0"
+			[[ "$state1" == unknown ]] && unreadable="${unreadable:+${unreadable} and }${n1}"
+			why="system ntp configuration unreadable on ${unreadable}"
+		elif [[ "$state0" == absent && "$state1" == absent ]]; then
+			why="no \`system ntp\` configured on either node"
+		else
+			if [[ "$state0" == present ]]; then
+				read -r -a node_servers <<<"$servers0"
+				for server in "${node_servers[@]}"; do
+					if [[ -z "${seen_servers[$server]:-}" ]]; then
+						seen_servers[$server]=1
+						server_list+=("$server")
+					fi
+				done
+			fi
+			if [[ "$state1" == present ]]; then
+				node_servers=()
+				read -r -a node_servers <<<"$servers1"
+				for server in "${node_servers[@]}"; do
+					if [[ -z "${seen_servers[$server]:-}" ]]; then
+						seen_servers[$server]=1
+						server_list+=("$server")
+					fi
+				done
+			fi
+			servers="${server_list[*]}"
+			_failover_clock_knobs_lenient
+			_failover_clock_measure "$n0" "$n1" "$_FC_SAMPLES"
+			if [[ -z "$_FC_SKEW" ]]; then
+				why="clock measurement unreadable on ${_FC_DOWN}"
+			elif _failover_clock_noisy; then
+				why="clock measurement too noisy (error +/-${_FC_UNC} s exceeds ${_FC_MAXUNC} s)"
+			else
+				_failover_clock_synced "$_FC_LEAP0" && synced0=1
+				_failover_clock_synced "$_FC_LEAP1" && synced1=1
+				if ((synced0 && synced1)); then
+					if _failover_clock_within "$bound"; then
+						verdict=PASS
+						why="both nodes synchronised (${_FC_LEAP0} / ${_FC_LEAP1}) and |skew| + error <= ${bound} s"
+					else
+						verdict=FAIL
+						why="both nodes synchronised (${_FC_LEAP0} / ${_FC_LEAP1}) but |skew| + error exceeds ${bound} s"
+					fi
+				elif ((synced0 || synced1)); then
+					verdict=FAIL
+					if ((synced0)); then
+						why="${n0} synchronised (${_FC_LEAP0}) while ${n1} is not (${_FC_LEAP1})"
+					else
+						why="${n1} synchronised (${_FC_LEAP1}) while ${n0} is not (${_FC_LEAP0})"
+					fi
+				else
+					if ((${#server_list[@]} == 0)); then
+						why="neither node synchronised and no configured server is available for the off-path control"
+					else
+						_failover_clock_offpath "${server_list[@]}"
+						case "$_FC_OFFPATH" in
+						none) why="lab NTP outage: neither node synchronised and no configured server (${servers# }) answers this host" ;;
+						unavailable) verdict=FAIL; why="off-path SNTP probe unavailable while neither node is synchronised" ;;
+						*) verdict=FAIL; why="neither node synchronised although configured servers answer this host (${_FC_OFFPATH#answered: })" ;;
+						esac
+					fi
+				fi
+			fi
+			why="${why}; ${_FC_SKEW:+node1-node0 skew ${_FC_SKEW} s +/-${_FC_UNC} s; }chrony ${n0}: ${_FC_LEAP0}, ${n1}: ${_FC_LEAP1}"
+		fi
+	fi
+	FAILOVER_CLOCK_DETAIL="${label}: NTP health ${verdict}: ${why}"
+	case "$verdict" in
+	PASS)
+		pass "$FAILOVER_CLOCK_DETAIL"
+		return 0
+		;;
+	FAIL)
+		fail "$FAILOVER_CLOCK_DETAIL"
+		return 1
+		;;
+	*)
+		if declare -F void >/dev/null; then
+			void "$FAILOVER_CLOCK_DETAIL"
+		else
+			echo "  VOID  $FAILOVER_CLOCK_DETAIL"
+		fi
+		return 2
+		;;
+	esac
 }
 
 # _failover_clock_escape <label> <n0> <n1> <samples> <bound> <budget>

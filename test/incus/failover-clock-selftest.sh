@@ -51,6 +51,8 @@ FC_UNTIMED="${TMP_DIR}/untimed"     # read commands NOT under a host timeout
 FC_VT="${TMP_DIR}/vclock"           # virtual host clock, epoch seconds
 FC_HOSTREADS="${TMP_DIR}/hostreads" # one line per formatted host UTC reading
 FC_SEQ="${TMP_DIR}/seq"             # per-node date-sample counters
+FC_PROBE_ARGS="${TMP_DIR}/probe-args" # hosts queried by the off-path control
+FC_SLEEP_CALLS="${TMP_DIR}/sleep-calls" # sleep invocations (must stay empty for the instantaneous cell)
 FC_BASE=1793440000
 mkdir -p "$FC_SEQ"
 
@@ -91,6 +93,8 @@ fc_reset() {
 	: >"$FC_WRITES"
 	: >"$FC_UNTIMED"
 	: >"$FC_HOSTREADS"
+	: >"$FC_PROBE_ARGS"
+	: >"$FC_SLEEP_CALLS"
 	rm -f "$FC_SEQ"/*
 	echo "${FC_BASE}.000000" >"$FC_VT"
 	unset XPF_FAILOVER_CLOCK_RESYNC XPF_FAILOVER_CLOCK_SKEW_BOUND_S \
@@ -100,18 +104,36 @@ fc_reset() {
 	FC_LAT_fw0="0.60:0.02 0.25:0.25 0.02:0.65"
 	FC_LAT_fw1="0.01:0.30 0.03:0.03 0.38:0.02"
 	_FC_BASE_TEXT=""
-	FC_NTP_STANZA=present         # present | absent | error (`show configuration system ntp`)
+	FC_NTP_STANZA=present         # legacy default; per-node overrides below
+	unset FC_NTP_STANZA_fw0 FC_NTP_STANZA_fw1 FC_NTP_SERVERS_fw0 FC_NTP_SERVERS_fw1
 	FC_PROBE_ANSWER=162.159.200.1 # servers answering the host's SNTP probe; FAIL = no python3
+}
+fc_ntp_stanza() {
+	local var="FC_NTP_STANZA_${1}"
+	if [[ -n "${!var:-}" ]]; then
+		printf '%s\n' "${!var}"
+	else
+		printf '%s\n' "$FC_NTP_STANZA"
+	fi
+}
+fc_ntp_servers() {
+	local var="FC_NTP_SERVERS_${1}"
+	if [[ -n "${!var:-}" ]]; then
+		printf '%s\n' "${!var}"
+	else
+		printf '%s\n' '162.159.200.1 91.189.91.112'
+	fi
 }
 FC_NTP_STANZA=present
 FC_PROBE_ANSWER=162.159.200.1
 # The off-path probe: python3 on the HOST. A function shadows the binary, and
 # answers as the scenario says.
 python3() {
-	[[ "${FC_UNDER_TIMEOUT:-0}" == 1 ]] || printf 'host python3\n' >>"$FC_UNTIMED"
-	echo probe >>"$TMP_DIR/probes"
-	[[ "$FC_PROBE_ANSWER" == FAIL ]] && return 127
-	printf '%s\n' "$FC_PROBE_ANSWER"
+    [[ "${FC_UNDER_TIMEOUT:-0}" == 1 ]] || printf 'host python3\n' >>"$FC_UNTIMED"
+    echo probe >>"$TMP_DIR/probes"
+    printf '%s\n' "${*:4}" >>"$FC_PROBE_ARGS"
+    [[ "$FC_PROBE_ANSWER" == FAIL ]] && return 127
+    printf '%s\n' "$FC_PROBE_ANSWER"
 }
 
 # Host clock. `+%s.%N` is the precondition's reading; the formatted UTC string
@@ -137,6 +159,7 @@ date() {
 # (fc_run), and the cell reads the 124 as a failure.
 FC_RUNAWAY_S=200 # above the largest budget any cell uses (the 120 s default)
 sleep() {
+	printf '%s\n' "$1" >>"$FC_SLEEP_CALLS"
 	if awk -v t="$(fc_vt)" -v b="$FC_BASE" -v cap="$FC_RUNAWAY_S" 'BEGIN { exit !(t - b > cap) }'; then
 		echo "RUNAWAY: the wait slept past ${FC_RUNAWAY_S} virtual seconds"
 		exit 124
@@ -158,7 +181,7 @@ incus() {
 	local node="$2"
 	shift 2
 	[[ "${1:-}" == "--" ]] && shift
-	local cmd="$*" elapsed off leap pre=0.05 post=0.05
+	local cmd="$*" elapsed off leap pre=0.05 post=0.05 stanza servers server
 	printf '%s %s\n' "$node" "$cmd" >>"$FC_CALLS"
 	case "$cmd" in
 	"date +%s.%N" | "timeout 10 chronyc -n tracking" | "cat /proc/uptime" | "cli -c show configuration system ntp")
@@ -180,8 +203,16 @@ incus() {
 		;;
 	"cli -c show configuration system ntp")
 		[[ "$off" == down ]] && return 1
-		case "$FC_NTP_STANZA" in
-		present) printf 'ntp {\n    server 162.159.200.1 {\n        routing-instance mgmt;\n    }\n    server 91.189.91.112 {\n        routing-instance mgmt;\n    }\n}\n' ;;
+		stanza=$(fc_ntp_stanza "$node")
+		case "$stanza" in
+		present)
+			servers=$(fc_ntp_servers "$node")
+			printf 'ntp {\n'
+			for server in $servers; do
+				printf '    server %s {\n        routing-instance mgmt;\n    }\n' "$server"
+			done
+			printf '}\n'
+			;;
 		absent)
 			printf 'error: configuration path not found: system ntp\n'
 			return 1
@@ -929,7 +960,7 @@ fc_census_scan() {
 		hits=$(grep -E "$FC_DIRECT_RE" <<<"$code" || true)
 		[[ -n "$hits" ]] && printf '%s: calls failover_resync_node_clocks directly: %s\n' "$f" "$(head -1 <<<"$hits")"
 		if ((lib == 0)) && grep -qE '^[[:space:]]*(source|\.)[[:space:]]+.*failover-clock-lib\.sh' <<<"$code"; then
-			grep -qE '(^|[^[:alnum:]_])failover_clock_(cell|precondition)[[:space:]]' <<<"$code" ||
+			grep -qE '(^|[^[:alnum:]_])failover_clock_(cell|precondition|ntp_cell)[[:space:]]' <<<"$code" ||
 				printf '%s: sources failover-clock-lib.sh but never runs the clock check\n' "$f"
 			# A clock VOID must reach the exit code of a direct run too.
 			grep -qE '^void\(\)' <<<"$code" ||
@@ -950,6 +981,7 @@ printf '#!/bin/bash\n. "$DIR/failover-clock-lib.sh"\necho no check here\n' >"$FX
 printf 'import time\n# date -s is fine in a comment\ntime.clock_settime(time.CLOCK_REALTIME, 0)\n' >"$FX/py-settime.py"
 printf 'import subprocess\nsubprocess.run(["incus", "exec", n, "--", "date", "-s@1793440000"])\n' >"$FX/py-list.py"
 printf '#!/bin/bash\nincus exec "$n" -- date "-s" "$now"\n' >"$FX/quoted.sh"
+printf '#!/bin/bash\nsource ./failover-clock-lib.sh\nvoid() { :; }\nfailover_clock_ntp_cell x "$A" "$B"\n' >"$FX/ntp-cell.sh"
 printf '#!/bin/bash\n# date -u -s "$now" in a comment is not a call\necho "date +%%s.%%N"\n' >"$FX/clean.sh"
 printf 'failover_resync_node_clocks() {\n\tincus exec "$n" -- date -u -s "$now"\n}\n_failover_clock_escape() {\n\tfailover_resync_node_clocks "$2" "$3"\n}\nfoo() {\n\tincus exec "$n" -- hwclock --hctosys\n}\n' >"$FX/lib/failover-clock-lib.sh"
 fx_out=$(fc_census_scan "$FX"/*.sh "$FX"/*.py "$FX/lib/failover-clock-lib.sh")
@@ -959,12 +991,12 @@ for want in "dot-source.sh: calls failover_resync_node_clocks directly" "indirec
 	"dot-no-check.sh: sources failover-clock-lib.sh but never runs the clock check" "no-void.sh: runs the clock check but defines no void()" \
 	"py-settime.py: sets a clock" \
 	"py-list.py: sets a clock" "quoted.sh: sets a clock" "lib/failover-clock-lib.sh: sets a clock:" "hwclock --hctosys"; do
-	[[ "$fx_out" == *"$want"* ]] || {
+    [[ "$fx_out" == *"$want"* ]] || {
 		fx_ok=0
 		echo "  census fixture MISSED: $want" >&2
 	}
 done
-if [[ "$fx_out" == *"clean.sh"* ]] || (($(grep -c 'lib/failover-clock-lib.sh' <<<"$fx_out") != 1)); then
+if [[ "$fx_out" == *"clean.sh"* || "$fx_out" == *"ntp-cell.sh"* ]] || (($(grep -c 'lib/failover-clock-lib.sh' <<<"$fx_out") != 1)); then
 	fx_ok=0
 	echo "  census fixture false positive: $fx_out" >&2
 fi
@@ -989,17 +1021,17 @@ for f in "${census_files[@]}"; do
 	grep -qE '^[[:space:]]*(source|\.)[[:space:]]+.*failover-clock-lib\.sh' "$f" && sourcing=$((sourcing + 1))
 done
 # Denominator, by NAME as well as by count: the census must have read the three
-# crash smokes, the Python H11 soak beside them, and shell and Python under
-# scripts/, or a green here means it scanned less than it claims.
+# crash smokes, the connectivity NTP cell, the Python H11 soak beside them,
+# and shell and Python under scripts/, or a green here means it scanned less than it claims.
 missing=""
 # Into a variable, never `printf | grep -q`: under pipefail an early -q exit
 # can SIGPIPE the producer and read a present file as missing.
 census_list=$(printf '%s\n' "${census_files[@]}")
 for want in test/incus/test-failover.sh test/incus/test-ha-crash.sh test/incus/test-double-failover.sh \
-	test/incus/rg_move_soak.py scripts/harness-census.sh scripts/iperf-json-metrics.py; do
+    test/incus/test-connectivity.sh test/incus/rg_move_soak.py scripts/harness-census.sh scripts/iperf-json-metrics.py; do
 	grep -qF "/$want" <<<"$census_list" || missing+=" $want"
 done
-if [[ -n "$missing" ]] || ((sourcing < 3 || ${#census_files[@]} < 100 || n_py < 10 || n_scripts < 30)); then
+if [[ -n "$missing" ]] || ((sourcing < 4 || ${#census_files[@]} < 100 || n_py < 10 || n_scripts < 30)); then
 	bad "census: scanned ${#census_files[@]} files (${n_py} Python, ${n_scripts} under scripts/), ${sourcing} sourcing the clock library; missing by name:${missing:- none}"
 elif [[ -n "$census_out" ]]; then
 	bad "census: a harness sets a node clock or bypasses the escape:"$'\n'"$census_out"
@@ -1020,6 +1052,101 @@ if [[ -n "$floor" && -n "$over" ]] && ((floor - 20 <= over)) &&
 else
 	bad "test-failover: clock floor '${floor}' s, CLOCK_FLOOR_OVERSHOOT '${over}', or its IPERF_DURATION_MIN term is missing or too small"
 fi
+
+# ── 18. test-connectivity's instantaneous NTP cell (#18629) ─────────────
+FC_NTP_CELL_RESULT=""
+FC_NTP_CELL_RC=0
+pass() { FC_NTP_CELL_RESULT=PASS; }
+fail() { FC_NTP_CELL_RESULT=FAIL; }
+void() { FC_NTP_CELL_RESULT=VOID; }
+fc_ntp_cell_case() { # <name> <stanza0> <servers0> <offset0> <leap0> <stanza1> <servers1> <offset1> <leap1> <probe-answer> [normal|noisy]
+    local name="$1" noise="${11:-}"
+    shift
+    fc_reset
+    FC_NTP_STANZA_fw0="$1"
+    FC_NTP_SERVERS_fw0="$2"
+    FC_TEST_OFF0="$3"
+    FC_TEST_LEAP0="$4"
+    FC_NTP_STANZA_fw1="$5"
+    FC_NTP_SERVERS_fw1="$6"
+    FC_TEST_OFF1="$7"
+    FC_TEST_LEAP1="$8"
+    FC_PROBE_ANSWER="$9"
+    if [[ "$noise" == noisy ]]; then
+        FC_LAT_fw0="1.2:1.2 1.2:1.2 1.2:1.2"
+        FC_LAT_fw1="1.2:1.2 1.2:1.2 1.2:1.2"
+    fi
+    fc_node_state() {
+        if [[ "$1" == fw0 ]]; then
+            printf '%s %s\n' "$FC_TEST_OFF0" "$FC_TEST_LEAP0"
+        else
+            printf '%s %s\n' "$FC_TEST_OFF1" "$FC_TEST_LEAP1"
+        fi
+    }
+    FC_NTP_CELL_RESULT=""
+    failover_clock_ntp_cell "connectivity" fw0 fw1 >"$TMP_DIR/ntp-${name}.out" 2>&1
+    FC_NTP_CELL_RC=$?
+    FC_NTP_CELL_DETAIL="$FAILOVER_CLOCK_DETAIL"
+    FC_NTP_CALL_FW0=$(grep -c '^fw0 cli -c show configuration system ntp$' "$FC_CALLS" || true)
+    FC_NTP_CALL_FW1=$(grep -c '^fw1 cli -c show configuration system ntp$' "$FC_CALLS" || true)
+    FC_NTP_CELL_CLEAN=1
+    [[ ! -s "$FC_WRITES" && ! -s "$FC_UNTIMED" && ! -s "$FC_SLEEP_CALLS" ]] || FC_NTP_CELL_CLEAN=0
+    ((FC_NTP_CELL_CLEAN)) || FC_NTP_ALL_CLEAN=0
+}
+FC_NTP_ALL_CLEAN=1
+fc_ntp_cell_case synced present 162.159.200.1 0.000 Normal present 91.189.91.112 0.150 Normal ""
+ntp_synced_rc=$FC_NTP_CELL_RC
+ntp_synced_result=$FC_NTP_CELL_RESULT
+ntp_synced_detail=$FC_NTP_CELL_DETAIL
+ntp_synced_calls="$FC_NTP_CALL_FW0/$FC_NTP_CALL_FW1"
+fc_ntp_cell_case one-unsynced present 162.159.200.1 0.000 "Not synchronised" present 91.189.91.112 0.000 Normal ""
+ntp_one_rc=$FC_NTP_CELL_RC
+ntp_one_result=$FC_NTP_CELL_RESULT
+ntp_one_detail=$FC_NTP_CELL_DETAIL
+fc_ntp_cell_case both-answer present 162.159.200.1 0.000 "Not synchronised" present 91.189.91.112 0.000 "Not synchronised" 91.189.91.112
+ntp_answer_rc=$FC_NTP_CELL_RC
+ntp_answer_result=$FC_NTP_CELL_RESULT
+ntp_answer_detail=$FC_NTP_CELL_DETAIL
+ntp_answer_hosts=$(cat "$FC_PROBE_ARGS")
+fc_ntp_cell_case both-outage present 162.159.200.1 0.000 "Not synchronised" present 91.189.91.112 0.000 "Not synchronised" ""
+ntp_outage_rc=$FC_NTP_CELL_RC
+ntp_outage_result=$FC_NTP_CELL_RESULT
+ntp_outage_detail=$FC_NTP_CELL_DETAIL
+fc_ntp_cell_case both-probe-unavailable present 162.159.200.1 0.000 "Not synchronised" present 91.189.91.112 0.000 "Not synchronised" FAIL
+ntp_probe_unavailable_rc=$FC_NTP_CELL_RC
+ntp_probe_unavailable_result=$FC_NTP_CELL_RESULT
+ntp_probe_unavailable_detail=$FC_NTP_CELL_DETAIL
+fc_ntp_cell_case no-stanza absent "" 0.000 "Not synchronised" absent "" 0.000 "Not synchronised" ""
+ntp_absent_rc=$FC_NTP_CELL_RC
+ntp_absent_result=$FC_NTP_CELL_RESULT
+ntp_absent_detail=$FC_NTP_CELL_DETAIL
+ntp_absent_commands=$(wc -l <"$FC_CALLS")
+ntp_absent_clean=$FC_NTP_CELL_CLEAN
+fc_ntp_cell_case unreadable error 162.159.200.1 0.000 Normal present 91.189.91.112 0.000 Normal ""
+ntp_unreadable_rc=$FC_NTP_CELL_RC
+ntp_unreadable_result=$FC_NTP_CELL_RESULT
+ntp_unreadable_detail=$FC_NTP_CELL_DETAIL
+fc_ntp_cell_case noisy present 162.159.200.1 0.000 Normal present 91.189.91.112 0.150 Normal "" noisy
+ntp_noisy_rc=$FC_NTP_CELL_RC
+ntp_noisy_result=$FC_NTP_CELL_RESULT
+ntp_noisy_detail=$FC_NTP_CELL_DETAIL
+if ((ntp_synced_rc == 0 && ntp_one_rc == 1 && ntp_answer_rc == 1 && ntp_outage_rc == 2 && ntp_probe_unavailable_rc == 1 && ntp_absent_rc == 2 &&
+    ntp_unreadable_rc == 2 && ntp_noisy_rc == 2)) &&
+    [[ "$ntp_synced_result" == PASS && "$ntp_synced_detail" == *"both nodes synchronised"* && "$ntp_synced_detail" == *"skew +0.150"* &&
+        "$ntp_one_result" == FAIL && "$ntp_one_detail" == *"fw1 synchronised (Normal) while fw0 is not (Not synchronised)"* &&
+        "$ntp_answer_result" == FAIL && "$ntp_answer_detail" == *"servers answer this host (91.189.91.112)"* &&
+        "$ntp_answer_hosts" == "162.159.200.1 91.189.91.112" &&
+        "$ntp_outage_result" == VOID && "$ntp_outage_detail" == *"lab NTP outage"* &&
+        "$ntp_absent_result" == VOID && "$ntp_absent_detail" == *"no \`system ntp\` configured on either node"* &&
+        "$ntp_unreadable_result" == VOID && "$ntp_unreadable_detail" == *"configuration unreadable on fw0"* &&
+        "$ntp_noisy_result" == VOID && "$ntp_noisy_detail" == *"clock measurement too noisy"* &&
+        "$ntp_probe_unavailable_result" == FAIL && "$ntp_probe_unavailable_detail" == *"off-path SNTP probe unavailable"* &&
+        "$ntp_synced_calls" == "1/1" && "$ntp_absent_commands" == 2 && "$ntp_absent_clean" == 1 && "$FC_NTP_ALL_CLEAN" == 1 ]]; then
+    ok "test-connectivity NTP cell: five lattice branches plus unreadable/noisy VOID; independent stanza reads and union-only off-path probe"
+else
+    bad "test-connectivity NTP cell: rc=$ntp_synced_rc/$ntp_one_rc/$ntp_answer_rc/$ntp_outage_rc/$ntp_absent_rc/$ntp_unreadable_rc/$ntp_noisy_rc results=$ntp_synced_result/$ntp_one_result/$ntp_answer_result/$ntp_outage_result/$ntp_absent_result/$ntp_unreadable_result/$ntp_noisy_result synced='$ntp_synced_detail' one='$ntp_one_detail' answered='$ntp_answer_detail' outage='$ntp_outage_detail' absent='$ntp_absent_detail' unreadable='$ntp_unreadable_detail' noisy='$ntp_noisy_detail' probe='$ntp_answer_hosts' calls=$ntp_synced_calls/$ntp_absent_commands clean=$FC_NTP_ALL_CLEAN absent-clean=$ntp_absent_clean writes='$(cat "$FC_WRITES")' untimed='$(cat "$FC_UNTIMED")'"
+fi
+unset -f pass fail void
 
 echo "----------------------------------------"
 echo "failover clock selftest: $PASS passed, $FAIL failed"
