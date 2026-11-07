@@ -658,37 +658,50 @@ mod tests {
         // first claim really lands before the blocked one — otherwise
         // the rollback path is exercised only for lucky seeds.
         let gate = Arc::new(TupleGate::new());
-        let held_key = key(1001, 1);
-        // The blocked second claim canonicalizes to held_key (domain 2
-        // erases to the held tuple). try_acquire_installs canonicalizes
-        // BEFORE it sorts (and the sort is what decides which claim is
-        // attempted first), so the fixture's ordering predicate must be
-        // computed on the CANONICAL keys with the install sort exactly:
-        // ordering the raw domain-1 keys hashes a domain the real sort
-        // never sees (domain feeds the shard hash), and the blocked key
-        // can then be attempted first — the assertions below would pass
-        // without any rollback having happened.
-        let held = gate.acquire_lease([held_key.clone()]).unwrap();
-        let held_canonical = TupleGate::canonical(&held_key);
+        // Ordering is seed-dependent TWICE over (Sol/GLM/Kimi seats at
+        // dd83e0dc80, Sol again at 78fcde4250): try_acquire_installs
+        // canonicalizes (domain 0) BEFORE sorting by (shard, Debug), so
+        // (a) the fixture order must be computed on canonical keys — the
+        // raw domain-1 hash is never what the install sort sees — and
+        // (b) fixing the held port and searching only Debug-smaller
+        // free ports leaves ~14 candidates when the held canonical
+        // shard is 0, none of which need hash to shard 0, so an
+        // .expect on the search can still panic per seed. Determinism
+        // therefore comes from choosing BOTH keys by the canonical
+        // comparator: scan ports until one key's canonical shard is
+        // strictly above another's. With 256 shards over ~65k ports a
+        // strict (free < held) canonical pair exists for every seed —
+        // the hash is keyed, so no seed can place all keys on one
+        // shard; if one ever did, this search panics ONCE, loudly,
+        // instead of passing vacuously on lucky seeds.
         let sorts_before = |a: &SessionKey, b: &SessionKey| {
             TupleGate::shard_index(a) < TupleGate::shard_index(b)
                 || (TupleGate::shard_index(a) == TupleGate::shard_index(b)
                     && format!("{a:?}") < format!("{b:?}"))
         };
-        let free = (1..u16::MAX)
-            .map(|port| key(port, 1))
-            .find(|candidate| {
-                sorts_before(&TupleGate::canonical(candidate), &held_canonical)
-            })
-            .expect("a free key sorting before the held key must exist");
-        // Ordering proof (not assumed): the canonical free key precedes
-        // the canonical held key under the install sort, so the free
-        // claim is attempted — and must land — before the blocked one.
-        // The port range starts at 1 so the Debug tie-break can also
-        // win at canonical shard 0 ("src_port: 1," < "src_port: 1001").
+        let mut held_key = None;
+        let mut free = None;
+        for port in 1..u16::MAX {
+            let candidate = key(port, 1);
+            let canonical = TupleGate::canonical(&candidate);
+            match &held_key {
+                None => held_key = Some(candidate),
+                Some(held) if sorts_before(&canonical, &TupleGate::canonical(held)) => {
+                    free = Some(candidate);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let held_key = held_key.expect("scan yields a first key");
+        let free = free.expect("a canonical pair with free strictly before held must exist");
+        // The blocked claim is the held port under domain 2: it
+        // canonicalizes onto held_key, which the lease already holds.
+        let blocked_port = held_key.src_port;
+        let held = gate.acquire_lease([held_key.clone()]).unwrap();
         assert!(sorts_before(
             &TupleGate::canonical(&free),
-            &held_canonical
+            &TupleGate::canonical(&held_key)
         ));
         let probe = gate
             .try_acquire_install(&free)
@@ -697,7 +710,7 @@ mod tests {
         // Probe claim released above; the paired install below starts
         // clean, and its own rollback is what the rest of this cell proves.
         assert!(matches!(
-            gate.try_acquire_installs([free.clone(), key(1001, 2)]),
+            gate.try_acquire_installs([free.clone(), key(blocked_port, 2)]),
             Err("gate_busy")
         ));
         drop(held);
