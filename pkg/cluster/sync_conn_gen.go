@@ -1720,9 +1720,11 @@ func (s *SessionSync) authorityConfigEpochThresholdDetails() (uint64, string) {
 // first config write to the current peer incarnation it is the newest
 // generation actually written to that incarnation (lastSentConfigGen): a peer
 // that has applied it holds every config this authority ever told it about.
-// configGenCounter cannot serve: it reserves a generation on every reconcile
-// tick, including the ones that find the config already pushed and send
-// nothing, so it runs one draw per 30 s past anything the peer can hold.
+// configGenCounter cannot serve after a generation is written: it tracks
+// reservations, not successful writes. Before #18644, already-pushed 30 s
+// reconcile ticks also reserved; those no-op ticks now check the marker first.
+// Failed or withheld push attempts can still reserve without writing, so use
+// lastSentConfigGen once this incarnation has received an actual write.
 // Before any write to this incarnation, the peer's tagged generation came
 // from its view of an earlier authority process, which may be an older boot
 // or a config edited while this node was down; that keeps the original

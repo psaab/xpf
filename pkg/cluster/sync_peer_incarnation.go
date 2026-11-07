@@ -153,11 +153,12 @@ type peerIncarnationState struct {
 	// WROTE to this peer incarnation (#18636), raised as a max by
 	// recordLastSentConfigGen just before the socket write. As the RG0
 	// authority, configEpochStale compares a peer's reverse-tagged applied
-	// generation against it, NOT against configGenCounter: the counter is a
-	// reservation counter, and the 30 s config-sync reconcile tick reserves
-	// one generation per tick before it finds the config already pushed and
-	// no-ops, so the counter runs past anything the peer was ever sent and
-	// a converged peer's every install read as stale. Incarnation-scoped so
+	// generation against it, NOT against configGenCounter. That counter tracks
+	// reservations rather than writes; before #18644 even no-op 30 s reconcile
+	// ticks reserved, but now the already-pushed marker is checked first. Failed
+	// or withheld push attempts can still reserve without writing, so a
+	// converged peer must be compared to the newest generation actually sent.
+	// Incarnation-scoped so
 	// a new peer incarnation is never compared against a generation sent to
 	// its predecessor; until the first write to it, configEpochStale keeps
 	// the reservation-counter comparison (fail-closed).

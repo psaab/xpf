@@ -9,14 +9,13 @@ import (
 )
 
 // #18636: the RG0 authority refused every reverse-tagged install from a fully
-// converged peer. The authority's 30 s config-sync reconcile tick reserves a
-// wire generation (ReserveConfigGen) BEFORE it finds the config "already
-// pushed for epoch/generation" and no-ops, so configGenCounter runs one draw
-// per tick past the newest generation the peer was ever sent, and the stale
-// check compared the peer's applied generation against that counter. The
-// authority now compares against the newest generation actually WRITTEN to the
-// current peer incarnation, and keeps the reservation-counter comparison
-// (fail-closed) until its first write to that incarnation.
+// converged peer. Before #18644, its 30 s config-sync reconcile tick could
+// reserve a wire generation before finding the config "already pushed for
+// epoch/generation" and no-op, advancing configGenCounter past the newest
+// generation the peer was sent. The synthetic reservations below model that
+// historical drift. The authority now compares against the newest generation
+// actually WRITTEN to the current peer incarnation, and keeps the reservation-
+// counter comparison (fail-closed) until its first write to that incarnation.
 
 func newConvergedPeer18636(t *testing.T, applied uint64) *SessionSync {
 	t.Helper()
@@ -52,9 +51,9 @@ func stampedV4FromPeer18636(t *testing.T, peer *SessionSync, port uint16, wantEp
 	return key, val
 }
 
-// THE DEFECT: the peer applied the newest generation the authority sent, and
-// two no-op reconcile ticks have since reserved two more. Both families must be
-// accepted.
+// THE HISTORICAL DEFECT: the peer applied the newest generation the authority
+// sent, and pre-#18644 no-op reconcile ticks could reserve two more. Both
+// families must still be accepted when those old reservations are modeled.
 func TestAuthorityAcceptsPeerOnNewestSentGenAfterReservedNoop18636(t *testing.T) {
 	const sentGen = uint64(4988897125605)
 	peer := newConvergedPeer18636(t, sentGen)
@@ -64,7 +63,7 @@ func TestAuthorityAcceptsPeerOnNewestSentGenAfterReservedNoop18636(t *testing.T)
 		t.Fatalf("reserved %d, want %d", gen, sentGen)
 	}
 	authority.recordLastSentConfigGen(gen)
-	// Two reconcile ticks that found the config already pushed.
+	// Simulate two pre-#18644 no-op ticks that each synthetically reserved.
 	authority.ReserveConfigGen()
 	authority.ReserveConfigGen()
 
@@ -132,7 +131,7 @@ func TestAuthorityThresholdIsScopedToPeerIncarnation18636(t *testing.T) {
 	const sentGen = uint64(7000)
 	authority, _ := newAuthority18636(t, sentGen-1)
 	authority.recordLastSentConfigGen(authority.ReserveConfigGen()) // sentGen, to incarnation A
-	authority.ReserveConfigGen()                                    // a no-op reconcile tick
+	authority.ReserveConfigGen() // synthetic pre-#18644 no-op reservation
 	if got := authority.authorityConfigEpochThreshold(); got != sentGen {
 		t.Fatalf("threshold = %d, want the generation written to incarnation A (%d)", got, sentGen)
 	}
@@ -204,9 +203,9 @@ func drainPipe18636(t *testing.T) net.Conn {
 // the new boot id (#18521 ordering). The BulkStart boot-id switch then retires
 // the incarnation. The retirement must seed the sent mark from the priming
 // connection that carried the push; otherwise the threshold reverts to the
-// reservation counter and, after one no-op reconcile tick, every install the
-// rebooted peer stamps with the pushed generation is refused until a re-push
-// lands.
+// reservation counter and a synthetic pre-#18644 no-op reservation would make
+// every install the rebooted peer stamps with the pushed generation be refused
+// until a re-push lands.
 func TestBootSwitchKeepsConfigWrittenOnPrimingConn18636(t *testing.T) {
 	authority, _ := newAuthority18636(t, 7999)
 	conn := drainPipe18636(t)
@@ -223,7 +222,7 @@ func TestBootSwitchKeepsConfigWrittenOnPrimingConn18636(t *testing.T) {
 	if got := authority.peerIncarnationState().lastSentConfigGen.Load(); got != pushed {
 		t.Fatalf("after the BulkStart boot switch the sent mark = %d, want the generation written on the priming connection (%d)", got, pushed)
 	}
-	authority.ReserveConfigGen() // one no-op reconcile tick
+	authority.ReserveConfigGen() // synthetic pre-#18644 no-op reservation
 	peer := newConvergedPeer18636(t, pushed)
 	key, val := stampedV4FromPeer18636(t, peer, 61850, pushed)
 	if !authority.installClusterSyncedV4(key, val) {

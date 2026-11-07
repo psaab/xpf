@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -68,11 +69,21 @@ func commitHostName(t *testing.T, store *configstore.Store, hostName string) {
 // config-sync enabled, a primary/secondary cluster manager, and a counting push
 // seam so pushes can be observed without a live TCP sync transport. The node is
 // marked connected with a live epoch.
+func newReconcileClusterManager(primary bool) *cluster.Manager {
+	m := newClusterManager(primary)
+	state := cluster.StateSecondary
+	if primary {
+		state = cluster.StatePrimary
+	}
+	m.SetGroupStateForTesting(0, state)
+	return m
+}
+
 func newReconcileDaemon(t *testing.T, primary bool, uptime time.Duration) (*Daemon, *atomic.Int64) {
 	t.Helper()
 	var pushes atomic.Int64
 	d := &Daemon{
-		cluster:   newClusterManager(primary),
+		cluster:   newReconcileClusterManager(primary),
 		store:     newConfigSyncStore(t, "recon-host"),
 		startTime: time.Now().Add(-uptime),
 	}
@@ -99,7 +110,7 @@ func TestConfigSyncReconcile_PushesAfterPromotion(t *testing.T) {
 
 	// Later promotion to RG0 primary with the SAME connection up → the
 	// reconciler must now push the authoritative config exactly once.
-	d.cluster = newClusterManager(true /*primary*/)
+	d.cluster = newReconcileClusterManager(true /*primary*/)
 	d.reconcileConfigSyncToPeer("rg0-promotion")
 	if got := pushes.Load(); got != 1 {
 		t.Fatalf("promotion must push exactly once; got %d pushes", got)
@@ -177,6 +188,116 @@ func TestConfigSyncReconcileAlreadyPushedDoesNotReserveGeneration18644(t *testin
 	if after := ss.ConfigGenCounterForTesting(); after != before {
 		t.Fatalf("already-pushed no-op ticks reserved config generations: before=%d after=%d across %d ticks",
 			before, after, ticks)
+	}
+}
+
+// FAIL-ON-REVERT: a same-text operator push at a newer wire generation
+// supersedes a reconcile reservation paused before its final marker check.
+// The old hash-only guard let that stale reconcile write G1 after G2 and
+// replace the generation the overdue-ACK path must resend.
+func TestConfigSyncReconcilePreservesNewerSameTextPush18644(t *testing.T) {
+	d, _ := newReconcileDaemon(t, true /*primary*/, 60*time.Second)
+	d.configSyncPushForTest = nil
+	ss := cluster.NewSessionSync(":0", "10.99.0.2:4785", nil)
+	ss.SetConnectedForTesting(true)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = ss
+	d.clusterCommsMu.Unlock()
+	d.configPeerStateForTest = func() (bool, bool) { return true, true }
+
+	type queuedConfig struct {
+		text string
+		gen  uint64
+	}
+	var queueMu sync.Mutex
+	var queued []queuedConfig
+	d.configSyncQueueForTest = func(text string, gen uint64) bool {
+		queueMu.Lock()
+		queued = append(queued, queuedConfig{text: text, gen: gen})
+		queueMu.Unlock()
+		return true
+	}
+
+	reserved := make(chan uint64, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseReconcile := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseReconcile()
+	var paused atomic.Bool
+	d.configSyncAfterReserveForTest = func(gen uint64) {
+		if paused.CompareAndSwap(false, true) {
+			reserved <- gen
+			<-release
+		}
+	}
+
+	reconcileDone := make(chan struct{})
+	go func() {
+		d.reconcileConfigSyncToPeer("same-text-commit-race")
+		close(reconcileDone)
+	}()
+	var g1 uint64
+	select {
+	case g1 = <-reserved:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile did not pause after reserving G1")
+	}
+
+	if err := d.syncConfigToPeerWithAuthorization(nil); err != nil {
+		t.Fatalf("same-text operator push: %v", err)
+	}
+	queueMu.Lock()
+	if len(queued) != 1 {
+		got := len(queued)
+		queueMu.Unlock()
+		t.Fatalf("operator push wrote %d generations before G1 resumed, want exactly G2", got)
+	}
+	g2 := queued[0].gen
+	text := queued[0].text
+	queueMu.Unlock()
+	if g2 <= g1 {
+		t.Fatalf("operator generation G2=%d is not newer than paused reconcile G1=%d", g2, g1)
+	}
+	_, activeText, _ := d.activeConfigSnapshotForPeer()
+	if text != activeText {
+		t.Fatalf("operator push text differs from active config: pushed=%q active=%q", text, activeText)
+	}
+
+	ss.SetOverdueConfigApplyDebtForTesting(g2, 2*time.Minute)
+	type resend struct {
+		text string
+		gen  uint64
+	}
+	var resends []resend
+	d.configResendForTest = func(text string, gen uint64) {
+		resends = append(resends, resend{text: text, gen: gen})
+	}
+	releaseReconcile()
+	select {
+	case <-reconcileDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconcile did not finish after the newer push completed")
+	}
+
+	queueMu.Lock()
+	finalQueued := append([]queuedConfig(nil), queued...)
+	queueMu.Unlock()
+	if len(finalQueued) != 1 || finalQueued[0].gen != g2 {
+		t.Fatalf("stale reconcile wrote after G2: queued=%+v, want only G2=%d", finalQueued, g2)
+	}
+	d.configSyncMu.Lock()
+	pushedGen, pushedWireGen, pushedText := d.configSyncPushedMarkerGen, d.configSyncPushedWireGen, d.configSyncPushedDigest
+	d.configSyncMu.Unlock()
+	if pushedGen != g2 || pushedWireGen != g2 || pushedText != text {
+		t.Fatalf("G1 replaced the G2 pushed marker: marker=%d wire=%d textMatches=%v, want marker/wire=%d",
+			pushedGen, pushedWireGen, pushedText == text, g2)
+	}
+
+	if !d.repushIfConfigAckOverdue("same-text-push-race") {
+		t.Fatal("newest G2 overdue ACK debt was not re-sent")
+	}
+	if len(resends) != 1 || resends[0].gen != g2 || resends[0].text != text {
+		t.Fatalf("overdue resend = %+v, want the same G2 text at generation %d", resends, g2)
 	}
 }
 

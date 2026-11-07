@@ -929,10 +929,17 @@ type Daemon struct {
 	// once, instead of leaving the peer indefinitely divergent (the connect
 	// edge could have skipped the only push) OR re-pushing on every tick.
 	syncPeerConnEpoch     atomic.Uint64
+	// configSyncPushMu serializes config wire writes with publication of their
+	// pushed markers. Never acquire it while holding configSyncMu.
+	configSyncPushMu      sync.Mutex
 	configSyncMu          sync.Mutex
 	configSyncHasPushed   bool
 	configSyncPushedEpoch uint64
 	configSyncPushedGen   uint64
+	// configSyncPushedMarkerGen fences an in-flight reconciliation claim from a
+	// later push of the same config text. Zero is the pre-reservation claim;
+	// after reserving, the exact wire generation owns the marker.
+	configSyncPushedMarkerGen uint64
 	// configAckRepushAtMono rate-limits the #18521 overdue-ACK re-push
 	// (cluster.MonotonicNanos of the last one; 0 = never).
 	configAckRepushAtMono atomic.Int64
@@ -956,10 +963,15 @@ type Daemon struct {
 	configSyncPeerSnapshotDeferredEpoch   uint64
 	configSyncPeerSnapshotDeferredMessage string
 	configSyncStable                      time.Duration // stability threshold; 0 → default 30s (test override)
-	// configSyncPushForTest, when non-nil, replaces the reconciler's real
-	// SessionSync.QueueConfig push so a unit test can count pushes without a
-	// live TCP sync transport (mirrors syncPeerForTest for the commit path).
+	// configSyncPushForTest, when non-nil, replaces a push with a count-only
+	// seam. Production queue-path tests use the generation-aware seam below.
 	configSyncPushForTest func()
+	// configSyncQueueForTest replaces only the socket queue after the production
+	// snapshot/reservation path. Test-only.
+	configSyncQueueForTest func(configText string, gen uint64) bool
+	// configSyncAfterReserveForTest parks reconciliation after its production
+	// reservation and before the marker-generation guard. Test-only.
+	configSyncAfterReserveForTest func(gen uint64)
 	// configResendForTest replaces the #18521 same-generation re-send's
 	// queue call with a capture of the text and wire generation. Test-only.
 	configResendForTest func(text string, gen uint64)
