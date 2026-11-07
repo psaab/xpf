@@ -88,7 +88,8 @@
 set -u
 
 # shellcheck disable=SC1007  # `CDPATH= cd` clears CDPATH for this command only
-ROOT=${GO_DEADCODE_ROOT:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)}
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT=${GO_DEADCODE_ROOT:-$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)}
 cd "$ROOT" || { echo "go-deadcode-gate: FATAL: cannot cd to $ROOT" >&2; exit 2; }
 
 ALLOWLIST=${DEADCODE_ALLOWLIST:-docs/deadcode-allowlist.txt}
@@ -118,7 +119,7 @@ if [ -n "${DEADCODE_OUTPUT:-}" ]; then
 else
 	# Resolve go1.26.* with the shared resolver; stdout is its binary path.
 	# The pinned analyser's SSA builder panics under go1.27 (see header).
-	if GO_BIN=$(sh "$ROOT/scripts/resolve-deadcode-go.sh"); then
+	if GO_BIN=$(sh "$SCRIPT_DIR/resolve-deadcode-go.sh"); then
 		GO_VER=$("$GO_BIN" version 2>/dev/null | sed -n 's/.*\(go1\.26\.[0-9]*\).*/\1/p')
 		echo "go-deadcode-gate: running golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION -test ./... with $GO_BIN ($GO_VER)"
 		if ! "$GO_BIN" run "golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION" -test ./... >"$SCRATCH/deadcode.raw" 2>"$SCRATCH/deadcode.err"; then
