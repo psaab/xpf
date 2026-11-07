@@ -190,13 +190,33 @@ fn ipv4_tunnel_header_df_set_id_is_constant_and_df_clear_ids_are_unique_17266() 
 
 #[test]
 fn shared_ipv4_identification_mapping_prevents_cross_site_wrap_collision_17266() {
-    // Before both IPv4 writers used the same mapping, raw=65534 mapped to
-    // 65535 in NAT64 while raw=65535 narrowed directly to 65535 in tunnels.
+    // NAT64 maps the last raw value before wrap to 65535. Exercise the actual
+    // tunnel-header writer with controlled boundary inputs: the next raw ID
+    // must map to 1, not collide with 65535 as `raw as u16` did.
+    let tunnel_id_of_raw = |raw: u32| -> u16 {
+        let mut buf = [0xffu8; 20];
+        write_ipv4_tunnel_header_with_raw_identification(
+            &mut buf,
+            Ipv4Addr::new(10, 0, 0, 1),
+            Ipv4Addr::new(10, 0, 0, 2),
+            47,
+            0,
+            64,
+            120,
+            false,
+            raw,
+        )
+        .expect("write_ipv4_tunnel_header_with_raw_identification");
+        assert_eq!(checksum16(&buf), 0, "header checksum must remain valid");
+        u16::from_be_bytes([buf[4], buf[5]])
+    };
     let nat64_id = map_ipv4_identification(65534);
-    let tunnel_id = map_ipv4_identification(65535);
+    let tunnel_id_before_wrap = tunnel_id_of_raw(65534);
+    let tunnel_id_after_wrap = tunnel_id_of_raw(65535);
     assert_eq!(nat64_id, 65535);
-    assert_eq!(tunnel_id, 1);
-    assert_ne!(nat64_id, tunnel_id);
+    assert_eq!(tunnel_id_before_wrap, nat64_id);
+    assert_eq!(tunnel_id_after_wrap, 1);
+    assert_ne!(nat64_id, tunnel_id_after_wrap);
 }
 
 // ---- IPv6 outer / GRE pattern ----

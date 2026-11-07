@@ -290,6 +290,36 @@ pub(in crate::afxdp) fn write_ipv4_tunnel_header(
     total_len: u16,
     df: bool,
 ) -> Option<usize> {
+    let raw_identification = if df {
+        0
+    } else {
+        next_datagram_identification()
+    };
+    write_ipv4_tunnel_header_with_raw_identification(
+        buf,
+        src,
+        dst,
+        protocol,
+        tos,
+        ttl,
+        total_len,
+        df,
+        raw_identification,
+    )
+}
+
+#[inline]
+fn write_ipv4_tunnel_header_with_raw_identification(
+    buf: &mut [u8],
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    tos: u8,
+    ttl: u8,
+    total_len: u16,
+    df: bool,
+    raw_identification: u32,
+) -> Option<usize> {
     let ip = buf.get_mut(..20)?;
     ip[0] = 0x45;
     ip[1] = tos;
@@ -297,7 +327,7 @@ pub(in crate::afxdp) fn write_ipv4_tunnel_header(
     let identification = if df {
         0
     } else {
-        map_ipv4_identification(next_datagram_identification())
+        map_ipv4_identification(raw_identification)
     };
     ip[4..6].copy_from_slice(&identification.to_be_bytes());
     ip[6..8].copy_from_slice(&(if df { 0x4000u16 } else { 0 }).to_be_bytes()); // DF, FragOffset=0
