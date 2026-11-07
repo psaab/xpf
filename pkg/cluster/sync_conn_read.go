@@ -592,6 +592,9 @@ func (s *SessionSync) expireBulkWindowIfStale() {
 		return
 	}
 	epoch := s.bulkRecvEpoch
+	abortedInventory := s.inventoryActive
+	abortedInventoryGeneration := s.inventoryActiveGeneration
+	abortedInventoryToken := s.inventoryActiveRequestToken
 	s.bulkRecvInvalid = true
 	s.stats.BulkRecvAborted.Add(1)
 	s.bulkInProgress = false
@@ -607,6 +610,11 @@ func (s *SessionSync) expireBulkWindowIfStale() {
 	s.bulkRecvStartedAt = time.Time{}
 	s.bulkRecvInvalid = false
 	s.bulkMu.Unlock()
+	if abortedInventory {
+		if cb := s.OnSessionInventoryBulkAborted; cb != nil {
+			cb(abortedInventoryGeneration, abortedInventoryToken)
+		}
+	}
 	slog.Warn("cluster sync: bulk receive window expired past deadline; window aborted, awaiting successful bulk reconcile",
 		"epoch", epoch, "aborted_total", s.stats.BulkRecvAborted.Load())
 }

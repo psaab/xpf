@@ -421,7 +421,6 @@ func (m *Manager) TakeoverReady() (bool, []string) {
 // peer-alive form so an unresolved fabric still surfaces as a blocker
 // while it can still matter.
 func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
-
 	m.mu.Lock()
 	ready, reasons := m.takeoverReadyLocked(peerAlive)
 	request := m.sessionInventoryRequester
@@ -439,6 +438,8 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 			m.sessionRepairOverflowReplayOverflow = false
 			m.sessionInventoryRequestAt = time.Time{}
 			m.sessionInventoryRequestToken = 0
+			m.sessionInventoryReplayState = ""
+			m.sessionInventoryStaleCompletionRejected = false
 		}
 		generation = m.sessionRepairOverflowGen
 	}
@@ -449,36 +450,41 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 		now := time.Now()
 		if m.sessionInventoryRequestAt.IsZero() ||
 			now.Sub(m.sessionInventoryRequestAt) >= sessionInventoryRequestRetryInterval {
-			m.sessionInventoryRequestSeq++
-			if m.sessionInventoryRequestSeq == 0 {
+			requestToken = m.sessionInventoryRequestToken
+			newRequest := requestToken == 0
+			if newRequest {
 				m.sessionInventoryRequestSeq++
+				if m.sessionInventoryRequestSeq == 0 {
+					m.sessionInventoryRequestSeq++
+				}
+				requestToken = m.sessionInventoryRequestSeq
+				m.sessionInventoryRequestToken = requestToken
+				if m.sessionRepairOverflowErr != "" &&
+					m.sessionRepairOverflowGen == generation {
+					// Snapshot only when a new replay is armed. Retries reuse
+					// this pair and must not erase overflow taint accumulated
+					// during the still-running replay.
+					m.sessionRepairOverflowReplayGen = generation
+					m.sessionRepairOverflowReplayToken = requestToken
+					m.sessionRepairOverflowReplayOverflow = false
+				}
+				m.sessionInventoryStaleCompletionRejected = false
 			}
-			requestToken = m.sessionInventoryRequestSeq
-			m.sessionInventoryRequestToken = requestToken
 			m.sessionInventoryRequestAt = now
 			requestAt = now
 			if m.sessionRepairOverflowErr != "" &&
-				m.sessionRepairOverflowGen == generation {
-				// Snapshot each distinct request attempt. A delayed callback
-				// from an older replay of this same process generation must not
-				// satisfy the latest token.
-				if m.sessionRepairOverflowReplayGen == 0 {
-					m.sessionRepairOverflowReplayGen = generation
-				}
-				m.sessionRepairOverflowReplayToken = requestToken
-				// This request's replay snapshot starts after all overflows
-				// observed before it. noteSyncedMirrorFailureLocked taints it
-				// again if another overflow arrives while it is in flight.
-				m.sessionRepairOverflowReplayOverflow = false
+				m.sessionRepairOverflowReplayToken == requestToken &&
+				m.sessionInventoryReplayState != sessionInventoryReplayActive {
+				m.sessionInventoryReplayState = sessionInventoryReplayWaitingForPeer
 			}
 		}
 	}
 	m.mu.Unlock()
 
 	// Never hold Manager.mu while asking SessionSync to queue the bulk request.
-	// TakeoverReady is level-triggered, so retrying here also recovers a request
-	// lost while the peer transport was disconnected. A rejected enqueue keeps
-	// the throttle too, avoiding an error loop while the queue remains full.
+	// Retries reuse the outstanding pair: SessionSync treats it idempotently
+	// while pending, active, or completed, so a slow replay cannot be
+	// perpetually superseded by readiness polling.
 	if !requestAt.IsZero() {
 		if !request(generation, requestToken) {
 			m.mu.Lock()
@@ -488,6 +494,10 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 					m.sessionRepairOverflowReplayGen = 0
 					m.sessionRepairOverflowReplayToken = 0
 					m.sessionRepairOverflowReplayOverflow = false
+				}
+				if m.sessionRepairOverflowErr != "" &&
+					m.sessionInventoryReplayState != sessionInventoryReplayActive {
+					m.sessionInventoryReplayState = sessionInventoryReplayEnqueueFailed
 				}
 			}
 			m.mu.Unlock()
@@ -660,6 +670,15 @@ func (m *Manager) HATakeoverReadiness() HATakeoverReadiness {
 	return s
 }
 
+const (
+	sessionInventoryReplayNotStarted      = "not-started"
+	sessionInventoryReplayEnqueueFailed   = "request-enqueue-failed"
+	sessionInventoryReplayWaitingForPeer  = "waiting-for-peer"
+	sessionInventoryReplayActive          = "replay-active"
+	sessionInventoryReplayStaleRejected   = "stale-completion-rejected"
+	sessionInventoryReplayOverflowRearmed = "overflow-rearmed"
+)
+
 const sessionInventoryRequestRetryInterval = 5 * time.Second
 
 // SetSessionInventoryRequester installs the daemon's peer-bulk request path.
@@ -668,10 +687,44 @@ func (m *Manager) SetSessionInventoryRequester(requester func(generation, reques
 	m.sessionInventoryRequester = requester
 	m.sessionInventoryRequestAt = time.Time{}
 	m.sessionInventoryRequestToken = 0
+	m.sessionInventoryReplayState = ""
+	m.sessionInventoryStaleCompletionRejected = false
 	m.sessionRepairOverflowReplayGen = 0
 	m.sessionRepairOverflowReplayToken = 0
 	m.sessionRepairOverflowReplayOverflow = false
 	m.mu.Unlock()
+}
+
+func (m *Manager) sessionInventoryRequestMatchesLocked(generation, requestToken uint64) bool {
+	return generation != 0 && requestToken != 0 &&
+		m.sessionInventoryRequestToken == requestToken &&
+		m.procGen == generation && m.proc != nil && m.proc.Process != nil
+}
+
+// MarkSessionInventoryBulkStarted records that the accepted peer replay has
+// begun. The local pair is captured from the request pending at BulkStart.
+func (m *Manager) MarkSessionInventoryBulkStarted(generation, requestToken uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.sessionInventoryRequestMatchesLocked(generation, requestToken) {
+		return false
+	}
+	m.sessionInventoryReplayState = sessionInventoryReplayActive
+	m.sessionInventoryStaleCompletionRejected = false
+	return true
+}
+
+// MarkSessionInventoryBulkAborted returns an outstanding replay to its
+// peer-wait state after SessionSync rejects or abandons its receive window.
+func (m *Manager) MarkSessionInventoryBulkAborted(generation, requestToken uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.sessionInventoryRequestMatchesLocked(generation, requestToken) ||
+		m.sessionInventoryReplayState != sessionInventoryReplayActive {
+		return false
+	}
+	m.sessionInventoryReplayState = sessionInventoryReplayWaitingForPeer
+	return true
 }
 
 // MarkSessionInventoryReconciled clears debt only for the latest local request
@@ -681,10 +734,8 @@ func (m *Manager) SetSessionInventoryRequester(requester func(generation, reques
 func (m *Manager) MarkSessionInventoryReconciled(generation, requestToken uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if generation == 0 || requestToken == 0 ||
-		m.sessionInventoryRequestToken != requestToken ||
-		m.procGen != generation || m.proc == nil || m.proc.Process == nil {
-		return false
+	if !m.sessionInventoryRequestMatchesLocked(generation, requestToken) {
+		return m.rejectStaleSessionInventoryCompletionLocked(generation, requestToken)
 	}
 	restartDebt := m.sessionInventoryDebtGen == generation
 	overflowReplay := m.sessionRepairOverflowErr != "" &&
@@ -692,7 +743,7 @@ func (m *Manager) MarkSessionInventoryReconciled(generation, requestToken uint64
 		m.sessionRepairOverflowReplayGen == generation &&
 		m.sessionRepairOverflowReplayToken == requestToken
 	if !restartDebt && !overflowReplay {
-		return false
+		return m.rejectStaleSessionInventoryCompletionLocked(generation, requestToken)
 	}
 	cleared := false
 	if restartDebt {
@@ -706,18 +757,37 @@ func (m *Manager) MarkSessionInventoryReconciled(generation, requestToken uint64
 			m.sessionRepairOverflowReplayGen = 0
 			m.sessionRepairOverflowReplayToken = 0
 			m.sessionRepairOverflowReplayOverflow = false
+			m.sessionInventoryReplayState = sessionInventoryReplayOverflowRearmed
 		} else {
 			m.sessionRepairOverflowErr = ""
 			m.sessionRepairOverflowGen = 0
 			m.sessionRepairOverflowReplayGen = 0
 			m.sessionRepairOverflowReplayToken = 0
 			m.sessionRepairOverflowReplayOverflow = false
+			m.sessionInventoryReplayState = ""
 			cleared = true
 		}
 	}
+	if !overflowReplay {
+		m.sessionInventoryReplayState = ""
+	}
+	m.sessionInventoryStaleCompletionRejected = false
 	m.sessionInventoryRequestAt = time.Time{}
 	m.sessionInventoryRequestToken = 0
 	return cleared
+}
+
+func (m *Manager) rejectStaleSessionInventoryCompletionLocked(generation, requestToken uint64) bool {
+	slog.Warn("userspace: rejected stale session inventory replay completion",
+		"generation", generation, "request_token", requestToken,
+		"current_generation", m.procGen, "current_request_token", m.sessionInventoryRequestToken)
+	if m.sessionRepairOverflowErr != "" {
+		m.sessionInventoryStaleCompletionRejected = true
+		if m.sessionInventoryReplayState != sessionInventoryReplayActive {
+			m.sessionInventoryReplayState = sessionInventoryReplayStaleRejected
+		}
+	}
+	return false
 }
 
 func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
@@ -755,9 +825,17 @@ func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
 		reasons = append(reasons, reason)
 	}
 	if m.sessionRepairOverflowErr != "" {
-		reasons = append(reasons,
-			"userspace worker-session repair overflow; full session inventory replay required: "+
-				m.sessionRepairOverflowErr)
+		replayState := m.sessionInventoryReplayState
+		if replayState == "" {
+			replayState = sessionInventoryReplayNotStarted
+		}
+		reason := "userspace worker-session repair overflow; full session inventory replay required: " +
+			m.sessionRepairOverflowErr + " (replay state: " + replayState
+		if m.sessionInventoryStaleCompletionRejected &&
+			replayState != sessionInventoryReplayStaleRejected {
+			reason += ", stale-completion-rejected"
+		}
+		reasons = append(reasons, reason+")")
 	}
 	if m.sessionInventoryDebtGen != 0 {
 		reasons = append(reasons, fmt.Sprintf(

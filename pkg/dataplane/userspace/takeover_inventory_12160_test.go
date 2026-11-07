@@ -286,6 +286,14 @@ func TestTakeoverInventoryRepairOverflowWrongGenerationAndIncompleteStayBlocked1
 	if m.MarkSessionInventoryReconciled(m.procGen+1, requests[0].token) {
 		t.Fatal("wrong-generation inventory completion cleared the overflow latch")
 	}
+	if ready, reasons := m.TakeoverReady(); ready ||
+		!strings.Contains(strings.Join(reasons, "\n"), "replay state: stale-completion-rejected") {
+		t.Fatalf("stale completion rejection was not visible in readiness: ready=%v reasons=%v",
+			ready, reasons)
+	}
+	if m.MarkSessionInventoryReconciled(m.procGen, requests[0].token+1) {
+		t.Fatal("completion with a stale request token cleared the overflow latch")
+	}
 	// A stale replay snapshot from a replaced helper is not the request armed
 	// for the running generation, even if a callback carries that generation.
 	m.mu.Lock()
@@ -369,7 +377,7 @@ func TestTakeoverInventoryOverflowDuringReplayStaysBlocked18661(t *testing.T) {
 	}
 }
 
-func TestTakeoverInventoryDelayedOldReplayCannotClearRearmedLatch18661(t *testing.T) {
+func TestTakeoverInventoryRetryKeepsOutstandingToken18661(t *testing.T) {
 	m := repairOverflowManager18661(t)
 	var requests []inventoryRequest18661
 	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
@@ -384,31 +392,22 @@ func TestTakeoverInventoryDelayedOldReplayCannotClearRearmedLatch18661(t *testin
 		t.Fatalf("initial overflow inventory requests = %v, want one", requests)
 	}
 
-	// Model TakeoverReady retrying while the previous replay's async callback
-	// has not run yet. The same helper generation gets a fresh local token.
+	// A readiness retry during the same in-flight replay must reuse the token
+	// captured by BulkStart; it cannot supersede the callback that will arrive.
 	m.mu.Lock()
 	m.sessionInventoryRequestAt = time.Now().Add(-sessionInventoryRequestRetryInterval)
 	m.mu.Unlock()
 	if ready, _ := m.TakeoverReady(); ready {
 		t.Fatal("overflow helper was takeover-ready during a replay retry")
 	}
-	if len(requests) != 2 || requests[0].generation != requests[1].generation ||
-		requests[0].token == requests[1].token {
-		t.Fatalf("replayed requests = %v, want distinct tokens for one helper generation", requests)
+	if len(requests) != 2 || requests[0] != requests[1] {
+		t.Fatalf("replayed requests = %v, want the same helper-generation/token pair", requests)
 	}
-	if m.MarkSessionInventoryReconciled(requests[0].generation, requests[0].token) {
-		t.Fatal("delayed completion from the prior replay cleared the re-armed overflow latch")
-	}
-	if ready, reasons := m.TakeoverReady(); ready ||
-		!strings.Contains(strings.Join(reasons, "\n"), "repair overflow") {
-		t.Fatalf("delayed old completion opened readiness: ready=%v reasons=%v",
-			ready, reasons)
-	}
-	if !m.MarkSessionInventoryReconciled(requests[1].generation, requests[1].token) {
-		t.Fatal("matching latest replay did not clear overflow debt")
+	if !m.MarkSessionInventoryReconciled(requests[0].generation, requests[0].token) {
+		t.Fatal("matching completion of the still-outstanding replay did not clear overflow debt")
 	}
 	if ready, reasons := m.TakeoverReady(); !ready {
-		t.Fatalf("readiness did not recover after latest replay: %v", reasons)
+		t.Fatalf("readiness did not recover after the slow matching replay: %v", reasons)
 	}
 }
 
@@ -427,8 +426,8 @@ func TestTakeoverInventoryRearmedReplaySnapshotsPriorOverflow18661(t *testing.T)
 		t.Fatalf("initial overflow inventory requests = %v, want one", requests)
 	}
 
-	// A second overflow taints the first replay. Before its async completion
-	// callback runs, retry with a fresh request token and replay snapshot.
+	// A second overflow taints the first replay. The 5s retry reuses its pair
+	// and must preserve that taint until the bulk completes.
 	latchRepairOverflow18661(m)
 	m.mu.Lock()
 	m.sessionInventoryRequestAt = time.Now().Add(-sessionInventoryRequestRetryInterval)
@@ -436,18 +435,24 @@ func TestTakeoverInventoryRearmedReplaySnapshotsPriorOverflow18661(t *testing.T)
 	if ready, _ := m.TakeoverReady(); ready {
 		t.Fatal("overflow helper was takeover-ready during a replay retry")
 	}
-	if len(requests) != 2 || requests[0].generation != requests[1].generation ||
-		requests[0].token == requests[1].token {
-		t.Fatalf("replayed requests = %v, want distinct tokens for one helper generation", requests)
+	if len(requests) != 2 || requests[0] != requests[1] {
+		t.Fatalf("replayed requests = %v, want the same pair for the outstanding replay", requests)
 	}
 	if m.MarkSessionInventoryReconciled(requests[0].generation, requests[0].token) {
-		t.Fatal("delayed completion from the tainted replay cleared the latch")
+		t.Fatal("completion of the tainted replay cleared the latch")
 	}
 	if ready, reasons := m.TakeoverReady(); ready ||
-		!strings.Contains(strings.Join(reasons, "\n"), "repair overflow") {
-		t.Fatalf("tainted replay opened readiness: ready=%v reasons=%v", ready, reasons)
+		!strings.Contains(strings.Join(reasons, "\n"), "replay state: overflow-rearmed") {
+		t.Fatalf("tainted replay did not expose its re-arm state: ready=%v reasons=%v", ready, reasons)
 	}
-	if !m.MarkSessionInventoryReconciled(requests[1].generation, requests[1].token) {
+	if len(requests) != 3 || requests[2].generation != requests[0].generation ||
+		requests[2].token == requests[0].token {
+		t.Fatalf("overflow replay did not re-arm with a fresh token: %v", requests)
+	}
+	if m.MarkSessionInventoryReconciled(requests[0].generation, requests[0].token) {
+		t.Fatal("delayed completion from the tainted replay cleared the newly re-armed latch")
+	}
+	if !m.MarkSessionInventoryReconciled(requests[2].generation, requests[2].token) {
 		t.Fatal("clean re-armed replay did not clear the earlier overflow")
 	}
 	if ready, reasons := m.TakeoverReady(); !ready {

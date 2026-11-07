@@ -135,6 +135,9 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 		invalid = true
 		s.stats.BulkRecvAborted.Add(1)
 	}
+	abortedInventory := (invalid || late) && s.inventoryActive
+	abortedInventoryGeneration := s.inventoryActiveGeneration
+	abortedInventoryToken := s.inventoryActiveRequestToken
 	if invalid || late {
 		s.bulkInProgress = false
 		s.bulkIncomplete = true
@@ -150,6 +153,11 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 		s.bulkRecvInvalid = false
 	}
 	s.bulkMu.Unlock()
+	if abortedInventory {
+		if cb := s.OnSessionInventoryBulkAborted; cb != nil {
+			cb(abortedInventoryGeneration, abortedInventoryToken)
+		}
+	}
 	if invalid || late {
 		slog.Warn("cluster sync: bulk receive window aborted; withholding BulkAck and failover release",
 			"epoch", epoch, "late", late,
@@ -195,6 +203,12 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 			s.inventoryPending = false
 			s.inventoryPendingGeneration = 0
 			s.inventoryPendingRequestToken = 0
+		}
+		if inventoryGen > s.inventoryCompletedGeneration ||
+			(inventoryGen == s.inventoryCompletedGeneration &&
+				inventoryRequestToken > s.inventoryCompletedRequestToken) {
+			s.inventoryCompletedGeneration = inventoryGen
+			s.inventoryCompletedRequestToken = inventoryRequestToken
 		}
 		s.bulkMu.Unlock()
 		if cb := s.OnSessionInventoryBulkReceived; cb != nil {

@@ -9,6 +9,29 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
+// NewSessionInventoryOverflowManagerForTest creates a ready-shaped manager
+// with one latched worker repair overflow. It lets cluster tests drive the
+// real inventory-request and replay callbacks without starting a helper.
+func NewSessionInventoryOverflowManagerForTest(eventStream *EventStream) *Manager {
+	m := New()
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
+	m.procGen = 19
+	m.clusterHA = true
+	m.mode = ModeUserspaceCompat
+	m.lastStatus = ProcessStatus{
+		Enabled:         true,
+		ForwardingArmed: true,
+		Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
+	}
+	m.xskLivenessProven = true
+	m.eventStream = eventStream
+	m.helperHAStatePublished = true
+	m.haGroups = map[int]HAGroupStatus{1: {RGID: 1, Active: false}}
+	m.sessionRepairOverflowErr = "test worker repair overflow"
+	m.sessionRepairOverflowGen = m.procGen
+	return m
+}
+
 const policySnapshotRecoveryApplySnapshotTypeForTest = "apply_snapshot"
 
 // PolicySnapshotRecoveryFixtureForTest drives a Manager synchronously with a

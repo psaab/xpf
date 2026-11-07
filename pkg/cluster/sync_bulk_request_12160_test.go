@@ -1,15 +1,20 @@
 package cluster
 
 import (
+	"context"
 	"encoding/binary"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
 type inventoryAddr12160 string
@@ -429,7 +434,6 @@ func TestPeerSessionInventoryExpiredBulkClearsActiveToken12160(t *testing.T) {
 	}
 }
 
-
 func TestPeerSessionInventoryNewSameGenerationTokenSurvivesDelayedBulkCompletion12160(t *testing.T) {
 	const generation = uint64(81)
 	const firstToken = uint64(1)
@@ -477,8 +481,15 @@ func TestPeerSessionInventoryNewSameGenerationTokenSurvivesDelayedBulkCompletion
 		t.Fatal("zero request token was accepted")
 	}
 	request(firstToken)
-	if receiver.RequestPeerSessionInventory(generation, firstToken) {
-		t.Fatal("equal request token overwrote an existing pending request")
+	if !receiver.RequestPeerSessionInventory(generation, firstToken) {
+		t.Fatal("retry of the same pending pair was not idempotently accepted")
+	}
+	select {
+	case duplicate := <-receiver.sendCh:
+		if frame := decodeInventoryFrame12160(t, duplicate); frame.typ == syncMsgBulkRequest {
+			t.Fatal("idempotent pending retry queued a duplicate BulkRequest")
+		}
+	default:
 	}
 	firstMarker := inventoryIncarnatedBulkMarker12160(1, bootIncarnation{1})
 	receiver.handleMessage(wire, syncMsgBulkStart, firstMarker)
@@ -543,6 +554,16 @@ func TestPeerSessionInventoryNewSameGenerationTokenSurvivesDelayedBulkCompletion
 	}
 	if pending, _, _ := inventoryPendingState12160(receiver); pending {
 		t.Fatal("new same-generation request remained pending after its bulk completed")
+	}
+	if !receiver.RequestPeerSessionInventory(generation, retryToken) {
+		t.Fatal("retry of the same completed pair was not idempotently accepted")
+	}
+	select {
+	case duplicate := <-receiver.sendCh:
+		if frame := decodeInventoryFrame12160(t, duplicate); frame.typ == syncMsgBulkRequest {
+			t.Fatal("idempotent completed retry queued a duplicate BulkRequest")
+		}
+	default:
 	}
 }
 
@@ -652,5 +673,144 @@ func TestBulkReconcileRejectsStaleSerial12160(t *testing.T) {
 	s.bulkMu.Unlock()
 	if !consumed {
 		t.Fatal("matching serial 7 did not consume the window")
+	}
+}
+
+func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
+	dir, err := os.MkdirTemp("", "inv18661")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	eventStream := dpuserspace.NewEventStream(filepath.Join(dir, "e.sock"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := eventStream.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
+	t.Cleanup(func() { eventStream.Close() })
+	manager := dpuserspace.NewSessionInventoryOverflowManagerForTest(eventStream)
+
+	receiverDP := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+	receiver := NewSessionSync(":0", "peer", receiverDP)
+	receiver.SetZoneRGMap(map[uint16]int{})
+	wire := newInventoryCaptureConn12160(t)
+	installInventoryConn12160(receiver, wire)
+	sender := NewSessionSync(":0", "peer", nil)
+	installInventoryConn12160(sender, wire)
+	var sourceCalls atomic.Int32
+	sender.BulkSnapshotSource = func() (BulkSnapshot, error) {
+		sourceCalls.Add(1)
+		return inventorySnapshot12160(), nil
+	}
+
+	type requestPair struct{ generation, token uint64 }
+	var requests []requestPair
+	manager.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, requestPair{generation: generation, token: token})
+		return receiver.RequestPeerSessionInventory(generation, token)
+	})
+	bulkStarted := make(chan bool, 1)
+	bulkCompleted := make(chan bool, 1)
+	receiver.OnSessionInventoryBulkStarted = func(generation, token uint64) {
+		bulkStarted <- manager.MarkSessionInventoryBulkStarted(generation, token)
+	}
+	receiver.OnSessionInventoryBulkAborted = func(generation, token uint64) {
+		manager.MarkSessionInventoryBulkAborted(generation, token)
+	}
+	receiver.OnSessionInventoryBulkReceived = func(generation, token uint64) {
+		bulkCompleted <- manager.MarkSessionInventoryReconciled(generation, token)
+	}
+
+	ready, reasons := manager.TakeoverReady()
+	if ready || !strings.Contains(strings.Join(reasons, "\n"), "replay state: not-started") {
+		t.Fatalf("initial overflow refusal did not identify an unstarted replay: ready=%v reasons=%v",
+			ready, reasons)
+	}
+	if len(requests) != 1 || requests[0].generation == 0 || requests[0].token == 0 {
+		t.Fatalf("initial inventory request pair = %v, want one nonzero pair", requests)
+	}
+	request := decodeInventoryFrame12160(t, <-receiver.sendCh)
+	if request.typ != syncMsgBulkRequest || len(request.payload) != 0 {
+		t.Fatalf("queued inventory request = type %d payload %x", request.typ, request.payload)
+	}
+	sender.handleMessage(wire, request.typ, request.payload)
+
+	var bulkEnd *inventoryFrame12160
+	for bulkEnd == nil {
+		frame := readInventoryFrame12160(t, wire.writes)
+		switch frame.typ {
+		case syncMsgBulkStart, syncMsgSessionV4:
+			receiver.handleMessage(wire, frame.typ, frame.payload)
+		case syncMsgBulkEnd:
+			held := frame
+			bulkEnd = &held
+		default:
+			t.Fatalf("unexpected inventory replay frame type %d", frame.typ)
+		}
+	}
+	select {
+	case started := <-bulkStarted:
+		if !started {
+			t.Fatal("accepted BulkStart did not mark the matching manager replay active")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("accepted BulkStart did not report replay-active state")
+	}
+	if ready, reasons := manager.TakeoverReady(); ready ||
+		!strings.Contains(strings.Join(reasons, "\n"), "replay state: replay-active") {
+		t.Fatalf("readiness refusal did not distinguish an active replay: ready=%v reasons=%v",
+			ready, reasons)
+	}
+
+	// Keep the real bulk window open beyond the manager's 5s retry cadence
+	// while its readiness caller continues to poll every 2s. A retry must reuse
+	// the request pair captured by BulkStart instead of superseding it.
+	for range 3 {
+		time.Sleep(2 * time.Second)
+		if ready, reasons := manager.TakeoverReady(); ready ||
+			!strings.Contains(strings.Join(reasons, "\n"), "replay state: replay-active") {
+			t.Fatalf("slow replay unexpectedly opened readiness: ready=%v reasons=%v", ready, reasons)
+		}
+	}
+	if len(requests) < 2 {
+		t.Fatalf("readiness did not exercise the retry while BulkEnd was held: requests=%v", requests)
+	}
+	for _, pair := range requests {
+		if pair != requests[0] {
+			t.Fatalf("retry superseded the in-flight request pair: requests=%v", requests)
+		}
+	}
+	select {
+	case duplicate := <-receiver.sendCh:
+		frame := decodeInventoryFrame12160(t, duplicate)
+		if frame.typ == syncMsgBulkRequest {
+			t.Fatal("retry queued a duplicate bulk request for the active replay")
+		}
+	default:
+	}
+	if got := sourceCalls.Load(); got != 1 {
+		t.Fatalf("slow replay invoked authoritative snapshot source %d times, want once", got)
+	}
+
+	receiver.handleMessage(wire, bulkEnd.typ, bulkEnd.payload)
+	select {
+	case completed := <-bulkCompleted:
+		if !completed {
+			t.Fatal("actual reconciled bulk completion did not clear the matching overflow latch")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("actual reconciled bulk did not report completion")
+	}
+	if ready, reasons := manager.TakeoverReady(); !ready {
+		t.Fatalf("slow real replay did not restore takeover readiness: %v", reasons)
+	}
+	if got, want := len(receiverDP.v4sessions), len(inventorySnapshot12160().V4); got != want {
+		t.Fatalf("receiver worker-session store has %d rows after replay, want %d", got, want)
+	}
+	for _, entry := range inventorySnapshot12160().V4 {
+		if _, ok := receiverDP.v4sessions[entry.Key]; !ok {
+			t.Fatalf("completed replay did not install worker session %v", entry.Key)
+		}
 	}
 }

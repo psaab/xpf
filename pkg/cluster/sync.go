@@ -1344,6 +1344,12 @@ type SessionSync struct {
 	// captured a pending inventory request and reconciled successfully. Both
 	// values are local correlation state; the request token is not sent on wire.
 	OnSessionInventoryBulkReceived func(generation, requestToken uint64)
+	// OnSessionInventoryBulkStarted fires after an accepted BulkStart captures
+	// a pending inventory request pair.
+	OnSessionInventoryBulkStarted func(generation, requestToken uint64)
+	// OnSessionInventoryBulkAborted fires when an active requested receive
+	// window is abandoned before successful reconciliation.
+	OnSessionInventoryBulkAborted func(generation, requestToken uint64)
 	// BulkSyncOverride, if set, runs as a best-effort fast-population pre-step
 	// BEFORE the authoritative BulkSync in doBulkSync (it does NOT replace it,
 	// #5085). It is NO LONGER wired in production — the async, lossy
@@ -1702,16 +1708,21 @@ type SessionSync struct {
 	bulkMu         sync.Mutex
 	bulkInProgress bool
 	// The next accepted bulk window captures the pending helper generation and
-	// local request token. Both remain active through reconciliation so the
-	// completion is tied to the exact request pair it may satisfy.
-	inventoryPending                bool
-	inventoryPendingGeneration      uint64
-	inventoryPendingRequestToken    uint64
-	inventoryActive                 bool
-	inventoryActiveGeneration       uint64
-	inventoryActiveRequestToken     uint64
-	bulkRecvSerial             uint64 // accepted-window identity carried through reconciliation
-	bulkRecvEpoch              uint64
+	// local request token. The active pair follows it through reconciliation so
+	// completion and abort callbacks identify the replay they describe.
+	inventoryPending             bool
+	inventoryPendingGeneration   uint64
+	inventoryPendingRequestToken uint64
+	inventoryActive              bool
+	inventoryActiveGeneration    uint64
+	inventoryActiveRequestToken  uint64
+	// The latest successfully reconciled request is an idempotency watermark:
+	// a readiness retry that races its asynchronous completion callback must
+	// not enqueue a duplicate bulk.
+	inventoryCompletedGeneration   uint64
+	inventoryCompletedRequestToken uint64
+	bulkRecvSerial                 uint64 // accepted-window identity carried through reconciliation
+	bulkRecvEpoch                  uint64
 	// bulkRecvIncarnation is the peer boot incarnation that started the bulk
 	// `bulkRecvEpoch` names, so a BulkEnd can be matched on more than the epoch
 	// (#9174 V013 — reasoning at the two sites, sync_conn_read.go's BulkEnd arm

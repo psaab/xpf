@@ -114,7 +114,15 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 	s.bulkInstallFailedV4 = make(map[dataplane.SessionKey]struct{})
 	s.bulkInstallFailedV6 = make(map[dataplane.SessionKeyV6]struct{})
 	s.bulkZoneSnapshot = zoneSnap
+	inventoryStarted := s.inventoryActive
+	inventoryGeneration := s.inventoryActiveGeneration
+	inventoryRequestToken := s.inventoryActiveRequestToken
 	s.bulkMu.Unlock()
+	if inventoryStarted {
+		if cb := s.OnSessionInventoryBulkStarted; cb != nil {
+			cb(inventoryGeneration, inventoryRequestToken)
+		}
+	}
 	// The generation reset moves to the ACCEPTED path only. It is the
 	// #2198 F2 remedy for a re-priming peer. A DIFFERENT known boot
 	// incarnation, or an un-incarnated legacy BulkStart, has no comparable

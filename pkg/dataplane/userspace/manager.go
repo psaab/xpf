@@ -171,16 +171,22 @@ type Manager struct {
 	// sessionInventoryRequestAt throttles peer bulk requests while the current
 	// helper generation waits for its authoritative session inventory.
 	sessionInventoryRequestAt time.Time
-	// sessionInventoryRequestSeq mints distinct local tokens for retries and
-	// replay re-arms; tokens are paired with procGen and never go on the wire.
+	// sessionInventoryRequestSeq mints a new local token only when a replay is
+	// first armed or re-armed. Retries of an outstanding replay reuse its token;
+	// tokens are paired with procGen and never go on the wire.
 	sessionInventoryRequestSeq uint64
 	// sessionInventoryRequestToken is the token currently expected to complete
 	// the outstanding session-inventory request.
 	sessionInventoryRequestToken uint64
+	// sessionInventoryReplayState describes overflow replay progress in
+	// readiness refusals; empty means no request has started.
+	sessionInventoryReplayState string
+	// sessionInventoryStaleCompletionRejected preserves operator visibility
+	// when a stale completion was rejected while a newer replay is active.
+	sessionInventoryStaleCompletionRejected bool
 	// sessionInventoryRequester asks the connected peer to send its authoritative
 	// owner-RG session inventory. It is installed by daemon cluster-sync wiring.
 	sessionInventoryRequester func(generation, requestToken uint64) bool
-
 	// sessionOperationID is monotonic within this Manager/helper lifecycle and
 	// is paired with procGen on every helper-first tuple mutation.
 	sessionOperationID uint64
@@ -630,9 +636,9 @@ type Manager struct {
 	// sessionRepairOverflowReplayGen is the generation snapshotted for an
 	// inventory replay that can clear the overflow latch (0 = none fired).
 	sessionRepairOverflowReplayGen uint64
-	// sessionRepairOverflowReplayToken is the fresh request token expected to
-	// complete the snapshotted replay. It separates delayed callbacks from
-	// later retries of the same helper generation.
+	// sessionRepairOverflowReplayToken is the request token expected to complete
+	// the snapshotted replay. It remains stable while a replay is outstanding,
+	// so periodic readiness retries cannot supersede a healthy slow replay.
 	sessionRepairOverflowReplayToken uint64
 	// sessionRepairOverflowReplayOverflow records an overflow that happened
 	// while a matching inventory request/replay was in flight; that replay

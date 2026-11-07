@@ -90,9 +90,9 @@ func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, sourc
 }
 
 // RequestPeerSessionInventory asks the connected peer to send its
-// authoritative session inventory. A request token for a generation with
-// existing pending or active state must strictly increase; both values are
-// local correlation state and are not sent on the wire.
+// authoritative session inventory. Retries of the same local request pair are
+// idempotent while pending, active, or just completed; a newer pair may arm
+// another bulk. Neither value is sent on wire.
 func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint64) bool {
 	if generation == 0 || requestToken == 0 {
 		return false
@@ -103,15 +103,37 @@ func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint6
 		return false
 	}
 	s.bulkMu.Lock()
-	if (s.inventoryPending &&
-		(generation < s.inventoryPendingGeneration ||
-			(generation == s.inventoryPendingGeneration && requestToken <= s.inventoryPendingRequestToken))) ||
-		(s.inventoryActive &&
-			(generation < s.inventoryActiveGeneration ||
-				(generation == s.inventoryActiveGeneration && requestToken <= s.inventoryActiveRequestToken))) {
+	latestGeneration, latestToken := s.inventoryCompletedGeneration, s.inventoryCompletedRequestToken
+	if s.inventoryPending &&
+		compareSessionInventoryRequestPair(
+			s.inventoryPendingGeneration, s.inventoryPendingRequestToken,
+			latestGeneration, latestToken) > 0 {
+		latestGeneration, latestToken = s.inventoryPendingGeneration, s.inventoryPendingRequestToken
+	}
+	if s.inventoryActive &&
+		compareSessionInventoryRequestPair(
+			s.inventoryActiveGeneration, s.inventoryActiveRequestToken,
+			latestGeneration, latestToken) > 0 {
+		latestGeneration, latestToken = s.inventoryActiveGeneration, s.inventoryActiveRequestToken
+	}
+	switch compareSessionInventoryRequestPair(generation, requestToken, latestGeneration, latestToken) {
+	case -1:
 		s.bulkMu.Unlock()
 		s.mu.Unlock()
 		return false
+	case 0:
+		// Zero/zero is only the initial state, and was rejected above.
+		samePending := s.inventoryPending &&
+			generation == s.inventoryPendingGeneration &&
+			requestToken == s.inventoryPendingRequestToken
+		sameActive := s.inventoryActive &&
+			generation == s.inventoryActiveGeneration &&
+			requestToken == s.inventoryActiveRequestToken
+		sameCompleted := generation == s.inventoryCompletedGeneration &&
+			requestToken == s.inventoryCompletedRequestToken
+		s.bulkMu.Unlock()
+		s.mu.Unlock()
+		return samePending || sameActive || sameCompleted
 	}
 	msg := encodeRawMessage(syncMsgBulkRequest, nil)
 	if !s.enqueueQueuedFrame(msg) {
@@ -129,6 +151,18 @@ func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint6
 	s.bulkMu.Unlock()
 	s.mu.Unlock()
 	return true
+}
+
+func compareSessionInventoryRequestPair(leftGeneration, leftToken, rightGeneration, rightToken uint64) int {
+	if leftGeneration < rightGeneration ||
+		(leftGeneration == rightGeneration && leftToken < rightToken) {
+		return -1
+	}
+	if leftGeneration > rightGeneration ||
+		(leftGeneration == rightGeneration && leftToken > rightToken) {
+		return 1
+	}
+	return 0
 }
 
 // QueueSessionV4 queues a v4 session for synchronization to the peer. The
