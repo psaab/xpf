@@ -338,3 +338,4 @@ failure.
 - A stream that survives the takeover but dies later is still a death. Check
   the per-stream last-good second. Many streams stopping in the same second
   points at an event (a delete, a reap or a role change), not at load.
+| F2 loss wave @732ee94c10 (wave-gate 3, 2026-11-07) | medians v4 14.43 / v6 15.12 Gbps (multi-P12R screen); F2 24/24 rc0, per-leg medians −16..−31% vs wave-2 row under orchestrator loadavg 12.7→17.6 — recorded as the new wave row, variance-shaped (#18976), identity a1ee3ae176 xpfd / 4b3b6a83 cli on deb 0.0.30379+g732ee94c1099 |
