@@ -121,3 +121,24 @@ func TestNamelessTermAlarmWarnings17257(t *testing.T) {
 		t.Fatalf("clean config alarm warnings = %q, want none", warnings)
 	}
 }
+
+func TestCompileConfigLenientTypedVisibleNamelessWarningsDeduplicated17257(t *testing.T) {
+	for _, src := range []string{
+		`firewall { family inet { filter F { term { then discard; } } } }`,
+		`policy-options { policy-statement P { term { then reject; } } }`,
+	} {
+		cfg, err := CompileConfigLenient(hierTree(t, src))
+		if err != nil {
+			t.Fatalf("lenient compile %q: %v", src, err)
+		}
+		count := 0
+		for _, warning := range cfg.Warnings {
+			if strings.Contains(warning, "nameless") {
+				count++
+			}
+		}
+		if count != 1 {
+			t.Errorf("typed-visible warnings for %q = %q; count=%d, want exactly one", src, cfg.Warnings, count)
+		}
+	}
+}
