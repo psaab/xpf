@@ -1624,12 +1624,12 @@ func checkRedactionPlaceholder(t *ConfigTree) error {
 	return nil
 }
 
-// redactedLocName renders the name-only location for a guard hit:
-// the flattened path up to and including the offending leaf KEYWORD
-// (plus instance names, which are identifiers, not values). For an
-// embedded change-configuration hit the location is the event-policy
-// stanza path without the payload token. Callers pass the flattened
-// path and the index of the last token to keep.
+// redactedLocName renders a safe location for a guard hit: the flattened
+// path up to and including the offending leaf KEYWORD, with secret-indexed
+// values masked and URL-classified values transformed by redactSecretPath.
+// For an embedded change-configuration hit, the location is the outer
+// event-policy stanza path without the payload token. Callers pass the
+// flattened path and the index of the last token to keep.
 func redactedLocName(full []string, keep int) string {
 	if keep >= len(full) {
 		keep = len(full) - 1

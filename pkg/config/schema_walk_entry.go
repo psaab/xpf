@@ -267,12 +267,13 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect, lenient bool) ([]
 // schema_walk_errors.go, but validators and node/tail validators
 // return errors built in other files, and a future formatter can
 // still bypass construction.
-// At the SchemaValidate exit, any secret token in the candidate tree
-// (per secretIndices over every flattened node path) is scrubbed from
-// the returned error text — all occurrences — so no schema error can
-// carry a credential operand to tolerant-ingress logs or compiled
-// warnings regardless of which helper built it. Cost is rejection-
-// path only: the tree is walked once per failed validation.
+// At the SchemaValidate exit, every secret token and every URL-classified
+// token whose RedactURL result differs from its input (per secretIndices
+// and urlLeafIndices over every flattened node path and embedded command)
+// is scrubbed from the returned error text — all occurrences — so no
+// credential operand reaches tolerant-ingress logs or compiled warnings
+// regardless of which helper built the error. Cost is rejection-path only:
+// the tree is walked once per failed validation.
 func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	if err == nil || tree == nil {
 		return err
@@ -434,10 +435,10 @@ func fieldCompletesValue(allValues []string, msg, field string) bool {
 }
 
 // neutralizeLoc scrubs a guard "(at ...)" location: belt-scrub its
-// text, and if the (unquoted) location equals or contains a secret
-// value, drop the value-bearing part. Guard locations built by the
-// current code are name-only, so this fires only for foreign/old
-// error shapes.
+// text, and if the (unquoted) location equals or contains a collected
+// secret value, drop the value-bearing suffix. Current guard locations
+// already mask secret operands and transform URL-classified values; this
+// remains defense for foreign/old error shapes.
 func neutralizeLoc(allValues []string, loc string) string {
 	out := scrubSecretValuesText(beltSecretValues(allValues), loc)
 	inner := out
@@ -505,10 +506,9 @@ func isPublicVocabulary(s string) bool {
 	return schemaGrammarKeywords[s]
 }
 
-// extractLocName returns the name-only "(at ...)" location from a
-// guard error built by checkRedactionPlaceholder, for re-wrapping
-// without re-embedding any rendered path. Guard errors built by the
-// current code already carry names only; the fallback is empty.
+// extractLocName returns the safely rendered "(at ...)" location from a
+// guard error built by checkRedactionPlaceholder, for re-wrapping without
+// re-embedding an unredacted path. The fallback is empty.
 func extractLocName(err error) string {
 	msg := err.Error()
 	const marker = "(at "
