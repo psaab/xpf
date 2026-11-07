@@ -1320,20 +1320,20 @@ func (a *LegacyDataPlaneAdapter) HATakeoverReadiness() HATakeoverReadiness {
 
 // SetSessionInventoryRequester installs the daemon's peer session-bulk request
 // path on the userspace manager.
-func (a *LegacyDataPlaneAdapter) SetSessionInventoryRequester(requester func(generation uint64) bool) {
+func (a *LegacyDataPlaneAdapter) SetSessionInventoryRequester(requester func(generation, requestToken uint64) bool) {
 	if a == nil || a.manager == nil {
 		return
 	}
 	a.manager.SetSessionInventoryRequester(requester)
 }
 
-// MarkSessionInventoryReconciled forwards a generation-tagged peer bulk
-// completion to the userspace manager.
-func (a *LegacyDataPlaneAdapter) MarkSessionInventoryReconciled(generation uint64) bool {
+// MarkSessionInventoryReconciled forwards a generation- and token-tagged peer
+// bulk completion to the userspace manager.
+func (a *LegacyDataPlaneAdapter) MarkSessionInventoryReconciled(generation, requestToken uint64) bool {
 	if a == nil || a.manager == nil {
 		return false
 	}
-	return a.manager.MarkSessionInventoryReconciled(generation)
+	return a.manager.MarkSessionInventoryReconciled(generation, requestToken)
 }
 
 // ErrCursorIterationUnsupported is returned by

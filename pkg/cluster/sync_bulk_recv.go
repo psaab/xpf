@@ -140,6 +140,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 		s.bulkIncomplete = true
 		s.inventoryActive = false
 		s.inventoryActiveGeneration = 0
+		s.inventoryActiveRequestToken = 0
 		s.bulkRecvV4 = nil
 		s.bulkRecvV6 = nil
 		s.bulkInstallFailedV4 = nil
@@ -169,7 +170,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 		s.scheduleBulkRerequest("transient helper install failures", bulkSerial, bulkRerequestTransientFloor, bulkDuration)
 		return false
 	}
-	reconciled, inventoryGen, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
+	reconciled, inventoryGen, inventoryRequestToken, inventoryRequested := s.reconcileStaleSessions(bulkSerial)
 	if !reconciled {
 		slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
 			"epoch", epoch)
@@ -186,16 +187,18 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 	}
 	if inventoryRequested {
 		s.bulkMu.Lock()
-		// A retry for the same helper generation is already covered by
-		// this successful full inventory. A newer helper generation stays
-		// pending and requires its own accepted bulk window.
-		if s.inventoryPending && s.inventoryPendingGeneration == inventoryGen {
+		// Only the exact request captured by the completed bulk is consumed;
+		// a retry or replay armed afterward remains pending for its own bulk.
+		if s.inventoryPending &&
+			s.inventoryPendingGeneration == inventoryGen &&
+			s.inventoryPendingRequestToken == inventoryRequestToken {
 			s.inventoryPending = false
 			s.inventoryPendingGeneration = 0
+			s.inventoryPendingRequestToken = 0
 		}
 		s.bulkMu.Unlock()
 		if cb := s.OnSessionInventoryBulkReceived; cb != nil {
-			go cb(inventoryGen)
+			go cb(inventoryGen, inventoryRequestToken)
 		}
 	}
 	return true

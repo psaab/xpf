@@ -598,6 +598,7 @@ func (s *SessionSync) expireBulkWindowIfStale() {
 	s.bulkIncomplete = true
 	s.inventoryActive = false
 	s.inventoryActiveGeneration = 0
+	s.inventoryActiveRequestToken = 0
 	s.bulkRecvV4 = nil
 	s.bulkRecvV6 = nil
 	s.bulkInstallFailedV4 = nil

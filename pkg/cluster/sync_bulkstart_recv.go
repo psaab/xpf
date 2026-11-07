@@ -94,8 +94,10 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 	}
 	s.inventoryActive = s.inventoryPending
 	s.inventoryActiveGeneration = s.inventoryPendingGeneration
+	s.inventoryActiveRequestToken = s.inventoryPendingRequestToken
 	if !s.inventoryActive {
 		s.inventoryActiveGeneration = 0
+		s.inventoryActiveRequestToken = 0
 	}
 	s.bulkRecvEpoch = epoch
 	// #9174 V013: remember WHICH BOOT started this bulk, so its end marker

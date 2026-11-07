@@ -1674,8 +1674,10 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.bulkZoneSnapshot = nil
 		s.inventoryPending = false
 		s.inventoryPendingGeneration = 0
+		s.inventoryPendingRequestToken = 0
 		s.inventoryActive = false
 		s.inventoryActiveGeneration = 0
+		s.inventoryActiveRequestToken = 0
 		s.bulkMu.Unlock()
 		if hadBulkInProgress {
 			// #15254 (A82-03): an accepted BulkStart stamped

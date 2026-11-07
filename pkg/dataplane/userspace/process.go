@@ -1204,6 +1204,10 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	m.sessionInventoryDebtGen = 0
 	m.sessionInventoryDebtOwed = m.clusterHA
 	m.sessionInventoryRequestAt = time.Time{}
+	m.sessionInventoryRequestToken = 0
+	m.sessionRepairOverflowReplayGen = 0
+	m.sessionRepairOverflowReplayToken = 0
+	m.sessionRepairOverflowReplayOverflow = false
 
 	m.publishedSnapshot = 0
 	// #7465: a new helper starts with an EMPTY HA inventory, so the fact that the

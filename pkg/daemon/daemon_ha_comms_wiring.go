@@ -418,28 +418,28 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 		slog.Info("cluster: session sync complete, releasing VRRP hold")
 		d.onSessionSyncBulkReceived()
 	}
-	ss.OnSessionInventoryBulkReceived = func(generation uint64) {
+	ss.OnSessionInventoryBulkReceived = func(generation, requestToken uint64) {
 		if d.getSessionSync() != ss {
 			return
 		}
 		if rt := d.dataplane(); rt != nil {
 			if reconciler, ok := rt.(interface {
-				MarkSessionInventoryReconciled(uint64) bool
+				MarkSessionInventoryReconciled(uint64, uint64) bool
 			}); ok {
-				reconciler.MarkSessionInventoryReconciled(generation)
+				reconciler.MarkSessionInventoryReconciled(generation, requestToken)
 			}
 		}
 	}
 
 	if rt := d.dataplane(); rt != nil {
 		if requester, ok := rt.(interface {
-			SetSessionInventoryRequester(func(uint64) bool)
+			SetSessionInventoryRequester(func(uint64, uint64) bool)
 		}); ok {
-			requester.SetSessionInventoryRequester(func(generation uint64) bool {
+			requester.SetSessionInventoryRequester(func(generation, requestToken uint64) bool {
 				if d.getSessionSync() != ss {
 					return false
 				}
-				return ss.RequestPeerSessionInventory(generation)
+				return ss.RequestPeerSessionInventory(generation, requestToken)
 			})
 		}
 	}

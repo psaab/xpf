@@ -90,10 +90,11 @@ func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, sourc
 }
 
 // RequestPeerSessionInventory asks the connected peer to send its
-// authoritative session inventory. Generation zero is reserved for no pending
-// request; nonzero generations are correlated locally, not sent on the wire.
-func (s *SessionSync) RequestPeerSessionInventory(generation uint64) bool {
-	if generation == 0 {
+// authoritative session inventory. A request token for a generation with
+// existing pending or active state must strictly increase; both values are
+// local correlation state and are not sent on the wire.
+func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint64) bool {
+	if generation == 0 || requestToken == 0 {
 		return false
 	}
 	s.mu.Lock()
@@ -102,8 +103,12 @@ func (s *SessionSync) RequestPeerSessionInventory(generation uint64) bool {
 		return false
 	}
 	s.bulkMu.Lock()
-	if (s.inventoryPending && generation < s.inventoryPendingGeneration) ||
-		(s.inventoryActive && generation < s.inventoryActiveGeneration) {
+	if (s.inventoryPending &&
+		(generation < s.inventoryPendingGeneration ||
+			(generation == s.inventoryPendingGeneration && requestToken <= s.inventoryPendingRequestToken))) ||
+		(s.inventoryActive &&
+			(generation < s.inventoryActiveGeneration ||
+				(generation == s.inventoryActiveGeneration && requestToken <= s.inventoryActiveRequestToken))) {
 		s.bulkMu.Unlock()
 		s.mu.Unlock()
 		return false
@@ -117,9 +122,10 @@ func (s *SessionSync) RequestPeerSessionInventory(generation uint64) bool {
 	}
 	s.inventoryPending = true
 	s.inventoryPendingGeneration = generation
-	// A bulk accepted before the first pending request cannot satisfy it. Keep
-	// an already active request intact: a completed bulk for the same helper
-	// generation also satisfies a retry queued while that bulk was running.
+	s.inventoryPendingRequestToken = requestToken
+	// A bulk accepted before the first pending request cannot satisfy it. A
+	// newer request issued while one is active remains pending for its own
+	// accepted bulk window.
 	s.bulkMu.Unlock()
 	s.mu.Unlock()
 	return true

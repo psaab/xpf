@@ -5,9 +5,15 @@ import (
 	"os/exec"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/dataplane"
 )
+
+type inventoryRequest18661 struct {
+	generation uint64
+	token      uint64
+}
 
 func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *testing.T) {
 	const preloadedSessions = 5
@@ -60,13 +66,13 @@ func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *test
 	m.haGroups = map[int]HAGroupStatus{1: {RGID: 1, Active: false}}
 	m.mu.Unlock()
 
-	requests := 0
+	var requests []inventoryRequest18661
 	adapter := NewLegacyDataPlaneAdapter(m)
-	adapter.SetSessionInventoryRequester(func(generation uint64) bool {
+	adapter.SetSessionInventoryRequester(func(generation, token uint64) bool {
 		if generation != debtGeneration {
 			return false
 		}
-		requests++
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
 		return true
 	})
 
@@ -80,14 +86,15 @@ func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *test
 	if !strings.Contains(strings.Join(reasons, "\n"), "session inventory not reconciled for helper generation 2") {
 		t.Fatalf("takeover denial omitted generation-scoped inventory debt: %v", reasons)
 	}
-	if requests != 1 {
-		t.Fatalf("peer bulk requests = %d, want one request for generation 2", requests)
+	if len(requests) != 1 || requests[0].generation != debtGeneration || requests[0].token == 0 {
+		t.Fatalf("peer bulk requests = %v, want one nonzero-token request for generation %d",
+			requests, debtGeneration)
 	}
 	if m.lastStatus.SessionTableEntries != 0 {
 		t.Fatalf("replacement helper session count = %d before bulk, want 0",
 			m.lastStatus.SessionTableEntries)
 	}
-	if adapter.MarkSessionInventoryReconciled(1) {
+	if adapter.MarkSessionInventoryReconciled(1, requests[0].token) {
 		t.Fatal("bulk completion for the dead helper generation cleared replacement debt")
 	}
 	if ready, _ := m.TakeoverReady(); ready {
@@ -99,8 +106,9 @@ func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *test
 	m.mu.Lock()
 	m.lastStatus.SessionTableEntries = preloadedSessions
 	m.mu.Unlock()
-	if !adapter.MarkSessionInventoryReconciled(debtGeneration) {
-		t.Fatalf("completed bulk for helper generation %d did not clear its debt", debtGeneration)
+	if !adapter.MarkSessionInventoryReconciled(debtGeneration, requests[0].token) {
+		t.Fatalf("completed bulk for helper generation %d/token %d did not clear its debt",
+			debtGeneration, requests[0].token)
 	}
 	if ready, reasons := m.TakeoverReady(); !ready {
 		t.Fatalf("takeover readiness did not recover after restoring %d sessions: %v",
@@ -140,9 +148,9 @@ func TestInventoryDebtBindsAtSpawnAfterReset12160(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cmd2.Process.Kill() })
-	var requests []uint64
-	m.SetSessionInventoryRequester(func(g uint64) bool {
-		requests = append(requests, g)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
 		return true
 	})
 	m.mu.Lock()
@@ -166,11 +174,13 @@ func TestInventoryDebtBindsAtSpawnAfterReset12160(t *testing.T) {
 	if ready, _ := m.TakeoverReady(); ready {
 		t.Fatal("respawned helper with debt is takeover-ready")
 	}
-	if len(requests) != 1 || requests[0] != newGen {
-		t.Fatalf("requests=%v; want exactly one for generation %d", requests, newGen)
+	if len(requests) != 1 || requests[0].generation != newGen || requests[0].token == 0 {
+		t.Fatalf("requests=%v; want one nonzero-token request for generation %d",
+			requests, newGen)
 	}
-	if !m.MarkSessionInventoryReconciled(newGen) {
-		t.Fatalf("completion for generation %d did not clear its debt", newGen)
+	if !m.MarkSessionInventoryReconciled(newGen, requests[0].token) {
+		t.Fatalf("completion for generation %d/token %d did not clear its debt",
+			newGen, requests[0].token)
 	}
 	if ready, reasons := m.TakeoverReady(); !ready {
 		t.Fatalf("readiness did not recover after generation-%d bulk: %v", newGen, reasons)
@@ -200,7 +210,7 @@ func TestInventoryBulkRequestThrottled12160(t *testing.T) {
 	m.mu.Unlock()
 	requests := 0
 	adapter := NewLegacyDataPlaneAdapter(m)
-	adapter.SetSessionInventoryRequester(func(uint64) bool {
+	adapter.SetSessionInventoryRequester(func(uint64, uint64) bool {
 		requests++
 		return true
 	})
@@ -238,9 +248,9 @@ func latchRepairOverflow18661(m *Manager) {
 
 func TestTakeoverInventoryRepairOverflowBlocks18661(t *testing.T) {
 	m := repairOverflowManager18661(t)
-	var requests []uint64
-	m.SetSessionInventoryRequester(func(generation uint64) bool {
-		requests = append(requests, generation)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
 		return true
 	})
 	latchRepairOverflow18661(m)
@@ -250,30 +260,30 @@ func TestTakeoverInventoryRepairOverflowBlocks18661(t *testing.T) {
 		t.Fatalf("overflow did not block takeover readiness: ready=%v reasons=%v",
 			ready, reasons)
 	}
-	if len(requests) != 1 || requests[0] != m.procGen {
-		t.Fatalf("overflow inventory requests = %v, want one for helper generation %d",
+	if len(requests) != 1 || requests[0].generation != m.procGen || requests[0].token == 0 {
+		t.Fatalf("overflow inventory requests = %v, want one nonzero-token request for helper generation %d",
 			requests, m.procGen)
 	}
 }
 
 func TestTakeoverInventoryRepairOverflowWrongGenerationAndIncompleteStayBlocked18661(t *testing.T) {
 	m := repairOverflowManager18661(t)
-	var requests []uint64
-	m.SetSessionInventoryRequester(func(generation uint64) bool {
-		requests = append(requests, generation)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
 		return true
 	})
 	latchRepairOverflow18661(m)
 
 	// A bulk completion before the overflow-triggered request is fired is not
 	// evidence that the missing worker repair was included.
-	if m.MarkSessionInventoryReconciled(m.procGen) {
+	if m.MarkSessionInventoryReconciled(m.procGen, 1) {
 		t.Fatal("completion without a fired overflow inventory request cleared the latch")
 	}
 	if ready, _ := m.TakeoverReady(); ready {
 		t.Fatal("incomplete replay opened takeover readiness")
 	}
-	if m.MarkSessionInventoryReconciled(m.procGen+1) {
+	if m.MarkSessionInventoryReconciled(m.procGen+1, requests[0].token) {
 		t.Fatal("wrong-generation inventory completion cleared the overflow latch")
 	}
 	// A stale replay snapshot from a replaced helper is not the request armed
@@ -281,7 +291,7 @@ func TestTakeoverInventoryRepairOverflowWrongGenerationAndIncompleteStayBlocked1
 	m.mu.Lock()
 	m.sessionRepairOverflowGen = m.procGen + 1
 	m.mu.Unlock()
-	if m.MarkSessionInventoryReconciled(m.procGen) {
+	if m.MarkSessionInventoryReconciled(m.procGen, requests[0].token) {
 		t.Fatal("completion for the running helper cleared a different generation's overflow request")
 	}
 	if ready, reasons := m.TakeoverReady(); ready ||
@@ -289,40 +299,42 @@ func TestTakeoverInventoryRepairOverflowWrongGenerationAndIncompleteStayBlocked1
 		t.Fatalf("wrong-generation completion opened readiness: ready=%v reasons=%v",
 			ready, reasons)
 	}
-	if len(requests) != 2 || requests[0] != m.procGen || requests[1] != m.procGen {
-		t.Fatalf("overflow inventory requests = %v, want two re-armed requests for helper generation %d",
+	if len(requests) != 2 ||
+		requests[0].generation != m.procGen || requests[1].generation != m.procGen ||
+		requests[0].token == requests[1].token {
+		t.Fatalf("overflow inventory requests = %v, want two distinct tokens for helper generation %d",
 			requests, m.procGen)
 	}
 }
 
 func TestTakeoverInventoryCleanRepairOverflowReplayRestoresReadiness18661(t *testing.T) {
 	m := repairOverflowManager18661(t)
-	var requests []uint64
-	m.SetSessionInventoryRequester(func(generation uint64) bool {
-		requests = append(requests, generation)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
 		return true
 	})
 	latchRepairOverflow18661(m)
 	if ready, _ := m.TakeoverReady(); ready {
 		t.Fatal("overflow helper was takeover-ready before inventory replay")
 	}
-	if !m.MarkSessionInventoryReconciled(m.procGen) {
+	if !m.MarkSessionInventoryReconciled(m.procGen, requests[0].token) {
 		t.Fatal("matching complete inventory replay did not clear overflow debt")
 	}
 	if ready, reasons := m.TakeoverReady(); !ready {
 		t.Fatalf("clean matching-generation replay did not restore readiness: %v", reasons)
 	}
-	if len(requests) != 1 || requests[0] != m.procGen {
-		t.Fatalf("overflow inventory requests = %v, want one for helper generation %d",
+	if len(requests) != 1 || requests[0].generation != m.procGen || requests[0].token == 0 {
+		t.Fatalf("overflow inventory requests = %v, want one nonzero-token request for helper generation %d",
 			requests, m.procGen)
 	}
 }
 
 func TestTakeoverInventoryOverflowDuringReplayStaysBlocked18661(t *testing.T) {
 	m := repairOverflowManager18661(t)
-	var requests []uint64
-	m.SetSessionInventoryRequester(func(generation uint64) bool {
-		requests = append(requests, generation)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
 		return true
 	})
 	m.mu.Lock()
@@ -335,7 +347,7 @@ func TestTakeoverInventoryOverflowDuringReplayStaysBlocked18661(t *testing.T) {
 	// This overflow lands after an inventory replay has already fired for the
 	// same helper generation. That earlier replay must not clear the new debt.
 	latchRepairOverflow18661(m)
-	if !m.MarkSessionInventoryReconciled(m.procGen) {
+	if !m.MarkSessionInventoryReconciled(m.procGen, requests[0].token) {
 		t.Fatal("completed inventory replay did not retire restart debt")
 	}
 	if ready, reasons := m.TakeoverReady(); ready ||
@@ -345,13 +357,100 @@ func TestTakeoverInventoryOverflowDuringReplayStaysBlocked18661(t *testing.T) {
 	}
 	// The failed replay retires its snapshot and immediately re-arms the
 	// request. Only the subsequent clean replay can clear the overflow latch.
-	if len(requests) != 2 || requests[1] != m.procGen {
-		t.Fatalf("overflow replay did not re-arm request: %v", requests)
+	if len(requests) != 2 || requests[1].generation != m.procGen ||
+		requests[1].token == requests[0].token {
+		t.Fatalf("overflow replay did not re-arm with a fresh token: %v", requests)
 	}
-	if !m.MarkSessionInventoryReconciled(m.procGen) {
+	if !m.MarkSessionInventoryReconciled(m.procGen, requests[1].token) {
 		t.Fatal("re-armed clean inventory replay did not clear overflow debt")
 	}
 	if ready, reasons := m.TakeoverReady(); !ready {
 		t.Fatalf("readiness did not recover after re-armed clean replay: %v", reasons)
+	}
+}
+
+func TestTakeoverInventoryDelayedOldReplayCannotClearRearmedLatch18661(t *testing.T) {
+	m := repairOverflowManager18661(t)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
+		return true
+	})
+	latchRepairOverflow18661(m)
+	if ready, _ := m.TakeoverReady(); ready {
+		t.Fatal("overflow helper was takeover-ready before inventory replay")
+	}
+	if len(requests) != 1 {
+		t.Fatalf("initial overflow inventory requests = %v, want one", requests)
+	}
+
+	// Model TakeoverReady retrying while the previous replay's async callback
+	// has not run yet. The same helper generation gets a fresh local token.
+	m.mu.Lock()
+	m.sessionInventoryRequestAt = time.Now().Add(-sessionInventoryRequestRetryInterval)
+	m.mu.Unlock()
+	if ready, _ := m.TakeoverReady(); ready {
+		t.Fatal("overflow helper was takeover-ready during a replay retry")
+	}
+	if len(requests) != 2 || requests[0].generation != requests[1].generation ||
+		requests[0].token == requests[1].token {
+		t.Fatalf("replayed requests = %v, want distinct tokens for one helper generation", requests)
+	}
+	if m.MarkSessionInventoryReconciled(requests[0].generation, requests[0].token) {
+		t.Fatal("delayed completion from the prior replay cleared the re-armed overflow latch")
+	}
+	if ready, reasons := m.TakeoverReady(); ready ||
+		!strings.Contains(strings.Join(reasons, "\n"), "repair overflow") {
+		t.Fatalf("delayed old completion opened readiness: ready=%v reasons=%v",
+			ready, reasons)
+	}
+	if !m.MarkSessionInventoryReconciled(requests[1].generation, requests[1].token) {
+		t.Fatal("matching latest replay did not clear overflow debt")
+	}
+	if ready, reasons := m.TakeoverReady(); !ready {
+		t.Fatalf("readiness did not recover after latest replay: %v", reasons)
+	}
+}
+
+func TestTakeoverInventoryRearmedReplaySnapshotsPriorOverflow18661(t *testing.T) {
+	m := repairOverflowManager18661(t)
+	var requests []inventoryRequest18661
+	m.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		requests = append(requests, inventoryRequest18661{generation: generation, token: token})
+		return true
+	})
+	latchRepairOverflow18661(m)
+	if ready, _ := m.TakeoverReady(); ready {
+		t.Fatal("overflow helper was takeover-ready before its first inventory replay")
+	}
+	if len(requests) != 1 {
+		t.Fatalf("initial overflow inventory requests = %v, want one", requests)
+	}
+
+	// A second overflow taints the first replay. Before its async completion
+	// callback runs, retry with a fresh request token and replay snapshot.
+	latchRepairOverflow18661(m)
+	m.mu.Lock()
+	m.sessionInventoryRequestAt = time.Now().Add(-sessionInventoryRequestRetryInterval)
+	m.mu.Unlock()
+	if ready, _ := m.TakeoverReady(); ready {
+		t.Fatal("overflow helper was takeover-ready during a replay retry")
+	}
+	if len(requests) != 2 || requests[0].generation != requests[1].generation ||
+		requests[0].token == requests[1].token {
+		t.Fatalf("replayed requests = %v, want distinct tokens for one helper generation", requests)
+	}
+	if m.MarkSessionInventoryReconciled(requests[0].generation, requests[0].token) {
+		t.Fatal("delayed completion from the tainted replay cleared the latch")
+	}
+	if ready, reasons := m.TakeoverReady(); ready ||
+		!strings.Contains(strings.Join(reasons, "\n"), "repair overflow") {
+		t.Fatalf("tainted replay opened readiness: ready=%v reasons=%v", ready, reasons)
+	}
+	if !m.MarkSessionInventoryReconciled(requests[1].generation, requests[1].token) {
+		t.Fatal("clean re-armed replay did not clear the earlier overflow")
+	}
+	if ready, reasons := m.TakeoverReady(); !ready {
+		t.Fatalf("readiness did not recover after clean re-armed replay: %v", reasons)
 	}
 }
