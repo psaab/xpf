@@ -223,7 +223,7 @@ func firewallNamelessError12526(s firewallNamelessSite17257) error {
 	if s.family != "" {
 		where = fmt.Sprintf("firewall family %s filter %q", s.family, s.filter)
 	}
-	return fmt.Errorf("%s contains a nameless `term` block starting with %q (#10294/#12092/#12526): give every term an explicit name", where, s.first)
+	return fmt.Errorf("%s contains a nameless `term` block starting with %q (#10294/#12092/#12526): give every term an explicit name; on tolerant loads the term is retained as an unconstrained discard at its authored position and may discard more traffic than the authored term scoped", where, s.first)
 }
 
 // ValidateFirewallNamelessTermsAST12526 checks literal hierarchical input

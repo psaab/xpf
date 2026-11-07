@@ -1,9 +1,11 @@
 xpf (0.0.0) unstable; urgency=medium
   * Config: tolerant loads and HA peer sync now warn about packed nameless
-    firewall/policy terms and retain neutral placeholders at their authored
-    positions instead of silently losing them. Firewall placeholders discard
-    fail-closed; retained markers feed persistent configuration alarms on all
-    four system/security alarm surfaces (#17257).
+    firewall/policy terms and retain placeholders at their authored positions
+    instead of silently losing them. Firewall placeholders are unconstrained
+    discards at the authored position, so tolerant recovery may discard more
+    traffic than the authored scoped term (fail-closed availability impact);
+    retained markers feed persistent configuration alarms on all four
+    system/security alarm surfaces (#17257).
   * CLI: implement operational `show configuration [<path>] | compare
     rollback <N>` against the ACTIVE configuration on both consoles.
     Bare `| compare` requires an explicit rollback index, and malformed
