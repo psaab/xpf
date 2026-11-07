@@ -4540,6 +4540,7 @@ impl SessionTable {
     /// clone matches the pre-existing `touch_if_stale_with_payload` /
     /// `account_packet` clones on paths needing the key after the borrow;
     /// the forward accounting leg itself clones nothing.
+    #[cfg(test)]
     #[inline]
     pub fn probe_hit(
         &mut self,
@@ -4570,6 +4571,7 @@ impl SessionTable {
     }
 
     /// #16042: [`Self::probe_hit`] carrying the parsed segment ack.
+    #[cfg(test)]
     pub fn probe_hit_with_ack(
         &mut self,
         key: &SessionKey,

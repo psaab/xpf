@@ -1113,6 +1113,9 @@ struct StageSeed {
     /// row (Established SYN-ACK observed, completing ACK outstanding)
     /// instead of a local install, so a cache hit can complete it.
     install_handshake_pending: bool,
+    /// #17268: add a reverse companion with this known peer ACK end so the
+    /// production-stage parser's value is checked, not only its call count.
+    expected_ack: Option<u32>,
     /// #18560: run the stage as a held pass does, with the flow cache in
     /// compare-only mode (`FlowCache::held_compare_only`).
     held_compare_only: bool,
@@ -1134,6 +1137,7 @@ impl Default for StageSeed {
             now_ns: 1_000_000,
             fabric_arrival_zone: None,
             install_handshake_pending: false,
+            expected_ack: None,
             held_compare_only: false,
         }
     }
@@ -1251,6 +1255,62 @@ fn run_stage_seeded(
             ),
             "fixture invalid: the seeded session did not install, so every \
              assertion about per-session accounting below would be vacuous"
+        );
+    }
+    if let Some(expected_ack) = seed.expected_ack {
+        assert!(
+            seed.install_handshake_pending,
+            "fixture invalid: expected ACK requires a pending forward row"
+        );
+        let (install_ns, protocol, tcp_flags) =
+            seed.session.expect("fixture invalid: pending row needs a session");
+        let forward_key = seed
+            .install_key
+            .clone()
+            .unwrap_or_else(|| entry_for_session.key.clone());
+        let forward_nat = entry_for_session.decision.nat;
+        let reverse_key = crate::session::reverse_session_key(&forward_key, forward_nat);
+        let reverse_nat = forward_nat.reverse(
+            forward_key.src_ip,
+            forward_key.dst_ip,
+            forward_key.src_port,
+            forward_key.dst_port,
+        );
+        let mut reverse_decision = entry_for_session.decision.clone();
+        reverse_decision.nat = reverse_nat;
+        let mut reverse_metadata = entry_for_session.metadata.clone();
+        reverse_metadata.is_reverse = true;
+        let installed = sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: reverse_key.clone(),
+                decision: reverse_decision,
+                metadata: reverse_metadata,
+                source_nat_static: None,
+                origin: crate::session::SessionOrigin::SyncImport,
+                now_ns: install_ns,
+                protocol,
+                tcp_flags,
+                session_id: 18656,
+                tcp_close_class: 0,
+                tcp_handshake_state: crate::session::TcpHandshakeState::HandshakePending
+                    .to_wire(),
+                persistent_lease_hold: None,
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            true,
+        );
+        assert!(installed, "fixture invalid: reverse companion did not install");
+        sessions.seed_tcp_isn(
+            &reverse_key,
+            expected_ack.wrapping_sub(1),
+            0,
+            crate::tcp_flags::TCP_SYN | crate::tcp_flags::TCP_ACK,
+        );
+        assert_eq!(
+            sessions.handshake_expected_ack(&forward_key),
+            Some(expected_ack),
+            "fixture invalid: forward row must resolve the known ACK from its reverse companion"
         );
     }
     let mut dbg = DebugPollCounters::default();
@@ -2581,6 +2641,7 @@ fn completing_cache_hit_derives_tcp_seq_ack_once_17268() {
         0,
         StageSeed {
             install_handshake_pending: true,
+            expected_ack: Some(1),
             ..StageSeed::default()
         },
     );
@@ -2594,6 +2655,42 @@ fn completing_cache_hit_derives_tcp_seq_ack_once_17268() {
     assert_eq!(
         derivations, 1,
         "a handshake completion candidate derives the ACK exactly once"
+    );
+
+    let wrong_fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let mut wrong_frame = frame.clone();
+    let ack_offset = usize::from(test_meta(&wrong_frame).l4_offset) + 8;
+    wrong_frame[ack_offset..ack_offset + 4].copy_from_slice(&2u32.to_be_bytes());
+    assert_eq!(
+        crate::afxdp::frame::extract_tcp_seq_ack_window(&wrong_frame)
+            .map(|(_, ack, _)| ack),
+        Some(2),
+        "fixture premise: the L3/L4 parser reads the deliberately wrong ACK"
+    );
+    let wrong_before = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test();
+    let wrong = run_stage_seeded(
+        &wrong_fixture,
+        &wrong_frame,
+        test_meta(&wrong_frame),
+        cached_entry(),
+        0,
+        StageSeed {
+            install_handshake_pending: true,
+            expected_ack: Some(1),
+            ..StageSeed::default()
+        },
+    );
+    let wrong_derivations =
+        crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - wrong_before;
+    assert!(matches!(wrong.outcome, FlowCacheOutcome::Consumed), "premise: wrong-ACK hit is served");
+    assert_eq!(
+        wrong.sessions.handshake_state_wire_for(&test_key()),
+        crate::session::TcpHandshakeState::HandshakePending.to_wire(),
+        "the parsed wrong ACK must not promote the pending session"
+    );
+    assert_eq!(
+        wrong_derivations, 1,
+        "a wrong-ACK completion candidate still derives the ACK exactly once"
     );
 
 }
