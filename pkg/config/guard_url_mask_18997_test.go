@@ -123,6 +123,37 @@ func TestSchemaExitScrubOverlappingURLNeedles18997(t *testing.T) {
 	}
 }
 
+// #18997 partial-overlap arm (Kimi delta at 72276114f0): two needles of
+// equal length can overlap PARTIALLY — "user:pw@host" and "@host?SECRET"
+// share "@host", so whichever fires first destroys the other's match
+// and leaves the non-overlapped credential half standing ("?SECRET" or
+// "user:pw"). Longest-first ordering cannot fix this; the scrub repeats
+// to a fixpoint, so the second pass matches the surviving half. A
+// needle containing the SecretRedacted sentinel itself ("redacted"
+// from a direct password) must not corrupt an inserted "<redacted>".
+func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
+	for _, lines := range [][]string{
+		{
+			`set system archival configuration archive-sites "user:pw@host" password "redacted"`,
+			`set system archival configuration archive-sites "@host?SECRET" password "s3cr3t"`,
+		},
+		{
+			`set system archival configuration archive-sites "@host?SECRET" password "s3cr3t"`,
+			`set system archival configuration archive-sites "user:pw@host" password "redacted"`,
+		},
+	} {
+		tree := buildRedactTree(t, lines)
+		foreign := fmt.Errorf("archive fetch failed for user:pw@host?SECRET")
+		got := scrubSchemaErrorSecrets(tree, foreign).Error()
+		if strings.Contains(got, "user:pw") || strings.Contains(got, "SECRET") {
+			t.Errorf("partially overlapping needle left a credential half (#18997): %v", got)
+		}
+		if strings.Contains(got, "<<redacted>>") {
+			t.Errorf("sentinel-containing needle corrupted the redaction sentinel: %v", got)
+		}
+	}
+}
+
 // #18997 short-URL arm (Kimi seat): a credential-bearing URL token can be
 // shorter than beltSecretValues' 4-byte floor ("a@b" is 3 bytes, ":p@"
 // carries an inline password) yet is still transformed by RedactURL.

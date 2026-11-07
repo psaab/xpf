@@ -425,12 +425,66 @@ func scrubSecretValuesText(values []string, text string) string {
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return len(ordered[i]) > len(ordered[j])
 	})
-	values = ordered
-	for _, v := range values {
-		if v == "" {
+	// Partially overlapping needles (Kimi fold at 72276114f0) defeat
+	// sequential ReplaceAll in EITHER order: "user:pw@host" and
+	// "@host?SECRET" share "@host", so the first replacement destroys
+	// the other's match and leaves its credential half standing
+	// ("?SECRET" / "user:pw"); repetition cannot recover a destroyed
+	// match. Occurrences are therefore computed as spans over the
+	// ORIGINAL text and merged before replacement — overlapping
+	// spans become one sentinel. Needles containing the SecretRedacted
+	// sentinel substring are dropped: they would match inside already
+	// rendered locations (diagnostic integrity; the sentinel spelling
+	// is a contract). Quoted and quoted-interior forms keep the
+	// sequential longest-first pass below: their renderings are
+	// distinct strings the raw spans cannot match.
+	needles := make([]string, 0, len(ordered))
+	for _, v := range ordered {
+		if v == "" || strings.Contains(v, SecretRedacted) {
 			continue
 		}
-		text = strings.ReplaceAll(text, v, SecretRedacted)
+		needles = append(needles, v)
+	}
+	type span struct{ lo, hi int }
+	var spans []span
+	for _, v := range needles {
+		for at := 0; ; {
+			i := strings.Index(text[at:], v)
+			if i < 0 {
+				break
+			}
+			spans = append(spans, span{at + i, at + i + len(v)})
+			at += i + 1
+		}
+	}
+	if len(spans) > 0 {
+		sort.Slice(spans, func(i, j int) bool {
+			if spans[i].lo != spans[j].lo {
+				return spans[i].lo < spans[j].lo
+			}
+			return spans[i].hi > spans[j].hi
+		})
+		var b strings.Builder
+		pos, end := 0, -1
+		for _, sp := range spans {
+			if end >= 0 && sp.lo < end {
+				if sp.hi > end {
+					end = sp.hi
+				}
+				continue
+			}
+			if end >= 0 {
+				b.WriteString(SecretRedacted)
+				pos = end
+			}
+			b.WriteString(text[pos:sp.lo])
+			pos, end = sp.lo, sp.hi
+		}
+		b.WriteString(SecretRedacted)
+		b.WriteString(text[end:])
+		text = b.String()
+	}
+	for _, v := range needles {
 		if q := strconv.Quote(v); q != v {
 			text = strings.ReplaceAll(text, q, strconv.Quote(SecretRedacted))
 		}
