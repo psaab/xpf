@@ -660,16 +660,42 @@ mod tests {
         let gate = Arc::new(TupleGate::new());
         let held_key = key(1001, 1);
         // The blocked second claim canonicalizes to held_key (domain 2
-        // erases to the held tuple).
+        // erases to the held tuple). try_acquire_installs canonicalizes
+        // BEFORE it sorts (and the sort is what decides which claim is
+        // attempted first), so the fixture's ordering predicate must be
+        // computed on the CANONICAL keys with the install sort exactly:
+        // ordering the raw domain-1 keys hashes a domain the real sort
+        // never sees (domain feeds the shard hash), and the blocked key
+        // can then be attempted first — the assertions below would pass
+        // without any rollback having happened.
         let held = gate.acquire_lease([held_key.clone()]).unwrap();
-        let free = (2000..3000u16)
+        let held_canonical = TupleGate::canonical(&held_key);
+        let sorts_before = |a: &SessionKey, b: &SessionKey| {
+            TupleGate::shard_index(a) < TupleGate::shard_index(b)
+                || (TupleGate::shard_index(a) == TupleGate::shard_index(b)
+                    && format!("{a:?}") < format!("{b:?}"))
+        };
+        let free = (1..u16::MAX)
             .map(|port| key(port, 1))
             .find(|candidate| {
-                TupleGate::shard_index(candidate) < TupleGate::shard_index(&held_key)
-                    || (TupleGate::shard_index(candidate) == TupleGate::shard_index(&held_key)
-                        && format!("{candidate:?}") < format!("{:?}", TupleGate::canonical(&held_key)))
+                sorts_before(&TupleGate::canonical(candidate), &held_canonical)
             })
             .expect("a free key sorting before the held key must exist");
+        // Ordering proof (not assumed): the canonical free key precedes
+        // the canonical held key under the install sort, so the free
+        // claim is attempted — and must land — before the blocked one.
+        // The port range starts at 1 so the Debug tie-break can also
+        // win at canonical shard 0 ("src_port: 1," < "src_port: 1001").
+        assert!(sorts_before(
+            &TupleGate::canonical(&free),
+            &held_canonical
+        ));
+        let probe = gate
+            .try_acquire_install(&free)
+            .expect("free key sorting first must claim cleanly before the blocked key");
+        drop(probe);
+        // Probe claim released above; the paired install below starts
+        // clean, and its own rollback is what the rest of this cell proves.
         assert!(matches!(
             gate.try_acquire_installs([free.clone(), key(1001, 2)]),
             Err("gate_busy")
