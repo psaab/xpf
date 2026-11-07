@@ -88,14 +88,13 @@
 
 use super::{SessionDecision, SessionKey, SessionMetadata};
 use crate::hot_hash_seed::HotPathSeededState;
+use crate::sharded::ShardedLock;
 use std::collections::{HashMap, VecDeque};
-use std::hash::BuildHasher;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Shard count (power of two, see `shard_index`).
+/// Shard count; the shared `ShardedLock` enforces the power-of-two invariant.
 const SHARDS: usize = 32;
-const _: () = assert!(SHARDS.is_power_of_two());
 
 /// Live rows node-wide (`SHARDS` x `SHARD_CAP`, 1024 per shard; each shard's
 /// table is reserved for twice that, `ROWS_RESERVE`). With the 2 s bridge TTL
@@ -196,8 +195,7 @@ struct Shard {
 }
 
 pub(crate) struct PuntSeedDirectory {
-    shards: [Mutex<Shard>; SHARDS],
-    hasher: HotPathSeededState,
+    shards: ShardedLock<Mutex<Shard>, SHARDS>,
     /// Idle gate: the matcher Relaxed-loads it and skips every lock while no
     /// seed is resident (every node outside an RG split). A stale read can only
     /// miss a row being published concurrently, which is today's verdict, never
@@ -225,16 +223,16 @@ impl Shard {
 
 impl PuntSeedDirectory {
     pub(crate) fn new() -> Self {
-        let state = HotPathSeededState::new(crate::hot_hash_seed::hot_path_hash_seed());
+        let seed = crate::hot_hash_seed::hot_path_hash_seed();
+        let state = HotPathSeededState::new(seed);
         Self {
-            shards: std::array::from_fn(|_| {
+            shards: ShardedLock::with_seed_and(seed, || {
                 Mutex::new(Shard {
                     rows: HashMap::with_hasher(state),
                     expiry: VecDeque::new(),
                     row_cap: 0,
                 })
             }),
-            hasher: state,
             live: AtomicUsize::new(0),
             #[cfg(test)]
             work: AtomicU64::new(0),
@@ -243,11 +241,13 @@ impl PuntSeedDirectory {
 
     #[inline]
     fn shard_index(&self, key: &SessionKey) -> usize {
-        (self.hasher.hash_one(key) as usize) & (SHARDS - 1)
+        self.shards.shard_index_for(key)
     }
 
     fn lock(&self, index: usize) -> std::sync::MutexGuard<'_, Shard> {
-        self.shards[index]
+        self.shards
+            .shard_at(index)
+            .get()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -323,7 +323,7 @@ impl PuntSeedDirectory {
     /// blocks: a contended shard is skipped and counted.
     pub(crate) fn publish(&self, key: &SessionKey, row: PuntSeedRow, now_ns: u64) -> bool {
         let index = self.shard_index(key);
-        let mut shard = match self.shards[index].try_lock() {
+        let mut shard = match self.shards.shard_at(index).get().try_lock() {
             Ok(guard) => guard,
             Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => {

@@ -1,6 +1,6 @@
 use crate::session::SessionKey;
+use crate::sharded::{ShardedLock, shard_index_with_seed};
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 #[cfg(not(test))]
@@ -76,19 +76,20 @@ struct Admission {
 /// different shard locks and proceed independently. The admission state fences
 /// only the map-wide clear.
 pub(crate) struct TupleGate {
-    shards: Vec<Shard>,
+    shards: ShardedLock<Shard, SHARD_COUNT>,
     admission: Mutex<Admission>,
     admission_changed: Condvar,
 }
 
 impl TupleGate {
     pub(crate) fn new() -> Self {
-        let shards = (0..SHARD_COUNT)
-            .map(|_| Shard {
+        let shards = ShardedLock::with_seed_and(
+            crate::hot_hash_seed::hot_path_hash_seed(),
+            || Shard {
                 entries: Mutex::new(HashMap::new()),
                 next_sequence: AtomicU64::new(0),
-            })
-            .collect();
+            },
+        );
         Self {
             shards,
             admission: Mutex::new(Admission::default()),
@@ -104,9 +105,10 @@ impl TupleGate {
     }
 
     fn shard_index(key: &SessionKey) -> usize {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) & (SHARD_COUNT - 1)
+        shard_index_with_seed::<SessionKey, SHARD_COUNT>(
+            key,
+            crate::hot_hash_seed::hot_path_hash_seed(),
+        )
     }
 
     fn claim_entry(
@@ -116,7 +118,10 @@ impl TupleGate {
     ) -> Result<(usize, Arc<Mutex<GateEntry>>, u64), &'static str> {
         let index = Self::shard_index(key);
         let mut entries =
-            lock_tolerant_counted(&self.shards[index].entries, Some(&TUPLE_GATE_POISON_RECOVERIES));
+            lock_tolerant_counted(
+                &self.shards.shard_at(index).get().entries,
+                Some(&TUPLE_GATE_POISON_RECOVERIES),
+            );
         let entry = if let Some(entry) = entries.get(key) {
             Arc::clone(entry)
         } else {
@@ -138,8 +143,7 @@ impl TupleGate {
             return Err("gate_busy");
         }
         let sequence = if matches!(mode, GateClaim::Lease) {
-            let sequence = self.shards[index]
-                .next_sequence
+            let sequence = self.shards.shard_at(index).get().next_sequence
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
             state.sequence = sequence;
@@ -170,7 +174,10 @@ impl TupleGate {
 
     fn remove_if_idle(&self, index: usize, key: &SessionKey, entry: &Arc<Mutex<GateEntry>>) {
         let mut shard =
-            lock_tolerant_counted(&self.shards[index].entries, Some(&TUPLE_GATE_POISON_RECOVERIES));
+            lock_tolerant_counted(
+                &self.shards.shard_at(index).get().entries,
+                Some(&TUPLE_GATE_POISON_RECOVERIES),
+            );
         if !shard
             .get(key)
             .is_some_and(|current| Arc::ptr_eq(current, entry))
@@ -708,7 +715,8 @@ mod tests {
         let index = TupleGate::shard_index(&TupleGate::canonical(&k));
         let permit = gate.try_acquire_install(&k).unwrap();
         let entry = {
-            let shard = crate::sync_util::lock_tolerant(&gate.shards[index].entries);
+            let shard =
+                crate::sync_util::lock_tolerant(&gate.shards.shard_at(index).get().entries);
             Arc::clone(shard.get(&TupleGate::canonical(&k)).unwrap())
         };
         drop(permit);
@@ -718,7 +726,7 @@ mod tests {
                     let _guard = entry.lock().unwrap();
                     panic!("17201 tuple-gate probe panic");
                 } else {
-                    let _guard = gate.shards[index].entries.lock().unwrap();
+                    let _guard = gate.shards.shard_at(index).get().entries.lock().unwrap();
                     panic!("17201 tuple-gate probe panic");
                 }
             }));
@@ -745,7 +753,8 @@ mod tests {
             .try_acquire_install(&k)
             .expect("poisoned shard must not panic setup installs");
         let live_entry = {
-            let shard = crate::sync_util::lock_tolerant(&gate.shards[index].entries);
+            let shard =
+                crate::sync_util::lock_tolerant(&gate.shards.shard_at(index).get().entries);
             Arc::clone(shard.get(&TupleGate::canonical(&k)).unwrap())
         };
         for mutex_is_entry in [false, true] {
@@ -754,7 +763,7 @@ mod tests {
                     let _guard = live_entry.lock().unwrap();
                     panic!("17201 tuple-gate live-entry probe panic");
                 } else {
-                    let _guard = gate.shards[index].entries.lock().unwrap();
+                    let _guard = gate.shards.shard_at(index).get().entries.lock().unwrap();
                     panic!("17201 tuple-gate live-shard probe panic");
                 }
             }));

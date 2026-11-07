@@ -18,9 +18,9 @@
 
 use super::SessionKey;
 use crate::hot_hash_seed::HotPathSeededState;
+use crate::sharded::ShardedLock;
 use smallvec::SmallVec;
 use std::collections::HashMap;
-use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Mutex, OnceLock, RwLock,
@@ -33,9 +33,8 @@ pub(crate) const PMECH_MAX_HELD_WAITERS_TOTAL: usize = 512;
 /// Per-token cap on held reverse waiters (V4 E).
 pub(crate) const PMECH_MAX_WAITERS_PER_TOKEN: usize = 4;
 
-/// Fixed shard count. Must stay a power of two (`SHARD_MASK` relies on it).
+/// Fixed power-of-two shard count, enforced by `ShardedLock`.
 const NUM_SHARDS: usize = 32;
-const SHARD_MASK: usize = 31;
 
 /// Packet direction a claim was reserved for. Preserved so callers can apply
 /// V3.3 disposition: reverse Pending holds, duplicate-forward Pending refuses.
@@ -292,8 +291,7 @@ type ShardMap = HashMap<SessionKey, ClaimRecord, HotPathSeededState>;
 /// All methods take `&self`; interior mutability (shard `RwLock`s, token
 /// `Mutex`, atomics) makes the `global()` singleton shareable across workers.
 pub(crate) struct PMechSessionDirectory {
-    shards: [RwLock<ShardMap>; NUM_SHARDS],
-    shard_hasher: HotPathSeededState,
+    shards: ShardedLock<RwLock<ShardMap>, NUM_SHARDS>,
     tokens: Mutex<HashMap<u64, TokenRecord>>,
     active_claim_count: AtomicUsize,
     held_waiters: AtomicUsize,
@@ -309,8 +307,9 @@ impl PMechSessionDirectory {
     fn with_seed(seed: u64) -> Self {
         let state = HotPathSeededState::new(seed);
         Self {
-            shards: std::array::from_fn(|_| RwLock::new(HashMap::with_hasher(state))),
-            shard_hasher: state,
+            shards: ShardedLock::with_seed_and(seed, || {
+                RwLock::new(HashMap::with_hasher(state))
+            }),
             tokens: Mutex::new(HashMap::new()),
             active_claim_count: AtomicUsize::new(0),
             held_waiters: AtomicUsize::new(0),
@@ -341,16 +340,16 @@ impl PMechSessionDirectory {
 
     #[inline]
     fn shard_index(&self, key: &SessionKey) -> usize {
-        let mut hasher = self.shard_hasher.build_hasher();
-        key.hash(&mut hasher);
-        (hasher.finish() as usize) & SHARD_MASK
+        self.shards.shard_index_for(key)
     }
 
     #[inline]
     fn read_shard(&self, idx: usize) -> std::sync::RwLockReadGuard<'_, ShardMap> {
         #[cfg(test)]
         self.shard_reads.fetch_add(1, Ordering::Relaxed);
-        self.shards[idx]
+        self.shards
+            .shard_at(idx)
+            .get()
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
@@ -524,7 +523,9 @@ impl PMechSessionDirectory {
         let mut guards = Vec::with_capacity(shard_idxs.len());
         for idx in &shard_idxs {
             guards.push(
-                self.shards[*idx]
+                self.shards
+                    .shard_at(*idx)
+                    .get()
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
@@ -621,7 +622,9 @@ impl PMechSessionDirectory {
         let mut guards = Vec::with_capacity(shard_idxs.len());
         for idx in &shard_idxs {
             guards.push(
-                self.shards[*idx]
+                self.shards
+                    .shard_at(*idx)
+                    .get()
                     .write()
                     .unwrap_or_else(|poisoned| poisoned.into_inner()),
             );
@@ -686,7 +689,9 @@ impl PMechSessionDirectory {
             let mut guards = Vec::with_capacity(shard_idxs.len());
             for idx in &shard_idxs {
                 guards.push(
-                    self.shards[*idx]
+                    self.shards
+                        .shard_at(*idx)
+                        .get()
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()),
                 );
@@ -752,7 +757,9 @@ impl PMechSessionDirectory {
             let mut guards = Vec::with_capacity(shard_idxs.len());
             for idx in &shard_idxs {
                 guards.push(
-                    self.shards[*idx]
+                    self.shards
+                        .shard_at(*idx)
+                        .get()
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()),
                 );
@@ -823,7 +830,9 @@ impl PMechSessionDirectory {
             let mut guards = Vec::with_capacity(shard_idxs.len());
             for idx in &shard_idxs {
                 guards.push(
-                    self.shards[*idx]
+                    self.shards
+                        .shard_at(*idx)
+                        .get()
                         .write()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()),
                 );
