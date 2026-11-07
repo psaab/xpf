@@ -566,7 +566,6 @@ class FairnessMultiSampleTest(unittest.TestCase):
             fake_harness = tmp_path / "fake-harness.sh"
             fake_eval = tmp_path / "fake-eval"
             fake_curl = tmp_path / "curl"
-            curl_sentinel = tmp_path / "curl-called"
             out_root = tmp_path / "sweep"
             fake_wrapper.write_text(
                 textwrap.dedent(
@@ -581,10 +580,17 @@ class FairnessMultiSampleTest(unittest.TestCase):
                             *) shift ;;
                         esac
                     done
+                    capture_file="$(dirname "$out_dir")/equal-flow/metrics-raw.prom"
                     for _ in {1..100}; do
-                        [[ -e "$CURL_SENTINEL" ]] && break
+                        if grep -q '^# xpf_fairness_scrape_end timestamp=' "$capture_file" 2>/dev/null; then
+                            break
+                        fi
                         sleep 0.02
                     done
+                    if ! grep -q '^# xpf_fairness_scrape_end timestamp=' "$capture_file"; then
+                        echo "class-sweep fixture did not observe a complete equal-flow scrape" >&2
+                        exit 1
+                    fi
                     ts=$(($(date +%s) - 5))
                     for sample in 1 2; do
                         sample_dir="$out_dir/sample-$sample"
@@ -616,7 +622,6 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     set -euo pipefail
-                    touch "$CURL_SENTINEL"
                     cat <<'PROM'
                     xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="2"} 1
                     xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="2"} 1
@@ -661,7 +666,6 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 "CAPTURE_DATAPLANE": "0",
                 "CLASS_FILTER": "q2",
                 "COS_IFINDEX": "14",
-                "CURL_SENTINEL": str(curl_sentinel),
                 "WRAPPER": str(fake_wrapper),
                 "HARNESS": str(fake_harness),
                 "FAIRNESS_EVAL": str(fake_eval),
@@ -703,7 +707,6 @@ class FairnessMultiSampleTest(unittest.TestCase):
             fake_harness = tmp_path / "fake-harness.sh"
             fake_eval = tmp_path / "fake-eval"
             fake_curl = tmp_path / "curl"
-            curl_sentinel = tmp_path / "curl-called"
             out_root = tmp_path / "sweep"
             fake_wrapper.write_text(
                 textwrap.dedent(
@@ -718,10 +721,17 @@ class FairnessMultiSampleTest(unittest.TestCase):
                             *) shift ;;
                         esac
                     done
+                    capture_file="$(dirname "$out_dir")/equal-flow/metrics-raw.prom"
                     for _ in {1..100}; do
-                        [[ -e "$CURL_SENTINEL" ]] && break
+                        if grep -q '^# xpf_fairness_scrape_end timestamp=' "$capture_file" 2>/dev/null; then
+                            break
+                        fi
                         sleep 0.02
                     done
+                    if ! grep -q '^# xpf_fairness_scrape_end timestamp=' "$capture_file"; then
+                        echo "class-sweep fixture did not observe a complete equal-flow scrape" >&2
+                        exit 1
+                    fi
                     ts=$(($(date +%s) - 5))
                     sample_dir="$out_dir/sample-1"
                     mkdir -p "$sample_dir/artifacts"
@@ -751,7 +761,6 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     """\
                     #!/usr/bin/env bash
                     set -euo pipefail
-                    touch "$CURL_SENTINEL"
                     cat <<'PROM'
                     xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="2"} 1
                     xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="2"} 1
@@ -786,7 +795,6 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 "CAPTURE_DATAPLANE": "0",
                 "CLASS_FILTER": "q2",
                 "COS_IFINDEX": "14",
-                "CURL_SENTINEL": str(curl_sentinel),
                 "WRAPPER": str(fake_wrapper),
                 "HARNESS": str(fake_harness),
                 "FAIRNESS_EVAL": str(fake_eval),
