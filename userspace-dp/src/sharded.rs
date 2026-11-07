@@ -13,8 +13,9 @@
 //!
 //! `ShardedLock<T, N>` is the shared shard storage and placement function:
 //!
-//! - `N` shards, each a `PaddedShard` (`#[repr(align(64))]`), so adjacent
-//!   shard cells do not share a cache line.
+//! - `N` shards, each a `PaddedShard` (`#[repr(align(128))]`), so each
+//!   shard starts on a 128-byte boundary and cannot share a 64-byte cache
+//!   line with its neighbors.
 //! - `N >= 2 && N.is_power_of_two()` is a compile-time obligation of every
 //!   monomorphisation: mask-based selection is only total for powers of two.
 //! - Placement uses the process-keyed `HotPathSeededState` and is stable
@@ -41,7 +42,7 @@ use std::sync::{Mutex, MutexGuard};
 /// This is the single definition point for shard padding in the crate:
 /// every sharded cross-worker container stores its shards as
 /// `[PaddedShard<_>; N]` (via [`ShardedLock`]).
-#[repr(align(64))]
+#[repr(align(128))]
 pub(crate) struct PaddedShard<T> {
     inner: T,
 }
@@ -198,12 +199,12 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn padded_shard_is_cache_line_isolated() {
-        assert_eq!(core::mem::align_of::<PaddedShard<Mutex<()>>>(), 64);
-        assert!(core::mem::size_of::<PaddedShard<Mutex<()>>>() >= 64);
+    fn shard_padding_is_128_byte_aligned() {
+        assert_eq!(core::mem::align_of::<PaddedShard<Mutex<()>>>(), 128);
+        assert!(core::mem::size_of::<PaddedShard<Mutex<()>>>() >= 128);
         assert_eq!(
             core::mem::align_of::<PaddedShard<std::sync::RwLock<()>>>(),
-            64
+            128
         );
     }
 
