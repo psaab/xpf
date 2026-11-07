@@ -44,6 +44,13 @@ import (
 // it. Tests must restore it with t.Cleanup.
 var readReauthInterval9051 = 5 * time.Second
 
+// readWatcherExitBound18994 bounds how long the stop returned by
+// watchReadAuthorization waits for its re-auth watcher to exit. It
+// mirrors streamWatcherExitBound18761 on the gRPC side: a tick is one
+// in-memory authorization, so the wait is normally microseconds; the
+// bound exists only so a wedged decision cannot hold the response open.
+var readWatcherExitBound18994 = 2 * time.Second
+
 // watchReadAuthorization returns a request whose context is cancelled as soon
 // as the full REST read policy stops authorizing it, plus a stop func the
 // caller must defer. The same predicate gates the initial read and each tick.
@@ -53,11 +60,19 @@ var readReauthInterval9051 = 5 * time.Second
 // the identical path as a hangup. The response is already committed to
 // text/event-stream by then, so there is no status code left to send -- which
 // is why the log line below is the record that this happened.
+//
+// The stop JOINs the watcher (bounded by readWatcherExitBound18994). The
+// watcher may be mid-tick (inside authorizeRESTRead, reading the principal's
+// config and passwd) when the handler returns; merely closing done asks it
+// to stop but leaves it running past the handler's return, which under -race
+// outlived the passwd fixture teardown (#18994, #18761 on the gRPC side).
 func (s *Server) watchReadAuthorization(r *http.Request, required config.LoginClassPermission) (*http.Request, func()) {
 	ctx, cancel := context.WithCancel(r.Context())
 	done := make(chan struct{})
 	interval := readReauthInterval9051
+	watcherExited := make(chan struct{})
 	go func() {
+		defer close(watcherExited)
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
@@ -84,5 +99,17 @@ func (s *Server) watchReadAuthorization(r *http.Request, required config.LoginCl
 			}
 		}
 	}()
-	return r.WithContext(ctx), func() { close(done); cancel() }
+	stop := func() {
+		close(done)
+		cancel()
+		t := time.NewTimer(readWatcherExitBound18994)
+		defer t.Stop()
+		select {
+		case <-watcherExited:
+		case <-t.C:
+			slog.Warn("api: read re-auth watcher did not exit within its bound after the request ended",
+				"method", r.Method, "path", r.URL.Path, "bound", readWatcherExitBound18994)
+		}
+	}
+	return r.WithContext(ctx), stop
 }

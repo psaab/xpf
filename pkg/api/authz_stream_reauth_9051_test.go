@@ -2,9 +2,11 @@ package api
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -87,7 +89,14 @@ func runGuardedRead9051(t *testing.T, s *Server, path string) (entered, finished
 		server: tcpAddr6974("127.0.0.1", 8080),
 	})
 	ctx, cancel := context.WithCancel(connCtx)
-	t.Cleanup(cancel)
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-finished:
+		case <-time.After(5 * time.Second):
+			t.Error("guarded read did not return after its context was cancelled")
+		}
+	})
 	r = httptest.NewRequest(http.MethodGet, path, nil).WithContext(ctx)
 	next := http.HandlerFunc(func(_ http.ResponseWriter, rr *http.Request) {
 		close(entered)
@@ -274,5 +283,62 @@ func TestQ53RESTReauthIntervalReadRacesCleanup(t *testing.T) {
 	for range 100 {
 		_, stop := s.watchReadAuthorization(req, config.PermView)
 		stop()
+	}
+}
+
+// TestRESTReadWatcherStopJoinsTick18994 pins the REST counterpart to the
+// bounded watcher join in #18761. Keep a re-authorization tick parked in the
+// accept-time peer lookup and prove stop does not return until the tick exits.
+func TestRESTReadWatcherStopJoinsTick18994(t *testing.T) {
+	oldInterval := readReauthInterval9051
+	readReauthInterval9051 = time.Millisecond
+	t.Cleanup(func() { readReauthInterval9051 = oldInterval })
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"events", "/api/v1/events/stream"},
+		{"logs", "/api/v1/logs/stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			releasePeerLookup := make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releasePeerLookup) }) }
+
+			s, _ := authzServer(t, Config{
+				Addr:  "127.0.0.1:0",
+				Store: authzStore(t, authzTestConfig),
+				PeerLookupFn: func(net.Addr, net.Addr) authz.PeerIdentity {
+					<-releasePeerLookup
+					return authz.PeerIdentity{UID: 0, OK: true, Local: true}
+				},
+			})
+			t.Cleanup(release)
+			connCtx := s.connContext(context.Background(), slotConn{
+				client: tcpAddr6974("127.0.0.1", 40051),
+				server: tcpAddr6974("127.0.0.1", 8080),
+			})
+			req := httptest.NewRequest(http.MethodGet, tc.path, nil).WithContext(connCtx)
+			_, stop := s.watchReadAuthorization(req, config.PermView)
+			waitForPeerWaiter(t)
+
+			stopped := make(chan struct{})
+			go func() {
+				stop()
+				close(stopped)
+			}()
+			select {
+			case <-stopped:
+				t.Error("REST stop returned while its authorization tick was still blocked")
+			case <-time.After(25 * time.Millisecond):
+			}
+			release()
+			select {
+			case <-stopped:
+			case <-time.After(3 * time.Second):
+				t.Fatal("REST stop did not return after the authorization tick was released")
+			}
+		})
 	}
 }
