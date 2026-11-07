@@ -19,8 +19,8 @@ type inventoryWiringSpy12160 struct {
 	installed  func(uint64, uint64) bool
 	requested  [][2]uint64
 	reconciled [][2]uint64
-	started    [][2]uint64
-	aborted    [][2]uint64
+	started    [][3]uint64
+	aborted    [][3]uint64
 }
 
 func (p *inventoryWiringSpy12160) SetSessionInventoryRequester(f func(uint64, uint64) bool) {
@@ -35,13 +35,13 @@ func (p *inventoryWiringSpy12160) MarkSessionInventoryReconciled(generation, req
 	return true
 }
 
-func (p *inventoryWiringSpy12160) MarkSessionInventoryBulkStarted(generation, requestToken uint64) bool {
-	p.started = append(p.started, [2]uint64{generation, requestToken})
+func (p *inventoryWiringSpy12160) MarkSessionInventoryBulkStarted(generation, requestToken, windowSerial uint64) bool {
+	p.started = append(p.started, [3]uint64{generation, requestToken, windowSerial})
 	return true
 }
 
-func (p *inventoryWiringSpy12160) MarkSessionInventoryBulkAborted(generation, requestToken uint64) bool {
-	p.aborted = append(p.aborted, [2]uint64{generation, requestToken})
+func (p *inventoryWiringSpy12160) MarkSessionInventoryBulkAborted(generation, requestToken, windowSerial uint64) bool {
+	p.aborted = append(p.aborted, [3]uint64{generation, requestToken, windowSerial})
 	return true
 }
 
@@ -58,8 +58,8 @@ func TestSessionInventoryWiringBound12160(t *testing.T) {
 		t.Errorf("published %T does not satisfy the reconciler assertion", published)
 	}
 	if _, ok := published.(interface {
-		MarkSessionInventoryBulkStarted(uint64, uint64) bool
-		MarkSessionInventoryBulkAborted(uint64, uint64) bool
+		MarkSessionInventoryBulkStarted(uint64, uint64, uint64) bool
+		MarkSessionInventoryBulkAborted(uint64, uint64, uint64) bool
 	}); !ok {
 		t.Errorf("published %T does not satisfy inventory replay lifecycle assertions", published)
 	}
@@ -118,11 +118,11 @@ func TestSessionInventoryWiringBound12160(t *testing.T) {
 	if len(spy.reconciled) != 1 || spy.reconciled[0] != ([2]uint64{9, 13}) {
 		t.Errorf("completion pair did not reach the runtime: %v", spy.reconciled)
 	}
-	ss.OnSessionInventoryBulkStarted(9, 13)
-	ss.OnSessionInventoryBulkAborted(9, 13)
-	if len(spy.started) != 1 || spy.started[0] != ([2]uint64{9, 13}) ||
-		len(spy.aborted) != 1 || spy.aborted[0] != ([2]uint64{9, 13}) {
-		t.Errorf("inventory replay lifecycle pairs were not forwarded: started=%v aborted=%v",
+	ss.OnSessionInventoryBulkStarted(9, 13, 21)
+	ss.OnSessionInventoryBulkAborted(9, 13, 21)
+	if len(spy.started) != 1 || spy.started[0] != ([3]uint64{9, 13, 21}) ||
+		len(spy.aborted) != 1 || spy.aborted[0] != ([3]uint64{9, 13, 21}) {
+		t.Errorf("inventory replay lifecycle window identities were not forwarded: started=%v aborted=%v",
 			spy.started, spy.aborted)
 	}
 	// A superseded SessionSync must not complete even with its captured pair.

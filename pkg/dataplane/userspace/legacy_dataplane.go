@@ -1338,20 +1338,20 @@ func (a *LegacyDataPlaneAdapter) MarkSessionInventoryReconciled(generation, requ
 
 // MarkSessionInventoryBulkStarted forwards admission of a matching inventory
 // replay to the manager's readiness diagnostics.
-func (a *LegacyDataPlaneAdapter) MarkSessionInventoryBulkStarted(generation, requestToken uint64) bool {
+func (a *LegacyDataPlaneAdapter) MarkSessionInventoryBulkStarted(generation, requestToken, windowSerial uint64) bool {
 	if a == nil || a.manager == nil {
 		return false
 	}
-	return a.manager.MarkSessionInventoryBulkStarted(generation, requestToken)
+	return a.manager.MarkSessionInventoryBulkStarted(generation, requestToken, windowSerial)
 }
 
 // MarkSessionInventoryBulkAborted forwards an abandoned inventory replay to
 // the manager's readiness diagnostics.
-func (a *LegacyDataPlaneAdapter) MarkSessionInventoryBulkAborted(generation, requestToken uint64) bool {
+func (a *LegacyDataPlaneAdapter) MarkSessionInventoryBulkAborted(generation, requestToken, windowSerial uint64) bool {
 	if a == nil || a.manager == nil {
 		return false
 	}
-	return a.manager.MarkSessionInventoryBulkAborted(generation, requestToken)
+	return a.manager.MarkSessionInventoryBulkAborted(generation, requestToken, windowSerial)
 }
 
 // ErrCursorIterationUnsupported is returned by

@@ -431,27 +431,27 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 		}
 	}
 
-	ss.OnSessionInventoryBulkStarted = func(generation, requestToken uint64) {
+	ss.OnSessionInventoryBulkStarted = func(generation, requestToken, windowSerial uint64) {
 		if d.getSessionSync() != ss {
 			return
 		}
 		if rt := d.dataplane(); rt != nil {
 			if tracker, ok := rt.(interface {
-				MarkSessionInventoryBulkStarted(uint64, uint64) bool
+				MarkSessionInventoryBulkStarted(uint64, uint64, uint64) bool
 			}); ok {
-				tracker.MarkSessionInventoryBulkStarted(generation, requestToken)
+				tracker.MarkSessionInventoryBulkStarted(generation, requestToken, windowSerial)
 			}
 		}
 	}
-	ss.OnSessionInventoryBulkAborted = func(generation, requestToken uint64) {
+	ss.OnSessionInventoryBulkAborted = func(generation, requestToken, windowSerial uint64) {
 		if d.getSessionSync() != ss {
 			return
 		}
 		if rt := d.dataplane(); rt != nil {
 			if tracker, ok := rt.(interface {
-				MarkSessionInventoryBulkAborted(uint64, uint64) bool
+				MarkSessionInventoryBulkAborted(uint64, uint64, uint64) bool
 			}); ok {
-				tracker.MarkSessionInventoryBulkAborted(generation, requestToken)
+				tracker.MarkSessionInventoryBulkAborted(generation, requestToken, windowSerial)
 			}
 		}
 	}

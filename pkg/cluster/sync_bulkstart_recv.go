@@ -117,10 +117,11 @@ func (s *SessionSync) handleBulkStart(conn net.Conn, payload []byte) bool {
 	inventoryStarted := s.inventoryActive
 	inventoryGeneration := s.inventoryActiveGeneration
 	inventoryRequestToken := s.inventoryActiveRequestToken
+	inventoryWindowSerial := s.bulkRecvSerial
 	s.bulkMu.Unlock()
 	if inventoryStarted {
 		if cb := s.OnSessionInventoryBulkStarted; cb != nil {
-			cb(inventoryGeneration, inventoryRequestToken)
+			cb(inventoryGeneration, inventoryRequestToken, inventoryWindowSerial)
 		}
 	}
 	// The generation reset moves to the ACCEPTED path only. It is the

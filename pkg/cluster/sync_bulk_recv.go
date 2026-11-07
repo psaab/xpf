@@ -155,7 +155,7 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 	s.bulkMu.Unlock()
 	if abortedInventory {
 		if cb := s.OnSessionInventoryBulkAborted; cb != nil {
-			cb(abortedInventoryGeneration, abortedInventoryToken)
+			cb(abortedInventoryGeneration, abortedInventoryToken, bulkSerial)
 		}
 	}
 	if invalid || late {
@@ -182,27 +182,48 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 	if !reconciled {
 		slog.Warn("cluster sync: bulk reconcile did not complete; withholding BulkAck and failover release",
 			"epoch", epoch)
+		if inventoryRequested {
+			s.bulkMu.Lock()
+			if s.inventoryActive &&
+				s.inventoryActiveGeneration == inventoryGen &&
+				s.inventoryActiveRequestToken == inventoryRequestToken &&
+				s.bulkRecvSerial == bulkSerial {
+				s.inventoryActive = false
+				s.inventoryActiveGeneration = 0
+				s.inventoryActiveRequestToken = 0
+			}
+			s.bulkMu.Unlock()
+			if cb := s.OnSessionInventoryBulkAborted; cb != nil {
+				cb(inventoryGen, inventoryRequestToken, bulkSerial)
+			}
+		}
 		s.scheduleBulkRerequest("bulk reconcile did not complete", bulkSerial, bulkRerequestBackoff, bulkDuration)
 		return false
 	}
 	s.noteBulkReconciled()
 	s.stats.BulkSyncEndTime.Store(time.Now().UnixNano())
 	slog.Info("cluster sync: bulk transfer complete", "epoch", epoch, "sessions", s.stats.BulkSyncSessions.Load(), "local", connLocalAddrString(conn), "remote", connRemoteAddrString(conn))
-	s.sendBulkAck(conn, epoch)
-	s.bulkEverCompleted.Store(true)
-	if s.OnBulkSyncReceived != nil {
-		go s.OnBulkSyncReceived()
-	}
 	if inventoryRequested {
 		s.bulkMu.Lock()
-		// Only the exact request captured by the completed bulk is consumed;
-		// a retry or replay armed afterward remains pending for its own bulk.
+		// Reconciliation has completed. Keep the active watermark through
+		// stale-row removal so a readiness retry cannot duplicate this replay.
+		// Only the exact request captured by this bulk is consumed; a newer
+		// request or BulkStart remains armed.
 		if s.inventoryPending &&
 			s.inventoryPendingGeneration == inventoryGen &&
 			s.inventoryPendingRequestToken == inventoryRequestToken {
 			s.inventoryPending = false
 			s.inventoryPendingGeneration = 0
 			s.inventoryPendingRequestToken = 0
+			s.inventoryPendingRequestAt = time.Time{}
+		}
+		if s.inventoryActive &&
+			s.bulkRecvSerial == bulkSerial &&
+			s.inventoryActiveGeneration == inventoryGen &&
+			s.inventoryActiveRequestToken == inventoryRequestToken {
+			s.inventoryActive = false
+			s.inventoryActiveGeneration = 0
+			s.inventoryActiveRequestToken = 0
 		}
 		if inventoryGen > s.inventoryCompletedGeneration ||
 			(inventoryGen == s.inventoryCompletedGeneration &&
@@ -211,6 +232,13 @@ func (s *SessionSync) handleBulkEnd(conn net.Conn, payload []byte) bool {
 			s.inventoryCompletedRequestToken = inventoryRequestToken
 		}
 		s.bulkMu.Unlock()
+	}
+	s.sendBulkAck(conn, epoch)
+	s.bulkEverCompleted.Store(true)
+	if s.OnBulkSyncReceived != nil {
+		go s.OnBulkSyncReceived()
+	}
+	if inventoryRequested {
 		if cb := s.OnSessionInventoryBulkReceived; cb != nil {
 			go cb(inventoryGen, inventoryRequestToken)
 		}

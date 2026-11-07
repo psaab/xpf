@@ -242,7 +242,16 @@ func (s *SessionSync) scheduleBulkRerequestFor(p *bulkRerequestPending) {
 				"withheld_serial", p.serial, "current_serial", cur, "reason", p.reason)
 			return
 		}
-		if !s.enqueueQueuedFrame(encodeRawMessage(syncMsgBulkRequest, nil)) {
+		s.bulkMu.Lock()
+		queued := s.enqueueQueuedFrame(encodeRawMessage(syncMsgBulkRequest, nil))
+		if queued && s.inventoryPending && !s.inventoryActive {
+			// This generic rerequest also covers a pending inventory pair
+			// abandoned by an aborted bulk. Do not immediately duplicate it
+			// with the manager's no-start retry.
+			s.inventoryPendingRequestAt = time.Now()
+		}
+		s.bulkMu.Unlock()
+		if !queued {
 			s.stats.Errors.Add(1)
 			slog.Warn("cluster sync: could not queue a bulk re-request after withholding a BulkAck "+
 				"(send queue full); the peer's 35s bulk-ack retry remains the fallback",

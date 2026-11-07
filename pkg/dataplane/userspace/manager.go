@@ -181,6 +181,10 @@ type Manager struct {
 	// sessionInventoryReplayState describes overflow replay progress in
 	// readiness refusals; empty means no request has started.
 	sessionInventoryReplayState string
+	// sessionInventoryReplayWindow identifies which accepted BulkStart owns
+	// the active diagnostic, preventing a delayed abort from demoting its
+	// replacement window.
+	sessionInventoryReplayWindow uint64
 	// sessionInventoryStaleCompletionRejected preserves operator visibility
 	// when a stale completion was rejected while a newer replay is active.
 	sessionInventoryStaleCompletionRejected bool

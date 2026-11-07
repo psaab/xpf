@@ -439,6 +439,7 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 			m.sessionInventoryRequestAt = time.Time{}
 			m.sessionInventoryRequestToken = 0
 			m.sessionInventoryReplayState = ""
+			m.sessionInventoryReplayWindow = 0
 			m.sessionInventoryStaleCompletionRejected = false
 		}
 		generation = m.sessionRepairOverflowGen
@@ -468,6 +469,7 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 					m.sessionRepairOverflowReplayToken = requestToken
 					m.sessionRepairOverflowReplayOverflow = false
 				}
+				m.sessionInventoryReplayWindow = 0
 				m.sessionInventoryStaleCompletionRejected = false
 			}
 			m.sessionInventoryRequestAt = now
@@ -482,9 +484,9 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 	m.mu.Unlock()
 
 	// Never hold Manager.mu while asking SessionSync to queue the bulk request.
-	// Retries reuse the outstanding pair: SessionSync treats it idempotently
-	// while pending, active, or completed, so a slow replay cannot be
-	// perpetually superseded by readiness polling.
+	// Retries reuse the outstanding pair. SessionSync resends only a pending
+	// pair whose no-start window elapsed; an accepted active replay stays
+	// duplicate-free while readiness polling continues.
 	if !requestAt.IsZero() {
 		if !request(generation, requestToken) {
 			m.mu.Lock()
@@ -688,6 +690,7 @@ func (m *Manager) SetSessionInventoryRequester(requester func(generation, reques
 	m.sessionInventoryRequestAt = time.Time{}
 	m.sessionInventoryRequestToken = 0
 	m.sessionInventoryReplayState = ""
+	m.sessionInventoryReplayWindow = 0
 	m.sessionInventoryStaleCompletionRejected = false
 	m.sessionRepairOverflowReplayGen = 0
 	m.sessionRepairOverflowReplayToken = 0
@@ -701,26 +704,34 @@ func (m *Manager) sessionInventoryRequestMatchesLocked(generation, requestToken 
 		m.procGen == generation && m.proc != nil && m.proc.Process != nil
 }
 
-// MarkSessionInventoryBulkStarted records that the accepted peer replay has
-// begun. The local pair is captured from the request pending at BulkStart.
-func (m *Manager) MarkSessionInventoryBulkStarted(generation, requestToken uint64) bool {
+// MarkSessionInventoryBulkStarted records the accepted replay and its receive
+// window. The serial makes delayed abort notifications harmless.
+func (m *Manager) MarkSessionInventoryBulkStarted(generation, requestToken, windowSerial uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.sessionInventoryRequestMatchesLocked(generation, requestToken) {
+	if windowSerial == 0 || !m.sessionInventoryRequestMatchesLocked(generation, requestToken) ||
+		windowSerial < m.sessionInventoryReplayWindow {
+		return false
+	}
+	if windowSerial == m.sessionInventoryReplayWindow &&
+		m.sessionInventoryReplayState != sessionInventoryReplayActive {
 		return false
 	}
 	m.sessionInventoryReplayState = sessionInventoryReplayActive
+	m.sessionInventoryReplayWindow = windowSerial
 	m.sessionInventoryStaleCompletionRejected = false
 	return true
 }
 
-// MarkSessionInventoryBulkAborted returns an outstanding replay to its
-// peer-wait state after SessionSync rejects or abandons its receive window.
-func (m *Manager) MarkSessionInventoryBulkAborted(generation, requestToken uint64) bool {
+// MarkSessionInventoryBulkAborted returns the matching receive window to its
+// peer-wait state. A stale callback cannot demote a newer active replay.
+func (m *Manager) MarkSessionInventoryBulkAborted(generation, requestToken, windowSerial uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.sessionInventoryRequestMatchesLocked(generation, requestToken) ||
-		m.sessionInventoryReplayState != sessionInventoryReplayActive {
+	if windowSerial == 0 ||
+		!m.sessionInventoryRequestMatchesLocked(generation, requestToken) ||
+		m.sessionInventoryReplayState != sessionInventoryReplayActive ||
+		m.sessionInventoryReplayWindow != windowSerial {
 		return false
 	}
 	m.sessionInventoryReplayState = sessionInventoryReplayWaitingForPeer
@@ -774,6 +785,7 @@ func (m *Manager) MarkSessionInventoryReconciled(generation, requestToken uint64
 	m.sessionInventoryStaleCompletionRejected = false
 	m.sessionInventoryRequestAt = time.Time{}
 	m.sessionInventoryRequestToken = 0
+	m.sessionInventoryReplayWindow = 0
 	return cleared
 }
 

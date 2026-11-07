@@ -3,6 +3,7 @@ package cluster
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"os"
@@ -427,10 +428,24 @@ func TestPeerSessionInventoryExpiredBulkClearsActiveToken12160(t *testing.T) {
 	s.bulkMu.Lock()
 	active, activeGeneration, activeToken = s.inventoryActive,
 		s.inventoryActiveGeneration, s.inventoryActiveRequestToken
+	s.inventoryPendingRequestAt = time.Now().Add(-inventoryPendingRetryWindow)
 	s.bulkMu.Unlock()
 	if active || activeGeneration != 0 || activeToken != 0 {
 		t.Fatalf("expired bulk retained active inventory state: (%v, %d, %d)",
 			active, activeGeneration, activeToken)
+	}
+	if !s.RequestPeerSessionInventory(generation, requestToken) {
+		t.Fatal("same pending pair could not re-request after its bulk aborted")
+	}
+	retry := decodeInventoryFrame12160(t, <-s.sendCh)
+	if retry.typ != syncMsgBulkRequest || len(retry.payload) != 0 {
+		t.Fatalf("aborted inventory retry = type %d payload %x, want empty BulkRequest",
+			retry.typ, retry.payload)
+	}
+	if pending, gotGeneration, gotToken := inventoryPendingState12160(s); !pending ||
+		gotGeneration != generation || gotToken != requestToken {
+		t.Fatalf("aborted retry changed pending pair: (%v, %d, %d)",
+			pending, gotGeneration, gotToken)
 	}
 }
 
@@ -699,8 +714,12 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 	sender := NewSessionSync(":0", "peer", nil)
 	installInventoryConn12160(sender, wire)
 	var sourceCalls atomic.Int32
+	firstExportFailed := make(chan struct{}, 1)
 	sender.BulkSnapshotSource = func() (BulkSnapshot, error) {
-		sourceCalls.Add(1)
+		if sourceCalls.Add(1) == 1 {
+			firstExportFailed <- struct{}{}
+			return BulkSnapshot{}, errors.New("snapshot export temporarily unavailable")
+		}
 		return inventorySnapshot12160(), nil
 	}
 
@@ -712,11 +731,11 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 	})
 	bulkStarted := make(chan bool, 1)
 	bulkCompleted := make(chan bool, 1)
-	receiver.OnSessionInventoryBulkStarted = func(generation, token uint64) {
-		bulkStarted <- manager.MarkSessionInventoryBulkStarted(generation, token)
+	receiver.OnSessionInventoryBulkStarted = func(generation, token, windowSerial uint64) {
+		bulkStarted <- manager.MarkSessionInventoryBulkStarted(generation, token, windowSerial)
 	}
-	receiver.OnSessionInventoryBulkAborted = func(generation, token uint64) {
-		manager.MarkSessionInventoryBulkAborted(generation, token)
+	receiver.OnSessionInventoryBulkAborted = func(generation, token, windowSerial uint64) {
+		manager.MarkSessionInventoryBulkAborted(generation, token, windowSerial)
 	}
 	receiver.OnSessionInventoryBulkReceived = func(generation, token uint64) {
 		bulkCompleted <- manager.MarkSessionInventoryReconciled(generation, token)
@@ -735,6 +754,62 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 		t.Fatalf("queued inventory request = type %d payload %x", request.typ, request.payload)
 	}
 	sender.handleMessage(wire, request.typ, request.payload)
+	select {
+	case <-firstExportFailed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("first authoritative snapshot export was not attempted")
+	}
+	select {
+	case raw := <-wire.writes:
+		t.Fatalf("failed snapshot export emitted a bulk frame before BulkStart: %x", raw)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Poll twice inside the 5s retry interval: neither poll may queue another
+	// request. The 6s poll must re-send the same pair without reconnecting.
+	for range 2 {
+		time.Sleep(2 * time.Second)
+		if ready, reasons := manager.TakeoverReady(); ready ||
+			!strings.Contains(strings.Join(reasons, "\n"), "replay state: waiting-for-peer") {
+			t.Fatalf("readiness did not remain blocked while export was unavailable: ready=%v reasons=%v",
+				ready, reasons)
+		}
+		if len(requests) != 1 {
+			t.Fatalf("request retried before its bounded window elapsed: %v", requests)
+		}
+		select {
+		case raw := <-receiver.sendCh:
+			t.Fatalf("no-start retry was sent before its bounded window: %x", raw)
+		default:
+		}
+	}
+	time.Sleep(2 * time.Second)
+	if ready, reasons := manager.TakeoverReady(); ready ||
+		!strings.Contains(strings.Join(reasons, "\n"), "replay state: waiting-for-peer") {
+		t.Fatalf("readiness unexpectedly opened before recovered replay: ready=%v reasons=%v",
+			ready, reasons)
+	}
+	if len(requests) != 2 || requests[1] != requests[0] {
+		t.Fatalf("bounded no-start retry did not reuse the request pair: %v", requests)
+	}
+	var retry inventoryFrame12160
+	select {
+	case raw := <-receiver.sendCh:
+		retry = decodeInventoryFrame12160(t, raw)
+	case <-time.After(2 * time.Second):
+		t.Fatal("bounded no-start retry did not queue a same-pair BulkRequest")
+	}
+	if retry.typ != syncMsgBulkRequest || len(retry.payload) != 0 {
+		t.Fatalf("no-start retry frame = type %d payload %x, want empty BulkRequest",
+			retry.typ, retry.payload)
+	}
+	receiver.mu.Lock()
+	stillConnected := receiver.activeConnLocked() == wire
+	receiver.mu.Unlock()
+	if !stillConnected {
+		t.Fatal("no-start retry depended on a peer reconnect")
+	}
+	sender.handleMessage(wire, retry.typ, retry.payload)
 
 	var bulkEnd *inventoryFrame12160
 	for bulkEnd == nil {
@@ -763,9 +838,9 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 			ready, reasons)
 	}
 
-	// Keep the real bulk window open beyond the manager's 5s retry cadence
-	// while its readiness caller continues to poll every 2s. A retry must reuse
-	// the request pair captured by BulkStart instead of superseding it.
+	// Keep the recovered replay open beyond the manager's 5s retry cadence
+	// while readiness continues to be polled. A retry must reuse the pair, but
+	// RequestPeerSessionInventory must not duplicate a healthy active bulk.
 	for range 3 {
 		time.Sleep(2 * time.Second)
 		if ready, reasons := manager.TakeoverReady(); ready ||
@@ -773,8 +848,8 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 			t.Fatalf("slow replay unexpectedly opened readiness: ready=%v reasons=%v", ready, reasons)
 		}
 	}
-	if len(requests) < 2 {
-		t.Fatalf("readiness did not exercise the retry while BulkEnd was held: requests=%v", requests)
+	if len(requests) < 3 {
+		t.Fatalf("readiness did not exercise an active replay retry: requests=%v", requests)
 	}
 	for _, pair := range requests {
 		if pair != requests[0] {
@@ -789,8 +864,8 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 		}
 	default:
 	}
-	if got := sourceCalls.Load(); got != 1 {
-		t.Fatalf("slow replay invoked authoritative snapshot source %d times, want once", got)
+	if got := sourceCalls.Load(); got != 2 {
+		t.Fatalf("authoritative snapshot source was called %d times, want one failed and one recovered export", got)
 	}
 
 	receiver.handleMessage(wire, bulkEnd.typ, bulkEnd.payload)
@@ -812,5 +887,96 @@ func TestSessionInventorySlowReplayKeepsRequestToken12160(t *testing.T) {
 		if _, ok := receiverDP.v4sessions[entry.Key]; !ok {
 			t.Fatalf("completed replay did not install worker session %v", entry.Key)
 		}
+	}
+}
+func TestSessionInventoryStaleAbortCannotDemoteNewWindow18661(t *testing.T) {
+	dir, err := os.MkdirTemp("", "inv18661")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	eventStream := dpuserspace.NewEventStream(filepath.Join(dir, "e.sock"))
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := eventStream.Start(ctx); err != nil {
+		t.Fatalf("start event stream: %v", err)
+	}
+	t.Cleanup(func() { eventStream.Close() })
+	manager := dpuserspace.NewSessionInventoryOverflowManagerForTest(eventStream)
+
+	receiver := NewSessionSync(":0", "peer", &mockSweepDP{
+		v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue),
+	})
+	receiver.SetZoneRGMap(map[uint16]int{})
+	wire := newInventoryCaptureConn12160(t)
+	installInventoryConn12160(receiver, wire)
+	type requestPair struct{ generation, token uint64 }
+	var request requestPair
+	manager.SetSessionInventoryRequester(func(generation, token uint64) bool {
+		request = requestPair{generation: generation, token: token}
+		return receiver.RequestPeerSessionInventory(generation, token)
+	})
+	type startedWindow struct {
+		ok                bool
+		generation, token uint64
+		serial            uint64
+	}
+	started := make(chan startedWindow, 2)
+	receiver.OnSessionInventoryBulkStarted = func(generation, token, serial uint64) {
+		started <- startedWindow{
+			ok:         manager.MarkSessionInventoryBulkStarted(generation, token, serial),
+			generation: generation, token: token, serial: serial,
+		}
+	}
+
+	if ready, _ := manager.TakeoverReady(); ready {
+		t.Fatal("overflow helper was takeover-ready before replay")
+	}
+	if request.generation == 0 || request.token == 0 {
+		t.Fatalf("overflow request pair = (%d, %d), want nonzero", request.generation, request.token)
+	}
+	queued := decodeInventoryFrame12160(t, <-receiver.sendCh)
+	if queued.typ != syncMsgBulkRequest {
+		t.Fatalf("initial request frame type = %d, want BulkRequest", queued.typ)
+	}
+
+	now := time.Now()
+	receiver.testBulkRecvNow = func() time.Time { return now }
+	first := inventoryIncarnatedBulkMarker12160(1, bootIncarnation{1})
+	receiver.handleMessage(wire, syncMsgBulkStart, first)
+	var firstWindow startedWindow
+	select {
+	case firstWindow = <-started:
+		if !firstWindow.ok || firstWindow.serial == 0 {
+			t.Fatalf("first BulkStart was not tracked: %+v", firstWindow)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("first BulkStart did not report its receive-window serial")
+	}
+
+	// Expire the first window but defer its abort callback. A new accepted
+	// window with the same request pair becomes active before the old callback.
+	now = now.Add(bulkRecvWindowTimeout + time.Second)
+	receiver.expireBulkWindowIfStale()
+	second := inventoryIncarnatedBulkMarker12160(2, bootIncarnation{1})
+	receiver.handleMessage(wire, syncMsgBulkStart, second)
+	var secondWindow startedWindow
+	select {
+	case secondWindow = <-started:
+		if !secondWindow.ok || secondWindow.serial <= firstWindow.serial {
+			t.Fatalf("replacement BulkStart did not supersede the old window: first=%+v second=%+v",
+				firstWindow, secondWindow)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("replacement BulkStart did not report its receive-window serial")
+	}
+
+	if manager.MarkSessionInventoryBulkAborted(
+		firstWindow.generation, firstWindow.token, firstWindow.serial) {
+		t.Fatal("delayed abort for the expired window was accepted against its replacement")
+	}
+	if ready, reasons := manager.TakeoverReady(); ready ||
+		!strings.Contains(strings.Join(reasons, "\n"), "replay state: replay-active") {
+		t.Fatalf("stale abort demoted the replacement replay: ready=%v reasons=%v", ready, reasons)
 	}
 }

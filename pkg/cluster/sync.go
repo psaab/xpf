@@ -1345,11 +1345,11 @@ type SessionSync struct {
 	// values are local correlation state; the request token is not sent on wire.
 	OnSessionInventoryBulkReceived func(generation, requestToken uint64)
 	// OnSessionInventoryBulkStarted fires after an accepted BulkStart captures
-	// a pending inventory request pair.
-	OnSessionInventoryBulkStarted func(generation, requestToken uint64)
+	// a pending inventory request pair and its receive-window serial.
+	OnSessionInventoryBulkStarted func(generation, requestToken, windowSerial uint64)
 	// OnSessionInventoryBulkAborted fires when an active requested receive
 	// window is abandoned before successful reconciliation.
-	OnSessionInventoryBulkAborted func(generation, requestToken uint64)
+	OnSessionInventoryBulkAborted func(generation, requestToken, windowSerial uint64)
 	// BulkSyncOverride, if set, runs as a best-effort fast-population pre-step
 	// BEFORE the authoritative BulkSync in doBulkSync (it does NOT replace it,
 	// #5085). It is NO LONGER wired in production — the async, lossy
@@ -1713,6 +1713,7 @@ type SessionSync struct {
 	inventoryPending             bool
 	inventoryPendingGeneration   uint64
 	inventoryPendingRequestToken uint64
+	inventoryPendingRequestAt    time.Time
 	inventoryActive              bool
 	inventoryActiveGeneration    uint64
 	inventoryActiveRequestToken  uint64
@@ -2923,9 +2924,6 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, u
 	inventoryRequestToken := s.inventoryActiveRequestToken
 	inventoryRequested := s.inventoryActive
 	s.bulkInProgress = false
-	s.inventoryActive = false
-	s.inventoryActiveGeneration = 0
-	s.inventoryActiveRequestToken = 0
 	s.bulkRecvV4 = nil
 	s.bulkRecvV6 = nil
 	s.bulkRecvStartedAt = time.Time{}

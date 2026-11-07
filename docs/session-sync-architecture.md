@@ -601,16 +601,20 @@ switch ("standby retains newer set").
 | 34 | *(retired)* | — | Was AuthUpgradeAck, the fourth frame of the pre-#7163 exchange. Left unused rather than recycled. |
 | 36 | AuthUpgradeConfirm | Initiator -> Responder | In-place authentication upgrade: handshake-binding MAC, and the responder's read boundary (#7163) |
 | 37 | AuthUpgradeRequest | Responder -> Initiator | In-place authentication upgrade: the responder-role node asking the initiator-role node to start (#7163) |
-| 42 | BulkRequest | Secondary -> Primary | Ask the peer to run its authoritative bulk source path (#12160); opaque payload. The requester-local `(helper generation, request token)` pair tracks the pending/active bulk and its reconciled completion, but neither value is sent on wire. Retries reuse the pair while outstanding; a new pair is armed only after completion/re-arm. Old peers ignore it fail-closed |
+| 42 | BulkRequest | Secondary -> Primary | Ask the peer to run its authoritative bulk source path (#12160); opaque payload. The requester-local `(helper generation, request token)` pair tracks the pending/active bulk and reconciled completion, but neither value is sent on wire. A pending pair is re-requested with the same BulkRequest after a bounded no-start retry window; a matching accepted BulkStart suppresses duplicates while replay is active. A local receive-window serial fences start/abort callbacks; it is also not sent on wire. Old peers ignore it fail-closed |
 
 The local pair binds to the next accepted `BulkStart`; it is not a wire
 correlation identifier. Therefore a peer bulk whose `BulkStart` was already
 sent before `BulkRequest` can still be delayed in transit and admitted after
 the request, and this protocol cannot prove that the peer's snapshot began
-after the local overflow. No token is added to the wire here. The receiver only
-releases overflow readiness after the full admitted replay reconciles; the
-regression cell also asserts the received worker-session rows rather than
-treating the completion callback itself as proof.
+after the local overflow. No request token or receive-window serial is added to
+the wire here. The accepted BulkStart's local serial tags start/abort callbacks
+so a delayed abort from an expired window cannot demote a newer replay. The
+receiver only releases overflow readiness after the full admitted replay
+reconciles; if the peer's snapshot export fails before sending BulkStart, the
+requester retries the same opaque BulkRequest after its bounded no-start
+window. Aborted admitted windows also retain the pending pair for this retry
+path; a healthy active replay is not duplicated.
 
 ### In-Place Authentication Upgrade (#6628)
 

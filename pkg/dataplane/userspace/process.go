@@ -1205,6 +1205,7 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	m.sessionInventoryDebtOwed = m.clusterHA
 	m.sessionInventoryRequestAt = time.Time{}
 	m.sessionInventoryRequestToken = 0
+	m.sessionInventoryReplayWindow = 0
 	m.sessionRepairOverflowReplayGen = 0
 	m.sessionRepairOverflowReplayToken = 0
 	m.sessionRepairOverflowReplayOverflow = false

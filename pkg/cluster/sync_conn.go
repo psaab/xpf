@@ -1660,6 +1660,7 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		abortedInventory := s.inventoryActive
 		abortedInventoryGeneration := s.inventoryActiveGeneration
 		abortedInventoryToken := s.inventoryActiveRequestToken
+		abortedInventorySerial := s.bulkRecvSerial
 		s.bulkInProgress = false
 		s.bulkRecvEpoch = 0
 		// #9174: the epoch high-water and the incarnation that set it are one
@@ -1678,13 +1679,14 @@ func (s *SessionSync) handleDisconnect(conn net.Conn) {
 		s.inventoryPending = false
 		s.inventoryPendingGeneration = 0
 		s.inventoryPendingRequestToken = 0
+		s.inventoryPendingRequestAt = time.Time{}
 		s.inventoryActive = false
 		s.inventoryActiveGeneration = 0
 		s.inventoryActiveRequestToken = 0
 		s.bulkMu.Unlock()
 		if abortedInventory {
 			if cb := s.OnSessionInventoryBulkAborted; cb != nil {
-				cb(abortedInventoryGeneration, abortedInventoryToken)
+				cb(abortedInventoryGeneration, abortedInventoryToken, abortedInventorySerial)
 			}
 		}
 		if hadBulkInProgress {

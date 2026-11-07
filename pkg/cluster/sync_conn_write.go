@@ -11,6 +11,10 @@ import (
 	"github.com/psaab/xpf/pkg/dataplane"
 )
 
+// The manager polls inventory readiness every 5s; leave headroom for its
+// callback/queue work while enforcing the same bounded resend cadence here.
+const inventoryPendingRetryWindow = 4 * time.Second
+
 // PauseIncrementalSync temporarily disables background sweep-driven session
 // replication. Explicit sync producers may continue queueing messages.
 func (s *SessionSync) PauseIncrementalSync(reason string) {
@@ -89,10 +93,11 @@ func (s *SessionSync) queueMessage(msg []byte, sentCounter *atomic.Uint64, sourc
 	return false
 }
 
-// RequestPeerSessionInventory asks the connected peer to send its
-// authoritative session inventory. Retries of the same local request pair are
-// idempotent while pending, active, or just completed; a newer pair may arm
-// another bulk. Neither value is sent on wire.
+// RequestPeerSessionInventory asks the peer to run its authoritative bulk
+// source path. The requester-local pair tracks a pending/active bulk and its
+// reconciled completion; neither value is sent on wire. A pending request is
+// re-sent after a bounded no-start window, while an active or completed pair
+// is idempotent. A newer pair may arm another bulk.
 func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint64) bool {
 	if generation == 0 || requestToken == 0 {
 		return false
@@ -131,12 +136,24 @@ func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint6
 			requestToken == s.inventoryActiveRequestToken
 		sameCompleted := generation == s.inventoryCompletedGeneration &&
 			requestToken == s.inventoryCompletedRequestToken
+		if samePending && !sameActive && !sameCompleted {
+			now := time.Now()
+			if s.inventoryPendingRequestAt.IsZero() ||
+				now.Sub(s.inventoryPendingRequestAt) >= inventoryPendingRetryWindow {
+				if !s.enqueueQueuedFrame(encodeRawMessage(syncMsgBulkRequest, nil)) {
+					s.stats.Errors.Add(1)
+					s.bulkMu.Unlock()
+					s.mu.Unlock()
+					return false
+				}
+				s.inventoryPendingRequestAt = now
+			}
+		}
 		s.bulkMu.Unlock()
 		s.mu.Unlock()
 		return samePending || sameActive || sameCompleted
 	}
-	msg := encodeRawMessage(syncMsgBulkRequest, nil)
-	if !s.enqueueQueuedFrame(msg) {
+	if !s.enqueueQueuedFrame(encodeRawMessage(syncMsgBulkRequest, nil)) {
 		s.stats.Errors.Add(1)
 		s.bulkMu.Unlock()
 		s.mu.Unlock()
@@ -145,6 +162,7 @@ func (s *SessionSync) RequestPeerSessionInventory(generation, requestToken uint6
 	s.inventoryPending = true
 	s.inventoryPendingGeneration = generation
 	s.inventoryPendingRequestToken = requestToken
+	s.inventoryPendingRequestAt = time.Now()
 	// A bulk accepted before the first pending request cannot satisfy it. A
 	// newer request issued while one is active remains pending for its own
 	// accepted bulk window.
