@@ -30,6 +30,7 @@ func TestFabricAuth14580_PersistentNatGenerationForgedReplayRejected(t *testing.
 	forged := &pb.SystemActionRequest{Action: "clear-persistent-nat", PersistentNatOrigin: origin, PersistentNatGeneration: ^uint64(0)}
 
 	var token string
+	var authenticatedReq interface{}
 	creds := fabricAuthCreds{keyFn: func() []byte { return []byte(fabricTestKey) }}
 	invoker := func(ctx context.Context, method string, req, reply interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
 		md, err := creds.GetRequestMetadata(ctx)
@@ -37,6 +38,7 @@ func TestFabricAuth14580_PersistentNatGenerationForgedReplayRejected(t *testing.
 			return err
 		}
 		token = md[fabricAuthMetadataKey]
+		authenticatedReq = req
 		return nil
 	}
 	if err := FabricAuthUnaryClientInterceptor(context.Background(), method, genuine, nil, nil, invoker); err != nil {
@@ -57,7 +59,7 @@ func TestFabricAuth14580_PersistentNatGenerationForgedReplayRejected(t *testing.
 	}
 
 	genuineProbe := &unaryCallProbe{}
-	if err := invoke(genuine, genuineProbe); err != nil {
+	if err := invoke(authenticatedReq, genuineProbe); err != nil {
 		t.Fatalf("genuine forwarded clear rejected: %v", err)
 	}
 	if !genuineProbe.called {

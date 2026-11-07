@@ -7259,8 +7259,10 @@ type ClearSessionsRequest struct {
 	Interface         string                 `protobuf:"bytes,8,opt,name=interface,proto3" json:"interface,omitempty"`                                          // optional: ingress/egress interface name filter
 	NatOnly           bool                   `protobuf:"varint,9,opt,name=nat_only,json=natOnly,proto3" json:"nat_only,omitempty"`                              // optional: only sessions with NAT translation
 	SourceNatPool     string                 `protobuf:"bytes,10,opt,name=source_nat_pool,json=sourceNatPool,proto3" json:"source_nat_pool,omitempty"`          // optional: source NAT pool name (translated source in pool)
-	unknownFields     protoimpl.UnknownFields
-	sizeCache         protoimpl.SizeCache
+	// A fresh per-invocation nonce, covered by the fabric authentication digest.
+	FabricNonce   []byte `protobuf:"bytes,11,opt,name=fabric_nonce,json=fabricNonce,proto3" json:"fabric_nonce,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *ClearSessionsRequest) Reset() {
@@ -7361,6 +7363,13 @@ func (x *ClearSessionsRequest) GetSourceNatPool() string {
 		return x.SourceNatPool
 	}
 	return ""
+}
+
+func (x *ClearSessionsRequest) GetFabricNonce() []byte {
+	if x != nil {
+		return x.FabricNonce
+	}
+	return nil
 }
 
 type ClearSessionsResponse struct {
@@ -9560,8 +9569,10 @@ type SystemActionRequest struct {
 	// every non-forwarded and legacy call.
 	PersistentNatOrigin     string `protobuf:"bytes,9,opt,name=persistent_nat_origin,json=persistentNatOrigin,proto3" json:"persistent_nat_origin,omitempty"`
 	PersistentNatGeneration uint64 `protobuf:"varint,10,opt,name=persistent_nat_generation,json=persistentNatGeneration,proto3" json:"persistent_nat_generation,omitempty"`
-	unknownFields           protoimpl.UnknownFields
-	sizeCache               protoimpl.SizeCache
+	// A fresh per-invocation nonce, covered by the fabric authentication digest.
+	FabricNonce   []byte `protobuf:"bytes,11,opt,name=fabric_nonce,json=fabricNonce,proto3" json:"fabric_nonce,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SystemActionRequest) Reset() {
@@ -9662,6 +9673,13 @@ func (x *SystemActionRequest) GetPersistentNatGeneration() uint64 {
 		return x.PersistentNatGeneration
 	}
 	return 0
+}
+
+func (x *SystemActionRequest) GetFabricNonce() []byte {
+	if x != nil {
+		return x.FabricNonce
+	}
+	return nil
 }
 
 type SystemActionResponse struct {
@@ -11040,7 +11058,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x06source\x18\x02 \x01(\tR\x06source\x12)\n" +
 	"\x10routing_instance\x18\x03 \x01(\tR\x0froutingInstance\",\n" +
 	"\x12TracerouteResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"\xe9\x02\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"\x8c\x03\n" +
 	"\x14ClearSessionsRequest\x12#\n" +
 	"\rsource_prefix\x18\x01 \x01(\tR\fsourcePrefix\x12-\n" +
 	"\x12destination_prefix\x18\x02 \x01(\tR\x11destinationPrefix\x12\x1a\n" +
@@ -11053,7 +11071,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\tinterface\x18\b \x01(\tR\tinterface\x12\x19\n" +
 	"\bnat_only\x18\t \x01(\bR\anatOnly\x12&\n" +
 	"\x0fsource_nat_pool\x18\n" +
-	" \x01(\tR\rsourceNatPool\"\xa2\x01\n" +
+	" \x01(\tR\rsourceNatPool\x12!\n" +
+	"\ffabric_nonce\x18\v \x01(\fR\vfabricNonce\"\xa2\x01\n" +
 	"\x15ClearSessionsResponse\x12!\n" +
 	"\fipv4_cleared\x18\x01 \x01(\x05R\vipv4Cleared\x12!\n" +
 	"\fipv6_cleared\x18\x02 \x01(\x05R\vipv6Cleared\x12\x1a\n" +
@@ -11232,7 +11251,7 @@ const file_xpf_proto_rawDesc = "" +
 	"\x14GetSystemInfoRequest\x12\x12\n" +
 	"\x04type\x18\x01 \x01(\tR\x04type\"/\n" +
 	"\x15GetSystemInfoResponse\x12\x16\n" +
-	"\x06output\x18\x01 \x01(\tR\x06output\"\x9c\x03\n" +
+	"\x06output\x18\x01 \x01(\tR\x06output\"\xbf\x03\n" +
 	"\x13SystemActionRequest\x12\x16\n" +
 	"\x06action\x18\x01 \x01(\tR\x06action\x12\x16\n" +
 	"\x06target\x18\x02 \x01(\tR\x06target\x12!\n" +
@@ -11244,7 +11263,8 @@ const file_xpf_proto_rawDesc = "" +
 	"\rbaseline_hash\x18\b \x01(\tR\fbaselineHash\x122\n" +
 	"\x15persistent_nat_origin\x18\t \x01(\tR\x13persistentNatOrigin\x12:\n" +
 	"\x19persistent_nat_generation\x18\n" +
-	" \x01(\x04R\x17persistentNatGeneration\"0\n" +
+	" \x01(\x04R\x17persistentNatGeneration\x12!\n" +
+	"\ffabric_nonce\x18\v \x01(\fR\vfabricNonce\"0\n" +
 	"\x14SystemActionResponse\x12\x18\n" +
 	"\amessage\x18\x01 \x01(\tR\amessage\"\xbb\x02\n" +
 	"\x18MonitorPacketDropRequest\x12#\n" +

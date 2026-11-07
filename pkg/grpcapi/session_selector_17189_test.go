@@ -113,6 +113,7 @@ func TestSessionSelectorClearFieldsCopied17189(t *testing.T) {
 		Interface:         "sentinel-interface",
 		NatOnly:           true,
 		SourceNatPool:     "sentinel-source_nat_pool",
+		FabricNonce:       []byte("sentinel-fabric_nonce"),
 	}
 	got, zoneName := selectorFromClear(clearReq)
 	if zoneName != "trust" {
@@ -158,18 +159,14 @@ func TestSessionSelectorClearFieldsCopied17189(t *testing.T) {
 		t.Errorf("selectorFromClear(nil) = (%v, %q), want empty selector and empty zone name", empty, zn)
 	}
 
-	// Reflection over ClearSessionsRequest itself: every field it
-	// declares must be accounted for below — by name-mapped copy into
-	// the GetSessionsRequest shape (`interface` lands on
-	// interface_filter), or, for `zone` only, by the separate name
-	// return. Clear is the highest-blast-radius consumer (a dropped
-	// selector widens a destructive clear), so its claim in
-	// session_selector.go is pinned by enumeration, not by the
-	// hand-written list above: a selector added to ClearSessionsRequest
-	// without reaching selectorFromClear fails here naming the field,
-	// exactly as the summary guard above does for its request. Zone is
-	// excluded BY NAME (with its retyping asserted) because it travels
-	// as the returned name, never as the numeric wildcard.
+	// Reflection over ClearSessionsRequest itself: every selector field it
+	// declares must be accounted for below — by name-mapped copy into the
+	// GetSessionsRequest shape (`interface` lands on `interface_filter`), or,
+	// for `zone`, by the separate name return. The fabric replay nonce is
+	// deliberately not a selector and must not reach selectorFromClear.
+	// Clear is the highest-blast-radius consumer (a dropped selector widens a
+	// destructive clear), so its claim in session_selector.go is pinned by
+	// enumeration, not by the hand-written list above.
 	clearMD := (&pb.ClearSessionsRequest{}).ProtoReflect().Descriptor()
 	sessMD := (&pb.GetSessionsRequest{}).ProtoReflect().Descriptor()
 	clearMsg := clearReq.ProtoReflect()
@@ -189,6 +186,15 @@ func TestSessionSelectorClearFieldsCopied17189(t *testing.T) {
 			// and the numeric GetSessions zone must stay unset.
 			if got.GetZone() != 0 {
 				t.Errorf("selectorFromClear copied clear zone name into numeric Zone=%d; resolution is the caller's job or the wildcard widens", got.GetZone())
+			}
+			continue
+		}
+		if name == "fabric_nonce" {
+			if fd.Kind() != protoreflect.BytesKind || string(clearMsg.Get(fd).Bytes()) != "sentinel-fabric_nonce" {
+				t.Fatalf("ClearSessionsRequest.fabric_nonce = %v, want the non-selector replay nonce fixture", clearMsg.Get(fd))
+			}
+			if sessMD.Fields().ByName(fd.Name()) != nil {
+				t.Errorf("fabric replay nonce unexpectedly exists in GetSessionsRequest selector shape")
 			}
 			continue
 		}

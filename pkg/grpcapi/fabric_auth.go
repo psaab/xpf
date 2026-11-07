@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -156,10 +157,11 @@ const (
 	fabricReplayCacheFull
 )
 
-// fabricMutationReplayCache makes a verified mutating token single-use on one
-// receiving Server. Its high-water auth window never moves backward; tokens
-// older than the high-water window's accepted skew band stay rejected even if
-// the wall clock rolls back after their entries are purged.
+// fabricMutationReplayCache makes each verified mutation invocation single-use
+// on one receiving Server. Nonce-bearing requests use a hash of the
+// authenticated nonce as their identity; legacy requests retain the verified
+// token identity. Its high-water auth window never moves backward, and tokens
+// older than the accepted skew band stay rejected even if entries are purged.
 type fabricMutationReplayCache struct {
 	mu sync.Mutex
 
@@ -173,7 +175,7 @@ type fabricMutationReplayCache struct {
 	highWaterSet    bool
 }
 
-func (c *fabricMutationReplayCache) consume(token [sha256.Size]byte, tokenWindow int64) fabricReplayCacheResult {
+func (c *fabricMutationReplayCache) consume(identity [sha256.Size]byte, tokenWindow int64) fabricReplayCacheResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -181,37 +183,37 @@ func (c *fabricMutationReplayCache) consume(token [sha256.Size]byte, tokenWindow
 	if c.nowFn != nil {
 		now = c.nowFn()
 	}
-	return c.consumeLocked(token, tokenWindow, fabricAuthWindow(now))
+	return c.consumeLocked(identity, tokenWindow, fabricAuthWindow(now))
 }
 
-func (c *fabricMutationReplayCache) consumeAt(token [sha256.Size]byte, tokenWindow, currentWindow int64) fabricReplayCacheResult {
+func (c *fabricMutationReplayCache) consumeAt(identity [sha256.Size]byte, tokenWindow, currentWindow int64) fabricReplayCacheResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.consumeLocked(token, tokenWindow, currentWindow)
+	return c.consumeLocked(identity, tokenWindow, currentWindow)
 }
 
-func (c *fabricMutationReplayCache) consumeLocked(token [sha256.Size]byte, tokenWindow, currentWindow int64) fabricReplayCacheResult {
+func (c *fabricMutationReplayCache) consumeLocked(identity [sha256.Size]byte, tokenWindow, currentWindow int64) fabricReplayCacheResult {
 	if !c.highWaterSet || currentWindow > c.highWaterWindow {
 		c.highWaterWindow = currentWindow
 		c.highWaterSet = true
 	}
 	oldestAcceptedWindow := c.highWaterWindow - 1
-	for window, tokens := range c.byWindow {
+	for window, keys := range c.byWindow {
 		if window >= oldestAcceptedWindow {
 			continue
 		}
-		for _, expired := range tokens {
+		for _, expired := range keys {
 			delete(c.seen, expired)
 		}
 		delete(c.byWindow, window)
 	}
 
-	// A stale token remains rejected even after its digest is removed to free
-	// capacity. This is what makes replay protection safe across wall rollback.
+	// A stale-window identity remains rejected even after its entry is removed
+	// to free capacity, preserving replay protection across wall-clock rollback.
 	if tokenWindow < oldestAcceptedWindow {
 		return fabricReplayDuplicate
 	}
-	if _, exists := c.seen[token]; exists {
+	if _, exists := c.seen[identity]; exists {
 		return fabricReplayDuplicate
 	}
 	if len(c.seen) >= fabricMutationReplayCacheCapacity {
@@ -223,8 +225,8 @@ func (c *fabricMutationReplayCache) consumeLocked(token [sha256.Size]byte, token
 	if c.byWindow == nil {
 		c.byWindow = make(map[int64][][sha256.Size]byte)
 	}
-	c.seen[token] = struct{}{}
-	c.byWindow[tokenWindow] = append(c.byWindow[tokenWindow], token)
+	c.seen[identity] = struct{}{}
+	c.byWindow[tokenWindow] = append(c.byWindow[tokenWindow], identity)
 	return fabricReplayAccepted
 }
 
@@ -837,7 +839,7 @@ func (s *Server) fabricAuthUnaryInterceptor(ctx context.Context, req interface{}
 		return nil, err
 	}
 	if tokenOK && fabricMutationReplayProtected(info.FullMethod, req) {
-		switch s.fabricMutationReplay.consume(token, tokenWindow) {
+		switch s.fabricMutationReplay.consume(fabricMutationReplayIdentity(token, req), tokenWindow) {
 		case fabricReplayDuplicate:
 			if emit, suppressed := denyaudit.Note(denyaudit.SurfaceFabricAuth, "mutating request token was already used"); emit {
 				slog.Warn("fabric gRPC listener rejected call: authentication failed",
@@ -874,6 +876,24 @@ func fabricMutationReplayProtected(method string, req interface{}) bool {
 	default:
 		return false
 	}
+}
+
+// fabricMutationReplayIdentity uses the authenticated nonce to distinguish
+// distinct invocations of the same mutation. The nonce is already included in
+// the HMAC-bound request digest before this key is derived. Requests from old
+// clients retain their existing token identity exactly.
+func fabricMutationReplayIdentity(token [sha256.Size]byte, req interface{}) [sha256.Size]byte {
+	var nonce []byte
+	switch r := req.(type) {
+	case *pb.ClearSessionsRequest:
+		nonce = r.GetFabricNonce()
+	case *pb.SystemActionRequest:
+		nonce = r.GetFabricNonce()
+	}
+	if len(nonce) == 0 {
+		return token
+	}
+	return sha256.Sum256(nonce)
 }
 
 // fabricAuthStreamInterceptor authenticates streaming RPCs on the fabric
@@ -989,8 +1009,9 @@ func withFabricAuthReqDigest(ctx context.Context, digest []byte) context.Context
 }
 
 // WithFabricAuthRequest binds a manual client's credential to req's arguments.
-// Compose it with WithFabricAuthMethod. Generated clients should install
-// FabricAuthUnaryClientInterceptor instead, which binds the request automatically.
+// Compose it with WithFabricAuthMethod. A manual mutation client must put a
+// fresh FabricNonce on the request before binding it; generated clients should
+// install FabricAuthUnaryClientInterceptor, which does this automatically.
 func WithFabricAuthRequest(ctx context.Context, req interface{}) (context.Context, error) {
 	digest, err := fabricRequestDigest(req)
 	if err != nil {
@@ -1008,9 +1029,41 @@ func fabricAuthReqDigest(ctx context.Context) []byte {
 	return fabricAuthEmptyRequestDigest[:]
 }
 
-// FabricAuthUnaryClientInterceptor carries the exact method being invoked — and
-// the request's argument digest (#10709) — to fabricAuthCreds. Install it
-// alongside NewFabricAuthCreds on every fabric client connection.
+// fabricMutationRequestWithNonce clones a fabric-protected mutation and stamps
+// a fresh nonce before the request is hashed and sent. Read-only calls and
+// non-fabric-safe SystemAction verbs are passed through unchanged.
+func fabricMutationRequestWithNonce(method string, req interface{}) (interface{}, error) {
+	if !fabricMutationReplayProtected(method, req) {
+		return req, nil
+	}
+
+	nonce := make([]byte, sha256.Size)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	switch r := req.(type) {
+	case *pb.ClearSessionsRequest:
+		if r == nil {
+			return nil, errors.New("fabric ClearSessions request is nil")
+		}
+		cloned := proto.Clone(r).(*pb.ClearSessionsRequest)
+		cloned.FabricNonce = nonce
+		return cloned, nil
+	case *pb.SystemActionRequest:
+		if r == nil {
+			return nil, errors.New("fabric SystemAction request is nil")
+		}
+		cloned := proto.Clone(r).(*pb.SystemActionRequest)
+		cloned.FabricNonce = nonce
+		return cloned, nil
+	default:
+		return nil, errors.New("fabric mutation request does not support a replay nonce")
+	}
+}
+
+// FabricAuthUnaryClientInterceptor carries the exact method being invoked —
+// and the nonce-bearing request's argument digest — to fabricAuthCreds. Install
+// it alongside NewFabricAuthCreds on every fabric client connection.
 func FabricAuthUnaryClientInterceptor(
 	ctx context.Context,
 	method string,
@@ -1019,6 +1072,10 @@ func FabricAuthUnaryClientInterceptor(
 	invoker grpc.UnaryInvoker,
 	opts ...grpc.CallOption,
 ) error {
+	req, err := fabricMutationRequestWithNonce(method, req)
+	if err != nil {
+		return err
+	}
 	digest, err := fabricRequestDigest(req)
 	if err != nil {
 		return err

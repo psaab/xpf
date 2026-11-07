@@ -976,6 +976,8 @@ message ClearSessionsRequest {
   string interface = 8;          // optional: ingress/egress interface name filter
   bool nat_only = 9;             // optional: only sessions with NAT translation
   string source_nat_pool = 10;   // optional: source NAT pool name (translated source in pool)
+  // A fresh per-invocation nonce, covered by the fabric authentication digest.
+  bytes fabric_nonce = 11;
 }
 message ClearSessionsResponse {
   int32 ipv4_cleared = 1;
@@ -1518,6 +1520,8 @@ message SystemActionRequest {
   // every non-forwarded and legacy call.
   string persistent_nat_origin = 9;
   uint64 persistent_nat_generation = 10;
+  // A fresh per-invocation nonce, covered by the fabric authentication digest.
+  bytes fabric_nonce = 11;
 }
 message SystemActionResponse { string message = 1; }
 

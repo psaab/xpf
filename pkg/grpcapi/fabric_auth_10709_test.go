@@ -43,6 +43,7 @@ func TestFabricAuth10709_UnaryArgumentsBound(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var token string
+			var authenticatedReq interface{}
 			creds := fabricAuthCreds{keyFn: func() []byte { return []byte(fabricTestKey) }}
 			invoker := func(ctx context.Context, method string, req, reply interface{}, _ *grpc.ClientConn, _ ...grpc.CallOption) error {
 				md, err := creds.GetRequestMetadata(ctx)
@@ -50,6 +51,7 @@ func TestFabricAuth10709_UnaryArgumentsBound(t *testing.T) {
 					return err
 				}
 				token = md[fabricAuthMetadataKey]
+				authenticatedReq = req
 				return nil
 			}
 			if err := FabricAuthUnaryClientInterceptor(context.Background(), tc.method, tc.first, nil, nil, invoker); err != nil {
@@ -71,7 +73,7 @@ func TestFabricAuth10709_UnaryArgumentsBound(t *testing.T) {
 
 			// A correctly bound request remains admitted as a positive control.
 			firstProbe := &unaryCallProbe{}
-			if err := invoke(tc.first, firstProbe); err != nil {
+			if err := invoke(authenticatedReq, firstProbe); err != nil {
 				t.Fatalf("original request rejected: %v", err)
 			}
 			if !firstProbe.called {
