@@ -190,11 +190,13 @@ fn ipv4_tunnel_header_df_set_id_is_constant_and_df_clear_ids_are_unique_17266() 
 
 #[test]
 fn ipv4_tunnel_header_df_set_performs_no_fetch_17266() {
-    // GLM M1: a fetch-and-discard mutant passes the wire assertions above
-    // but must RED here — the DF path must not advance the domain counter.
-    let before = tunnel_identification_current_for_test();
+    // GLM M1 + Sol delta: fresh local domain (no race with parallel
+    // tests minting through the production statics). A fetch-and-discard
+    // mutant advances the counter and REDs here.
+    let counter = DatagramIdentification::new();
+    let before = counter.current_for_test();
     let mut buf = [0xffu8; 20];
-    write_ipv4_tunnel_header(
+    write_ipv4_tunnel_header_counted_for_test(
         &mut buf,
         Ipv4Addr::new(10, 0, 0, 1),
         Ipv4Addr::new(10, 0, 0, 2),
@@ -203,26 +205,43 @@ fn ipv4_tunnel_header_df_set_performs_no_fetch_17266() {
         64,
         120,
         true,
+        &counter,
     )
-    .expect("write_ipv4_tunnel_header");
+    .expect("write_ipv4_tunnel_header_counted_for_test");
     assert_eq!(
-        tunnel_identification_current_for_test(),
+        counter.current_for_test(),
         before,
         "DF-set write advanced the tunnel Identification counter"
     );
+    // Control: a DF-clear write through the same counter advances it.
+    write_ipv4_tunnel_header_counted_for_test(
+        &mut buf,
+        Ipv4Addr::new(10, 0, 0, 1),
+        Ipv4Addr::new(10, 0, 0, 2),
+        47,
+        0,
+        64,
+        120,
+        false,
+        &counter,
+    )
+    .expect("write_ipv4_tunnel_header_counted_for_test df-clear");
+    assert_eq!(counter.current_for_test(), before + 1);
 }
 
 #[test]
 fn datagram_identification_domains_are_independent_17266() {
-    // Sol/Kimi MAJOR: unrelated tunnel mints must not advance the NAT64
-    // domains (merged-sequence reuse across reassembly tuples).
-    let nat64_before = NAT64_IPV4_IDENTIFICATION.current_for_test();
-    let nat64v6_before = NAT64_IPV6_IDENTIFICATION.current_for_test();
+    // Sol/Kimi MAJOR, race-free form: fresh instances per domain;
+    // advancing one must not move the others.
+    let tunnel = DatagramIdentification::new();
+    let nat64 = DatagramIdentification::new();
+    let nat64v6 = DatagramIdentification::new();
     for _ in 0..1024 {
-        let _ = next_datagram_identification();
+        let _ = tunnel.next();
     }
-    assert_eq!(NAT64_IPV4_IDENTIFICATION.current_for_test(), nat64_before);
-    assert_eq!(NAT64_IPV6_IDENTIFICATION.current_for_test(), nat64v6_before);
+    assert_eq!(nat64.current_for_test(), 1);
+    assert_eq!(nat64v6.current_for_test(), 1);
+    assert_eq!(tunnel.current_for_test(), 1025);
 }
 
 #[test]

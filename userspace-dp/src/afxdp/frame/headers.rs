@@ -61,16 +61,33 @@ impl DatagramIdentification {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
     /// Test-only counter read (GLM #17266 M1): pins that the DF-set path
-    /// performs NO fetch at all (fetch-and-discard must RED).
+    /// performs NO fetch at all (fetch-and-discard must RED). Tests use
+    /// FRESH instances (Sol delta: reading the production statics races
+    /// parallel tests that also mint).
     #[cfg(test)]
     pub(crate) fn current_for_test(&self) -> u32 {
         self.next.load(Ordering::Relaxed)
     }
 }
 
+/// Test-only tunnel writer against a caller-supplied domain counter, so
+/// the fetch-free DF pin does not race the production static.
 #[cfg(test)]
-pub(crate) fn tunnel_identification_current_for_test() -> u32 {
-    TUNNEL_IDENTIFICATION.current_for_test()
+pub(crate) fn write_ipv4_tunnel_header_counted_for_test(
+    buf: &mut [u8],
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    tos: u8,
+    ttl: u8,
+    total_len: u16,
+    df: bool,
+    counter: &DatagramIdentification,
+) -> Option<usize> {
+    let raw_identification = if df { 0 } else { counter.next() };
+    write_ipv4_tunnel_header_with_raw_identification(
+        buf, src, dst, protocol, tos, ttl, total_len, df, raw_identification,
+    )
 }
 
 static TUNNEL_IDENTIFICATION: DatagramIdentification = DatagramIdentification::new();
