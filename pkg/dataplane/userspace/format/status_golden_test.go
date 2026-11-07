@@ -129,8 +129,8 @@ func goldenStatusSummaryFixture() userspace.ProcessStatus {
 		EventStreamSessionDeltaLostOpen:   statusU64ptr(2),
 		EventStreamSessionDeltaLostClose:  statusU64ptr(3),
 		EventStreamSessionDeltaLostUpdate: statusU64ptr(4),
-		HelperStatusObservationSequence:  7,
-		EventStreamReplayEvictions: 1, EventStreamInvalidAcks: 0,
+		HelperStatusObservationSequence:   7,
+		EventStreamReplayEvictions:        1, EventStreamInvalidAcks: 0,
 		EventStreamSessionCloseSent: 90, EventStreamSessionCloseDropped: 3,
 		EventStreamSessionCreateSent: 12, EventStreamSessionCreateDropped: 1,
 		SourceNATPools: []userspace.SourceNATPoolStatus{

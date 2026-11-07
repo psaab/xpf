@@ -125,7 +125,6 @@ func TestEventStreamSessionDeltaLossMissingKeysStayUnknown18635(t *testing.T) {
 	}
 }
 
-
 func TestHelperStatusObservationSequenceAdvancesOnPublication18635(t *testing.T) {
 	m := New()
 	for want := uint64(1); want <= 2; want++ {

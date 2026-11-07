@@ -12,7 +12,6 @@ import (
 
 func statusU64ptr(v uint64) *uint64 { return &v }
 
-
 func TestFormatStatusSummary(t *testing.T) {
 	now := time.Now().UTC()
 	status := userspace.ProcessStatus{
@@ -62,7 +61,7 @@ func TestFormatStatusSummary(t *testing.T) {
 		EventStreamSessionDeltaLostOpen:   statusU64ptr(2),
 		EventStreamSessionDeltaLostClose:  statusU64ptr(3),
 		EventStreamSessionDeltaLostUpdate: statusU64ptr(4),
-		HelperStatusObservationSequence:  7,
+		HelperStatusObservationSequence:   7,
 		EventStreamSessionCloseSent:       90,
 		EventStreamSessionCloseDropped:    3,
 		EventStreamSessionCreateSent:      12,
