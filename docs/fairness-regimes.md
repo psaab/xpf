@@ -2331,11 +2331,15 @@ starvation is distinguishable in `probe.json` from one that never starved.
 - **Attribution of the verdict itself.** #8259 was the separate defect that
   mice and elephants terminate on the same host, so a loaded/idle ratio could
   not separate firewall queueing from target-host service. Loosening this rule
-  lets a concentrated tail produce a FAIL; #8259 is what makes that FAIL mean
-  something, and neither subsumes the other. **The second target is now
-  provisioned** (`test/incus/mouse-target-setup.sh`, `MOUSE_TARGET_V4`), so
-  both halves are in place and the fixture can produce an attributable verdict
-  for the first time — which is the run #1359 item 3 has been waiting on.
+  lets a concentrated tail produce a FAIL; distinct target-host placement is
+  what would make that FAIL attributable, and neither subsumes the other.
+  Although the loss target's second address is provisioned
+  (`MOUSE_TARGET_V4`, `172.16.80.201`; see
+  `test/incus/mouse-target-setup.sh`), it shares `xpf-mouse-target` with
+  `IPERF_TARGET4` (`172.16.80.202`). The reducer's target-string inequality
+  does not establish different target hosts: a non-VOID result is still not
+  host-attributable, and a separate target host is still needed for the
+  #1359 item 3 run.
 - **The `error_rate >= 0.01` rule**, which #8277 notes is the same shape: a
   connection error rate that rises *because* flows are being starved is a
   result, not a reason to discard the measurement. It was left alone

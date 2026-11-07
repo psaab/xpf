@@ -404,8 +404,8 @@ the mechanics, so this section is sequencing only.
    invocation in the row IS the method; a figure reported without it is an
    anecdote, not a measurement. Measured on a healthy fw0 with CoS applied,
    minutes apart, on the SAME port 5211: **`-P 16 -t 30` → 23.1 Gbit/s,
-   single-stream → 5.23 Gbit/s.** So a lane that improvises
-   `iperf3 -c 172.16.80.200 -p 5211` reads 5.23 against the row's then ≥ 23 bar and owns a
+   single-stream → 5.23 Gbit/s. The historical bad invocation for that
+   then-target, `iperf3 -c 172.16.80.200 -p 5211`, reads 5.23 against the row's then ≥ 23 bar and owns a
    4.4x "regression" created entirely by its own invocation. #7480 did exactly
    that, then spent a lock cell and two hypotheses on the gap — auditing
    `cos-iperf-config.set`, `scheduler-uncapped` and `afxdp/cos/admission.rs`,

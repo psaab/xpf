@@ -835,9 +835,11 @@ reserve. Assigned in order of value:
    `ix1` as a passive or active second target (e.g. a second target
    container on VLAN 80 via `ix1`) lets a suspicious result be re-run
    on a different PF/driver to separate "firewall" from "Mellanox
-   path" — the attribution trick the mouse-target split (§1.2,
-   MOUSE_TARGET) already uses at the address level, applied at the
-   PF level.
+   path". This is not the attribution trick already provided by the
+   current mouse-target address split (§1.2, `MOUSE_TARGET_V4`): its
+   `.201` and `.202` addresses are both on `xpf-mouse-target`, so address
+   inequality does not isolate target-host service. Only a separately
+   provisioned target container on `ix1` would be a distinct target host.
 3. **Spare capacity.** Second generator, per-test `/64` subnets
    (§2.4.2), or a future GRE/sfmix leg (Q10) can take `ix1` (or spare
    `ix0`) VFs without renumbering the v1 allocation.

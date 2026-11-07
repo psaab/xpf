@@ -387,8 +387,15 @@ run from the client. For family 4, capture on the IPv4 target container with
 Ad-hoc family-6 capture (no iperf3 coordination) looks like:
 
 ```bash
-grpcurl -plaintext -d '{"iface":"eth0","duration_s":30,"filter":"tcp port 5201"}' \
-  172.16.80.200:50051 capture.CaptureService/Run > server-grpc.txt
+grpcurl -insecure -d '{
+  "bpf_filter": "tcp port 5201",
+  "interface": "eth0",
+  "duration_seconds": 30,
+  "text_output": true,
+  "no_resolve": true,
+  "verbosity": 1
+}' \
+  172.16.80.200:50051 capture.CaptureService/StartCapture > server-grpc.txt
 ```
 
 For the full orchestrated run (server + LAN + WAN + iperf3 + stats
