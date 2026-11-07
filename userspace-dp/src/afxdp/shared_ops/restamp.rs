@@ -484,9 +484,14 @@ fn stage_and_counts_pass(
             while alias_cursor < map_keys.len()
                 && hold_work < STAGE_COUNTS_LOCK_CHUNK_18662
             {
-                let map_key = &map_keys[alias_cursor];
+                let slot = alias_cursor;
                 alias_cursor += 1;
                 hold_work += 1;
+                let alias = &map_keys[slot];
+                if !alias.live {
+                    continue;
+                }
+                let map_key = &alias.map_key;
                 if wanted.contains_key(map_key) {
                     continue;
                 }

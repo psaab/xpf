@@ -653,10 +653,15 @@ impl SharedServedAliasIndex {
 /// Maps a row's stable `entry.key` to every map slot that currently stores
 /// that row. Forward-wire aliases intentionally retain their canonical
 /// `entry.key`, so looking up only the derived wire tuple misses stale and
-/// caller-NAT aliases. Two inline slots cover the published alias and the
-/// established-restamp alias without a per-alias heap allocation.
+/// caller-NAT aliases. Removed slots become tombstones rather than shifting
+/// later cursors between lock chunks. Two inline slots cover the published
+/// alias and established-restamp alias without a per-alias heap allocation.
+pub(in crate::afxdp) struct SharedEntryKeySlot {
+    pub(in crate::afxdp) map_key: SessionKey,
+    pub(in crate::afxdp) live: bool,
+}
 pub(in crate::afxdp) type SharedEntryKeyIndex =
-    FastMap<SessionKey, smallvec::SmallVec<[SessionKey; 2]>>;
+    FastMap<SessionKey, smallvec::SmallVec<[SharedEntryKeySlot; 2]>>;
 
 #[derive(Clone)]
 pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {

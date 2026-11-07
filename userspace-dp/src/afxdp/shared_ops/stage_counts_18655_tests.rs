@@ -258,7 +258,7 @@ fn mixed_state() -> (Map, Map, SharedSessionOwnerRgIndexes, Vec<(SessionKey, cra
         let aliases = wire_index
             .get(&restamped)
             .expect("#18662: restamp keeps a reserved entry-key bucket");
-        assert_eq!(aliases.len(), 1);
+        assert_eq!(aliases.iter().filter(|slot| slot.live).count(), 1);
         assert!(
             !aliases.spilled(),
             "#18662: restoring one wire alias stays in the two-slot inline bucket"
@@ -493,6 +493,98 @@ fn indexed_stage_counts_bound_each_hold_at_64k_18662() {
     assert!(
         after.3 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
         "#18662: 64k population caps visited lookup candidates per hold"
+    );
+}
+
+#[test]
+fn wire_alias_index_removal_preserves_resumed_cursor_slot_18662() {
+    const CHUNK: usize = 128;
+    const DIRECT_LOOKUPS: usize = 2;
+    const CURSOR_AFTER_FIRST_HOLD: usize = CHUNK - DIRECT_LOOKUPS;
+    const ALIASES: usize = CURSOR_AFTER_FIRST_HOLD + 2;
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let client = v4(10, 0, 61, 102);
+    let server = v4(172, 16, 80, 200);
+    let forward = key(client, 20_000, server, 443, crate::ip_proto::PROTO_TCP);
+    let nat = no_nat();
+    let stage = TcpHandshakeState::Established.to_wire();
+    let mut map_keys = Vec::with_capacity(ALIASES);
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        for i in 0..ALIASES {
+            let map_key = key(
+                client,
+                30_000 + i as u16,
+                server,
+                443,
+                crate::ip_proto::PROTO_TCP,
+            );
+            let entry = row(&forward, nat, stage, i as u64, i as u64, false, i as u64 + 1);
+            wires.insert(map_key.clone(), entry.clone());
+            update_stage_counts_entry_key_index(
+                &indexes.stage_counts_forward_wire_sessions,
+                &map_key,
+                None,
+                Some(&entry),
+            );
+            map_keys.push(map_key);
+        }
+    }
+
+    // A 128-work hold spends two candidates on direct lookups, leaving the
+    // alias cursor at slot 126. Simulate a concurrent removal of slot 0
+    // before the next hold: the saved cursor's row must not shift backward.
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        let removed = wires.remove(&map_keys[0]).expect("first alias exists");
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &map_keys[0],
+            Some(&removed),
+            None,
+        );
+    }
+    {
+        let wire_index = lock_shared_recover(&indexes.stage_counts_forward_wire_sessions);
+        let aliases = wire_index.get(&forward).expect("alias bucket remains reserved");
+        assert_eq!(aliases.len(), ALIASES);
+        assert!(!aliases[0].live, "removed alias leaves a stable tombstone");
+        assert!(aliases[CURSOR_AFTER_FIRST_HOLD].live);
+        assert_eq!(
+            aliases[CURSOR_AFTER_FIRST_HOLD].map_key,
+            map_keys[CURSOR_AFTER_FIRST_HOLD],
+            "removing an earlier slot must not move a row behind the saved cursor"
+        );
+    }
+    let restored = row(&forward, nat, stage, 0, 0, false, 1);
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        wires.insert(map_keys[0].clone(), restored.clone());
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &map_keys[0],
+            None,
+            Some(&restored),
+        );
+    }
+    {
+        let wire_index = lock_shared_recover(&indexes.stage_counts_forward_wire_sessions);
+        let aliases = wire_index.get(&forward).expect("restored bucket is reserved");
+        assert_eq!(aliases.len(), ALIASES, "restamp must reuse the stable slot");
+        assert!(aliases[0].live);
+        assert_eq!(aliases[0].map_key, map_keys[0]);
+    }
+
+    let out = shared_rows_stage_and_counts(
+        &shared,
+        &wire_map,
+        &indexes,
+        &[(forward, nat)],
+    );
+    assert_eq!(
+        out,
+        vec![(stage, (ALIASES - 1) as u64, (ALIASES - 1) as u64)],
+        "#18662: stage/count fold still sees the final alias after earlier removal"
     );
 }
 

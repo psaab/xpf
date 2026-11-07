@@ -1,7 +1,7 @@
 use super::*;
 use crate::session::ForwardingGenerationStamp;
 use std::sync::atomic::AtomicU64;
-/// Keep the #18662 `entry.key` directory paired with one primary map slot.
+/// Keep the #18662 `entry.key` directory paired with the forward-wire map.
 /// Call only while holding that map's mutex, always before dropping it.
 pub(super) fn update_stage_counts_entry_key_index(
     index: &Arc<Mutex<SharedEntryKeyIndex>>,
@@ -13,28 +13,40 @@ pub(super) fn update_stage_counts_entry_key_index(
     if let Some(previous) = previous
         && let Some(map_keys) = index.get_mut(&previous.key)
     {
-        // Retain an empty inline bucket while the canonical session is live.
-        // The completing-packet restamp can restore the same wire key after
-        // displacement without allocating a new index node.
-        map_keys.retain(|key| key != map_key);
+        // Keep removed keys in their slots so a cursor resumed after another
+        // publisher's update cannot skip a later alias.
+        if let Some(slot) = map_keys.iter_mut().find(|slot| slot.map_key == *map_key) {
+            slot.live = false;
+        }
     }
     if let Some(next) = next {
         let map_keys = index.entry(next.key.clone()).or_default();
-        if !map_keys.contains(map_key) {
-            map_keys.push(map_key.clone());
+        if let Some(slot) = map_keys.iter_mut().find(|slot| slot.map_key == *map_key) {
+            // Re-publishing/restamping the same map key revives its stable slot.
+            slot.live = true;
+        } else {
+            map_keys.push(SharedEntryKeySlot {
+                map_key: map_key.clone(),
+                live: true,
+            });
         }
     }
 }
+
 /// Drop a reserved bucket only after its canonical session is gone.
 pub(super) fn prune_empty_stage_counts_entry_key_index(
     index: &Arc<Mutex<SharedEntryKeyIndex>>,
     entry_key: &SessionKey,
 ) {
     let mut index = lock_shared_recover(index);
-    if index.get(entry_key).is_some_and(|map_keys| map_keys.is_empty()) {
+    if index
+        .get(entry_key)
+        .is_some_and(|map_keys| map_keys.iter().all(|slot| !slot.live))
+    {
         index.remove(entry_key);
     }
 }
+
 use std::sync::{MutexGuard, TryLockError};
 
 /// #4800: calls to [`publish_shared_session`] — one per session published
