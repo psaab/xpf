@@ -4550,6 +4550,34 @@
     "tx_vlan_id": 4205,
     "worker_id": 17142003
   },
+  "session_delta_loss_baseline": {
+    "event_stream_session_delta_lost_close": 2,
+    "event_stream_session_delta_lost_open": 1,
+    "event_stream_session_delta_lost_update": 3,
+    "helper_status_measurement_sequence": 41,
+    "pid": 16132,
+    "started_at": "2023-11-14T22:13:20Z"
+  },
+  "session_delta_loss_probe_request": {
+    "baseline": {
+      "event_stream_session_delta_lost_close": 2,
+      "event_stream_session_delta_lost_open": 1,
+      "event_stream_session_delta_lost_update": 3,
+      "helper_status_measurement_sequence": 41,
+      "pid": 16132,
+      "started_at": "2023-11-14T22:13:20Z"
+    }
+  },
+  "session_delta_loss_probe_response": {
+    "event_stream_session_delta_lost_close": 2,
+    "event_stream_session_delta_lost_open": 1,
+    "event_stream_session_delta_lost_update": 3,
+    "helper_status_measurement_sequence": 42,
+    "lost_since": 6,
+    "pid": 16132,
+    "started_at": "2023-11-14T22:13:20Z",
+    "valid": true
+  },
   "session_export_request": {
     "continuation": false,
     "max": 0,

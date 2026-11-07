@@ -25,14 +25,14 @@ type SessionDeltaLossProbeRequest struct {
 }
 
 type SessionDeltaLossProbeResponse struct {
-	Valid                             bool      `json:"valid"`
-	PID                               int       `json:"pid"`
-	StartedAt                         time.Time `json:"started_at"`
-	HelperStatusMeasurementSequence   uint64    `json:"helper_status_measurement_sequence"`
-	EventStreamSessionDeltaLostOpen   uint64    `json:"event_stream_session_delta_lost_open"`
-	EventStreamSessionDeltaLostClose  uint64    `json:"event_stream_session_delta_lost_close"`
-	EventStreamSessionDeltaLostUpdate uint64    `json:"event_stream_session_delta_lost_update"`
-	LostSince                         *uint64   `json:"lost_since,omitempty"`
+	Valid                             bool       `json:"valid"`
+	PID                               *int       `json:"pid"`
+	StartedAt                         *time.Time `json:"started_at"`
+	HelperStatusMeasurementSequence   *uint64    `json:"helper_status_measurement_sequence"`
+	EventStreamSessionDeltaLostOpen   *uint64    `json:"event_stream_session_delta_lost_open"`
+	EventStreamSessionDeltaLostClose  *uint64    `json:"event_stream_session_delta_lost_close"`
+	EventStreamSessionDeltaLostUpdate *uint64    `json:"event_stream_session_delta_lost_update"`
+	LostSince                         *uint64    `json:"lost_since,omitempty"`
 }
 
 // SessionDeltaLossProbe bypasses helperStatusView and asks the helper to
@@ -96,14 +96,22 @@ func FormatSessionDeltaLossProbe(response *SessionDeltaLossProbeResponse, baseli
 	if response == nil || !response.Valid {
 		return "", errors.New("session-delta loss baseline identity or counters changed; wait evidence is void")
 	}
+	if response.PID == nil || *response.PID <= 0 ||
+		response.StartedAt == nil || response.StartedAt.IsZero() ||
+		response.HelperStatusMeasurementSequence == nil || *response.HelperStatusMeasurementSequence == 0 ||
+		response.EventStreamSessionDeltaLostOpen == nil ||
+		response.EventStreamSessionDeltaLostClose == nil ||
+		response.EventStreamSessionDeltaLostUpdate == nil {
+		return "", errors.New("session-delta loss probe omitted required identity, stamp, or counter field")
+	}
 	if baseline {
 		value := SessionDeltaLossBaseline{
-			PID:                               response.PID,
-			StartedAt:                         response.StartedAt,
-			HelperStatusMeasurementSequence:   response.HelperStatusMeasurementSequence,
-			EventStreamSessionDeltaLostOpen:   response.EventStreamSessionDeltaLostOpen,
-			EventStreamSessionDeltaLostClose:  response.EventStreamSessionDeltaLostClose,
-			EventStreamSessionDeltaLostUpdate: response.EventStreamSessionDeltaLostUpdate,
+			PID:                               *response.PID,
+			StartedAt:                         *response.StartedAt,
+			HelperStatusMeasurementSequence:   *response.HelperStatusMeasurementSequence,
+			EventStreamSessionDeltaLostOpen:   *response.EventStreamSessionDeltaLostOpen,
+			EventStreamSessionDeltaLostClose:  *response.EventStreamSessionDeltaLostClose,
+			EventStreamSessionDeltaLostUpdate: *response.EventStreamSessionDeltaLostUpdate,
 		}
 		payload, err := json.Marshal(value)
 		if err != nil {

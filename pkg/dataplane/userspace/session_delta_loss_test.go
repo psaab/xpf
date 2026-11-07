@@ -68,15 +68,21 @@ func TestSessionDeltaLossProbeFreshConfirmationBypassesHeldStatus18635(t *testin
 				open = lost.Load()
 				lostSince = open - baseline.EventStreamSessionDeltaLostOpen
 			}
+			pid := 4242
+			projectedStartedAt := startedAt
+			zeroClose := uint64(0)
+			zeroUpdate := uint64(0)
 			response := ControlResponse{
 				OK: true,
 				SessionDeltaLossProbe: &SessionDeltaLossProbeResponse{
-					Valid:                           true,
-					PID:                             4242,
-					StartedAt:                       startedAt,
-					HelperStatusMeasurementSequence: sequence,
-					EventStreamSessionDeltaLostOpen: open,
-					LostSince:                       &lostSince,
+					Valid:                             true,
+					PID:                               &pid,
+					StartedAt:                         &projectedStartedAt,
+					HelperStatusMeasurementSequence:   &sequence,
+					EventStreamSessionDeltaLostOpen:   &open,
+					EventStreamSessionDeltaLostClose:  &zeroClose,
+					EventStreamSessionDeltaLostUpdate: &zeroUpdate,
+					LostSince:                         &lostSince,
 				},
 			}
 			encodeErr := json.NewEncoder(conn).Encode(response)
@@ -95,16 +101,24 @@ func TestSessionDeltaLossProbeFreshConfirmationBypassesHeldStatus18635(t *testin
 	if err != nil {
 		t.Fatalf("wait-start helper query: %v", err)
 	}
-	if !baselineResponse.Valid || baselineResponse.LostSince == nil || *baselineResponse.LostSince != 0 {
-		t.Fatalf("wait-start response = %+v, want valid zero-loss baseline", baselineResponse)
+	if !baselineResponse.Valid ||
+		baselineResponse.PID == nil || *baselineResponse.PID != 4242 ||
+		baselineResponse.StartedAt == nil || !baselineResponse.StartedAt.Equal(startedAt) ||
+		baselineResponse.HelperStatusMeasurementSequence == nil ||
+		*baselineResponse.HelperStatusMeasurementSequence != 40 ||
+		baselineResponse.EventStreamSessionDeltaLostOpen == nil ||
+		baselineResponse.EventStreamSessionDeltaLostClose == nil ||
+		baselineResponse.EventStreamSessionDeltaLostUpdate == nil ||
+		baselineResponse.LostSince == nil || *baselineResponse.LostSince != 0 {
+		t.Fatalf("wait-start response = %+v, want complete valid zero-loss baseline", baselineResponse)
 	}
 	baseline := &SessionDeltaLossBaseline{
-		PID:                               baselineResponse.PID,
-		StartedAt:                         baselineResponse.StartedAt,
-		HelperStatusMeasurementSequence:   baselineResponse.HelperStatusMeasurementSequence,
-		EventStreamSessionDeltaLostOpen:   baselineResponse.EventStreamSessionDeltaLostOpen,
-		EventStreamSessionDeltaLostClose:  baselineResponse.EventStreamSessionDeltaLostClose,
-		EventStreamSessionDeltaLostUpdate: baselineResponse.EventStreamSessionDeltaLostUpdate,
+		PID:                               *baselineResponse.PID,
+		StartedAt:                         *baselineResponse.StartedAt,
+		HelperStatusMeasurementSequence:   *baselineResponse.HelperStatusMeasurementSequence,
+		EventStreamSessionDeltaLostOpen:   *baselineResponse.EventStreamSessionDeltaLostOpen,
+		EventStreamSessionDeltaLostClose:  *baselineResponse.EventStreamSessionDeltaLostClose,
+		EventStreamSessionDeltaLostUpdate: *baselineResponse.EventStreamSessionDeltaLostUpdate,
 	}
 
 	// Ordinary helper projections 41 and 42 were both projected with zero loss;
@@ -168,6 +182,134 @@ func TestSessionDeltaLossProbeFreshConfirmationBypassesHeldStatus18635(t *testin
 	}
 	if err := <-helperErr; err != nil {
 		t.Fatalf("fake helper: %v", err)
+	}
+}
+
+func TestSessionDeltaLossProbeHeldAnswerUsesAnswerTimeSnapshot18635(t *testing.T) {
+	socketDir, err := os.MkdirTemp(os.TempDir(), "xpf18635-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketDir) })
+	listener, err := net.Listen("unix", filepath.Join(socketDir, "h"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	startedAt := time.Date(2026, 5, 20, 10, 11, 12, 0, time.UTC)
+	zero := uint64(0)
+	baseline := &SessionDeltaLossBaseline{
+		PID:                               4242,
+		StartedAt:                         startedAt,
+		HelperStatusMeasurementSequence:   40,
+		EventStreamSessionDeltaLostOpen:   zero,
+		EventStreamSessionDeltaLostClose:  zero,
+		EventStreamSessionDeltaLostUpdate: zero,
+	}
+	var lost atomic.Uint64
+	projected := make(chan struct{}, 1)
+	release := make(chan struct{})
+	helperErr := make(chan error, 1)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			helperErr <- acceptErr
+			return
+		}
+		defer conn.Close()
+		var request ControlRequest
+		if decodeErr := json.NewDecoder(conn).Decode(&request); decodeErr != nil {
+			helperErr <- decodeErr
+			return
+		}
+		if request.Type != "status" || !request.SuppressStatus ||
+			request.SessionDeltaLossProbe == nil ||
+			request.SessionDeltaLossProbe.Baseline == nil {
+			helperErr <- &probeTestError{message: "held confirmation omitted its wait-start baseline"}
+			return
+		}
+
+		// This is the helper's answer-time snapshot. Holding the prepared reply
+		// cannot retroactively include a loss that occurs before the client reads it.
+		open := lost.Load()
+		lostSince := open - request.SessionDeltaLossProbe.Baseline.EventStreamSessionDeltaLostOpen
+		pid := 4242
+		sequence := uint64(42)
+		closeLost := uint64(0)
+		updateLost := uint64(0)
+		responseStartedAt := startedAt
+		response := &SessionDeltaLossProbeResponse{
+			Valid:                             true,
+			PID:                               &pid,
+			StartedAt:                         &responseStartedAt,
+			HelperStatusMeasurementSequence:   &sequence,
+			EventStreamSessionDeltaLostOpen:   &open,
+			EventStreamSessionDeltaLostClose:  &closeLost,
+			EventStreamSessionDeltaLostUpdate: &updateLost,
+			LostSince:                         &lostSince,
+		}
+		projected <- struct{}{}
+		<-release
+		helperErr <- json.NewEncoder(conn).Encode(ControlResponse{
+			OK:                    true,
+			SessionDeltaLossProbe: response,
+		})
+	}()
+
+	manager := New()
+	manager.cfg.ControlSocket = listener.Addr().String()
+	result := make(chan struct {
+		response *SessionDeltaLossProbeResponse
+		err      error
+	}, 1)
+	go func() {
+		response, probeErr := manager.SessionDeltaLossProbe(baseline)
+		result <- struct {
+			response *SessionDeltaLossProbeResponse
+			err      error
+		}{response, probeErr}
+	}()
+	select {
+	case <-projected:
+		lost.Store(1)
+		close(release)
+	case <-time.After(2 * time.Second):
+		t.Fatal("helper did not project its zero-loss confirmation")
+	}
+	select {
+	case got := <-result:
+		if got.err != nil {
+			t.Fatalf("held confirmation query: %v", got.err)
+		}
+		if got.response.LostSince == nil || *got.response.LostSince != 0 ||
+			got.response.EventStreamSessionDeltaLostOpen == nil ||
+			*got.response.EventStreamSessionDeltaLostOpen != 0 {
+			t.Fatalf("held reply = %+v, want its pre-increment answer-time snapshot", got.response)
+		}
+		formatted, formatErr := FormatSessionDeltaLossProbe(got.response, false)
+		if formatErr != nil || formatted != "Event stream HA session delta lost since baseline: 0\n" {
+			t.Fatalf("held reply formatting = %q, err=%v; want its answer-time zero", formatted, formatErr)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("held confirmation did not return")
+	}
+	if err := <-helperErr; err != nil {
+		t.Fatalf("fake helper: %v", err)
+	}
+}
+
+func TestSessionDeltaLossProbeOmittedRequiredFieldVoids18635(t *testing.T) {
+	const fixture = `{"valid":true,"started_at":"2026-05-20T10:11:12Z","helper_status_measurement_sequence":42,"event_stream_session_delta_lost_open":0,"event_stream_session_delta_lost_close":0,"event_stream_session_delta_lost_update":0,"lost_since":0}`
+	var response SessionDeltaLossProbeResponse
+	if err := json.Unmarshal([]byte(fixture), &response); err != nil {
+		t.Fatalf("decode missing-pid fixture: %v", err)
+	}
+	if response.PID != nil {
+		t.Fatalf("omitted pid decoded as present: %d", *response.PID)
+	}
+	if formatted, err := FormatSessionDeltaLossProbe(&response, false); err == nil || formatted != "" {
+		t.Fatalf("missing required pid yielded formatted proof %q, err=%v; want VOID", formatted, err)
 	}
 }
 

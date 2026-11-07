@@ -3071,6 +3071,14 @@ fn wire_invariant_default_specimens() {
     // serialization specimen can ever carry them — see
     // `wire_fixture_completeness_16132`.
     let stamp = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("sentinel timestamp");
+    let populated_loss_baseline = SessionDeltaLossBaseline {
+        pid: 16132,
+        started_at: stamp.clone(),
+        helper_status_measurement_sequence: 41,
+        event_stream_session_delta_lost_open: 1,
+        event_stream_session_delta_lost_close: 2,
+        event_stream_session_delta_lost_update: 3,
+    };
     let populated_policy_match = SessionPolicyMatch {
         addr_family: 2,
         routing_domain: 7,
@@ -3335,6 +3343,29 @@ fn wire_invariant_default_specimens() {
                 protocol: 6,
             }),
             ..Default::default()
+        }),
+    );
+    s.insert(
+        "session_delta_loss_baseline".into(),
+        dump(&populated_loss_baseline),
+    );
+    s.insert(
+        "session_delta_loss_probe_request".into(),
+        dump(&SessionDeltaLossProbeRequest {
+            baseline: Some(populated_loss_baseline.clone()),
+        }),
+    );
+    s.insert(
+        "session_delta_loss_probe_response".into(),
+        dump(&SessionDeltaLossProbeResponse {
+            valid: true,
+            pid: 16132,
+            started_at: stamp.clone(),
+            helper_status_measurement_sequence: 42,
+            event_stream_session_delta_lost_open: 1,
+            event_stream_session_delta_lost_close: 2,
+            event_stream_session_delta_lost_update: 3,
+            lost_since: Some(6),
         }),
     );
     s.insert(
