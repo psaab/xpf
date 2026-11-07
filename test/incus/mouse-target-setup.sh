@@ -338,8 +338,10 @@ do_status() {
     fi
     echo
     echo "Point a harness at it with:  MOUSE_TARGET_V4=${MOUSE_TARGET_V4}"
-    echo "The #8467 attributability check passes as soon as it differs from"
-    echo "ELEPHANT_TARGET_V4 (default ${IPERF_TARGET4:-172.16.80.202})."
+    echo "#8467 compares target strings only; different addresses clear its"
+    echo "equality-based VOID-NOT-ATTRIBUTABLE guard, not host attribution."
+    echo "Today .201/.202 both terminate on xpf-mouse-target, so a non-VOID result"
+    echo "is not host-attributable without a genuinely separate target host."
 }
 
 do_destroy() {
