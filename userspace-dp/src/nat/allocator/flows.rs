@@ -42,7 +42,7 @@
 
 use super::LiveAllocation;
 use crate::nat::SourceNatFlowKey;
-use crate::sharded::{ShardedLock, shard_index_with_seed};
+use crate::sharded::{ShardedMap, shard_index_with_seed};
 use rustc_hash::FxHashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
@@ -67,7 +67,7 @@ pub(in crate::nat) struct LiveFlowShard {
 // len/iter/clear), preserving the old FxHashMap semantics.
 #[derive(Debug)]
 pub(in crate::nat::allocator) struct LiveFlowMap {
-    pub(in crate::nat::allocator) shards: ShardedLock<Mutex<LiveFlowShard>, LIVE_SHARDS>,
+    pub(in crate::nat::allocator) shards: ShardedMap<SourceNatFlowKey, Mutex<LiveFlowShard>, LIVE_SHARDS>,
     pub(in crate::nat::allocator) count: AtomicUsize,
     /// Fold 2: shared atomic admission counter (see module doc).
     /// Incremented ONLY by `admit_one`, decremented ONLY by a
@@ -86,7 +86,7 @@ impl Default for LiveFlowMap {
 impl LiveFlowMap {
     pub(in crate::nat::allocator) fn new() -> Self {
         Self {
-            shards: ShardedLock::new(),
+            shards: ShardedMap::new(),
             count: AtomicUsize::new(0),
             admission: AtomicUsize::new(0),
         }
@@ -297,4 +297,22 @@ impl LiveFlowMap {
         out
     }
 
+}
+
+#[cfg(test)]
+mod sharded_map_footprint_probe {
+    use super::*;
+
+    #[test]
+    fn measure_snat_shard_storage() {
+        let old_bytes = std::mem::size_of::<Vec<Mutex<LiveFlowShard>>>()
+            + LIVE_SHARDS * std::mem::size_of::<Mutex<LiveFlowShard>>();
+        let new_bytes = std::mem::size_of::<
+            ShardedMap<SourceNatFlowKey, Mutex<LiveFlowShard>, LIVE_SHARDS>,
+        >();
+        println!(
+            "SNAT shard storage: old={old_bytes} bytes, new={new_bytes} bytes, delta={}",
+            new_bytes as isize - old_bytes as isize
+        );
+    }
 }

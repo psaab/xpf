@@ -88,12 +88,12 @@
 
 use super::{SessionDecision, SessionKey, SessionMetadata};
 use crate::hot_hash_seed::HotPathSeededState;
-use crate::sharded::ShardedLock;
+use crate::sharded::ShardedMap;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 
-/// Shard count; the shared `ShardedLock` enforces the power-of-two invariant.
+/// Shard count; the shared `ShardedMap` enforces the power-of-two invariant.
 const SHARDS: usize = 32;
 
 /// Live rows node-wide (`SHARDS` x `SHARD_CAP`, 1024 per shard; each shard's
@@ -195,7 +195,7 @@ struct Shard {
 }
 
 pub(crate) struct PuntSeedDirectory {
-    shards: ShardedLock<Mutex<Shard>, SHARDS>,
+    shards: ShardedMap<SessionKey, Mutex<Shard>, SHARDS>,
     /// Idle gate: the matcher Relaxed-loads it and skips every lock while no
     /// seed is resident (every node outside an RG split). A stale read can only
     /// miss a row being published concurrently, which is today's verdict, never
@@ -226,7 +226,7 @@ impl PuntSeedDirectory {
         let seed = crate::hot_hash_seed::hot_path_hash_seed();
         let state = HotPathSeededState::new(seed);
         Self {
-            shards: ShardedLock::with_seed_and(seed, || {
+            shards: ShardedMap::with_seed_and(seed, || {
                 Mutex::new(Shard {
                     rows: HashMap::with_hasher(state),
                     expiry: VecDeque::new(),
