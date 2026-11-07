@@ -167,7 +167,7 @@ func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 // original text and leaves its non-overlapped half standing. Both
 // needles below are whole archive-sites values; the foreign error
 // carries their concatenation, quoted.
-func TestSchemaExitScrubPivotCrossOverlap18997(t *testing.T) {
+func TestSchemaExitScrubSentinelCrossOverlap18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "user:pw@host" password "s3cr3t"`,
 		`set system archival configuration archive-sites "@host<redacted>" password "s3cr3t"`,
@@ -204,7 +204,7 @@ func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
 // ordinary spans and yields exactly one sentinel in raw and
 // %q-rendered diagnostics (direct emission; matching reads the
 // original text, so inserted sentinels are never re-matched).
-func TestSchemaExitScrubPivotRewrittenOnce18997(t *testing.T) {
+func TestSchemaExitScrubSentinelRewrittenOnce18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "@host<redacted>" password "s3cr3t"`,
 	})

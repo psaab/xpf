@@ -278,8 +278,9 @@ func quotedInterior(tok string) string {
 // path, PLUS the inner secret and transformable URL tokens of any embedded
 // `change-configuration commands` payload (fold 4, F2 — the outer AST sees
 // the quoted command as one token, so its inner credentials are collected
-// by lexing it exactly as the ingest guard does). Deduplicated, longest
-// first so a longer value is replaced before any shorter value it contains.
+// by lexing it exactly as the ingest guard does). Deduplicated; the
+// list order is historical (the scrub span-merges over the original
+// text, so needle order no longer decides correctness).
 func collectSecretValues(tree *ConfigTree) []string {
 	if tree == nil {
 		return nil
@@ -338,8 +339,8 @@ func collectSecretValues(tree *ConfigTree) []string {
 		}
 	}
 	walk(tree.Children, nil)
-	// Longest first: replacing a contained shorter value first would
-	// corrupt the longer one's match.
+	// Historical longest-first order (kept for deterministic output;
+	// span-merging in the scrub makes it non-load-bearing).
 	for i := range values {
 		for j := i + 1; j < len(values); j++ {
 			if len(values[j]) > len(values[i]) {
