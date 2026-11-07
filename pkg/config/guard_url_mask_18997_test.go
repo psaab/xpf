@@ -203,9 +203,10 @@ func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
 // #18997 sentinel-containing credential arm (Kimi delta at 6f14ef160e):
 // a password that merely CONTAINS the sentinel spelling
 // ("only<redacted>credential") is a real credential — dropping its
-// needle (the first span implementation) fails OPEN. Such needles
-// keep their raw form only (quoted forms would corrupt rendered
-// sentinels); the raw span replaces the whole value.
+// needle (the first span implementation) fails OPEN. Such values
+// join the span pass with pivot-flagged spans (their inserted
+// sentinel cannot be SecretRedacted itself, or a later "redacted"
+// needle would match inside it); all forms span-merge.
 func TestSchemaExitScrubSentinelContainingCredential18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "scp://u:p@h/d" password "only<redacted>credential"`,

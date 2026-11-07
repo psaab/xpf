@@ -426,8 +426,9 @@ func scrubSecretValuesText(values []string, text string) string {
 	// password SchemaValidate accepts) join the SAME span pass, but
 	// their inserted replacement cannot be SecretRedacted itself: a
 	// later needle ("redacted") would match inside it. Their spans are
-	// instead emitted as a NUL-wrapped PIVOT (NUL never appears in a
-	// rendered diagnostic; lexer rejects control bytes), rewritten to
+	// instead emitted as a NUL-wrapped PIVOT (the pivot string never
+	// appears in a rendered diagnostic; the lexer tolerates NUL bytes
+	// inside quoted values but no producer emits this exact token), rewritten to
 	// SecretRedacted once, after all spanning. Because the pivot
 	// substitution happens in the span pass itself (not as a text
 	// pre-pass), an ordinary needle partially overlapping a
