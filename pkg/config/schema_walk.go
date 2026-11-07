@@ -938,7 +938,7 @@ func walkSchemaNode(node *Node, parent *schemaNode, path []string, vc *walkConte
 				"`%s` statement is then silently dropped from the compiled config "+
 				"while `show configuration` still displays it. Add the missing `;` "+
 				"(#8437)",
-				nameOnlyArg(strings.Join(redactSecretPath(append(append([]string(nil), path...), keyword)), " ")),
+				redactedPathArg(strings.Join(redactSecretPath(append(append([]string(nil), path...), keyword)), " ")),
 				tok, keyword, keyword, tok)
 		}
 	}

@@ -18,15 +18,13 @@ import (
 // the untyped `password`/`tsig-secret` DDNS leaves). Now EVERY schema
 // error is constructed here: callers pass the leaf's full key path
 // (path tokens plus the node's own Keys) and the already-formatted
-// message; when any token of that path is secret per secretIndices —
-// the same registry the AST redactor uses, so `password` is secret
-// only under dynamic-dns/api-auth/... and `community` only under
-// snmp — every secret-indexed token is scrubbed from the message
-// (all occurrences) before the error is created. The path itself is
-// rendered through redactSecretPath as before. Non-secret messages
-// pass through byte-identical. Validators that return their own
-// errors (ValidateCryptHash, #16066) must still be value-free at the
-// source; this is the walker-level net for formatter-built text.
+// message; secret-indexed tokens are scrubbed from the formatted message,
+// and paths are rendered through redactSecretPath (including URL
+// userinfo/query/fragment redaction). Paths without classified secrets or
+// URLs and their messages pass through byte-identical. Validators that
+// return their own errors (ValidateCryptHash, #16066) must still be
+// value-free at the source; this is the walker-level net for
+// formatter-built text.
 // pathHasSecretIndex reports whether fullPath carries any
 // secret-indexed token (fold 6): the CONSTRUCTION-TIME test for
 // "this error's operands sit ON a known secret leaf". Unlike the
@@ -36,17 +34,17 @@ func pathHasSecretIndex(fullPath []string) bool {
 	return len(secretIndices(fullPath)) > 0
 }
 
-// nameOnlyArg marks a string argument that is ALREADY a name-only
-// rendering (produced by redactSecretPath / redactedLocName): stanza
-// and leaf NAMES, never candidate values. redactArgsOnSecretLeaf
-// exempts marked args (fold 7, GLM F2 — unmarked, the #8437 site's
-// name-only prefix and every schemaPathErrorf `joined` prefix were
-// redacted as if operands, collapsing locations to <redacted>).
-type nameOnlyArg string
+// redactedPathArg marks a path string that is ALREADY rendered through
+// redactSecretPath / redactedLocName. Secret operands are masked and
+// URL-classified values are transformed; no credential bytes remain.
+// redactArgsOnSecretLeaf exempts marked args (fold 7, GLM F2 — unmarked,
+// the #8437 site's path prefix and every schemaPathErrorf joined prefix
+// were redacted as if operands, collapsing locations to <redacted>).
+type redactedPathArg string
 
 // redactArgsOnSecretLeaf replaces EVERY string argument with
 // SecretRedacted when fullPath is secret-indexed (fold 6), EXCEPT
-// nameOnlyArg-marked ones. String args on a secret leaf are
+// redactedPathArg-marked ones. String args on a secret leaf are
 // operator operands (extra/trailing/modifier tokens); non-string
 // args (counts, args-arity) are kept. Defect-class format text is
 // untouched, so diagnostics keep their class.
@@ -57,7 +55,7 @@ func redactArgsOnSecretLeaf(fullPath []string, args []interface{}) []interface{}
 	out := make([]interface{}, len(args))
 	for i, a := range args {
 		switch v := a.(type) {
-		case nameOnlyArg:
+		case redactedPathArg:
 			out[i] = string(v)
 		case string:
 			out[i] = SecretRedacted
@@ -76,13 +74,13 @@ func schemaErrorf(fullPath []string, format string, args ...interface{}) error {
 
 // schemaPathErrorf is schemaErrorf for the common walker shape: the
 // message is "<joined redacted path>: <formatted detail>". The
-// joined prefix is name-only by construction (redactSecretPath),
-// so it is marked and never operand-redacted.
+// joined prefix is safely pre-rendered (secret operands masked and URL
+// values transformed by redactSecretPath), so it is not operand-redacted.
 func schemaPathErrorf(fullPath []string, format string, args ...interface{}) error {
 	joined := strings.Join(redactSecretPath(fullPath), " ")
 	args = redactArgsOnSecretLeaf(fullPath, args)
 	detail := fmt.Sprintf(format, args...)
-	return schemaErrorf(fullPath, "%s: %s", nameOnlyArg(joined), detail)
+	return schemaErrorf(fullPath, "%s: %s", redactedPathArg(joined), detail)
 }
 
 // unknownTopLevelStanzaSchemaError marks the deliberate, one-level closed-world
@@ -175,10 +173,10 @@ func typedLeafErrorf(path []string, format string, args ...interface{}) error {
 	// `password`) — construction is the only sound layer for them.
 	if len(path) > 0 && isSecretLeaf(strings.Join(redactSecretPath(path), " "), path[len(path)-1:]) {
 		// Copy before mutating (GLM residual): never corrupt a
-		// caller's spread slice. nameOnlyArg args pass through.
+		// caller's spread slice. redactedPathArg args pass through.
 		cp := make([]interface{}, len(args))
 		for i, a := range args {
-			if _, isName := a.(nameOnlyArg); isName {
+			if _, isPath := a.(redactedPathArg); isPath {
 				cp[i] = a
 			} else if _, ok := a.(string); ok {
 				cp[i] = SecretRedacted
@@ -273,14 +271,14 @@ func quotedInterior(tok string) string {
 	return q
 }
 
-// collectSecretValues returns every secret VALUE in the candidate:
-// for each node, the secret-indexed tokens of its flattened path,
-// PLUS the inner secret tokens of any embedded
-// `change-configuration commands` payload (fold 4, F2 — the outer AST
-// sees the quoted command as one token, so its inner credential
-// operands are collected by lexing it exactly as the ingest guard
-// does). Deduplicated, longest first so a longer value is replaced
-// before any shorter value it contains.
+// collectSecretValues returns every secret VALUE and every URL-classified
+// value that RedactURL actually transforms in the candidate: for each node,
+// the secret-indexed tokens and transformable URL tokens of its flattened
+// path, PLUS the inner secret and transformable URL tokens of any embedded
+// `change-configuration commands` payload (fold 4, F2 — the outer AST sees
+// the quoted command as one token, so its inner credentials are collected
+// by lexing it exactly as the ingest guard does). Deduplicated, longest
+// first so a longer value is replaced before any shorter value it contains.
 func collectSecretValues(tree *ConfigTree) []string {
 	if tree == nil {
 		return nil
@@ -305,6 +303,11 @@ func collectSecretValues(tree *ConfigTree) []string {
 					add(full[i])
 				}
 			}
+			for _, i := range urlLeafIndices(full) {
+				if i >= 0 && i < len(full) && RedactURL(full[i]) != full[i] {
+					add(full[i])
+				}
+			}
 			// Embedded commands payload: lex each candidate payload
 			// token (any token after a change-configuration/commands
 			// pair in this node's flattened path) and collect its
@@ -324,7 +327,7 @@ func collectSecretValues(tree *ConfigTree) []string {
 						}
 					}
 					for _, idx := range urlLeafIndices(tokens) {
-						if idx >= 0 && idx < len(tokens) {
+						if idx >= 0 && idx < len(tokens) && RedactURL(tokens[idx]) != tokens[idx] {
 							add(tokens[idx])
 						}
 					}
