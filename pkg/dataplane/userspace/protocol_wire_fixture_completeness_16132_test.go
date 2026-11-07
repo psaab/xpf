@@ -222,7 +222,7 @@ var goOnlyKeys = map[string][]string{
 		"entry_programs", "event_stream", "last_snapshot_reject_reasons",
 		"local_address_prune_skipped_total", "rst_suppression_degraded",
 		"rst_suppression_failures_total", "snapshot_retry_debt",
-		"snapshot_retry_debt_generation", "xdp_branch_counters",
+		"snapshot_retry_debt_generation", "helper_status_observation_sequence", "xdp_branch_counters",
 		"zone_id_collisions",
 	},
 	"ConfigSnapshot":         {"mirror_exclusions", "syn_cookie_key_ring", "syn_cookie_master_key"},

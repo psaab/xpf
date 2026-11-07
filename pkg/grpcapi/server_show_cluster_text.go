@@ -201,7 +201,33 @@ func (s *Server) showChassisClusterControlPlaneStatistics(buf *strings.Builder) 
 // showChassisClusterDataPlaneStatistics renders data-plane cluster
 // statistics, plus the userspace data-plane status summary if
 // available.
-func (s *Server) showChassisClusterDataPlaneStatistics(buf *strings.Builder) {
+func (s *Server) showChassisClusterDataPlaneStatistics(filter string, buf *strings.Builder) {
+	if filter != "" {
+		baseline, isBaseline, err := dpuserspace.ParseSessionDeltaLossProbeFilter(filter)
+		if err != nil {
+			fmt.Fprintf(buf, "Session-delta loss probe invalid: %v\n", err)
+			return
+		}
+		provider, ok := s.dpProbe().(interface {
+			SessionDeltaLossProbe(*dpuserspace.SessionDeltaLossBaseline) (*dpuserspace.SessionDeltaLossProbeResponse, error)
+		})
+		if !ok {
+			fmt.Fprintln(buf, "Session-delta loss probe unavailable")
+			return
+		}
+		response, err := provider.SessionDeltaLossProbe(baseline)
+		if err != nil {
+			fmt.Fprintf(buf, "Session-delta loss probe failed: %v\n", err)
+			return
+		}
+		output, err := dpuserspace.FormatSessionDeltaLossProbe(response, isBaseline)
+		if err != nil {
+			fmt.Fprintf(buf, "Session-delta loss probe invalid: %v\n", err)
+			return
+		}
+		buf.WriteString(output)
+		return
+	}
 	if s.cluster == nil {
 		fmt.Fprintln(buf, "Cluster not configured")
 		return

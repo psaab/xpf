@@ -1,5 +1,5 @@
-use crate::protocol::{ControlResponse, SessionPolicyListRequest};
 use crate::afxdp::SessionDomain;
+use crate::protocol::{ControlResponse, SessionPolicyListRequest};
 
 /// #10512: read-only policy invalidation discovery. The request is handled on
 /// the session socket without taking ServerState; callers perform deletes in a

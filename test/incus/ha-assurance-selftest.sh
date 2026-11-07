@@ -78,6 +78,12 @@ assert_not_contains() {
 	local context="$3"
 	[[ "$text" != *"$needle"* ]] || fail_test "${context}: unexpectedly contains '${needle}'"
 }
+if ! ha_u64_greater 9223372036854775808 9223372036854775807; then
+	fail_test 'u64 measurement comparison overflowed signed Bash arithmetic'
+fi
+if ! ha_u64_less 1 9223372036854775808 || ! ha_u64_equal 00042 42; then
+	fail_test 'u64 measurement comparison mishandled decimal ordering or leading zeros'
+fi
 
 reset_verdict() {
 	FAILED=0
@@ -434,7 +440,7 @@ assert_helper_value 321 ha_sync_stats_value "${STATISTICS_RENDERED}" 'Session cr
 assert_helper_value 321 ha_sync_stats_value "${STATISTICS_RENDERED}" 'Session create' received
 assert_helper_value 0 ha_status_summary_value "${STATISTICS_RENDERED}" 'Session delta pending'
 assert_helper_value 5 ha_status_summary_value "${STATISTICS_RENDERED}" 'Session delta drained'
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${STATISTICS_RENDERED}" "${STATISTICS_RENDERED}" 321 321 0 0
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${STATISTICS_RENDERED}" "${STATISTICS_RENDERED}" 321 321 0 0 0
 assert_helper_value 18 ha_status_summary_value "${STATISTICS_RENDERED}" 'Session misses'
 assert_helper_value 9000 ha_interface_packets_value "${INTERFACES_RENDERED}" 'ge-[0-9]+-0-1' rx
 assert_helper_value 2600 ha_interface_packets_value "${INTERFACES_RENDERED}" 'ge-[0-9]+-0-2' tx
@@ -469,7 +475,7 @@ assert_helper_value 19 ha_status_summary_value "${SYNC_TARGET}" 'Session delta d
 assert_helper_status 2 ha_status_summary_value "${SYNC_TARGET}" 'Missing label'
 assert_helper_value 5 ha_sync_stats_value "${SYNC_SOURCE}" 'Session create' sent
 assert_helper_value 5 ha_sync_stats_value "${SYNC_TARGET}" 'Session create' received
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 5 5 0 0
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 5 5 0 0 0
 
 SYNC_REVERSE_SOURCE="${TMP_DIR}/sync-reverse-source.txt"
 SYNC_REVERSE_TARGET="${TMP_DIR}/sync-reverse-target.txt"
@@ -493,7 +499,7 @@ Session delta drained: 0
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 0 ha_session_sync_idle_sample fw1 fw0 "${SYNC_REVERSE_SOURCE}" "${SYNC_REVERSE_TARGET}" 7 7 0 0
+assert_helper_status 0 ha_session_sync_idle_sample fw1 fw0 "${SYNC_REVERSE_SOURCE}" "${SYNC_REVERSE_TARGET}" 7 7 0 0 0
 SYNC_NOT_IDLE="${TMP_DIR}/sync-not-idle.txt"
 cat >"${SYNC_NOT_IDLE}" <<'EOF'
 Services Synchronized:
@@ -505,7 +511,7 @@ Session delta drained: 0
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_NOT_IDLE}" 5 5 0 0
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_NOT_IDLE}" 5 5 0 0 0
 SYNC_MISSING_DRAINED="${TMP_DIR}/sync-missing-drained.txt"
 cat >"${SYNC_MISSING_DRAINED}" <<'EOF'
 Services Synchronized:
@@ -514,7 +520,7 @@ Session create 5 5
 Session delta pending: 0
 Session delta dropped: 0
 EOF
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" 5 5 0 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" 5 5 0 0 0
 
 # #16289: offset baselines. The tcp-cluster failure was source sent=15 vs
 # target received=174 (delta 159 from a previous counting epoch) with
@@ -544,9 +550,9 @@ Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
 # First sample only establishes the baseline: never idle by itself.
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" '' '' '' ''
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" '' '' '' 0 0
 # Static offset pair (the cell3.log evidence shape) is idle vs baseline.
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174 0 0
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174 0 0 0
 # Lockstep advance since baseline (15->74, 174->233) stays idle.
 SYNC_OFFSET_SOURCE_LATE="${TMP_DIR}/sync-offset-source-late.txt"
 SYNC_OFFSET_TARGET_LATE="${TMP_DIR}/sync-offset-target-late.txt"
@@ -570,7 +576,7 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE_LATE}" "${SYNC_OFFSET_TARGET_LATE}" 15 174 0 0
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE_LATE}" "${SYNC_OFFSET_TARGET_LATE}" 15 174 0 0 0
 # Received stalls while sent grows since baseline: not idle.
 SYNC_OFFSET_TARGET_STALLED="${TMP_DIR}/sync-offset-target-stalled.txt"
 cat >"${SYNC_OFFSET_TARGET_STALLED}" <<'EOF'
@@ -583,7 +589,7 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE_LATE}" "${SYNC_OFFSET_TARGET_STALLED}" 15 174 0 0
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE_LATE}" "${SYNC_OFFSET_TARGET_STALLED}" 15 174 0 0 0
 # Offset pair with pending nonzero: not idle even with equal deltas.
 SYNC_OFFSET_TARGET_PENDING="${TMP_DIR}/sync-offset-target-pending.txt"
 cat >"${SYNC_OFFSET_TARGET_PENDING}" <<'EOF'
@@ -596,7 +602,7 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET_PENDING}" 15 174 0 0
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET_PENDING}" 15 174 0 0 0
 # #16500 -> #18632: shrinking gap since baseline. In-flight creates at the
 # first sample (baseline 20/17) are delivered (20/20): D falls 3 -> 0. That
 # is a NEW FLOOR (verdict 4: re-baseline and restart the streak), not an
@@ -651,9 +657,9 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 4 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET}" 20 17 0 0
+assert_helper_status 4 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET}" 20 17 0 0 0
 # The same pair re-baselined onto itself is idle at the floor.
-assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET}" 20 20 0 0
+assert_helper_status 0 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET}" 20 20 0 0 0
 # Received ahead at the baseline, then sent catches up: 20/22 -> 22/22.
 SYNC_AHEAD_BASE_SOURCE="${TMP_DIR}/sync-ahead-base-source.txt"
 SYNC_AHEAD_BASE_TARGET="${TMP_DIR}/sync-ahead-base-target.txt"
@@ -699,7 +705,7 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_AHEAD_SOURCE}" "${SYNC_AHEAD_TARGET}" 20 22 0 0
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_AHEAD_SOURCE}" "${SYNC_AHEAD_TARGET}" 20 22 0 0 0
 # #18632 at the unit level, on the #18627 loss numbers (floor
 # sent-received = -107439). Lockstep advance at the floor is idle. A
 # baseline taken one BELOW the floor (the source-first capture race:
@@ -716,14 +722,14 @@ write_unit_sync_pair() {
 	printf 'Services Synchronized:\nSession create 0 %s\n\nSession delta pending: %s\nSession delta dropped: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\nHelper status measurement sequence: 1\n' "$2" "$3" >"${SYNC_LOSS_TARGET}"
 }
 write_unit_sync_pair 22049 129488 0
-assert_helper_status 0 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22048 129488 0 0
+assert_helper_status 0 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0 0
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22048 129488 0 0 0
 write_unit_sync_pair 22050 129488 0
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0 0
 write_unit_sync_pair 22049 131000 0
-assert_helper_status 4 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0
+assert_helper_status 4 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0 0
 write_unit_sync_pair 22049 129488 2
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_LOSS_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 0 0 0
 # Gap grows since baseline: 20/20 -> 25/20 stays not idle.
 SYNC_GROWN_SOURCE="${TMP_DIR}/sync-grown-source.txt"
 SYNC_GROWN_TARGET="${TMP_DIR}/sync-grown-target.txt"
@@ -747,7 +753,7 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_GROWN_SOURCE}" "${SYNC_GROWN_TARGET}" 20 20 0 0
+assert_helper_status 1 ha_session_sync_idle_sample fw0 fw1 "${SYNC_GROWN_SOURCE}" "${SYNC_GROWN_TARGET}" 20 20 0 0 0
 # Shrunk gap with pending nonzero stays not idle.
 SYNC_SHRUNK_TARGET_PENDING="${TMP_DIR}/sync-shrunk-target-pending.txt"
 cat >"${SYNC_SHRUNK_TARGET_PENDING}" <<'EOF'
@@ -760,23 +766,23 @@ Session delta drained: 19
 Event stream HA session delta lost: 0
 Helper status measurement sequence: 1
 EOF
-assert_helper_status 4 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET_PENDING}" 20 17 0 0
+assert_helper_status 4 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SHRUNK_SOURCE}" "${SYNC_SHRUNK_TARGET_PENDING}" 20 17 0 0 0
 # Counter rewind since baseline (daemon restart / epoch reset) is the
 # distinct re-baseline verdict 3, never idle and never VOID.
-assert_helper_status 3 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 15 174 0 0
+assert_helper_status 3 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_TARGET}" 15 174 0 0 0
 # Blind evidence stays VOID even on a rewound sample and even on the
 # baseline-establishing sample (parse precedes every baseline branch).
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" 15 174 0 0
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" '' '' '' ''
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" 15 174 0 0 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_SOURCE}" "${SYNC_MISSING_DRAINED}" '' '' '' '' 0
 # Malformed / half-empty baselines are VOID; older argument shapes that omit
 # the source event-stream-lost baseline are gone.
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" malformed 174 0 0
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 '' 0 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" malformed 174 0 0 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 '' 0 0 0
 assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}"
 assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174 '' 0
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" '' '' 0 0
-assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174 x 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174 '' 0 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" '' '' 0 0 0
+assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE}" "${SYNC_OFFSET_TARGET}" 15 174 x 0 0
 # #18632 source side (AD seat): the source's helper delta buffer. A delta
 # it still holds, or has dropped, never becomes a sent create, so neither
 # D nor the target's pending count can see it. At the floor with source
@@ -785,44 +791,38 @@ assert_helper_status 2 ha_session_sync_idle_sample fw0 fw1 "${SYNC_OFFSET_SOURCE
 # below its baseline is a helper restart (rewind, 3); a source capture
 # without the dropped line is blind (VOID).
 SYNC_SRC_SIDE_SOURCE="${TMP_DIR}/sync-src-side-source.txt"
+SYNC_EVENT_LOSS_MISSING="${TMP_DIR}/sync-event-loss-missing.txt"
 write_src_side_source() {
 	# $1=sent $2=source pending $3=source dropped
 	printf 'Services Synchronized:\nSession create %s 0\n\nSession delta pending: %s\nSession delta dropped: %s\nSession delta drained: 0\nEvent stream HA session delta lost: %s\nHelper status measurement sequence: 1\n' "$1" "$2" "$3" "${4:-0}" >"${SYNC_SRC_SIDE_SOURCE}"
 }
 write_unit_sync_pair 22049 129488 0
 write_src_side_source 22049 0 4
-assert_helper_status 0 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
+assert_helper_status 0 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 0
 write_src_side_source 22049 2 4
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 0
 write_src_side_source 22049 0 5
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
-assert_contains "$(<"${ERR}")" 'the source dropped 1 session delta(s) since the baseline' 'source drop diagnostic'
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 0
+assert_contains "$(<"${ERR}")" 'the source dropped session deltas since the baseline (dropped=5 baseline=4)' 'source drop diagnostic'
 # A drop wins over a new floor: the baseline must not move onto it.
 write_unit_sync_pair 22049 131000 0
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 0
 write_unit_sync_pair 22049 129488 0
 write_src_side_source 22049 0 3
-assert_helper_status 3 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
-# #18635: an HA event-stream loss is independent of the RPC fallback drop
-# counter and of the sent/received floor. It must keep a caught-up sample
-# not-idle, and a rewound loss counter requires the same restart baseline.
+assert_helper_status 3 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 0
+# #18635: stale ordinary projections (including a cached zero) are ignored.
+# The helper-side since-baseline answer is the evidence, and a positive
+# answer is the loss-of-sync mutant this sample must catch.
 write_src_side_source 22049 0 4 1
-assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
-assert_contains "$(<"${ERR}")" 'lost 1 HA event-stream session delta(s)' 'event-stream HA delta loss diagnostic'
-assert_helper_status 3 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 2
-write_src_side_source 22049 0 4 0
-assert_helper_status 3 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 1
-SYNC_MEASUREMENT_MISSING="${TMP_DIR}/sync-measurement-missing.txt"
-printf 'Services Synchronized:\nSession create 22049 0\n\nSession delta pending: 0\nSession delta dropped: 4\nSession delta drained: 0\nEvent stream HA session delta lost: 0\nHelper status observation sequence: 1\n' >"${SYNC_MEASUREMENT_MISSING}"
-assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_MEASUREMENT_MISSING}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
-printf 'Services Synchronized:\nSession create 22049 0\n\nSession delta pending: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\nHelper status measurement sequence: 1\n' >"${SYNC_SRC_SIDE_SOURCE}"
-SYNC_EVENT_LOSS_MISSING="${TMP_DIR}/sync-event-loss-missing.txt"
-# #18635: absent loss counters remain unknown through formatting, so this
-# sample is VOID even with manager and helper measurement sequences present.
-printf 'Services Synchronized:\nHelper status observation sequence: 1\nHelper status measurement sequence: 1\nSession create 22049 0\n\nSession delta pending: 0\nSession delta dropped: 4\nSession delta drained: 0\n' >"${SYNC_EVENT_LOSS_MISSING}"
-assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
-assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_EVENT_LOSS_MISSING}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
-assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" '' '' '' ''
+assert_helper_status 1 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 1
+assert_contains "$(<"${ERR}")" 'helper reports 1 HA event-stream session delta loss since wait-start baseline total=0' 'event-stream helper loss-since diagnostic'
+assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 ''
+# A missing cached status loss line does not affect the probe predicate:
+# only the dedicated helper answer can establish or void its baseline.
+printf 'Services Synchronized:\nSession create 22049 0\n\nSession delta pending: 0\nSession delta dropped: 4\nSession delta drained: 0\nHelper status measurement sequence: 1\n' >"${SYNC_EVENT_LOSS_MISSING}"
+assert_helper_status 0 ha_session_sync_idle_sample node0 node1 "${SYNC_EVENT_LOSS_MISSING}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 0
+assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 ''
+assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" '' '' '' '' 0
 
 # #16289 stateful wait loops: an observed unreceived send must NOT be
 # absorbed by re-baselining. Both production wait loops are extracted
@@ -900,18 +900,19 @@ EOF
 write_seq_pair() {
 	# Index/calls live in files: captures run inside $(...) subshells in
 	# the failover loop, so shell variables would reset every attempt.
-	# sent/recv/target-pending[/source-pending/source-dropped/source-event-loss/manager-source-seq/manager-target-seq/helper-source-seq/helper-target-seq].
-	local idx pair sent recv pending src_pending src_dropped src_event_lost source_status_seq target_status_seq source_measurement_seq target_measurement_seq calls
+	# sent/recv/target-pending[/source-pending/source-dropped/source-event-loss/manager-source-seq/manager-target-seq/helper-source-seq/helper-target-seq/sample-loss-since/final-loss-since].
+	local idx pair sent recv pending src_pending src_dropped src_event_lost source_status_seq target_status_seq source_measurement_seq target_measurement_seq sample_loss_since confirm_loss_since calls
 	idx="$(cat "${SEQ_INDEX_FILE}")"
 	pair="${SEQ[$idx]}"
-	IFS=/ read -r sent recv pending src_pending src_dropped src_event_lost source_status_seq target_status_seq source_measurement_seq target_measurement_seq <<< "$pair"
+	IFS=/ read -r sent recv pending src_pending src_dropped src_event_lost source_status_seq target_status_seq source_measurement_seq target_measurement_seq sample_loss_since confirm_loss_since <<< "$pair"
 	calls="$(cat "${SEQ_CALLS_FILE}")"
 	source_status_seq="${source_status_seq:-$((calls + 1))}"
 	target_status_seq="${target_status_seq:-$source_status_seq}"
 	source_measurement_seq="${source_measurement_seq:-$source_status_seq}"
-	target_measurement_seq="${target_measurement_seq:-$target_status_seq}"
 	write_runner_fixture "$SEQ_SOURCE" "$sent" 0 "${src_pending:-0}" "${src_dropped:-0}" "${src_event_lost:-0}" "$source_status_seq" "$source_measurement_seq"
 	write_runner_fixture "$SEQ_TARGET" 0 "$recv" "$pending" 0 0 "$target_status_seq" "$target_measurement_seq"
+	printf '%s\n' "${sample_loss_since:-0}" >"${SEQ_LOSS_SAMPLE_FILE}"
+	printf '%s\n' "${confirm_loss_since:-0}" >"${SEQ_LOSS_CONFIRM_FILE}"
 	if (( idx < ${#SEQ[@]} - 1 )); then printf '%s\n' "$((idx + 1))" > "${SEQ_INDEX_FILE}"; fi
 	printf '%s\n' "$((calls + 1))" > "${SEQ_CALLS_FILE}"
 }
@@ -929,6 +930,26 @@ capture_sync_snapshot() {
 	local label="$2" path
 	path="$(sync_snapshot_path "$label" "$1")"
 	if [[ "$1" == "$TARGET_VM" ]]; then write_seq_pair; cp "$SEQ_TARGET" "$path"; else cp "$SEQ_SOURCE" "$path"; fi
+}
+write_loss_probe_fixture() {
+	local label="$1" token="$2" value
+	if [[ -z "$token" ]]; then
+		printf 'Event stream HA session delta loss baseline token: testbaseline\nEvent stream HA session delta lost total: 0\n' >"${SEQ_LOSS_PROBE_FILE}"
+	else
+		if [[ "$label" == *confirmation* ]]; then
+			value="$(cat "${SEQ_LOSS_CONFIRM_FILE}")"
+		else
+			value="$(cat "${SEQ_LOSS_SAMPLE_FILE}")"
+		fi
+		printf 'Event stream HA session delta lost since baseline: %s\n' "$value" >"${SEQ_LOSS_PROBE_FILE}"
+	fi
+	printf '%s\n' "${SEQ_LOSS_PROBE_FILE}"
+}
+ha_capture_session_delta_loss_probe() {
+	write_loss_probe_fixture "$1" "$4"
+}
+capture_session_delta_loss_probe() {
+	write_loss_probe_fixture "$2" "$3"
 }
 run_failover_loop() {
 	SEQ_TARGET_ID=node1
@@ -960,6 +981,7 @@ run_sync_loop_case() {
 	cp "${ROOT}/test/incus/ha-assurance-lib.sh" "$LOOP_DIR/lib.sh"
 	out="$(SEQ_CSV="$seq_csv" SESSION_SYNC_IDLE_TIMEOUT="$timeout" SESSION_SYNC_IDLE_STABLE_SAMPLES=3 \
 		SEQ_SOURCE="${LOOP_DIR}/seq-source.txt" SEQ_TARGET="${LOOP_DIR}/seq-target.txt" SEQ_INDEX_FILE="${LOOP_DIR}/seq-index" SEQ_CALLS_FILE="${LOOP_DIR}/seq-calls" \
+		SEQ_LOSS_SAMPLE_FILE="${LOOP_DIR}/seq-loss-sample" SEQ_LOSS_CONFIRM_FILE="${LOOP_DIR}/seq-loss-confirm" SEQ_LOSS_PROBE_FILE="${LOOP_DIR}/seq-loss-probe" \
 		ARTIFACT_DIR="$LOOP_DIR" SOURCE_NODE=0 TARGET_NODE=1 FW0=fw0 FW1=fw1 SEQ_EXPORT=1 FORCE_SAMPLE_RC="${FORCE_SAMPLE_RC:-}" \
 		bash -euo pipefail "$LOOP_RUNNER_FILE" "$LOOP_DIR/lib.sh" "$LOOP_HELPERS" "$loop" 2>&1)"
 	# The failover timeout reports its elapsed seconds; normalise them.
@@ -994,32 +1016,31 @@ VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'failover loop: received catch-up require
 LOOPRC=0
 VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: received catch-up requires final publication' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6'
 
-# Late source loss after the last idle publication is not hidden by the CLI's
-# cached copy: a repeated helper measurement cannot complete the final
-# confirmation, and the next fresh projection carries the loss.
+# A late helper loss-since answer is authoritative even when ordinary cached
+# status still says zero; the loss keeps the sample out of the stable window.
 run_sync_loop_case failover 7 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
-session sync node0->node1 cached helper status measurement sequence did not advance (source fresh=0 target fresh=0)
-session sync node0->node1 not idle: the source lost 1 HA event-stream session delta(s) since the baseline (lost=1 baseline=0)
-FAIL-MARK loop: session sync did not become idle within 7 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
+session sync node0->node1 not idle: helper reports 1 HA event-stream session delta loss since wait-start baseline total=0
+session sync node0->node1 not idle: helper reports 1 HA event-stream session delta loss since wait-start baseline total=0
+FAIL-MARK loop: session sync did not become idle within 7 attempts (Ns; 0 of 3 samples at the floor) (node0->node1)
 LOOPRC=1
-VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'failover loop: late loss after cached publication blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'failover loop: helper loss-since blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6/6/6/7/1/0' '16/175/0/0/0/0/7/7/7/8/1/0'
 run_sync_loop_case userspace 7 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=1
-VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'userspace loop: late loss after cached publication blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
-# Hold the second Go status response after it projected loss=0: its manager
-# sequence advances while the helper measurement stamp is still old. The
-# final proof cannot use it; the released response carries loss=1.
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'userspace loop: helper loss-since blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6/6/6/7/1/0' '16/175/0/0/0/0/7/7/7/8/1/0'
+# Hold an ordinary zero-loss projection, then let loss land. The final
+# helper-since query is a new request after the stable window and must see it.
 run_sync_loop_case failover 7 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
-session sync node0->node1 cached helper status measurement sequence did not advance (source fresh=0 target fresh=1)
-session sync node0->node1 not idle: the source lost 1 HA event-stream session delta(s) since the baseline (lost=1 baseline=0)
-FAIL-MARK loop: session sync did not become idle within 7 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
+session sync node0->node1 final helper confirmation reports 1 HA event-stream session delta loss since baseline total=0
+session sync node0->node1 not idle: helper reports 1 HA event-stream session delta loss since wait-start baseline total=0
+FAIL-MARK loop: session sync did not become idle within 7 attempts (Ns; 0 of 3 samples at the floor) (node0->node1)
 LOOPRC=1
-VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'failover loop: held second status response cannot confirm zero loss' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6/6/5/6' '16/175/0/0/0/1/7/7/6/7'
-run_sync_loop_case userspace 7 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'failover loop: held ordinary status cannot hide loss from fresh confirmation' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6/6/6/7/0/1' '16/175/0/0/0/0/7/7/7/8/1/0'
+run_sync_loop_case userspace 7 'session sync node0->node1 final helper confirmation reports 1 HA event-stream session delta loss since baseline total=0
+FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=1
-VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'userspace loop: held second status response cannot confirm zero loss' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6/6/5/6' '16/175/0/0/0/1/7/7/6/7'
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'userspace loop: held ordinary status cannot hide loss from fresh confirmation' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6/6/6/7/0/1' '16/175/0/0/0/0/7/7/7/8/1/0'
 # A ClearFilterCounters-shaped Go-only publication advances manager sequence
 # but not the helper measurement stamp; it cannot count on either side.
 run_sync_loop_case failover 6 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
@@ -1116,10 +1137,10 @@ VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=8' 'userspace loop: a new floor mid-streak r
 # (dropped 0 -> 1). Every later sample stays not idle (the baseline keeps
 # the old dropped count), so the wait FAILs at its timeout.
 run_sync_loop_case failover 5 'session sync node0->node1 baseline: source sent=20, target received=20, pending=0
-session sync node0->node1 not idle: the source dropped 1 session delta(s) since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
-session sync node0->node1 not idle: the source dropped 1 session delta(s) since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
-session sync node0->node1 not idle: the source dropped 1 session delta(s) since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
-session sync node0->node1 not idle: the source dropped 1 session delta(s) since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
+session sync node0->node1 not idle: the source dropped session deltas since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
+session sync node0->node1 not idle: the source dropped session deltas since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
+session sync node0->node1 not idle: the source dropped session deltas since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
+session sync node0->node1 not idle: the source dropped session deltas since the baseline (dropped=1 baseline=0); a dropped delta never becomes a sent create
 FAIL-MARK loop: session sync did not become idle within 5 attempts (Ns; 0 of 3 samples at the floor) (node0->node1)
 LOOPRC=1
 VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=5' 'failover loop: a source delta drop is never absorbed' '20/20/0/0/0' '20/20/0/0/1'
@@ -1292,6 +1313,17 @@ capture_sync_snapshot() {
 	if [[ "$1" == "$SOURCE_VM" ]]; then role=S; fi
 	tl_capture "$role" "$path"
 }
+tl_loss_probe() {
+	local token="$1" path="${TL_DIR}/loss-probe.txt"
+	if [[ -z "$token" ]]; then
+		printf 'Event stream HA session delta loss baseline token: testbaseline\nEvent stream HA session delta lost total: 0\n' >"$path"
+	else
+		printf 'Event stream HA session delta lost since baseline: 0\n' >"$path"
+	fi
+	printf '%s\n' "$path"
+}
+ha_capture_session_delta_loss_probe() { tl_loss_probe "$4"; }
+capture_session_delta_loss_probe() { tl_loss_probe "$3"; }
 case "$3" in
 failover)
 	if ha_wait_for_session_sync_idle loop node0 fw0 node1 fw1 2>/dev/null; then rc=0; else rc=$?; fi ;;
@@ -2187,13 +2219,13 @@ printf '#18635 event-stream HA session-delta loss gates idle\n'
 write_unit_sync_pair 22049 129488 0
 write_src_side_source 22049 0 4 1
 run_event_stream_loss_sample() {
-	ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
+	ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0 1
 }
 assert_lib_fn_control_holds sync-event-stream-loss ha_session_sync_idle_sample \
-	'if (( source_event_stream_lost > baseline_event_stream_lost )); then' 1 \
-	'lost 1 HA event-stream session delta(s)' run_event_stream_loss_sample
+	'if ha_u64_greater "$event_stream_lost_since" 0; then' 1 \
+	'helper reports 1 HA event-stream session delta loss since wait-start baseline total=0' run_event_stream_loss_sample
 sync_event_stream_loss_mutant="$(lib_fn_mutant ha_session_sync_idle_sample sync-event-stream-loss \
-	'if (( source_event_stream_lost > baseline_event_stream_lost )); then' 'if false; then')" ||
+	'if ha_u64_greater "$event_stream_lost_since" 0; then' 'if false; then')" ||
 	fail_test 'lib_fn_mutant refused the event-stream loss comparison mutant'
 if ( source "$sync_event_stream_loss_mutant"; run_event_stream_loss_sample ); then
 	sync_event_stream_loss_mutant_rc=0
@@ -2228,6 +2260,9 @@ PY
 	out="$(SEQ_CSV="$SYNC_MEASUREMENT_SEQUENCE" SESSION_SYNC_IDLE_TIMEOUT=6 SESSION_SYNC_IDLE_STABLE_SAMPLES=3 \
 		SEQ_SOURCE="${LOOP_DIR}/seq-source-measurement.txt" SEQ_TARGET="${LOOP_DIR}/seq-target-measurement.txt" \
 		SEQ_INDEX_FILE="${LOOP_DIR}/seq-index-measurement" SEQ_CALLS_FILE="${LOOP_DIR}/seq-calls-measurement" \
+		SEQ_LOSS_SAMPLE_FILE="${LOOP_DIR}/seq-loss-sample-measurement" \
+		SEQ_LOSS_CONFIRM_FILE="${LOOP_DIR}/seq-loss-confirm-measurement" \
+		SEQ_LOSS_PROBE_FILE="${LOOP_DIR}/seq-loss-probe-measurement" \
 		ARTIFACT_DIR="$LOOP_DIR" SOURCE_NODE=0 TARGET_NODE=1 FW0=fw0 FW1=fw1 SEQ_EXPORT=1 \
 		bash -euo pipefail "$LOOP_RUNNER_FILE" "$LOOP_DIR/lib.sh" "$current_helpers" failover 2>&1)"
 	[[ "$out" == *"PASS-MARK loop: session sync idle"* ]]

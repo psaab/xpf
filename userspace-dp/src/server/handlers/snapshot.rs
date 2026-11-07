@@ -1,13 +1,13 @@
 // #1345: per-verb handlers for apply_snapshot and bump_fib_generation,
 // split out of handlers.rs in #1345. Both verbs pivot on request.snapshot.
 
+use super::super::ServerState;
 use super::super::helpers::{
-    reconcile_status_bindings_with_policy_state, project_status, replan_queues,
+    project_status, reconcile_status_bindings_with_policy_state, replan_queues,
     same_plan_apply_needs_binding_reconcile, should_run_afxdp, snapshot_binding_plan_key,
 };
-use super::super::ServerState;
 use crate::{
-    ConfigSnapshot, ControlResponse, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+    CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, ControlResponse,
     SNAPSHOT_CONTENT_CONFLICT_PREFIX,
 };
 
@@ -86,9 +86,7 @@ pub(super) fn apply(
         );
         eprintln!(
             "ERROR: apply_snapshot refused (snapshot policy mismatch): policies_len=0 installed_policies={} generation={} total={}",
-            installed_policies,
-            snapshot.generation,
-            guard.snapshot_policy_mismatch_total
+            installed_policies, snapshot.generation, guard.snapshot_policy_mismatch_total
         );
         return;
     }
@@ -234,17 +232,11 @@ pub(super) fn apply(
             response.ok = false;
             response.error = format!(
                 "snapshot generation rollback rejected: ({}, {}) < current ({}, {})",
-                snapshot.generation,
-                snapshot.fib_generation,
-                cur_generation,
-                cur_fib_generation
+                snapshot.generation, snapshot.fib_generation, cur_generation, cur_fib_generation
             );
             eprintln!(
                 "CTRL_REQ: apply_snapshot rejected (generation rollback): ({}, {}) < current ({}, {})",
-                snapshot.generation,
-                snapshot.fib_generation,
-                cur_generation,
-                cur_fib_generation
+                snapshot.generation, snapshot.fib_generation, cur_generation, cur_fib_generation
             );
             return;
         }
@@ -324,8 +316,10 @@ pub(super) fn apply(
     guard.status.last_snapshot_policy_count = snapshot.summary.policy_count as u64;
     guard.status.last_fib_generation = snapshot.fib_generation;
     guard.status.last_snapshot_at = Some(snapshot.generated_at);
-    let prev_capabilities =
-        std::mem::replace(&mut guard.status.capabilities, snapshot.capabilities.clone());
+    let prev_capabilities = std::mem::replace(
+        &mut guard.status.capabilities,
+        snapshot.capabilities.clone(),
+    );
     let existing_bindings = guard.status.bindings.clone();
     // #14959: prior worker count, restored with existing_bindings on the
     // full-apply post-teardown rollback so the binding/worker plan status
@@ -485,12 +479,10 @@ pub(super) fn apply(
             // generation / persisted state here would report a
             // rejected snapshot as the running config.
             let refresh_result = if should_run_afxdp(&guard.status) {
-                guard
-                    .afxdp
-                    .refresh_runtime_snapshot_with_policy_state(
-                        &snapshot,
-                        policy_state.take().expect("prepared policy state"),
-                    )
+                guard.afxdp.refresh_runtime_snapshot_with_policy_state(
+                    &snapshot,
+                    policy_state.take().expect("prepared policy state"),
+                )
             } else {
                 guard
                     .afxdp
@@ -552,13 +544,10 @@ pub(super) fn apply(
             // side-effecting tunnel/WG prunes and the guard.snapshot swap,
             // and fail CLOSED on error. This adds integrity VALIDATION, not
             // activation — the worker spawn stays deferred below.
-            if let Err(err) = guard
-                .afxdp
-                .validate_snapshot_buildable_with_policy_state(
-                    &snapshot,
-                    policy_state.take().expect("prepared policy state"),
-                )
-            {
+            if let Err(err) = guard.afxdp.validate_snapshot_buildable_with_policy_state(
+                &snapshot,
+                policy_state.take().expect("prepared policy state"),
+            ) {
                 // Mirror the #3766/#3789 same-plan capture-restore legs:
                 // restore the status-reporting fields bumped at the top of
                 // `apply`, report ok=false, and do NOT persist. Validation
@@ -790,7 +779,10 @@ pub(super) fn bump_fib(
     // is disarmed or workers are deferred/stopped and its validation state
     // therefore lags (or resets to zero). Refuse a rollback against either
     // baseline before allowing the coordinator to publish.
-    let current_fib = guard.status.last_fib_generation.max(guard.afxdp.fib_generation());
+    let current_fib = guard
+        .status
+        .last_fib_generation
+        .max(guard.afxdp.fib_generation());
     if snapshot.fib_generation < current_fib {
         response.ok = false;
         response.error = format!(

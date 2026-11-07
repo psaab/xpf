@@ -419,6 +419,20 @@ capture_sync_snapshot() {
 	run_vm "$vm" 'cli -c "show chassis cluster data-plane statistics"' >"$(sync_snapshot_path "$label" "$vm")" 2>&1 || true
 }
 
+capture_session_delta_loss_probe() {
+	local vm="$1" label="$2" baseline_token="$3" path command
+	path="$(sync_snapshot_path "${label}-loss" "$vm")"
+	if [[ -z "$baseline_token" ]]; then
+		command='cli -c "show chassis cluster data-plane statistics loss-baseline"'
+	else
+		command="cli -c \"show chassis cluster data-plane statistics loss-since ${baseline_token}\""
+	fi
+	if ! run_vm "$vm" "$command" >"$path" 2>&1; then
+		return 2
+	fi
+	printf '%s\n' "$path"
+}
+
 # #18632/#18635: idle = N paired fresh helper-measured SOURCE and TARGET
 # status projections at an unchanged floor, with no create outstanding beyond
 # that floor and nothing pending at those reads, followed by one more fresh
@@ -432,19 +446,33 @@ wait_for_session_sync_idle() {
 	source_node="$(node_name "$SOURCE_NODE")"
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
-	local baseline_sent="" baseline_received="" baseline_dropped="" baseline_event_stream_lost=""
+	local baseline_sent="" baseline_received="" baseline_dropped=""
+	local baseline_event_stream_lost baseline_event_stream_lost_token
 	local last_source_measurement_sequence="" last_target_measurement_sequence=""
 	local final_source_confirmation_measurement_sequence="" final_target_confirmation_measurement_sequence=""
+	local baseline_loss_probe_path
+
+	if ! baseline_loss_probe_path="$(capture_session_delta_loss_probe "$SOURCE_VM" "${label}-baseline" "")" ||
+		! baseline_event_stream_lost_token="$(ha_session_delta_loss_baseline_token "$baseline_loss_probe_path")" ||
+		! baseline_event_stream_lost="$(ha_status_summary_value "$baseline_loss_probe_path" "Event stream HA session delta lost total")"; then
+		void "${label}: helper loss baseline unavailable or malformed (${source_node}->${target_node})"
+		return 0
+	fi
+
 	while (( tries > 0 )); do
-		# #18632: TARGET first, then source (see ha_session_sync_idle_sample):
-		# sent - received then reads high, not low; only a source stall
-		# between the enqueue and the sent count, longer than the gap
-		# between the reads, could read it low, which FAILs the wait.
+		# TARGET first, then source: a create counted as received is counted as
+		# sent immediately afterward, so sent - received reads high, not low.
 		capture_sync_snapshot "$TARGET_VM" "${label}-target"
 		capture_sync_snapshot "$SOURCE_VM" "${label}-source"
 		local source_path target_path
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
+		local loss_path event_stream_lost_since
+		if ! loss_path="$(capture_session_delta_loss_probe "$SOURCE_VM" "${label}-sample" "$baseline_event_stream_lost_token")" ||
+			! event_stream_lost_since="$(ha_session_delta_loss_since_value "$loss_path")"; then
+			void "${label}: helper loss-since query unavailable or malformed (${source_node}->${target_node})"
+			return 0
+		fi
 		local next_source_measurement_sequence next_target_measurement_sequence
 		local source_measurement_fresh=1 target_measurement_fresh=1
 		if ! next_source_measurement_sequence="$(ha_status_summary_value "$source_path" "Helper status measurement sequence")" ||
@@ -455,27 +483,27 @@ wait_for_session_sync_idle() {
 			return 0
 		fi
 		if [[ -n "$last_source_measurement_sequence" ]]; then
-			if (( next_source_measurement_sequence < last_source_measurement_sequence )); then
+			if ha_u64_less "$next_source_measurement_sequence" "$last_source_measurement_sequence"; then
 				stable=0
 				final_source_confirmation_measurement_sequence=""
 				source_measurement_fresh=0
 			fi
-			if (( next_target_measurement_sequence < last_target_measurement_sequence )); then
+			if ha_u64_less "$next_target_measurement_sequence" "$last_target_measurement_sequence"; then
 				stable=0
 				final_target_confirmation_measurement_sequence=""
 				target_measurement_fresh=0
 			fi
-			if (( next_source_measurement_sequence == last_source_measurement_sequence )); then
+			if ha_u64_equal "$next_source_measurement_sequence" "$last_source_measurement_sequence"; then
 				source_measurement_fresh=0
 			fi
-			if (( next_target_measurement_sequence == last_target_measurement_sequence )); then
+			if ha_u64_equal "$next_target_measurement_sequence" "$last_target_measurement_sequence"; then
 				target_measurement_fresh=0
 			fi
 		fi
 		last_source_measurement_sequence="$next_source_measurement_sequence"
 		last_target_measurement_sequence="$next_target_measurement_sequence"
 		local sample_status sample_diagnostic
-		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" "$baseline_event_stream_lost" 2>&1)"; then
+		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" "$baseline_event_stream_lost" "$event_stream_lost_since" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
@@ -489,20 +517,20 @@ wait_for_session_sync_idle() {
 			return 0
 		fi
 		if (( sample_status != 0 && sample_status != 1 && sample_status != 3 && sample_status != 4 )); then
-			# #18632: an unknown verdict is VOID, as in test-failover.
 			void "${label}: session sync sample verdict ${sample_status} unknown: ${sample_diagnostic}"
 			return 0
 		fi
-		# The helper verdicts above are fail-closed on blind evidence, so
-		# these re-reads cannot fail on the paths that use their values
-		# (0/1/3/4 all imply the helper parsed every field).
-		local source_sent target_recv target_pending target_drained source_dropped source_event_stream_lost
+		local source_sent target_recv target_pending target_drained source_dropped
 		source_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)"
 		source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")"
-		source_event_stream_lost="$(ha_status_summary_value "$source_path" "Event stream HA session delta lost")"
 		target_recv="$(ha_sync_stats_value "$target_path" "Session create" received)"
 		target_pending="$(ha_status_summary_value "$target_path" "Session delta pending")"
 		target_drained="$(ha_status_summary_value "$target_path" "Session delta drained")"
+		if ha_u64_greater "$event_stream_lost_since" 0; then
+			stable=0
+			final_source_confirmation_measurement_sequence=""
+			final_target_confirmation_measurement_sequence=""
+		fi
 		if (( sample_status == 0 )); then
 			if (( source_measurement_fresh != 0 && target_measurement_fresh != 0 &&
 				stable < stable_needed )); then
@@ -510,36 +538,41 @@ wait_for_session_sync_idle() {
 			fi
 			if (( source_measurement_fresh != 0 && target_measurement_fresh != 0 &&
 				stable >= stable_needed )); then
-				# Require fresh source AND target helper projections after the idle
-				# streak; manager publication alone is not freshness evidence.
 				if [[ -z "$final_source_confirmation_measurement_sequence" ||
 					-z "$final_target_confirmation_measurement_sequence" ]]; then
 					final_source_confirmation_measurement_sequence="$next_source_measurement_sequence"
 					final_target_confirmation_measurement_sequence="$next_target_measurement_sequence"
-				elif (( next_source_measurement_sequence > final_source_confirmation_measurement_sequence &&
-					next_target_measurement_sequence > final_target_confirmation_measurement_sequence )); then
-					pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
-					return 0
+				elif ha_u64_greater "$next_source_measurement_sequence" "$final_source_confirmation_measurement_sequence" &&
+					ha_u64_greater "$next_target_measurement_sequence" "$final_target_confirmation_measurement_sequence"; then
+					# The helper answers this query against the immutable wait-start
+					# baseline on a fresh round trip after the stable window.
+					if ! loss_path="$(capture_session_delta_loss_probe "$SOURCE_VM" "${label}-confirmation" "$baseline_event_stream_lost_token")" ||
+						! event_stream_lost_since="$(ha_session_delta_loss_since_value "$loss_path")"; then
+						void "${label}: helper loss confirmation unavailable or malformed (${source_node}->${target_node})"
+						return 0
+					fi
+					if ha_u64_greater "$event_stream_lost_since" 0; then
+						printf 'session sync %s->%s final helper confirmation reports %s HA event-stream session delta loss since baseline total=%s\n' \
+							"$source_node" "$target_node" "$event_stream_lost_since" "$baseline_event_stream_lost" >&2
+						stable=0
+						final_source_confirmation_measurement_sequence=""
+						final_target_confirmation_measurement_sequence=""
+					else
+						pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
+						return 0
+					fi
 				fi
 			fi
 		elif (( sample_status == 3 || sample_status == 4 )); then
-			# #16289: counter rewind (daemon or helper restart), or
-			# #18632: a new floor. Moving DOWN shrinks what the baseline
-			# can absorb (creates in flight at it) and never grows it; a
-			# create lost after the wait has seen the true floor is never
-			# absorbed. These are the ONLY re-baseline triggers; both
-			# restart the streak.
+			# Rewind/floor changes rebaseline only sync counts. The event-stream
+			# loss token remains fixed; helper identity changes VOID the proof.
 			stable=0
 			final_source_confirmation_measurement_sequence=""
 			final_target_confirmation_measurement_sequence=""
 			baseline_sent="$source_sent"
 			baseline_received="$target_recv"
 			baseline_dropped="$source_dropped"
-			baseline_event_stream_lost="$source_event_stream_lost"
 		else
-			# Ordinary not-idle: above the floor, or something pending.
-			# It neither counts nor resets the count (#18632: see
-			# ha_session_sync_idle_sample). Establish the baseline only
 			if (( stable >= stable_needed )); then
 				final_source_confirmation_measurement_sequence=""
 				final_target_confirmation_measurement_sequence=""
@@ -548,7 +581,6 @@ wait_for_session_sync_idle() {
 				baseline_sent="$source_sent"
 				baseline_received="$target_recv"
 				baseline_dropped="$source_dropped"
-				baseline_event_stream_lost="$source_event_stream_lost"
 			fi
 		fi
 		prev_source_sent="$source_sent"

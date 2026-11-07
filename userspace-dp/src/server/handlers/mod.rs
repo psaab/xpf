@@ -35,7 +35,6 @@
 //     set), and a failed flush arms delta loss on drained contributors
 //     (#5294/#16584).
 
-mod session_counters;
 mod binding;
 mod export;
 mod forwarding;
@@ -43,20 +42,21 @@ mod ha;
 mod idle_leases;
 mod inject_packet;
 mod neighbors;
+mod policy_list;
 mod queue;
 mod rebind;
+mod session_counters;
 mod session_deltas;
 mod snapshot;
 mod stop_workers;
 mod sync_session;
-mod policy_list;
 
-use crate::afxdp::{HaRefreshOutcome, SessionDomain, HA_REFRESH_NEEDS_CONTROL_SOCKET};
 use super::super::*;
 use super::helpers::{
-    lock_server_state_recover, project_status, supervise_tunnels,
-    wait_for_binding_settle, write_state,
+    lock_server_state_recover, project_status, supervise_tunnels, wait_for_binding_settle,
+    write_state,
 };
+use crate::afxdp::{HA_REFRESH_NEEDS_CONTROL_SOCKET, HaRefreshOutcome, SessionDomain};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,7 +110,10 @@ mod deferred_17135_tests {
         // Build via a raw byte name so this fixture does not itself match
         // the acceptance grep for the production quarantine checks.
         let state = Arc::new(Mutex::new(ServerState {
-            status: ProcessStatus { pid: 17135, ..Default::default() },
+            status: ProcessStatus {
+                pid: 17135,
+                ..Default::default()
+            },
             snapshot: None,
             afxdp: crate::afxdp::Coordinator::new(),
             state_writer: Arc::new(crate::state_writer::StateWriter::new()),
@@ -129,7 +132,10 @@ mod deferred_17135_tests {
         attach_status_after_wait(&state, &running, &mut response);
         let status = response.status.expect("status must attach");
         assert_eq!(status.pid, 17135);
-        assert!(running.load(Ordering::SeqCst), "healthy attach must not stop the daemon");
+        assert!(
+            running.load(Ordering::SeqCst),
+            "healthy attach must not stop the daemon"
+        );
     }
 
     #[test]
@@ -138,8 +144,14 @@ mod deferred_17135_tests {
         let running = Arc::new(AtomicBool::new(true));
         let mut response = ControlResponse::default();
         attach_status_after_wait(&state, &running, &mut response);
-        assert!(response.status.is_none(), "quarantined state yields no status");
-        assert!(!running.load(Ordering::SeqCst), "quarantine must ensure shutdown is underway");
+        assert!(
+            response.status.is_none(),
+            "quarantined state yields no status"
+        );
+        assert!(
+            !running.load(Ordering::SeqCst),
+            "quarantine must ensure shutdown is underway"
+        );
     }
 
     #[test]
@@ -223,10 +235,7 @@ impl Write for ResponseSizeCounter {
     }
 }
 
-fn enforce_fib_response_cap(
-    response: &mut ControlResponse,
-    byte_cap: usize,
-) -> Result<(), String> {
+fn enforce_fib_response_cap(response: &mut ControlResponse, byte_cap: usize) -> Result<(), String> {
     let mut counter = ResponseSizeCounter(0);
     serde_json::to_writer(&mut counter, response)
         .map_err(|error| format!("count fib_dump response: {error}"))?;
@@ -261,7 +270,10 @@ mod fib_response_cap_tests {
             }],
             ..Default::default()
         };
-        let exact_response_bytes = serde_json::to_vec(&response).expect("serialize fixture").len() + 1;
+        let exact_response_bytes = serde_json::to_vec(&response)
+            .expect("serialize fixture")
+            .len()
+            + 1;
         enforce_fib_response_cap(&mut response, exact_response_bytes)
             .expect("count the complete response");
 
@@ -362,7 +374,6 @@ pub(crate) fn handle_stream(
     let mut drained_delta_slots: Vec<u32> = Vec::new();
     let mut drained_delta_workers: Vec<u32> = Vec::new();
 
-
     // #7209: THE VERBS SERVED WITHOUT `state.lock()`.
     //
     // Everything below this block takes the snapshot-wide mutex, which
@@ -392,11 +403,7 @@ pub(crate) fn handle_stream(
     if request.request_type == "sync_session" {
         sync_session::handle(&session_domain, request.session_sync, &mut response);
     } else if request.request_type == "list_sessions_by_policy" {
-        policy_list::handle(
-            &session_domain,
-            request.session_policy_list,
-            &mut response,
-        );
+        policy_list::handle(&session_domain, request.session_policy_list, &mut response);
     }
 
     // #9629: session-socket HA fast path — lease-only refresh, never `ServerState`.
@@ -453,7 +460,9 @@ pub(crate) fn handle_stream(
         // fast paths above stay servable: they provably never touch `ServerState`.
         if guard.quarantined_after_panic {
             running.store(false, Ordering::SeqCst);
-            return Err("server state quarantined after a handler panic; restart required".to_string());
+            return Err(
+                "server state quarantined after a handler panic; restart required".to_string(),
+            );
         }
         // #17141: supervise inside this same (only) lock acquisition,
         // before the match — never a second lock just for supervision.
@@ -461,10 +470,10 @@ pub(crate) fn handle_stream(
         match request.request_type.as_str() {
             "ping" => {}
             "scheduler_heartbeat" => {
-                guard.afxdp.scheduler_lease.apply(
-                    request.version,
-                    crate::afxdp::monotonic_nanos(),
-                );
+                guard
+                    .afxdp
+                    .scheduler_lease
+                    .apply(request.version, crate::afxdp::monotonic_nanos());
             }
             "status" => {
                 // #9629 (Spark MAJOR-2): the status loop is the bounded
@@ -475,8 +484,18 @@ pub(crate) fn handle_stream(
                 // control path and does not reintroduce the session-thread
                 // mutex wedge.
                 persist_state = true;
+                if let Some(probe_request) = request.session_delta_loss_probe.as_ref() {
+                    // The wait-window answer is computed from counters read by
+                    // this request's own helper projection, never from a Go
+                    // cache publication or an earlier held ProcessStatus.
+                    project_status(&mut guard);
+                    response.session_delta_loss_probe =
+                        Some(super::helpers::status::session_delta_loss_probe(
+                            &guard.status,
+                            probe_request,
+                        ));
+                }
             }
-
             "fib_dump" => match guard.afxdp.dump_fib() {
                 Ok((generation, routes)) => {
                     response.fib_generation = generation;
@@ -496,8 +515,9 @@ pub(crate) fn handle_stream(
                     .as_ref()
                     .map(|snapshot| snapshot.map_pins.ctrl.clone())
                     .unwrap_or_default();
-                let _ctrl_stamp_grant =
-                    guard.afxdp.open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
+                let _ctrl_stamp_grant = guard
+                    .afxdp
+                    .open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
                 snapshot::apply(
                     &mut guard,
                     request.snapshot,
@@ -585,8 +605,9 @@ pub(crate) fn handle_stream(
                     .as_ref()
                     .map(|snapshot| snapshot.map_pins.ctrl.clone())
                     .unwrap_or_default();
-                let _ctrl_stamp_grant =
-                    guard.afxdp.open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
+                let _ctrl_stamp_grant = guard
+                    .afxdp
+                    .open_ctrl_stamp_grant(request.ctrl_stamp_deadline_mono_ns, &pin);
                 snapshot::bump_fib(
                     &mut guard,
                     request.snapshot.as_ref(),
@@ -650,15 +671,13 @@ pub(crate) fn handle_stream(
                 project_status(&mut guard);
                 persist_state = true;
             }
-            "set_queue_state" => {
-                queue::set(
-                    &mut guard,
-                    request.queue,
-                    &mut response,
-                    &mut persist_state,
-                    &mut deferred,
-                )
-            }
+            "set_queue_state" => queue::set(
+                &mut guard,
+                request.queue,
+                &mut response,
+                &mut persist_state,
+                &mut deferred,
+            ),
             "set_binding_state" => binding::set(
                 &mut guard,
                 request.binding,
@@ -680,13 +699,13 @@ pub(crate) fn handle_stream(
             // #8615: the DISPLAY read. Separate verb, separate response field,
             // separate record type — the SHOW table needs `active_flows`, which
             // the sync record is forbidden to carry.
-            "export_persistent_lease_display" => {
-                idle_leases::export_display(&mut guard, request.lease_export.as_ref(), &mut response)
-            }
+            "export_persistent_lease_display" => idle_leases::export_display(
+                &mut guard,
+                request.lease_export.as_ref(),
+                &mut response,
+            ),
             // #10784: revoke leases in the helper allocator, not only the Go display mirror.
-            "clear_persistent_nat_leases" => {
-                idle_leases::clear(&mut guard, &mut response)
-            }
+            "clear_persistent_nat_leases" => idle_leases::clear(&mut guard, &mut response),
             "import_idle_leases" => idle_leases::import(
                 &mut guard,
                 &request.idle_leases,

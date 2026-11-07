@@ -1,8 +1,8 @@
 // #1345: per-verb handler for update_neighbors, split out of handlers.rs in #1345.
 
-use super::super::helpers::project_status;
 use super::super::ServerState;
-use crate::{afxdp, NeighborSnapshot};
+use super::super::helpers::project_status;
+use crate::{NeighborSnapshot, afxdp};
 
 pub(super) fn update(
     guard: &mut ServerState,
@@ -84,9 +84,7 @@ pub(super) fn update(
                 .cloned()
                 .collect();
             let flagged = raw_filtered.len() != neighbors.len();
-            let fenced = guard
-                .afxdp
-                .fenced_neighbor_snapshots(&raw_filtered);
+            let fenced = guard.afxdp.fenced_neighbor_snapshots(&raw_filtered);
             // A raw row the coordinator dropped entirely (e.g. a
             // directed broadcast) has no fenced counterpart; the flag
             // still forces the digest clear below.

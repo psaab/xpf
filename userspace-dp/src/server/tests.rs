@@ -10,16 +10,17 @@
 
 use super::helpers::{
     bindings_settled, build_synced_session_entry, clear_pre_persist_lock_probe,
-    forwarding_unsupported_error, parse_session_sync_mac, reconcile_status_bindings,
-    project_status, set_bindings_forwarding_armed, should_run_afxdp, take_pre_persist_lock_free,
-    write_state,
+    forwarding_unsupported_error, parse_session_sync_mac, project_status,
+    reconcile_status_bindings, set_bindings_forwarding_armed, should_run_afxdp,
+    take_pre_persist_lock_free, write_state,
 };
-use super::{handle_stream, ServerState, SocketMode};
+use super::{ServerState, SocketMode, handle_stream};
 use crate::state_writer::StateWriter;
 use crate::{
-    afxdp, BindingControlRequest, BindingStatus, ControlRequest, ControlResponse, ForwardingControlRequest,
-    HAGroupStatus, HAStateUpdateRequest, ProcessStatus, QueueControlRequest, SessionExportRequest,
-    SessionSyncRequest, UserspaceCapabilities, MAX_CONTROL_REQUEST_BYTES,
+    BindingControlRequest, BindingStatus, ControlRequest, ControlResponse,
+    ForwardingControlRequest, HAGroupStatus, HAStateUpdateRequest, MAX_CONTROL_REQUEST_BYTES,
+    ProcessStatus, QueueControlRequest, SessionExportRequest, SessionSyncRequest,
+    UserspaceCapabilities, afxdp,
 };
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
@@ -74,8 +75,7 @@ fn run_request_with_domain(
     mode: SocketMode,
 ) -> ControlResponse {
     let state_file = unique_state_file(&request.request_type);
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let handle = {
         let state_file = state_file.clone();
@@ -105,14 +105,15 @@ fn run_request_on_file(
     request: ControlRequest,
     state_file: &str,
 ) -> ControlResponse {
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let handle = {
         let state_file = state_file.to_string();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
+            std::thread::spawn(move || {
+                handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+            })
         }
     };
 
@@ -179,14 +180,20 @@ fn run_request_delivering_wg_secrets(
         }
     }
     let state_file = unique_state_file(&request.request_type);
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
     let handle = {
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            handle_stream(server, &state_file, state, running, session_domain, SocketMode::Main)
+            handle_stream(
+                server,
+                &state_file,
+                state,
+                running,
+                session_domain,
+                SocketMode::Main,
+            )
         })
     };
     serde_json::to_writer(&mut client, &payload).expect("write request");
@@ -204,14 +211,15 @@ fn run_request_delivering_wg_secrets(
 fn run_raw(state: Arc<Mutex<ServerState>>, payload: &[u8]) -> Result<(), String> {
     use std::io::Write as _;
     let state_file = unique_state_file("raw");
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let handle = {
         let state_file = state_file.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &state_file, state, running, sd, SocketMode::Main))
+            std::thread::spawn(move || {
+                handle_stream(server, &state_file, state, running, sd, SocketMode::Main)
+            })
         }
     };
     client.write_all(payload).expect("write raw payload");
@@ -368,7 +376,9 @@ fn unknown_request_type_is_rejected_with_message() {
     let response = run_request(new_state(ProcessStatus::default()), req("does_not_exist"));
     assert!(!response.ok);
     assert!(
-        response.error.contains("unknown request type does_not_exist"),
+        response
+            .error
+            .contains("unknown request type does_not_exist"),
         "unexpected error: {}",
         response.error
     );
@@ -1107,8 +1117,7 @@ fn update_ha_state_session_refuses_inventory_creation_9629() {
     let resp = run_request_with_domain(state.clone(), request, domain.clone(), SocketMode::Session);
     assert!(!resp.ok, "all-inactive on empty stored must route to main");
     assert!(
-        resp
-            .error
+        resp.error
             .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
         "NeedsLock prefix missing: {:?}",
         resp.error
@@ -1169,7 +1178,10 @@ fn update_ha_state_delayed_refresh_after_clear_9629() {
     clear_req.ha_state = Some(HAStateUpdateRequest { groups: vec![] });
     let clear_resp = run_request(state.clone(), clear_req);
     assert!(clear_resp.ok, "clear: {}", clear_resp.error);
-    assert!(domain.ha_group_status(1).is_none(), "CLEAR must empty stored");
+    assert!(
+        domain.ha_group_status(1).is_none(),
+        "CLEAR must empty stored"
+    );
     // Stale pre-clear snapshot replayed on Session: must refuse, no restore.
     let mut stale_req = req("update_ha_state");
     stale_req.ha_state = Some(HAStateUpdateRequest {
@@ -1183,8 +1195,7 @@ fn update_ha_state_delayed_refresh_after_clear_9629() {
     let resp = run_request_with_domain(state, stale_req, domain.clone(), SocketMode::Session);
     assert!(!resp.ok, "stale post-clear refresh must route to main");
     assert!(
-        resp
-            .error
+        resp.error
             .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
         "NeedsLock prefix missing: {:?}",
         resp.error
@@ -1226,10 +1237,12 @@ fn update_ha_state_session_expired_demotion_stays_expired_9629() {
         }],
     });
     let resp = run_request_with_domain(state, request, domain.clone(), SocketMode::Session);
-    assert!(!resp.ok, "expired mismatch must route to main (zero refreshed)");
     assert!(
-        resp
-            .error
+        !resp.ok,
+        "expired mismatch must route to main (zero refreshed)"
+    );
+    assert!(
+        resp.error
             .starts_with(crate::afxdp::HA_REFRESH_NEEDS_CONTROL_SOCKET),
         "NeedsLock prefix missing: {:?}",
         resp.error
@@ -1276,7 +1289,11 @@ fn update_ha_state_session_ping_served_while_locked_9629() {
     let _ = release_tx.send(());
     holder.join().expect("holder thread");
 
-    assert!(resp.ok, "session ping must succeed while locked; error={}", resp.error);
+    assert!(
+        resp.ok,
+        "session ping must succeed while locked; error={}",
+        resp.error
+    );
     assert!(
         resp.status.is_none(),
         "session ping must not attach status (no refresh, no lock)"
@@ -1410,8 +1427,11 @@ fn sync_session_missing_request_is_rejected() {
 #[test]
 fn sync_session_unknown_operation_is_rejected() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "frobnicate".to_string(),
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "frobnicate".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(!response.ok);
     assert!(
@@ -1426,14 +1446,17 @@ fn sync_session_unknown_operation_is_rejected() {
 #[test]
 fn sync_session_delete_with_valid_key_succeeds() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-    addr_family: 2, // AF_INET
-    protocol: 6,    // TCP
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "delete".to_string(),
+        addr_family: 2, // AF_INET
+        protocol: 6,    // TCP
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(response.ok, "unexpected error: {}", response.error);
 }
@@ -1444,8 +1467,11 @@ fn sync_session_delete_with_valid_key_succeeds() {
 /// on the wire, so a rename typo cannot round-trip through this struct.
 #[test]
 fn a_sync_session_request_decodes_the_peer_delete_mark_9714() {
-    let mut wire = serde_json::to_value(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-    ..SessionSyncRequest::default() })
+    let mut wire = serde_json::to_value(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "delete".to_string(),
+        ..SessionSyncRequest::default()
+    })
     .expect("encode a delete");
     wire["peer_delete"] = serde_json::Value::Bool(true);
     let marked: SessionSyncRequest =
@@ -1470,35 +1496,41 @@ fn a_sync_session_request_decodes_the_peer_delete_mark_9714() {
 #[test]
 fn sync_session_upsert_with_valid_entry_succeeds() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(response.ok, "unexpected error: {}", response.error);
 }
 
 #[test]
 fn sync_session_upsert_accepts_unknown_provenance_12187() {
-    let sync = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    source_nat_provenance: 3,
-    ..SessionSyncRequest::default() };
+    let sync = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        source_nat_provenance: 3,
+        ..SessionSyncRequest::default()
+    };
     let imported = build_synced_session_entry(&sync, &rustc_hash::FxHashMap::default(), 0)
         .expect("out-of-range provenance is unknown, not a rejected sync");
     assert_eq!(imported.source_nat_static, None);
@@ -1518,18 +1550,21 @@ fn sync_session_upsert_accepts_unknown_provenance_12187() {
 fn delivered_session_close_deletes_synced_opening_10888() {
     let state = new_state(ProcessStatus::default());
     let mut upsert = req("sync_session");
-    upsert.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    tcp_handshake_state: 1,
-    ..SessionSyncRequest::default() });
+    upsert.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        tcp_handshake_state: 1,
+        ..SessionSyncRequest::default()
+    });
     let upsert_response = run_request(state.clone(), upsert);
     assert!(
         upsert_response.ok,
@@ -1547,14 +1582,17 @@ fn delivered_session_close_deletes_synced_opening_10888() {
     );
 
     let mut close = req("sync_session");
-    close.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    ..SessionSyncRequest::default() });
+    close.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "delete".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        ..SessionSyncRequest::default()
+    });
     let close_response = run_request(state.clone(), close);
     assert!(
         close_response.ok,
@@ -1575,15 +1613,18 @@ fn delivered_session_close_deletes_synced_opening_10888() {
 #[test]
 fn sync_session_upsert_with_malformed_mac_is_rejected() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    neighbor_mac: "zz:zz:zz:zz:zz:zz".to_string(),
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        neighbor_mac: "zz:zz:zz:zz:zz:zz".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(!response.ok);
     assert!(
@@ -1601,18 +1642,21 @@ fn sync_session_upsert_with_quarantine_sentinel_domain_is_refused_9956() {
     // agreement with Go's `QuarantinedRoutingInstanceDomain` is pinned in
     // `the_quarantine_sentinel_decodes_unrecognized_9956`.
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    routing_domain: quarantine_sentinel_domain_9956(),
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        routing_domain: quarantine_sentinel_domain_9956(),
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(
         !response.ok,
@@ -1660,17 +1704,20 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v4_9956() {
     let sentinel = quarantine_sentinel_domain_9956();
     let afxdp = afxdp::Coordinator::new();
     let entry = crate::server::helpers::build_synced_session_entry(
-        &SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default() },
+        &SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        },
         afxdp.zone_name_to_id_ref(),
         sentinel,
     )
@@ -1689,15 +1736,18 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v4_9956() {
         snapshot_policy_mismatch_total: 0,
     }));
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    routing_domain: sentinel,
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "delete".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        routing_domain: sentinel,
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(state.clone(), request);
     assert!(
         response.ok,
@@ -1722,17 +1772,20 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
     let sentinel = quarantine_sentinel_domain_9956();
     let afxdp = afxdp::Coordinator::new();
     let entry = crate::server::helpers::build_synced_session_entry(
-        &SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-        addr_family: libc::AF_INET6 as u8,
-        protocol: 6,
-        src_ip: "2001:db8::1".to_string(),
-        dst_ip: "2001:db8::2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default() },
+        &SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family: libc::AF_INET6 as u8,
+            protocol: 6,
+            src_ip: "2001:db8::1".to_string(),
+            dst_ip: "2001:db8::2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        },
         afxdp.zone_name_to_id_ref(),
         sentinel,
     )
@@ -1751,15 +1804,18 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
         snapshot_policy_mismatch_total: 0,
     }));
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-    addr_family: libc::AF_INET6 as u8,
-    protocol: 6,
-    src_ip: "2001:db8::1".to_string(),
-    dst_ip: "2001:db8::2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    routing_domain: sentinel,
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "delete".to_string(),
+        addr_family: libc::AF_INET6 as u8,
+        protocol: 6,
+        src_ip: "2001:db8::1".to_string(),
+        dst_ip: "2001:db8::2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        routing_domain: sentinel,
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(state.clone(), request);
     assert!(
         response.ok,
@@ -1780,12 +1836,15 @@ fn sync_session_delete_with_quarantine_sentinel_domain_removes_v6_9956() {
 #[test]
 fn sync_session_delete_with_unparseable_ip_is_rejected() {
     let mut request = req("sync_session");
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "not-an-ip".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "delete".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "not-an-ip".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let response = run_request(new_state(ProcessStatus::default()), request);
     assert!(!response.ok);
     assert!(
@@ -1826,17 +1885,20 @@ fn rebind_preserves_synced_sessions() {
     });
 
     let mut upsert = req("sync_session");
-    upsert.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    ..SessionSyncRequest::default() });
+    upsert.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let upsert_resp = run_request(state.clone(), upsert);
     assert!(upsert_resp.ok, "upsert failed: {}", upsert_resp.error);
     assert!(
@@ -1894,17 +1956,20 @@ fn stop_workers_preserves_synced_sessions_for_rebind() {
     });
 
     let mut upsert = req("sync_session");
-    upsert.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    ..SessionSyncRequest::default() });
+    upsert.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let upsert_resp = run_request(state.clone(), upsert);
     assert!(upsert_resp.ok, "upsert failed: {}", upsert_resp.error);
     let before = state
@@ -1912,7 +1977,10 @@ fn stop_workers_preserves_synced_sessions_for_rebind() {
         .unwrap()
         .afxdp
         .snapshot_shared_session_entries();
-    assert!(!before.is_empty(), "synced session should be present after upsert");
+    assert!(
+        !before.is_empty(),
+        "synced session should be present after upsert"
+    );
 
     let stop_resp = run_request(state.clone(), req("stop_workers"));
     assert!(stop_resp.ok, "stop_workers failed: {}", stop_resp.error);
@@ -1999,17 +2067,20 @@ fn full_stop_still_wipes_synced_sessions_control_14677() {
         ..ProcessStatus::default()
     });
     let mut upsert = req("sync_session");
-    upsert.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    ..SessionSyncRequest::default() });
+    upsert.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
     let upsert_resp = run_request(state.clone(), upsert);
     assert!(upsert_resp.ok, "upsert failed: {}", upsert_resp.error);
     assert!(
@@ -2051,7 +2122,7 @@ fn bump_fib_generation_missing_snapshot_is_rejected() {
 
 #[test]
 fn bump_fib_generation_updates_status_and_stored_snapshot() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     // Seed a stored snapshot via apply_snapshot first.
     {
@@ -2096,7 +2167,7 @@ fn bump_fib_generation_updates_status_and_stored_snapshot() {
 /// that installed zero bindings over the working config with ok=true.
 #[test]
 fn apply_snapshot_with_wild_ifindex_is_refused_without_install_9900() {
-    use crate::{ConfigSnapshot, InterfaceSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, InterfaceSnapshot};
     let state = new_state(ProcessStatus::default());
     let mut request = req("apply_snapshot");
     request.snapshot = Some(ConfigSnapshot {
@@ -2145,8 +2216,7 @@ fn quarantined_state_refuses_requests_9900() {
     let state = new_state(ProcessStatus::default());
     state.lock().expect("state").quarantined_after_panic = true;
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
     let state_file = format!(
         "{}/xpf-quarantine-test-{}.json",
@@ -2158,13 +2228,23 @@ fn quarantined_state_refuses_requests_9900() {
         let running = running.clone();
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            handle_stream(server, &state_file, state, running, session_domain, SocketMode::Main)
+            handle_stream(
+                server,
+                &state_file,
+                state,
+                running,
+                session_domain,
+                SocketMode::Main,
+            )
         })
     };
     let request = req("ping");
     serde_json::to_writer(&mut client, &request).expect("write request");
     std::io::Write::write_all(&mut client, b"\n").expect("newline");
-    let err = handle.join().expect("handler thread").expect_err("must refuse");
+    let err = handle
+        .join()
+        .expect("handler thread")
+        .expect_err("must refuse");
     assert!(
         err.contains("quarantined"),
         "refusal must say quarantined, got: {err}"
@@ -2204,7 +2284,7 @@ fn quarantined_state_skips_state_file_write_9900() {
 /// stored snapshot, and worker FIB generation all stay at the prior value.
 #[test]
 fn bump_fib_generation_rejects_wrong_protocol_version() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     // Seed a stored snapshot at fib_generation 1.
     {
@@ -2241,7 +2321,11 @@ fn bump_fib_generation_rejects_wrong_protocol_version() {
         "rejected bump must not advance last_fib_generation"
     );
     assert_eq!(
-        guard.snapshot.as_ref().expect("stored snapshot").fib_generation,
+        guard
+            .snapshot
+            .as_ref()
+            .expect("stored snapshot")
+            .fib_generation,
         1,
         "rejected bump must not rewrite the stored snapshot"
     );
@@ -2260,7 +2344,7 @@ fn bump_fib_generation_rejects_wrong_protocol_version() {
 /// the last accepted value.
 #[test]
 fn bump_fib_generation_rejects_generation_rollback() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     // Seed a stored snapshot at fib_generation 5.
     {
@@ -2306,7 +2390,11 @@ fn bump_fib_generation_rejects_generation_rollback() {
         "rejected rollback must not lower last_fib_generation"
     );
     assert_eq!(
-        guard.snapshot.as_ref().expect("stored snapshot").fib_generation,
+        guard
+            .snapshot
+            .as_ref()
+            .expect("stored snapshot")
+            .fib_generation,
         7,
         "rejected rollback must not rewrite the stored snapshot"
     );
@@ -2323,7 +2411,7 @@ fn bump_fib_generation_rejects_generation_rollback() {
 /// when it changes P-MECH authority.
 #[test]
 fn bump_fib_generation_rejects_disarmed_rollback_and_invalidates_digest() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     // Disarmed apply advances status/snapshot to fib 5 while coordinator
     // validation stays 0 (forwarding not armed).
@@ -2369,10 +2457,7 @@ fn bump_fib_generation_rejects_disarmed_rollback_and_invalidates_digest() {
     {
         let guard = state.lock().expect("state");
         assert_eq!(guard.status.last_fib_generation, 5);
-        assert_eq!(
-            guard.snapshot.as_ref().expect("stored").fib_generation,
-            5
-        );
+        assert_eq!(guard.snapshot.as_ref().expect("stored").fib_generation, 5);
     }
     // An accepted forward bump mutates stored P-MECH authority, so its
     // content digest must be invalidated.
@@ -2405,7 +2490,7 @@ fn bump_fib_generation_rejects_disarmed_rollback_and_invalidates_digest() {
 /// generation the control plane already considered applied.
 #[test]
 fn bump_fib_generation_persists_bumped_generation() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     let state_file = unique_state_file("bump-persist");
     // Seed apply persists the state file at fib_generation 1.
@@ -2471,7 +2556,7 @@ fn apply_snapshot_missing_payload_is_rejected() {
 #[test]
 fn apply_snapshot_policy_count_mismatch_is_refused_and_counted() {
     use crate::protocol::snapshot::SnapshotSummary;
-    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, PolicyRuleSnapshot};
     let state = new_state(ProcessStatus::default());
     // Seed a good snapshot carrying one policy.
     {
@@ -2556,8 +2641,15 @@ fn apply_snapshot_policy_count_mismatch_is_refused_and_counted() {
         "refused apply must not change the applied policy count"
     );
     let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
-    assert_eq!(installed.generation, 1, "prior snapshot must stay installed");
-    assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+    assert_eq!(
+        installed.generation, 1,
+        "prior snapshot must stay installed"
+    );
+    assert_eq!(
+        installed.policies.len(),
+        1,
+        "prior policies must stay installed"
+    );
 }
 
 /// HARDENING (#15742 follow-up, joint omission): both transmitted fields
@@ -2567,7 +2659,7 @@ fn apply_snapshot_policy_count_mismatch_is_refused_and_counted() {
 #[test]
 fn apply_snapshot_both_zeroed_over_installed_is_refused() {
     use crate::protocol::snapshot::SnapshotSummary;
-    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, PolicyRuleSnapshot};
     let state = new_state(ProcessStatus::default());
     let policy = || PolicyRuleSnapshot {
         rule_id: "lan->wan/allow-all".to_string(),
@@ -2610,7 +2702,11 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
             ..ConfigSnapshot::default()
         });
         let response = run_request(fresh, request);
-        assert!(response.ok, "empty first apply must succeed: {}", response.error);
+        assert!(
+            response.ok,
+            "empty first apply must succeed: {}",
+            response.error
+        );
     }
     // Seed one installed policy.
     {
@@ -2646,7 +2742,10 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
         ..ConfigSnapshot::default()
     });
     let response = run_request(state.clone(), request);
-    assert!(!response.ok, "both-zeroed apply over installed policies must be refused");
+    assert!(
+        !response.ok,
+        "both-zeroed apply over installed policies must be refused"
+    );
     assert!(
         response.error.contains("no full-clear signal"),
         "unexpected error: {}",
@@ -2656,9 +2755,12 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
     assert_eq!(guard.snapshot_policy_mismatch_total, 1);
     assert_eq!(guard.status.last_snapshot_generation, 1);
     let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
-    assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+    assert_eq!(
+        installed.policies.len(),
+        1,
+        "prior policies must stay installed"
+    );
 }
-
 
 /// #16056 (A6-06): a snapshot whose summary.interface_count/zone_count
 /// disagree with the built sections it carries — interface_count=2 with
@@ -2673,7 +2775,7 @@ fn apply_snapshot_both_zeroed_over_installed_is_refused() {
 #[test]
 fn apply_snapshot_section_count_mismatch_is_refused_and_counted_16056() {
     use crate::protocol::snapshot::SnapshotSummary;
-    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, PolicyRuleSnapshot};
     let state = new_state(ProcessStatus::default());
     let zones = || {
         vec![
@@ -2824,10 +2926,21 @@ fn apply_snapshot_section_count_mismatch_is_refused_and_counted_16056() {
         "refused applies must not advance the reported generation"
     );
     let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
-    assert_eq!(installed.generation, 1, "prior snapshot must stay installed");
-    assert_eq!(installed.interfaces.len(), 2, "prior interfaces must stay installed");
+    assert_eq!(
+        installed.generation, 1,
+        "prior snapshot must stay installed"
+    );
+    assert_eq!(
+        installed.interfaces.len(),
+        2,
+        "prior interfaces must stay installed"
+    );
     assert_eq!(installed.zones.len(), 2, "prior zones must stay installed");
-    assert_eq!(installed.policies.len(), 1, "prior policies must stay installed");
+    assert_eq!(
+        installed.policies.len(),
+        1,
+        "prior policies must stay installed"
+    );
 }
 
 /// #16056 (A6-06, joint-omission arm): both transmitted fields zeroed
@@ -2840,7 +2953,7 @@ fn apply_snapshot_section_count_mismatch_is_refused_and_counted_16056() {
 #[test]
 fn apply_snapshot_both_zeroed_sections_over_installed_is_refused_16056() {
     use crate::protocol::snapshot::SnapshotSummary;
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let zones = || {
         vec![
             crate::ZoneSnapshot {
@@ -2884,7 +2997,11 @@ fn apply_snapshot_both_zeroed_sections_over_installed_is_refused_16056() {
             ..ConfigSnapshot::default()
         });
         let response = run_request(fresh, request);
-        assert!(response.ok, "empty first apply must succeed: {}", response.error);
+        assert!(
+            response.ok,
+            "empty first apply must succeed: {}",
+            response.error
+        );
     }
     let state = new_state(ProcessStatus::default());
     // Seed 2 zones + 2 interfaces.
@@ -2923,7 +3040,10 @@ fn apply_snapshot_both_zeroed_sections_over_installed_is_refused_16056() {
             ..ConfigSnapshot::default()
         });
         let response = run_request(state.clone(), request);
-        assert!(!response.ok, "both-zeroed interfaces over installed must be refused");
+        assert!(
+            !response.ok,
+            "both-zeroed interfaces over installed must be refused"
+        );
         assert!(
             response.error.contains("no full-clear signal"),
             "unexpected error: {}",
@@ -2947,7 +3067,10 @@ fn apply_snapshot_both_zeroed_sections_over_installed_is_refused_16056() {
             ..ConfigSnapshot::default()
         });
         let response = run_request(state.clone(), request);
-        assert!(!response.ok, "both-zeroed zones over installed must be refused");
+        assert!(
+            !response.ok,
+            "both-zeroed zones over installed must be refused"
+        );
         assert!(
             response.error.contains("no full-clear signal"),
             "unexpected error: {}",
@@ -2958,13 +3081,17 @@ fn apply_snapshot_both_zeroed_sections_over_installed_is_refused_16056() {
     assert_eq!(guard.snapshot_policy_mismatch_total, 2);
     assert_eq!(guard.status.last_snapshot_generation, 1);
     let installed = guard.snapshot.as_ref().expect("prior snapshot retained");
-    assert_eq!(installed.interfaces.len(), 2, "prior interfaces must stay installed");
+    assert_eq!(
+        installed.interfaces.len(),
+        2,
+        "prior interfaces must stay installed"
+    );
     assert_eq!(installed.zones.len(), 2, "prior zones must stay installed");
 }
 
 #[test]
 fn apply_snapshot_integrity_preflight_rejects_without_mutating_state() {
-    use crate::{AddressBookSnapshot, ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{AddressBookSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     // A reserved-sentinel address-book id (0) must fail the #1606
     // integrity preflight BEFORE any guard.status / guard.snapshot
     // mutation. The previous good config must survive intact.
@@ -3007,7 +3134,7 @@ fn apply_snapshot_integrity_preflight_rejects_without_mutating_state() {
 #[test]
 fn apply_snapshot_reuses_policy_preflight_on_same_plan_refresh_11005() {
     use crate::{
-        ConfigSnapshot, PolicyRuleSnapshot, ZoneSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, PolicyRuleSnapshot, ZoneSnapshot,
     };
 
     let snapshot = |generation| ConfigSnapshot {
@@ -3086,7 +3213,7 @@ fn apply_snapshot_reuses_policy_preflight_on_same_plan_refresh_11005() {
 /// last_snapshot_generation advanced. Every assertion below flips.
 #[test]
 fn apply_snapshot_same_plan_build_failure_rejects_and_keeps_prior_3766() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     // A tunnel interface is excluded from the binding plan, so both applies
     // share an (empty) binding-plan key -> the second apply takes the
@@ -3125,7 +3252,11 @@ fn apply_snapshot_same_plan_build_failure_rejects_and_keeps_prior_3766() {
     let mut first = req("apply_snapshot");
     first.snapshot = Some(snapshot(1, "10.0.0.1/24"));
     let response = run_request(state.clone(), first);
-    assert!(response.ok, "baseline apply must succeed: {}", response.error);
+    assert!(
+        response.ok,
+        "baseline apply must succeed: {}",
+        response.error
+    );
 
     // Apply 2 (same-plan refresh leg): unparseable address -> build fails.
     let mut second = req("apply_snapshot");
@@ -3187,7 +3318,11 @@ fn forwarding_caps() -> UserspaceCapabilities {
 /// FULL-APPLY leg (not the address-only same-plan leg the tunnel helper
 /// drives). A valid inet address keeps the pre-teardown forwarding build
 /// green so the reconcile REACHES the post-teardown worker spawn.
-fn data_iface_6140(name: &str, linux_name: &str, ifindex: i32) -> crate::protocol::snapshot::InterfaceSnapshot {
+fn data_iface_6140(
+    name: &str,
+    linux_name: &str,
+    ifindex: i32,
+) -> crate::protocol::snapshot::InterfaceSnapshot {
     crate::protocol::snapshot::InterfaceSnapshot {
         name: name.to_string(),
         linux_name: linux_name.to_string(),
@@ -3253,7 +3388,7 @@ fn tunnel_iface_3789(address: &str) -> crate::protocol::snapshot::InterfaceSnaps
 /// Every assertion below flips.
 #[test]
 fn apply_snapshot_full_reconcile_build_failure_rejects_and_keeps_prior_3789() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     // Armed so the reconcile takes the real afxdp.reconcile path (not the
     // disarmed stop arm). forwarding_supported comes from the snapshot.
@@ -3317,7 +3452,7 @@ fn apply_snapshot_full_reconcile_build_failure_rejects_and_keeps_prior_3789() {
 /// advanced to 2. The generation/defer_workers assertions flip.
 #[test]
 fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prior_3789() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     // Prior snapshot deferred workers -> previous_defer_workers=true makes
     // same_plan_apply_needs_binding_reconcile return true on the next
@@ -3437,7 +3572,7 @@ fn apply_snapshot_same_plan_needs_reconcile_build_failure_rejects_and_keeps_prio
 #[test]
 fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
     use crate::{
-        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
         ERROR_RETRY_CLASS_RETRY_DEBT, SNAPSHOT_POST_TEARDOWN_PREFIX,
     };
 
@@ -3638,7 +3773,7 @@ fn post_teardown_spawn_failure_fails_closed_no_persist_4952() {
 #[test]
 fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
     use crate::{
-        ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, ERROR_CODE_SNAPSHOT_POST_TEARDOWN,
         ERROR_RETRY_CLASS_RETRY_DEBT, SNAPSHOT_POST_TEARDOWN_PREFIX,
     };
 
@@ -3761,7 +3896,10 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
         "the rejected snapshot must not overwrite the persisted baseline"
     );
     assert_eq!(
-        guard.snapshot.as_ref().map(|s| s.interfaces[0].linux_name.as_str()),
+        guard
+            .snapshot
+            .as_ref()
+            .map(|s| s.interfaces[0].linux_name.as_str()),
         Some("ge-0-0-1"),
         "the prior snapshot (ge-0-0-1) must be restored intact as the baseline"
     );
@@ -3797,7 +3935,10 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
     // bindings, so the restored set is empty). Assert the restored
     // snapshot/bindings consistency rather than the pre-#14959 desync.
     assert_eq!(
-        guard.snapshot.as_ref().map(|s| s.interfaces[0].linux_name.as_str()),
+        guard
+            .snapshot
+            .as_ref()
+            .map(|s| s.interfaces[0].linux_name.as_str()),
         Some("ge-0-0-1"),
         "the prior snapshot must be restored"
     );
@@ -3827,7 +3968,7 @@ fn full_apply_post_teardown_spawn_failure_fails_closed_no_persist_6140() {
 /// Assertions (a)/(b)/(c)/(d) all flip as ASSERTION failures.
 #[test]
 fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     // Prior snapshot: one binding interface (ge-0/0/1, ifindex 11). Its only
     // role is to make guard.snapshot Some with a DISTINCT plan key so the new
@@ -3995,7 +4136,7 @@ fn full_apply_post_spawn_inthread_bind_failure_fails_closed_no_persist_5143() {
 /// (ge-0-0-2) bindings in place, so the ge-0-0-1 assertions fail.
 #[test]
 fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, SNAPSHOT_POST_TEARDOWN_PREFIX};
 
     let prior = ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
@@ -4124,7 +4265,7 @@ fn full_apply_post_teardown_rollback_restores_prior_bindings_14959() {
 /// the failed bring-up's refreshed truth, not the restored plan.
 #[test]
 fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_POST_TEARDOWN_PREFIX};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, SNAPSHOT_POST_TEARDOWN_PREFIX};
 
     let prior = ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
@@ -4260,7 +4401,7 @@ fn same_plan_post_teardown_rollback_restores_prior_bindings_14959() {
 /// Every assertion below flips.
 #[test]
 fn apply_snapshot_defer_workers_missing_map_pin_fails_closed_5171() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     // Disarmed helper (the realistic deferred state). No prior snapshot.
     let state = new_state(ProcessStatus::default());
@@ -4317,7 +4458,7 @@ fn apply_snapshot_defer_workers_missing_map_pin_fails_closed_5171() {
 /// and persists the non-buildable config.
 #[test]
 fn apply_snapshot_defer_workers_forwarding_integrity_fails_closed_5171() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     let state = new_state(ProcessStatus::default());
 
@@ -4367,7 +4508,7 @@ fn apply_snapshot_defer_workers_forwarding_integrity_fails_closed_5171() {
 /// not activation.
 #[test]
 fn apply_snapshot_defer_workers_valid_config_applies_without_spawning_5171() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     let state = new_state(ProcessStatus::default());
 
@@ -4432,7 +4573,7 @@ fn apply_snapshot_defer_workers_valid_config_applies_without_spawning_5171() {
 /// below flips.
 #[test]
 fn apply_snapshot_rejects_generation_rollback_5169() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     let state_file = unique_state_file("apply-rollback-5169");
 
@@ -4551,7 +4692,7 @@ fn apply_snapshot_rejects_generation_rollback_5169() {
 /// half is `apply_snapshot_refuses_reused_generation_with_different_content_9520`.
 #[test]
 fn apply_snapshot_admits_generation_reuse_5169() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
 
     // Apply gen (config=6, fib=5).
@@ -4601,7 +4742,9 @@ fn apply_snapshot_admits_generation_reuse_5169() {
 /// ACKed, the installed digest and default policy flip to B, and B is persisted.
 #[test]
 fn apply_snapshot_refuses_reused_generation_with_different_content_9520() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_CONTENT_CONFLICT_PREFIX};
+    use crate::{
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+    };
     let state = new_state(ProcessStatus::default());
     let state_file = unique_state_file("apply-content-conflict-9520");
     let snapshot = |digest: &str, default_policy: &str| ConfigSnapshot {
@@ -4654,7 +4797,10 @@ fn apply_snapshot_refuses_reused_generation_with_different_content_9520() {
         Some("digest-a"),
         "the refused content must not become the boot baseline"
     );
-    assert_eq!(persisted["snapshot"]["default_policy"].as_str(), Some("permit"));
+    assert_eq!(
+        persisted["snapshot"]["default_policy"].as_str(),
+        Some("permit")
+    );
     let _ = std::fs::remove_file(&state_file);
 }
 
@@ -4668,7 +4814,9 @@ fn apply_snapshot_refuses_reused_generation_with_different_content_9520() {
 /// is ACKed with the new content.
 #[test]
 fn apply_snapshot_refuses_reused_generation_with_different_content_at_advanced_fib_9520() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_CONTENT_CONFLICT_PREFIX};
+    use crate::{
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+    };
     let state = new_state(ProcessStatus::default());
     let snapshot = |fib: u32, digest: &str, default_policy: &str| ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
@@ -4695,7 +4843,10 @@ fn apply_snapshot_refuses_reused_generation_with_different_content_at_advanced_f
         response.error
     );
     let guard = state.lock().expect("state");
-    assert_eq!(guard.status.last_fib_generation, 5, "the refused apply must not advance fib");
+    assert_eq!(
+        guard.status.last_fib_generation, 5,
+        "the refused apply must not advance fib"
+    );
     let installed = guard.snapshot.as_ref().expect("installed snapshot");
     assert_eq!(installed.content_digest, "digest-a");
     assert_eq!(installed.default_policy, "permit");
@@ -4710,7 +4861,7 @@ fn apply_snapshot_refuses_reused_generation_with_different_content_at_advanced_f
 /// or comparing a field outside the digest, reds the first or second step.
 #[test]
 fn apply_snapshot_admits_reused_generation_with_identical_content_9520() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     let snapshot = |generation: u64, fib: u32, digest: &str, default_policy: &str| ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
@@ -4723,9 +4874,18 @@ fn apply_snapshot_admits_reused_generation_with_identical_content_9520() {
     };
     let steps = [
         ("first apply", snapshot(6, 5, "digest-a", "permit")),
-        ("idempotent retry, same digest", snapshot(6, 5, "digest-a", "permit")),
-        ("fib advance, same digest", snapshot(6, 7, "digest-a", "permit")),
-        ("generation advance, different content", snapshot(7, 7, "digest-b", "deny")),
+        (
+            "idempotent retry, same digest",
+            snapshot(6, 5, "digest-a", "permit"),
+        ),
+        (
+            "fib advance, same digest",
+            snapshot(6, 7, "digest-a", "permit"),
+        ),
+        (
+            "generation advance, different content",
+            snapshot(7, 7, "digest-b", "deny"),
+        ),
     ];
     for (step, snap) in steps {
         let mut request = req("apply_snapshot");
@@ -4750,7 +4910,9 @@ fn apply_snapshot_admits_reused_generation_with_identical_content_9520() {
 /// apply is ACKed with the new content.
 #[test]
 fn apply_snapshot_refuses_reused_generation_without_a_digest_9520() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION, SNAPSHOT_CONTENT_CONFLICT_PREFIX};
+    use crate::{
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, SNAPSHOT_CONTENT_CONFLICT_PREFIX,
+    };
     let state = new_state(ProcessStatus::default());
     let apply = |generation: u64, digest: &str, default_policy: &str| {
         let mut request = req("apply_snapshot");
@@ -4767,26 +4929,43 @@ fn apply_snapshot_refuses_reused_generation_without_a_digest_9520() {
     };
 
     let first = apply(6, "", "permit");
-    assert!(first.ok, "a first apply has no baseline to conflict with: {}", first.error);
+    assert!(
+        first.ok,
+        "a first apply has no baseline to conflict with: {}",
+        first.error
+    );
     let bare_retry = apply(6, "", "deny");
     assert!(
-        !bare_retry.ok && bare_retry.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        !bare_retry.ok
+            && bare_retry
+                .error
+                .starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
         "two gen 6 applies without a digest must not be taken as identical: ok={} error={}",
         bare_retry.ok,
         bare_retry.error
     );
     let stamped_retry = apply(6, "digest-a", "deny");
     assert!(
-        !stamped_retry.ok && stamped_retry.error.starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
+        !stamped_retry.ok
+            && stamped_retry
+                .error
+                .starts_with(SNAPSHOT_CONTENT_CONFLICT_PREFIX),
         "an installed snapshot without a digest cannot vouch for a retry that carries one: ok={} error={}",
         stamped_retry.ok,
         stamped_retry.error
     );
     let advance = apply(7, "", "deny");
-    assert!(advance.ok, "a generation advance needs no digest: {}", advance.error);
+    assert!(
+        advance.ok,
+        "a generation advance needs no digest: {}",
+        advance.error
+    );
     let guard = state.lock().expect("state");
     assert_eq!(guard.status.last_snapshot_generation, 7);
-    assert_eq!(guard.snapshot.as_ref().map(|s| s.default_policy.as_str()), Some("deny"));
+    assert_eq!(
+        guard.snapshot.as_ref().map(|s| s.default_policy.as_str()),
+        Some("deny")
+    );
 }
 
 /// #9520: a partial update that changes content the helper enforces stops the
@@ -4802,7 +4981,7 @@ fn apply_snapshot_refuses_reused_generation_without_a_digest_9520() {
 #[test]
 fn a_partial_update_stops_the_installed_digest_vouching_for_a_retry_9520() {
     use crate::{
-        ConfigSnapshot, FabricSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, FabricSnapshot, NeighborSnapshot,
         SNAPSHOT_CONTENT_CONFLICT_PREFIX,
     };
     let initial_neighbors = vec![NeighborSnapshot {
@@ -4912,7 +5091,7 @@ fn a_partial_update_stops_the_installed_digest_vouching_for_a_retry_9520() {
 /// digest is refused before this #5169 gate's fib comparison matters.
 #[test]
 fn apply_snapshot_rejects_fib_rollback_5169() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
 
     // Baseline (config=6, fib=5).
@@ -4952,7 +5131,10 @@ fn apply_snapshot_rejects_fib_rollback_5169() {
         ..ConfigSnapshot::default()
     });
     let response = run_request(state.clone(), request);
-    assert!(!response.ok, "a fib rollback under a reused config must be rejected");
+    assert!(
+        !response.ok,
+        "a fib rollback under a reused config must be rejected"
+    );
     assert!(
         response
             .error
@@ -4977,7 +5159,7 @@ fn apply_snapshot_rejects_fib_rollback_5169() {
 /// not regress legitimate applies.
 #[test]
 fn apply_snapshot_monotonic_config_advance_applies_5169() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
 
     // Baseline (config=5, fib=5).
@@ -5024,7 +5206,7 @@ fn apply_snapshot_monotonic_config_advance_applies_5169() {
 /// digest is refused before this #5169 gate's fib comparison matters.
 #[test]
 fn apply_snapshot_fib_only_advance_admitted_5169() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
 
     // Baseline (config=6, fib=5).
@@ -5072,7 +5254,10 @@ fn apply_snapshot_fib_only_advance_admitted_5169() {
 
 #[test]
 fn set_binding_state_missing_payload_is_rejected() {
-    let response = run_request(new_state(ProcessStatus::default()), req("set_binding_state"));
+    let response = run_request(
+        new_state(ProcessStatus::default()),
+        req("set_binding_state"),
+    );
     assert!(!response.ok);
     assert!(
         response.error.contains("missing binding state"),
@@ -5211,7 +5396,7 @@ fn set_queue_state_toggles_armed_on_known_queue() {
 /// takes the armed arm and `afxdp.reconcile` returns `Err` on this snapshot —
 /// the same fault the #3789 apply-leg tests use.
 fn failing_reconcile_snapshot() -> crate::ConfigSnapshot {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
         generation: 7,
@@ -5550,7 +5735,12 @@ fn sync_session_is_served_while_the_state_lock_is_held_7209() {
         .expect("holder never acquired the state lock");
 
     let t0 = Instant::now();
-    let resp = run_request_with_domain(state.clone(), req("sync_session"), session_domain, SocketMode::Main);
+    let resp = run_request_with_domain(
+        state.clone(),
+        req("sync_session"),
+        session_domain,
+        SocketMode::Main,
+    );
     let elapsed = t0.elapsed();
     let _ = release_tx.send(());
     holder.join().expect("holder thread");
@@ -5610,30 +5800,36 @@ fn sync_session_real_payload_is_served_while_the_state_lock_is_held_7209() {
 
     fn upsert_request() -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default() });
+        request.session_sync = Some(SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        });
         request
     }
 
     fn delete_request() -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        ..SessionSyncRequest::default() });
+        request.session_sync = Some(SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "delete".to_string(),
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            ..SessionSyncRequest::default()
+        });
         request
     }
 
@@ -5661,7 +5857,8 @@ fn sync_session_real_payload_is_served_while_the_state_lock_is_held_7209() {
             .expect("holder never acquired the state lock");
 
         let t0 = Instant::now();
-        let resp = run_request_with_domain(state.clone(), build(), session_domain, SocketMode::Main);
+        let resp =
+            run_request_with_domain(state.clone(), build(), session_domain, SocketMode::Main);
         let elapsed = t0.elapsed();
         let _ = release_tx.send(());
         holder.join().expect("holder thread");
@@ -5785,7 +5982,6 @@ fn parse_session_sync_mac_rejects_non_hex() {
     assert!(parse_session_sync_mac("zz:bf:72:01:02:03").is_err());
 }
 
-
 #[test]
 fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
     let cases = [
@@ -5864,17 +6060,20 @@ fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
     for (name, addr_family, protocol, src_ip, dst_ip, src_port, dst_port, reason) in cases {
         let state = new_state(ProcessStatus::default());
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-        addr_family,
-        protocol,
-        src_ip: src_ip.to_string(),
-        dst_ip: dst_ip.to_string(),
-        src_port,
-        dst_port,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default() });
+        request.session_sync = Some(SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family,
+            protocol,
+            src_ip: src_ip.to_string(),
+            dst_ip: dst_ip.to_string(),
+            src_port,
+            dst_port,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        });
         let response = run_request(state.clone(), request);
         assert!(!response.ok, "{name}: incomplete key was accepted");
         assert!(
@@ -5895,21 +6094,23 @@ fn synced_import_rejects_incomplete_packet_path_keys_and_counts_10720() {
         );
         project_status(&mut guard);
         assert_eq!(
-            guard.status.synced_import_incomplete_key,
-            1,
+            guard.status.synced_import_incomplete_key, 1,
             "{name}: incomplete-key count must reach process status"
         );
     }
 }
 #[test]
 fn synced_import_allows_zero_ports_for_non_port_protocol_10720() {
-    let request = SessionSyncRequest { forward_wire_alias_origin: false, addr_family: libc::AF_INET as u8,
-    protocol: 1,
-    src_ip: "192.0.2.1".to_string(),
-    dst_ip: "192.0.2.2".to_string(),
-    src_port: 0,
-    dst_port: 0,
-    ..SessionSyncRequest::default() };
+    let request = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        addr_family: libc::AF_INET as u8,
+        protocol: 1,
+        src_ip: "192.0.2.1".to_string(),
+        dst_ip: "192.0.2.2".to_string(),
+        src_port: 0,
+        dst_port: 0,
+        ..SessionSyncRequest::default()
+    };
     assert!(
         super::helpers::build_synced_session_key(
             &request,
@@ -5928,13 +6129,16 @@ fn synced_import_refuses_fragment_sentinel_protocol_14648() {
         } else {
             ("2001:db8::1", "2001:db8::2")
         };
-        let request = SessionSyncRequest { forward_wire_alias_origin: false, addr_family: family,
-        protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
-        src_ip: src_ip.to_string(),
-        dst_ip: dst_ip.to_string(),
-        src_port: 0,
-        dst_port: 0,
-        ..SessionSyncRequest::default() };
+        let request = SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            addr_family: family,
+            protocol: crate::session::SHIM_PROTO_FRAGMENT_NO_L4,
+            src_ip: src_ip.to_string(),
+            dst_ip: dst_ip.to_string(),
+            src_port: 0,
+            dst_port: 0,
+            ..SessionSyncRequest::default()
+        };
         let err = super::helpers::build_synced_session_key(
             &request,
             0,
@@ -6038,9 +6242,18 @@ fn reconcile_disarmed_clears_full_stale_binding_survivors() {
     // The #2794 survivor class — THESE go RED if the fix is reverted.
     assert_eq!(b.socket_ifindex, 0, "#2794: socket_ifindex left stale");
     assert_eq!(b.socket_queue_id, 0, "#2794: socket_queue_id left stale");
-    assert_eq!(b.socket_bind_flags, 0, "#2794: socket_bind_flags left stale");
-    assert_eq!(b.flow_cache_capacity, 0, "#2794: flow_cache_capacity left stale");
-    assert_eq!(b.active_flow_count, 0, "#2794: active_flow_count left stale");
+    assert_eq!(
+        b.socket_bind_flags, 0,
+        "#2794: socket_bind_flags left stale"
+    );
+    assert_eq!(
+        b.flow_cache_capacity, 0,
+        "#2794: flow_cache_capacity left stale"
+    );
+    assert_eq!(
+        b.active_flow_count, 0,
+        "#2794: active_flow_count left stale"
+    );
     assert_eq!(b.rx_packets, 0, "#2794: rx_packets counter left stale");
 }
 
@@ -6097,7 +6310,10 @@ fn bindings_settled_registered_needs_ready_or_error() {
         ready: false,
         ..BindingStatus::default()
     }];
-    assert!(!bindings_settled(&pending), "registered + not ready is pending");
+    assert!(
+        !bindings_settled(&pending),
+        "registered + not ready is pending"
+    );
 
     let ready = vec![BindingStatus {
         registered: true,
@@ -6129,7 +6345,7 @@ fn bindings_settled_registered_needs_ready_or_error() {
 /// NOT-same-plan path).
 #[test]
 fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     // Hold the WG port for the whole test: a disarmed helper must not even
     // ATTEMPT a bind (Codex code-r2 — the transient spawn/bind would surface
     // here as a wg_bind_listen_port exception), so this blocker must never be
@@ -6159,12 +6375,10 @@ fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
             mode: "wireguard".to_string(),
             wg_listen_port: port,
             wg_local_privkey_hex:
-                "a01010101010101010101010101010101010101010101010101010101010101a"
-                    .to_string(),
+                "a01010101010101010101010101010101010101010101010101010101010101a".to_string(),
             wg_peers: vec![crate::protocol::snapshot::TunnelWgPeerSnapshot {
                 wg_peer_pubkey_hex:
-                    "b02020202020202020202020202020202020202020202020202020202020202b"
-                        .to_string(),
+                    "b02020202020202020202020202020202020202020202020202020202020202b".to_string(),
                 wg_allowed_ips: vec!["10.77.0.0/24".to_string()],
                 ..Default::default()
             }],
@@ -6231,10 +6445,9 @@ fn wg1866_disarmed_same_plan_apply_does_not_hold_wg_ports() {
 /// empty. Every thread assertion below flips.
 #[test]
 fn apply_snapshot_defer_plan_refusal_keeps_live_tunnel_threads_14131() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
-    let (_wg_tun, _gre_tun) = crate::afxdp::Coordinator::register_tunnel_tun_standins_for_test(
-        "wgt14131", "gre14131",
-    );
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
+    let (_wg_tun, _gre_tun) =
+        crate::afxdp::Coordinator::register_tunnel_tun_standins_for_test("wgt14131", "gre14131");
     let wg_port = crate::test_ports::reserve_ephemeral_udp_port();
     let state = new_state(ProcessStatus {
         workers: 0,
@@ -6276,11 +6489,11 @@ fn apply_snapshot_defer_plan_refusal_keeps_live_tunnel_threads_14131() {
         ifindex: 4251,
         mode: "wireguard".to_string(),
         wg_listen_port: wg_port,
-        wg_local_privkey_hex:
-            "a01010101010101010101010101010101010101010101010101010101010101a".to_string(),
+        wg_local_privkey_hex: "a01010101010101010101010101010101010101010101010101010101010101a"
+            .to_string(),
         wg_peers: vec![crate::protocol::snapshot::TunnelWgPeerSnapshot {
-            wg_peer_pubkey_hex:
-                "b02020202020202020202020202020202020202020202020202020202020202b".to_string(),
+            wg_peer_pubkey_hex: "b02020202020202020202020202020202020202020202020202020202020202b"
+                .to_string(),
             wg_allowed_ips: vec!["10.77.0.0/24".to_string()],
             wg_endpoint: "127.0.0.1:9".to_string(),
             ..Default::default()
@@ -6805,17 +7018,15 @@ fn export_all_sessions_does_not_hold_state_lock_during_push() {
     // thread finishes promptly instead of waiting the full 5 s per-delta
     // timeout. Stop once no frame arrives for a short grace period (export done
     // pushing).
-    let drainer = std::thread::spawn(move || {
-        while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
-    });
+    let drainer = std::thread::spawn(
+        move || {
+            while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+        },
+    );
 
     let export_resp = export_thread.join().expect("export thread");
     drainer.join().expect("drainer thread");
-    assert!(
-        export_resp.ok,
-        "bulk export failed: {}",
-        export_resp.error
-    );
+    assert!(export_resp.ok, "bulk export failed: {}", export_resp.error);
 }
 
 /// #3773 (L4): an `update_fabrics` that CHANGES the fabric set must fold the
@@ -6831,7 +7042,7 @@ fn export_all_sessions_does_not_hold_state_lock_during_push() {
 /// persisted `snapshot.fabrics` at the empty apply-time set (RED).
 #[test]
 fn update_fabrics_persists_resolved_fabric_set() {
-    use crate::{ConfigSnapshot, FabricSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, FabricSnapshot};
     let state = new_state(ProcessStatus::default());
     let state_file = unique_state_file("fabric-persist");
     // Seed an apply_snapshot with NO fabrics (initial build before the peer
@@ -6899,7 +7110,7 @@ fn update_fabrics_persists_resolved_fabric_set() {
 /// SyncFabricState refresh must not churn the disk on every unchanged tick.
 #[test]
 fn update_fabrics_unchanged_set_does_not_rewrite_state_file() {
-    use crate::{ConfigSnapshot, FabricSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, FabricSnapshot};
     let resolved = FabricSnapshot {
         parent_unbindable: false,
         name: "fab0".into(),
@@ -6964,7 +7175,7 @@ fn update_fabrics_unchanged_set_does_not_rewrite_state_file() {
 /// decoded `state.snapshot.neighbors` at the empty apply-time set (RED).
 #[test]
 fn update_neighbors_changed_set_folds_and_persists_12195() {
-    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot};
     let state = new_state(ProcessStatus::default());
     let state_file = unique_state_file("neighbor-persist");
     // Seed an apply_snapshot with NO neighbors. This persists the state file
@@ -7033,7 +7244,7 @@ fn update_neighbors_changed_set_folds_and_persists_12195() {
 /// disk on the periodic neighbor refresh; the fold gates on an actual change.
 #[test]
 fn update_neighbors_unchanged_set_does_not_rewrite_state_file_12195() {
-    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot};
     let accepted = NeighborSnapshot {
         interface: "ge-0-0-1".to_string(),
         ifindex: 7,
@@ -7089,7 +7300,7 @@ fn update_neighbors_unchanged_set_does_not_rewrite_state_file_12195() {
 #[test]
 fn update_neighbors_replace_skips_family_mismatch_and_clears_digest_3771_9520() {
     use crate::{
-        ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot,
         SNAPSHOT_CONTENT_CONFLICT_PREFIX,
     };
 
@@ -7198,7 +7409,7 @@ fn update_neighbors_replace_skips_family_mismatch_and_clears_digest_3771_9520() 
 #[test]
 fn update_neighbors_unchanged_filtered_set_clears_digest_and_persists_3771_9520() {
     use crate::{
-        ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION,
+        CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot,
         SNAPSHOT_CONTENT_CONFLICT_PREFIX,
     };
 
@@ -7299,7 +7510,7 @@ fn update_neighbors_unchanged_filtered_set_clears_digest_and_persists_3771_9520(
 /// not cause a state-file write.
 #[test]
 fn update_neighbors_mismatched_replace_with_empty_digest_does_not_write_12195() {
-    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot};
     let state = new_state(ProcessStatus {
         forwarding_armed: true,
         last_snapshot_generation: 1,
@@ -7348,7 +7559,7 @@ fn update_neighbors_mismatched_replace_with_empty_digest_does_not_write_12195() 
 /// MAC and the stored-neighbors assertion flips.
 #[test]
 fn update_neighbors_stores_fenced_mac_not_refused_raw_16555() {
-    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot};
     let genuine = NeighborSnapshot {
         interface: "ge-0-0-1".to_string(),
         ifindex: 7,
@@ -7415,7 +7626,7 @@ fn update_neighbors_stores_fenced_mac_not_refused_raw_16555() {
 /// baseline a rebind rebuilds from never carries the attacker MAC.
 #[test]
 fn apply_snapshot_stores_fenced_neighbor_mac_16555() {
-    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot};
     let row = |mac: &str, state: &str| NeighborSnapshot {
         interface: "ge-0-0-1".to_string(),
         ifindex: 7,
@@ -7500,7 +7711,7 @@ fn apply_snapshot_stores_fenced_neighbor_mac_16555() {
 /// same-plan refresh leg and every binding still carries ifindex 101 (RED).
 #[test]
 fn update_fabrics_plan_change_forces_rebind_on_next_apply_9803() {
-    use crate::{ConfigSnapshot, FabricSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, FabricSnapshot};
     let mut status = ProcessStatus::default();
     status.workers = 1;
     let state = new_state(status);
@@ -7633,22 +7844,25 @@ fn nat64_synced_entry_rebuilds_reverse_bib_4565() {
     // NAT64 forward flow: v6 client -> synthetic 64:ff9b::192.168.1.1
     // (dst_v4 = 192.168.1.1 by RFC 6052 /96), translated to pool source
     // 203.0.113.5:40000 on the active node.
-    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: libc::AF_INET6 as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "2001:db8::1".to_string(),
-    dst_ip: "64:ff9b::c0a8:101".to_string(),
-    src_port: 5001,
-    dst_port: 80,
-    ingress_zone_id: 2,
-    egress_zone_id: 3,
-    egress_ifindex: 12,
-    // The generic NAT fields carry the mangled cross-family remnants on the
-    // real wire; the NAT64 path must OVERRIDE them from nat64_snat_v4.
-    nat_src_ip: "2001:db8:dead:beef::".to_string(),
-    nat_src_port: 40000,
-    nat64_snat_v4: "203.0.113.5".to_string(),
-    ..SessionSyncRequest::default() };
+    let req = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET6 as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "2001:db8::1".to_string(),
+        dst_ip: "64:ff9b::c0a8:101".to_string(),
+        src_port: 5001,
+        dst_port: 80,
+        ingress_zone_id: 2,
+        egress_zone_id: 3,
+        egress_ifindex: 12,
+        // The generic NAT fields carry the mangled cross-family remnants on the
+        // real wire; the NAT64 path must OVERRIDE them from nat64_snat_v4.
+        nat_src_ip: "2001:db8:dead:beef::".to_string(),
+        nat_src_port: 40000,
+        nat64_snat_v4: "203.0.113.5".to_string(),
+        ..SessionSyncRequest::default()
+    };
     let entry = build_synced_session_entry(&req, &zones, 0).expect("build nat64 entry");
 
     // (a) NAT64 cross-family bit set -> tx dispatch reverse-translates + #4564
@@ -7684,26 +7898,33 @@ fn nat64_synced_entry_rebuilds_reverse_bib_4565() {
     // (d) the synthesized reverse companion key is the v4 reply tuple
     // (server_v4 -> snat_v4), so the server's IPv4 reply matches after failover.
     let rk = reverse_session_key(&entry.key, entry.decision.nat);
-    assert_eq!(rk.addr_family, libc::AF_INET as u8, "reverse key must be v4");
+    assert_eq!(
+        rk.addr_family,
+        libc::AF_INET as u8,
+        "reverse key must be v4"
+    );
     assert_eq!(rk.src_ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
     assert_eq!(rk.dst_ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 5)));
     assert_eq!(rk.dst_port, 40000, "reply dst port is the translated port");
 
     // A non-NAT64 synced session (empty nat64_snat_v4) is unaffected: no nat64
     // bit, no reverse info, generic nat_src preserved.
-    let plain = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 1234,
-    dst_port: 80,
-    ingress_zone_id: 2,
-    egress_zone_id: 3,
-    egress_ifindex: 12,
-    nat_src_ip: "203.0.113.9".to_string(),
-    nat_src_port: 50000,
-    ..SessionSyncRequest::default() };
+    let plain = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 1234,
+        dst_port: 80,
+        ingress_zone_id: 2,
+        egress_zone_id: 3,
+        egress_ifindex: 12,
+        nat_src_ip: "203.0.113.9".to_string(),
+        nat_src_port: 50000,
+        ..SessionSyncRequest::default()
+    };
     let plain_entry = build_synced_session_entry(&plain, &zones, 0).expect("build plain entry");
     assert!(!plain_entry.decision.nat.nat64, "non-nat64 stays non-nat64");
     assert_eq!(plain_entry.metadata.nat64_reverse, None);
@@ -7845,7 +8066,11 @@ fn update_neighbors_response_distinguishes_apply_and_exact_fence_10035() {
     applied.neighbor_generation = 7;
     applied.neighbors = Some(vec![target.clone()]);
     let applied_response = run_request(state.clone(), applied);
-    assert!(applied_response.ok, "applied replace failed: {}", applied_response.error);
+    assert!(
+        applied_response.ok,
+        "applied replace failed: {}",
+        applied_response.error
+    );
     assert_eq!(
         applied_response
             .status
@@ -7862,7 +8087,11 @@ fn update_neighbors_response_distinguishes_apply_and_exact_fence_10035() {
     changed.mac = "02:00:00:00:00:02".to_string();
     fenced.neighbors = Some(vec![changed]);
     let fenced_response = run_request(state, fenced);
-    assert!(fenced_response.ok, "fenced replace failed: {}", fenced_response.error);
+    assert!(
+        fenced_response.ok,
+        "fenced replace failed: {}",
+        fenced_response.error
+    );
     assert_eq!(
         fenced_response
             .status
@@ -7886,7 +8115,7 @@ fn update_neighbors_response_distinguishes_apply_and_exact_fence_10035() {
 /// accepted set; a same-generation request with a different MAC must not fold.
 #[test]
 fn update_neighbors_fenced_replace_does_not_fold_snapshot_12195() {
-    use crate::{ConfigSnapshot, NeighborSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, NeighborSnapshot};
 
     let accepted = NeighborSnapshot {
         interface: "ge-0-0-1".to_string(),
@@ -7999,14 +8228,15 @@ fn drain_session_deltas_survive_write_state_failure_5294() {
     let mut request = req("drain_session_deltas");
     request.session_deltas = Some(crate::SessionDeltaDrainRequest { max: 256 });
 
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let handle = {
         let bad = bad_state_file.clone();
         {
             let sd = state.lock().expect("state").afxdp.session_domain().clone();
-            std::thread::spawn(move || handle_stream(server, &bad, state, running, sd, SocketMode::Main))
+            std::thread::spawn(move || {
+                handle_stream(server, &bad, state, running, sd, SocketMode::Main)
+            })
         }
     };
 
@@ -8093,8 +8323,7 @@ fn drain_session_deltas_write_failure_arms_delta_loss_16584() {
         let mut guard = state.lock().expect("state");
         guard.afxdp.seed_pending_session_deltas_for_test(0, 5);
     }
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let handle = {
         let state = state.clone();
@@ -8181,8 +8410,7 @@ fn owner_rg_collect_write_failure_arms_delta_loss_16584() {
         continuation_sequence: 0,
         client_window: 0,
     });
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let handle = {
         let state = state.clone();
@@ -8276,7 +8504,9 @@ fn status_refresh_publishes_flood_counters_6938() {
 
     // Assert on the WIRE payload the daemon actually returns, not only on the
     // in-memory state: the attach is the half an operator sees.
-    let wire = response.status.expect("dispatcher attached no status to the reply");
+    let wire = response
+        .status
+        .expect("dispatcher attached no status to the reply");
     assert!(
         wire.zone_flood_counters.iter().any(|r| r.zone_id == Z),
         "the reply's status carries no flood row for zone {Z}: {:?}",
@@ -8336,7 +8566,11 @@ fn clear_flood_counters_request_empties_the_store_6938() {
 
     let guard = state.lock().expect("state");
     assert!(
-        !guard.status.zone_flood_counters.iter().any(|r| r.zone_id == Z),
+        !guard
+            .status
+            .zone_flood_counters
+            .iter()
+            .any(|r| r.zone_id == Z),
         "zone {Z} still publishes a flood row after `clear_flood_counters`. The \
          handler's clear_flood_counters() call does not reach the helper's \
          cumulative store, so the operator's clear is undone by the next 1 s \
@@ -8381,7 +8615,9 @@ fn clear_filter_counters_request_zeroes_term_and_policer_counters_15107() {
             .three_color_policer_counters
             .iter()
             .find(|r| r.name == "wan-pol")
-            .expect("control failed: the seeded policer counter was not published before the clear");
+            .expect(
+                "control failed: the seeded policer counter was not published before the clear",
+            );
         assert_eq!(
             policer.green_packets, 1,
             "control failed: seeded policer published no green hit: {policer:?}"
@@ -8389,7 +8625,11 @@ fn clear_filter_counters_request_zeroes_term_and_policer_counters_15107() {
     }
 
     let cleared = run_request(state.clone(), req("clear_filter_counters"));
-    assert!(cleared.ok, "clear_filter_counters failed: {}", cleared.error);
+    assert!(
+        cleared.ok,
+        "clear_filter_counters failed: {}",
+        cleared.error
+    );
 
     let guard = state.lock().expect("state");
     for row in &guard.status.filter_term_counters {
@@ -8400,7 +8640,8 @@ fn clear_filter_counters_request_zeroes_term_and_policer_counters_15107() {
              The handler's clear_filter_counters() call does not reach the \
              helper's live filter counters, so the operator's clear is undone \
              by the next 1 s status poll (#15107)",
-            row.filter_name, row.term_name
+            row.filter_name,
+            row.term_name
         );
     }
     for row in &guard.status.three_color_policer_counters {
@@ -8448,8 +8689,10 @@ fn flood_fold_is_wired_into_the_worker_loop_6938() {
         )
     });
     let sibling_at = src.find(sibling).unwrap_or_else(|| {
-        panic!("the worker loop no longer calls flush_recorded_zone_counters — this \
-                guard's adjacency claim names a sibling that is gone")
+        panic!(
+            "the worker loop no longer calls flush_recorded_zone_counters — this \
+                guard's adjacency claim names a sibling that is gone"
+        )
     });
     assert!(
         fold_at > sibling_at && fold_at - sibling_at < 800,
@@ -8511,7 +8754,6 @@ fn flood_fold_guard_does_not_accept_the_sibling_fold_6938() {
     );
 }
 
-
 /// #6983: the zone-TRAFFIC status publication, the twin of
 /// `status_refresh_publishes_flood_counters_6938` above.
 ///
@@ -8548,7 +8790,9 @@ fn status_refresh_publishes_zone_traffic_counters_6983() {
     let state = new_state(ProcessStatus::default());
     {
         let mut guard = state.lock().expect("state");
-        guard.afxdp.seed_zone_traffic_counter_for_test(Z, "trust", BYTES);
+        guard
+            .afxdp
+            .seed_zone_traffic_counter_for_test(Z, "trust", BYTES);
         // Precondition: the wire status starts EMPTY, so a pass cannot be
         // explained by the fixture having pre-populated it.
         assert!(
@@ -8639,9 +8883,9 @@ fn worker_loop_refreshes_publish_tick_counters_6971() {
              dead distribution input",
         ),
     ] {
-        let at = src.find(needle).unwrap_or_else(|| {
-            panic!("the worker loop does not call {what}: {why} (#6971)")
-        });
+        let at = src
+            .find(needle)
+            .unwrap_or_else(|| panic!("the worker loop does not call {what}: {why} (#6971)"));
         assert!(
             at > tick_at,
             "{what} is called BEFORE the publish-tick guard (offset {at} vs \
@@ -8932,7 +9176,10 @@ fn failed_binding_reconcile_restores_the_prior_registration_6750() {
         "slot 0 still reports registered=true after a reconcile that FAILED — the \
          helper is advertising a binding its sockets never took (#6750)",
     );
-    assert!(!guard.status.bindings[0].armed, "the arm bit was left committed too");
+    assert!(
+        !guard.status.bindings[0].armed,
+        "the arm bit was left committed too"
+    );
 }
 
 /// #6750 for `set_queue_state`, which mutates EVERY binding on the queue — so
@@ -8984,7 +9231,10 @@ fn failed_queue_reconcile_restores_every_binding_on_the_queue_6750() {
             "slot {slot} on the requested queue still reports registered=true after \
              a FAILED reconcile (#6750)",
         );
-        assert!(!guard.status.bindings[slot].armed, "slot {slot} arm bit left committed");
+        assert!(
+            !guard.status.bindings[slot].armed,
+            "slot {slot} arm bit left committed"
+        );
     }
     assert!(
         guard.status.bindings[2].registered && guard.status.bindings[2].armed,
@@ -9088,7 +9338,10 @@ fn faulted_reconcile_three_verbs_share_the_finish_tail_17126() {
             "precondition: state file must not exist before the {verb} request"
         );
         let response = run_request_on_file(state.clone(), request, &state_file);
-        assert!(!response.ok, "{verb}: faulted reconcile must report ok=false");
+        assert!(
+            !response.ok,
+            "{verb}: faulted reconcile must report ok=false"
+        );
         assert!(
             response.error.contains(expected_error),
             "{verb}: unexpected error {}",
@@ -9134,17 +9387,20 @@ fn faulted_reconcile_three_verbs_share_the_finish_tail_17126() {
 fn sync_session_upsert_reports_a_semantic_refusal_on_the_wire_6785() {
     fn upsert_request(src_port: u16) -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-        addr_family: 2,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default() });
+        request.session_sync = Some(SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        });
         request
     }
 
@@ -9174,7 +9430,9 @@ fn sync_session_upsert_reports_a_semantic_refusal_on_the_wire_6785() {
          a BPF mirror row for a session this helper never took (#6785)"
     );
     assert!(
-        second.error.starts_with(crate::afxdp::SYNCED_IMPORT_REFUSED_PREFIX),
+        second
+            .error
+            .starts_with(crate::afxdp::SYNCED_IMPORT_REFUSED_PREFIX),
         "a refusal must carry the machine-readable prefix Go classifies on, or \
          it is indistinguishable from a transport failure and would disarm HA \
          takeover-readiness on a healthy node; got {:?}",
@@ -9260,18 +9518,21 @@ fn refresh_status_projects_interface_snat_registry_counters_6751() {
 #[test]
 fn session_sync_import_stores_locally_resolved_ingress_7095() {
     let zones = rustc_hash::FxHashMap::default();
-    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 5001,
-    dst_port: 80,
-    ingress_zone_id: 2,
-    egress_zone_id: 3,
-    ingress_ifindex: 42,
-    ingress_vlan_id: 50,
-    ..SessionSyncRequest::default() };
+    let req = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 5001,
+        dst_port: 80,
+        ingress_zone_id: 2,
+        egress_zone_id: 3,
+        ingress_ifindex: 42,
+        ingress_vlan_id: 50,
+        ..SessionSyncRequest::default()
+    };
     let entry = build_synced_session_entry(&req, &zones, 0).expect("build entry");
     assert_eq!(
         entry.metadata.ingress_ifindex, 42,
@@ -9296,18 +9557,21 @@ fn session_sync_import_stores_locally_resolved_ingress_7095() {
 #[test]
 fn session_sync_import_keeps_zero_ingress_when_unknown_7095() {
     let zones = rustc_hash::FxHashMap::default();
-    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: libc::AF_INET as u8,
-    protocol: crate::ip_proto::PROTO_TCP,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 5001,
-    dst_port: 80,
-    ingress_zone_id: 2,
-    egress_zone_id: 3,
-    // No ingress_ifindex / ingress_vlan_id: exactly what an older daemon
-    // sends, since serde defaults them.
-    ..SessionSyncRequest::default() };
+    let req = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: crate::ip_proto::PROTO_TCP,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 5001,
+        dst_port: 80,
+        ingress_zone_id: 2,
+        egress_zone_id: 3,
+        // No ingress_ifindex / ingress_vlan_id: exactly what an older daemon
+        // sends, since serde defaults them.
+        ..SessionSyncRequest::default()
+    };
     let entry = build_synced_session_entry(&req, &zones, 0).expect("build entry");
     assert_eq!(
         entry.metadata.ingress_ifindex, 0,
@@ -9333,17 +9597,20 @@ mod routing_domain_delete_7160 {
     const DOMAIN: u32 = 100_007;
 
     fn upsert_request() -> SessionSyncRequest {
-        SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        egress_ifindex: 7,
-        neighbor_mac: "02:bf:72:01:02:03".to_string(),
-        src_mac: "02:bf:72:0a:0b:0c".to_string(),
-        ..SessionSyncRequest::default() }
+        SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        }
     }
 
     /// The bare-5-tuple delete `deleteHelperSessionsV4` actually sends: "a
@@ -9351,14 +9618,17 @@ mod routing_domain_delete_7160 {
     /// there is no ingress identity to resolve a domain from.
     fn bare_five_tuple_delete() -> ControlRequest {
         let mut request = req("sync_session");
-        request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "delete".to_string(),
-        addr_family: libc::AF_INET as u8,
-        protocol: 6,
-        src_ip: "10.0.0.1".to_string(),
-        dst_ip: "10.0.0.2".to_string(),
-        src_port: 1234,
-        dst_port: 80,
-        ..SessionSyncRequest::default() });
+        request.session_sync = Some(SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "delete".to_string(),
+            addr_family: libc::AF_INET as u8,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port: 1234,
+            dst_port: 80,
+            ..SessionSyncRequest::default()
+        });
         request
     }
 
@@ -9537,7 +9807,11 @@ mod routing_domain_delete_7160 {
         // The same fixture the ambiguity cell uses: the tuple is live in TWO tenants,
         // so an ABSENT delete is refused. A STATED default instance must not be.
         let state = state_holding_the_same_tuple_in(&[100_007, 100_008]);
-        assert_eq!(synced_key_count(&state), 4, "setup: two tenants x (forward + reverse)");
+        assert_eq!(
+            synced_key_count(&state),
+            4,
+            "setup: two tenants x (forward + reverse)"
+        );
 
         let mut request = bare_five_tuple_delete();
         request
@@ -9803,7 +10077,11 @@ mod routing_domain_delete_7160 {
         install_sync.session_id = 0xA11CE;
         install.session_sync = Some(install_sync);
         let installed = run_request(state.clone(), install);
-        assert!(installed.ok, "fixture upsert must land: {:?}", installed.error);
+        assert!(
+            installed.ok,
+            "fixture upsert must land: {:?}",
+            installed.error
+        );
         let live_id = shared_session_id_for(&state, 0);
         assert_eq!(
             live_id, 0xA11CE,
@@ -9846,7 +10124,11 @@ mod routing_domain_delete_7160 {
         install_sync.session_id = 0xA11CE;
         install.session_sync = Some(install_sync);
         let installed = run_request(state.clone(), install);
-        assert!(installed.ok, "fixture upsert must land: {:?}", installed.error);
+        assert!(
+            installed.ok,
+            "fixture upsert must land: {:?}",
+            installed.error
+        );
         let live_id = shared_session_id_for(&state, 0);
         assert_eq!(
             live_id, 0xA11CE,
@@ -9884,7 +10166,11 @@ mod routing_domain_delete_7160 {
         install_sync.session_id = 0xA11CE;
         install.session_sync = Some(install_sync);
         let installed = run_request(state.clone(), install);
-        assert!(installed.ok, "fixture upsert must land: {:?}", installed.error);
+        assert!(
+            installed.ok,
+            "fixture upsert must land: {:?}",
+            installed.error
+        );
         let live_id = shared_session_id_for(&state, 0);
         assert_eq!(
             live_id, 0xA11CE,
@@ -9926,7 +10212,10 @@ mod routing_domain_delete_7160 {
         let list = req("list_sessions_by_policy");
         let response = run_request(state.clone(), list);
         assert!(
-            !response.ok && response.error.contains("missing session policy list request"),
+            !response.ok
+                && response
+                    .error
+                    .contains("missing session policy list request"),
             "missing body must fail closed, got ok={} err={:?}",
             response.ok,
             response.error
@@ -9953,11 +10242,12 @@ mod routing_domain_delete_7160 {
             ..Default::default()
         });
         let response = run_request(state.clone(), list);
-        assert!(response.ok, "authoritative empty must be ok: {:?}", response.error);
         assert!(
-            response.session_policy_complete,
-            "empty ids must complete"
+            response.ok,
+            "authoritative empty must be ok: {:?}",
+            response.error
         );
+        assert!(response.session_policy_complete, "empty ids must complete");
         assert!(
             response.session_policy_matches.is_empty(),
             "empty ids must match nothing"
@@ -10013,8 +10303,7 @@ mod routing_domain_delete_7160 {
     #[test]
     fn policy_list_populated_delegation_e2e_10512() {
         let mut coordinator = afxdp::Coordinator::new();
-        let mut worker =
-            crate::afxdp::register_list_test_worker(&mut coordinator, 0);
+        let mut worker = crate::afxdp::register_list_test_worker(&mut coordinator, 0);
         let key = crate::session::SessionKey {
             addr_family: libc::AF_INET as u8,
             protocol: 6,
@@ -10048,7 +10337,11 @@ mod routing_domain_delete_7160 {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         let response = handle.join().expect("request thread");
-        assert!(response.ok, "populated scan must be ok: {:?}", response.error);
+        assert!(
+            response.ok,
+            "populated scan must be ok: {:?}",
+            response.error
+        );
         assert!(
             response.session_policy_complete,
             "pumped scan must complete"
@@ -10060,8 +10353,7 @@ mod routing_domain_delete_7160 {
         );
         assert_eq!(response.session_policy_matches[0].policy_id, 5);
         assert_eq!(
-            response.session_policy_matches[0].expected_rt_flow_session_id,
-            live,
+            response.session_policy_matches[0].expected_rt_flow_session_id, live,
             "delegated row must carry the live identity"
         );
         assert!(
@@ -10237,7 +10529,10 @@ mod routing_domain_delete_7160 {
     fn an_import_uses_the_carried_domain_not_the_derived_one_7239() {
         const DERIVED: u32 = 100_001;
         const CARRIED: u32 = 100_009;
-        assert_ne!(DERIVED, CARRIED, "fixture: the two must differ to discriminate");
+        assert_ne!(
+            DERIVED, CARRIED,
+            "fixture: the two must differ to discriminate"
+        );
 
         let mut afxdp = afxdp::Coordinator::new();
         afxdp.seed_routing_domain_for_test(24, DERIVED);
@@ -10328,8 +10623,7 @@ mod routing_domain_delete_7160 {
 /// Module-level so the guard and its over-reach control search for the SAME
 /// strings — a control that retypes the needle stops controlling the guard the
 /// first time one of them is edited.
-const PPTP_DRAIN_NEEDLE: &str =
-    "crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(";
+const PPTP_DRAIN_NEEDLE: &str = "crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(";
 const PPTP_EXPIRY_NEEDLE: &str =
     "let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns";
 /// #7699: the DATA-channel resolve's call site. Same module-level treatment and
@@ -10350,11 +10644,7 @@ fn pptp_drain_line(src: &str, needle: &str) -> Option<usize> {
 fn pptp_resolve_assignment_line(src: &str) -> Option<usize> {
     let lines: Vec<_> = src
         .lines()
-        .map(|line| {
-            line.split_once("//")
-                .map_or(line, |(code, _)| code)
-                .trim()
-        })
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code).trim())
         .collect();
     lines.iter().enumerate().find_map(|(i, line)| {
         let assigned_inline = line
@@ -10384,10 +10674,8 @@ fn pptp_resolve_assignment_line(src: &str) -> Option<usize> {
 #[test]
 fn pptp_drain_guard_does_not_accept_a_mention_7699() {
     const COMMENTED_OUT: &str = "        // crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n        //     &pptp_control,\n";
-    const PROSE: &str =
-        "        // the drain rides crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch( periodic work\n";
-    const REAL: &str =
-        "        crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n            &pptp_control,\n";
+    const PROSE: &str = "        // the drain rides crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch( periodic work\n";
+    const REAL: &str = "        crate::afxdp::worker_queue::drain_pptp_control_inbox_at_epoch(\n            &pptp_control,\n";
 
     assert!(
         pptp_drain_line(COMMENTED_OUT, PPTP_DRAIN_NEEDLE).is_none(),
@@ -10567,16 +10855,11 @@ fn descriptor_loop_resolves_the_pptp_data_channel_7699() {
 fn pptp_resolve_guard_does_not_accept_a_mention_7699() {
     const COMMENTED_OUT: &str =
         "        // flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n";
-    const PROSE: &str =
-        "        // the resolve rides flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain( here\n";
-    const REAL: &str =
-        "        flow =\n            crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n                packet_frame,\n";
-    const UNASSIGNED: &str =
-        "        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n            packet_frame,\n";
-    const INLINE_COMMENT_MENTION: &str =
-        "        flow = None; // crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n";
-    const INLINE_REAL: &str =
-        "        flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(packet_frame,\n";
+    const PROSE: &str = "        // the resolve rides flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain( here\n";
+    const REAL: &str = "        flow =\n            crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n                packet_frame,\n";
+    const UNASSIGNED: &str = "        crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n            packet_frame,\n";
+    const INLINE_COMMENT_MENTION: &str = "        flow = None; // crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(\n";
+    const INLINE_REAL: &str = "        flow = crate::afxdp::gre_discriminator::pptp_data_session_flow_in_domain(packet_frame,\n";
 
     assert!(
         pptp_resolve_assignment_line(COMMENTED_OUT).is_none(),
@@ -10622,7 +10905,10 @@ fn pptp_resolve_guard_does_not_accept_a_mention_7699() {
 // and pinning the full sentence would red on any new verb for no reason.
 #[test]
 fn the_unknown_verb_wording_the_go_side_matches_on_is_pinned_7919() {
-    let response = run_request(new_state(ProcessStatus::default()), req("session_counters_typo"));
+    let response = run_request(
+        new_state(ProcessStatus::default()),
+        req("session_counters_typo"),
+    );
     assert!(!response.ok);
     assert!(
         response.error.starts_with("unknown request type"),
@@ -10749,12 +11035,7 @@ fn sync_session_import_is_applied_while_the_state_lock_is_held_7209() {
     use std::time::{Duration, Instant};
 
     let state = new_state(ProcessStatus::default());
-    let session_domain = state
-        .lock()
-        .expect("state")
-        .afxdp
-        .session_domain()
-        .clone();
+    let session_domain = state.lock().expect("state").afxdp.session_domain().clone();
 
     let mut request = req("sync_session");
     // DELIBERATELY NOT setting `suppress_status`, though both daemon senders do.
@@ -10762,17 +11043,20 @@ fn sync_session_import_is_applied_while_the_state_lock_is_held_7209() {
     // not "provided the caller asked for no status". An implementation that
     // took the lock for a status attach would leave the verb starvable by any
     // caller that omitted the flag, and this cell would not see it.
-    request.session_sync = Some(SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    addr_family: 2,
-    protocol: 6,
-    src_ip: "10.0.0.1".to_string(),
-    dst_ip: "10.0.0.2".to_string(),
-    src_port: 4321,
-    dst_port: 80,
-    egress_ifindex: 7,
-    neighbor_mac: "02:bf:72:01:02:03".to_string(),
-    src_mac: "02:bf:72:0a:0b:0c".to_string(),
-    ..SessionSyncRequest::default() });
+    request.session_sync = Some(SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        addr_family: 2,
+        protocol: 6,
+        src_ip: "10.0.0.1".to_string(),
+        dst_ip: "10.0.0.2".to_string(),
+        src_port: 4321,
+        dst_port: 80,
+        egress_ifindex: 7,
+        neighbor_mac: "02:bf:72:01:02:03".to_string(),
+        src_mac: "02:bf:72:0a:0b:0c".to_string(),
+        ..SessionSyncRequest::default()
+    });
 
     // The barrier `apply_snapshot` would be sitting in. Held for the WHOLE
     // request, not merely overlapping its start: a guard released early would
@@ -10780,15 +11064,21 @@ fn sync_session_import_is_applied_while_the_state_lock_is_held_7209() {
     let blocker = state.lock().expect("state");
 
     let state_file = unique_state_file("sync_session_contention_7209");
-    let (mut client, server) =
-        std::os::unix::net::UnixStream::pair().expect("control socket pair");
+    let (mut client, server) = std::os::unix::net::UnixStream::pair().expect("control socket pair");
     let running = Arc::new(AtomicBool::new(true));
     let (tx, rx) = mpsc::channel();
     let handler = {
         let state = state.clone();
         let state_file = state_file.clone();
         std::thread::spawn(move || {
-            let result = handle_stream(server, &state_file, state, running, session_domain, SocketMode::Main);
+            let result = handle_stream(
+                server,
+                &state_file,
+                state,
+                running,
+                session_domain,
+                SocketMode::Main,
+            );
             let _ = tx.send(());
             result
         })
@@ -10862,14 +11152,12 @@ fn refresh_status_projects_the_delete_replica_counters_8586() {
     let state = new_state(ProcessStatus::default());
     let mut guard = state.lock().expect("server state");
 
-    let before_dropped =
-        crate::afxdp::SESSION_DELETE_REPLICA_DROPPED.load(Ordering::Relaxed);
+    let before_dropped = crate::afxdp::SESSION_DELETE_REPLICA_DROPPED.load(Ordering::Relaxed);
     let before_repaired =
         crate::afxdp::SESSION_DELETE_REPLICA_DROP_REPAIRED.load(Ordering::Relaxed);
 
     crate::afxdp::SESSION_DELETE_REPLICA_DROPPED.fetch_add(13, Ordering::Relaxed);
-    crate::afxdp::SESSION_DELETE_REPLICA_DROP_REPAIRED
-        .fetch_add(5, Ordering::Relaxed);
+    crate::afxdp::SESSION_DELETE_REPLICA_DROP_REPAIRED.fetch_add(5, Ordering::Relaxed);
 
     project_status(&mut guard);
 
@@ -10918,8 +11206,7 @@ fn ipsec_inner_ecn_alias_is_the_canonical_cell_9506() {
          cells means D13 drops are counted where no reader looks"
     );
 
-    let before =
-        crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed);
+    let before = crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed);
     crate::afxdp::ipsec_inner::ipsec_inner_ecn_illegal_drops.store(before + 7, Ordering::Relaxed);
     let through_canonical =
         crate::afxdp::ipsec_inner::IPSEC_INNER_ECN_ILLEGAL_DROPS.load(Ordering::Relaxed);
@@ -10941,8 +11228,8 @@ fn ipsec_inner_ecn_alias_is_the_canonical_cell_9506() {
 /// seeded counter remains non-zero, which reds this cell.
 #[test]
 fn refresh_status_projects_ipsec_inner_counters() {
-    use std::sync::atomic::Ordering;
     use crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot;
+    use std::sync::atomic::Ordering;
 
     let state = new_state(ProcessStatus::default());
     let mut guard = state.lock().expect("server state");
@@ -10962,10 +11249,8 @@ fn refresh_status_projects_ipsec_inner_counters() {
         .store(23, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL
         .store(43, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL
-        .store(29, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL
-        .store(31, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL.store(29, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL.store(31, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL
         .store(37, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
@@ -10988,89 +11273,85 @@ fn refresh_status_projects_ipsec_inner_counters() {
         .store(before.ipsec_inner_ecn_illegal_drops, Ordering::Relaxed);
     crate::afxdp::ipsec_inner::ipsec_inner_noroute_total
         .store(before.ipsec_inner_noroute_total, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL
-        .store(before.ipsec_inner_worker_queue_full_total, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL
-        .store(before.ipsec_inner_verdict_queue_full_total, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL
-        .store(before.ipsec_inner_verdict_queue_contended_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_QUEUE_FULL_TOTAL.store(
+        before.ipsec_inner_worker_queue_full_total,
+        Ordering::Relaxed,
+    );
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_FULL_TOTAL.store(
+        before.ipsec_inner_verdict_queue_full_total,
+        Ordering::Relaxed,
+    );
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_VERDICT_QUEUE_CONTENDED_TOTAL.store(
+        before.ipsec_inner_verdict_queue_contended_total,
+        Ordering::Relaxed,
+    );
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_SLAB_EXHAUSTED_TOTAL
         .store(before.ipsec_inner_slab_exhausted_total, Ordering::Relaxed);
     crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_RETIRED_TOTAL
         .store(before.ipsec_inner_worker_retired_total, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL
-        .store(before.ipsec_inner_worker_orphan_reaped_total, Ordering::Relaxed);
-    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL
-        .store(before.ipsec_inner_orphan_provisional_total, Ordering::Relaxed);
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_WORKER_ORPHAN_REAPED_TOTAL.store(
+        before.ipsec_inner_worker_orphan_reaped_total,
+        Ordering::Relaxed,
+    );
+    crate::afxdp::ipsec_inner_queue::IPSEC_INNER_ORPHAN_PROVISIONAL_TOTAL.store(
+        before.ipsec_inner_orphan_provisional_total,
+        Ordering::Relaxed,
+    );
 
     assert_eq!(
-        guard.status.zone_gate_unzoned_total,
-        3,
+        guard.status.zone_gate_unzoned_total, 3,
         "the unzoned-gate counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.zone_gate_ambiguous_total,
-        5,
+        guard.status.zone_gate_ambiguous_total, 5,
         "the ambiguous-gate counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.zone_gate_stale_total,
-        7,
+        guard.status.zone_gate_stale_total, 7,
         "the stale-gate counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.zone_gate_no_generation_total,
-        11,
+        guard.status.zone_gate_no_generation_total, 11,
         "the missing-generation counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_parse_drops_total,
-        13,
+        guard.status.ipsec_inner_parse_drops_total, 13,
         "the parse-drop counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_ecn_illegal_drops,
-        17,
+        guard.status.ipsec_inner_ecn_illegal_drops, 17,
         "the ECN-refusal counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_noroute_total,
-        47,
+        guard.status.ipsec_inner_noroute_total, 47,
         "the no-route counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_worker_queue_full_total,
-        19,
+        guard.status.ipsec_inner_worker_queue_full_total, 19,
         "the worker-queue-full counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_verdict_queue_full_total,
-        23,
+        guard.status.ipsec_inner_verdict_queue_full_total, 23,
         "the verdict-queue-full counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_verdict_queue_contended_total,
-        43,
+        guard.status.ipsec_inner_verdict_queue_contended_total, 43,
         "the verdict-queue-contended counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_slab_exhausted_total,
-        29,
+        guard.status.ipsec_inner_slab_exhausted_total, 29,
         "the slab-exhausted counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_worker_retired_total,
-        31,
+        guard.status.ipsec_inner_worker_retired_total, 31,
         "the worker-retired counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_worker_orphan_reaped_total,
-        37,
+        guard.status.ipsec_inner_worker_orphan_reaped_total, 37,
         "the orphan-reaped counter must reach its own status field"
     );
     assert_eq!(
-        guard.status.ipsec_inner_orphan_provisional_total,
-        41,
+        guard.status.ipsec_inner_orphan_provisional_total, 41,
         "the provisional-orphan counter must reach its own status field"
     );
 }
@@ -11162,7 +11443,11 @@ fn scheduler_heartbeat_renews_lease_without_snapshot_status_or_persistence() {
     request.suppress_status = true;
 
     let response = run_request_on_file(state.clone(), request, &state_file);
-    assert!(response.ok, "unexpected heartbeat refusal: {}", response.error);
+    assert!(
+        response.ok,
+        "unexpected heartbeat refusal: {}",
+        response.error
+    );
     assert!(
         response.status.is_none(),
         "a lease heartbeat must not request or attach status"
@@ -11252,7 +11537,7 @@ fn fib_dump_is_a_read_only_control_verb_11370() {
 /// retry takes the refresh leg — the live slot never appears.
 #[test]
 fn same_plan_retry_after_bind_failure_reconciles_14130() {
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
 
     let snap = |generation: u64| ConfigSnapshot {
         version: CONFIG_SNAPSHOT_PROTOCOL_VERSION,
@@ -11344,7 +11629,7 @@ fn same_plan_retry_after_bind_failure_reconciles_14130() {
 #[test]
 fn apply_snapshot_authorized_clear_marker_installs_empty() {
     use crate::protocol::snapshot::SnapshotSummary;
-    use crate::{ConfigSnapshot, PolicyRuleSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot, PolicyRuleSnapshot};
     let zones = || {
         vec![
             crate::ZoneSnapshot {
@@ -11412,9 +11697,16 @@ fn apply_snapshot_authorized_clear_marker_installs_empty() {
             response.error
         );
         let guard = state.lock().expect("state");
-        assert_eq!(guard.snapshot_policy_mismatch_total, 0, "authorized clear is not a mismatch");
+        assert_eq!(
+            guard.snapshot_policy_mismatch_total, 0,
+            "authorized clear is not a mismatch"
+        );
         let installed = guard.snapshot.as_ref().expect("snapshot installed");
-        assert_eq!(installed.policies.len(), 0, "clear must install the empty set");
+        assert_eq!(
+            installed.policies.len(),
+            0,
+            "clear must install the empty set"
+        );
         assert_eq!(guard.status.last_snapshot_policy_count, 0);
     }
     // Reseed one policy, then an UNMARKED both-zeroed apply still refuses.
@@ -11495,8 +11787,8 @@ fn refresh_status_projects_reinject_handler_panics_17123() {
 /// stops passing the grant (the row keeps the old stamp) or stops revoking it.
 #[test]
 fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
-    use crate::afxdp::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::afxdp::{EXPECTED_CTRL_METADATA_VERSION, UserspaceCtrlValue};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     {
         let mut request = req("apply_snapshot");
@@ -11536,15 +11828,28 @@ fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
     request.ctrl_stamp_deadline_mono_ns = crate::afxdp::monotonic_nanos() + 10_000_000_000;
     let response = run_request(state.clone(), request);
     assert!(response.ok, "bump: {}", response.error);
-    assert_eq!(row.get().fib_generation, 7, "the granted bump must advance the ctrl stamp");
+    assert_eq!(
+        row.get().fib_generation,
+        7,
+        "the granted bump must advance the ctrl stamp"
+    );
     assert_eq!(row.update_count(), 1);
     let status = response.status.expect("status payload");
     assert_eq!(status.ctrl_stamp_advances_total, 1);
     {
         let guard = state.lock().expect("state");
-        assert_eq!(guard.afxdp.ctrl_stamp_grant_for_test(), None, "the grant must not outlive its request");
         assert_eq!(
-            guard.afxdp.ctrl_stamp.test_last_grant.as_ref().map(|g| g.pin_path.as_str()),
+            guard.afxdp.ctrl_stamp_grant_for_test(),
+            None,
+            "the grant must not outlive its request"
+        );
+        assert_eq!(
+            guard
+                .afxdp
+                .ctrl_stamp
+                .test_last_grant
+                .as_ref()
+                .map(|g| g.pin_path.as_str()),
             Some("/test/pins/userspace_ctrl"),
             "a route-only bump takes the ctrl pin from the stored snapshot"
         );
@@ -11559,7 +11864,11 @@ fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
     });
     let response = run_request(state, request);
     assert!(response.ok, "second bump: {}", response.error);
-    assert_eq!(row.get().fib_generation, 7, "an ungranted bump wrote the ctrl row");
+    assert_eq!(
+        row.get().fib_generation,
+        7,
+        "an ungranted bump wrote the ctrl row"
+    );
 }
 
 /// #18560: the same grant on `apply_snapshot`. A same-plan apply that moves
@@ -11567,8 +11876,8 @@ fn bump_fib_generation_grant_advances_ctrl_stamp_18560() {
 /// store. RED if the apply arm stops passing the grant.
 #[test]
 fn apply_snapshot_grant_advances_ctrl_stamp_18560() {
-    use crate::afxdp::{UserspaceCtrlValue, EXPECTED_CTRL_METADATA_VERSION};
-    use crate::{ConfigSnapshot, CONFIG_SNAPSHOT_PROTOCOL_VERSION};
+    use crate::afxdp::{EXPECTED_CTRL_METADATA_VERSION, UserspaceCtrlValue};
+    use crate::{CONFIG_SNAPSHOT_PROTOCOL_VERSION, ConfigSnapshot};
     let state = new_state(ProcessStatus::default());
     let apply = |generation: u64, grant: u64| {
         let mut request = req("apply_snapshot");
@@ -11603,15 +11912,83 @@ fn apply_snapshot_grant_advances_ctrl_stamp_18560() {
     let response = apply(2, crate::afxdp::monotonic_nanos() + 10_000_000_000);
     assert!(response.ok, "granted apply_snapshot: {}", response.error);
     let published = state.lock().expect("state").afxdp.published_ctrl_stamp();
-    assert_eq!(published.config_generation, 2, "premise: the apply published generation 2");
-    assert_eq!(row.get().config_generation, 2, "the granted apply must advance the ctrl stamp");
+    assert_eq!(
+        published.config_generation, 2,
+        "premise: the apply published generation 2"
+    );
+    assert_eq!(
+        row.get().config_generation,
+        2,
+        "the granted apply must advance the ctrl stamp"
+    );
     {
         let guard = state.lock().expect("state");
         assert_eq!(guard.afxdp.ctrl_stamp_grant_for_test(), None);
         assert_eq!(
-            guard.afxdp.ctrl_stamp.test_last_grant.as_ref().map(|g| g.pin_path.as_str()),
+            guard
+                .afxdp
+                .ctrl_stamp
+                .test_last_grant
+                .as_ref()
+                .map(|g| g.pin_path.as_str()),
             Some("/test/pins/userspace_ctrl"),
             "the apply takes the ctrl pin from its own snapshot"
         );
     }
+}
+#[test]
+fn session_delta_loss_probe_uses_wait_start_baseline_18635() {
+    use crate::protocol::{SessionDeltaLossBaseline, SessionDeltaLossProbeRequest};
+
+    let started_at = chrono::Utc::now();
+    let baseline_status = ProcessStatus {
+        pid: 4242,
+        started_at,
+        helper_status_measurement_sequence: 40,
+        event_stream_session_delta_lost_open: 0,
+        event_stream_session_delta_lost_close: 0,
+        event_stream_session_delta_lost_update: 0,
+        ..ProcessStatus::default()
+    };
+    let baseline_probe = super::helpers::status::session_delta_loss_probe(
+        &baseline_status,
+        &SessionDeltaLossProbeRequest::default(),
+    );
+    assert!(baseline_probe.valid);
+    assert_eq!(baseline_probe.lost_since, Some(0));
+    let baseline = SessionDeltaLossBaseline {
+        pid: baseline_probe.pid,
+        started_at: baseline_probe.started_at,
+        helper_status_measurement_sequence: baseline_probe.helper_status_measurement_sequence,
+        event_stream_session_delta_lost_open: baseline_probe.event_stream_session_delta_lost_open,
+        event_stream_session_delta_lost_close: baseline_probe.event_stream_session_delta_lost_close,
+        event_stream_session_delta_lost_update: baseline_probe
+            .event_stream_session_delta_lost_update,
+    };
+
+    // Ordinary status projections at epochs 41 and 42 are deliberately held
+    // outside this query. They are not evidence: the confirmation evaluates
+    // the original epoch-40 baseline against counters freshly read at epoch 43.
+    let mut confirmation = baseline_status.clone();
+    confirmation.helper_status_measurement_sequence = 43;
+    confirmation.event_stream_session_delta_lost_update = 1;
+    let response = super::helpers::status::session_delta_loss_probe(
+        &confirmation,
+        &SessionDeltaLossProbeRequest {
+            baseline: Some(baseline.clone()),
+        },
+    );
+    assert!(response.valid);
+    assert_eq!(response.lost_since, Some(1));
+
+    // A restarted helper is not a chance to silently establish a new baseline.
+    confirmation.pid += 1;
+    let restarted = super::helpers::status::session_delta_loss_probe(
+        &confirmation,
+        &SessionDeltaLossProbeRequest {
+            baseline: Some(baseline),
+        },
+    );
+    assert!(!restarted.valid);
+    assert_eq!(restarted.lost_since, None);
 }

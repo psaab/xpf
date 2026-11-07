@@ -17,7 +17,9 @@ use crate::protocol::{SessionCounterQueryRequest, SessionCounterRowWire};
 use std::net::IpAddr;
 
 /// Build the lookup key, or `None` with a reason the caller reports.
-fn key_from_request(req: &SessionCounterQueryRequest) -> Result<crate::session::SessionKey, String> {
+fn key_from_request(
+    req: &SessionCounterQueryRequest,
+) -> Result<crate::session::SessionKey, String> {
     let src_ip: IpAddr = req
         .src_ip
         .parse()

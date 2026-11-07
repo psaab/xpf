@@ -4,18 +4,16 @@
 //! plus `snapshot` because `ProcessStatus` and `ControlRequest`
 //! aggregate them.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 // #7160: `ProcessStatus` now lives in the sibling `status` module (split out
 // to keep this file under the modularity floor). `ControlResponse` still
 // embeds it, so name it directly rather than through the crate re-export.
-use super::status::ProcessStatus;
 use super::session_export::SessionExportRequest;
+use super::status::ProcessStatus;
 
-use super::binding::{
-    HAGroupStatus,
-    SessionDeltaInfo,
-};
+use super::binding::{HAGroupStatus, SessionDeltaInfo};
 use super::snapshot::{ConfigSnapshot, FabricSnapshot, NeighborSnapshot};
 
 /// The config-snapshot wire contract version, mirrored on the Go side by
@@ -526,6 +524,9 @@ pub(crate) struct ControlRequest {
     /// plane never sends it.
     #[serde(rename = "session_counter_query", default)]
     pub session_counter_query: Option<SessionCounterQueryRequest>,
+    /// Helper-evaluated cumulative loss since the wait's original baseline.
+    #[serde(rename = "session_delta_loss_probe", default)]
+    pub session_delta_loss_probe: Option<SessionDeltaLossProbeRequest>,
     /// #8121: idle persistent-NAT leases to install (the `import_idle_leases`
     /// verb). Absent for every other verb.
     #[serde(rename = "idle_leases", default, skip_serializing_if = "Vec::is_empty")]
@@ -549,6 +550,36 @@ pub(crate) struct ControlRequest {
     pub neighbor_replace: bool,
     #[serde(default)]
     pub fabrics: Option<Vec<FabricSnapshot>>,
+}
+
+/// A wait-start loss baseline bound to one helper instance and status epoch.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SessionDeltaLossBaseline {
+    pub pid: i32,
+    pub started_at: DateTime<Utc>,
+    pub helper_status_measurement_sequence: u64,
+    pub event_stream_session_delta_lost_open: u64,
+    pub event_stream_session_delta_lost_close: u64,
+    pub event_stream_session_delta_lost_update: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub(crate) struct SessionDeltaLossProbeRequest {
+    #[serde(default)]
+    pub baseline: Option<SessionDeltaLossBaseline>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SessionDeltaLossProbeResponse {
+    pub valid: bool,
+    pub pid: i32,
+    pub started_at: DateTime<Utc>,
+    pub helper_status_measurement_sequence: u64,
+    pub event_stream_session_delta_lost_open: u64,
+    pub event_stream_session_delta_lost_close: u64,
+    pub event_stream_session_delta_lost_update: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lost_since: Option<u64>,
 }
 
 /// One resolved next-hop leg in a read-only helper FIB dump (#11370).
@@ -1048,8 +1079,9 @@ pub(crate) struct ControlResponse {
         skip_serializing_if = "Vec::is_empty"
     )]
     pub session_counters: Vec<SessionCounterRowWire>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<ProcessStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_delta_loss_probe: Option<SessionDeltaLossProbeResponse>,
     #[serde(
         rename = "session_policy_matches",
         default,
@@ -1922,7 +1954,6 @@ fn is_zero_u32(v: &u32) -> bool {
 fn is_false(v: &bool) -> bool {
     !*v
 }
-
 
 /// #7919: the 5-tuple a `session_counters` query names.
 ///

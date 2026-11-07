@@ -205,7 +205,7 @@ func (c *CLI) showChassisCluster(args []string) error {
 		case "chassis-cluster-control-plane-statistics":
 			return c.showChassisClusterControlPlaneStats()
 		case "chassis-cluster-data-plane-statistics":
-			return c.showChassisClusterDataPlaneStats()
+			return c.showChassisClusterDataPlaneStats(filter)
 		case "chassis-cluster-data-plane-interfaces":
 			return c.showChassisClusterDataPlaneInterfaces()
 		case "chassis-cluster-data-plane-fairness":
@@ -359,7 +359,29 @@ func (c *CLI) showChassisClusterControlPlaneStats() error {
 	return nil
 }
 
-func (c *CLI) showChassisClusterDataPlaneStats() error {
+func (c *CLI) showChassisClusterDataPlaneStats(filter string) error {
+	if filter != "" {
+		baseline, isBaseline, err := dpuserspace.ParseSessionDeltaLossProbeFilter(filter)
+		if err != nil {
+			return err
+		}
+		provider, ok := c.dpProbe().(interface {
+			SessionDeltaLossProbe(*dpuserspace.SessionDeltaLossBaseline) (*dpuserspace.SessionDeltaLossProbeResponse, error)
+		})
+		if !ok {
+			return fmt.Errorf("userspace session-delta loss probe unavailable")
+		}
+		response, err := provider.SessionDeltaLossProbe(baseline)
+		if err != nil {
+			return err
+		}
+		output, err := dpuserspace.FormatSessionDeltaLossProbe(response, isBaseline)
+		if err != nil {
+			return err
+		}
+		fmt.Print(output)
+		return nil
+	}
 	if c.cluster == nil {
 		fmt.Println("Cluster not configured")
 		return nil

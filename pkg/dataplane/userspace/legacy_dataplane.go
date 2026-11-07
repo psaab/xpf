@@ -939,6 +939,16 @@ func (a *LegacyDataPlaneAdapter) Status() (ProcessStatus, error) {
 	return m.Status()
 }
 
+func (a *LegacyDataPlaneAdapter) SessionDeltaLossProbe(
+	baseline *SessionDeltaLossBaseline,
+) (*SessionDeltaLossProbeResponse, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return nil, err
+	}
+	return m.SessionDeltaLossProbe(baseline)
+}
+
 // UserspaceEventStreamStatus returns daemon-owned counters even if the helper
 // is stopped and Status() cannot obtain a helper snapshot.
 func (a *LegacyDataPlaneAdapter) UserspaceEventStreamStatus() EventStreamStatus {

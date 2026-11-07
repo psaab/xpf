@@ -784,6 +784,10 @@ type ControlRequest struct {
 	// field, never a redefinition — an old helper ignores it, and this control
 	// plane never sends it to one twice (the first refusal is sticky per call).
 	SessionCounterQuery *SessionCounterQuery `json:"session_counter_query,omitempty"`
+	// SessionDeltaLossProbe is a helper-evaluated wait-window query. Its
+	// optional baseline binds the counters to one helper instance and status
+	// projection stamp.
+	SessionDeltaLossProbe *SessionDeltaLossProbeRequest `json:"session_delta_loss_probe,omitempty"`
 	// IdleLeases carries idle persistent-NAT leases for the import_idle_leases
 	// verb (#8121). omitempty so every other request is byte-identical to
 	// before — the control socket is shared with the 1/s status poll and with
@@ -839,14 +843,15 @@ type ControlResponse struct {
 	// not yet converted, and for the converted post-teardown site it
 	// prefers a recognized code but falls back to the prose prefix when
 	// the code is empty or unrecognized (no blanket unknown rule).
-	ErrorCode                    string               `json:"error_code,omitempty"`
-	ErrorRetryClass              string               `json:"error_retry_class,omitempty"`
-	Status                       *ProcessStatus       `json:"status,omitempty"`
-	SessionPolicyMatches         []SessionPolicyMatch `json:"session_policy_matches,omitempty"`
-	SessionPolicyComplete        bool                 `json:"session_policy_complete,omitempty"`
-	SessionPolicyContinuation    string               `json:"session_policy_continuation,omitempty"`
-	SessionPolicyPerWorkerErrors []string             `json:"session_policy_per_worker_errors,omitempty"`
-	SessionDeltas                []SessionDeltaInfo   `json:"session_deltas,omitempty"`
+	ErrorCode                    string                         `json:"error_code,omitempty"`
+	ErrorRetryClass              string                         `json:"error_retry_class,omitempty"`
+	Status                       *ProcessStatus                 `json:"status,omitempty"`
+	SessionDeltaLossProbe        *SessionDeltaLossProbeResponse `json:"session_delta_loss_probe,omitempty"`
+	SessionPolicyMatches         []SessionPolicyMatch           `json:"session_policy_matches,omitempty"`
+	SessionPolicyComplete        bool                           `json:"session_policy_complete,omitempty"`
+	SessionPolicyContinuation    string                         `json:"session_policy_continuation,omitempty"`
+	SessionPolicyPerWorkerErrors []string                       `json:"session_policy_per_worker_errors,omitempty"`
+	SessionDeltas                []SessionDeltaInfo             `json:"session_deltas,omitempty"`
 	// SessionExportMore reports that an export_owner_rg_sessions answer was
 	// CAPPED by the request's Max and the helper still holds deltas from the
 	// same window (#9344).

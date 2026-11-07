@@ -1,10 +1,10 @@
 // #1345: per-verb handler for set_forwarding_state, split out of handlers.rs in #1345.
 
+use super::super::ServerState;
 use super::super::helpers::{
     capture_binding_arm_state, finish_binding_reconcile, forwarding_unsupported_error,
     set_bindings_forwarding_armed,
 };
-use super::super::ServerState;
 use crate::{ControlResponse, ForwardingControlRequest};
 
 pub(super) fn set(

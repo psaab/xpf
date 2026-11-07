@@ -52,6 +52,7 @@ func TestClusterSubsystemViewTrailingTokens17225(t *testing.T) {
 		// both surfaces; it is not a subsystem.
 		{"fence-status", nil},
 		{"fence-status", []string{"extra"}},
+		{"data-plane", []string{"statistics", "loss-since"}},
 	} {
 		if topic, filter, err := ClusterSubsystemView(tc.sub, tc.rest); err == nil {
 			t.Errorf("ClusterSubsystemView(%q, %v) = (%q, %q), nil; want an error", tc.sub, tc.rest, topic, filter)
@@ -74,6 +75,8 @@ func TestClusterSubsystemViewRecognizedAndBare17225(t *testing.T) {
 		{"data-plane", []string{"fairness"}, "chassis-cluster-data-plane-fairness", ""},
 		{"data-plane", []string{"flows"}, "chassis-cluster-data-plane-flows", ""},
 		{"data-plane", []string{"flows", "limit", "20"}, "chassis-cluster-data-plane-flows", "limit 20"},
+		{"data-plane", []string{"statistics", "loss-baseline"}, "chassis-cluster-data-plane-statistics", "loss-baseline"},
+		{"data-plane", []string{"statistics", "loss-since", "opaque-token"}, "chassis-cluster-data-plane-statistics", "loss-since opaque-token"},
 		{"ip-monitoring", nil, "chassis-cluster-ip-monitoring-status", ""},
 		{"ip-monitoring", []string{"status"}, "chassis-cluster-ip-monitoring-status", ""},
 		{"fabric", nil, "chassis-cluster-fabric-statistics", ""},

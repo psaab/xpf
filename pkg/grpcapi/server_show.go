@@ -467,7 +467,7 @@ func (s *Server) showText(ctx context.Context, req *pb.ShowTextRequest) (*pb.Sho
 
 	case "chassis-cluster-data-plane-statistics":
 		// #1043 Phase 11: case body extracted to server_show_cluster_text.go
-		s.showChassisClusterDataPlaneStatistics(&buf)
+		s.showChassisClusterDataPlaneStatistics(req.Filter, &buf)
 
 	case "chassis-cluster-data-plane-interfaces":
 		// #1043 Phase 11: case body extracted to server_show_cluster_text.go

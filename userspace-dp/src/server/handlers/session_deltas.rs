@@ -1,7 +1,7 @@
 // #1345: per-verb handler for drain_session_deltas, split out of handlers.rs in #1345.
 
-use super::super::helpers::project_status;
 use super::super::ServerState;
+use super::super::helpers::project_status;
 use crate::{ControlResponse, SessionDeltaDrainRequest};
 
 pub(super) fn drain(

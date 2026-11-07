@@ -49,11 +49,11 @@ func ParseNATPoolSelector(rest []string) (string, error) {
 // present token must be a recognized leaf with exact arity (#15775):
 // `statistics junk`, `status junk`, `statistics|interfaces|fairness
 // junk` and the like error instead of rendering the leaf view.
-// `data-plane flows` is the one leaf that takes trailing arguments,
-// joined as its filter. `fence-status` is a leaf view of
-// `show chassis cluster` itself, not a subsystem: both dispatchers
-// handle it before delegating here, so it is rejected as an unknown
-// subsystem.
+// `fence-status` is a leaf view of `show chassis cluster`. `data-plane`
+// statistics also accepts only the private loss-baseline and loss-since
+// probes used by HA wait loops. `show chassis cluster` is not a
+// subsystem: both dispatchers handle it before delegating here, so it is
+// rejected as an unknown subsystem.
 func ClusterSubsystemView(sub string, rest []string) (topic, filter string, err error) {
 	switch sub {
 	case "control-plane":
@@ -69,6 +69,12 @@ func ClusterSubsystemView(sub string, rest []string) (topic, filter string, err 
 		case "statistics":
 			if len(rest) == 1 {
 				return "chassis-cluster-data-plane-statistics", "", nil
+			}
+			if len(rest) == 2 && rest[1] == "loss-baseline" {
+				return "chassis-cluster-data-plane-statistics", rest[1], nil
+			}
+			if len(rest) == 3 && rest[1] == "loss-since" {
+				return "chassis-cluster-data-plane-statistics", strings.Join(rest[1:], " "), nil
 			}
 		case "interfaces":
 			if len(rest) == 1 {

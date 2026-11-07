@@ -1,7 +1,7 @@
 // #1345: per-verb handler for inject_packet, split out of handlers.rs in #1345.
 
-use super::super::helpers::project_status;
 use super::super::ServerState;
+use super::super::helpers::project_status;
 use crate::{ControlResponse, InjectPacketRequest};
 
 pub(super) fn handle(

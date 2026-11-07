@@ -409,7 +409,7 @@ func checkGolden11581(t *testing.T, method, goldenName, transcript, got string, 
 func TestShowChassisClusterDataPlaneStatistics11581(t *testing.T) {
 	s := server11581(t)
 	var buf strings.Builder
-	s.showChassisClusterDataPlaneStatistics(&buf)
+	s.showChassisClusterDataPlaneStatistics("", &buf)
 	checkGolden11581(t,
 		"Server.showChassisClusterDataPlaneStatistics",
 		"show_chassis_cluster_data_plane_statistics_11581.golden",

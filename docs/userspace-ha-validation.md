@@ -240,8 +240,8 @@ move an RG. They share one sample predicate, `ha_session_sync_idle_sample` in
 **The property.** Idle = N paired fresh source-AND-target helper-measured
 status projections at an unchanged floor, with no create outstanding beyond
 that floor and nothing pending at those reads, followed by one more fresh
-projection from both endpoints before PASS. N is
-`SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
+projection from both endpoints and a fresh helper loss-since answer before
+PASS. N is `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
 
 - `Helper status measurement sequence` is helper-owned and advances on each
   Rust status projection. Both source and target measurements must advance for
@@ -251,23 +251,28 @@ projection from both endpoints before PASS. N is
   counter, not a freshness epoch. A cache-only publisher such as
   `ClearFilterCounters` can advance it without obtaining a new helper
   projection, so neither wait loop accepts it as proof.
-- For helpers that report the three additive event-stream loss counters, the
-  Go status loop issues a second `status` read after the first response and
-  publishes only that second response. The second read must carry all counters
-  and a helper measurement sequence newer than the first read; a failed,
-  partial, or non-advancing refresh is not published as valid status. Thus a
-  pre-loss first response cannot be given a fresh Go publication stamp.
+- At wait start, the source helper answers a fresh `loss-baseline` query with
+  an opaque baseline token containing PID, process start time, helper
+  measurement sequence, and all three per-kind loss counters. Every sample
+  asks the helper for `loss-since TOKEN`; the helper evaluates its current
+  counters while answering that request, bypassing manager status cache. A
+  changed helper identity, rewound stamp/counter, missing answer, or malformed
+  response VOIDs the wait rather than silently starting a new loss baseline.
+- After the paired stable window, the final `loss-since TOKEN` is a new
+  helper round trip issued after that window, and only its answer can certify
+  zero loss. The proof is as fresh as that confirmation round trip itself;
+  ordinary held status projections and Go cache publishers cannot supply it.
 - "Pending" covers both the target's helper delta queue
   (`Session delta pending`) and the source's helper delta buffer.
-- The source's `Session delta dropped` fallback count and
-  `Event stream HA session delta lost` total must both remain unchanged
-  since the wait began. The latter sums only non-bulk, non-CommandExport HA
-  session-delta Open/Close/Update failures from the helper's lossless event-stream enqueue;
-  it is distinct from `Event stream producer: dropped=`, which also counts
-  shed RT_FLOW log events. If an older helper omits any additive loss-counter
-  key or the helper measurement sequence, formatting omits that evidence and
-  the idle verdict is VOID; key presence distinguishes unknown from a
-  trustworthy zero without a status protocol-version bump.
+- The source's `Session delta dropped` fallback count must remain unchanged
+  since the wait began. The `Event stream HA session delta lost` status line
+  still reports non-bulk, non-CommandExport HA session-delta Open/Close/Update
+  losses from the lossless enqueue, distinct from `Event stream producer:
+  dropped=`, which also counts shed RT_FLOW log events. The idle gate trusts
+  the direct helper loss-since answer, not this cached status line. A helper
+  missing the probe or any required loss-counter/projection field VOIDs the
+  verdict; key presence distinguishes unknown from zero without a status
+  protocol-version bump.
 
 A sample reads D = the source's `Session create` Sent minus the target's
 `Session create` Received (`show chassis cluster data-plane statistics`).
@@ -352,12 +357,12 @@ How the predicate gets there:
 - **Source-side deltas.** A session delta the source's helper still holds, or
   has dropped, never becomes a "sent" create. So neither D nor the target's
   pending count can see it. The predicate therefore also reads the source's
-  `Session delta pending` (must be 0 at an idle sample) and both source loss
-  counters: `Session delta dropped` for the per-binding RPC-fallback path, and
-  `Event stream HA session delta lost` for non-bulk event-stream Open/Close/
-  Update deltas whose lossless enqueue failed. The latter is a separate total;
-  it does not use the mixed `Event stream producer: dropped=` count, which
-  includes rate-limited log events.
+  `Session delta pending` (must be 0 at an idle sample), requires the
+  `Session delta dropped` RPC-fallback count to stay unchanged, and asks the
+  helper directly for event-stream loss since the wait-start token. That
+  answer sums non-bulk, non-CommandExport Open/Close/Update enqueue failures;
+  it does not use `Event stream producer: dropped=`, which also counts
+  rate-limited log events.
 - **Unknown verdicts.** An unknown helper verdict VOIDs the wait in both
   loops.
 
@@ -382,11 +387,14 @@ or sequence number, not counts.
   earlier counted samples as old as the wait itself, up to about 28
   attempts. The PASS sample is still an exact reading, so this is not a lost
   create.
-- **A rewind wipes a drop.** A counter rewind (a daemon or helper restart)
-  re-baselines everything, including both source loss counters, so a loss
-  seen before it is forgotten.
-- **After the last sample.** A create sent after the last idle sample is not
-  covered.
+- **Helper restart or rewind.** The loss baseline binds PID, start time,
+  helper measurement sequence, and all three counters. A restart, stamp
+  rewind, or counter decrease makes the probe invalid and VOIDs the wait;
+  the event-loss baseline is never silently reset. A rewind of the separate
+  `Session delta dropped` counter re-baselines only the sync-count floor.
+- **After confirmation.** Loss occurring after the final helper answer is
+  outside that wait's proof; the guarantee is bounded by the confirmation
+  round trip. A create sent after the last idle sample is not covered.
 
 `test/incus/ha-assurance-selftest.sh` covers this with fixed counter pairs and
 with timeline cells. In a timeline cell the counters depend on when each

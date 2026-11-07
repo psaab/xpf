@@ -1,9 +1,9 @@
 // #1345: per-verb handler for set_queue_state, split out of handlers.rs in #1345.
 
-use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, project_status};
 use super::super::ServerState;
-use chrono::Utc;
+use super::super::helpers::{capture_binding_arm_state, finish_binding_reconcile, project_status};
 use crate::{ControlResponse, QueueControlRequest};
+use chrono::Utc;
 
 pub(super) fn set(
     guard: &mut ServerState,

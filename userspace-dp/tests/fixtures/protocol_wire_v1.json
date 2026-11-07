@@ -874,6 +874,7 @@
     "packet": null,
     "queue": null,
     "session_counter_query": null,
+    "session_delta_loss_probe": null,
     "session_deltas": null,
     "session_export": null,
     "session_policy_list": null,
@@ -940,6 +941,7 @@
       "src_ip": "10.0.0.1",
       "src_port": 40001
     },
+    "session_delta_loss_probe": null,
     "session_deltas": null,
     "session_export": null,
     "session_policy_list": {
@@ -980,7 +982,8 @@
     "session_mirror_v4_count": 0,
     "session_mirror_v6_count": 0,
     "session_policy_complete": false,
-    "session_policy_continuation": ""
+    "session_policy_continuation": "",
+    "status": null
   },
   "control_response_populated": {
     "display_leases": [
@@ -1080,6 +1083,16 @@
         "worker_id": 1
       }
     ],
+    "session_delta_loss_probe": {
+      "event_stream_session_delta_lost_close": 2,
+      "event_stream_session_delta_lost_open": 1,
+      "event_stream_session_delta_lost_update": 3,
+      "helper_status_measurement_sequence": 41,
+      "lost_since": 6,
+      "pid": 16132,
+      "started_at": "2023-11-14T22:13:20Z",
+      "valid": true
+    },
     "session_deltas": [
       {
         "addr_family": 0,
@@ -1296,6 +1309,7 @@
       "handshake_relay_outbox_drops_total": 0,
       "handshake_relay_refused_total": 0,
       "helper_mode": "",
+      "helper_status_measurement_sequence": 0,
       "ike_exchange_entries": 0,
       "ike_exchange_evictions_total": 0,
       "inject_packet_tuple_protocol_version": 0,
@@ -2702,6 +2716,7 @@
     "handshake_relay_outbox_drops_total": 0,
     "handshake_relay_refused_total": 0,
     "helper_mode": "",
+    "helper_status_measurement_sequence": 0,
     "ike_exchange_entries": 0,
     "ike_exchange_evictions_total": 0,
     "inject_packet_tuple_protocol_version": 0,
@@ -3037,6 +3052,7 @@
     "handshake_relay_outbox_drops_total": 307,
     "handshake_relay_refused_total": 311,
     "helper_mode": "",
+    "helper_status_measurement_sequence": 0,
     "ike_exchange_entries": 0,
     "ike_exchange_evictions_total": 0,
     "inject_packet_tuple_protocol_version": 0,
@@ -3383,6 +3399,7 @@
     "handshake_relay_outbox_drops_total": 431,
     "handshake_relay_refused_total": 433,
     "helper_mode": "",
+    "helper_status_measurement_sequence": 0,
     "ike_exchange_entries": 0,
     "ike_exchange_evictions_total": 0,
     "inject_packet_tuple_protocol_version": 0,
@@ -3935,6 +3952,7 @@
     "handshake_relay_outbox_drops_total": 401,
     "handshake_relay_refused_total": 409,
     "helper_mode": "",
+    "helper_status_measurement_sequence": 0,
     "ike_exchange_entries": 0,
     "ike_exchange_evictions_total": 0,
     "inject_packet_tuple_protocol_version": 0,

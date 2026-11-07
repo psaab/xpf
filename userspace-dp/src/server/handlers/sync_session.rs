@@ -1,13 +1,13 @@
 // #1345: per-verb handler for sync_session, split out of handlers.rs in #1345.
 
 use super::super::helpers::{
-    SyncedKeyIntent, SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX, build_synced_session_entry,
+    SYNCED_KEY_INCOMPLETE_REFUSED_PREFIX, SyncedKeyIntent, build_synced_session_entry,
     build_synced_session_key,
 };
 use crate::afxdp::SessionDomain;
 use crate::afxdp::{
-    SyncedDeleteMode, SyncedImportOutcome, SYNCED_DELETE_REFUSED_PREFIX,
-    SYNCED_IMPORT_REFUSED_PREFIX,
+    SYNCED_DELETE_REFUSED_PREFIX, SYNCED_IMPORT_REFUSED_PREFIX, SyncedDeleteMode,
+    SyncedImportOutcome,
 };
 use crate::{ControlResponse, SessionSyncRequest};
 
@@ -127,29 +127,27 @@ pub(super) fn handle(
     // Exact `(epoch, operation_id, mutation_id)` replays return the recorded
     // response summary. A new operation id carrying a known mutation id is a
     // repair/retry-after-unknown-outcome and deliberately proceeds.
-    let mut mutation_lease = if epoch_scoped
-        && !sync_req.operation_id.is_empty()
-        && !sync_req.mutation_id.is_empty()
-    {
-        match domain.helper_mutation_begin(
-            sync_req.helper_epoch,
-            &sync_req.operation_id,
-            &sync_req.mutation_id,
-        ) {
-            Ok(crate::afxdp::HelperMutationBegin::Replay(outcome)) => {
-                outcome.apply_to_response(response);
-                return;
+    let mut mutation_lease =
+        if epoch_scoped && !sync_req.operation_id.is_empty() && !sync_req.mutation_id.is_empty() {
+            match domain.helper_mutation_begin(
+                sync_req.helper_epoch,
+                &sync_req.operation_id,
+                &sync_req.mutation_id,
+            ) {
+                Ok(crate::afxdp::HelperMutationBegin::Replay(outcome)) => {
+                    outcome.apply_to_response(response);
+                    return;
+                }
+                Ok(crate::afxdp::HelperMutationBegin::Proceed(lease)) => Some(lease),
+                Err(reason) => {
+                    response.ok = false;
+                    response.error = reason.to_string();
+                    return;
+                }
             }
-            Ok(crate::afxdp::HelperMutationBegin::Proceed(lease)) => Some(lease),
-            Err(reason) => {
-                response.ok = false;
-                response.error = reason.to_string();
-                return;
-            }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
     // #10512 scoped verb requires its identity (plan §2.1: zero forward id
     // is identity-missing, never an unconditional delete). Fail fast before
     // key building; the mutation lease completes here (taken, so the tail
@@ -290,7 +288,7 @@ pub(super) fn handle(
                     }
                 }
             }
-        },
+        }
         // #7188: a delete reconstructs the key with `Delete` intent, so a peer
         // that could not state the tunnel discriminator retracts the `None`
         // class rather than being refused. A delete can only under-match; it
@@ -304,228 +302,226 @@ pub(super) fn handle(
         // the 5-tuple did not already name. Two different fields, one rule —
         // fail closed where an identity is PUBLISHED, fail open where one is
         // only RETRACTED.
-        "delete" | "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped" => match build_synced_session_key(
-            &sync_req,
-            resolved_domain.unwrap_or(0),
-            SyncedKeyIntent::Delete,
-        ) {
-            Ok(key) => {
-                let forward_only = sync_req.forward_only;
-                let scoped = sync_req.operation.as_str() == "mirror_delete_scoped";
-                let strict_mirror = matches!(
-                    sync_req.operation.as_str(),
-                    "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
-                );
-                // #17133: build the (peer x strict x scoped) mode ONCE and
-                // thread it through both the exact delete and the
-                // tunnel-variant purge. #12886 was the variant path
-                // rebuilding this choice from a narrower signature and
-                // dropping `strict_mirror`; `expected_id` was dropped the
-                // same way. The scoped zero check above guarantees the
-                // scoped constructor succeeds here.
-                let mode = if scoped {
-                    SyncedDeleteMode::peer_mirror_scoped(sync_req.session_id)
-                        .expect("scoped verb with session_id 0 returned above")
-                } else {
-                    SyncedDeleteMode {
-                        peer: sync_req.peer_delete,
-                        strict_mirror,
-                        expected_id: None,
-                    }
-                };
-                let mut mirror_delete_error = false;
-                let mut delete = |key| {
-                    let outcome = domain.delete_synced(key, mode, forward_only);
-                    mirror_delete_error |= outcome.mirror_delete_failed();
-                    if sync_req.peer_delete {
-                        outcome.keeps_caller_rows()
+        "delete" | "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped" => {
+            match build_synced_session_key(
+                &sync_req,
+                resolved_domain.unwrap_or(0),
+                SyncedKeyIntent::Delete,
+            ) {
+                Ok(key) => {
+                    let forward_only = sync_req.forward_only;
+                    let scoped = sync_req.operation.as_str() == "mirror_delete_scoped";
+                    let strict_mirror = matches!(
+                        sync_req.operation.as_str(),
+                        "mirror_delete" | "mirror_delete_batch" | "mirror_delete_scoped"
+                    );
+                    // #17133: build the (peer x strict x scoped) mode ONCE and
+                    // thread it through both the exact delete and the
+                    // tunnel-variant purge. #12886 was the variant path
+                    // rebuilding this choice from a narrower signature and
+                    // dropping `strict_mirror`; `expected_id` was dropped the
+                    // same way. The scoped zero check above guarantees the
+                    // scoped constructor succeeds here.
+                    let mode = if scoped {
+                        SyncedDeleteMode::peer_mirror_scoped(sync_req.session_id)
+                            .expect("scoped verb with session_id 0 returned above")
                     } else {
-                        false
-                    }
-                };
-                // (keeps_caller_rows, mirror_delete_failed) per variant purge.
-                let delete_tunnel_variants = |key| {
-                    let outcome = domain.delete_synced_tunnel_variants(key, mode, forward_only);
-                    (
-                        outcome.keeps_caller_rows(),
-                        outcome.mirror_delete_failed(),
-                    )
-                };
-                let mut refused = false;
-                // #7160 (#2387): a bare-5-tuple delete (the `clear security
-                // flow session` / batch-revoke path) carries no ingress
-                // identity, so the key above resolved domain 0 and the exact
-                // delete cannot reach a session that lives in a routing
-                // instance.
-                //
-                // #8636: RESOLVE the domain, or REFUSE. This used to delete the
-                // tuple in EVERY configured domain. Routing instances exist to
-                // carry OVERLAPPING address space, so two tenants holding the
-                // same 5-tuple is the normal case rather than a corner — and
-                // the retry then tore down the other tenant's live session. The
-                // rationale it was written under ("a refused delete LEAKS while
-                // an under-matching one removes nothing the 5-tuple did not
-                // already name") is true on the #7188 DISCRIMINATOR axis it was
-                // written for and does not carry to this one: deleting in every
-                // domain removes sessions the 5-tuple names in OTHER TENANTS,
-                // which is precisely removing something it did not name.
-                //
-                // So probe first and act on the count. Same loop, same slow
-                // path, same handful of domains — a lookup instead of a delete.
-                //
-                // WHY REFUSING IS NOW CHEAP, and it was not before today. The
-                // objection to failing closed is that a session survives a
-                // policy invalidation that should have killed it. #8356 changed
-                // that: zone policy is re-derived on the established-session hit
-                // path once per `config_generation`, a commit bumps the
-                // generation and invalidates the flow cache, so the next packet
-                // of a surviving session is judged and revoked if the live
-                // policy denies. And EVERY reason the Go side invalidates for is
-                // a zone-policy change (PolicyDeleted / PolicyModified /
-                // DefaultPolicyChanged), so the populations coincide exactly. A
-                // refused delete therefore leaks for ONE PACKET, not until idle
-                // timeout.
-                //
-                // The residual is where that re-derivation DECLINES — ICMP under
-                // a type-constrained permit (#8618), an unresolvable zone
-                // (`to_id == 0 || from_id == 0`), `NoLocalEntry` — INTERSECTED
-                // with "the tuple is ambiguous", since a unique tuple is deleted
-                // exactly as before. Every member of that intersection fails
-                // toward keeping a session too long rather than tearing down
-                // another tenant's, which is the direction that makes it
-                // acceptable rather than merely small.
-                //
-                // #9714 review round 2, findings 2 and 4: resolve the COMPLETE
-                // candidate set without mutating anything, then perform EXACTLY ONE
-                // delete, or none.
-                //
-                // The previous shape probed first but still deleted the exact
-                // domain-0 entry BEFORE it counted the matches, so "domain 0 plus one
-                // match" deleted both, and "domain 0 plus several" deleted domain 0
-                // and then reported ambiguity — having already mutated the state it
-                // was declining to act on. An exact refusal was masked too, because
-                // the ownership token was only emitted while `response.ok` still held.
-                //
-                // `bare` is "this request NAMES no domain", which is NOT
-                // `key.routing_domain == 0`. Domain 0 is also the DEFAULT routing
-                // instance, and a sender that stated it made a statement:
-                // `routing_domain_from_wire` deliberately separates `Present(0)` from
-                // `Absent`, and `resolved_domain` carries that distinction until
-                // `unwrap_or(0)` flattens it for the key. Reading the flattened 0 as
-                // "unknown" sent an AUTHORITATIVE single-domain delete into the
-                // ambiguity probe, where it could be refused for naming too many
-                // tenants when it had named exactly one.
-                let bare = resolved_domain.is_none();
-                let purge_tunnel_variants = tunnel_variant_purge_applies(
-                    sync_req.purge_tunnel_variants,
-                    sync_req.protocol,
-                    sync_req.tunnel_discriminator,
-                );
-                let mut matched: Vec<u32> = Vec::new();
-                if bare {
-                    // Domain 0 is a CANDIDATE like any other, not a special case
-                    // evaluated first and deleted before the rest are counted.
-                    if if purge_tunnel_variants {
-                        domain.synced_tunnel_variant_contains(&key)
-                    } else {
-                        domain.synced_session_contains(&key)
-                    } {
-                        matched.push(0);
-                    }
-                    for rd in view.routing_domains() {
-                        if rd == 0 {
-                            continue;
+                        SyncedDeleteMode {
+                            peer: sync_req.peer_delete,
+                            strict_mirror,
+                            expected_id: None,
                         }
-                        let mut scoped = key.clone();
-                        scoped.routing_domain = rd;
-                        let present = if purge_tunnel_variants {
-                            domain.synced_tunnel_variant_contains(&scoped)
-                        } else {
-                            domain.synced_session_contains(&scoped)
-                        };
-                        if present {
-                            matched.push(rd);
-                        }
-                    }
-                }
-                if !bare {
-                    // A policy-invalidation GRE delete carries no trustworthy
-                    // discriminator from the BPF mirror. Purge every variant
-                    // only when the explicit trailing flag is present; generic
-                    // GC/operator deletes retain exact/under-match semantics.
-                    refused |= if purge_tunnel_variants {
-                        let (keeps, mfail) = delete_tunnel_variants(key.clone());
-                        mirror_delete_error |= mfail;
-                        keeps
-                    } else {
-                        delete(key.clone())
                     };
-                } else {
-                    match matched.as_slice() {
-                        // No shared authority anywhere for this tuple.
-                        //
-                        // #9714 r2 F4: a MARKED delete stops here. The domain-0
-                        // delete used to go out regardless, and a worker whose real
-                        // local session lives in another domain misses the scoped
-                        // lookup and takes the unconditional key-only arm, tearing
-                        // out the steering row of a live flow. That is reachable
-                        // during install, because the BPF publish precedes the
-                        // shared-map publish — so "no shared entry" does NOT mean
-                        // "no session". An authoritative delete keeps its plain-miss
-                        // kernel cleanup, which is the behaviour operators rely on
-                        [] => {
-                            if !sync_req.peer_delete {
+                    let mut mirror_delete_error = false;
+                    let mut delete = |key| {
+                        let outcome = domain.delete_synced(key, mode, forward_only);
+                        mirror_delete_error |= outcome.mirror_delete_failed();
+                        if sync_req.peer_delete {
+                            outcome.keeps_caller_rows()
+                        } else {
+                            false
+                        }
+                    };
+                    // (keeps_caller_rows, mirror_delete_failed) per variant purge.
+                    let delete_tunnel_variants = |key| {
+                        let outcome = domain.delete_synced_tunnel_variants(key, mode, forward_only);
+                        (outcome.keeps_caller_rows(), outcome.mirror_delete_failed())
+                    };
+                    let mut refused = false;
+                    // #7160 (#2387): a bare-5-tuple delete (the `clear security
+                    // flow session` / batch-revoke path) carries no ingress
+                    // identity, so the key above resolved domain 0 and the exact
+                    // delete cannot reach a session that lives in a routing
+                    // instance.
+                    //
+                    // #8636: RESOLVE the domain, or REFUSE. This used to delete the
+                    // tuple in EVERY configured domain. Routing instances exist to
+                    // carry OVERLAPPING address space, so two tenants holding the
+                    // same 5-tuple is the normal case rather than a corner — and
+                    // the retry then tore down the other tenant's live session. The
+                    // rationale it was written under ("a refused delete LEAKS while
+                    // an under-matching one removes nothing the 5-tuple did not
+                    // already name") is true on the #7188 DISCRIMINATOR axis it was
+                    // written for and does not carry to this one: deleting in every
+                    // domain removes sessions the 5-tuple names in OTHER TENANTS,
+                    // which is precisely removing something it did not name.
+                    //
+                    // So probe first and act on the count. Same loop, same slow
+                    // path, same handful of domains — a lookup instead of a delete.
+                    //
+                    // WHY REFUSING IS NOW CHEAP, and it was not before today. The
+                    // objection to failing closed is that a session survives a
+                    // policy invalidation that should have killed it. #8356 changed
+                    // that: zone policy is re-derived on the established-session hit
+                    // path once per `config_generation`, a commit bumps the
+                    // generation and invalidates the flow cache, so the next packet
+                    // of a surviving session is judged and revoked if the live
+                    // policy denies. And EVERY reason the Go side invalidates for is
+                    // a zone-policy change (PolicyDeleted / PolicyModified /
+                    // DefaultPolicyChanged), so the populations coincide exactly. A
+                    // refused delete therefore leaks for ONE PACKET, not until idle
+                    // timeout.
+                    //
+                    // The residual is where that re-derivation DECLINES — ICMP under
+                    // a type-constrained permit (#8618), an unresolvable zone
+                    // (`to_id == 0 || from_id == 0`), `NoLocalEntry` — INTERSECTED
+                    // with "the tuple is ambiguous", since a unique tuple is deleted
+                    // exactly as before. Every member of that intersection fails
+                    // toward keeping a session too long rather than tearing down
+                    // another tenant's, which is the direction that makes it
+                    // acceptable rather than merely small.
+                    //
+                    // #9714 review round 2, findings 2 and 4: resolve the COMPLETE
+                    // candidate set without mutating anything, then perform EXACTLY ONE
+                    // delete, or none.
+                    //
+                    // The previous shape probed first but still deleted the exact
+                    // domain-0 entry BEFORE it counted the matches, so "domain 0 plus one
+                    // match" deleted both, and "domain 0 plus several" deleted domain 0
+                    // and then reported ambiguity — having already mutated the state it
+                    // was declining to act on. An exact refusal was masked too, because
+                    // the ownership token was only emitted while `response.ok` still held.
+                    //
+                    // `bare` is "this request NAMES no domain", which is NOT
+                    // `key.routing_domain == 0`. Domain 0 is also the DEFAULT routing
+                    // instance, and a sender that stated it made a statement:
+                    // `routing_domain_from_wire` deliberately separates `Present(0)` from
+                    // `Absent`, and `resolved_domain` carries that distinction until
+                    // `unwrap_or(0)` flattens it for the key. Reading the flattened 0 as
+                    // "unknown" sent an AUTHORITATIVE single-domain delete into the
+                    // ambiguity probe, where it could be refused for naming too many
+                    // tenants when it had named exactly one.
+                    let bare = resolved_domain.is_none();
+                    let purge_tunnel_variants = tunnel_variant_purge_applies(
+                        sync_req.purge_tunnel_variants,
+                        sync_req.protocol,
+                        sync_req.tunnel_discriminator,
+                    );
+                    let mut matched: Vec<u32> = Vec::new();
+                    if bare {
+                        // Domain 0 is a CANDIDATE like any other, not a special case
+                        // evaluated first and deleted before the rest are counted.
+                        if if purge_tunnel_variants {
+                            domain.synced_tunnel_variant_contains(&key)
+                        } else {
+                            domain.synced_session_contains(&key)
+                        } {
+                            matched.push(0);
+                        }
+                        for rd in view.routing_domains() {
+                            if rd == 0 {
+                                continue;
+                            }
+                            let mut scoped = key.clone();
+                            scoped.routing_domain = rd;
+                            let present = if purge_tunnel_variants {
+                                domain.synced_tunnel_variant_contains(&scoped)
+                            } else {
+                                domain.synced_session_contains(&scoped)
+                            };
+                            if present {
+                                matched.push(rd);
+                            }
+                        }
+                    }
+                    if !bare {
+                        // A policy-invalidation GRE delete carries no trustworthy
+                        // discriminator from the BPF mirror. Purge every variant
+                        // only when the explicit trailing flag is present; generic
+                        // GC/operator deletes retain exact/under-match semantics.
+                        refused |= if purge_tunnel_variants {
+                            let (keeps, mfail) = delete_tunnel_variants(key.clone());
+                            mirror_delete_error |= mfail;
+                            keeps
+                        } else {
+                            delete(key.clone())
+                        };
+                    } else {
+                        match matched.as_slice() {
+                            // No shared authority anywhere for this tuple.
+                            //
+                            // #9714 r2 F4: a MARKED delete stops here. The domain-0
+                            // delete used to go out regardless, and a worker whose real
+                            // local session lives in another domain misses the scoped
+                            // lookup and takes the unconditional key-only arm, tearing
+                            // out the steering row of a live flow. That is reachable
+                            // during install, because the BPF publish precedes the
+                            // shared-map publish — so "no shared entry" does NOT mean
+                            // "no session". An authoritative delete keeps its plain-miss
+                            // kernel cleanup, which is the behaviour operators rely on
+                            [] => {
+                                if !sync_req.peer_delete {
+                                    refused |= if purge_tunnel_variants {
+                                        let (keeps, mfail) = delete_tunnel_variants(key.clone());
+                                        mirror_delete_error |= mfail;
+                                        keeps
+                                    } else {
+                                        delete(key.clone())
+                                    };
+                                }
+                            }
+                            // Exactly one domain holds it, so the bare tuple names it
+                            // unambiguously.
+                            [rd] => {
+                                let mut scoped = key.clone();
+                                scoped.routing_domain = *rd;
                                 refused |= if purge_tunnel_variants {
-                                    let (keeps, mfail) =
-                                        delete_tunnel_variants(key.clone());
+                                    let (keeps, mfail) = delete_tunnel_variants(scoped);
                                     mirror_delete_error |= mfail;
                                     keeps
                                 } else {
-                                    delete(key.clone())
+                                    delete(scoped)
                                 };
                             }
-                        }
-                        // Exactly one domain holds it, so the bare tuple names it
-                        // unambiguously.
-                        [rd] => {
-                            let mut scoped = key.clone();
-                            scoped.routing_domain = *rd;
-                            refused |= if purge_tunnel_variants {
-                                let (keeps, mfail) = delete_tunnel_variants(scoped);
-                                mirror_delete_error |= mfail;
-                                keeps
-                            } else {
-                                delete(scoped)
-                            };
-                        }
-                        // Ambiguous: the tuple names a live session in more than one
-                        // tenant and nothing in this request says which. Refuse
-                        // rather than guess, having mutated NOTHING. Go tolerates a
-                        // per-key refusal without aborting the batch (#5881), so the
-                        // rest of a clear still proceeds.
-                        _ => {
-                            response.ok = false;
-                            response.error = format!(
-                                "{SYNCED_DELETE_REFUSED_PREFIX}ambiguous-routing-domain (5-tuple matches {} routing instances)",
-                                matched.len()
-                            );
+                            // Ambiguous: the tuple names a live session in more than one
+                            // tenant and nothing in this request says which. Refuse
+                            // rather than guess, having mutated NOTHING. Go tolerates a
+                            // per-key refusal without aborting the batch (#5881), so the
+                            // rest of a clear still proceeds.
+                            _ => {
+                                response.ok = false;
+                                response.error = format!(
+                                    "{SYNCED_DELETE_REFUSED_PREFIX}ambiguous-routing-domain (5-tuple matches {} routing instances)",
+                                    matched.len()
+                                );
+                            }
                         }
                     }
+                    if mirror_delete_error && response.ok {
+                        response.ok = false;
+                        response.error = "mirror-write-failed".to_string();
+                    } else if refused && response.ok {
+                        response.ok = false;
+                        response.error =
+                            format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned");
+                    }
                 }
-                if mirror_delete_error && response.ok {
+                Err(err) => {
                     response.ok = false;
-                    response.error = "mirror-write-failed".to_string();
-                } else if refused && response.ok {
-                    response.ok = false;
-                    response.error =
-                        format!("{SYNCED_DELETE_REFUSED_PREFIX}peer-delete-local-owned");
+                    response.error = err;
                 }
             }
-            Err(err) => {
-                response.ok = false;
-                response.error = err;
-            }
-        },
+        }
         other => {
             response.ok = false;
             response.error = format!("unknown session sync operation {other}");
@@ -553,9 +549,7 @@ fn tunnel_variant_purge_applies(
     protocol: u8,
     tunnel_discriminator: u64,
 ) -> bool {
-    purge_tunnel_variants
-        && protocol == crate::ip_proto::PROTO_GRE
-        && tunnel_discriminator == 0
+    purge_tunnel_variants && protocol == crate::ip_proto::PROTO_GRE && tunnel_discriminator == 0
 }
 
 #[cfg(test)]
@@ -650,11 +644,14 @@ mod tests {
             }
             Err(reason) => panic!("a fresh triple must begin, got Err({reason})"),
         };
-        let request = SessionSyncRequest { forward_wire_alias_origin: false, operation: "mirror_clear_chunk".to_string(),
-        helper_epoch: 7,
-        operation_id: "op-1".to_string(),
-        mutation_id: "mut-A".to_string(),
-        ..SessionSyncRequest::default() };
+        let request = SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "mirror_clear_chunk".to_string(),
+            helper_epoch: 7,
+            operation_id: "op-1".to_string(),
+            mutation_id: "mut-A".to_string(),
+            ..SessionSyncRequest::default()
+        };
         let mut response = ControlResponse {
             ok: true,
             ..ControlResponse::default()
@@ -671,4 +668,3 @@ mod tests {
         );
     }
 }
-

@@ -355,8 +355,8 @@ func TestStatusLoopPublishesPostProjectionLossRead18635(t *testing.T) {
 	t.Fatal("status loop never published the confirmed helper response")
 }
 
-// #18635: a statusLoop confirmation response blocked while the worker records
-// loss must project after release; the first pre-loss response is not publishable.
+// #18635: a newer ordinary status projection can still be held before publish.
+// The loss-since confirmation must therefore bypass this cache entirely.
 func TestStatusLoopUsesPostHoldConfirmationProjection18635(t *testing.T) {
 	oldInterval := statusLoopInterval
 	statusLoopInterval = 20 * time.Millisecond
@@ -372,12 +372,8 @@ func TestStatusLoopUsesPostHoldConfirmationProjection18635(t *testing.T) {
 			t.Errorf("request type = %q, want status", req.Type)
 		}
 		calls++
-		if calls == 2 {
-			close(secondReadStarted)
-			<-releaseSecondRead
-		}
 		currentLoss, zero := loss, uint64(0)
-		measurementSequence := uint64(calls)
+		measurementSequence := uint64(40 + calls)
 		snapshot := *readyHelperStatus()
 		snapshot.PID = 4242
 		snapshot.EventStreamSessionDeltaLostOpen = &currentLoss
@@ -385,6 +381,12 @@ func TestStatusLoopUsesPostHoldConfirmationProjection18635(t *testing.T) {
 		snapshot.EventStreamSessionDeltaLostUpdate = &zero
 		snapshot.HelperStatusMeasurementSequence = &measurementSequence
 		*status = snapshot
+		if calls == 2 {
+			// The helper has already projected a newer zero-loss measurement;
+			// hold that response while the enqueue failure lands.
+			close(secondReadStarted)
+			<-releaseSecondRead
+		}
 		return nil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -416,11 +418,11 @@ func TestStatusLoopUsesPostHoldConfirmationProjection18635(t *testing.T) {
 			got = *publishedLoss
 		}
 		m.mu.Unlock()
-		if sequence >= 2 {
+		if sequence >= 42 {
 			cancel()
 			<-done
-			if publishedLoss == nil || got != 1 {
-				t.Fatalf("published helper measurement=%d loss=%v, want confirmation loss=1",
+			if publishedLoss == nil || got != 0 {
+				t.Fatalf("published helper measurement=%d loss=%v, want held projection loss=0 (the fresh since-query is separate)",
 					sequence, publishedLoss)
 			}
 			if calls < 2 {

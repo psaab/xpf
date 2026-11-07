@@ -1,7 +1,7 @@
 // #1345: per-verb handler for stop_workers, split out of handlers.rs in #1345.
 
-use super::super::helpers::project_status;
 use super::super::ServerState;
+use super::super::helpers::project_status;
 
 pub(super) fn handle(guard: &mut ServerState, persist_state: &mut bool) {
     // Stop all AF_XDP workers without recreating them.

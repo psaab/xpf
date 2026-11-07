@@ -2942,7 +2942,8 @@ fn wire_invariant_default_specimens() {
     // value so no two fields can be transposed undetected.
     s.insert(
         "session_delta_info_populated".into(),
-        dump(&SessionDeltaInfo { forward_wire_alias_origin: true,
+        dump(&SessionDeltaInfo {
+            forward_wire_alias_origin: true,
             timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0)
                 .expect("sentinel timestamp"),
             slot: 17142001,
@@ -3354,6 +3355,18 @@ fn wire_invariant_default_specimens() {
                 rev_bytes: 5,
             }],
             status: Some(ProcessStatus::default()),
+            // #18635: the Go wire census needs a populated probe response,
+            // including its timestamp identity and optional since-total.
+            session_delta_loss_probe: Some(SessionDeltaLossProbeResponse {
+                valid: true,
+                pid: 16132,
+                started_at: stamp.clone(),
+                helper_status_measurement_sequence: 41,
+                event_stream_session_delta_lost_open: 1,
+                event_stream_session_delta_lost_close: 2,
+                event_stream_session_delta_lost_update: 3,
+                lost_since: Some(6),
+            }),
             session_policy_matches: vec![populated_policy_match.clone()],
             session_policy_per_worker_errors: vec!["16132-per-worker".into()],
             session_deltas: vec![SessionDeltaInfo::default()],
@@ -3741,9 +3754,12 @@ fn wire_invariant_default_specimens() {
     );
     s.insert(
         "session_sync_request_populated".into(),
-        dump(&SessionSyncRequest { forward_wire_alias_origin: false, primary_liveness: true,
-        policy_matches: Some(vec![populated_policy_match.clone()]),
-        ..Default::default() }),
+        dump(&SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            primary_liveness: true,
+            policy_matches: Some(vec![populated_policy_match.clone()]),
+            ..Default::default()
+        }),
     );
     s.insert(
         "three_color_policer_status_populated".into(),
@@ -4668,9 +4684,12 @@ fn apply_snapshot_rejects_oversize_collector_port_1977() {
 // (serde default). Wire parity with the Go SessionSyncRequest.Generation field.
 #[test]
 fn session_sync_request_generation_roundtrip_2170() {
-    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    generation: 0x1122_3344_5566_7788,
-    ..Default::default() };
+    let req = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        generation: 0x1122_3344_5566_7788,
+        ..Default::default()
+    };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     let back: SessionSyncRequest =
         serde_json::from_str(&json).expect("deserialize SessionSyncRequest");
@@ -4689,8 +4708,11 @@ fn session_sync_request_generation_roundtrip_2170() {
 
 #[test]
 fn session_sync_request_primary_liveness_roundtrip_16880() {
-    let req = SessionSyncRequest { forward_wire_alias_origin: false, primary_liveness: true,
-    ..Default::default() };
+    let req = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        primary_liveness: true,
+        ..Default::default()
+    };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     assert!(
         json.contains("\"primary_liveness\":true"),
@@ -4737,9 +4759,7 @@ fn session_sync_request_log_flags_roundtrip_2785() {
         serde_json::from_str(r#"{"operation":"upsert","src_ip":"10.0.0.1"}"#)
             .expect("legacy SessionSyncRequest without log flags decodes");
     assert!(
-        !legacy.log_session_init
-            && !legacy.log_session_close
-            && !legacy.forward_wire_alias_origin,
+        !legacy.log_session_init && !legacy.log_session_close && !legacy.forward_wire_alias_origin,
         "omitted log and alias-origin fields must default to false"
     );
 }
@@ -4751,11 +4771,14 @@ fn session_sync_request_log_flags_roundtrip_2785() {
 // global timeout (pre-#3301 behavior, rolling-upgrade safe).
 #[test]
 fn session_sync_request_policy_fields_roundtrip_3301() {
-    let req = SessionSyncRequest { forward_wire_alias_origin: false, operation: "upsert".to_string(),
-    policy_id: 42,
-    policy_counter_idx: 7,
-    inactivity_timeout: 30,
-    ..Default::default() };
+    let req = SessionSyncRequest {
+        forward_wire_alias_origin: false,
+        operation: "upsert".to_string(),
+        policy_id: 42,
+        policy_counter_idx: 7,
+        inactivity_timeout: 30,
+        ..Default::default()
+    };
     let json = serde_json::to_string(&req).expect("serialize SessionSyncRequest");
     // Wire keys must match the Go SessionSyncRequest json tags exactly.
     assert!(

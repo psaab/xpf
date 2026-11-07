@@ -60,7 +60,7 @@ func TestClusterCLIReportsLatchedCleartextSync11773(t *testing.T) {
 		},
 		{
 			name: "data-plane statistics",
-			run:  c.showChassisClusterDataPlaneStats,
+			run:  func() error { return c.showChassisClusterDataPlaneStats("") },
 			want: []string{fmt.Sprintf("%-32s %-12d %d", "Config cleartext", 2, 3)},
 		},
 	} {

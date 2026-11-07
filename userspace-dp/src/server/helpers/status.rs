@@ -17,7 +17,8 @@
 use super::summarize_queues;
 use crate::afxdp;
 use crate::protocol::{
-    BindingCountersSnapshot, ControlResponse, ProcessStatus, UserspaceCapabilities,
+    BindingCountersSnapshot, ControlResponse, ProcessStatus, SessionDeltaLossProbeRequest,
+    SessionDeltaLossProbeResponse, UserspaceCapabilities,
 };
 use crate::server::ServerState;
 use chrono::Utc;
@@ -774,6 +775,74 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.learned_route_import_capped = state.afxdp.learned_route_import_capped_now();
 }
 
+/// Evaluate the loss-since query against this freshly projected helper status.
+/// A missing/rewound epoch, a helper restart, or a counter decrease is invalid
+/// evidence, never a new baseline.
+pub(crate) fn session_delta_loss_probe(
+    status: &ProcessStatus,
+    request: &SessionDeltaLossProbeRequest,
+) -> SessionDeltaLossProbeResponse {
+    let current = crate::protocol::SessionDeltaLossBaseline {
+        pid: status.pid,
+        started_at: status.started_at.clone(),
+        helper_status_measurement_sequence: status.helper_status_measurement_sequence,
+        event_stream_session_delta_lost_open: status.event_stream_session_delta_lost_open,
+        event_stream_session_delta_lost_close: status.event_stream_session_delta_lost_close,
+        event_stream_session_delta_lost_update: status.event_stream_session_delta_lost_update,
+    };
+    let mut response = SessionDeltaLossProbeResponse {
+        valid: false,
+        pid: current.pid,
+        started_at: current.started_at.clone(),
+        helper_status_measurement_sequence: current.helper_status_measurement_sequence,
+        event_stream_session_delta_lost_open: current.event_stream_session_delta_lost_open,
+        event_stream_session_delta_lost_close: current.event_stream_session_delta_lost_close,
+        event_stream_session_delta_lost_update: current.event_stream_session_delta_lost_update,
+        lost_since: None,
+    };
+
+    let Some(baseline) = request.baseline.as_ref() else {
+        response.valid = current.pid > 0 && current.helper_status_measurement_sequence > 0;
+        response.lost_since = response.valid.then_some(0);
+        return response;
+    };
+
+    if current.pid != baseline.pid
+        || current.started_at != baseline.started_at
+        || baseline.helper_status_measurement_sequence == 0
+        || current.helper_status_measurement_sequence < baseline.helper_status_measurement_sequence
+        || current.event_stream_session_delta_lost_open
+            < baseline.event_stream_session_delta_lost_open
+        || current.event_stream_session_delta_lost_close
+            < baseline.event_stream_session_delta_lost_close
+        || current.event_stream_session_delta_lost_update
+            < baseline.event_stream_session_delta_lost_update
+    {
+        return response;
+    }
+    let Some(lost_since) = current
+        .event_stream_session_delta_lost_open
+        .checked_sub(baseline.event_stream_session_delta_lost_open)
+        .and_then(|open| {
+            current
+                .event_stream_session_delta_lost_close
+                .checked_sub(baseline.event_stream_session_delta_lost_close)
+                .and_then(|close| open.checked_add(close))
+        })
+        .and_then(|partial| {
+            current
+                .event_stream_session_delta_lost_update
+                .checked_sub(baseline.event_stream_session_delta_lost_update)
+                .and_then(|update| partial.checked_add(update))
+        })
+    else {
+        return response;
+    };
+    response.valid = true;
+    response.lost_since = Some(lost_since);
+    response
+}
+
 pub(crate) fn project_event_stream_producer_stats(
     status: &mut ProcessStatus,
     events: crate::event_stream::DataplaneEventStats,
@@ -1161,7 +1230,10 @@ mod status_wiring_tests {
     fn event_stream_session_delta_loss_projects_to_status_18635() {
         let helper = squeeze(&code_only(&read("src/server/helpers/status.rs")));
         for (status_field, stats_field) in [
-            ("event_stream_session_delta_lost_open", "session_delta_lost_open"),
+            (
+                "event_stream_session_delta_lost_open",
+                "session_delta_lost_open",
+            ),
             (
                 "event_stream_session_delta_lost_close",
                 "session_delta_lost_close",

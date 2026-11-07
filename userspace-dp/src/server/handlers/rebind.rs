@@ -1,7 +1,7 @@
 // #1345: per-verb handler for rebind, split out of handlers.rs in #1345.
 
-use super::super::helpers::{reconcile_status_bindings, project_status};
 use super::super::ServerState;
+use super::super::helpers::{project_status, reconcile_status_bindings};
 use crate::ControlResponse;
 
 pub(super) fn handle(

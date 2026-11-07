@@ -136,7 +136,80 @@ PY
 	fi
 	return 2
 }
+
+ha_u64_normalize() {
+	local value="$1"
+	if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+		return 2
+	fi
+	value="${value#"${value%%[!0]*}"}"
+	printf '%s\n' "${value:-0}"
+}
+
+# Compare decimal u64 strings without Bash's signed arithmetic conversion.
+# Return 0 when left < right; 1 when left >= right; 2 for malformed input.
+ha_u64_less() {
+	local left right LC_ALL=C
+	left="$(ha_u64_normalize "$1")" || return 2
+	right="$(ha_u64_normalize "$2")" || return 2
+	if (( ${#left} != ${#right} )); then
+		(( ${#left} < ${#right} ))
+		return
+	fi
+	[[ "$left" < "$right" ]]
+}
+
+ha_u64_greater() {
+	local left right LC_ALL=C
+	left="$(ha_u64_normalize "$1")" || return 2
+	right="$(ha_u64_normalize "$2")" || return 2
+	if (( ${#left} != ${#right} )); then
+		(( ${#left} > ${#right} ))
+		return
+	fi
+	[[ "$left" > "$right" ]]
+}
+
+ha_u64_equal() {
+	local left right
+	left="$(ha_u64_normalize "$1")" || return 2
+	right="$(ha_u64_normalize "$2")" || return 2
+	[[ "$left" == "$right" ]]
+}
 # Pure parser and verdict APIs shared by the legacy and reached HA validators.
+ha_session_delta_loss_baseline_token() {
+	if [[ $# -ne 1 ]]; then
+		printf 'session-delta loss baseline: expected <file>\n' >&2
+		return 2
+	fi
+	if python3 - "$1" <<'PY'
+import pathlib
+import re
+import sys
+
+path = pathlib.Path(sys.argv[1])
+try:
+    text = path.read_text(encoding="utf-8")
+except (OSError, UnicodeError) as exc:
+    print(f"session-delta loss baseline {path}: unreadable ({exc})", file=sys.stderr)
+    raise SystemExit(2)
+pattern = re.compile(r"^Event stream HA session delta loss baseline token: ([A-Za-z0-9_-]+)$")
+matches = [match.group(1) for line in text.splitlines() if (match := pattern.fullmatch(line))]
+if len(matches) != 1:
+    reason = "missing" if not matches else "ambiguous"
+    print(f"session-delta loss baseline {path}: token {reason}", file=sys.stderr)
+    raise SystemExit(2)
+print(matches[0])
+PY
+	then
+		return 0
+	fi
+	return 2
+}
+
+ha_session_delta_loss_since_value() {
+	ha_status_summary_value "$1" "Event stream HA session delta lost since baseline"
+}
 # Parse/value helpers print a value and return 0, or return 2 with a VOID reason
 # on stderr. Verdict helpers return 0=PASS, 1=measured FAIL, 2=VOID.
 
@@ -237,19 +310,19 @@ PY
 # files are explicit; callers must not derive direction from ambient globals.
 #
 # THE PROPERTY (#18632/#18635): idle = N samples at an unchanged floor, the
-# latest of them included, with no create outstanding beyond that floor
-# and nothing pending at those reads (the target's helper delta queue and
-# the source's helper delta buffer), and neither source loss counter
-# increasing since the wait began. The counters are the per-binding RPC
-# fallback `Session delta dropped` and the total of lost non-bulk HA
-# event-stream Open/Close/Update deltas. Per sample, with D = source
-# `Session create` sent - target `Session create` received, outstanding
-# beyond the floor is D - D_floor, where D_floor is the lowest D the wait
-# has observed (the baseline pair the caller passes). The N samples need not
-# be consecutive: a sample above the floor neither counts nor resets the
-# count. A source loss does not restart it: that sample is not idle, and
-# because the caller keeps both loss baselines, no later sample can count
-# either, so the wait FAILs.
+# latest of them included, with no create outstanding beyond that floor and
+# nothing pending at those reads (the target's helper delta queue and the
+# source's helper delta buffer), plus a helper-evaluated event-stream loss
+# delta of zero from the immutable wait-start baseline. The baseline is bound
+# to helper PID, boot timestamp and projection stamp; restart or rewind is
+# VOID, never a new loss epoch. The other source loss counter is the per-binding
+# RPC fallback `Session delta dropped`. Per sample, with D = source
+# `Session create` sent - target `Session create` received, outstanding beyond
+# the floor is D - D_floor, where D_floor is the lowest D the wait has
+# observed (the baseline pair the caller passes). The N samples need not be
+# consecutive: a sample above the floor neither counts nor resets the count.
+# The fresh helper since-baseline query is repeated at each sample and again at
+# final confirmation; a positive answer keeps the wait from passing.
 #
 # Why a floor, not absolute equality (#16289): the two daemons do not
 # count from the same epoch. Bulk-sync frames are counted by the receiver
@@ -302,25 +375,24 @@ PY
 #   reset, so a lag that clears for one sample can PASS on earlier counted
 #   samples as old as the wait itself (up to ~28 attempts). The PASS sample
 #   is still exact, so this is not a lost create.
-# - A rewind (daemon or helper restart) re-baselines everything, including
-#   both source loss counters, so a loss seen before it is forgotten.
+# - Helper identity mismatch or a counter rewind makes the loss-since
+#   confirmation VOID. The wait never silently re-baselines across a helper
+#   restart; the proof is as fresh as the final helper round trip itself.
 # - A create sent after the last idle sample.
 #
-# Verdicts: 0 idle at the floor (D == D_floor, both pendings 0, and neither
-# source loss counter increased); 1 not idle (D above the floor, a pending
-# delta, or a source loss since the baseline; baseline kept, so a loss keeps
-# every later sample not idle); 4 new floor (D < D_floor; the caller
-# re-baselines to this sample and resets the streak); 3 counter rewind (a
-# daemon or helper restarted, including either source loss counter; the caller
-# re-baselines); 2 VOID (blind/malformed evidence or a malformed baseline).
-# The first sample of a wait (all four baselines empty) only establishes the
-# floor and returns 1. Target "drained" is required and parseable,
-# informational only. Every evidence field is parsed before any baseline
-# branch, so blind evidence is VOID even on the baseline-establishing sample
-# and even on a rewound sample.
+# Verdicts: 0 idle at the floor (D == D_floor, both pendings 0, source RPC
+# drops unchanged, and the helper's loss-since answer is zero); 1 not idle
+# (D above the floor, pending work, an RPC drop, or helper-reported event loss);
+# 4 new floor (D < D_floor; the caller re-baselines sync counts and resets the
+# streak); 3 RPC-drop rewind; 2 VOID (blind/malformed evidence, invalid helper
+# identity or stamp, or a missing loss-since answer). The first sample of a
+# wait establishes only the sync-count floor; the event-loss baseline has
+# already been obtained by a fresh helper query at wait start. Target "drained"
+# is required and parseable, informational only. Every evidence field is
+# parsed before any count-baseline branch.
 ha_session_sync_idle_sample() {
-	if [[ $# -ne 8 ]]; then
-		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received> <baseline-source-dropped> <baseline-event-stream-lost>\n' >&2
+	if [[ $# -ne 9 ]]; then
+		printf 'session sync sample: expected <source-node> <target-node> <source-stats> <target-stats> <baseline-sent> <baseline-received> <baseline-source-dropped> <baseline-event-stream-lost-total> <event-stream-lost-since-baseline>\n' >&2
 		return 2
 	fi
 	local source_node="$1"
@@ -331,17 +403,16 @@ ha_session_sync_idle_sample() {
 	local baseline_received="$6"
 	local baseline_dropped="$7"
 	local baseline_event_stream_lost="$8"
-	local sent received pending drained source_pending source_dropped source_event_stream_lost source_measurement_sequence target_measurement_sequence parse_status=0
+	local event_stream_lost_since="$9"
+	local sent received pending drained source_pending source_dropped source_measurement_sequence target_measurement_sequence parse_status=0
 	# Parse every evidence field before any baseline branch, so blind or
-	# malformed evidence is VOID (2) even on the baseline-establishing
-	# sample and even when the counters have rewound.
+	# malformed evidence is VOID even on the baseline-establishing sample.
 	sent="$(ha_sync_stats_value "$source_path" "Session create" sent)" || parse_status=2
 	received="$(ha_sync_stats_value "$target_path" "Session create" received)" || parse_status=2
 	pending="$(ha_status_summary_value "$target_path" "Session delta pending")" || parse_status=2
 	drained="$(ha_status_summary_value "$target_path" "Session delta drained")" || parse_status=2
 	source_pending="$(ha_status_summary_value "$source_path" "Session delta pending")" || parse_status=2
 	source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")" || parse_status=2
-	source_event_stream_lost="$(ha_status_summary_value "$source_path" "Event stream HA session delta lost")" || parse_status=2
 	source_measurement_sequence="$(ha_status_summary_value "$source_path" "Helper status measurement sequence")" || parse_status=2
 	target_measurement_sequence="$(ha_status_summary_value "$target_path" "Helper status measurement sequence")" || parse_status=2
 	: "$drained" # Required and parseable, informational only.
@@ -352,16 +423,26 @@ ha_session_sync_idle_sample() {
 			"$source_node" "$target_node" "$source_measurement_sequence" "$target_measurement_sequence" >&2
 		return 2
 	fi
-	if [[ -z "$baseline_sent" && -z "$baseline_received" && -z "$baseline_dropped" && -z "$baseline_event_stream_lost" ]]; then
-		# First sample of a wait: it only establishes the baseline. It is
-		# never idle by itself, so the N-samples rule still requires
-		# later samples to prove nothing sent since is unreceived.
+	if [[ ! "$baseline_event_stream_lost" =~ ^[0-9]+$ ||
+		! "$event_stream_lost_since" =~ ^[0-9]+$ ]]; then
+		printf 'session sync %s->%s missing or malformed helper loss-since evidence (baseline total=%s since=%s)\n' \
+			"$source_node" "$target_node" "$baseline_event_stream_lost" "$event_stream_lost_since" >&2
+		return 2
+	fi
+	if ha_u64_greater "$event_stream_lost_since" 0; then
+		printf 'session sync %s->%s not idle: helper reports %s HA event-stream session delta loss since wait-start baseline total=%s\n' \
+			"$source_node" "$target_node" "$event_stream_lost_since" "$baseline_event_stream_lost" >&2
+		return 1
+	fi
+	if [[ -z "$baseline_sent" && -z "$baseline_received" && -z "$baseline_dropped" ]]; then
+		# The event-loss baseline was already captured by the fresh helper probe
+		# at wait start. This sample establishes only the sync-count floor.
 		printf 'session sync %s->%s baseline: source sent=%s, target received=%s, pending=%s\n' \
 			"$source_node" "$target_node" "$sent" "$received" "$pending" >&2
 		return 1
 	fi
 	if [[ ! "$baseline_sent" =~ ^[0-9]+$ || ! "$baseline_received" =~ ^[0-9]+$ ||
-		! "$baseline_dropped" =~ ^[0-9]+$ || ! "$baseline_event_stream_lost" =~ ^[0-9]+$ ]]; then
+		! "$baseline_dropped" =~ ^[0-9]+$ ]]; then
 		printf 'session sync %s->%s malformed baseline: sent=%s received=%s source dropped=%s\n' \
 			"$source_node" "$target_node" "$baseline_sent" "$baseline_received" "$baseline_dropped" >&2
 		return 2
@@ -371,19 +452,14 @@ ha_session_sync_idle_sample() {
 			"$source_node" "$target_node" "$sent" "$baseline_sent" "$received" "$baseline_received" "$pending" >&2
 		return 3
 	fi
-	if (( source_dropped < baseline_dropped || source_event_stream_lost < baseline_event_stream_lost )); then
-		printf 'session sync %s->%s not idle: a source loss counter rewound (session delta dropped=%s baseline=%s, event-stream HA session delta lost=%s baseline=%s; the helper restarted); re-baseline required\n' \
-			"$source_node" "$target_node" "$source_dropped" "$baseline_dropped" "$source_event_stream_lost" "$baseline_event_stream_lost" >&2
+	if ha_u64_less "$source_dropped" "$baseline_dropped"; then
+		printf 'session sync %s->%s not idle: source session-delta dropped counter rewound (%s baseline=%s); re-baseline required\n' \
+			"$source_node" "$target_node" "$source_dropped" "$baseline_dropped" >&2
 		return 3
 	fi
-	if (( source_dropped > baseline_dropped )); then
-		printf 'session sync %s->%s not idle: the source dropped %s session delta(s) since the baseline (dropped=%s baseline=%s); a dropped delta never becomes a sent create\n' \
-			"$source_node" "$target_node" "$(( source_dropped - baseline_dropped ))" "$source_dropped" "$baseline_dropped" >&2
-		return 1
-	fi
-	if (( source_event_stream_lost > baseline_event_stream_lost )); then
-		printf 'session sync %s->%s not idle: the source lost %s HA event-stream session delta(s) since the baseline (lost=%s baseline=%s)\n' \
-			"$source_node" "$target_node" "$(( source_event_stream_lost - baseline_event_stream_lost ))" "$source_event_stream_lost" "$baseline_event_stream_lost" >&2
+	if ha_u64_greater "$source_dropped" "$baseline_dropped"; then
+		printf 'session sync %s->%s not idle: the source dropped session deltas since the baseline (dropped=%s baseline=%s); a dropped delta never becomes a sent create\n' \
+			"$source_node" "$target_node" "$source_dropped" "$baseline_dropped" >&2
 		return 1
 	fi
 	local outstanding=$(( (sent - received) - (baseline_sent - baseline_received) ))

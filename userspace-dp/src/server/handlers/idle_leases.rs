@@ -18,8 +18,8 @@ use crate::nat::{
     IdleLeaseRecord, MAX_PERSISTENT_NAT_LEASE_LIFETIME_NS, MIN_PERSISTENT_NAT_LEASE_TIMEOUT_NS,
 };
 use crate::protocol::{
-    DisplayLeaseWire, IdleLeaseWire, LeaseExportRequest, PermittedRemoteWire,
-    MAX_CONTROL_RESPONSE_BYTES, MAX_LEASE_EXPORT_PAGE,
+    DisplayLeaseWire, IdleLeaseWire, LeaseExportRequest, MAX_CONTROL_RESPONSE_BYTES,
+    MAX_LEASE_EXPORT_PAGE, PermittedRemoteWire,
 };
 use std::net::IpAddr;
 
@@ -265,7 +265,20 @@ pub(super) fn from_wire(w: &IdleLeaseWire) -> Option<PoolIdleLease> {
 /// order would skip/duplicate across pages. The key covers the full
 /// wire identity (pool, protocol, source, scopes, translated,
 /// remotes) so distinct wire rows never compare equal.
-fn idle_lease_sort_key(w: &IdleLeaseWire) -> (String, u8, String, u16, u32, u32, String, u16, Vec<(String, u16)>, bool) {
+fn idle_lease_sort_key(
+    w: &IdleLeaseWire,
+) -> (
+    String,
+    u8,
+    String,
+    u16,
+    u32,
+    u32,
+    String,
+    u16,
+    Vec<(String, u16)>,
+    bool,
+) {
     (
         w.pool_name.clone(),
         w.protocol,
@@ -283,7 +296,20 @@ fn idle_lease_sort_key(w: &IdleLeaseWire) -> (String, u8, String, u16, u32, u32,
     )
 }
 
-fn display_lease_sort_key(w: &DisplayLeaseWire) -> (String, u8, String, u16, u32, u32, String, u16, Vec<(String, u16)>, bool) {
+fn display_lease_sort_key(
+    w: &DisplayLeaseWire,
+) -> (
+    String,
+    u8,
+    String,
+    u16,
+    u32,
+    u32,
+    String,
+    u16,
+    Vec<(String, u16)>,
+    bool,
+) {
     (
         w.pool_name.clone(),
         w.protocol,
@@ -598,7 +624,9 @@ mod tests {
         assert!(from_wire(&w).is_none(), "nat64 without scope must refuse");
         w.nat64_scope = "tenant-b|zones=trust-b|ris=|src=|constrained=0".to_string();
         let rec64 = from_wire(&w).expect("scoped nat64 parses");
-        assert!(matches!(&rec64.pool, LeasePoolId::Nat64 { scope, .. } if scope.contains("tenant-b")));
+        assert!(
+            matches!(&rec64.pool, LeasePoolId::Nat64 { scope, .. } if scope.contains("tenant-b"))
+        );
         assert_eq!(to_wire(&rec64).nat64_scope, w.nat64_scope);
     }
 
@@ -769,32 +797,52 @@ mod tests {
         let mut cursor = String::new();
         let mut pages = 0usize;
         loop {
-            let req = LeaseExportRequest { paged: true, cursor: cursor.clone(), max: 0 };
+            let req = LeaseExportRequest {
+                paged: true,
+                cursor: cursor.clone(),
+                max: 0,
+            };
             let (page, more, next) = page_wire(&all, Some(&req)).expect("page");
             let mut resp = ControlResponse::default();
             resp.idle_leases = page.clone();
             resp.lease_export_more = more;
             resp.lease_export_continuation = next.clone();
             let bytes = serde_json::to_vec(&resp).expect("serialize page").len() + 1;
-            assert!(bytes <= MAX_CONTROL_RESPONSE_BYTES, "page {pages} is {bytes} bytes, over cap");
+            assert!(
+                bytes <= MAX_CONTROL_RESPONSE_BYTES,
+                "page {pages} is {bytes} bytes, over cap"
+            );
             seen.extend(page);
             pages += 1;
             if !more {
                 break;
             }
-            assert!(!next.is_empty() && next != cursor, "continuation must advance");
+            assert!(
+                !next.is_empty() && next != cursor,
+                "continuation must advance"
+            );
             cursor = next;
             assert!(pages < 1000, "pager must terminate");
         }
         assert!(pages > 1, "300k must take multiple pages, got {pages}");
         assert_eq!(seen.len(), 300_000);
-        assert_eq!(seen, all, "pages must reassemble the sorted population exactly");
+        assert_eq!(
+            seen, all,
+            "pages must reassemble the sorted population exactly"
+        );
         // Small-population control stays single-page.
         let small = &all[..3];
-        let req = LeaseExportRequest { paged: true, cursor: String::new(), max: 0 };
+        let req = LeaseExportRequest {
+            paged: true,
+            cursor: String::new(),
+            max: 0,
+        };
         let (page, more, next) = page_wire(small, Some(&req)).expect("small page");
         assert_eq!(page.len(), 3);
-        assert!(!more && next.is_empty(), "small population must be single-page");
+        assert!(
+            !more && next.is_empty(),
+            "small population must be single-page"
+        );
         // Unpaged (pre-#16589) request stays single-shot.
         let (page, more, _) = page_wire(small, None).expect("unpaged");
         assert_eq!(page.len(), 3);
@@ -814,12 +862,19 @@ mod tests {
         let mut cursor = String::new();
         let mut pages = 0usize;
         loop {
-            let req = LeaseExportRequest { paged: true, cursor: cursor.clone(), max: 0 };
+            let req = LeaseExportRequest {
+                paged: true,
+                cursor: cursor.clone(),
+                max: 0,
+            };
             let (page, more, next) = page_wire(&all, Some(&req)).expect("page");
             let mut resp = ControlResponse::default();
             resp.idle_leases = page;
             let bytes = serde_json::to_vec(&resp).expect("serialize page").len() + 1;
-            assert!(bytes <= MAX_CONTROL_RESPONSE_BYTES, "page {pages} over cap: {bytes}");
+            assert!(
+                bytes <= MAX_CONTROL_RESPONSE_BYTES,
+                "page {pages} over cap: {bytes}"
+            );
             seen += resp.idle_leases.len();
             pages += 1;
             if !more {
@@ -831,12 +886,30 @@ mod tests {
         assert_eq!(seen, 150_000);
         assert!(pages > 1, "150k x 4 remotes must page, got {pages}");
         // A cursor past the population and a non-numeric cursor refuse.
-        let bad = LeaseExportRequest { paged: true, cursor: "150001".into(), max: 0 };
-        assert!(page_wire(&all, Some(&bad)).is_err(), "out-of-range cursor must refuse");
-        let bad = LeaseExportRequest { paged: true, cursor: "x".into(), max: 0 };
-        assert!(page_wire(&all, Some(&bad)).is_err(), "non-numeric cursor must refuse");
+        let bad = LeaseExportRequest {
+            paged: true,
+            cursor: "150001".into(),
+            max: 0,
+        };
+        assert!(
+            page_wire(&all, Some(&bad)).is_err(),
+            "out-of-range cursor must refuse"
+        );
+        let bad = LeaseExportRequest {
+            paged: true,
+            cursor: "x".into(),
+            max: 0,
+        };
+        assert!(
+            page_wire(&all, Some(&bad)).is_err(),
+            "non-numeric cursor must refuse"
+        );
         // max is honoured and clamped by the helper ceiling.
-        let req = LeaseExportRequest { paged: true, cursor: String::new(), max: 7 };
+        let req = LeaseExportRequest {
+            paged: true,
+            cursor: String::new(),
+            max: 7,
+        };
         let (page, more, next) = page_wire(&all, Some(&req)).expect("max page");
         assert_eq!(page.len(), 7);
         assert!(more && next == "7");
