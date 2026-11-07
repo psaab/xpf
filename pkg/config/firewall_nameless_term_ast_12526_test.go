@@ -426,3 +426,23 @@ func TestCompileConfigLenientPackedAfterShapeMatrix17257(t *testing.T) {
 		})
 	}
 }
+
+func TestCompileConfigLenientPackedAfterMultiKeyChildren17257(t *testing.T) {
+	// Kimi delta-4: distinct multi-key children each compile to their
+	// own nameless term; the packed site follows BOTH.
+	src := `firewall { family inet { filter F { term { T then next term { } U then accept { } } term { } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 3 {
+		t.Fatalf("filter = %+v, want [T, U, placeholder]", filter)
+	}
+	if filter.Terms[0].Name != "T" || filter.Terms[1].Name != "U" {
+		t.Fatalf("terms = [%q %q], want [T U]", filter.Terms[0].Name, filter.Terms[1].Name)
+	}
+	if term := filter.Terms[2]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("third term = %+v, want the packed discard last", term)
+	}
+}

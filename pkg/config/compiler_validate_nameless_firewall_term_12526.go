@@ -138,20 +138,28 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 	if term == nil {
 		return 0
 	}
-	// Compiler emission (parent-probed over the shape matrix):
-	// - >=2-key term: exactly 1.
-	// - one-key container: named-block children 1 each; leaf / multi-key
-	//   nameless children merge onto ONE typed marker (all leaves of a
-	//   container compress to the single first-token marker); a container
-	//   with ONLY block children emits no marker.
+	// Compiler emits len(namedInstances([term])) for a container, minus
+	// children that are the container's own from/then body statements
+	// (they merge onto the container's single typed marker, which is
+	// itself one of the instances when a body statement exists).
+	// Packed-invisible malformed terms emit nothing (parent-probed).
 	if len(term.Keys) >= 2 {
+		if _, malformed := firewallNamelessTermBody12526(term); malformed {
+			if _, visible := pre[term]; !visible {
+				return 0
+			}
+		}
 		return 1
 	}
 	if len(term.Keys) != 1 || len(term.Children) == 0 {
 		return 0
 	}
+	if _, malformed := firewallNamelessTermBody12526(term); malformed {
+		if _, visible := pre[term]; !visible {
+			return 0
+		}
+	}
 	count := 0
-	marker := false
 	for _, child := range term.Children {
 		if child == nil {
 			continue
@@ -160,12 +168,15 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 			count++ // named child block
 			continue
 		}
-		marker = true // leaf or multi-key nameless child
-	}
-	if marker {
-		if _, visible := pre[term]; visible {
-			count++
+		if child.Name() == "from" || child.Name() == "then" {
+			continue // body statement of the container marker
 		}
+		count++ // multi-key / bare-leaf nameless statement: own term
+	}
+	// The container's own typed marker (emitted when the container is
+	// malformed and typed-visible) is additional to body statements.
+	if _, malformed := firewallNamelessTermBody12526(term); malformed && len(term.Children) > 0 {
+		count++
 	}
 	return count
 }
