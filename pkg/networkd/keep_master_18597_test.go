@@ -246,8 +246,9 @@ func TestFailedReconfigureRetriesOnlyItsOwnLink18597(t *testing.T) {
 }
 
 // AG2: KeepMaster=yes flips networkd's LinkLocalAddressing DEFAULT to "no"
-// (systemd.network(5)), so every management-class row must keep rendering the
-// explicit LinkLocalAddressing=ipv6 beside it. A refactor that drops the
+// (systemd.network(5)), so every ENABLED management-class row must keep
+// rendering the explicit LinkLocalAddressing=ipv6 beside it. (Always-down
+// rows deliberately render LinkLocalAddressing=no; see the #18607 table.) A refactor that drops the
 // explicit line would silently remove IPv6 link-local from em0/fxp0/fab*.
 func TestKeepMasterRowsKeepExplicitLinkLocal18597(t *testing.T) {
 	m := New()
