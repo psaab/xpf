@@ -19,16 +19,18 @@ func TestOpShowConfigurationGluedCompareRefused18993(t *testing.T) {
 		{"configuration", "system|", "compare", "rollback", "1"},
 		{"configuration", "system|compare", "rollback", "1"},
 		{"configuration", "|compare", "rollback", "1"},
+		{"configuration", "system", "|/*x*/compare", "rollback", "1"},
+		{"configuration", "|/*x*/compare", "rollback", "1"},
 	} {
 		f := &rec18664{}
 		c := &ctl{client: f}
 		var err error
 		captureStdout(t, func() { err = c.handleShow(args) })
-		if err == nil {
-			t.Fatalf("handleShow(%q) returned nil; want glued-pipe refusal before any RPC", args)
-		}
 		if f.calls() != 0 {
 			t.Fatalf("handleShow(%q) issued %d RPCs; want refusal before the wire", args, f.calls())
+		}
+		if err == nil {
+			t.Fatalf("handleShow(%q) returned nil; want glued-pipe refusal before any RPC", args)
 		}
 	}
 }

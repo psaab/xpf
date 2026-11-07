@@ -42,9 +42,11 @@ func TestCLIShowConfigurationLeftGluedCompareRefused18993(t *testing.T) {
 		"show configuration| compare rollback 1",
 		"show configuration system| compare rollback 1",
 		// Already-refused glued shapes staying refused.
-		"show configuration|compare rollback 1",
-		"show configuration system|compare rollback 1",
 		"show configuration |compare rollback 1",
+		// The config lexer skips the block comment after the pipe, but
+		// the pipe remains raw-byte adjacent to that comment.
+		"show configuration |/*x*/compare rollback 1",
+		"show configuration system |/*x*/compare rollback 1",
 	}
 	for _, fixture := range gluedCompareFixtures18993() {
 		for _, line := range lines {
@@ -127,6 +129,8 @@ func TestCLIShowConfigurationGluedCompareHandlerRefused18993(t *testing.T) {
 		{"configuration", "system|compare", "rollback", "1"},
 		{"configuration", "|compare", "rollback", "1"},
 		{"configuration", "/*x*/|", "compare", "rollback", "1"},
+		{"configuration", "|/*x*/compare", "rollback", "1"},
+		{"configuration", "system", "|/*x*/compare", "rollback", "1"},
 	} {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			c := &CLI{store: showCompareStore18669(t)}

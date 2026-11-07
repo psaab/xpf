@@ -93,32 +93,82 @@ func ValidateOperationalGate(words []string) error {
 }
 
 // ClassifyComparePipe reports whether words contain an operational compare
-// pipe and whether its `|` byte is glued to non-space text. The pipe may be
-// a standalone token followed by `compare`, or appear in a token as
-// `configuration|`, `|compare`, or `configuration|compare`. Gluing is
-// determined by adjacency to bytes in the token, not by path/token shape;
-// this also makes comment-ending bytes before `|` count as glued.
+// pipe and whether its `|` byte is glued to non-space text. It recognizes
+// compare after whitespace-skipped comments, while measuring adjacency from
+// the original tokens: a comment start after `|` and comment-end bytes before
+// `|` both make the pipe glued. Pipe text inside a block comment is ignored.
 func ClassifyComparePipe(words []string) (found, glued bool) {
-	for i, word := range words {
-		for start := 0; start < len(word); {
-			rel := strings.IndexByte(word[start:], '|')
-			if rel < 0 {
-				break
-			}
-			pipe := start + rel
-			after := word[pipe+1:]
-			compareFollows := after == "compare" ||
-				(after == "" && i+1 < len(words) && words[i+1] == "compare")
-			if compareFollows {
-				found = true
-				if pipe > 0 || after != "" {
-					glued = true
-				}
-			}
-			start = pipe + 1
+	for i, offset := 0, 0; i < len(words); {
+		word := words[i]
+		if offset >= len(word) {
+			i++
+			offset = 0
+			continue
 		}
+		if strings.HasPrefix(word[offset:], "/*") {
+			nextWord, nextOffset, closed := skipCompareBlockComment(words, i, offset+2)
+			if !closed {
+				return found, glued
+			}
+			i, offset = nextWord, nextOffset
+			continue
+		}
+		if strings.HasPrefix(word[offset:], "//") || word[offset] == '#' {
+			// words are already split at whitespace; skip this comment token
+			// and continue with the next non-comment token.
+			i++
+			offset = 0
+			continue
+		}
+		if word[offset] == '|' && compareFollowsAfterPipe(words, i, offset+1) {
+			found = true
+			if offset > 0 || offset+1 < len(word) {
+				glued = true
+			}
+		}
+		offset++
 	}
 	return found, glued
+}
+
+func skipCompareBlockComment(words []string, wordIndex, offset int) (int, int, bool) {
+	for wordIndex < len(words) {
+		word := words[wordIndex]
+		if offset <= len(word) {
+			if end := strings.Index(word[offset:], "*/"); end >= 0 {
+				return wordIndex, offset + end + 2, true
+			}
+		}
+		wordIndex++
+		offset = 0
+	}
+	return wordIndex, 0, false
+}
+
+func compareFollowsAfterPipe(words []string, wordIndex, offset int) bool {
+	for wordIndex < len(words) {
+		word := words[wordIndex]
+		if offset >= len(word) {
+			wordIndex++
+			offset = 0
+			continue
+		}
+		if strings.HasPrefix(word[offset:], "/*") {
+			var closed bool
+			wordIndex, offset, closed = skipCompareBlockComment(words, wordIndex, offset+2)
+			if !closed {
+				return false
+			}
+			continue
+		}
+		if strings.HasPrefix(word[offset:], "//") || word[offset] == '#' {
+			wordIndex++
+			offset = 0
+			continue
+		}
+		return word[offset:] == "compare"
+	}
+	return false
 }
 
 // firstBarePipe returns the first token that is exactly the output-pipe

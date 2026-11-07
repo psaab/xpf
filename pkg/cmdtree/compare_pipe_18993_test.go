@@ -16,7 +16,12 @@ func TestClassifyComparePipe18993(t *testing.T) {
 		{"right glued", []string{"show", "configuration", "|compare", "rollback", "1"}, true, true},
 		{"both sides glued", []string{"show", "configuration", "system|compare", "rollback", "1"}, true, true},
 		{"comment-end glued", []string{"show", "configuration", "/*x*/|", "compare", "rollback", "1"}, true, true},
-		{"comment after pipe glued", []string{"show", "configuration", "|/*x*/compare", "rollback", "1"}, false, false},
+		{"right block comment glued", []string{"show", "configuration", "|/*x*/compare", "rollback", "1"}, true, true},
+		{"right block comment split across words", []string{"show", "configuration", "|/*", "x", "*/compare", "rollback", "1"}, true, true},
+		{"right slash comment glued", []string{"show", "configuration", "|//x", "compare", "rollback", "1"}, true, true},
+		{"right hash comment glued", []string{"show", "configuration", "|#x", "compare", "rollback", "1"}, true, true},
+		{"spaced pipe before block comment", []string{"show", "configuration", "|", "/*x*/compare", "rollback", "1"}, true, false},
+		{"pipe inside comment ignored", []string{"show", "configuration", "/* |compare */", "system"}, false, false},
 		{"non-compare pipe", []string{"show", "configuration", "|", "display", "set"}, false, false},
 		{"unrelated text", []string{"show", "configuration", "system"}, false, false},
 	} {
