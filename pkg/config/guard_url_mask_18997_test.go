@@ -102,12 +102,11 @@ func TestSchemaExitScrubNeverEchoesURLValue18997(t *testing.T) {
 }
 
 // #18997 overlapping-needle arm (Kimi delta at b141027483): "@" and
-// ":p@" are both RedactURL-transformed URL tokens; if the shorter "@"
-// needle fires first, ":p@" is rewritten to ":p<redacted>" and the
-// inline password stands. collectURLValues returns traversal order, so
-// scrubSecretValuesText must apply needles longest-first (as
-// collectSecretValues itself already sorts). Tree order below puts
-// the short needle first on purpose.
+// ":p@" are both RedactURL-transformed URL tokens; sequential
+// replacement in traversal order rewrites ":p@" to ":p<redacted>" and
+// the inline password stands. Occurrences now span-merge over the
+// original text, so order no longer matters; tree order below still
+// puts the short needle first on purpose.
 func TestSchemaExitScrubOverlappingURLNeedles18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "@" password "s3cr3t"`,
@@ -127,10 +126,12 @@ func TestSchemaExitScrubOverlappingURLNeedles18997(t *testing.T) {
 // equal length can overlap PARTIALLY — "user:pw@host" and "@host?SECRET"
 // share "@host", so whichever fires first destroys the other's match
 // and leaves the non-overlapped credential half standing ("?SECRET" or
-// "user:pw"). Longest-first ordering cannot fix this; the scrub repeats
-// to a fixpoint, so the second pass matches the surviving half. A
-// needle containing the SecretRedacted sentinel itself ("redacted"
-// from a direct password) must not corrupt an inserted "<redacted>".
+// "user:pw"). Sequential ordering cannot fix this; occurrences
+// span-merge over the original text so both needles' union is
+// redacted in one pass. A needle that is a SUBSTRING of the sentinel
+// ("redacted") is pre-existing cosmetic surface (it can rewrite an
+// already-rendered "<redacted>" in construction-time text); a needle
+// CONTAINING the sentinel is a real credential, pinned separately.
 func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 	for _, lines := range [][]string{
 		{
