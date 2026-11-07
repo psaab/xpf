@@ -20,13 +20,41 @@ func captureStaleConfigWarnLog18649(t *testing.T) *bytes.Buffer {
 	return &logs
 }
 
-func pinStaleConfigWarnClock18649(t *testing.T, start int64) *atomic.Int64 {
+type staleConfigWarnUnlockWriter18649 struct {
+	ss                     *SessionSync
+	logs                   bytes.Buffer
+	warnings               int
+	warnedWhileApplyMuHeld bool
+}
+
+func (w *staleConfigWarnUnlockWriter18649) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte(staleConfigRefusalWarnMessage)) {
+		w.warnings++
+		if w.ss.applyMu.TryLock() {
+			w.ss.applyMu.Unlock()
+		} else {
+			w.warnedWhileApplyMuHeld = true
+		}
+	}
+	return w.logs.Write(p)
+}
+
+func captureStaleConfigWarnUnlockLog18649(t *testing.T, ss *SessionSync) *staleConfigWarnUnlockWriter18649 {
+	t.Helper()
+	logs := &staleConfigWarnUnlockWriter18649{ss: ss}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	return logs
+}
+
+func pinStaleConfigWarnClock18649(t *testing.T, ss *SessionSync, start int64) *atomic.Int64 {
 	t.Helper()
 	now := &atomic.Int64{}
 	now.Store(start)
-	previous := staleConfigRefusalWarnNowNanos
-	staleConfigRefusalWarnNowNanos = func() int64 { return now.Load() }
-	t.Cleanup(func() { staleConfigRefusalWarnNowNanos = previous })
+	previous := ss.nowMonoFn
+	ss.nowMonoFn = func() int64 { return now.Load() }
+	t.Cleanup(func() { ss.nowMonoFn = previous })
 	return now
 }
 
@@ -56,7 +84,7 @@ func TestStaleConfigRefusalWarnTracksGrowthAndRateLimits18649(t *testing.T) {
 	const start = int64(10_000_000_000)
 	ss, dp := newAuthority18636(t, 100)
 	logs := captureStaleConfigWarnLog18649(t)
-	now := pinStaleConfigWarnClock18649(t, start)
+	now := pinStaleConfigWarnClock18649(t, ss, start)
 	epoch := configEpochReverseTag | 5
 
 	refuseStaleV4ConfigEpoch18649(t, ss, 61849, epoch)
@@ -114,7 +142,7 @@ func TestStaleConfigRefusalWarnTracksGrowthAndRateLimits18649(t *testing.T) {
 func TestStaleConfigRefusalWarnRequiresCurrentLocalConfig18649(t *testing.T) {
 	ss, _ := newAuthority18636(t, 100)
 	logs := captureStaleConfigWarnLog18649(t)
-	pinStaleConfigWarnClock18649(t, 20_000_000_000)
+	pinStaleConfigWarnClock18649(t, ss, 20_000_000_000)
 	ss.lastRecvConfigGen.Store(50)
 	ss.lastAppliedConfigGen.Store(10)
 	if !ss.TransferReadiness().ConfigStale() {
@@ -149,7 +177,7 @@ func TestStaleConfigRefusalWarnReportsLocalBarrier18649(t *testing.T) {
 	ss.lastRecvConfigGen.Store(100)
 	ss.lastAppliedConfigGen.Store(100)
 	capture := captureStaleConfigWarnLog18649(t)
-	pinStaleConfigWarnClock18649(t, 30_000_000_000)
+	pinStaleConfigWarnClock18649(t, ss, 30_000_000_000)
 
 	refuseStaleV4ConfigEpoch18649(t, ss, 61855, 5)
 	if got := strings.Count(capture.String(), staleConfigRefusalWarnMessage); got != 1 {
@@ -173,23 +201,23 @@ func TestStaleConfigRefusalWarnReportsLocalBarrier18649(t *testing.T) {
 // minute alone must not re-emit the same growth.
 func TestStaleConfigRefusalWarnRequiresCounterGrowth18649(t *testing.T) {
 	const start = int64(40_000_000_000)
-	now := pinStaleConfigWarnClock18649(t, start)
 	ss := &SessionSync{}
+	now := pinStaleConfigWarnClock18649(t, ss, start)
 	ss.applyMu.Lock()
 	defer ss.applyMu.Unlock()
 	limiter := &ss.staleConfigRefusalWarn
 
-	if emit, _ := limiter.admit(0, false); emit {
+	if emit, _ := limiter.admit(0, false, now.Load()); emit {
 		t.Fatal("zero counter unexpectedly admitted a warning")
 	}
-	if emit, _ := limiter.admit(1, false); !emit {
+	if emit, _ := limiter.admit(1, false, now.Load()); !emit {
 		t.Fatal("first counter growth did not admit a warning")
 	}
 	now.Store(start + int64(staleConfigRefusalWarnInterval))
-	if emit, _ := limiter.admit(1, false); emit {
+	if emit, _ := limiter.admit(1, false, now.Load()); emit {
 		t.Fatal("elapsed interval without counter growth re-emitted a warning")
 	}
-	if emit, _ := limiter.admit(2, false); !emit {
+	if emit, _ := limiter.admit(2, false, now.Load()); !emit {
 		t.Fatal("new counter growth after the interval did not admit a warning")
 	}
 }
@@ -198,7 +226,7 @@ func TestStaleConfigRefusalWarnReportsLastSentThreshold18649(t *testing.T) {
 	ss, _ := newAuthority18636(t, 50)
 	ss.recordLastSentConfigGen(100)
 	logs := captureStaleConfigWarnLog18649(t)
-	pinStaleConfigWarnClock18649(t, 50_000_000_000)
+	pinStaleConfigWarnClock18649(t, ss, 50_000_000_000)
 
 	refuseStaleV6ConfigEpoch18649(t, ss, 61856, configEpochReverseTag|5)
 	for _, want := range []string{
@@ -212,5 +240,55 @@ func TestStaleConfigRefusalWarnReportsLastSentThreshold18649(t *testing.T) {
 		if !strings.Contains(logs.String(), want) {
 			t.Errorf("authority warning lacks %q: %s", want, logs.String())
 		}
+	}
+}
+
+func TestStaleConfigRefusalWarnIncludesPostWriteRollback18649(t *testing.T) {
+	const start = int64(60_000_000_000)
+	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{}}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.IsPrimaryFn = func() bool { return false }
+	ss.lastRecvConfigGen.Store(10)
+	ss.lastAppliedConfigGen.Store(10)
+	logs := captureStaleConfigWarnUnlockLog18649(t, ss)
+	now := pinStaleConfigWarnClock18649(t, ss, start)
+
+	// A direct refusal emits first. Subsequent post-write config changes create
+	// rollback refusals that share the same counter and one-minute limiter.
+	refuseStaleV4ConfigEpoch18649(t, ss, 61857, 5)
+	if logs.warnings != 1 {
+		t.Fatalf("direct refusal warnings = %d, want 1; logs: %s", logs.warnings, logs.logs.String())
+	}
+
+	dp.onSetV4 = func() {
+		ss.lastRecvConfigGen.Store(10)
+		ss.lastAppliedConfigGen.Store(10)
+	}
+	ss.lastRecvConfigGen.Store(5)
+	ss.lastAppliedConfigGen.Store(5)
+	now.Store(start + int64(30*time.Second))
+	refuseStaleV4ConfigEpoch18649(t, ss, 61858, 5)
+	if logs.warnings != 1 {
+		t.Fatalf("in-window rollback refusal re-warned: warnings=%d logs=%s", logs.warnings, logs.logs.String())
+	}
+
+	ss.lastRecvConfigGen.Store(5)
+	ss.lastAppliedConfigGen.Store(5)
+	now.Store(start + int64(staleConfigRefusalWarnInterval))
+	refuseStaleV4ConfigEpoch18649(t, ss, 61859, 5)
+	if logs.warnings != 2 {
+		t.Fatalf("post-window rollback growth warnings = %d, want 2; logs: %s", logs.warnings, logs.logs.String())
+	}
+	if logs.warnedWhileApplyMuHeld {
+		t.Fatal("a rate-limited Warn reached the log sink while applyMu was held")
+	}
+	if !strings.Contains(logs.logs.String(), "suppressed_since_last=1") {
+		t.Fatalf("post-window Warn did not include the suppressed rollback refusal: %s", logs.logs.String())
+	}
+	if len(dp.v4sessions) != 0 {
+		t.Fatalf("post-write stale permits survived rollback: %d sessions", len(dp.v4sessions))
+	}
+	if got := ss.stats.SessionsStaleConfigIgnored.Load(); got != 3 {
+		t.Fatalf("stale-config refusal count = %d, want 3 including two rollbacks", got)
 	}
 }

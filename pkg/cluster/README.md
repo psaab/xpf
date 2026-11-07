@@ -5457,12 +5457,14 @@ it.
   stale-config-ignored` climbed at 55-160/s on the RG0 primary, and the
   primary never imported a session its peer created.
   When `SessionsStaleConfigIgnored` grows while this node's
-  `TransferReadinessSnapshot.ConfigStale` is false, the install path emits a
-  Warn immediately and then at most once per minute across IPv4 and IPv6.
-  Suppressed refusals remain counted and are reported by the next Warn, which
-  includes the decoded epoch/tag bit, the exact authority threshold or local
-  config barrier, and the comparison branch. The existing Debug refusal log
-  remains per install; neither warning changes refusal behavior.
+  `TransferReadinessSnapshot.ConfigStale` is false, both pre-install refusals
+  and post-write rollbacks feed one shared limiter and emit a Warn immediately,
+  then at most once per minute across IPv4 and IPv6. This is counter-growth
+  detection, not rate-derivative detection: sustained refusal growth produces
+  one Warn per minute. Suppressed refusals remain counted and are reported by
+  the next Warn, which includes the decoded epoch/tag bit, the exact authority
+  threshold or local config barrier, and the comparison branch. The existing
+  Debug refusal log remains per install; neither warning changes refusal behavior.
   A non-authority stamps `tag | lastAppliedConfigGen` only when the peer is known
   capable, received and applied marks agree and are nonzero, and the applied
   mark is newer than the floor captured on entry to the current non-authority

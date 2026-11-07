@@ -1715,7 +1715,6 @@ func (s *SessionSync) authorityConfigEpochThresholdDetails() (uint64, string) {
 	return s.configGenCounter.Load(), "config_gen_counter"
 }
 
-
 // authorityConfigEpochThreshold is the generation a reverse-tagged peer epoch
 // must reach for the RG0 authority to accept the install (#18636). From the
 // first config write to the current peer incarnation it is the newest
@@ -1764,32 +1763,32 @@ func (s *SessionSync) authorityConfigEpochThreshold() uint64 {
 // The generation is deliberately NOT recorded for a rolled-back install: the
 // per-key recv-gen high-water must stay where it was so the peer's next
 // re-sync of this key is admitted rather than refused as stale.
-func (s *SessionSync) rollBackStaleConfigInstallV4(key dataplane.SessionKey, epoch uint64) {
-	rollBackStaleConfigInstall(s, epoch, "v4",
+func (s *SessionSync) rollBackStaleConfigInstallV4(key dataplane.SessionKey, epoch, threshold uint64, thresholdKind, branch string, rg0Authority bool) (staleConfigRefusalWarnRecord, bool, error) {
+	return rollBackStaleConfigInstall(s, epoch, "v4", threshold, thresholdKind, branch, rg0Authority,
 		func() error { return s.sessions.DeleteWithCompanionsV4(key, dataplane.DeleteReasonClusterStale, false) })
 }
 
 // rollBackStaleConfigInstallV6 is the v6 twin of
 // rollBackStaleConfigInstallV4; see there for why the check is re-run after
 // the write instead of being serialized with it.
-func (s *SessionSync) rollBackStaleConfigInstallV6(key dataplane.SessionKeyV6, epoch uint64) {
-	rollBackStaleConfigInstall(s, epoch, "v6",
+func (s *SessionSync) rollBackStaleConfigInstallV6(key dataplane.SessionKeyV6, epoch, threshold uint64, thresholdKind, branch string, rg0Authority bool) (staleConfigRefusalWarnRecord, bool, error) {
+	return rollBackStaleConfigInstall(s, epoch, "v6", threshold, thresholdKind, branch, rg0Authority,
 		func() error { return s.sessions.DeleteWithCompanionsV6(key, dataplane.DeleteReasonClusterStale, false) })
 }
 
 // rollBackStaleConfigInstall is the shared rollback behind the V4/V6
 // wrappers (#16173): the store delete itself stays a family call passed
 // by the wrapper (SessionKey vs SessionKeyV6 stores are genuinely
-// different); only the counting/logging is shared.
-func rollBackStaleConfigInstall(s *SessionSync, epoch uint64, af string, del func() error) {
-	s.stats.SessionsStaleConfigIgnored.Add(1)
+// different); only the counting and warning decision are shared.
+func rollBackStaleConfigInstall(s *SessionSync, epoch uint64, af string, threshold uint64, thresholdKind, branch string, rg0Authority bool, del func() error) (staleConfigRefusalWarnRecord, bool, error) {
+	refusals := s.stats.SessionsStaleConfigIgnored.Add(1)
+	warning, emit := s.prepareStaleConfigRefusalWarning(epoch, threshold, thresholdKind, branch, rg0Authority, refusals)
 	if err := del(); err != nil {
-		slog.Warn("cluster sync: could not roll back a "+af+" install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
-			"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load(), "err", err)
-		return
+		return warning, emit, err
 	}
 	slog.Debug("cluster sync: rolled back a "+af+" install whose config epoch went stale during the dataplane write (#6368)",
 		"session_config_epoch", epoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
+	return warning, emit, nil
 }
 
 // installClusterSyncedV4 applies a received v4 install through the ordering
@@ -1802,6 +1801,23 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	}
 	// #9715: guard, write and record are one apply across receive loops; see applyMu.
 	s.applyMu.Lock()
+	var pendingWarning staleConfigRefusalWarnRecord
+	var emitWarning bool
+	var rollbackErr error
+	var rollbackAF string
+	var rollbackEpoch uint64
+	var rollbackAppliedConfigGen uint64
+	// Register logging first and unlocking second so both Warns run outside
+	// applyMu; the warning decision itself is prepared under the lock.
+	defer func() {
+		if rollbackErr != nil {
+			slog.Warn("cluster sync: could not roll back a "+rollbackAF+" install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
+				"session_config_epoch", rollbackEpoch, "applied_config_gen", rollbackAppliedConfigGen, "err", rollbackErr)
+		}
+		if emitWarning {
+			pendingWarning.emit()
+		}
+	}()
 	defer s.applyMu.Unlock()
 	record, apply := s.installGenGuardV4(key, val.Generation)
 	scopedRecord, scopedApply := s.installGenGuardScopedV4(scopedLogicalDomain(val.RoutingDomain), key, val.Generation)
@@ -1813,7 +1829,7 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	}
 	if stale, threshold, thresholdKind, branch, authority := s.configEpochStaleDetails(val.ConfigEpoch); stale {
 		refusals := s.stats.SessionsStaleConfigIgnored.Add(1)
-		s.maybeWarnStaleConfigRefusal(val.ConfigEpoch, threshold, thresholdKind, branch, authority, refusals)
+		pendingWarning, emitWarning = s.prepareStaleConfigRefusalWarning(val.ConfigEpoch, threshold, thresholdKind, branch, authority, refusals)
 		slog.Debug("cluster sync: ignored stale-config-epoch v4 install (peer moved to a newer config that may deny this session)",
 			"session_config_epoch", val.ConfigEpoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
 		return false
@@ -1853,8 +1869,13 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 	if err == nil {
 		// #6368: re-read the threshold after the write (see the shared
 		// core's contract via logInstallOutcome's rollback arm).
-		if s.configEpochStale(val.ConfigEpoch) {
-			s.rollBackStaleConfigInstallV4(key, val.ConfigEpoch)
+		if stale, threshold, thresholdKind, branch, authority := s.configEpochStaleDetails(val.ConfigEpoch); stale {
+			pendingWarning, emitWarning, rollbackErr = s.rollBackStaleConfigInstallV4(key, val.ConfigEpoch, threshold, thresholdKind, branch, authority)
+			if rollbackErr != nil {
+				rollbackAF = "v4"
+				rollbackEpoch = val.ConfigEpoch
+				rollbackAppliedConfigGen = s.lastAppliedConfigGen.Load()
+			}
 			return false
 		}
 		s.recordInstalledGenV4(key, record)
@@ -1872,6 +1893,23 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	}
 	// #9715: see the v4 twin and applyMu.
 	s.applyMu.Lock()
+	var pendingWarning staleConfigRefusalWarnRecord
+	var emitWarning bool
+	var rollbackErr error
+	var rollbackAF string
+	var rollbackEpoch uint64
+	var rollbackAppliedConfigGen uint64
+	// Register logging first and unlocking second so both Warns run outside
+	// applyMu; the warning decision itself is prepared under the lock.
+	defer func() {
+		if rollbackErr != nil {
+			slog.Warn("cluster sync: could not roll back a "+rollbackAF+" install whose config epoch went stale during the dataplane write — a stale permit may survive until the next config apply",
+				"session_config_epoch", rollbackEpoch, "applied_config_gen", rollbackAppliedConfigGen, "err", rollbackErr)
+		}
+		if emitWarning {
+			pendingWarning.emit()
+		}
+	}()
 	defer s.applyMu.Unlock()
 	record, apply := s.installGenGuardV6(key, val.Generation)
 	scopedRecord, scopedApply := s.installGenGuardScopedV6(scopedLogicalDomain(val.RoutingDomain), key, val.Generation)
@@ -1883,7 +1921,7 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	}
 	if stale, threshold, thresholdKind, branch, authority := s.configEpochStaleDetails(val.ConfigEpoch); stale {
 		refusals := s.stats.SessionsStaleConfigIgnored.Add(1)
-		s.maybeWarnStaleConfigRefusal(val.ConfigEpoch, threshold, thresholdKind, branch, authority, refusals)
+		pendingWarning, emitWarning = s.prepareStaleConfigRefusalWarning(val.ConfigEpoch, threshold, thresholdKind, branch, authority, refusals)
 		slog.Debug("cluster sync: ignored stale-config-epoch v6 install (peer moved to a newer config that may deny this session)",
 			"session_config_epoch", val.ConfigEpoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
 		return false
@@ -1921,8 +1959,13 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 	err := s.sessions.PutClusterSyncedV6(key, val)
 	if err == nil {
 		// #6368: see the v4 twin — re-read the threshold after the write.
-		if s.configEpochStale(val.ConfigEpoch) {
-			s.rollBackStaleConfigInstallV6(key, val.ConfigEpoch)
+		if stale, threshold, thresholdKind, branch, authority := s.configEpochStaleDetails(val.ConfigEpoch); stale {
+			pendingWarning, emitWarning, rollbackErr = s.rollBackStaleConfigInstallV6(key, val.ConfigEpoch, threshold, thresholdKind, branch, authority)
+			if rollbackErr != nil {
+				rollbackAF = "v6"
+				rollbackEpoch = val.ConfigEpoch
+				rollbackAppliedConfigGen = s.lastAppliedConfigGen.Load()
+			}
 			return false
 		}
 		s.recordInstalledGenV6(key, record)
