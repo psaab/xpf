@@ -2376,6 +2376,20 @@ impl TxnHarness {
         }
     }
 
+    pub(super) fn enable_syn_cookie_for_zone(&mut self, zone: &str, master_key: [u8; 16]) {
+        let mut profiles = FxHashMap::default();
+        profiles.insert(
+            zone.to_string(),
+            crate::screen::ScreenProfile {
+                syn_flood_threshold: 1,
+                syn_cookie: true,
+                ..crate::screen::ScreenProfile::default()
+            },
+        );
+        self.screen.update_profiles(profiles);
+        self.screen.update_syn_cookie_master_key(Some(master_key));
+    }
+
     pub(super) fn run(
         &mut self,
         binding: &mut BindingWorker,
