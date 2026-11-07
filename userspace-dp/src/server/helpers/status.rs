@@ -1151,6 +1151,29 @@ mod status_wiring_tests {
     }
 
     #[test]
+    fn event_stream_session_delta_loss_projects_to_status_18635() {
+        let helper = squeeze(&code_only(&read("src/server/helpers/status.rs")));
+        for (status_field, stats_field) in [
+            ("event_stream_session_delta_lost_open", "session_delta_lost_open"),
+            (
+                "event_stream_session_delta_lost_close",
+                "session_delta_lost_close",
+            ),
+            (
+                "event_stream_session_delta_lost_update",
+                "session_delta_lost_update",
+            ),
+        ] {
+            assert!(
+                helper.contains(&format!(
+                    "state.status.{status_field}=es_stats.{stats_field};"
+                )),
+                "#18635: ProcessStatus.{status_field} must project EventStreamStats.{stats_field}"
+            );
+        }
+    }
+
+    #[test]
     fn distinct_source_nat_collisions_are_aggregated() {
         let source = code_only(&read("src/server/helpers/status.rs"));
         let refresh_end = source
