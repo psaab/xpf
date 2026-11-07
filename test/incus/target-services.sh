@@ -23,12 +23,13 @@
 #   ./test/incus/target-services.sh up       # start what is missing
 #   ./test/incus/target-services.sh down     # stop target listeners and units
 #
-# #8259 UPDATE — THERE IS NOW A SECOND TARGET, and it is an incus instance.
-# `test/incus/mouse-target-setup.sh` provisions `xpf-mouse-target` at
-# 172.16.80.201: an SR-IOV VF tagged into VLAN 80, running this same grid
-# (iperf3 5200-5211, echo 6200-6211, plus port 7). It exists so a
-# mouse-latency verdict can be ATTRIBUTED — mice on one host, elephants on
-# the other — which #8467's void check has been waiting for.
+# #8259 UPDATE — `mouse-target-setup.sh` provisions the target service
+# container. In the default loss fixture, this is `xpf-mouse-target` at
+# 172.16.80.201, running this grid (iperf3 5200-5211, echo 6200-6211,
+# plus port 7). There, IPERF_TARGET4=.202 is another address on that same
+# host; the .201/.202 difference clears only #8467's equality-based VOID
+# guard and does not provide host attribution. A separate target host is
+# still required.
 #
 # #16213 UPDATE — THE FIRST TARGET IS THE SAME HOST. On the standing loss
 # cluster, the v4 iperf target (what IPERF_TARGET4 and $TARGET_V4 point

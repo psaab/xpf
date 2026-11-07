@@ -1,31 +1,29 @@
 #!/usr/bin/env bash
 #
-# #8259 — provision the SECOND VLAN-80 target, so a mouse-latency verdict can
-# be attributed.
+# #8259 — provision the mouse-probe target service container. A second
+# address on that container does not by itself make a mouse-latency verdict
+# host-attributable.
 #
-# THE PROBLEM THIS EXISTS FOR. Every mouse-latency and fairness harness sends
-# mice and elephants to the SAME host, `172.16.80.200`. The loaded cell adds
-# ~8.6 Gbit/s of receive load to the very host whose service time is inside
-# every mouse sample, so the loaded/idle ratio cannot separate firewall
-# queueing from target-host service. #8467 made the gate say so —
-# `VOID-NOT-ATTRIBUTABLE` rather than a PASS or FAIL it cannot support — and
-# recorded that the check "passes the moment the two targets differ".
+# THE PROBLEM THIS EXISTS FOR. In the original loss setup, mice and elephants
+# shared `172.16.80.200`. The loaded cell adds ~8.6 Gbit/s to the same host
+# whose service time is inside every mouse sample, so loaded/idle could not
+# separate firewall queueing from target-host service. #8467 returns
+# VOID-NOT-ATTRIBUTABLE when target strings are equal. Differing strings clear
+# that equality guard only; they do not establish distinct target hosts.
 #
 # It could not be made to differ at the time: the standing target was
 # then believed to be external lab hardware with no handle from here.
 # #16213 corrected that record — the container carried v4 .200, while v6
 # ::200 was external. #18576 later found the external v6 box also answers
-# ARP for v4 .200, making it dual-held. The second incus-managed host this
-# script creates is the safe destination; .200 is not a measurement target.
-#
-# There is now. This script creates one.
-#
-# WHAT IT BUILDS. An incus container on the loss remote with an SR-IOV VF on
-# the WAN PF tagged into VLAN 80, running the same service grid
-# `target-services.sh` documents as the contract: per-class
-# iperf3 servers on 5200-5211 and per-class TCP echo daemons on 6200-6211,
-# plus port 7. It is a drop-in second target, not a mouse-only appliance, so
-# any harness can point either of its two knobs at it.
+# ARP for v4 .200, making it dual-held. This script creates a managed target
+# container; in the default loss fixture, .201 and .202 both terminate on
+# xpf-mouse-target, so it is not separate from the current iperf target.
+# WHAT IT BUILDS. An Incus service container on the selected remote, with an
+# SR-IOV VF on the selected PF/VLAN and the grid documented by
+# `target-services.sh`: per-class iperf3 servers on 5200-5211, TCP echo
+# daemons on 6200-6211, and port 7. Harnesses may use it as either target;
+# different addresses on this container do not create distinct target
+# hosts.
 #
 # THE PRIMARY TARGET'S ADDRESS IS DECLARED HERE (#16213). On the
 # standing loss cluster, the elephant / iperf target that
@@ -95,7 +93,7 @@ ref="${INCUS_REMOTE}:${MOUSE_TARGET_NAME}"
 
 usage() {
     cat <<USAGE
-${0##*/} — provision the #8259 second VLAN-80 target
+${0##*/} — provision the #8259 mouse-probe target container
 
   up       create (if absent) and reconcile the instance and its services
   status   report the instance, its VLAN-80 address, and the service grid
@@ -340,8 +338,10 @@ do_status() {
     echo "Point a harness at it with:  MOUSE_TARGET_V4=${MOUSE_TARGET_V4}"
     echo "#8467 compares target strings only; different addresses clear its"
     echo "equality-based VOID-NOT-ATTRIBUTABLE guard, not host attribution."
-    echo "Today .201/.202 both terminate on xpf-mouse-target, so a non-VOID result"
-    echo "is not host-attributable without a genuinely separate target host."
+    echo "Default loss fixture: .201/.202 share xpf-mouse-target; a non-VOID"
+    echo "result is not host-attributable. A separate target host is required."
+    echo "For other clusters or overrides, verify host placement before"
+    echo "treating a non-VOID result as host-attributable."
 }
 
 do_destroy() {

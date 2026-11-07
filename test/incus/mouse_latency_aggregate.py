@@ -357,12 +357,13 @@ def decide(
     # reports INSUFFICIENT-DATA, which is also right — there is nothing to
     # attribute yet.
     #
-    # The check passes the moment the two targets differ, so pointing
-    # ELEPHANT_TARGET_V4 at a different VLAN-80 address turns the gate
-    # back on with no further change. The second host exists (#8259);
-    # on loss the .200 primary is an alias of it (#16213), so the two
-    # knobs must name different addresses (.200 vs .201) — see
-    # target-services.sh.
+    # The guard below compares target strings only. Differing strings clear
+    # its equality-based VOID-NOT-ATTRIBUTABLE result; they do not establish
+    # distinct target hosts. On the default loss fixture, MOUSE_TARGET_V4
+    # (.201) and IPERF_TARGET4 (.202) are both on xpf-mouse-target, so a
+    # non-VOID result from that pair is not host-attributable. A separate
+    # target host is required; enforcing host identity would be a separate
+    # #8259/#8467 behavior decision, not a documentation-only change.
     loaded_pair = (gate_loaded.get("mouse_target"), gate_loaded.get("elephant_target"))
     idle_pair = (gate_idle.get("mouse_target"), gate_idle.get("elephant_target"))
     for cell_name, (mouse, elephant) in (("loaded", loaded_pair), ("idle", idle_pair)):

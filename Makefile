@@ -1747,18 +1747,18 @@ test-screen-probe-lib:
 test-v6-na-recovery-lib:
 	bash ./test/incus/v6-na-recovery-12495-selftest.sh
 
-# #8259: provision the SECOND VLAN-80 target, so a mouse-latency verdict can be
-# ATTRIBUTED.
+# #8259: `mouse-target-setup.sh` provisions the VLAN-80 target service
+# container. In the default loss fixture, MOUSE_TARGET_V4=.201 and
+# IPERF_TARGET4=.202 are different addresses on the same xpf-mouse-target host.
 #
-# Mice and elephants both terminated on 172.16.80.200, so the loaded cell added
-# the elephants' offered load to the host whose service time is inside every
-# mouse sample — and #8467 made the gate return VOID-NOT-ATTRIBUTABLE rather
-# than a PASS or FAIL it could not support. The blocker was never the check: the
-# standing target is external lab hardware with no management path, and the
-# firewall's WAN neighbour table held exactly two entries, so there was nowhere
-# to move a flow to. `up` creates a third — an incus container on an SR-IOV VF
-# tagged into VLAN 80, running target-services.sh's own grid (iperf3 5200-5211,
-# echo 6200-6211, port 7).
+# #8467's reducer compares target strings only: address inequality clears its
+# equality-based VOID-NOT-ATTRIBUTABLE check but does not establish distinct
+# target hosts. A non-VOID result from the default loss pair is still not
+# host-attributable. Attribution requires a genuinely separate target host,
+# which the loss fixture does not currently have.
+#
+# The container runs the shared grid (iperf3 5200-5211, echo 6200-6211,
+# port 7); declaring the second address there does not make a second host.
 #
 # Idempotent: it creates and reconciles one container. That container is the
 # v4 iperf target every loss gate measures, and `up` rewrites and restarts its
