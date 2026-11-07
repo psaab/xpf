@@ -611,9 +611,23 @@ type Manager struct {
 	// sessionRepairOverflowErr is unrecoverable per-key convergence debt:
 	// the helper committed authority but could not reserve a bounded worker
 	// repair slot. Unlike a pending repair, one successful socket round-trip
-	// cannot prove this row converged, so it independently gates takeover until
-	// this Manager is rebuilt and the cluster session inventory is replayed.
+	// cannot prove this row converged, so it independently gates takeover
+	// (#18661). It clears ONLY when an inventory request for the armed
+	// overflow generation has fired and its matching helper-generation replay
+	// completes with no overflow since that request was fired; the bulk
+	// callback alone cannot prove worker convergence.
 	sessionRepairOverflowErr string
+	// sessionRepairOverflowGen is the helper process generation armed by the
+	// latest repair overflow (#18661). TakeoverReadyForPeer snapshots this
+	// generation when it fires the inventory request.
+	sessionRepairOverflowGen uint64
+	// sessionRepairOverflowReplayGen is the generation snapshotted for an
+	// inventory replay that can clear the overflow latch (0 = none fired).
+	sessionRepairOverflowReplayGen uint64
+	// sessionRepairOverflowReplayOverflow records an overflow that happened
+	// while a matching inventory request/replay was in flight; that replay
+	// cannot clear the latch and re-arms a fresh generation-bound request.
+	sessionRepairOverflowReplayOverflow bool
 
 	// napiBoundBootstrapGen is the helper generation whose all-bindings-bound
 	// NAPI bootstrap has fired (#18707, ensureXSKBoundNAPIBootstrapLocked).

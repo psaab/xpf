@@ -424,9 +424,21 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 
 	m.mu.Lock()
 	ready, reasons := m.takeoverReadyLocked(peerAlive)
-	generation := m.sessionInventoryDebtGen
 	request := m.sessionInventoryRequester
 	requestAt := time.Time{}
+	generation := m.sessionInventoryDebtGen
+	if m.sessionRepairOverflowErr != "" && m.proc != nil &&
+		m.proc.Process != nil && m.procGen != 0 {
+		// A helper restart invalidates any in-flight overflow replay. Re-arm
+		// against the generation that can actually converge the worker state.
+		if m.sessionRepairOverflowGen != m.procGen {
+			m.sessionRepairOverflowGen = m.procGen
+			m.sessionRepairOverflowReplayGen = 0
+			m.sessionRepairOverflowReplayOverflow = false
+			m.sessionInventoryRequestAt = time.Time{}
+		}
+		generation = m.sessionRepairOverflowGen
+	}
 	if generation != 0 && request != nil &&
 		m.proc != nil && m.proc.Process != nil && m.procGen == generation &&
 		m.lastStatus.Enabled && m.lastStatus.ForwardingArmed &&
@@ -436,6 +448,15 @@ func (m *Manager) TakeoverReadyForPeer(peerAlive bool) (bool, []string) {
 			now.Sub(m.sessionInventoryRequestAt) >= sessionInventoryRequestRetryInterval {
 			m.sessionInventoryRequestAt = now
 			requestAt = now
+			if m.sessionRepairOverflowErr != "" &&
+				m.sessionRepairOverflowGen == generation &&
+				m.sessionRepairOverflowReplayGen == 0 {
+				// Snapshot the overflow state at the point this generation's
+				// authoritative inventory request is fired. A bulk completing
+				// without this snapshot cannot clear the overflow latch.
+				m.sessionRepairOverflowReplayGen = generation
+				m.sessionRepairOverflowReplayOverflow = false
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -625,17 +646,44 @@ func (m *Manager) SetSessionInventoryRequester(requester func(generation uint64)
 }
 
 // MarkSessionInventoryReconciled clears restart debt only when the completed
-// peer bulk belongs to the currently running helper generation.
+// peer bulk belongs to the currently running helper generation. It also clears
+// repair-overflow debt only when TakeoverReadyForPeer fired an inventory
+// request for the same generation and no new overflow occurred during replay.
 func (m *Manager) MarkSessionInventoryReconciled(generation uint64) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if generation == 0 || m.sessionInventoryDebtGen != generation ||
-		m.procGen != generation || m.proc == nil || m.proc.Process == nil {
+	if generation == 0 || m.procGen != generation ||
+		m.proc == nil || m.proc.Process == nil {
 		return false
 	}
-	m.sessionInventoryDebtGen = 0
+	restartDebt := m.sessionInventoryDebtGen == generation
+	overflowReplay := m.sessionRepairOverflowErr != "" &&
+		m.sessionRepairOverflowGen == generation &&
+		m.sessionRepairOverflowReplayGen == generation
+	if !restartDebt && !overflowReplay {
+		return false
+	}
+	cleared := false
+	if restartDebt {
+		m.sessionInventoryDebtGen = 0
+		cleared = true
+	}
+	if overflowReplay {
+		if m.sessionRepairOverflowReplayOverflow {
+			// This completed replay cannot prove convergence after an overflow
+			// landed during it. Retire its snapshot and immediately re-arm.
+			m.sessionRepairOverflowReplayGen = 0
+			m.sessionRepairOverflowReplayOverflow = false
+		} else {
+			m.sessionRepairOverflowErr = ""
+			m.sessionRepairOverflowGen = 0
+			m.sessionRepairOverflowReplayGen = 0
+			m.sessionRepairOverflowReplayOverflow = false
+			cleared = true
+		}
+	}
 	m.sessionInventoryRequestAt = time.Time{}
-	return true
+	return cleared
 }
 
 func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
@@ -845,9 +893,24 @@ func (m *Manager) noteSyncedMirrorFailureLocked(err error) {
 	if errors.Is(err, dataplane.ErrSyncedImportRepairOverflow) {
 		// This is not socket-health failure, but the failed key has no repair
 		// slot. A later successful import cannot prove this worker converged, so
-		// preserve a separate takeover-readiness gate until the manager is
-		// rebuilt and the cluster inventory is replayed.
+		// arm a generation-bound peer inventory replay to gate takeover until the
+		// helper's worker state converges.
 		m.sessionRepairOverflowErr = err.Error()
+		if (m.sessionRepairOverflowReplayGen != 0 &&
+			m.sessionRepairOverflowReplayGen == m.procGen) ||
+			(m.procGen != 0 && !m.sessionInventoryRequestAt.IsZero()) {
+			// An inventory request for this helper was already in flight when
+			// the overflow arrived, so its replay cannot clear the new debt.
+			m.sessionRepairOverflowGen = m.procGen
+			m.sessionRepairOverflowReplayGen = m.procGen
+			m.sessionRepairOverflowReplayOverflow = true
+		} else {
+			m.sessionRepairOverflowGen = m.procGen
+			m.sessionRepairOverflowReplayGen = 0
+			m.sessionRepairOverflowReplayOverflow = false
+			// An earlier inventory request may not have included this overflow.
+			m.sessionInventoryRequestAt = time.Time{}
+		}
 		slog.Error("userspace: helper committed synced import but repair latch overflowed; "+
 			"HA takeover readiness is blocked until full session replay",
 			"err", err)
