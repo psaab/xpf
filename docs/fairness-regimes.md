@@ -531,11 +531,12 @@ A measurement run **PASSES** iff ALL of:
 
    `MOUSE_TARGET_V4` and `ELEPHANT_TARGET_V4` are separate knobs that default
    to the same address. The loss env's candidate pair is mouse
-   `172.16.80.201` and elephant `$IPERF_TARGET4` (`172.16.80.202`), both on
-   `xpf-mouse-target` (§1.3.1); distinct strings satisfy only the reducer's
-   equality check, not target-host isolation. Do not describe that pair as
-   restoring attribution or treat a non-VOID result as host-attributable. A
-   separate host for one role is still required.
+   `172.16.80.201` and elephant `$IPERF_TARGET4` (`172.16.80.202`); both are
+   on `xpf-mouse-target` (see `docs/incus-tcp-udp-plan.md` §1.3.1).
+   Distinct strings satisfy only the reducer's equality check, not target-host
+   isolation. Do not describe that pair as restoring attribution or treat a
+   non-VOID result as host-attributable. A separate host for one role is still
+   required.
    <!-- Expires-when: #18576 closed -->
    Before #18576, the loss v4 primary was `.200`, a legacy alias on the
    incus-managed `xpf-mouse-target` host (#16213).
