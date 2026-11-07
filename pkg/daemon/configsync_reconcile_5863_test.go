@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/configstore"
 )
 
@@ -145,6 +146,37 @@ func TestConfigSyncReconcile_HappyPathPushesOnce(t *testing.T) {
 	}
 	if got := pushes.Load(); got != 1 {
 		t.Fatalf("primary+stable must push exactly once across many ticks; got %d", got)
+	}
+}
+
+// TestConfigSyncReconcileAlreadyPushedDoesNotReserveGeneration18644 exercises
+// the production reservation path with a satisfied (epoch x hash) marker.
+// Repeated safety-net ticks must leave SessionSync's wire-generation counter
+// unchanged, rather than reserving before recognizing the no-op.
+func TestConfigSyncReconcileAlreadyPushedDoesNotReserveGeneration18644(t *testing.T) {
+	d, _ := newReconcileDaemon(t, true /*primary*/, 60*time.Second)
+	d.configSyncPushForTest = nil
+	ss := cluster.NewSessionSync(":0", "10.99.0.2:4785", nil)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = ss
+	d.clusterCommsMu.Unlock()
+	_, configText, _ := d.activeConfigSnapshotForPeer()
+	epoch := d.syncPeerConnEpoch.Load()
+
+	d.configSyncMu.Lock()
+	d.configSyncHasPushed = true
+	d.configSyncPushedEpoch = epoch
+	d.configSyncPushedGen = configGenerationHash(configText)
+	d.configSyncMu.Unlock()
+
+	before := ss.ConfigGenCounterForTesting()
+	const ticks = 10
+	for range ticks {
+		d.reconcileConfigSyncToPeer("reconcile-loop")
+	}
+	if after := ss.ConfigGenCounterForTesting(); after != before {
+		t.Fatalf("already-pushed no-op ticks reserved config generations: before=%d after=%d across %d ticks",
+			before, after, ticks)
 	}
 }
 

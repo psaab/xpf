@@ -5449,10 +5449,11 @@ it.
   `configGenCounter`, the original comparison, which refuses (fail-closed) a
   tagged generation the peer took from an earlier authority process (an older
   boot, or a config edited while this node was down), until the reconnect
-  push lands. `configGenCounter` alone cannot be the threshold: it is a
-  reservation counter, and the 30 s config-sync reconcile tick reserves a
-  generation before it finds the config already pushed and no-ops. So it runs
-  one draw per tick past anything the peer was ever sent. On `loss` (#18636)
+  push lands. The counter alone cannot be the threshold because it can still
+  advance before any successful write when a push is attempted. #18644 makes
+  an already-satisfied reconcile a true no-op: the daemon checks and claims
+  its (connection epoch x config hash) marker before reserving, so periodic
+  ticks do not burn generations. On `loss` (#18636)
   that refused every install from a converged peer, `Sessions
   stale-config-ignored` climbed at 55-160/s on the RG0 primary, and the
   primary never imported a session its peer created.

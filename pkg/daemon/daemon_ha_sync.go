@@ -709,26 +709,6 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		slog.Debug("cluster: config-sync reconcile skip (uptime below stability threshold)", "reason", reason)
 		return
 	}
-	var reservedGen uint64
-	if d.configSyncPushForTest == nil {
-		latestCfg, latestText, latestAncestry, latestReservedGen :=
-			d.activeConfigSnapshotAndReserveForPeer(ss, gen)
-		if latestCfg == nil {
-			return
-		}
-		cfg, configText, ancestry, reservedGen =
-			latestCfg, latestText, latestAncestry, latestReservedGen
-		gen = configGenerationHash(configText)
-		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
-		if err != nil {
-			reportEpoch, reportState := d.currentPeerSnapshotObservation()
-			if auth != nil {
-				reportEpoch, reportState = auth.peerConnEpoch, auth.state
-			}
-			d.reportPeerSnapshotConfigSyncDeferred(configText, reportEpoch, reportState, err.Error())
-			return
-		}
-	}
 	epoch, attemptState := d.currentPeerSnapshotObservation()
 	if auth != nil {
 		epoch, attemptState = auth.peerConnEpoch, auth.state
@@ -741,8 +721,9 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 		}
 	}
 
-	// Claim only after the live peer passed the snapshot-protocol gate. Queue
-	// failure or a boundary revalidation failure clears this claim immediately.
+	// #18644: atomically check and claim the (epoch x generation) marker before
+	// reserving a wire generation. Claiming first also makes concurrent
+	// reconciles share one reservation rather than each burning one.
 	d.configSyncMu.Lock()
 	if d.syncPeerConnEpoch.Load() != epoch || !d.syncPeerConnected.Load() {
 		d.configSyncMu.Unlock()
@@ -762,6 +743,59 @@ func (d *Daemon) reconcileConfigSyncToPeer(reason string) {
 	d.configSyncPushedEpoch = epoch
 	d.configSyncPushedGen = gen
 	d.configSyncMu.Unlock()
+	claimedGen := gen
+
+	var reservedGen uint64
+	if d.configSyncPushForTest == nil {
+		latestCfg, latestText, latestAncestry, latestReservedGen :=
+			d.activeConfigSnapshotAndReserveForPeer(ss, gen)
+		if latestCfg == nil {
+			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen)
+			return
+		}
+		cfg, configText, ancestry, reservedGen =
+			latestCfg, latestText, latestAncestry, latestReservedGen
+		gen = configGenerationHash(configText)
+		auth, err = d.peerSnapshotProtocolAuthorizationForConfig(cfg)
+		if err != nil {
+			d.clearConfigSyncPushedAtEpoch(epoch, claimedGen)
+			reportEpoch, reportState := d.currentPeerSnapshotObservation()
+			if auth != nil {
+				reportEpoch, reportState = auth.peerConnEpoch, auth.state
+			}
+			d.reportPeerSnapshotConfigSyncDeferred(configText, reportEpoch, reportState, err.Error())
+			return
+		}
+		if auth != nil {
+			if auth.peerConnEpoch != epoch {
+				d.clearConfigSyncPushedAtEpoch(epoch, claimedGen)
+				return
+			}
+			allowed, authErr := d.revalidatePeerSnapshotAuthorization(auth, configText)
+			if authErr != nil || !allowed {
+				d.clearConfigSyncPushedAtEpoch(epoch, claimedGen)
+				return
+			}
+			attemptState = auth.state
+		}
+	}
+
+	// The connection or marker may have changed while the active snapshot was
+	// revalidated and reserved. Do not queue against a claim that is no longer
+	// current; the ordinary connection/reconcile trigger will retry.
+	d.configSyncMu.Lock()
+	stillClaimed := d.syncPeerConnEpoch.Load() == epoch && d.syncPeerConnected.Load() &&
+		d.configSyncHasPushed && d.configSyncPushedEpoch == epoch &&
+		d.configSyncPushedGen == claimedGen
+	d.configSyncMu.Unlock()
+	if !stillClaimed {
+		d.clearConfigSyncPushedAtEpoch(epoch, claimedGen)
+		if auth != nil {
+			d.reportPeerSnapshotConfigSyncDeferred(configText, epoch, attemptState,
+				"peer connection changed before config queueing; reconciliation will retry")
+		}
+		return
+	}
 
 	slog.Info("cluster: config-sync reconcile pushing config to peer",
 		"reason", reason, "epoch", epoch, "generation", gen, "size", len(configText))

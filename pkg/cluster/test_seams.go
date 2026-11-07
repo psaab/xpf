@@ -454,6 +454,15 @@ func (s *SessionSync) AckConfigApplyForTesting(gen uint64) {
 	s.handleConfigApplyAck(nil, p[:])
 }
 
+// ConfigGenCounterForTesting reports the next wire-generation reservation
+// state so daemon reconciler tests can prove no-op ticks consume no generations.
+func (s *SessionSync) ConfigGenCounterForTesting() uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.configGenCounter.Load()
+}
+
 // SetHeartbeatRestartRetryDelayForTesting caps every RestartHeartbeat retry
 // pause at d and returns the restore function. #18597: pkg/daemon's cells
 // drive a restart that fails every bind attempt (an owed restart, #9751)

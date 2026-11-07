@@ -1497,10 +1497,12 @@ current peer incarnation (`peerIncarnationState.lastSentConfigGen`).
 - Before the first write to that incarnation, the threshold is
   `configGenCounter`. That keeps the original comparison, which fails
   closed.
-- The counter alone cannot be the threshold. It is a reservation counter, and
-  the 30 s config-sync reconcile reserves a generation before it finds the
-  config already pushed. So it runs past anything the peer was ever sent, and
-  a converged peer's every install read as stale.
+- The counter alone cannot be the threshold. It is a reservation counter and
+  can advance before a successful write when a push is attempted. #18644 makes
+  an already-satisfied reconcile a true no-op: the daemon checks and claims its
+  (connection epoch x config hash) marker before reserving, so periodic ticks
+  consume no generations. A failed push attempt can still reserve before the
+  first successful write, so the per-incarnation last-sent mark remains needed.
 - A BulkStart boot-id switch seeds the new incarnation's mark from the config
   written on the priming connection (the #18521 ordering: the peer-connect
   push precedes the new boot's BulkStart). The switch's capability callback
