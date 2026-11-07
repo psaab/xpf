@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/psaab/xpf/pkg/cmdtree"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/configstore"
 )
@@ -407,27 +408,31 @@ func (c *CLI) checkShowConfigurationRead(args []string) error {
 	}
 	path := args
 	display := ""
-	var comparePipe []string
+	var compareArgs []string
+	compareFound := false
 	for i, a := range args {
 		if a == "|" {
 			if i+2 < len(args) && args[i+1] == "display" {
 				display = "display " + args[i+2]
 			}
-			if i+1 < len(args) && args[i+1] == "compare" {
-				comparePipe = args[i+1:]
+			if i+1 < len(args) {
+				command, tail := cmdtree.ComparePipeCommand(args[i+1:])
+				if command == "compare" {
+					compareFound, compareArgs = true, tail
+				}
 			}
 			path = args[:i]
 			break
 		}
 	}
-	if len(comparePipe) > 0 {
+	if compareFound {
 		// Operational compare uses the rollback slot and ACTIVE arms. Price
 		// both rendered trees from the same capture that the handler renders;
 		// the staged candidate is neither read nor authorized as a baseline.
-		if len(comparePipe) != 3 || comparePipe[1] != "rollback" {
+		if len(compareArgs) != 2 || compareArgs[0] != "rollback" {
 			return nil // malformed compare renders nothing; handler returns usage.
 		}
-		n, err := strconv.Atoi(comparePipe[2])
+		n, err := strconv.Atoi(compareArgs[1])
 		if err != nil || n < 0 {
 			return nil // malformed compare renders nothing; handler returns usage.
 		}

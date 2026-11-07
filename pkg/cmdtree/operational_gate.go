@@ -94,9 +94,10 @@ func ValidateOperationalGate(words []string) error {
 
 // ClassifyComparePipe reports whether words contain an operational compare
 // pipe and whether its `|` byte is glued to non-space text. It recognizes
-// compare after whitespace-skipped comments, while measuring adjacency from
-// the original tokens: a comment start after `|` and comment-end bytes before
-// `|` both make the pipe glued. Pipe text inside a block comment is ignored.
+// compare after skipped inline block comments, while measuring adjacency from
+// the original tokens: a block-comment start after `|` and comment-end bytes
+// before `|` both make the pipe glued. Pipe text inside a block comment is
+// ignored. Line comments consume the rest of the command line.
 func ClassifyComparePipe(words []string) (found, glued bool) {
 	for i, offset := 0, 0; i < len(words); {
 		word := words[i]
@@ -114,16 +115,15 @@ func ClassifyComparePipe(words []string) (found, glued bool) {
 			continue
 		}
 		if strings.HasPrefix(word[offset:], "//") || word[offset] == '#' {
-			// words are already split at whitespace; skip this comment token
-			// and continue with the next non-comment token.
-			i++
-			offset = 0
-			continue
+			return found, glued
 		}
-		if word[offset] == '|' && compareFollowsAfterPipe(words, i, offset+1) {
-			found = true
-			if offset > 0 || offset+1 < len(word) {
-				glued = true
+		if word[offset] == '|' {
+			command, _ := comparePipeCommandAt(words, i, offset+1)
+			if command == "compare" {
+				found = true
+				if offset > 0 || offset+1 < len(word) {
+					glued = true
+				}
 			}
 		}
 		offset++
@@ -145,7 +145,14 @@ func skipCompareBlockComment(words []string, wordIndex, offset int) (int, int, b
 	return wordIndex, 0, false
 }
 
-func compareFollowsAfterPipe(words []string, wordIndex, offset int) bool {
+// ComparePipeCommand returns the first command and remaining words after a
+// show-configuration pipe, skipping inline block comments. Its returned args
+// alias words; line comments end the command tail.
+func ComparePipeCommand(words []string) (command string, args []string) {
+	return comparePipeCommandAt(words, 0, 0)
+}
+
+func comparePipeCommandAt(words []string, wordIndex, offset int) (string, []string) {
 	for wordIndex < len(words) {
 		word := words[wordIndex]
 		if offset >= len(word) {
@@ -157,18 +164,16 @@ func compareFollowsAfterPipe(words []string, wordIndex, offset int) bool {
 			var closed bool
 			wordIndex, offset, closed = skipCompareBlockComment(words, wordIndex, offset+2)
 			if !closed {
-				return false
+				return "", nil
 			}
 			continue
 		}
 		if strings.HasPrefix(word[offset:], "//") || word[offset] == '#' {
-			wordIndex++
-			offset = 0
-			continue
+			return "", nil
 		}
-		return word[offset:] == "compare"
+		return word[offset:], words[wordIndex+1:]
 	}
-	return false
+	return "", nil
 }
 
 // firstBarePipe returns the first token that is exactly the output-pipe

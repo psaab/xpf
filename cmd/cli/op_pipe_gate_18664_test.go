@@ -322,6 +322,8 @@ func TestOpShowConfigurationCompareRollback18669(t *testing.T) {
 	}{
 		{"show configuration | compare rollback 2", 2, []string{}},
 		{"show configuration system | compare rollback 3", 3, []string{"system"}},
+		{"show configuration | /*x*/compare rollback 2", 2, []string{}},
+		{"show configuration system | /*x*/ compare rollback 3", 3, []string{"system"}},
 	} {
 		t.Run(tc.line, func(t *testing.T) {
 			f, out, err := dispatch18664(t, tc.line, false)

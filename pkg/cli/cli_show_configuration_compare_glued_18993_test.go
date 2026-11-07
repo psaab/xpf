@@ -100,6 +100,26 @@ func TestCLIShowConfigurationSpacedCompareControls18993(t *testing.T) {
 				wantIn:  []string{activeDomain18669},
 				wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
 			},
+			{
+				line:    "show configuration | /*x*/compare rollback 1",
+				wantIn:  []string{activeDomain18669, activeInterface18669},
+				wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
+			},
+			{
+				line:    "show configuration | /*x*/ compare rollback 1",
+				wantIn:  []string{activeDomain18669, activeInterface18669},
+				wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
+			},
+			{
+				line:    "show configuration system | /*x*/compare rollback 1",
+				wantIn:  []string{activeDomain18669},
+				wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
+			},
+			{
+				line:    "show configuration system | /*x*/ compare rollback 1",
+				wantIn:  []string{activeDomain18669},
+				wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
+			},
 		} {
 			t.Run(fixture.name+"/"+tc.line, func(t *testing.T) {
 				c := &CLI{store: fixture.store(t), userClass: fixture.userClass}

@@ -82,15 +82,16 @@ func (c *ctl) handleShow(args []string) error {
 		if err != nil {
 			return err
 		}
-		if len(pipe) > 0 && pipe[0] == "compare" {
+		pipeCommand, compareArgs := cmdtree.ComparePipeCommand(pipe)
+		if pipeCommand == "compare" {
 			const usage = "usage: show configuration [<path>] | compare rollback <N>"
-			if len(pipe) == 1 {
+			if len(compareArgs) == 0 {
 				return fmt.Errorf("syntax error: | compare on operational show configuration requires rollback <N>")
 			}
-			if len(pipe) != 3 || pipe[1] != "rollback" {
+			if len(compareArgs) != 2 || compareArgs[0] != "rollback" {
 				return fmt.Errorf("%s", usage)
 			}
-			n, err := parseRollbackSelector(pipe[2], usage, 0)
+			n, err := parseRollbackSelector(compareArgs[1], usage, 0)
 			if err != nil {
 				return err
 			}

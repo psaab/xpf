@@ -133,14 +133,15 @@ func (c *CLI) handleShow(args []string) error {
 			fmt.Println(pipeErr.Error())
 			return nil
 		}
-		if piped && format == displayPipeNone && len(pipeRest) > 0 && pipeRest[0] == "compare" {
-			if len(pipeRest) == 1 {
+		pipeCommand, compareArgs := cmdtree.ComparePipeCommand(pipeRest)
+		if piped && format == displayPipeNone && pipeCommand == "compare" {
+			if len(compareArgs) == 0 {
 				return fmt.Errorf("syntax error: | compare on operational show configuration requires rollback <N>")
 			}
-			if len(pipeRest) != 3 || pipeRest[1] != "rollback" {
+			if len(compareArgs) != 2 || compareArgs[0] != "rollback" {
 				return fmt.Errorf("usage: show configuration [<path>] | compare rollback <N>")
 			}
-			n, err := strconv.Atoi(pipeRest[2])
+			n, err := strconv.Atoi(compareArgs[1])
 			if err != nil || n < 0 {
 				return fmt.Errorf("usage: show configuration [<path>] | compare rollback <N>")
 			}
