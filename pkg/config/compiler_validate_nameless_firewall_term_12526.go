@@ -112,23 +112,45 @@ type firewallNamelessSite17257 struct {
 }
 
 // expandedFirewallTermCount17257 counts compiled terms the authored terms
-// before index authoredUpTo lower to: a >=2-key term yields one, a one-key
-// container yields one per child block, and malformed terms yield zero
-// (they never reach the compiled list; their placeholder takes the slot).
-func expandedFirewallTermCount17257(terms []*Node, authoredUpTo int) int {
+// before index authoredUpTo lower to, following compileFirewall exactly:
+// namedInstances emits one term per >=2-key node, one per child of a
+// one-key container (named blocks plus nameless-marked instances), and
+// nothing for a leaf/one-key statement the compiler cannot see. Malformed
+// terms therefore count by their shape, not zero: a packed (invisible)
+// site's placeholder takes its slot only when it IS the site.
+func expandedFirewallTermCount17257(terms []*Node, authoredUpTo int, pre map[*Node]struct{}) int {
 	count := 0
 	for i, term := range terms {
 		if i >= authoredUpTo {
 			break
 		}
-		if _, malformed := firewallNamelessTermBody12526(term); malformed {
+		count += compiledFirewallTermEmissions17257(term, pre)
+	}
+	return count
+}
+
+// compiledFirewallTermEmissions17257 mirrors compileFirewall's term loop for
+// one authored term node: namedInstances expands it, terms whose node is in
+// the nameless set are dropped (unknown-child path), packed-invisible terms
+// emit nothing. A typed-visible malformed term emits one marker ordered
+// after its named siblings (parent-probed).
+func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int {
+	if term == nil {
+		return 0
+	}
+	nameless := firewallNamelessTermNodes([]*Node{term})
+	instances := namedInstances([]*Node{term})
+	count := 0
+	for _, inst := range instances {
+		if _, dropped := nameless[inst.node]; dropped {
 			continue
 		}
-		if len(term.Keys) >= 2 {
+		count++
+	}
+	if _, malformed := firewallNamelessTermBody12526(term); malformed && len(term.Children) > 0 {
+		if _, visible := pre[term]; visible {
 			count++
-			continue
 		}
-		count += len(term.Children)
 	}
 	return count
 }
@@ -166,7 +188,7 @@ func scanFirewallNamelessTerms12526(tree *ConfigTree) (all []firewallNamelessSit
 			if !malformed {
 				continue
 			}
-			site := firewallNamelessSite17257{family: family, filter: filter, first: first, ordinal: i, expanded: expandedFirewallTermCount17257(terms, i)}
+			site := firewallNamelessSite17257{family: family, filter: filter, first: first, ordinal: i, expanded: expandedFirewallTermCount17257(terms, i, pre)}
 			all = append(all, site)
 			_, existedBeforeUnpack := pre[term]
 			if !existedBeforeUnpack || (len(term.Keys) == 1 && len(term.Children) == 0) {

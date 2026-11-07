@@ -283,21 +283,63 @@ func TestCompileConfigLenientNamelessAfterContainerKeepsAuthoredOrder17257(t *te
 }
 
 func TestCompileConfigLenientNamelessInsideContainerKeepsSiblingOrder17257(t *testing.T) {
-	// A nameless statement INSIDE a container: its expanded index must
-	// count the named siblings authored before it inside the container.
+	// A nameless statement INSIDE a container is itself the packed site;
+	// the compiler emits only its typed sibling shape (parent probe: the
+	// container lowers to the single typed-visible term "then"/discard),
+	// so the placeholder takes the authored END slot of the filter.
 	src := `firewall { filter { F term { allow { then accept; } then discard; } } }`
 	cfg, err := CompileConfigLenient(hierTree(t, src))
 	if err != nil {
 		t.Fatalf("tolerant compile: %v", err)
 	}
 	filter := cfg.Firewall.FiltersInet["F"]
-	if filter == nil || len(filter.Terms) != 2 {
-		t.Fatalf("filter = %+v, want [allow placeholder]", filter)
+	if filter == nil || len(filter.Terms) != 1 {
+		t.Fatalf("filter = %+v, want the single typed-visible term", filter)
 	}
-	if term := filter.Terms[0]; term == nil || term.Name != "allow" || term.Action != FilterActionAccept {
-		t.Fatalf("first term = %+v, want named allow accept", term)
+	if term := filter.Terms[0]; term == nil || !term.nameless {
+		t.Fatalf("term = %+v, want the typed-visible nameless term", term)
+	}
+}
+
+func TestCompileConfigLenientPackedAfterTypedVisibleKeepsOrder17257(t *testing.T) {
+	// Sol/Kimi delta MAJOR: a typed-visible malformed term compiles to a
+	// marker slot; a later PACKED site must insert AFTER it, not at 0.
+	src := `firewall { family inet { filter F { term { then accept; } term { } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 2 {
+		t.Fatalf("filter = %+v, want [typed-visible, placeholder]", filter)
+	}
+	if term := filter.Terms[0]; term == nil || !term.nameless || term.Name != "then" {
+		t.Fatalf("first term = %+v, want the typed-visible nameless marker", term)
 	}
 	if term := filter.Terms[1]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
-		t.Fatalf("second term = %+v, want the nameless discard after allow", term)
+		t.Fatalf("second term = %+v, want the packed discard after the typed-visible marker", term)
+	}
+}
+
+func TestCompileConfigLenientPackedAfterMixedContainerKeepsOrder17257(t *testing.T) {
+	// Mixed container: named child compiles, nameless sibling is a typed
+	// marker; the following packed site lands after BOTH.
+	src := `firewall { family inet { filter F { term { allow-tcp { from { protocol tcp; } then accept; } then discard; } term { } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 3 {
+		t.Fatalf("filter = %+v, want [allow-tcp, typed marker, placeholder]", filter)
+	}
+	if term := filter.Terms[0]; term == nil || term.Name != "allow-tcp" || term.Action != FilterActionAccept {
+		t.Fatalf("first term = %+v, want allow-tcp accept", term)
+	}
+	if term := filter.Terms[1]; term == nil || !term.nameless || term.Name != "then" {
+		t.Fatalf("second term = %+v, want the typed-visible nameless marker (compiler orders it after named siblings)", term)
+	}
+	if term := filter.Terms[2]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("third term = %+v, want the packed discard last", term)
 	}
 }
