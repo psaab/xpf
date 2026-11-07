@@ -375,6 +375,10 @@ func TestCompileConfigLenientPackedNamelessPolicyTermWarns17257(t *testing.T) {
 }
 
 func TestPolicyNamelessPlaceholderKeepsAuthoredOrdinal17257(t *testing.T) {
+	// The discriminating fixture puts a NAMED term first, so the
+	// placeholder must move past it; blind-append coincides here, so
+	// the mutant gate is the production-call check below in the log.
+
 	// probe companion: placeholder must ALSO land after a leading named term.
 	cfg2, err2 := CompileConfigLenient(hierTree(t, `policy-options {
     policy-statement P {

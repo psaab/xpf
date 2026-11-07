@@ -98,7 +98,7 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 		if statement == nil {
 			continue
 		}
-		index := site.ordinal
+		index := site.expanded
 		placeholder := &PolicyTerm{Name: site.first, nameless: true}
 		if index > len(statement.Terms) {
 			index = len(statement.Terms)

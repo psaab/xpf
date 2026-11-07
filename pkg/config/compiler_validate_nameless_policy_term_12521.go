@@ -193,6 +193,39 @@ type policyNamelessSite17257 struct {
 	policy  string
 	first   string
 	ordinal int
+	// expanded counts compiled terms authored before this site, mirroring
+	// compilePolicyOptions (one-key containers emit their named children
+	// plus one marker per nameless child; GLM residual).
+	expanded int
+}
+
+func expandedPolicyTermCount17257(terms []*Node, authoredUpTo int) int {
+	count := 0
+	for i, term := range terms {
+		if i >= authoredUpTo {
+			break
+		}
+		if term.Inactive {
+			continue
+		}
+		if len(term.Keys) >= 2 {
+			count++
+			continue
+		}
+		if len(term.Keys) == 1 {
+			_, _, nameless := policyNamelessTermBody12521(term)
+			if nameless {
+				count++
+				continue
+			}
+			for _, child := range term.Children {
+				if namedPolicyTermChild12521(child) {
+					count++
+				}
+			}
+		}
+	}
+	return count
 }
 
 func scanPolicyNamelessTerms12521(tree *ConfigTree) (all []policyNamelessSite17257, packed []policyNamelessSite17257) {
@@ -230,7 +263,7 @@ func scanPolicyNamelessTerms12521(tree *ConfigTree) (all []policyNamelessSite172
 				if !nameless {
 					continue
 				}
-				site := policyNamelessSite17257{policy: ps.name, first: first, ordinal: ordinal}
+				site := policyNamelessSite17257{policy: ps.name, first: first, ordinal: ordinal, expanded: expandedPolicyTermCount17257(ps.node.FindChildren("term"), ordinal)}
 				all = append(all, site)
 				if _, existedBeforeUnpack := pre[term]; !existedBeforeUnpack {
 					packed = append(packed, site)
