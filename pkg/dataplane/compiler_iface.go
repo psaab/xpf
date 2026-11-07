@@ -11,6 +11,7 @@ import (
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/networkd"
+	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 )
@@ -768,6 +769,7 @@ func compileZones(dp DataPlane, cfg *config.Config, result *CompileResult) error
 	buildInterfaceNetworkdModels(cfg, result, seen)
 	buildFabricBondModels(cfg, result, seen)
 	buildBridgeDomainModels(cfg, result, seen)
+	fillRoutingInstanceVRFNames(cfg, result)
 	externalNetwork := networkd.FindExternallyManaged(networkd.DefaultNetworkDir)
 	stripUnmanagedInterfaces(cfg, result, seen, externalNetwork)
 
@@ -2410,6 +2412,77 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 		}
 	}
 
+}
+
+// fillRoutingInstanceVRFNames fills an empty networkd VRFName for each
+// managed row the daemon binds to a non-forwarding, non-reserved
+// routing-instance VRF. The three model builders above only stamp the
+// management VRF (#18597); this post-build pass is the one place routing-
+// instance members gain the same treatment, so their rows render
+// KeepMaster=yes and networkd no longer releases them from vrf-<ri> when
+// their own files change (#18605). An existing name always wins. Devices
+// owned by explicit tunnel routing-instance stanzas, dual claims, or retained
+// quarantined conflicts are never stamped.
+func fillRoutingInstanceVRFNames(cfg *config.Config, result *CompileResult) {
+	if cfg == nil || result == nil || len(result.ManagedInterfaces) == 0 {
+		return
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	excluded := config.RoutingInstanceDualClaimedLinuxNames(cfg, tunnelNames)
+	if excluded == nil {
+		excluded = make(map[string]bool)
+	}
+	for _, conflict := range cfg.QuarantinedRIMemberDeviceConflicts {
+		if conflict.LinuxName != "" {
+			excluded[conflict.LinuxName] = true
+		}
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" && tc.Name != "" {
+			excluded[tc.Name] = true
+		}
+		for _, unit := range ifc.Units {
+			if unit == nil || unit.Tunnel == nil {
+				continue
+			}
+			tc := unit.Tunnel
+			if tc.RoutingInstance != "" && tc.Name != "" {
+				excluded[tc.Name] = true
+			}
+		}
+	}
+
+	vrfByLinuxName := make(map[string]string)
+	for _, ri := range cfg.RoutingInstances {
+		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
+			config.IsReservedRoutingInstanceName(ri.Name) {
+			continue
+		}
+		vrfName := routing.VRFDeviceName(ri.Name)
+		if vrfName == "" {
+			continue
+		}
+		for _, linuxName := range config.RoutingInstanceMemberLinuxNamesForInstance(cfg, tunnelNames, ri) {
+			if linuxName == "" || excluded[linuxName] {
+				continue
+			}
+			if _, exists := vrfByLinuxName[linuxName]; !exists {
+				vrfByLinuxName[linuxName] = vrfName
+			}
+		}
+	}
+	for i := range result.ManagedInterfaces {
+		row := &result.ManagedInterfaces[i]
+		if row.VRFName != "" || row.Name == "" || excluded[row.Name] {
+			continue
+		}
+		if vrfName := vrfByLinuxName[row.Name]; vrfName != "" {
+			row.VRFName = vrfName
+		}
+	}
 }
 
 // stripUnmanagedInterfaces discovers all system interfaces and marks unconfigured

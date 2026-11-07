@@ -112,8 +112,10 @@ Triggers `networkctl reload` only when files actually changed.
   unmanaged-interface scan via the `daemonOwned` map.
 - **VRF membership renders `KeepMaster=yes`, never `VRF=` (#18597).** Every
   VRF xpf uses (`vrf-mgmt` and the routing-instance `vrf-*`) is created by
-  `pkg/routing` over netlink, not as a networkd `.netdev`. Only `vrf-mgmt`
-  members carry `VRFName` today. A `VRF=vrf-mgmt` line never resolved: networkd logged `vrf-mgmt NetDev could not be
+  `pkg/routing` over netlink, not as a networkd `.netdev`. Management rows
+  carry `VRFName=vrf-mgmt`; the compiler's post-build pass also fills it for
+  members of non-forwarding, non-reserved routing instances (#18605). A
+  `VRF=vrf-mgmt` line never resolved: networkd logged `vrf-mgmt NetDev could not be
   found, ignoring assignment` on every reload, treated the link as having NO
   master, and on every reconfigure set `IFLA_MASTER=0`. The kernel VRF driver
   cycles a link on every enslave and release, so each commit took em0 (the
@@ -127,11 +129,11 @@ Triggers `networkctl reload` only when files actually changed.
   with a non-empty `VRFName` renders `KeepMaster=yes` unless it also names a
   networkd-owned `Bond=` or `Bridge=` master, which `KeepMaster` would make
   networkd ignore. The daemon's `BindInterfaceToVRF` owns the binding. Cells:
-  `keep_master_18597_test.go`. Residuals: a routing-instance member row carries
-  no master directive, so networkd still releases it from its `vrf-*` when
-  that row's OWN files change (the daemon's #6805 late pass rebinds it; the
-  narrowed tail below means an unrelated commit no longer touches it; #18605),
-  and a DISABLED management-class row takes the always-down early return
+  `keep_master_18597_test.go` plus the #18605 dataplane model cells. The
+  compiler excludes dual-claimed and retained quarantined devices, as well as
+  tunnel devices owned by an explicit tunnel `routing-instance` stanza; a
+  removed RI member therefore loses `KeepMaster=yes` on its next compile.
+  Residual: a DISABLED management-class row takes the always-down early return
   without `KeepMaster=yes` (#18607).
 - **The activation tail reconfigures only interfaces whose files changed
   (#18597).** `Apply` records which interfaces had a `.link`, `.netdev` or
