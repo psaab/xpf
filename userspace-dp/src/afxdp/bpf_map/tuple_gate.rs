@@ -679,22 +679,41 @@ mod tests {
                 || (TupleGate::shard_index(a) == TupleGate::shard_index(b)
                     && format!("{a:?}") < format!("{b:?}"))
         };
-        let mut held_key = None;
-        let mut free = None;
-        for port in 1..u16::MAX {
-            let candidate = key(port, 1);
-            let canonical = TupleGate::canonical(&candidate);
-            match &held_key {
-                None => held_key = Some(candidate),
-                Some(held) if sorts_before(&canonical, &TupleGate::canonical(held)) => {
-                    free = Some(candidate);
-                    break;
-                }
-                _ => {}
+        // Track the canonical MAXIMUM and MINIMUM over the scanned
+        // ports: their strict span exists unless every scanned key
+        // canonicalizes identically, and taking the pair from the two
+        // extremes does not depend on scan order (an order-dependent
+        // first-pair search misses the pair whenever the first keys
+        // happen to be the global minimum). A full 1..MAX span repeats
+        // only 256 ports per shard class, so the scan is microseconds.
+        let mut min_key: Option<SessionKey> = None;
+        let mut max_key: Option<SessionKey> = None;
+        for port in 1..=u16::MAX {
+            let candidate = TupleGate::canonical(&key(port, 1));
+            if min_key
+                .as_ref()
+                .is_none_or(|min| sorts_before(&candidate, min))
+            {
+                min_key = Some(candidate.clone());
+            }
+            if max_key
+                .as_ref()
+                .is_none_or(|max| sorts_before(max, &candidate))
+            {
+                max_key = Some(candidate);
             }
         }
-        let held_key = held_key.expect("scan yields a first key");
-        let free = free.expect("a canonical pair with free strictly before held must exist");
+        let free = min_key.expect("scan yields a minimum key");
+        let held_canonical = max_key.expect("scan yields a maximum key");
+        assert!(
+            sorts_before(&free, &held_canonical),
+            "canonical key span must be strict (min < max) for every seed"
+        );
+        let held_key = held_canonical.clone();
+        // The fixture template fixes every field except the port, so
+        // the raw domain-1 spelling of either canonical key is just
+        // key(port, 1) — canonical() clears only domain/discriminator.
+        let free = key(free.src_port, 1);
         // The blocked claim is the held port under domain 2: it
         // canonicalizes onto held_key, which the lease already holds.
         let blocked_port = held_key.src_port;
