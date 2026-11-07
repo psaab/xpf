@@ -365,3 +365,26 @@ func TestOpShowConfigurationCompareRefusals18669(t *testing.T) {
 		})
 	}
 }
+
+// TestOpLeafOutputModifierRefused18666: a pure keyword leaf has no handler
+// pipe parser, so `| display` must fail before it can fall through to the
+// default text renderer. These rows are the #18666 regressions and fail on
+// revert: each previously returned nil (or made an RPC) with the modifier
+// silently dropped.
+func TestOpLeafOutputModifierRefused18666(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"show version | display set", `syntax error: "show version" does not accept the output modifier "| display set"`},
+		{"show chassis hardware | display xml", `syntax error: "show chassis hardware" does not accept the output modifier "| display xml"`},
+		{"show system license | display json", `syntax error: "show system license" does not accept the output modifier "| display json"`},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			f, out, err := dispatch18664(t, tc.line, false)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
+			}
+			if f.calls() != 0 || out != "" {
+				t.Fatalf("dispatch(%q) calls=%d output=%q; want refusal before handler/RPC", tc.line, f.calls(), out)
+			}
+		})
+	}
+}

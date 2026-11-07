@@ -3199,6 +3199,13 @@ configuration mode, `run show configuration | display set` does the same.
   `syntax error: "request chassis cluster" does not accept the output modifier "| display set"`;
   `show chassis | display set` ->
   `syntax error: "show chassis" does not accept the output modifier "| display set"`.
+- A bare output pipe after a pure keyword leaf is refused on both consoles,
+  rather than silently returning the default text output:
+  `show version | display xml` ->
+  `syntax error: "show version" does not accept the output modifier "| display xml"`.
+  `show configuration | display set` remains a supported registered
+  consumer, as do the handler-parsed pipes after value slots and
+  `AcceptsArgs` tails.
 - Operational `show configuration [<path>] | compare rollback <N>` is
   supported on both the remote and local xpf consoles. It compares rollback
   N against the ACTIVE configuration, not the candidate; a path before the

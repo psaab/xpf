@@ -62,10 +62,12 @@ the pipe. The rules:
   instead of `unknown <path> command: |`. `cmd/cli` already refused these
   shapes before #18664 (exit 1); #18664 changed its message. The local CLI
   previously let help-printing / pipe-dropping handlers succeed for them;
-  #18668 adds the same refusal there. A pipe after a value slot,
-  leaf or `AcceptsArgs` tail (`show configuration security | display
-  set`, `show system rollback 1 | display json`) is still the handler's
-  business, as before.
+  #18666 additionally refuses a bare output pipe after a pure keyword leaf
+  with the same modifier-specific error (`show version | display xml` ->
+  `syntax error: "show version" does not accept the output modifier "| display xml"`).
+  Pipes after a value slot or an `AcceptsArgs` tail remain with the handler:
+  `show configuration security | display set` and `show system rollback 1
+  | display json` still work.
 - Output filters (`| match`, `| count`, ...) never reach the gate. They
   are peeled first by `cliterm.SplitPipe` in each surface's `dispatch`, so a
   chained `show configuration | display set | match x` reaches the gate as

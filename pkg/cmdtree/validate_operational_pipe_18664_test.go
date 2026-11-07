@@ -14,7 +14,9 @@ import (
 //     bad token, with the node's canonical path as the prefix (the gate
 //     admits it only for a command whose handler parses pipes);
 //   - a `|` after a value slot, a leaf or an AcceptsArgs tail is NOT a
-//     keyword-only failure (ok=false), so the gate leaves it to the handler.
+//     keyword-only failure (ok=false). The shared gate separately refuses
+//     a pure keyword leaf (#18666); value-slot and AcceptsArgs pipes stay
+//     with their handlers.
 //
 // If ValidateOperationalLine ever started stripping pipes itself, the first
 // property would break and the remote gate would hand `clear security |

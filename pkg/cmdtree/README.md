@@ -181,8 +181,13 @@ pipe (#9628: the pipe is not tree grammar). A `|` passed in is judged as a
 trailing word, so a pipe directly under a keyword-only node is reported as
 `bad == "|"`. The shared `ValidateOperationalGate` (`operational_gate.go`,
 #18664) validates the pre-pipe words and uses that report to locate the pipe;
-both CLI dispatchers call it. `TestValidateOperationalLinePipePosition18664`
-and `TestOperationalGate18668` pin the contract.
+both CLI dispatchers call it. #18666 additionally refuses a pipe after a
+pure keyword leaf: `ValidateOperationalLine` deliberately leaves trailing
+words after leaves to handlers, so the gate checks for a childless, no-value
+keyword path before the first pipe. Registered pipe consumers still work, as
+do pipes after value slots and `AcceptsArgs` tails. The tests
+`TestValidateOperationalLinePipePosition18664` and
+`TestOperationalGate18668` pin these contracts.
 
 It is OPT-IN AND NEVER A RELAXATION: an unmarked node is exactly as strict as
 before, so it cannot re-open #8289. The mutant that deletes the opt-in and

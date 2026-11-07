@@ -26,6 +26,22 @@ func TestOperationalGate18668(t *testing.T) {
 			want:  `syntax error: "show chassis" does not accept the output modifier "| display set"`,
 		},
 		{
+			name:  "leaf show version pipe",
+			words: []string{"show", "version", "|", "display", "set"},
+			want:  `syntax error: "show version" does not accept the output modifier "| display set"`,
+		},
+		{
+			name:  "leaf show hardware pipe",
+			words: []string{"show", "chassis", "hardware", "|", "display", "xml"},
+			want:  `syntax error: "show chassis hardware" does not accept the output modifier "| display xml"`,
+		},
+		{
+			name:  "leaf show license pipe",
+			words: []string{"show", "system", "license", "|", "display", "json"},
+			want:  `syntax error: "show system license" does not accept the output modifier "| display json"`,
+		},
+
+		{
 			name:  "unknown token before pipe",
 			words: []string{"clear", "security", "ike", "|", "display", "set"},
 			want:  "unknown clear security command: ike",

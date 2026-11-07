@@ -145,8 +145,9 @@ func TestLocalKeywordOnlyUnknownRefused18668(t *testing.T) {
 // TestLocalKeywordOnlyControls18668: shapes the gate must not refuse.
 // Bare keyword nodes keep help+nil; `?`/`help` return before the gate; the
 // one pipe consumer (`show configuration`) renders the committed config;
-// pipes after a value slot / leaf are the handler's domain; and the two
-// pre-existing refusal controls keep refusing exactly as before #18668.
+// pipes after value slots and `AcceptsArgs` tails remain with their handlers;
+// and the two pre-existing refusal controls keep refusing exactly as before
+// #18668.
 func TestLocalKeywordOnlyControls18668(t *testing.T) {
 	// Bare keyword nodes: help + nil.
 	for _, line := range []string{
@@ -221,6 +222,29 @@ func TestLocalKeywordOnlyControls18668(t *testing.T) {
 			}
 			if strings.Contains(out, "Possible completions:") {
 				t.Fatalf("dispatch(%q) printed help instead of refusing:\n%s", tc.line, out)
+			}
+		})
+	}
+}
+
+// TestLocalLeafOutputModifierRefused18666 proves that the local console's
+// shared operational gate rejects a display modifier after a pure keyword
+// leaf before its default-format handler can run and silently drop it.
+func TestLocalLeafOutputModifierRefused18666(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"show version | display set", `syntax error: "show version" does not accept the output modifier "| display set"`},
+		{"show chassis hardware | display xml", `syntax error: "show chassis hardware" does not accept the output modifier "| display xml"`},
+		{"show system license | display json", `syntax error: "show system license" does not accept the output modifier "| display json"`},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			c := committedStore18668(t)
+			var err error
+			out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
+			}
+			if out != "" {
+				t.Fatalf("dispatch(%q) output=%q; want refusal before handler", tc.line, out)
 			}
 		})
 	}

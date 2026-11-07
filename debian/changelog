@@ -37,6 +37,12 @@ xpf (0.0.0) unstable; urgency=medium
     refused keyword-only pipes; the local handlers could print help and exit
     successfully after dropping `| display`. Both now use the cmdtree gate
     after local permission/config-read checks, retaining RBAC precedence.
+  * CLI: refuse bare output modifiers after pure keyword leaves (#18666).
+    `show version | display xml` previously ran the default text handler and
+    exited successfully after dropping the requested format. The shared
+    cmdtree gate now rejects leaf pipes before dispatch on both consoles;
+    `show configuration` and value-slot/`AcceptsArgs` pipe handlers remain
+    unchanged.
   * Config: strict local operator commits now refuse a packed hierarchical
     tail only when the gate proves it is silently dropped; `xpfd check-config`
     and `commit check` report the site for bracing remediation. Bootstrap and
