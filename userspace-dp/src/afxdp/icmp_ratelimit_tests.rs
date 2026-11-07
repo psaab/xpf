@@ -974,16 +974,6 @@ fn source_deny_consumes_no_aggregate_token_9901() {
     );
 }
 
-/// #15248 (A67-01): probe the first `n` addresses of one documentation /64 —
-/// the attacker host's own prefix, one IID apart. Literals per RFC 3849.
-/// Before the fix `addr_fold` folded the full /128, so every IID got its own
-/// slot and its own 100-token budget; after the fix all of them key ONE
-/// /64 source and share that source's budget.
-fn rotation_sources_v6(n: u16) -> Vec<IpAddr> {
-    (1..=n)
-        .map(|iid| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x67, 0, 0, 0, 0, iid)))
-        .collect()
-}
 /// #18404: probe IIDs of the rotation /64 (2001:db8:67::/64) for `n`
 /// sources in DISTINCT host-tier slots. Seed-adaptive via `slot_for_test`
 /// (the `distinct_slot_sources` convention), so it never hardcodes a
@@ -1434,7 +1424,24 @@ fn rotating_v6_iids_saturate_at_prefix64_cap_16510() {
     let zone = 16_512u32;
     let t0 = 22_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
-    let attackers = rotation_sources_v6(64);
+    // #18673: seed-adaptive distinct host slots like the #18404 sibling,
+    // so the dropped-/64-tier mutant admits the full 64-slot host-tier sum
+    // (64 x ~164 >> 6000) on every seed instead of ~95% of them.
+    let attackers = distinct_host_slot_rotation_sources_v6(64);
+    assert!(
+        attackers
+            .iter()
+            .all(|a| ZoneLimiter::prefix64_slot_for_test(a)
+                == ZoneLimiter::prefix64_slot_for_test(&attackers[0])),
+        "test setup: every IID of one /64 must key the same /64 slot"
+    );
+    let host_slots: std::collections::HashSet<_> =
+        attackers.iter().map(ZoneLimiter::slot_for_test).collect();
+    assert_eq!(
+        host_slots.len(),
+        attackers.len(),
+        "test setup: each IID must key a distinct host slot"
+    );
     let victim = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x77, 0, 0, 0, 0, 1));
     let mut admitted = 0u32;
     // 1000 steps of 10ms: each IID attempts every 50ms = 20/s per IID.
