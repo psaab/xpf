@@ -465,21 +465,13 @@ func TestRedactionSiteConsumersPinned17270(t *testing.T) {
 }
 
 func TestRedactionOverlapSecretBeatsURL17270(t *testing.T) {
-	// GLM #17270: one index that is BOTH a URL site and a gated secret
-	// (dynamic-dns server URL then gated password): the secret mask must
-	// win; a precedence flip leaks the value verbatim.
-	tree := parseHierText(t, `
-system {
-    services {
-        dynamic-dns {
-            provider p1 {
-                server https://upd.example.com/update;
-                password OVERLAP-PROBE-17270;
-            }
-        }
-    }
-}
-`)
+	// GLM #17270: the overlap exists only in the FLAT set shape (one
+	// flattened Keys path: urlLeafIndices marks every token after the
+	// gated server, secretIndices marks the gated password value at the
+	// SAME index). Hierarchical leaves never overlap. Secret mask wins.
+	tree := buildRedactTree(t, []string{
+		"set system services dynamic-dns provider p1 server https://upd.example.com/update password OVERLAP-PROBE-17270",
+	})
 	out := tree.RedactedClone().FormatSet()
 	if strings.Contains(out, "OVERLAP-PROBE-17270") {
 		t.Fatalf("overlapping secret leaked under URL transform:\n%s", out)
