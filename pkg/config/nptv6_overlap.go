@@ -5,163 +5,205 @@ import (
 	"net"
 )
 
-// NPTv6OverlapConflict reports the first cross-rule NPTv6 prefix overlap that
-// `Nptv6State::try_from_snapshots` would REJECT, or "" when the helper would
-// accept the whole set (#7078, closing the residual named in
-// pkg/dataplane/compiler_validate_4960.go).
-//
-// It is the single source of truth for "would the helper refuse this rule set
-// for overlap", in the same role NPTv6ScopeUnsupported plays for "does this rule
-// reach the helper at all". Both the #4960 pre-pass and any future caller read
-// one answer, so Go and Rust cannot drift on a rejection whose whole purpose is
-// to predict the other side's verdict.
-//
-// # Why validateNPTv6Strict's overlap check could not be reused (historical)
-//
-// That one exists and is older, but at the time this predicate was written
-// its `seenPrefix` carried only `{net, ones, ruleSetName, ruleName}` — NO
-// zone. The helper partitions by zone scope (#5176): `find_overlap` gates
-// every candidate on `zones_conflict`, and two DISTINCT non-empty `from
-// zone` scopes are disjoint, because a packet carries exactly one relevant
-// zone. Reusing the then-unpartitioned check as the pre-pass would have
-// hard-failed split-horizon configurations the helper installs happily —
-// converting a working apply into a failed one, the exact over-rejection
-// the #4960 guard's three properties exist to prevent. #15266 (B09-01)
-// has since made validateNPTv6Strict zone-aware too (its seenPrefix now
-// carries fromZone and its overlap leg is gated on zonesConflictNPTv6), so
-// commit and helper share one answer; this predicate remains the
-// dataplane pre-pass's answer and the two must stay in agreement.
-//
-// # Mirroring the helper
-//
-//   - Two INDEPENDENT seen-sets, internal and external, because outbound matches
-//     on the internal prefix and inbound on the external one. A collision
-//     between an internal and an external prefix is not an overlap.
-//   - Overlap is a common-prefix match at the SHORTER length
-//     (`candidate[..common] == prefix[..common]` over `min(candidate_words,
-//     words)`), not equality — a /48 and a /64 beneath it DO collide.
-//   - Gated on zonesConflictNPTv6, mirroring `zones_conflict`.
-//   - Rules the snapshot builder DROPS are skipped: an excluded rule never
-//     reaches try_from_snapshots, so it cannot participate in a rejection the
-//     helper makes. This is the same property-1 gate the parse class uses.
-//   - Rule-sets dropped for a tolerant undefined from-zone (#16008) are
-//     skipped: buildNptv6Snapshots drops the whole rule-set, so its rules
-//     never reach the helper either and cannot report or trigger an overlap.
-//   - Rules whose prefixes do not parse are skipped, because the helper rejects
-//     those on the parse arm BEFORE it ever calls find_overlap. Reporting them
-//     as overlaps would name the wrong reason for a correct rejection.
-func NPTv6OverlapConflict(cfg *Config) string {
-	if cfg == nil {
-		return ""
-	}
-	var internalSeen, externalSeen []nptv6Seen
+// NPTv6RuleRef is one NPTv6 rule together with the rule-set identity and the
+// builder's membership verdict. Rules excluded by unsupported scope, dropped
+// match leaves, or a tolerant undefined zone remain present for validation
+// diagnostics, but Installed is false and they cannot participate in helper
+// overlap findings.
+type NPTv6RuleRef struct {
+	RuleSet          *StaticNATRuleSet
+	Rule             *StaticNATRule
+	Index            int
+	Installed        bool
+	UndefinedZone    bool
+	ScopeUnsupported bool
+	ExcludedReason   string
+}
 
-	// Config order, deliberately: Security.NAT.Static is a SLICE, and the helper
-	// walks the snapshot in the order the builder emitted it. Which of an
-	// overlapping PAIR is named as "already seen" depends on that order, so
-	// walking the slice as-is reproduces the helper's choice rather than
-	// inventing a different one.
+// NPTv6Rules returns the canonical ordered NPTv6 rule population. The builder,
+// prefix pre-pass, overlap checker, external-prefix validator, and both strict
+// validators consume these same references so their IsNPTv6 / exclusion /
+// unsupported-scope / #16008 rule-set membership cannot drift.
+//
+// Every NPTv6 rule is returned, including rules that will not be installed:
+// compileNPTv6 and the strict validators still need to diagnose malformed
+// prefixes and unsupported scope. Installed is the exact membership decision
+// shared with buildNptv6Snapshots and overlap/external-prefix checks.
+func NPTv6Rules(cfg *Config) []NPTv6RuleRef {
+	if cfg == nil {
+		return nil
+	}
+	var rules []NPTv6RuleRef
 	for _, rs := range cfg.Security.NAT.Static {
 		if rs == nil {
 			continue
 		}
-		// #16008: a tolerant undefined-zone rule-set is dropped whole by
-		// buildNptv6Snapshots; it never reaches the helper.
-		if cfg.LenientNATUndefinedZoneRuleSets[NATRuleSetRef{Kind: "static", Name: rs.Name}] {
-			continue
-		}
+		undefinedZone := cfg.LenientNATUndefinedZoneRuleSets[NATRuleSetRef{Kind: "static", Name: rs.Name}]
 		for _, rule := range rs.Rules {
-			if rule == nil {
+			if rule == nil || !rule.IsNPTv6 {
 				continue
 			}
-			if !rule.IsNPTv6 || rule.Then == "" || rule.Match == "" {
-				continue // not an NPTv6 rule
-			}
-			// Dropped by the snapshot builder — unsupported scope (#5818) or
-			// unknown match leaves (#9877) — never reaches the helper, so it
-			// can neither report nor trigger an overlap.
-			if NPTv6ScopeUnsupported(rs, rule) || StaticNATRuleExcludedReason(rule) != "" {
-				continue
-			}
-			extWords, extN, extOK := nptv6PrefixWords(rule.Match)
-			intWords, intN, intOK := nptv6PrefixWords(rule.Then)
-			if !extOK || !intOK || extN != intN {
-				// The helper refuses these on its parse / length arm first.
-				continue
-			}
-			if prev := nptv6FindOverlap(externalSeen, extWords, extN, rs.FromZone); prev != "" {
-				return fmt.Sprintf("rule-set %q rule %q external prefix %q overlaps %s",
-					rs.Name, rule.Name, rule.Match, prev)
-			}
-			if prev := nptv6FindOverlap(internalSeen, intWords, intN, rs.FromZone); prev != "" {
-				return fmt.Sprintf("rule-set %q rule %q nptv6-prefix %q overlaps %s",
-					rs.Name, rule.Name, rule.Then, prev)
-			}
-			externalSeen = append(externalSeen, nptv6Seen{extWords, extN, rs.Name, rule.Name, rs.FromZone})
-			internalSeen = append(internalSeen, nptv6Seen{intWords, intN, rs.Name, rule.Name, rs.FromZone})
+			excludedReason := StaticNATRuleExcludedReason(rule)
+			scopeUnsupported := NPTv6ScopeUnsupported(rs, rule)
+			rules = append(rules, NPTv6RuleRef{
+				RuleSet:          rs,
+				Rule:             rule,
+				Index:            len(rules),
+				Installed:        !undefinedZone && !scopeUnsupported && excludedReason == "",
+				UndefinedZone:    undefinedZone,
+				ScopeUnsupported: scopeUnsupported,
+				ExcludedReason:   excludedReason,
+			})
 		}
 	}
-	return ""
+	return rules
 }
 
-// nptv6Seen is one already-admitted prefix, carrying the zone the helper's
-// `find_overlap` gates on. (Historically validateNPTv6Strict's equivalent
-// lacked this field; #15266 added it there too.)
+// NPTv6OverlapDirection identifies the prefix namespace whose first-match
+// lookup would be ambiguous.
+type NPTv6OverlapDirection uint8
+
+const (
+	NPTv6OverlapInternal NPTv6OverlapDirection = iota + 1
+	NPTv6OverlapExternal
+)
+
+// NPTv6OverlapFinding is one overlap between two entries in the canonical
+// helper population. Identical rule-set/rule names are not a self-skip: two
+// emitted snapshots with those names still reach Rust as two entries, and the
+// helper rejects an overlapping pair (including an exact duplicate).
+type NPTv6OverlapFinding struct {
+	Rule      NPTv6RuleRef
+	Previous  NPTv6RuleRef
+	Direction NPTv6OverlapDirection
+}
+
+// NPTv6OverlapFindings is the sole Go overlap engine. It follows snapshot
+// order, uses independent internal/outbound and external/inbound namespaces,
+// and partitions collisions with the helper's from-zone predicate. The helper
+// accepts only /48 and /64 prefixes; those are word-aligned, so comparing the
+// first min(prefix-words) 16-bit words is exact. Other lengths (including
+// ::/0 and non-word-aligned /63 or /65) are rejected before overlap and are
+// deliberately not promoted into this engine.
+func NPTv6OverlapFindings(rules []NPTv6RuleRef) []NPTv6OverlapFinding {
+	var findings []NPTv6OverlapFinding
+	var internalSeen, externalSeen []nptv6Seen
+	for _, rule := range rules {
+		if !rule.Installed {
+			continue
+		}
+		extWords, extN, extOK := nptv6PrefixWords(rule.Rule.Match)
+		intWords, intN, intOK := nptv6PrefixWords(rule.Rule.Then)
+		if !extOK || !intOK || extN != intN {
+			// Rust rejects malformed, unsupported, mismatched, or host-bits-set
+			// prefixes before it reaches find_overlap.
+			continue
+		}
+
+		overlapFound := false
+		if previous, ok := nptv6FindOverlap(internalSeen, intWords, intN, rule.RuleSet.FromZone); ok {
+			findings = append(findings, NPTv6OverlapFinding{
+				Rule: rule, Previous: previous, Direction: NPTv6OverlapInternal,
+			})
+			overlapFound = true
+		}
+		if previous, ok := nptv6FindOverlap(externalSeen, extWords, extN, rule.RuleSet.FromZone); ok {
+			findings = append(findings, NPTv6OverlapFinding{
+				Rule: rule, Previous: previous, Direction: NPTv6OverlapExternal,
+			})
+			overlapFound = true
+		}
+		if overlapFound {
+			// Match validateNPTv6Strict's established diagnostic population:
+			// an already-overlapping rule is not a baseline for later findings.
+			continue
+		}
+		internalSeen = append(internalSeen, nptv6Seen{words: intWords, n: intN, rule: rule})
+		externalSeen = append(externalSeen, nptv6Seen{words: extWords, n: extN, rule: rule})
+	}
+	return findings
+}
+
+// NPTv6OverlapConflict reports the first overlap in the canonical helper
+// population, or "" when the Rust helper would accept the prefixes.
+func NPTv6OverlapConflict(cfg *Config) string {
+	findings := NPTv6OverlapFindings(NPTv6Rules(cfg))
+	if len(findings) == 0 {
+		return ""
+	}
+	finding := findings[0]
+	return formatNPTv6OverlapConflict(finding)
+}
+
+func formatNPTv6OverlapConflict(finding NPTv6OverlapFinding) string {
+	rule, previous := finding.Rule, finding.Previous
+	if finding.Direction == NPTv6OverlapInternal {
+		return fmt.Sprintf("rule-set %q rule %q nptv6-prefix %q overlaps rule-set %q rule %q",
+			rule.RuleSet.Name, rule.Rule.Name, rule.Rule.Then,
+			previous.RuleSet.Name, previous.Rule.Name)
+	}
+	return fmt.Sprintf("rule-set %q rule %q external prefix %q overlaps rule-set %q rule %q",
+		rule.RuleSet.Name, rule.Rule.Name, rule.Rule.Match,
+		previous.RuleSet.Name, previous.Rule.Name)
+}
+
 type nptv6Seen struct {
-	words    [4]uint16
-	n        int
-	ruleSet  string
-	rule     string
-	fromZone string
+	words [4]uint16
+	n     int
+	rule  NPTv6RuleRef
 }
 
-// nptv6FindOverlap mirrors userspace-dp/src/nptv6.rs `find_overlap`.
-func nptv6FindOverlap(seenList []nptv6Seen, candidate [4]uint16, candidateWords int, candidateZone string) string {
-	for _, s := range seenList {
+func nptv6FindOverlap(seenList []nptv6Seen, candidate [4]uint16, candidateWords int, candidateZone string) (NPTv6RuleRef, bool) {
+	for _, seen := range seenList {
 		common := candidateWords
-		if s.n < common {
-			common = s.n
+		if seen.n < common {
+			common = seen.n
 		}
 		match := true
 		for i := 0; i < common; i++ {
-			if candidate[i] != s.words[i] {
+			if candidate[i] != seen.words[i] {
 				match = false
 				break
 			}
 		}
-		if match && zonesConflictNPTv6(candidateZone, s.fromZone) {
-			return fmt.Sprintf("rule-set %q rule %q", s.ruleSet, s.rule)
+		if match && zonesConflictNPTv6(candidateZone, seen.rule.RuleSet.FromZone) {
+			return seen.rule, true
 		}
 	}
-	return ""
+	return NPTv6RuleRef{}, false
 }
 
-// zonesConflictNPTv6 mirrors `zones_conflict`: a packet carries exactly one
-// relevant zone, so two scopes conflict only when either is a wildcard (empty)
-// or both name the same zone. Two distinct non-empty zones are disjoint —
-// legitimate split-horizon (#5176).
+// zonesConflictNPTv6 mirrors the helper's zones_conflict: two scopes conflict
+// when either is a wildcard or both name the same zone.
 func zonesConflictNPTv6(a, b string) bool {
 	return a == "" || b == "" || a == b
 }
 
-// nptv6PrefixWords parses an NPTv6 prefix into the helper's [u16; 4] + word
-// count. NPTv6 supports /48 and /64 only, both multiples of 16, so a word
-// comparison is exactly a bit comparison.
+// nptv6PrefixWords parses one exact helper-supported prefix. Only /48 and /64
+// are accepted; host bits are rejected instead of silently masking the
+// operator's input. NPTv6OverlapFindings runs this after the shared membership
+// selection, before comparing the word-aligned prefixes.
 func nptv6PrefixWords(s string) ([4]uint16, int, bool) {
 	var out [4]uint16
-	_, n, err := net.ParseCIDR(s)
-	if err != nil {
+	_, network, err := net.ParseCIDR(s)
+	if err != nil || network == nil {
 		return out, 0, false
 	}
-	ip := n.IP.To16()
-	if ip == nil {
-		return out, 0, false
-	}
-	ones, _ := n.Mask.Size()
+	ones, _ := network.Mask.Size()
 	if ones != 48 && ones != 64 {
 		return out, 0, false
 	}
-	for i := 0; i < 4; i++ {
+	if natAddrFamily(natCIDRIPPart(s)) != "v6" {
+		return out, 0, false
+	}
+	if hostBits, ok := nptv6PrefixHasHostBits(s, network); !ok || hostBits {
+		return out, 0, false
+	}
+	ip := network.IP.To16()
+	if ip == nil {
+		return out, 0, false
+	}
+	for i := 0; i < len(out); i++ {
 		out[i] = uint16(ip[i*2])<<8 | uint16(ip[i*2+1])
 	}
 	return out, ones / 16, true

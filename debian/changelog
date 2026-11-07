@@ -4,6 +4,12 @@ xpf (0.0.0) unstable; urgency=medium
     retaining the inherited direct-feed carve-out (#16550) and DNS-only
     cold/failed admission (#15930/#16595) (#17256).
 
+  * Config/dataplane: share NPTv6 rule membership and overlap findings across
+    snapshot construction, compile preflight, strict validation, and external
+    prefix checks. This closes the #16008 dropped-set and duplicate-identity
+    verdict gaps while preserving the helper's zone partition and fail-closed
+    handling of duplicate snapshots (#17259).
+
   * Config: tolerant loads and HA peer sync now warn about packed nameless
     firewall/policy terms and retain placeholders at their authored positions
     instead of silently losing them. Firewall placeholders are unconstrained

@@ -33,12 +33,10 @@ type dupNATRule struct {
 // pkg/dataplane/userspace/nat_nptv6.go). The reason line is deliberately
 // type-agnostic: it never claims a per-rule counter (an NPTv6 rule has none —
 // compileStaticNAT skips rule.IsNPTv6 before assignNATCounterID) and does not
-// assert runtime shadowing for disjoint prefixes. The genuine, type-independent
-// defect is the shared name identity. (Overlapping NPTv6 prefixes are rejected
-// separately by the #2241 overlap gate; that gate SKIPS same-(rule-set, rule)
-// pairs (#4339, so a multi-from-scope rule is not flagged against itself),
-// which is exactly why THIS duplicate-name gate is the only one that catches a
-// same-named NPTv6 pair.)
+// assert runtime shadowing for disjoint prefixes. The #2241 overlap gate
+// compares every emitted snapshot row and catches overlapping same-name
+// entries too, but it does not reject disjoint prefix/zone pairs — the
+// independent shared rule-name identity reason remains necessary.
 //
 // This is a DIFFERENT failure mode from #5180's last-writer-wins hierarchical
 // blocks: duplicate NAT rules BOTH survive. Runs PRE-expansion on top-level

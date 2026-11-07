@@ -11,9 +11,9 @@
 // Until the wire+dataplane carry and evaluate those dimensions (a substantial
 // change deferred to a /research follow-up), the fix REJECTS an NPTv6 rule
 // carrying an unsupported scope dimension at strict commit and FAILS CLOSED on
-// the tolerant/lenient load path (downgraded to a warning; the snapshot builder
-// independently EXCLUDES the scope-carrying rule so it installs nothing rather
-// than an over-broad rewrite). Mirrors the #5859 static-nat `then inet` and
+// the tolerant/lenient load path (downgraded to a warning; shared NPTv6Rules
+// marks the rule excluded and the snapshot builder installs nothing rather than
+// an over-broad rewrite). Mirrors the #5859 static-nat `then inet` and
 // #5819 persistent-nat + no-translation fail-closed patterns.
 //
 // A `from zone`-only (or fully-unscoped/global) NPTv6 rule is UNAFFECTED — that
@@ -116,9 +116,9 @@ func TestNPTv6ScopeRejectedAtCommit_5818(t *testing.T) {
 // scope-carrying NPTv6 rule does NOT hard-reject the whole config (a config
 // persisted before this gate existed still boots — #1960), but the violation is
 // SURFACED as a warning naming the rule-set. RED-on-revert: no scope warning is
-// produced (the rule would ship silently as a broader rewrite). The snapshot
-// builder independently EXCLUDES the rule (fail closed); that is asserted in the
-// pkg/dataplane/userspace suite.
+// produced (the rule would ship silently as a broader rewrite). The shared
+// NPTv6Rules population marks the rule excluded and the builder emits no
+// snapshot row, as asserted in the pkg/dataplane/userspace suite.
 func TestNPTv6ScopeLenientFailClosed_5818(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -3293,11 +3293,13 @@ NPTv6 (RFC 6296) static rules are COUNTER-LESS — `compileStaticNAT` skips
 `rule.IsNPTv6` before `assignNATCounterID`, and `buildNptv6Snapshots`
 (`pkg/dataplane/userspace/nat_nptv6.go`) appends each rule as its own snapshot —
 so a counter-specific diagnostic would be false for them. The #2241 NPTv6
-overlap gate (`compiler_validate_strict_nat.go`) also deliberately SKIPS
-same-`(rule-set, rule)` pairs (#4339, so a single multi-`from`-scope rule is not
-flagged against itself), so it never compares two same-named NPTv6 rules — this
-duplicate-name gate is the ONLY one that catches them, and it does so with the
-same name-identity reason it uses for every other NAT type.
+overlap gate (`compiler_validate_strict_nat.go`) uses the same overlap findings
+as the dataplane pre-pass and checks every emitted row, including same-name
+entries. A multi-`from`-scope rule in distinct non-empty zones remains
+non-overlapping because the helper's zone partition makes the scopes disjoint;
+the separate duplicate-name gate still rejects duplicate rule identities even
+when their prefixes are disjoint, using the same name-identity reason it uses
+for every NAT type.
 
 Covered by `pkg/config/dup_nat_rule_names_5649_test.go` (source / destination /
 static reject, NPTv6 counter-less reject, lenient warn, and distinct-name /

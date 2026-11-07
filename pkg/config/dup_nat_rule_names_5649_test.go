@@ -130,13 +130,12 @@ func TestDuplicateNATRuleNameRejected(t *testing.T) {
 
 // TestDuplicateNATRuleNameNPTv6Counterless binds the #6452 review fold. NPTv6
 // (RFC 6296) static rules are COUNTER-LESS: compileStaticNAT skips rule.IsNPTv6
-// before assignNATCounterID, and buildNptv6Snapshots appends each as its own
-// snapshot. The #2241 NPTv6 overlap gate deliberately SKIPS same-(rule-set,
-// rule) pairs (#4339, so a multi-from-scope rule is not flagged against
-// itself), so it never compares two same-named NPTv6 rules — this gate is the
-// only one that catches them. A duplicate NPTv6 rule name is therefore still
-// rejected (a duplicate name is always invalid), but the type-agnostic
-// diagnostic must NOT claim a per-rule counter the NPTv6 rule does not have.
+// before assignNATCounterID, and buildNptv6Snapshots appends each population
+// row as its own snapshot. The shared overlap engine compares emitted rows,
+// including same-name entries, and does not mask this independent duplicate
+// name error. A duplicate NPTv6 rule name is therefore still rejected (a
+// duplicate name is always invalid), but the type-agnostic diagnostic must NOT
+// claim a per-rule counter the NPTv6 rule does not have.
 //
 // RED-on-revert of a counter-specific message (e.g. reintroducing "share the
 // one natType/ruleset/rule counter identity"): the "must NOT mention counter"

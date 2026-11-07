@@ -59,11 +59,9 @@ func TestNPTv6OverlapRejectedBeforeHostMutation_7078(t *testing.T) {
 //
 // #5176 partitions overlap by zone scope: a packet carries exactly one relevant
 // zone, so two DISTINCT non-empty `from zone` scopes are disjoint and the helper
-// installs both rules happily. Reusing validateNPTv6Strict's older overlap check
-// — whose `seenPrefix` carries no zone — would reject this config, converting a
-// working apply into a failed one. That is the over-rejection the #4960 guard's
-// three properties exist to prevent, so a fix that closes the residual by
-// breaking this is worse than the residual.
+// installs both rules happily. The strict validator and dataplane pre-pass share
+// the same zone-partitioned overlap findings; removing that partition would make
+// Go reject what the helper accepts, an over-rejection the #4960 guard prevents.
 //
 // The prefixes here are IDENTICAL to the rejected case above. Only the zone
 // differs, which is what makes this a discriminating cell rather than a

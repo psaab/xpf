@@ -5,22 +5,15 @@ import (
 	"testing"
 )
 
-// #15266 (B09-01): validateNPTv6Strict rejected same-prefix NPTv6 rules in
-// different `from zone` rule-sets that the helper admits. Its seenPrefix
-// carried no zone, so a split-horizon pair (distinct non-empty zones) was
-// flagged as overlapping, and the lenient warning falsely claimed the helper
-// rejects the whole snapshot. The helper (nptv6.rs find_overlap /
-// zones_conflict, #5176) and the zone-aware predicate
-// (nptv6FindOverlap / zonesConflictNPTv6 in nptv6_overlap.go) agree: two
-// distinct non-empty zones are disjoint because a packet carries exactly
-// one relevant zone.
+// #15266 (B09-01): same-prefix NPTv6 rules in different `from zone` rule-sets
+// are not an overlap: the helper gates on zones_conflict, and distinct
+// non-empty zones are disjoint because a packet carries one relevant zone.
+// The strict validator, apply pre-pass, and external-prefix consumer now share
+// the canonical membership list and overlap engine, so they retain the same
+// zone partition.
 //
-// The fix makes the overlap leg of validateNPTv6Strict use the same
-// zone-aware predicate, so commit and helper share one answer.
-//
-// FAIL-ON-REVERT: drop the zonesConflictNPTv6 gate in validateNPTv6Strict
-// (compare prefixes zone-blindly again) and
-// TestNPTv6SplitHorizonDifferentZonesCommits15266 and
+// FAIL-ON-REVERT: remove the zonesConflictNPTv6 partition in the shared engine
+// and TestNPTv6SplitHorizonDifferentZonesCommits15266 plus
 // TestNPTv6SplitHorizonLenientNoFalseWarning15266 go RED.
 
 func nptv6SplitHorizon15266(zoneA, ruleA, zoneB, ruleB string) []string {

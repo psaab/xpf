@@ -181,9 +181,9 @@ func runTailGates(cfg *Config, opts compileOpts) error {
 	// reject the unsupported-scope NPTv6 rule at strict commit rather than silently
 	// widen it. Strict (commit / commit-check): hard-reject naming the rule-set /
 	// rule + the unsupported constraint. Lenient (load / peer-sync): warn so a
-	// config persisted before this gate existed still boots (#1960 no-brick); the
-	// snapshot builder (buildNptv6Snapshots) independently EXCLUDES the scope-
-	// carrying rule so it installs nothing rather than a widened rewrite. A
+	// config persisted before this gate existed still boots (#1960 no-brick);
+	// NPTv6Rules marks the rule excluded and the snapshot builder emits nothing
+	// rather than a widened rewrite. A
 	// from-zone-only / fully-unscoped NPTv6 rule is unaffected (#5176-correct
 	// path); an ordinary static-NAT rule with the same dimensions is honored, not
 	// touched. Runs AFTER validateNPTv6Strict so a malformed-prefix error still

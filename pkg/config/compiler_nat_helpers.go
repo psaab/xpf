@@ -482,13 +482,10 @@ func parseNATMatchScopes(node *Node) []natMatchScope {
 // repeated `from zone untrust;` clauses, or a packed-header restatement —
 // carries no meaning in Junos (a list value repeated is one value), but
 // before this dedupe the Cartesian expansion emitted one rule-set per
-// spelling. For NPTv6 that produced two identical StaticNATRuleSets whose
-// strict-commit self-skip (#4339, keyed on rule-set+rule names only)
-// suppressed the overlap verdict while the dataplane pre-pass
-// (NPTv6OverlapConflict, no name-identity skip) and the Rust helper both
-// rejected "rule r1 overlaps rule r1" — so a clean commit wedged every
-// later apply. Distinct values (including distinct kinds sharing a value
-// string, and the match-any {zone, ""} default) are untouched.
+// spelling. The shared NPTv6 population and overlap engine now reject
+// duplicate emitted snapshots consistently with Rust; this dedupe preserves
+// the intended single expansion. Distinct values (including distinct kinds
+// sharing a value string, and the match-any {zone, ""} default) are untouched.
 func dedupeNATScopes(scopes []natMatchScope) []natMatchScope {
 	if len(scopes) < 2 {
 		return scopes

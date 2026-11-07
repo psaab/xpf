@@ -4,33 +4,25 @@ package config
 // carries a match-scope dimension the NPTv6 dataplane does not honor and is
 // therefore EXCLUDED from the userspace snapshot (#5818 fail-closed).
 //
-// It is the single source of truth for two callers that must agree exactly on
-// "does this rule reach the Rust helper":
+// NPTv6Rules calls this once per NPTv6 rule and carries the result in its
+// canonical reference. The snapshot builder and compileNPTv6 both consume that
+// reference: a dropped rule never reaches the Rust helper and keeps
+// warn-and-skip for a per-rule prefix fault; an emitted rule is subject to the
+// #4960 validate-before-mutate check because Rust rejects the whole snapshot on
+// an unparseable, mismatched, or host-bits-set prefix.
 //
-//   - `pkg/dataplane/userspace.buildNptv6Snapshots` DROPS the rule, so it never
-//     reaches `Nptv6State::try_from_snapshots`.
-//   - `pkg/dataplane.compileNPTv6` reads it to choose the DISPOSITION of a
-//     per-rule prefix fault. A rule that WILL be emitted must be a hard error:
-//     the helper rejects the WHOLE snapshot on an unparseable / mismatched /
-//     host-bits-set prefix, and that rejection lands at publish, AFTER
-//     compileZones has created VLANs and reconciled addresses (#4960). A rule
-//     that will be DROPPED must stay a warn-and-skip, because today's apply
-//     SUCCEEDS without it and erroring would fail a config that works.
+// Keeping the membership decision in one helper avoids two bad directions:
+// disagreeing on DROP rejects a working config, while disagreeing on EMIT lets
+// the half-applied #4960 shape back in. The overlap and external-prefix gates
+// use the same Installed verdict from NPTv6Rules.
 //
-// The two directions fail differently and both are bad, which is why this is
-// one function rather than two copies of a five-field predicate: disagreeing in
-// the DROP direction rejects a working config, disagreeing in the EMIT
-// direction lets the half-applied #4960 shape back in.
+// `validateNPTv6ScopeStrict` also consumes NPTv6Rules, but uses its
+// ScopeUnsupported detail to report WHICH dimension offends in
+// operator-facing text. TestNPTv6ScopeUnsupportedMatchesTheStrictGate_4960
+// pins the shared decision.
 //
-// `validateNPTv6ScopeStrict` deliberately stays separate rather than calling
-// this: it must report WHICH dimension offends, per rule-set and per rule, in
-// operator-facing text. This answers only the yes/no the two compile-path
-// callers need. TestNPTv6ScopeUnsupportedMatchesTheStrictGate_4960 pins the two
-// to the same answer.
-//
-// A nil rule-set or rule reports true (excluded). Neither caller can pass one —
-// both skip nils first — and "excluded" is the direction that cannot turn a
-// working config into a failed apply.
+// A nil rule-set or rule reports true (excluded); NPTv6Rules skips nil entries
+// before calling this predicate, so nil cannot reach a downstream consumer.
 func NPTv6ScopeUnsupported(rs *StaticNATRuleSet, rule *StaticNATRule) bool {
 	if rs == nil || rule == nil {
 		return true

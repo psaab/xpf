@@ -5,22 +5,18 @@ import (
 	"testing"
 )
 
-// #4339: a static-NAT rule-set with a SINGLE NPTv6 rule was rejected as
-// overlapping ITSELF — "rule map-v6-neutral overlaps rule-set NPTv6-INBOUND rule
-// map-v6-neutral" — whenever the rule-set carried MORE THAN ONE from-scope
-// (`from zone A; from zone B`, or several interfaces). compileNATStatic
-// scope-expands one logical rule into one StaticNATRuleSet entry PER from-scope,
-// all sharing the rule-set name AND the rule name; validateNPTv6Strict's seen
-// lists span every rule-set, so the second scope-expansion's prefixes matched
-// the first's exactly and the rule was flagged as overlapping itself. This
-// blocked ANY NPTv6 inbound mapping bound to more than one zone/interface.
+// #4339: a static-NAT rule-set with a SINGLE NPTv6 rule and multiple distinct
+// from-scopes (`from zone trust; from zone untrust`) must not be rejected as
+// overlapping itself. compileNATStatic emits one snapshot per scope; the shared
+// overlap engine partitions by from-zone, so two distinct non-empty zones are
+// disjoint exactly as they are in the helper. Repeated identical scopes are
+// deduplicated separately by collectNATScopes (#16874).
 //
-// The fix skips the same (rule-set, rule) identity in the overlap check — a rule
-// is never compared against itself — while still detecting a GENUINE overlap
-// between DISTINCT rules.
+// The tests also pin the opposite case: two distinct rules that overlap within a
+// common zone remain rejected.
 //
-// FAIL-ON-REVERT: remove the sameRule skip in validateNPTv6Strict and
-// TestNPTv6SingleRuleMultiScopeCommits_4339 goes RED (self-overlap reject).
+// FAIL-ON-REVERT: remove the zonesConflictNPTv6 partition in the shared overlap
+// engine and TestNPTv6SingleRuleMultiScopeCommits_4339 goes RED.
 
 // nptv6MultiScopeSet builds a single-rule NPTv6 rule-set with TWO from-scopes.
 func nptv6MultiScopeSet(rule, match, prefix string) []string {
@@ -70,9 +66,9 @@ func TestNPTv6GenuineOverlapStillRejected_4339(t *testing.T) {
 	}
 }
 
-// The genuine-overlap check must still fire even when BOTH rules are themselves
-// multi-scope — i.e. the self-skip must not accidentally suppress a real overlap
-// hidden among the scope-expanded duplicates.
+// The genuine-overlap check must still fire when BOTH distinct rules are
+// expanded across the same multiple scopes. Shared zones conflict even though
+// each logical rule also has another disjoint scope.
 func TestNPTv6GenuineOverlapMultiScopeStillRejected_4339(t *testing.T) {
 	lines := []string{
 		"set security zones security-zone trust",

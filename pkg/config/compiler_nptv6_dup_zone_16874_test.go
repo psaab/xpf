@@ -5,25 +5,16 @@ import (
 	"testing"
 )
 
-// #16874: a repeated `from zone` value on an NPTv6 static rule-set committed
-// clean but every dataplane apply then failed the NPTv6 overlap pre-pass.
-//
-// Mechanism: `from zone [ untrust untrust ]` reached compileNATStatic as two
-// identical scopes, producing two identical StaticNATRuleSets
-// {R, untrust}. Strict validateNPTv6Strict's #4339 self-skip is keyed on
-// (rule-set, rule) names only, so the self-pair was never compared and the
-// commit was persisted. The apply pre-pass NPTv6OverlapConflict (and the
-// Rust helper) has no name-identity skip, so it returned
-// `rule-set "R" rule "r1" ... overlaps rule-set "R" rule "r1"` and every
-// later apply wedged on the previous snapshot.
-//
-// Fix: dedupe (kind, value) scope values in collectNATScopes — a repeated
-// list value carries no meaning in Junos — so one logical scope yields
-// exactly one expansion for every NAT kind.
+// #16874: a repeated `from zone` value on an NPTv6 static rule-set used to
+// create identical snapshot rows, so the helper rejected a duplicate
+// same-zone prefix after strict validation had admitted it. The shared NPTv6
+// population and overlap findings now reject such duplicate rows consistently;
+// collectNATScopes still deduplicates repeated authored scope values so valid
+// configs produce exactly one expansion.
 //
 // FAIL-ON-REVERT: drop the dedupe in collectNATScopes and
 // TestNPTv6DuplicateFromZoneCommits16874 goes RED (two expansions and a
-// non-empty NPTv6OverlapConflict pre-pass verdict despite a clean commit).
+// non-empty strict/pre-pass overlap verdict).
 
 func nptv6DupZoneCommit16874(name, fromClause string) []string {
 	return []string{
@@ -101,8 +92,8 @@ func TestNPTv6DuplicateFromZoneMatchesSingle16874(t *testing.T) {
 }
 
 // Distinct scopes must NOT be collapsed: `from zone [ untrust trust ]`
-// still expands once per distinct zone (the #4339 legitimate multi-scope
-// shape), and the commit stays clean via the self-skip + zone partition.
+// still expands once per distinct zone (the #4339 multi-scope shape), and the
+// commit stays clean because the shared overlap engine partitions by zone.
 func TestNPTv6DistinctFromZonesNotCollapsed16874(t *testing.T) {
 	cfg, err := CompileConfig(buildTree(t, nptv6DupZoneCommit16874("R",
 		"set security nat static rule-set R from zone [ untrust trust ]")))

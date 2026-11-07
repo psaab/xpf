@@ -3263,226 +3263,166 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 		return fmt.Errorf("%s", msg)
 	}
 
-	// Track already-validated prefixes per direction to reject overlaps (#2241).
-	// Outbound matches on the internal prefix; inbound matches on the external
-	// (match) prefix. Each direction is checked independently.
-	//
-	// #15266 (B09-01): fromZone partitions the overlap check exactly as the
-	// helper does (#5176). Two DISTINCT non-empty `from zone` scopes are
-	// disjoint -- a packet carries exactly one relevant zone -- so same-prefix
-	// rules in different zones are legitimate split-horizon, not an
-	// order-dependent overlap. The zone-aware predicate is the same one
-	// NPTv6OverlapConflict uses (zonesConflictNPTv6), so commit and helper
-	// share one answer.
-	type seenPrefix struct {
-		net         *net.IPNet
-		ones        int
-		ruleSetName string
-		ruleName    string
-		fromZone    string
-	}
-	var internalSeen, externalSeen []seenPrefix
+	// The strict gate and the dataplane pre-pass consume the same overlap
+	// findings over the canonical helper population. Invalid and dropped rules
+	// still receive per-rule diagnostics below, but cannot participate in an
+	// overlap the helper never reaches.
+	rules := NPTv6Rules(cfg)
+	findings := NPTv6OverlapFindings(rules)
+	findingIndex := 0
+	for _, member := range rules {
+		for findingIndex < len(findings) && findings[findingIndex].Rule.Index < member.Index {
+			findingIndex++
+		}
+		rs, rule := member.RuleSet, member.Rule
 
-	// overlaps reports whether two IPv6 prefixes overlap — i.e. one contains
-	// the other's network address (the shorter prefix is a prefix of the
-	// longer). This covers identical /48-/48, identical /64-/64, and a /48
-	// nesting a /64 (the case that makes first-match resolution order-
-	// dependent).
-	overlaps := func(a, b *net.IPNet) bool {
-		return a.Contains(b.IP) || b.Contains(a.IP)
-	}
+		// #5523/#6479: NPTv6 (RFC 6296) translates the IPv6 address prefix
+		// and has NO transport-port concept, so a `then static-nat
+		// nptv6-prefix <p6> mapped-port <p>` is invalid in EVERY shape
+		// (collapsed keys, hierarchical nptv6-prefix child, or a distinct
+		// `mapped-port` sibling). The host-mask loop skips nptv6 rules
+		// entirely (`IsNPTv6` continue), so WITHOUT this gate a mapped-port
+		// on an nptv6 rule reached no validator at all: a malformed operand
+		// was silently accepted (the C179-038 class for the nptv6 shape) and
+		// a well-formed one was silently ignored. recordNPTv6MappedPort-
+		// Presence stamps MappedPortPresent whenever the keyword appears, so
+		// reject on PRESENCE alone — the value is irrelevant on nptv6, even a
+		// well-formed 1-65535 port is meaningless. This runs BEFORE the
+		// prefix-parse/length checks so it fires even when the prefixes are
+		// otherwise valid (the pure silent-accept case). No `continue`: on the
+		// lenient no-brick path the prefix diagnostics still accumulate, and
+		// the nptv6 prefix translation itself still applies (MappedPort==0),
+		// so this warning is scoped to the dropped mapped-port, not the rule.
+		if rule.MappedPortPresent {
+			msg := fmt.Sprintf(
+				"security nat static rule-set %q rule %q then static-nat nptv6-prefix does not support mapped-port (NPTv6 translates the address prefix per RFC 6296, not transport ports); remove the mapped-port",
+				rs.Name, rule.Name)
+			if lenient {
+				warnings = append(warnings, msg+
+					" (ignored: mapped-port dropped by dataplane; the nptv6 prefix translation still applies)")
+			} else {
+				return nil, fmt.Errorf("%s", msg)
+			}
+		}
 
-	for _, rs := range cfg.Security.NAT.Static {
-		if rs == nil {
+		// External prefix = `match destination-address`. The family is
+		// classified from the original CIDR text (natCIDRIPPart +
+		// natAddrFamily below), not the parsed net.IP, so the parsed IP
+		// values are intentionally discarded.
+		_, extNet, errExt := net.ParseCIDR(rule.Match)
+		// Internal prefix = `then static-nat nptv6-prefix`.
+		_, intNet, errInt := net.ParseCIDR(rule.Then)
+
+		if errExt != nil {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q match destination-address %q is not a valid IPv6 prefix for nptv6-prefix translation",
+				rs.Name, rule.Name, rule.Match)); err != nil {
+				return nil, err
+			}
 			continue
 		}
-		for _, rule := range rs.Rules {
-			if rule == nil || !rule.IsNPTv6 {
-				continue
+		if errInt != nil {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q then static-nat nptv6-prefix %q is not a valid IPv6 prefix",
+				rs.Name, rule.Name, rule.Then)); err != nil {
+				return nil, err
 			}
+			continue
+		}
 
-			// #5523/#6479: NPTv6 (RFC 6296) translates the IPv6 address prefix
-			// and has NO transport-port concept, so a `then static-nat
-			// nptv6-prefix <p6> mapped-port <p>` is invalid in EVERY shape
-			// (collapsed keys, hierarchical nptv6-prefix child, or a distinct
-			// `mapped-port` sibling). The host-mask loop skips nptv6 rules
-			// entirely (`IsNPTv6` continue), so WITHOUT this gate a mapped-port
-			// on an nptv6 rule reached no validator at all: a malformed operand
-			// was silently accepted (the C179-038 class for the nptv6 shape) and
-			// a well-formed one was silently ignored. recordNPTv6MappedPort-
-			// Presence stamps MappedPortPresent whenever the keyword appears, so
-			// reject on PRESENCE alone — the value is irrelevant on nptv6, even a
-			// well-formed 1-65535 port is meaningless. This runs BEFORE the
-			// prefix-parse/length checks so it fires even when the prefixes are
-			// otherwise valid (the pure silent-accept case). No `continue`: on the
-			// lenient no-brick path the prefix diagnostics still accumulate, and
-			// the nptv6 prefix translation itself still applies (MappedPort==0),
-			// so this warning is scoped to the dropped mapped-port, not the rule.
-			if rule.MappedPortPresent {
-				msg := fmt.Sprintf(
-					"security nat static rule-set %q rule %q then static-nat nptv6-prefix does not support mapped-port (NPTv6 translates the address prefix per RFC 6296, not transport ports); remove the mapped-port",
-					rs.Name, rule.Name)
-				if lenient {
-					warnings = append(warnings, msg+
-						" (ignored: mapped-port dropped by dataplane; the nptv6 prefix translation still applies)")
-				} else {
-					return nil, fmt.Errorf("%s", msg)
-				}
-			}
+		extOnes, _ := extNet.Mask.Size()
+		intOnes, _ := intNet.Mask.Size()
 
-			// External prefix = `match destination-address`. The family is
-			// classified from the original CIDR text (natCIDRIPPart +
-			// natAddrFamily below), not the parsed net.IP, so the parsed IP
-			// values are intentionally discarded.
-			_, extNet, errExt := net.ParseCIDR(rule.Match)
-			// Internal prefix = `then static-nat nptv6-prefix`.
-			_, intNet, errInt := net.ParseCIDR(rule.Then)
+		if extOnes != intOnes {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q nptv6 prefix lengths must match (match %q is /%d, nptv6-prefix %q is /%d)",
+				rs.Name, rule.Name, rule.Match, extOnes, rule.Then, intOnes)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if extOnes != 48 && extOnes != 64 {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q nptv6 prefix length /%d is unsupported (only /48 and /64 are allowed)",
+				rs.Name, rule.Name, extOnes)); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		// Family classification MUST be textual (natAddrFamily), not
+		// net.IP.To4(): Go folds an IPv4-mapped IPv6 literal
+		// (::ffff:1.2.3.4) so its parsed .To4() is non-nil, but Rust's
+		// Ipv6Addr::from_str (parse_prefix in userspace-dp/src/nptv6.rs)
+		// accepts the same text as a valid IPv6 address and APPLIES the
+		// rule. A To4()-based check here would warn-skip on the lenient
+		// load path while the dataplane installs the rule — a Go<->Rust
+		// divergence (#2247 item 2). Classifying on the original text
+		// (colon == v6) matches the helper exactly, so an IPv4-mapped form
+		// is treated as IPv6 here too. We split the IP part off the CIDR
+		// (the same idiom as isHostMaskAddress); ParseCIDR already proved
+		// these parse, so a missing slash cannot happen, but the helper is
+		// robust either way.
+		if natAddrFamily(natCIDRIPPart(rule.Match)) != "v6" ||
+			natAddrFamily(natCIDRIPPart(rule.Then)) != "v6" {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q nptv6 prefixes must be IPv6 (match %q, nptv6-prefix %q)",
+				rs.Name, rule.Name, rule.Match, rule.Then)); err != nil {
+				return nil, err
+			}
+			continue
+		}
 
-			if errExt != nil {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q match destination-address %q is not a valid IPv6 prefix for nptv6-prefix translation",
-					rs.Name, rule.Name, rule.Match)); err != nil {
-					return nil, err
-				}
-				continue
+		// #2380: host-bits-zero strictness. net.ParseCIDR masks the
+		// address to the prefix length silently, so a prefix with bits
+		// set beyond the prefix length (e.g. 2001:db8:1:2::/48) parses
+		// as a DIFFERENT prefix (2001:db8:1::/48) than the operator
+		// wrote, and the Rust parse_prefix (nptv6.rs) discards the extra
+		// words identically. Both planes agree on the masked result, so
+		// there is no traffic-correctness bug — but the operator gets a
+		// rule that does not match what they typed, with no feedback.
+		// Junos rejects host bits set on a prefix; mirror that here. This
+		// is the same class as isHostMaskAddress for static-NAT host
+		// masks. The masked network address is extNet.IP / intNet.IP; the
+		// raw address is the IP part of the original CIDR text. A mismatch
+		// means host/subnet bits were set.
+		if host, ok := nptv6PrefixHasHostBits(rule.Match, extNet); ok && host {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q match destination-address %q has host bits set beyond the /%d prefix (Junos rejects this; write the masked prefix explicitly)",
+				rs.Name, rule.Name, rule.Match, extOnes)); err != nil {
+				return nil, err
 			}
-			if errInt != nil {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q then static-nat nptv6-prefix %q is not a valid IPv6 prefix",
-					rs.Name, rule.Name, rule.Then)); err != nil {
-					return nil, err
-				}
-				continue
+			continue
+		}
+		if host, ok := nptv6PrefixHasHostBits(rule.Then, intNet); ok && host {
+			if err := emit(fmt.Sprintf(
+				"security nat static rule-set %q rule %q then static-nat nptv6-prefix %q has host bits set beyond the /%d prefix (Junos rejects this; write the masked prefix explicitly)",
+				rs.Name, rule.Name, rule.Then, intOnes)); err != nil {
+				return nil, err
 			}
+			continue
+		}
 
-			extOnes, _ := extNet.Mask.Size()
-			intOnes, _ := intNet.Mask.Size()
-
-			if extOnes != intOnes {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q nptv6 prefix lengths must match (match %q is /%d, nptv6-prefix %q is /%d)",
-					rs.Name, rule.Name, rule.Match, extOnes, rule.Then, intOnes)); err != nil {
-					return nil, err
-				}
-				continue
+		// Format the findings computed by the shared overlap engine. Unlike
+		// the old name-keyed self-skip, duplicate same-identity entries are
+		// separate emitted snapshots and the Rust helper rejects their
+		// overlap too (#16874 fail-closed parity).
+		for findingIndex < len(findings) && findings[findingIndex].Rule.Index == member.Index {
+			finding := findings[findingIndex]
+			previous := finding.Previous
+			var msg string
+			if finding.Direction == NPTv6OverlapInternal {
+				msg = fmt.Sprintf(
+					"security nat static rule-set %q rule %q nptv6-prefix %q overlaps rule-set %q rule %q (outbound/internal prefixes overlap; first-match resolution would be order-dependent)",
+					rs.Name, rule.Name, rule.Then, previous.RuleSet.Name, previous.Rule.Name)
+			} else {
+				msg = fmt.Sprintf(
+					"security nat static rule-set %q rule %q match destination-address %q overlaps rule-set %q rule %q (inbound/external prefixes overlap; first-match resolution would be order-dependent)",
+					rs.Name, rule.Name, rule.Match, previous.RuleSet.Name, previous.Rule.Name)
 			}
-			if extOnes != 48 && extOnes != 64 {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q nptv6 prefix length /%d is unsupported (only /48 and /64 are allowed)",
-					rs.Name, rule.Name, extOnes)); err != nil {
-					return nil, err
-				}
-				continue
+			if err := emit(msg); err != nil {
+				return nil, err
 			}
-			// Family classification MUST be textual (natAddrFamily), not
-			// net.IP.To4(): Go folds an IPv4-mapped IPv6 literal
-			// (::ffff:1.2.3.4) so its parsed .To4() is non-nil, but Rust's
-			// Ipv6Addr::from_str (parse_prefix in userspace-dp/src/nptv6.rs)
-			// accepts the same text as a valid IPv6 address and APPLIES the
-			// rule. A To4()-based check here would warn-skip on the lenient
-			// load path while the dataplane installs the rule — a Go<->Rust
-			// divergence (#2247 item 2). Classifying on the original text
-			// (colon == v6) matches the helper exactly, so an IPv4-mapped form
-			// is treated as IPv6 here too. We split the IP part off the CIDR
-			// (the same idiom as isHostMaskAddress); ParseCIDR already proved
-			// these parse, so a missing slash cannot happen, but the helper is
-			// robust either way.
-			if natAddrFamily(natCIDRIPPart(rule.Match)) != "v6" ||
-				natAddrFamily(natCIDRIPPart(rule.Then)) != "v6" {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q nptv6 prefixes must be IPv6 (match %q, nptv6-prefix %q)",
-					rs.Name, rule.Name, rule.Match, rule.Then)); err != nil {
-					return nil, err
-				}
-				continue
-			}
-
-			// #2380: host-bits-zero strictness. net.ParseCIDR masks the
-			// address to the prefix length silently, so a prefix with bits
-			// set beyond the prefix length (e.g. 2001:db8:1:2::/48) parses
-			// as a DIFFERENT prefix (2001:db8:1::/48) than the operator
-			// wrote, and the Rust parse_prefix (nptv6.rs) discards the extra
-			// words identically. Both planes agree on the masked result, so
-			// there is no traffic-correctness bug — but the operator gets a
-			// rule that does not match what they typed, with no feedback.
-			// Junos rejects host bits set on a prefix; mirror that here. This
-			// is the same class as isHostMaskAddress for static-NAT host
-			// masks. The masked network address is extNet.IP / intNet.IP; the
-			// raw address is the IP part of the original CIDR text. A mismatch
-			// means host/subnet bits were set.
-			if host, ok := nptv6PrefixHasHostBits(rule.Match, extNet); ok && host {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q match destination-address %q has host bits set beyond the /%d prefix (Junos rejects this; write the masked prefix explicitly)",
-					rs.Name, rule.Name, rule.Match, extOnes)); err != nil {
-					return nil, err
-				}
-				continue
-			}
-			if host, ok := nptv6PrefixHasHostBits(rule.Then, intNet); ok && host {
-				if err := emit(fmt.Sprintf(
-					"security nat static rule-set %q rule %q then static-nat nptv6-prefix %q has host bits set beyond the /%d prefix (Junos rejects this; write the masked prefix explicitly)",
-					rs.Name, rule.Name, rule.Then, intOnes)); err != nil {
-					return nil, err
-				}
-				continue
-			}
-
-			// #2241: overlap rejection. Check the internal (outbound) and
-			// external (inbound) prefixes independently against prior rules.
-			// #15266: gated on zonesConflictNPTv6 -- distinct non-empty zones
-			// never see the same packet, so they cannot overlap (#5176).
-			//
-			// #4339: a rule is NEVER compared against itself. A single NPTv6
-			// rule in a rule-set with MULTIPLE from-scopes (`from zone A; from
-			// zone B`, or several interfaces) is scope-expanded by
-			// compileNATStatic into one StaticNATRuleSet entry PER scope, all
-			// sharing the rule-set name AND the rule name (they are one logical
-			// rule; only the from-scope differs). The seen lists span every
-			// rule-set, so the second scope-expansion's prefixes matched the
-			// first's exactly and the rule was reported as overlapping ITSELF —
-			// blocking ANY NPTv6 mapping whose rule-set had more than one
-			// from-scope. Skip the same (rule-set, rule) identity so only
-			// DISTINCT rules are compared for a genuine, order-dependent overlap.
-			sameRule := func(prev seenPrefix) bool {
-				return prev.ruleSetName == rs.Name && prev.ruleName == rule.Name
-			}
-			overlapFound := false
-			for _, prev := range internalSeen {
-				if sameRule(prev) {
-					continue
-				}
-				if overlaps(prev.net, intNet) && zonesConflictNPTv6(rs.FromZone, prev.fromZone) {
-					overlapFound = true
-					if err := emit(fmt.Sprintf(
-						"security nat static rule-set %q rule %q nptv6-prefix %q overlaps rule-set %q rule %q (outbound/internal prefixes overlap; first-match resolution would be order-dependent)",
-						rs.Name, rule.Name, rule.Then, prev.ruleSetName, prev.ruleName)); err != nil {
-						return nil, err
-					}
-					break
-				}
-			}
-			for _, prev := range externalSeen {
-				if sameRule(prev) {
-					continue
-				}
-				if overlaps(prev.net, extNet) && zonesConflictNPTv6(rs.FromZone, prev.fromZone) {
-					overlapFound = true
-					if err := emit(fmt.Sprintf(
-						"security nat static rule-set %q rule %q match destination-address %q overlaps rule-set %q rule %q (inbound/external prefixes overlap; first-match resolution would be order-dependent)",
-						rs.Name, rule.Name, rule.Match, prev.ruleSetName, prev.ruleName)); err != nil {
-						return nil, err
-					}
-					break
-				}
-			}
-			if overlapFound {
-				// Do not register an overlapping rule as a baseline for
-				// subsequent comparisons; the snapshot is already rejected.
-				continue
-			}
-
-			internalSeen = append(internalSeen, seenPrefix{net: intNet, ones: intOnes, ruleSetName: rs.Name, ruleName: rule.Name, fromZone: rs.FromZone})
-			externalSeen = append(externalSeen, seenPrefix{net: extNet, ones: extOnes, ruleSetName: rs.Name, ruleName: rule.Name, fromZone: rs.FromZone})
+			findingIndex++
 		}
 	}
 
@@ -3533,9 +3473,9 @@ func validateNPTv6Strict(cfg *Config, lenient bool) ([]string, error) {
 // Strict (commit / commit-check): hard-reject naming the rule-set/rule and the
 // unsupported constraint. Lenient (load / peer-sync, #1960 / #1979 doctrine):
 // return the message as a warning so a config committed before this gate existed
-// (or peer-synced) still boots — the snapshot builder (buildNptv6Snapshots)
-// independently EXCLUDES the scope-carrying rule so nothing installs rather than
-// a widened rewrite. Mirrors the #5859 static-nat `then inet` and #5819
+// (or peer-synced) still boots — NPTv6Rules marks the scope-carrying rule
+// excluded and the snapshot builder emits nothing rather than a widened
+// rewrite. Mirrors the #5859 static-nat `then inet` and #5819
 // persistent-nat + no-translation fail-closed patterns. Uses the same
 // opts.lenientNPTv6 flag as validateNPTv6Strict.
 func validateNPTv6ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
@@ -3555,62 +3495,50 @@ func validateNPTv6ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 		return fmt.Errorf("%s", msg)
 	}
 
-	for _, rs := range cfg.Security.NAT.Static {
-		if rs == nil {
-			continue
-		}
-		// Scope only applies to NPTv6 rule-sets. A rule-set with NO nptv6-prefix
-		// rule is ordinary static NAT, whose interface/RI scope and source-address
-		// match ARE honored — leave it untouched.
-		hasNptv6 := false
-		for _, rule := range rs.Rules {
-			if rule != nil && rule.IsNPTv6 {
-				hasNptv6 = true
-				break
-			}
-		}
-		if !hasNptv6 {
-			continue
-		}
-
-		// Rule-set FromInterface scope. Reported before FromRoutingInstance and
-		// the per-rule source match for a deterministic first offender.
-		if rs.FromInterface != "" {
-			if err := emit(fmt.Sprintf(
-				"security nat static rule-set %q is an NPTv6 (nptv6-prefix) rule-set "+
-					"scoped `from interface %q`, but the NPTv6 dataplane honors only "+
-					"`from zone`; the interface constraint would be dropped and the "+
-					"prefix rewrite installed over a broader scope, translating traffic "+
-					"the interface scope excludes — remove the interface scope until "+
-					"scoped NPTv6 support lands (#5818)",
-				rs.Name, rs.FromInterface)); err != nil {
-				return nil, err
-			}
-		}
-		if rs.FromRoutingInstance != "" || rs.FromRoutingInstanceDefault {
-			riName := rs.FromRoutingInstance
-			if riName == "" {
-				riName = FBFDefaultRoutingInstance
-			}
-			if err := emit(fmt.Sprintf(
-				"security nat static rule-set %q is an NPTv6 (nptv6-prefix) rule-set "+
-					"scoped `from routing-instance %q`, but the NPTv6 dataplane honors "+
-					"only `from zone`; the routing-instance constraint would be dropped "+
-					"and the prefix rewrite installed over a broader scope, translating "+
-					"traffic the routing-instance scope excludes — remove the routing-"+
-					"instance scope until scoped NPTv6 support lands (#5818)",
-				rs.Name, riName)); err != nil {
-				return nil, err
+	rules := NPTv6Rules(cfg)
+	var lastRuleSet *StaticNATRuleSet
+	for _, member := range rules {
+		rs, rule := member.RuleSet, member.Rule
+		if rs != lastRuleSet {
+			lastRuleSet = rs
+			if member.ScopeUnsupported {
+				// Rule-set FromInterface scope. Reported before FromRoutingInstance and
+				// the per-rule source match for a deterministic first offender.
+				if rs.FromInterface != "" {
+					if err := emit(fmt.Sprintf(
+						"security nat static rule-set %q is an NPTv6 (nptv6-prefix) rule-set "+
+							"scoped `from interface %q`, but the NPTv6 dataplane honors only "+
+							"`from zone`; the interface constraint would be dropped and the "+
+							"prefix rewrite installed over a broader scope, translating traffic "+
+							"the interface scope excludes — remove the interface scope until "+
+							"scoped NPTv6 support lands (#5818)",
+						rs.Name, rs.FromInterface)); err != nil {
+						return nil, err
+					}
+				}
+				if rs.FromRoutingInstance != "" || rs.FromRoutingInstanceDefault {
+					riName := rs.FromRoutingInstance
+					if riName == "" {
+						riName = FBFDefaultRoutingInstance
+					}
+					if err := emit(fmt.Sprintf(
+						"security nat static rule-set %q is an NPTv6 (nptv6-prefix) rule-set "+
+							"scoped `from routing-instance %q`, but the NPTv6 dataplane honors "+
+							"only `from zone`; the routing-instance constraint would be dropped "+
+							"and the prefix rewrite installed over a broader scope, translating "+
+							"traffic the routing-instance scope excludes — remove the routing-"+
+							"instance scope until scoped NPTv6 support lands (#5818)",
+						rs.Name, riName)); err != nil {
+						return nil, err
+					}
+				}
 			}
 		}
 
 		// Per-rule `match source-address`. Prefer the full bracket-list
 		// (SourceAddresses); fall back to the singular SourceAddress for an
 		// older typed config, mirroring buildNptv6Snapshots' fail-closed check.
-		for _, rule := range rs.Rules {
-			if rule == nil || !rule.IsNPTv6 {
-				continue
-			}
+		if member.ScopeUnsupported {
 			srcAddrs := append([]string(nil), rule.SourceAddresses...)
 			if len(srcAddrs) == 0 && rule.SourceAddress != "" {
 				srcAddrs = append(srcAddrs, rule.SourceAddress)
@@ -6073,54 +6001,33 @@ type nptv6ExternalPrefix struct {
 	fromZone string
 }
 
-// nptv6ExternalPrefixes enumerates the NPTv6 external prefixes that will
-// actually install — the same population buildNptv6Snapshots emits:
-// IsNPTv6 rules that are not scope-dropped (#5818/#9877), not in a
-// tolerated undefined-zone rule-set (#16008), and whose prefixes parse at
-// matching /48 or /64 (others are rejected by validateNPTv6Strict and
-// never install). Ordering follows config order for deterministic
-// diagnostics.
+// nptv6ExternalPrefixes enumerates helper-valid external prefixes from the
+// canonical NPTv6 membership list. Excluded or unsupported rules, tolerant
+// undefined-zone rule-sets, malformed prefixes, and unsupported prefix lengths
+// are omitted. Ordering follows config order for deterministic diagnostics.
 func nptv6ExternalPrefixes(cfg *Config) []nptv6ExternalPrefix {
-	if cfg == nil || len(cfg.Security.NAT.Static) == 0 {
+	if cfg == nil {
 		return nil
 	}
 	var out []nptv6ExternalPrefix
-	for _, rs := range cfg.Security.NAT.Static {
-		if rs == nil {
+	for _, member := range NPTv6Rules(cfg) {
+		if !member.Installed {
 			continue
 		}
-		if cfg.LenientNATUndefinedZoneRuleSets[NATRuleSetRef{Kind: "static", Name: rs.Name}] {
+		rs, rule := member.RuleSet, member.Rule
+		_, extN, extOK := nptv6PrefixWords(rule.Match)
+		_, intN, intOK := nptv6PrefixWords(rule.Then)
+		if !extOK || !intOK {
 			continue
 		}
-		for _, rule := range rs.Rules {
-			if rule == nil || !rule.IsNPTv6 {
-				continue
-			}
-			if NPTv6ScopeUnsupported(rs, rule) || StaticNATRuleExcludedReason(rule) != "" {
-				continue
-			}
-			if _, _, ok := nptv6PrefixWords(rule.Match); !ok {
-				continue
-			}
-			if _, _, ok := nptv6PrefixWords(rule.Then); !ok {
-				continue
-			}
-			// Lengths must match for the helper to install the rule.
-			_, extNet, errExt := net.ParseCIDR(rule.Match)
-			_, intNet, errInt := net.ParseCIDR(rule.Then)
-			if errExt != nil || errInt != nil {
-				continue
-			}
-			extOnes, _ := extNet.Mask.Size()
-			intOnes, _ := intNet.Mask.Size()
-			if extOnes != intOnes {
-				continue
-			}
-			out = append(out, nptv6ExternalPrefix{
-				ruleSet: rs.Name, rule: rule.Name,
-				prefix: rule.Match, fromZone: rs.FromZone,
-			})
+		if extN != intN {
+			continue
 		}
+		// Lengths must match for the helper to install the rule.
+		out = append(out, nptv6ExternalPrefix{
+			ruleSet: rs.Name, rule: rule.Name,
+			prefix: rule.Match, fromZone: rs.FromZone,
+		})
 	}
 	return out
 }
