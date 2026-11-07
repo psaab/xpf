@@ -158,9 +158,9 @@ func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 
 // Escaped arm of the same cell shape: a sentinel-containing credential
 // with a newline renders under %q with escapes; raw-only spanning (the
-// first sentinel fix) cannot match it. The pivot substitution covers
+// first sentinel fix) cannot match it. The unified span pass covers
 // raw, Quote, and interior forms, so the %q text is scrubbed too.
-// #18997 pivot-cross-overlap arm (Sol fold at f33328217a): an ordinary
+// #18997 sentinel-cross-overlap arm (Sol fold at f33328217a): an ordinary
 // credential partially overlapping a sentinel-containing one must
 // merge with its span — a text pre-pass that replaces the sentinel
 // value BEFORE spanning destroys the ordinary needle's match in the
@@ -175,10 +175,10 @@ func TestSchemaExitScrubPivotCrossOverlap18997(t *testing.T) {
 	foreign := fmt.Errorf("archive fetch failed for %q", "user:pw@host<redacted>")
 	got := scrubSchemaErrorSecrets(tree, foreign).Error()
 	if strings.Contains(got, "user:pw") || strings.Contains(got, "@host") {
-		t.Errorf("ordinary needle destroyed by sentinel pivot pre-pass (#18997): %v", got)
+		t.Errorf("ordinary needle cross-destroyed by sentinel span (#18997): %v", got)
 	}
 	if strings.Contains(got, "xpf-redacted-pivot") {
-		t.Errorf("pivot marker leaked into diagnostic: %v", got)
+		t.Errorf("removed pivot marker present in diagnostic: %v", got)
 	}
 }
 
@@ -196,14 +196,14 @@ func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
 		t.Errorf("escaped sentinel-containing credential echoed (#18997): %v", got)
 	}
 	if strings.Contains(got, "<<redacted>>") {
-		t.Errorf("sentinel corrupted by pivot substitution: %v", got)
+		t.Errorf("sentinel corrupted by scrub substitution: %v", got)
 	}
 }
 
 // Sentinel-emission pin: a sentinel-containing span merges with
 // ordinary spans and yields exactly one sentinel in raw and
-// %q-rendered diagnostics (pivot apparatus removed — direct emission
-// proved byte-identical because matching reads the original text).
+// %q-rendered diagnostics (direct emission; matching reads the
+// original text, so inserted sentinels are never re-matched).
 func TestSchemaExitScrubPivotRewrittenOnce18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "@host<redacted>" password "s3cr3t"`,
@@ -214,11 +214,27 @@ func TestSchemaExitScrubPivotRewrittenOnce18997(t *testing.T) {
 	} {
 		got := scrubSchemaErrorSecrets(tree, foreign).Error()
 		if strings.Contains(got, "xpf-redacted-pivot") || strings.Contains(got, "@host") {
-			t.Errorf("pivot not rewritten to sentinel (#18997): %v", got)
+			t.Errorf("sentinel span not emitted as one sentinel (#18997): %v", got)
 		}
 		if n := strings.Count(got, SecretRedacted); n != 1 {
-			t.Errorf("merged pivot span must yield exactly one sentinel, got %d: %v", n, got)
+			t.Errorf("merged sentinel span must yield exactly one sentinel, got %d: %v", n, got)
 		}
+	}
+}
+
+// #18997 nested-quote arm (Kimi close at a734ceba1c): a value rendered
+// inside one %q string and embedded in a SECOND %q rendering appears
+// with its interior doubly escaped; no raw/Quote/interior needle
+// occurs. The doubly-escaped interior form is spanned.
+func TestSchemaExitScrubNestedQuotedCredential18997(t *testing.T) {
+	secret := "only<redacted>credential\nTAIL"
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "scp://u:p@h/d" password "` + secret + `"`,
+	})
+	foreign := fmt.Errorf("diag %q", fmt.Sprintf("prefix %q suffix", secret))
+	got := scrubSchemaErrorSecrets(tree, foreign).Error()
+	if strings.Contains(got, "TAIL") || strings.Contains(got, "credential") {
+		t.Errorf("nested-quoted credential echoed (#18997): %v", got)
 	}
 }
 
@@ -226,9 +242,9 @@ func TestSchemaExitScrubPivotRewrittenOnce18997(t *testing.T) {
 // a password that merely CONTAINS the sentinel spelling
 // ("only<redacted>credential") is a real credential — dropping its
 // needle (the first span implementation) fails OPEN. Such values
-// join the span pass with pivot-flagged spans (their inserted
-// sentinel cannot be SecretRedacted itself, or a later "redacted"
-// needle would match inside it); all forms span-merge.
+// join the same span pass; because matching reads the original
+// text, an inserted sentinel is never re-matched by a "redacted"
+// needle within the call; all forms span-merge.
 func TestSchemaExitScrubSentinelContainingCredential18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "scp://u:p@h/d" password "only<redacted>credential"`,

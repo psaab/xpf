@@ -457,6 +457,16 @@ func scrubSecretValuesText(values []string, text string) string {
 		if in := quotedInterior(v); in != v && len(in) >= 2 {
 			addSpans(in)
 		}
+		// Nested-quote form (Kimi fold): a value already rendered
+		// inside one %q string and then embedded in a SECOND %q
+		// rendering appears with every backslash and quote of its
+		// interior escaped again, and the inner quotes escaped too —
+		// neither Quote(interior) nor the plain interior occurs; the
+		// doubly-escaped interior does.
+		if in := quotedInterior(v); len(in) >= 2 {
+			doubly := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(in)
+			addSpans(doubly)
+		}
 	}
 	if len(spans) == 0 {
 		return text
