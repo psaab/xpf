@@ -85,7 +85,7 @@ func TestNPTv6SplitHorizonStillCompiles_7078(t *testing.T) {
 			"zones are legitimate split-horizon (#5176) and the helper installs both. "+
 			"Rejecting them turns a working apply into a failed one — the exact "+
 			"over-rejection the #4960 pre-pass must not commit, and what reusing "+
-			"validateNPTv6Strict's zone-blind overlap check would have done: %v", err)
+			"validateNPTv6Strict's shared zone-partitioned overlap findings would have done: %v", err)
 	}
 	if strings.HasPrefix(err.Error(), "validate nptv6: ") {
 		t.Fatalf("the pre-pass's nptv6 row rejected a config the helper accepts: %v", err)
@@ -164,7 +164,7 @@ func TestNPTv6OverlapPredicateMirrorsTheHelper_7078(t *testing.T) {
 // TestNPTv6OverlapSkipsUnknownLeavesExcludedRules_9877: a marked NPTv6 rule is
 // dropped by the snapshot builder, so it can neither report nor trigger an
 // overlap — in either seen-set position. RED-on-revert: drop the
-// StaticNATRuleExcludedReason consult in NPTv6OverlapConflict and both rows
+// StaticNATRuleExcludedReason consult in config.NPTv6Rules and both rows
 // report the overlap.
 func TestNPTv6OverlapSkipsUnknownLeavesExcludedRules_9877(t *testing.T) {
 	marked := func(name, zone, match, then string) *config.StaticNATRuleSet {
@@ -230,7 +230,7 @@ func TestNPTv6OverlapWithExcludedRuleStillCompiles_9877(t *testing.T) {
 // a tolerant undefined from-zone (#16008) is dropped whole by
 // buildNptv6Snapshots, so it can neither report nor trigger an overlap —
 // in either seen-set position. RED-on-revert: drop the
-// LenientNATUndefinedZoneRuleSets consult in NPTv6OverlapConflict and
+// LenientNATUndefinedZoneRuleSets consult in config.NPTv6Rules and
 // both rows report the overlap.
 func TestNPTv6OverlapSkipsDroppedUndefinedZone16008(t *testing.T) {
 	set := func(name, zone, match, then string) *config.StaticNATRuleSet {

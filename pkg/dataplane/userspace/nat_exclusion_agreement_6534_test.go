@@ -229,6 +229,17 @@ func natExclusionCases() []natExclusionCase {
 			wantExcluded: false,
 		},
 		{
+			name: "nptv6_undefined_zone_is_dropped",
+			site: "buildNptv6Snapshots",
+			cmds: []string{
+				"set security nat static rule-set nrs from zone ghostzone",
+				"set security nat static rule-set nrs rule n1 match destination-address 2602:fd41:70::/48",
+				"set security nat static rule-set nrs rule n1 then static-nat nptv6-prefix fd35:1940:27::/48",
+			},
+			rule:         "n1",
+			wantExcluded: true,
+		},
+		{
 			name: "nptv6_source_address_scope_is_dropped",
 			site: "buildNptv6Snapshots",
 			cmds: []string{

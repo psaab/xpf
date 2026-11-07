@@ -11,6 +11,7 @@ import (
 // RenderStatic renders `show security nat static` — static NAT and
 // NPTv6 rule-sets from configuration.
 func RenderStatic(w io.Writer, cfg *config.Config) {
+	installed := nptv6InstalledSet(cfg)
 	if cfg == nil || len(cfg.Security.NAT.Static) == 0 {
 		io.WriteString(w, "No static NAT rules configured.\n")
 		return
@@ -39,7 +40,7 @@ func RenderStatic(w io.Writer, cfg *config.Config) {
 			} else {
 				fmt.Fprintf(w, "    Then static-nat prefix:    %s\n", rule.Then)
 			}
-			noteNotInstalledStatic(w, staticRuleNotInstalledReason(rs, rule))
+			noteNotInstalledStatic(w, staticRuleNotInstalledReason(rs, rule, installed))
 		}
 		io.WriteString(w, "\n")
 	}
@@ -55,11 +56,50 @@ func RenderStatic(w io.Writer, cfg *config.Config) {
 // takes only the IsNPTv6 rules and drops those config.NPTv6ScopeUnsupported
 // rejects (#5818). Asking one predicate about both kinds would annotate the
 // wrong half.
-func staticRuleNotInstalledReason(rs *config.StaticNATRuleSet, rule *config.StaticNATRule) string {
+
+// nptv6InstalledSet builds the canonical installed lookup from
+// config.NPTv6Rules for the renderers (Kimi #17259). Keyed by
+// (rule-set, rule): compileNATStatic shares one *StaticNATRule across
+// per-scope rule-set expansions, whose Installed verdicts can differ
+// (Kimi delta MAJOR — pointer-only keying aliases them).
+func nptv6InstalledSet(cfg *config.Config) map[nptv6RuleKey]bool {
+	installed := make(map[nptv6RuleKey]bool)
+	for _, ref := range config.NPTv6Rules(cfg) {
+		installed[nptv6RuleKey{rs: ref.RuleSet, rule: ref.Rule}] = ref.Installed
+	}
+	return installed
+}
+
+type nptv6RuleKey struct {
+	rs   *config.StaticNATRuleSet
+	rule *config.StaticNATRule
+}
+
+func staticRuleNotInstalledReason(rs *config.StaticNATRuleSet, rule *config.StaticNATRule, nptv6Installed map[nptv6RuleKey]bool) string {
 	if rule == nil {
 		return ""
 	}
 	if rule.IsNPTv6 {
+		// Kimi #17259: when the caller supplies the canonical
+		// NPTv6Rules installed set, it decides (incl. #16008
+		// undefined-zone drops the renderer cannot see locally).
+		if nptv6Installed != nil {
+			if nptv6Installed[nptv6RuleKey{rs: rs, rule: rule}] {
+				return ""
+			}
+			// Not installed: name the canonical reason in builder
+			// precedence (#9877 exclusion, scope, undefined zone).
+			if reason := config.StaticNATRuleExcludedReason(rule); reason != "" {
+				return reason
+			}
+			if config.NPTv6ScopeUnsupported(rs, rule) {
+				return "NPTv6 rule carries a match scope the dataplane cannot honor " +
+					"(from-interface / from-routing-instance / source-address / destination-port); " +
+					"installing it would widen the rewrite"
+			}
+			return "NPTv6 rule-set references an undefined from-zone; " +
+				"the dataplane dropped the rule-set (#16008)"
+		}
 		// #9877 first: the only StaticNATRuleExcludedReason clause that can
 		// fire for NPTv6 rules, in the builder's precedence.
 		if reason := config.StaticNATRuleExcludedReason(rule); reason != "" {
@@ -83,6 +123,7 @@ func staticRuleNotInstalledReason(rs *config.StaticNATRuleSet, rule *config.Stat
 // translation-target routing-instance — fields already carried on
 // config.StaticNATRule that the plain `static` view omits.
 func RenderStaticRule(w io.Writer, cfg *config.Config, detail bool) {
+	installed := nptv6InstalledSet(cfg)
 	if cfg == nil || len(cfg.Security.NAT.Static) == 0 {
 		io.WriteString(w, "No static NAT rules configured.\n")
 		return
@@ -112,7 +153,7 @@ func RenderStaticRule(w io.Writer, cfg *config.Config, detail bool) {
 			} else {
 				fmt.Fprintf(w, "    Then static-nat prefix:    %s\n", rule.Then)
 			}
-			noteNotInstalledStatic(w, staticRuleNotInstalledReason(rs, rule))
+			noteNotInstalledStatic(w, staticRuleNotInstalledReason(rs, rule, installed))
 			if !detail {
 				continue
 			}
@@ -139,6 +180,7 @@ func RenderStaticRule(w io.Writer, cfg *config.Config, detail bool) {
 // RenderNPTv6 renders `show security nat nptv6` — only the NPTv6 rules
 // within the static rule-sets.
 func RenderNPTv6(w io.Writer, cfg *config.Config) {
+	installed := nptv6InstalledSet(cfg)
 	if cfg == nil || len(cfg.Security.NAT.Static) == 0 {
 		io.WriteString(w, "No NPTv6 rules configured.\n")
 		return
@@ -159,7 +201,7 @@ func RenderNPTv6(w io.Writer, cfg *config.Config) {
 			// #6534: #5818 DROPS a scope-carrying NPTv6 rule from the
 			// snapshot. Hung under the row rather than added as a fifth
 			// column so an all-healthy table stays byte-identical.
-			if reason := staticRuleNotInstalledReason(rs, rule); reason != "" {
+			if reason := staticRuleNotInstalledReason(rs, rule, installed); reason != "" {
 				fmt.Fprintf(w, "%-20s %-20s NOT INSTALLED — %s\n", "", "", reason)
 			}
 		}

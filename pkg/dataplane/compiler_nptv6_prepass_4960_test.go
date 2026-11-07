@@ -251,8 +251,8 @@ func TestNPTv6ScopeUnsupportedNilArgsReportExcluded_4960(t *testing.T) {
 // #9877 twin of the scope-exclusion guard above: buildNptv6Snapshots DROPS a
 // rule carrying unknown match leaves, so it never reaches the helper and a
 // malformed prefix on it must be warn-and-skip — not a whole-apply hard
-// error. RED-on-revert: drop the StaticNATRuleExcludedReason consult in
-// compileNPTv6 and the pre-pass rejects with "invalid nptv6-prefix" instead
+// error. RED-on-revert: drop the member.Installed gate (config.NPTv6Rules)
+// in compileNPTv6 and the pre-pass rejects with "invalid nptv6-prefix" instead
 // of reaching the tripwire.
 func TestNPTv6UnknownLeavesExcludedRuleWithBadPrefixStillCompiles_9877(t *testing.T) {
 	dp := &recordingDP{}
