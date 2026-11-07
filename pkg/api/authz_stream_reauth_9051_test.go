@@ -320,7 +320,7 @@ func TestRESTReadWatcherStopJoinsTick18994(t *testing.T) {
 				server: tcpAddr6974("127.0.0.1", 8080),
 			})
 			req := httptest.NewRequest(http.MethodGet, tc.path, nil).WithContext(connCtx)
-			_, stop := s.watchReadAuthorization(req, config.PermView)
+			watchedReq, stop := s.watchReadAuthorization(req, config.PermView)
 			waitForPeerWaiter(t)
 
 			stopped := make(chan struct{})
@@ -332,6 +332,14 @@ func TestRESTReadWatcherStopJoinsTick18994(t *testing.T) {
 			case <-stopped:
 				t.Error("REST stop returned while its authorization tick was still blocked")
 			case <-time.After(25 * time.Millisecond):
+			}
+			// Sol MINOR: prove stop ENTRY (it cancels the request ctx
+			// before joining) before releasing the tick, so a stop
+			// goroutine that never ran cannot false-GREEN the revert.
+			select {
+			case <-watchedReq.Context().Done():
+			case <-time.After(3 * time.Second):
+				t.Fatal("stop did not cancel the request context (stop entry not observed)")
 			}
 			releaseStart := time.Now()
 			release()
