@@ -587,18 +587,40 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 		return nil
 	}
 
-	tree, generation, _ := store.CandidateGateSample()
+	tree, generation, activeTree := store.CandidateGateSample()
 	if generation != expectedGen {
 		return fmt.Errorf("candidate changed while sampling peer control-address preflight: %w",
 			errCommitPreflightGenerationConflict)
 	}
-	if tree == nil {
+	if tree == nil || activeTree == nil {
 		return nil
 	}
 	peerNodeID, ok := config.PeerNodeID(running.NodeID())
 	if !ok {
 		return nil
 	}
+
+	// CandidateGateSample returns private deep copies. Normalize the active
+	// tree exactly as peer-sync ingress does before determining whether the
+	// running heartbeat address came from a rendered static address.
+	configstore.RewriteRetiredDataplaneTypeForPeerSync(activeTree)
+	runningPeerView, err := config.CompileConfigForNodeLenient(activeTree, peerNodeID)
+	if err != nil || runningPeerView == nil || runningPeerView.Chassis.Cluster == nil {
+		// Without a compiled running peer view there is no evidence that the
+		// heartbeat endpoint is a configured static control address.
+		return nil
+	}
+	runningControlInterface := runningPeerView.Chassis.Cluster.ControlInterface
+	runningStaticAddrs := controlLinkStaticAddrs18606(runningPeerView, runningControlInterface)
+	if !cidrListHasIP18606(runningStaticAddrs, net.ParseIP(peerAddr)) {
+		// DHCP-derived and foreign heartbeat addresses are not being removed by
+		// this config candidate, so unrelated commits must remain admissible.
+		return nil
+	}
+
+	// Match the standby's SyncApplyGated ingress: strip retired dataplane
+	// leaves from the sampled clone before compiling the candidate for the peer.
+	configstore.RewriteRetiredDataplaneTypeForPeerSync(tree)
 	peerView, err := config.CompileConfigForNodeLenient(tree, peerNodeID)
 	if err != nil {
 		return fmt.Errorf("commit rejected: cannot compile candidate for peer node %d control-address preflight: %w",
@@ -608,14 +630,18 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 	if peerView != nil && peerView.Chassis.Cluster != nil {
 		controlInterface = peerView.Chassis.Cluster.ControlInterface
 	}
-	return peerControlAddressDecision18630(peerAddr, controlLinkStaticAddrs18606(peerView, controlInterface))
+	return peerControlAddressDecision18630(peerAddr, runningStaticAddrs,
+		controlLinkStaticAddrs18606(peerView, controlInterface))
 }
 
-// peerControlAddressDecision18630 compares the rendered control-unit
-// addresses with the peer address the running heartbeat actually dials.
-func peerControlAddressDecision18630(runningPeerAddr string, peerRenderedAddrs []string) error {
+// peerControlAddressDecision18630 refuses only when the running heartbeat peer
+// address is statically rendered by the running peer view and disappears from
+// the candidate peer view.
+func peerControlAddressDecision18630(runningPeerAddr string, runningStaticAddrs, peerRenderedAddrs []string) error {
 	peerIP := net.ParseIP(runningPeerAddr)
-	if peerIP == nil || cidrListHasIP18606(peerRenderedAddrs, peerIP) {
+	if peerIP == nil ||
+		!cidrListHasIP18606(runningStaticAddrs, peerIP) ||
+		cidrListHasIP18606(peerRenderedAddrs, peerIP) {
 		return nil
 	}
 	return fmt.Errorf("commit rejected: the peer's chassis cluster control-link "+

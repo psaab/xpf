@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"net"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,8 +14,9 @@ import (
 )
 
 const (
-	peerControlAddrOld18630 = "10.99.14.2/30"
-	peerControlAddrNew18630 = "10.99.14.5/30"
+	peerControlAddrOld18630     = "10.99.14.2/30"
+	peerControlAddrNew18630     = "10.99.14.5/30"
+	peerControlAddrForeign18630 = "192.0.2.77"
 )
 
 func peerControlAddrStore18630(t *testing.T, candidatePeerAddr string) *configstore.Store {
@@ -58,9 +60,43 @@ func peerControlAddrStore18630(t *testing.T, candidatePeerAddr string) *configst
 	return store
 }
 
+func peerControlAddrDHCPStore18630(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	if err := store.SetFromInput("groups node1 interfaces em0 unit 0 family inet dhcp"); err != nil {
+		t.Fatalf("set peer DHCP: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit peer DHCP running config: %v", err)
+	}
+	if err := store.SetFromInput("system host-name unrelated-dhcp-edit-18630"); err != nil {
+		t.Fatalf("stage unrelated candidate: %v", err)
+	}
+	return store
+}
+
+func peerControlAddrForeignStore18630(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	if err := store.SetFromInput("groups node0 chassis cluster peer-address " + peerControlAddrForeign18630); err != nil {
+		t.Fatalf("set running peer endpoint: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit foreign running endpoint: %v", err)
+	}
+	if err := store.SetFromInput("system host-name unrelated-foreign-edit-18630"); err != nil {
+		t.Fatalf("stage unrelated candidate: %v", err)
+	}
+	return store
+}
+
 func runningPeerControlDaemon18630(store *configstore.Store) *Daemon {
+	return runningPeerControlDaemonWithPeerAddr18630(store, "10.99.14.2")
+}
+
+func runningPeerControlDaemonWithPeerAddr18630(store *configstore.Store, peerAddr string) *Daemon {
 	running := cluster.NewManager(0, 1)
-	running.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "em0")
+	running.SetHeartbeatEndpointForTesting("10.99.14.1", peerAddr, "em0")
 	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1), cluster: running}
 	d.applyBodyForTest = func(*config.Config) {}
 	return d
@@ -134,5 +170,84 @@ func TestPeerControlAddressUnchangedCommitPasses_18630(t *testing.T) {
 	}
 	if got := controlLinkStaticAddrs18606(peerView, "em0"); len(got) != 1 || got[0] != peerControlAddrOld18630 {
 		t.Fatalf("committed peer view renders em0 addresses %v, want unchanged [%s]", got, peerControlAddrOld18630)
+	}
+}
+
+func TestPeerControlAddressDHCPAndForeignBindingsPassBothCommitPaths18630(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		peerAddr string
+		newStore func(*testing.T) *configstore.Store
+	}{
+		{"DHCP-derived peer address", "10.99.14.2", peerControlAddrDHCPStore18630},
+		{"foreign peer address", peerControlAddrForeign18630, peerControlAddrForeignStore18630},
+	} {
+		for _, entry := range []struct {
+			name      string
+			confirmed bool
+		}{
+			{"plain commit", false},
+			{"confirmed commit", true},
+		} {
+			t.Run(tc.name+"/"+entry.name, func(t *testing.T) {
+				store := tc.newStore(t)
+				activePeerView, err := config.CompileConfigForNodeLenient(store.ActiveTree(), 1)
+				if err != nil {
+					t.Fatalf("compile running peer view: %v", err)
+				}
+				runningAddrs := controlLinkStaticAddrs18606(activePeerView, "em0")
+				peerIP := net.ParseIP(tc.peerAddr)
+				if cidrListHasIP18606(runningAddrs, peerIP) {
+					t.Fatalf("precondition: running peer address %s unexpectedly appears in static control addresses %v",
+						tc.peerAddr, runningAddrs)
+				}
+				candidatePeerView, err := config.CompileConfigForNodeLenient(store.CandidateTree(), 1)
+				if err != nil {
+					t.Fatalf("compile candidate peer view: %v", err)
+				}
+				candidateAddrs := controlLinkStaticAddrs18606(candidatePeerView, "em0")
+				if cidrListHasIP18606(candidateAddrs, peerIP) {
+					t.Fatalf("precondition: candidate unexpectedly renders running peer address %s in %v",
+						tc.peerAddr, candidateAddrs)
+				}
+				if strings.Join(runningAddrs, ",") != strings.Join(candidateAddrs, ",") {
+					t.Fatalf("precondition: unrelated candidate changed control addresses: running=%v candidate=%v",
+						runningAddrs, candidateAddrs)
+				}
+
+				d := runningPeerControlDaemonWithPeerAddr18630(store, tc.peerAddr)
+				if entry.confirmed {
+					_, err = d.commitConfirmedAndApply(
+						context.Background(), configstore.InternalCommitter(), 5, peerSyncNever)
+				} else {
+					_, err = d.commitAndApply(
+						context.Background(), configstore.InternalCommitter(), "unrelated candidate edit", peerSyncNever)
+				}
+				if err != nil {
+					t.Fatalf("%s must pass when the heartbeat address is not statically configured in the running peer view: %v",
+						entry.name, err)
+				}
+			})
+		}
+	}
+}
+
+func TestPeerOnlyRetiredDataplaneTypePassesControlAddressPreflight18630(t *testing.T) {
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	if err := store.SetFromInput("groups node1 system dataplane-type dpdk"); err != nil {
+		t.Fatalf("set retired dataplane type only on peer: %v", err)
+	}
+	candidateBefore := store.CandidateTree().Format()
+	if !strings.Contains(candidateBefore, "dataplane-type dpdk") {
+		t.Fatalf("precondition: candidate does not contain peer-only dpdk leaf: %s", candidateBefore)
+	}
+
+	d := runningPeerControlDaemon18630(store)
+	if _, err := d.commitAndApply(context.Background(), configstore.InternalCommitter(),
+		"peer-only retired dataplane leaf", peerSyncNever); err != nil {
+		t.Fatalf("peer-only dpdk leaf is stripped by peer-sync ingress and must pass the control-address gate: %v", err)
+	}
+	if active := store.ActiveTree().Format(); !strings.Contains(active, "dataplane-type dpdk") {
+		t.Fatalf("peer-ingest normalization mutated the operator's committed tree: %s", active)
 	}
 }

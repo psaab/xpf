@@ -134,6 +134,14 @@ func rewriteRetiredDataplaneType(tree *config.ConfigTree, caller retireRewriteCa
 	return rewrites
 }
 
+// RewriteRetiredDataplaneTypeForPeerSync applies the retired-backend rewrite
+// used before Store.SyncApplyGated compiles peer input. It mutates tree; a
+// caller modeling peer ingestion must pass a private clone, just as the strict
+// peer-view compile path does.
+func RewriteRetiredDataplaneTypeForPeerSync(tree *config.ConfigTree) int {
+	return rewriteRetiredDataplaneType(tree, SyncCaller)
+}
+
 // systemBlocksOf returns every top-level child whose first key is
 // `system`. Mirrors tree.FindChild's matching rule but returns all
 // matches instead of the first.

@@ -909,7 +909,7 @@ func compileTreeStrictJudgedDrops18771(tree *config.ConfigTree, nodeID int, curr
 	// peer group's leaf must survive to sync so the standby's own
 	// tolerance is what handles it.
 	peerTree := tree.Clone()
-	rewriteRetiredDataplaneType(peerTree, SyncCaller)
+	RewriteRetiredDataplaneTypeForPeerSync(peerTree)
 	if err := config.ValidatePeerEffectiveStrictWithPackedTailGate18771(peerTree, nodeID, eligible); err != nil {
 		return nil, nil, err
 	}
