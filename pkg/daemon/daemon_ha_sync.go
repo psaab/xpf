@@ -1236,8 +1236,15 @@ func (d *Daemon) warnFab1LocalAddressMismatch(cfg *config.Config) {
 	}
 	epochHost = normalizeFab1Host(epochHost)
 
-	currentHost := normalizeFab1Host(resolveClusterInterfaceAddr(
-		cfg, cc.Fabric1Interface, cc.Fabric1PeerAddress, ""))
+	// Resolve silently (Sol #18613): the shared resolver logs its own
+	// WARN per failed lookup, which would storm every 30 s tick while
+	// an eligible epoch's fab1 is unresolvable. The mismatch watcher
+	// needs only the address (empty on any failure); bind paths keep
+	// the resolver's diagnostics.
+	currentHost := ""
+	if addrs, err := clusterInterfaceAddrsByName(cfg, cc.Fabric1Interface); err == nil && len(addrs) > 0 {
+		currentHost = normalizeFab1Host(selectClusterBindAddr(addrs, cc.Fabric1PeerAddress, ""))
+	}
 
 	// The resolver ran without either lock. A stop/restart may have replaced
 	// the epoch meanwhile, so do not report its result against a successor.

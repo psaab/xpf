@@ -261,10 +261,25 @@ func TestFab1MismatchSkipsResolveWithoutDualEpochHost18613(t *testing.T) {
 		t.Fatal("empty resolution consumed the epoch's mismatch-warning allowance")
 	}
 
+	// Sol #18613: while eligible-but-unresolvable, repeated ticks must
+	// not storm ANY warning. The resolver's own generic WARN
+	// ("using fallback") firing per tick is the storm shape; count
+	// every WARN record across repeated empty/failed resolutions.
+	warnBefore := strings.Count(logs.String(), "level=WARN")
+	for range 3 {
+		d.warnFab1LocalAddressMismatch(cfg)
+	}
+	if got := strings.Count(logs.String(), "level=WARN"); got != warnBefore {
+		t.Fatalf("eligible-but-unresolvable ticks emitted %d new WARN records, want 0 (warn storm): %s", got-warnBefore, logs.String())
+	}
+	if resolutions != 4 {
+		t.Fatalf("resolver ran %d times after repeated unresolvable ticks, want 4 total", resolutions)
+	}
+
 	missing = false
 	d.warnFab1LocalAddressMismatch(cfg) // recovery to a different address is still checked
-	if resolutions != 2 {
-		t.Fatalf("resolver ran %d times after fab1 became addressable, want two total", resolutions)
+	if resolutions != 5 {
+		t.Fatalf("resolver ran %d times after fab1 became addressable, want five total", resolutions)
 	}
 	if got := strings.Count(logs.String(), "cluster: fab1 local address differs"); got != 1 {
 		t.Fatalf("resolved mismatch warnings = %d, want one: %s", got, logs.String())
