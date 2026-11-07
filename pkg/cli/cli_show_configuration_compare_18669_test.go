@@ -561,3 +561,36 @@ func TestCLIShowConfigurationGluedBareCompareRefused18669(t *testing.T) {
 		t.Fatalf("dispatch(glued bare compare) returned nil, output %q", out)
 	}
 }
+
+func TestCLIShowConfigurationScopedGluedCompareRefused18669(t *testing.T) {
+	fixtures := []struct {
+		name      string
+		store     func(*testing.T) *configstore.Store
+		userClass string
+	}{
+		{"foreign-holder", foreignShowCompareStore18669, "super-user"},
+		{"ownerless-no-rbac", showCompareStore18669, ""},
+	}
+	lines := []string{
+		"show configuration system |compare rollback 1",
+		"show configuration system domain-name|compare rollback 1",
+	}
+	for _, fixture := range fixtures {
+		for _, line := range lines {
+			t.Run(fixture.name+"/"+line, func(t *testing.T) {
+				c := &CLI{store: fixture.store(t), userClass: fixture.userClass}
+				if got, want := c.promptForCurrentMode(), c.operationalPrompt(); got != want {
+					t.Fatalf("promptForCurrentMode() = %q, want operational prompt %q", got, want)
+				}
+				var err error
+				out := captureStdout(t, func() { err = c.dispatch(line) })
+				if err == nil {
+					t.Fatalf("dispatch(%q) returned nil, output %q; want glued-pipe refusal", line, out)
+				}
+				if strings.Contains(out, "configuration path not found") {
+					t.Errorf("dispatch(%q) printed candidate path-not-found output: %q", line, out)
+				}
+			})
+		}
+	}
+}

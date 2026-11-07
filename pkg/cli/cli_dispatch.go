@@ -64,7 +64,7 @@ func operationalShowConfigurationCompare(line string) bool {
 		if parts[i] == "|" {
 			return i+1 < len(parts) && parts[i+1] == "compare"
 		}
-		if parts[i] == "|compare" || strings.HasSuffix(parts[i], "|compare") {
+		if isGluedComparePipeToken(parts[i]) {
 			return true
 		}
 	}
