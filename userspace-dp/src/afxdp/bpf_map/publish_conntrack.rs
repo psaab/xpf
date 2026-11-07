@@ -1,33 +1,16 @@
-// Per-address-family publish helpers for `publish_bpf_conntrack_entry`.
+// Pure conntrack-value builders and attribution helpers.
 //
-// Pure code motion out of `bpf_map/mod.rs`: the v4 and v6 arms of the
-// original 204-LOC orchestrator now live in `publish_v4_session` and
-// `publish_v6_session`. The orchestrator (`publish_bpf_conntrack_entry`)
-// stays in the parent module and dispatches by address family.
-//
-// Both helpers preserve the original side-effect contract:
-//   - construct `BpfSessionKey*` from the forward 5-tuple
-//   - construct a reverse key via `reverse_session_key()`; on a
-//     cross-family reverse-key result, the helper returns early and
-//     skips the BPF write entirely (same observable effect as the
-//     pre-refactor early returns at the orchestrator level)
-//   - populate `BpfSessionValue*` with state, flags, zones, NAT IPs/ports,
-//     and the reverse key
-//   - `bpf_map_update_elem` with `BPF_ANY`
-//   - on failure, `eprintln!("xpf-ha: conntrack vN map update failed: …")`
-//
-// See #1356.
+// All per-session conntrack map I/O and family dispatch live in
+// `conntrack_io.rs` (#17271). This module owns only the field-level builders
+// and predicates needed by that I/O boundary.
 
 use super::{
-    BpfSessionKeyV4, BpfSessionKeyV6, BpfSessionValueV4, BpfSessionValueV6, ConntrackPublishResult,
-    SESS_STATE_ESTABLISHED, SessionDecision, SessionKey, SessionMetadata, bpf_session_key_v4,
-    bpf_session_key_v6, reverse_session_key,
+    BpfSessionValueV4, BpfSessionValueV6, SESS_STATE_ESTABLISHED, SessionDecision, SessionKey,
+    SessionMetadata, bpf_session_key_v4, bpf_session_key_v6, reverse_session_key,
 };
 use crate::session::SessionSyncAttribution;
 use crate::ip_proto::{PROTO_TCP, PROTO_UDP};
-use core::ffi::{c_int, c_void};
-use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 
 // `security alg <proto> disable` bitfield (#2008 H3/H4). Mirrors the Go
 // `algDisableFlags` encoding and the legacy flow_config_map ALGFlags layout.
@@ -100,75 +83,6 @@ pub(super) fn alg_type_for_session(
     }
 }
 
-#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
-pub(super) fn publish_v4_session(
-    conntrack_v4_fd: c_int,
-    key: &SessionKey,
-    src: Ipv4Addr,
-    dst: Ipv4Addr,
-    decision: SessionDecision,
-    metadata: &SessionMetadata,
-    flags: u16,
-    ingress_zone_id: u32,
-    egress_zone_id: u32,
-    now_secs: u64,
-    alg_disable_flags: u8,
-    app_id: u16,
-    // #5213: the STABLE dataplane session id (`SessionEntry.session_id`, #4915)
-    // resolved by the caller from the session table. Stamped into the conntrack
-    // value so `show security flow session` reports the SAME id RT_FLOW emits for
-    // the session (SESSION_CREATE/CLOSE). `0` = unknown/absent (the caller had no
-    // live entry), preserving the legacy ordinal fallback on the Go render side.
-    session_id: u64,
-    // #8125: see build_conntrack_value_v4.
-    timeout_secs: u32,
-) -> ConntrackPublishResult {
-    let bpf_key = bpf_session_key_v4(
-        src.octets(),
-        dst.octets(),
-        key.src_port,
-        key.dst_port,
-        key.protocol,
-    );
-
-    // A cross-family reverse key means the session cannot be mirrored to the v4
-    // conntrack map — skip the write entirely (pre-#5213 behaviour).
-    let Some(value) = build_conntrack_value_v4(
-        key,
-        decision,
-        metadata,
-        flags,
-        ingress_zone_id,
-        egress_zone_id,
-        now_secs,
-        alg_disable_flags,
-        app_id,
-        session_id,
-        timeout_secs,
-    ) else {
-        return ConntrackPublishResult::IntentionallySkipped;
-    };
-
-    let rc = unsafe {
-        libbpf_sys::bpf_map_update_elem(
-            conntrack_v4_fd,
-            (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
-            (&value as *const BpfSessionValueV4).cast::<c_void>(),
-            libbpf_sys::BPF_ANY as u64,
-        )
-    };
-    if rc < 0 {
-        eprintln!(
-            "xpf-ha: conntrack v4 map update failed: {}",
-            io::Error::last_os_error()
-        );
-    }
-    if rc >= 0 {
-        ConntrackPublishResult::Written
-    } else {
-        ConntrackPublishResult::KernelError
-    }
-}
 
 /// #9546: the routing domain stamped into a conntrack mirror row.
 ///
@@ -355,116 +269,10 @@ pub(super) fn build_conntrack_value_v4(
 /// that reopens the hole: the walker learns a new traversable type, this copy
 /// does not, and the refusal silently stops covering it — which is exactly how
 /// the #4517 types came to be missing from the GRE-inner classify in #6886.
-fn v6_session_key_is_publishable(protocol: u8) -> bool {
+pub(super) fn v6_session_key_is_publishable(protocol: u8) -> bool {
     !crate::afxdp::ipv6_ext_header_is_traversable(protocol)
 }
 
-pub(super) fn publish_v6_session(
-    conntrack_v6_fd: c_int,
-    key: &SessionKey,
-    src: Ipv6Addr,
-    dst: Ipv6Addr,
-    decision: SessionDecision,
-    metadata: &SessionMetadata,
-    flags: u16,
-    ingress_zone_id: u32,
-    egress_zone_id: u32,
-    now_secs: u64,
-    alg_disable_flags: u8,
-    app_id: u16,
-    // #5213: stable dataplane session id — see publish_v4_session.
-    session_id: u64,
-    // #8125: see build_conntrack_value_v4.
-    timeout_secs: u32,
-) -> ConntrackPublishResult {
-    // #6923: THE CHOKEPOINT. Refuse to make a key the shim would probe visible
-    // when its protocol is an IPv6 extension-header type rather than an L4.
-    //
-    // The shim's over-limit refusal was never a property of the shim. Its walk
-    // exhausts and returns the LAST DECLARED next-header — an extension-header
-    // value, not a real protocol — and `parse_l4`'s catch-all then yields ports
-    // 0/0. The intended consequence is that the session lookup MISSES and the
-    // packet is redirected to userspace. But the lookup only misses while
-    // nothing has published `(AF_INET6, <a traversable next-header>, src, dst,
-    // 0, 0)`. Publish that tuple and the next packet of the same over-limit
-    // chain HITS and takes the fast path, silently, with no code change
-    // anywhere near the shim.
-    //
-    // That was previously held by an ENUMERATION — two writers that both
-    // declined the tuple (`metadata_tuple_complete` on the packet path,
-    // `build_synced_session_key` on the HA import path) and a doc comment
-    // asking that a third not be added. A comment is not a gate, and an
-    // enumeration is only as good as its completeness.
-    //
-    // Here it is expressed ONCE, at the point where a key becomes shim-visible,
-    // so a third writer inherits it instead of having to remember it. This is
-    // the sole path by which a v6 key can enter the CONNTRACK mirror map:
-    //   - `publish_bpf_conntrack_entry` -> here, `BPF_ANY` (creates)
-    //   - `refresh_bpf_conntrack_last_seen`, `BPF_EXIST` — CANNOT create; that
-    //     is demonstrated against a real map, not inferred from the flag's
-    //     name, by `test/mutation/selftest-bpf-exist-cannot-create_6923.sh`
-    //   - `delete_bpf_conntrack_entry` — a delete, which cannot mint a key
-    //
-    // #14648: this is NOT the sole path into the map the SHIM probes. The
-    // shim probes `userspace_sessions` (the steering map), whose writers go
-    // through `write_steering_row` in `bpf_map/mod.rs` — a different map from
-    // this conntrack mirror. That map's publishability gate is
-    // `steering_key_is_publishable` there; conflating the two maps is what
-    // left the steering publish ungated for protocol 255.
-    //
-    // DELIBERATELY UNREACHABLE TODAY. Both existing writers already decline, so
-    // this refuses nothing that currently happens — it is a backstop, and its
-    // value is that it stays true when a third writer appears. It is exercised
-    // by its own tests rather than by production traffic, which is the intended
-    // state for a backstop and not the "ships and does nothing" shape: the
-    // guard IS the deliverable, and it is directly testable at its own entry.
-    if !v6_session_key_is_publishable(key.protocol) {
-        return ConntrackPublishResult::IntentionallySkipped;
-    }
-    let bpf_key = bpf_session_key_v6(
-        src.octets(),
-        dst.octets(),
-        key.src_port,
-        key.dst_port,
-        key.protocol,
-    );
-
-    let Some(value) = build_conntrack_value_v6(
-        key,
-        decision,
-        metadata,
-        flags,
-        ingress_zone_id,
-        egress_zone_id,
-        now_secs,
-        alg_disable_flags,
-        app_id,
-        session_id,
-        timeout_secs,
-    ) else {
-        return ConntrackPublishResult::IntentionallySkipped;
-    };
-
-    let rc = unsafe {
-        libbpf_sys::bpf_map_update_elem(
-            conntrack_v6_fd,
-            (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
-            (&value as *const BpfSessionValueV6).cast::<c_void>(),
-            libbpf_sys::BPF_ANY as u64,
-        )
-    };
-    if rc < 0 {
-        eprintln!(
-            "xpf-ha: conntrack v6 map update failed: {}",
-            io::Error::last_os_error()
-        );
-    }
-    if rc >= 0 {
-        ConntrackPublishResult::Written
-    } else {
-        ConntrackPublishResult::KernelError
-    }
-}
 
 /// #5213: v6 sibling of [`build_conntrack_value_v4`] — pure builder for the v6
 /// conntrack mirror value, stamping the stable `session_id`. Returns `None` on a
@@ -549,7 +357,7 @@ pub(super) fn build_conntrack_value_v6(
         last_seen: now_secs,
         // #8125: see the v4 arm.
         timeout: if timeout_secs > 0 { timeout_secs } else { 1800 },
-        // #3056: see publish_v4_session — stamp the admitting policy ID so the
+        // #3056: see build_conntrack_value_v4 — stamp the admitting policy ID so the
         // IPv6 live-session rows attribute the policy that admitted the flow.
         policy_id: metadata.policy_id,
         ingress_zone: ingress_zone_id as u16,
@@ -807,70 +615,45 @@ mod publish_chokepoint_6923_tests {
         }
     }
 
-    /// #6923 WIRING: `publish_v6_session` must CALL the refusal, before it
-    /// builds the key.
+    /// #6923 WIRING: the conntrack I/O boundary must CALL the refusal before
+    /// building a v6 value.
     ///
-    /// Added because deleting the call red nothing: every other test here
-    /// exercises the predicate directly, and the predicate was never the part
-    /// at risk. A refusal that is perfectly correct and never invoked is the
-    /// defect this whole change is about, one layer in — and this codebase has
-    /// hit that shape repeatedly (#6888, #7713, and #7734's own detector).
-    ///
-    /// A behavioural test would be better, but publishing needs a real BPF map
-    /// fd and CAP_BPF, which unit tests do not have. So this binds the call
-    /// site structurally, and the ORDER with it: the refusal must precede the
-    /// `BpfSessionKeyV6` construction, because a check after the map update
-    /// would let the key exist for the window that matters.
+    /// The predicate is not enough by itself: a correct refusal that is never
+    /// invoked is the defect this bind guards against. The check must precede
+    /// the v6 value builder, which constructs the reverse key that can become
+    /// visible to the shim.
     #[test]
-    fn publish_v6_session_calls_the_refusal_before_building_the_key_6923() {
+    fn conntrack_io_calls_the_v6_refusal_before_building_the_value_6923() {
         let src = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("src/afxdp/bpf_map/publish_conntrack.rs"),
+                .join("src/afxdp/bpf_map/conntrack_io.rs"),
         )
-        .expect("read publish_conntrack.rs");
+        .expect("read conntrack_io.rs");
         let code: String = src
             .lines()
             .filter(|l| !l.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n");
         let start = code
-            .find("pub(super) fn publish_v6_session(")
-            .expect("#6923: publish_v6_session is gone — fix this bind, do not delete it");
+            .find("pub(crate) fn publish_conntrack_row(")
+            .expect("#6923: conntrack I/O publish boundary is gone — fix this bind, do not delete it");
         let body = &code[start..];
         let end = body
             .find("\n}")
-            .expect("#6923: could not bound publish_v6_session");
+            .expect("#6923: could not bound publish_conntrack_row");
         let body = &body[..end];
 
         let guard_at = body.find("v6_session_key_is_publishable").expect(
-            "#6923: publish_v6_session does not call the refusal. The predicate can be entirely \
-             correct and never invoked — that is the same defect this change exists to close, one \
-             layer in",
+            "#6923: conntrack_io publish does not call the refusal. The predicate can be correct \
+             and never invoked — the same defect this bind exists to close",
         );
-        // #7743: the key construction was single-sourced into
-        // `bpf_session_key_v6`, so this anchor accepts EITHER spelling and
-        // takes whichever appears first. Pinning only the struct literal made
-        // this guard fail the moment the builder replaced it — a pinned literal
-        // must become an alias, not a decommissioned test. If NEITHER spelling
-        // is present the key is no longer built here at all, and the expect
-        // below fails loudly rather than passing vacuously.
-        let key_at = [
-            body.find("bpf_session_key_v6("),
-            body.find("BpfSessionKeyV6 {"),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-        .expect(
-            "#6923/#7743: publish_v6_session no longer builds a v6 key by any known spelling \
-             (neither `bpf_session_key_v6(` nor `BpfSessionKeyV6 {`) — re-anchor this bind, do \
-             not delete it",
+        let value_at = body.find("build_conntrack_value_v6").expect(
+            "#6923: conntrack_io no longer builds a v6 value through the known builder; re-anchor \
+             this bind rather than deleting it",
         );
         assert!(
-            guard_at < key_at,
-            "#6923: the refusal must run BEFORE the key is built and published. A check placed \
-             after the map update leaves the key visible to the shim for exactly the window that \
-             matters"
+            guard_at < value_at,
+            "#6923: the refusal must run BEFORE the v6 value is built and published"
         );
     }
 

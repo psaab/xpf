@@ -2140,7 +2140,7 @@ fn conntrack_rmw_policy_declines_under_gate_lease_13668() {
     let _lease = crate::afxdp::bpf_map::global_tuple_gate()
         .acquire_lease([key.clone()])
         .expect("lease");
-    // Policy restamp has no test-fd model; gated decline returns false before any map access.
+    // Policy restamp uses the selected-fd backend only after gate admission.
     assert!(
         !restamp_bpf_conntrack_policy(
             crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
@@ -2390,6 +2390,24 @@ fn conntrack_test_rows_use_only_the_selected_family_fd_17271() {
             Some(original.clone()),
             "wrong-family lookup/delete must leave the row byte-for-byte unchanged",
         );
+        let mut policy_metadata = metadata.clone();
+        policy_metadata.policy_id = 17271;
+        policy_metadata.ingress_zone = 701;
+        policy_metadata.egress_zone = 702;
+        assert!(
+            restamp_bpf_conntrack_policy(
+                wrong_v4,
+                wrong_v6,
+                key,
+                &policy_metadata,
+            ),
+            "a missing selected map remains a successful no-op",
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_row_for_test(key),
+            Some(original.clone()),
+            "wrong-slot policy restamp must leave the row unchanged",
+        );
 
         assert!(
             crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
@@ -2427,6 +2445,12 @@ fn conntrack_test_rows_use_only_the_selected_family_fd_17271() {
         assert!(crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
             good_v4, good_v6, key, 77,
         ));
+        assert!(restamp_bpf_conntrack_policy(
+            good_v4,
+            good_v6,
+            key,
+            &policy_metadata,
+        ));
         crate::afxdp::bpf_map::update_session_cluster_synced_origin(
             good_v4, good_v6, key, false,
         );
@@ -2442,6 +2466,8 @@ fn conntrack_test_rows_use_only_the_selected_family_fd_17271() {
             crate::afxdp::bpf_map::conntrack_row_for_test(key).expect("row remains");
         assert_eq!(updated.app_id, 77);
         assert!(!updated.cluster_synced);
+        assert_eq!(updated.ingress_zone, 701);
+        assert_eq!(updated.egress_zone, 702);
 
         assert_eq!(
             crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_result(
