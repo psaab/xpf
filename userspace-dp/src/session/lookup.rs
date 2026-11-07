@@ -2272,12 +2272,12 @@ impl SessionTable {
         })
     }
 
-    /// #16223: collect this table's completed forward pairs for the
-    /// periodic shared-wire maintenance: canonical forward keys whose
-    /// entry is fully established (pending cleared, not closing) with
-    /// at least one admitted reverse packet. The caller drives a
-    /// full-table walk per maintenance slice (budget `usize::MAX`)
-    /// and threads the returned cursor (always 0 on completion).
+    /// #16223: collect this table's completed forward pairs for periodic
+    /// shared-wire maintenance: canonical forward keys that are fully
+    /// established (pending cleared, not closing) and served reverse traffic.
+    /// The caller advances a bounded slot cursor across paced ct-slices and
+    /// resets it at the end of the table; this is not a full-table first-slice
+    /// walk.
     /// Serving state only — replica rows in this table are
     /// reported too when they themselves completed, which is correct:
     /// their completion is equally node-level proof.
@@ -2417,7 +2417,7 @@ impl SessionTable {
         &self,
         cursor: usize,
         budget: usize,
-        shared_evidence: &dyn Fn(&SessionKey) -> NodeServedEvidence,
+        shared_evidence: &dyn Fn(&mut [NodeServedForwardCandidate]),
         out: &mut Vec<(SessionKey, crate::nat::NatDecision)>,
     ) -> usize {
         let cap = self.slot_high_watermark.min(self.entries.capacity());
@@ -2426,6 +2426,7 @@ impl SessionTable {
         }
         let start = if cursor >= cap { 0 } else { cursor };
         let end = start.saturating_add(budget).min(cap);
+        let mut candidates: SmallVec<[NodeServedForwardCandidate; 16]> = SmallVec::new();
         for idx in start..end {
             if let Some(record) = self.entries.get(idx) {
                 let entry = &record.entry;
@@ -2446,7 +2447,9 @@ impl SessionTable {
                 let serving_origin = !entry.origin.is_peer_synced()
                     || entry.origin == SessionOrigin::SharedPromote
                     || entry.origin == SessionOrigin::WorkerLocalImport;
-                if serving_origin && entry.established && !entry.handshake_pending {
+                let locally_established =
+                    serving_origin && entry.established && !entry.handshake_pending;
+                if locally_established {
                     // Already locally complete: the strict slice
                     // covers it when it also served reverse traffic;
                     // include it here too so the shared wire advances
@@ -2454,8 +2457,14 @@ impl SessionTable {
                     // Peer replicas never take this arm: their own
                     // flags are not node-level proof (their
                     // completion is announced via the HA Update
-                    // carve-out instead).
-                    out.push((record.key.clone(), entry.decision.nat));
+                    // carve-out).
+                    candidates.push(NodeServedForwardCandidate {
+                        key: record.key.clone(),
+                        nat: entry.decision.nat,
+                        local: NodeServedEvidence::default(),
+                        shared: NodeServedEvidence::default(),
+                        needs_shared: false,
+                    });
                     continue;
                 }
                 // Evidence arm (serving rows AND peer replicas):
@@ -2463,27 +2472,38 @@ impl SessionTable {
                 // traffic observed for the canonical key in the
                 // shared synced/replica maps (`rev_packets>0` on
                 // the wire counters the #16217 counter carriage now
-                // stamps at import, surfaced via
-                // `shared_completion_evidence`), a local
-                // reverse-served sibling in THIS table, or
-                // (a)/(c) — proves the tuple completed, so the
-                // SHARED canonical + alias advance to Established
-                // even though this row's local stage stays pending.
-                // For a pure HA-peer replica (`SyncImport` /
-                // `SharedMaterialize`) this is the ONLY qualifying
-                // arm: its own flags never publish, and it requires
-                // actual counted reverse service (fail-closed: a
-                // zero-count import never publishes). Promotion
-                // target is the shared canonical+alias stage only;
-                // the local row's stage is unchanged.
-                let mut evidence = self.node_served_evidence(&record.key);
-                let shared = shared_evidence(&record.key);
-                evidence.rev_packets_any =
-                    evidence.rev_packets_any.max(evidence.rev_packets).max(shared.rev_packets_any);
-                evidence.served_completed = evidence.served_completed || shared.served_completed;
-                if evidence.served_and_completed() {
-                    out.push((record.key.clone(), entry.decision.nat));
-                }
+                // stamps at import, surfaced through the batched
+                // shared evidence below), a local reverse-served
+                // sibling in THIS table, or (a)/(c) — proves the
+                // tuple completed. For a pure HA-peer replica
+                // (`SyncImport` / `SharedMaterialize`) this is the
+                // ONLY qualifying arm: its own flags never publish,
+                // and it requires actual counted reverse service
+                // (fail-closed: a zero-count import never publishes).
+                // Promotion target is the shared canonical+alias
+                // stage only; the local row's stage is unchanged.
+                let local = self.node_served_evidence(&record.key);
+                candidates.push(NodeServedForwardCandidate {
+                    key: record.key.clone(),
+                    nat: entry.decision.nat,
+                    local,
+                    shared: NodeServedEvidence::default(),
+                    needs_shared: true,
+                });
+            }
+        }
+        if candidates.iter().any(|candidate| candidate.needs_shared) {
+            shared_evidence(&mut candidates);
+        }
+        for candidate in candidates {
+            let mut evidence = candidate.local;
+            evidence.rev_packets_any = evidence
+                .rev_packets_any
+                .max(evidence.rev_packets)
+                .max(candidate.shared.rev_packets_any);
+            evidence.served_completed |= candidate.shared.served_completed;
+            if !candidate.needs_shared || evidence.served_and_completed() {
+                out.push((candidate.key, candidate.nat));
             }
         }
         if end >= cap { 0 } else { end }

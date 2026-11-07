@@ -281,6 +281,17 @@ mod entry;
 pub(crate) use entry::*;
 mod ctx;
 pub(crate) use ctx::*;
+
+/// A forward worker row considered by the bounded node-evidence slice.
+/// Shared-map evidence is filled in one batch after local evidence is
+/// captured, so the worker acquires the shared-map pair once per slice.
+pub(crate) struct NodeServedForwardCandidate {
+    pub(crate) key: SessionKey,
+    pub(crate) nat: NatDecision,
+    pub(crate) local: NodeServedEvidence,
+    pub(crate) shared: NodeServedEvidence,
+    pub(crate) needs_shared: bool,
+}
 // #6949: the HA-carried policy attribution (policy_id, counter idx, app
 // timeout, NAT64 pool source) derived ONCE for BOTH session-delta producers —
 // the binary open frame and the JSON RPC-fallback delta.

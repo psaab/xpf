@@ -7,19 +7,18 @@
 //! `sessions × shared rows`. On tcp at 4000 sessions this held the mutexes
 //! ~100% of the time (17k calls/s × 57 µs) and stalled every worker.
 //!
-//! These cells pin three things:
-//! 1. EXACTNESS. Over a mixed shared state, the batched pass returns
-//!    exactly what the old per-key scan (copied verbatim below as the
-//!    reference) returned, for every key. The state covers forward,
-//!    reverse and NAT'd wire-alias rows, a stale alias left by a NAT
-//!    change, an alias inserted under the caller's NAT, cross-flow key
-//!    collisions, duplicate and absent keys. The census in
-//!    `docs/log/18655.md` shows wire rows are not stored under their own
-//!    `entry.key`, so keyed `get()` would diverge here.
-//! 2. WORK. One batch visits each shared row exactly once, whatever the
-//!    batch size. Reverting to a per-key scan makes it `keys × rows`.
-//! 3. The batched count restamp leaves the maps exactly as the per-pair
-//!    helper does.
+//! These cells pin four things:
+//! 1. EXACTNESS. Over a mixed shared state, the batched pass returns exactly
+//!    what the old per-key scan (copied verbatim below as the reference)
+//!    returned. Fixtures cover forward/reverse/NAT aliases, stale/caller-NAT
+//!    aliases, collisions, duplicate and absent keys.
+//! 2. LOCK BOUNDS. `STAGE_COUNTS_WORK_18655` records actual rows fetched per
+//!    dual-map hold at small and 64k populations, not merely query keys.
+//! 3. FAN-OUT WORK. Lookup candidates and every output-slot fold iteration
+//!    share a 128-operation chunk budget; the shared-wire-key collision and
+//!    65,536-duplicate cells exercise both forms of fan-out.
+//! 4. The batched count restamp leaves the maps exactly as the per-pair helper
+//!    does. Stable-slot lifecycle and between-hold cells pin mutation behavior.
 
 use super::*;
 use crate::session::{SessionOrigin, TcpHandshakeState};
@@ -497,7 +496,7 @@ fn indexed_stage_counts_bound_each_hold_at_64k_18662() {
 }
 
 #[test]
-fn wire_alias_index_removal_preserves_resumed_cursor_slot_18662() {
+fn wire_alias_index_removal_preserves_stable_slot_18662() {
     const CHUNK: usize = 128;
     const DIRECT_LOOKUPS: usize = 2;
     const CURSOR_AFTER_FIRST_HOLD: usize = CHUNK - DIRECT_LOOKUPS;
@@ -531,9 +530,9 @@ fn wire_alias_index_removal_preserves_resumed_cursor_slot_18662() {
         }
     }
 
-    // A 128-work hold spends two candidates on direct lookups, leaving the
-    // alias cursor at slot 126. Simulate a concurrent removal of slot 0
-    // before the next hold: the saved cursor's row must not shift backward.
+    // Structural check for the stable-slot invariant: removal tombstones
+    // slot 0 without shifting the slot a bounded cursor may already have
+    // passed. The between-holds cells below exercise the actual cursor.
     {
         let mut wires = lock_shared_recover(&wire_map);
         let removed = wires.remove(&map_keys[0]).expect("first alias exists");
@@ -584,10 +583,472 @@ fn wire_alias_index_removal_preserves_resumed_cursor_slot_18662() {
     assert_eq!(
         out,
         vec![(stage, (ALIASES - 1) as u64, (ALIASES - 1) as u64)],
-        "#18662: stage/count fold still sees the final alias after earlier removal"
+        "#18662: redundant aggregate check; the stable-slot positions above are the cursor proof"
     );
 }
 
+
+fn requested_with_passed_first_alias_18662(forward: &SessionKey) -> Vec<SessionKey> {
+    let server = v4(172, 16, 80, 200);
+    let mut requested = Vec::with_capacity(64);
+    requested.push(forward.clone());
+    requested.extend((0..63).map(|i| {
+        key(
+            v4(10, 0, 62, i),
+            30_000 + u16::from(i),
+            server,
+            443,
+            crate::ip_proto::PROTO_TCP,
+        )
+    }));
+    requested
+}
+
+fn wanted_for_alias_18662(forward: &SessionKey, nat: crate::nat::NatDecision) -> StageCountsWanted {
+    let mut wanted = StageCountsWanted::default();
+    wanted.entry(forward.clone()).or_default().push((0, false));
+    wanted
+        .entry(crate::session::forward_wire_key(forward, nat))
+        .or_default()
+        .push((0, true));
+    wanted
+}
+
+#[test]
+fn alias_revived_after_passed_slot_is_picked_up_next_cycle_18662() {
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let forward = key(
+        v4(10, 0, 61, 102),
+        20_000,
+        v4(172, 16, 80, 200),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let nat = snat(Some(49_000));
+    let stale_map_key = key(
+        v4(192, 0, 2, 56),
+        45_004,
+        v4(198, 51, 100, 99),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let original = row(&forward, nat, 1, 1, 1, false, 6_001);
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        wires.insert(stale_map_key.clone(), original.clone());
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &stale_map_key,
+            None,
+            Some(&original),
+        );
+        let removed = wires.remove(&stale_map_key).expect("initial alias exists");
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &stale_map_key,
+            Some(&removed),
+            None,
+        );
+    }
+    let wanted = wanted_for_alias_18662(&forward, nat);
+    let requested = requested_with_passed_first_alias_18662(&forward);
+    let mut out = [(0, 0, 0)];
+    let restored = row(
+        &forward,
+        nat,
+        TcpHandshakeState::Established.to_wire(),
+        9,
+        11,
+        false,
+        6_002,
+    );
+    let mut revived = false;
+    stage_and_counts_pass_with_hook(
+        &shared,
+        &wire_map,
+        &indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut out,
+        &requested,
+        || {
+            if revived {
+                return;
+            }
+            revived = true;
+            let mut wires = lock_shared_recover(&wire_map);
+            wires.insert(stale_map_key.clone(), restored.clone());
+            update_stage_counts_entry_key_index(
+                &indexes.stage_counts_forward_wire_sessions,
+                &stale_map_key,
+                None,
+                Some(&restored),
+            );
+        },
+    );
+    assert!(revived, "fixture: the pass released its first lock hold");
+    assert_eq!(out, [(0, 0, 0)], "the already-passed tombstone is deferred");
+
+    let mut next_cycle = [(0, 0, 0)];
+    stage_and_counts_pass(
+        &shared,
+        &wire_map,
+        &indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut next_cycle,
+        &requested,
+    );
+    assert_eq!(
+        next_cycle,
+        [(TcpHandshakeState::Established.to_wire(), 9, 11)],
+        "the next cycle starts at slot zero and sees the revived alias"
+    );
+}
+
+fn assert_alias_reinsert_after_pass_18662(prune_bucket: bool) {
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let forward = key(
+        v4(10, 0, 61, 103),
+        20_001,
+        v4(172, 16, 80, 200),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let nat = snat(Some(49_001));
+    let stale_map_key = key(
+        v4(192, 0, 2, 57),
+        45_005,
+        v4(198, 51, 100, 99),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let original = row(&forward, nat, 1, 5, 7, false, 6_101);
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        wires.insert(stale_map_key.clone(), original.clone());
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &stale_map_key,
+            None,
+            Some(&original),
+        );
+    }
+    let wanted = wanted_for_alias_18662(&forward, nat);
+    let requested = requested_with_passed_first_alias_18662(&forward);
+    let mut current_cycle = [(0, 0, 0)];
+    let replacement = row(
+        &forward,
+        nat,
+        TcpHandshakeState::Established.to_wire(),
+        9,
+        11,
+        false,
+        6_102,
+    );
+    let mut reinserted = false;
+    stage_and_counts_pass_with_hook(
+        &shared,
+        &wire_map,
+        &indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut current_cycle,
+        &requested,
+        || {
+            if reinserted {
+                return;
+            }
+            reinserted = true;
+            let mut wires = lock_shared_recover(&wire_map);
+            let removed = wires.remove(&stale_map_key).expect("passed alias exists");
+            update_stage_counts_entry_key_index(
+                &indexes.stage_counts_forward_wire_sessions,
+                &stale_map_key,
+                Some(&removed),
+                None,
+            );
+            if prune_bucket {
+                prune_empty_stage_counts_entry_key_index(
+                    &indexes.stage_counts_forward_wire_sessions,
+                    &forward,
+                );
+            }
+            wires.insert(stale_map_key.clone(), replacement.clone());
+            update_stage_counts_entry_key_index(
+                &indexes.stage_counts_forward_wire_sessions,
+                &stale_map_key,
+                None,
+                Some(&replacement),
+            );
+        },
+    );
+    assert!(reinserted, "fixture: the pass released its first lock hold");
+    assert_eq!(
+        current_cycle,
+        [(1, 5, 7)],
+        "current cycle keeps the snapshot taken before removal/reinsert"
+    );
+
+    let mut next_cycle = [(0, 0, 0)];
+    stage_and_counts_pass(
+        &shared,
+        &wire_map,
+        &indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut next_cycle,
+        &requested,
+    );
+    assert_eq!(
+        next_cycle,
+        [(TcpHandshakeState::Established.to_wire(), 9, 11)],
+        "next cycle sees the replacement even when its bucket was pruned/recreated"
+    );
+}
+
+#[test]
+fn alias_remove_reinsert_at_passed_slot_is_seen_next_cycle_18662() {
+    assert_alias_reinsert_after_pass_18662(false);
+}
+
+#[test]
+fn alias_prune_recreate_at_passed_slot_is_seen_next_cycle_18662() {
+    assert_alias_reinsert_after_pass_18662(true);
+}
+
+#[test]
+fn cross_bucket_displacement_is_key_scoped_and_converges_next_cycle_18662() {
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let server = v4(172, 16, 80, 200);
+    let old_owner = key(v4(10, 0, 61, 105), 20_003, server, 443, crate::ip_proto::PROTO_TCP);
+    let new_owner = key(v4(10, 0, 61, 106), 20_004, server, 443, crate::ip_proto::PROTO_TCP);
+    let nat = no_nat();
+    let stale_alias_key = key(
+        v4(192, 0, 2, 55),
+        45_003,
+        v4(198, 51, 100, 99),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    assert_ne!(stale_alias_key, old_owner);
+    assert_ne!(stale_alias_key, new_owner);
+    let old_row = row(&old_owner, nat, 1, 5, 7, false, 6_401);
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        wires.insert(stale_alias_key.clone(), old_row.clone());
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &stale_alias_key,
+            None,
+            Some(&old_row),
+        );
+    }
+    let replacement = row(
+        &new_owner,
+        nat,
+        TcpHandshakeState::Established.to_wire(),
+        9,
+        11,
+        false,
+        6_402,
+    );
+    let mut wanted = wanted_for_alias_18662(&old_owner, nat);
+    wanted.entry(new_owner.clone()).or_default().extend([(1, false), (1, true)]);
+    let mut requested = requested_with_passed_first_alias_18662(&old_owner);
+    requested.push(new_owner.clone());
+    let mut mixed = [(0, 0, 0); 2];
+    let mut displaced = false;
+    stage_and_counts_pass_with_hook(
+        &shared,
+        &wire_map,
+        &indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut mixed,
+        &requested,
+        || {
+            if displaced {
+                return;
+            }
+            displaced = true;
+            let mut wires = lock_shared_recover(&wire_map);
+            let removed = wires
+                .remove(&stale_alias_key)
+                .expect("the first owner alias was already visited");
+            wires.insert(stale_alias_key.clone(), replacement.clone());
+            update_stage_counts_entry_key_index(
+                &indexes.stage_counts_forward_wire_sessions,
+                &stale_alias_key,
+                Some(&removed),
+                Some(&replacement),
+            );
+        },
+    );
+    assert!(displaced, "fixture: the first candidate chunk completed");
+    assert_eq!(
+        mixed,
+        [(1, 5, 7), (TcpHandshakeState::Established.to_wire(), 9, 11)],
+        "the processed owner keeps pre-displacement evidence; the later owner sees its own new row"
+    );
+
+    let mut next_cycle = [(0, 0, 0); 2];
+    stage_and_counts_pass(
+        &shared,
+        &wire_map,
+        &indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut next_cycle,
+        &requested,
+    );
+    assert_eq!(
+        next_cycle,
+        [(0, 0, 0), (TcpHandshakeState::Established.to_wire(), 9, 11)],
+        "the next cycle converges to the current owner without transferring old evidence"
+    );
+}
+
+#[test]
+fn shared_wire_key_collision_folds_many_outputs_outside_lock_hold_18662() {
+    const FORWARDS: usize = 2_048;
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let server = v4(172, 16, 80, 200);
+    let nat = snat(Some(45_000));
+    let mut queries = Vec::with_capacity(FORWARDS);
+    for i in 0..FORWARDS {
+        let forward = key(
+            v4(10, 0, (i >> 8) as u8, i as u8),
+            20_000 + i as u16,
+            server,
+            443,
+            crate::ip_proto::PROTO_TCP,
+        );
+        queries.push((forward, nat));
+    }
+    let shared_wire_key = crate::session::forward_wire_key(&queries[0].0, nat);
+    assert!(
+        queries
+            .iter()
+            .all(|(forward, nat)| crate::session::forward_wire_key(forward, *nat) == shared_wire_key),
+        "fixture: all forward keys collapse to one NAT wire key"
+    );
+    let shared_wire_row = row(
+        &shared_wire_key,
+        no_nat(),
+        TcpHandshakeState::Established.to_wire(),
+        17,
+        23,
+        false,
+        6_201,
+    );
+    lock_shared_recover(&wire_map).insert(shared_wire_key, shared_wire_row);
+
+    let before = STAGE_COUNTS_WORK_18655.with(|work| work.get());
+    let actual = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, &queries);
+    let after = STAGE_COUNTS_WORK_18655.with(|work| work.get());
+    assert_eq!(actual.len(), FORWARDS);
+    assert!(actual.iter().all(|row| *row == (4, 17, 23)));
+    assert_eq!(after.0 - before.0, 1);
+    assert!(
+        after.2 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+        "the collision's 2,048 output folds do not extend a map-lock hold"
+    );
+    assert!(
+        after.3 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+        "lookup candidates and slot-fold iterations are jointly charged to each chunk"
+    );
+}
+
+#[test]
+fn duplicate_query_fanout_is_charged_to_bounded_work_18662() {
+    const DUPLICATES: usize = 65_536;
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let forward = key(
+        v4(10, 0, 61, 104),
+        20_002,
+        v4(172, 16, 80, 200),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let nat = snat(Some(49_002));
+    let row = row(
+        &forward,
+        nat,
+        TcpHandshakeState::Established.to_wire(),
+        17,
+        23,
+        false,
+        6_301,
+    );
+    lock_shared_recover(&shared).insert(forward.clone(), row);
+    let queries = vec![(forward, nat); DUPLICATES];
+
+    let before = STAGE_COUNTS_WORK_18655.with(|work| work.get());
+    let actual = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, &queries);
+    let after = STAGE_COUNTS_WORK_18655.with(|work| work.get());
+    assert_eq!(actual.len(), DUPLICATES);
+    assert!(actual.iter().all(|row| *row == (4, 17, 23)));
+    assert_eq!(after.0 - before.0, 1);
+    assert!(
+        after.2 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+        "65,536 duplicate outputs do not increase rows fetched under one lock hold"
+    );
+    assert!(
+        after.3 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+        "65,536 slot folds are split into fixed-work chunks"
+    );
+}
+
+#[test]
+fn packet_completion_restamp_reactivates_published_alias_slot_18662() {
+    let (shared, nat_map, wire_map, indexes) = maps();
+    let client = v4(10, 0, 61, 102);
+    let server = v4(172, 16, 80, 200);
+    let forward = key(client, 31_001, server, 443, crate::ip_proto::PROTO_TCP);
+    let nat = snat(Some(49_001));
+    let entry = row(
+        &forward,
+        nat,
+        TcpHandshakeState::HandshakePending.to_wire(),
+        1,
+        1,
+        false,
+        5_001,
+    );
+    publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &entry);
+    let wire_key = crate::session::forward_wire_key(&forward, nat);
+
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        let removed = wires.remove(&wire_key).expect("published alias exists");
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &wire_key,
+            Some(&removed),
+            None,
+        );
+    }
+    {
+        let wire_index = lock_shared_recover(&indexes.stage_counts_forward_wire_sessions);
+        let aliases = wire_index.get(&forward).expect("published slot remains reserved");
+        assert_eq!(aliases.len(), 1);
+        assert!(!aliases[0].live);
+        assert!(!aliases.spilled());
+    }
+
+    let transitioned =
+        restamp_shared_forward_wire_established(&shared, &wire_map, &indexes, &[(forward.clone(), nat)]);
+    assert_eq!(transitioned, vec![(forward.clone(), nat)]);
+    {
+        let wire_index = lock_shared_recover(&indexes.stage_counts_forward_wire_sessions);
+        let aliases = wire_index.get(&forward).expect("restamp reuses published slot");
+        assert_eq!(aliases.len(), 1, "no third distinct key is appended");
+        assert!(aliases[0].live);
+        assert_eq!(aliases[0].map_key, wire_key);
+        assert!(!aliases.spilled(), "same-key completion restamp stays inline");
+    }
+    let alias = lock_shared_recover(&wire_map)
+        .get(&wire_key)
+        .cloned()
+        .expect("alias restored");
+    assert_eq!(alias.key, forward);
+    assert_eq!(alias.tcp_handshake_state, TcpHandshakeState::Established.to_wire());
+}
 #[test]
 fn empty_batch_takes_no_lock_and_no_pass_18655() {
     let (shared, wire_map, indexes, _) = mixed_state();

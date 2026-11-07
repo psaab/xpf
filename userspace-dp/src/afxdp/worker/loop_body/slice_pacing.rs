@@ -23,15 +23,16 @@ pub(super) const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000; // full-table fresh
 pub(super) const CT_SLICE_INTERVAL_NS: u64 = 100_000_000; // 100ms between slices
 pub(super) const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per slice
 /// #18662: fixed upper bound on rows advanced by the shared-evidence
-/// worker-table cursor in one ct-slice. The alias-exact stage/count read
-/// separately bounds each shared-map lock hold to this many matching rows.
+/// worker-table cursor in one ct-slice. Stage/count indexed reads separately
+/// cap map-lock row visits and combined lookup/fold work at 128 per chunk.
 pub(super) const CT_EVIDENCE_CHUNK: usize = 2048;
-/// Maximum interval between shared-evidence passes for the current slab.
-/// `run_shared_evidence_leg` runs at the first slice of each ct-refresh cycle;
-/// oversized HA-import populations stretch the cycle beyond its 10 s target.
+/// Maximum interval between shared-evidence visits to a worker row.
+/// The worker cursor advances `CT_EVIDENCE_CHUNK` slots on the first due
+/// slice and each paced slice while work remains; a large slab stretches
+/// the full sweep beyond its 10 s target.
 pub(super) fn shared_evidence_max_cadence_ns(slab_len: usize) -> u64 {
     CT_REFRESH_WINDOW_NS.max(
-        (slab_len.div_ceil(CT_REFRESH_SLICE_BUDGET) as u64)
+        (slab_len.div_ceil(CT_EVIDENCE_CHUNK) as u64)
             .saturating_mul(CT_SLICE_INTERVAL_NS),
     )
 }
@@ -49,13 +50,14 @@ mod tests {
         assert_eq!(shared_evidence_max_cadence_ns(300_000), 14_700_000_000);
     }
 }
-// #18655: the ct-slice shared-evidence leg (`run_shared_evidence_leg`) runs
-// once per refresh cycle, on the cycle's first slice. A pair that completes
-// right after that slice has its shared stage advanced at the next cycle start,
-// which is at most
-//     max(CT_REFRESH_WINDOW_NS, ceil(slab / CT_REFRESH_SLICE_BUDGET) * CT_SLICE_INTERVAL_NS)
-// later. That is 10 s at the default cap; HA imports can stretch it to about
-// 13 s at the usual 2x population. Static asserts below guard the default-cap
+// #18655/#18662: the shared-evidence leg runs on the first due slice and
+// resumes on each paced slice while its worker cursor is nonzero, advancing
+// at most CT_EVIDENCE_CHUNK slots. A row completing before its slot is visited
+// may be advanced later in the current cycle; after its slot has passed, it
+// waits for the next cycle. The maximum row-visit interval is
+//     max(CT_REFRESH_WINDOW_NS, ceil(slab / CT_EVIDENCE_CHUNK) * CT_SLICE_INTERVAL_NS)
+// which is 10 s at the default cap; HA imports can stretch it to about 13 s
+// at the usual 2x population. Static asserts below guard the default-cap
 // contract against the 20 s TCP opening window. Imports have no per-table cap,
 // so production expiry also computes the current cycle from this same slab
 // bound; a larger population receives a correspondingly longer short-window

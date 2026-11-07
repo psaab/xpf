@@ -567,7 +567,7 @@ fn split_two_workers_neither_alone_sufficient_16217() {
     }
     // A's slice alone collects via (a): any worker's local row Established.
     let mut a_node: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    a.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut a_node);
+    a.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut a_node);
     assert!(
         a_node.iter().any(|(k, _)| k == &forward),
         "#16217(a): local Established row collects without shared evidence"
@@ -607,7 +607,7 @@ fn split_two_workers_neither_alone_sufficient_16217() {
     ));
     // B's slice alone (no shared evidence) must NOT collect.
     let mut b_alone: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    b.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut b_alone);
+    b.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut b_alone);
     assert!(
         !b_alone.iter().any(|(k, _)| k == &forward),
         "premise: worker B alone insufficient"
@@ -644,15 +644,19 @@ fn split_two_workers_neither_alone_sufficient_16217() {
     }
     // Alone: no shared evidence → not collected.
     let mut c_alone: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    c.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut c_alone);
+    c.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut c_alone);
     assert!(
         !c_alone.iter().any(|(k, _)| k == &forward),
         "premise: collector table alone insufficient (no cross-table view)"
     );
     // Aggregated: reverse service observed node-wide (B) → collected.
-    let agg = |_: &SessionKey| NodeServedEvidence {
-        rev_packets_any: 7,
-        ..NodeServedEvidence::default()
+    let agg = |candidates: &mut [crate::session::NodeServedForwardCandidate]| {
+        for candidate in candidates.iter_mut().filter(|candidate| candidate.needs_shared) {
+            candidate.shared = NodeServedEvidence {
+                rev_packets_any: 7,
+                ..NodeServedEvidence::default()
+            };
+        }
     };
     let mut c_agg: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
     c.node_served_forward_slice(0, usize::MAX, &agg, &mut c_agg);
@@ -661,9 +665,13 @@ fn split_two_workers_neither_alone_sufficient_16217() {
         "#16217(b): node-wide reverse evidence must collect the split tuple"
     );
     // Aggregated (c): #16223 served-completion stamp alone → collected.
-    let agg_c = |_: &SessionKey| NodeServedEvidence {
-        served_completed: true,
-        ..NodeServedEvidence::default()
+    let agg_c = |candidates: &mut [crate::session::NodeServedForwardCandidate]| {
+        for candidate in candidates.iter_mut().filter(|candidate| candidate.needs_shared) {
+            candidate.shared = NodeServedEvidence {
+                served_completed: true,
+                ..NodeServedEvidence::default()
+            };
+        }
     };
     let mut c_agg2: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
     c.node_served_forward_slice(0, usize::MAX, &agg_c, &mut c_agg2);
@@ -673,7 +681,7 @@ fn split_two_workers_neither_alone_sufficient_16217() {
     );
     // Negative: zero aggregated evidence → still not collected.
     let mut c_neg: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    c.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut c_neg);
+    c.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut c_neg);
     assert!(!c_neg.iter().any(|(k, _)| k == &forward));
 }
 
@@ -722,7 +730,7 @@ fn split_cache_hit_completion_collects_without_ct_slice_16217() {
         ));
     }
     let mut ctrl_out: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    control.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut ctrl_out);
+    control.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut ctrl_out);
     // A pending pair with only a reverse replica present DOES carry
     // rev_packets_any via the local half; use zero-evidence collector
     // semantics: the pair is not Established locally, so (a) fails and
@@ -763,7 +771,7 @@ fn split_cache_hit_completion_collects_without_ct_slice_16217() {
     // collects (Established row present), proving the wire can advance
     // on the same packet path.
     let mut out: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    serving.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut out);
+    serving.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut out);
     assert!(out.iter().any(|(k, _)| k == &forward), "#16217: completed pair must collect without ct-slice");
 
     // Replica table (peer worker): pending, completes from node
@@ -891,7 +899,7 @@ fn split_serving_established_replica_pending_completes_and_announces_16217() {
     assert!(serving_entry.counters.rev_packets > 0);
     // Leg 1: the node-served slice collects the serving pair.
     let mut out: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    serving.node_served_forward_slice(0, usize::MAX, &|_| NodeServedEvidence::default(), &mut out);
+    serving.node_served_forward_slice(0, usize::MAX, &|_| {}, &mut out);
     assert!(
         out.iter().any(|(k, _)| k == &forward),
         "#16217: node-served slice must collect the sibling serving pair, got {out:?}"
@@ -1027,7 +1035,7 @@ fn backup_origin_row_publishes_to_shared_16217() {
         table.node_served_forward_slice(
             0,
             usize::MAX,
-            &|_| NodeServedEvidence::default(),
+            &|_| {},
             &mut out,
         );
         out
@@ -1124,7 +1132,16 @@ fn sync_import_pending_row_collects_on_imported_reverse_evidence_16217() {
     };
     let collect = |table: &SessionTable, shared: NodeServedEvidence| {
         let mut out = Vec::new();
-        table.node_served_forward_slice(0, usize::MAX, &|_| shared, &mut out);
+        table.node_served_forward_slice(
+            0,
+            usize::MAX,
+            &|candidates: &mut [crate::session::NodeServedForwardCandidate]| {
+                for candidate in candidates.iter_mut().filter(|candidate| candidate.needs_shared) {
+                    candidate.shared = shared;
+                }
+            },
+            &mut out,
+        );
         out
     };
 

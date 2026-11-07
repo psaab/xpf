@@ -32,18 +32,11 @@ use super::*;
 /// — the single node-wide order for the shared maps. Every function
 /// that needs both maps takes them in this order and never holds
 /// them in reverse; see `restamp_shared_forward_wire_established`.
-pub(in crate::afxdp) fn shared_completion_evidence(
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+fn shared_completion_evidence_for_maps(
+    holders: &FastMap<SessionKey, SyncedSessionEntry>,
+    wires: &FastMap<SessionKey, SyncedSessionEntry>,
     key: &SessionKey,
 ) -> crate::session::NodeServedEvidence {
-    // Both maps, canonical order (shared_sessions first), held
-    // together so the two halves of the evidence are one snapshot.
-    // Companion keys derive from a canonical row's OWN NAT decision;
-    // without a canonical row, the no-NAT companions (identity) still
-    // find a plain tuple's reverse row.
-    let holders = lock_shared_recover(shared_sessions);
-    let wires = lock_shared_recover(shared_forward_wire_sessions);
     let mut ev = crate::session::NodeServedEvidence::default();
     let nat = holders
         .get(key)
@@ -53,7 +46,7 @@ pub(in crate::afxdp) fn shared_completion_evidence(
     let reverse_key = crate::session::reverse_session_key(key, nat);
     let wire_key = crate::session::forward_wire_key(key, nat);
     let rev_wire_key = crate::session::forward_wire_key(&reverse_key, nat);
-    for map in [&*holders, &*wires] {
+    for map in [holders, wires] {
         for k in [key, &reverse_key, &wire_key, &rev_wire_key] {
             if let Some(entry) = map.get(k)
                 && entry.rev_packets > 0
@@ -91,6 +84,54 @@ fn shared_node_served_entry_claims_alias(
         crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
             || canonical == *key
     }
+}
+
+pub(in crate::afxdp) fn shared_completion_evidence(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> crate::session::NodeServedEvidence {
+    // Both maps, canonical order (shared_sessions first), held
+    // together so the two halves of the evidence are one snapshot.
+    let holders = lock_shared_recover(shared_sessions);
+    let wires = lock_shared_recover(shared_forward_wire_sessions);
+    shared_completion_evidence_for_maps(&holders, &wires, key)
+}
+
+/// #18662: compute every pending worker row's evidence under one shared-map
+/// lock pair per worker slice. Strict local completions are left untouched.
+pub(in crate::afxdp) fn shared_completion_evidence_batch(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    candidates: &mut [crate::session::NodeServedForwardCandidate],
+) {
+    if !candidates.iter().any(|candidate| candidate.needs_shared) {
+        return;
+    }
+    let holders = lock_shared_recover(shared_sessions);
+    let wires = lock_shared_recover(shared_forward_wire_sessions);
+    #[cfg(test)]
+    {
+        SHARED_COMPLETION_EVIDENCE_BATCH_LOCK_PAIRS_18662
+            .with(|count| count.set(count.get() + 1));
+        let pending_rows = candidates
+            .iter()
+            .filter(|candidate| candidate.needs_shared)
+            .count() as u64;
+        SHARED_COMPLETION_EVIDENCE_BATCH_PENDING_ROWS_18662
+            .with(|count| count.set(count.get() + pending_rows));
+    }
+    for candidate in candidates.iter_mut().filter(|candidate| candidate.needs_shared) {
+        candidate.shared = shared_completion_evidence_for_maps(&holders, &wires, &candidate.key);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(in crate::afxdp) static SHARED_COMPLETION_EVIDENCE_BATCH_LOCK_PAIRS_18662: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+    pub(in crate::afxdp) static SHARED_COMPLETION_EVIDENCE_BATCH_PENDING_ROWS_18662: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
 }
 
 /// #16223: node-level served-handshake evidence for `key` (either half of
@@ -407,35 +448,73 @@ pub(super) type StageCountsWanted = FastMap<SessionKey, Vec<(usize, bool)>>;
 /// stage/count mutex hold, independent of table size.
 pub(in crate::afxdp) const STAGE_COUNTS_LOCK_CHUNK_18662: usize = 128;
 
-/// Fold a matching shared row into its requested output slots.
-fn fold_stage_count_row(
+#[derive(Clone, Copy)]
+struct StageCountsEvidence<'a> {
+    slots: &'a [(usize, bool)],
+    is_wire: bool,
+    is_reverse: bool,
+    stage: u8,
+    fwd_packets: u64,
+    rev_packets: u64,
+}
+
+#[derive(Clone, Copy)]
+struct PendingStageCountsFold<'a> {
+    row: StageCountsEvidence<'a>,
+    next_slot: usize,
+}
+
+/// Snapshot one matching row while the shared-map locks are held. The
+/// variable-size output-slot fold runs only after both locks are released.
+fn stage_counts_evidence<'a>(
     entry: &SyncedSessionEntry,
     is_wire: bool,
-    wanted: &StageCountsWanted,
+    wanted: &'a StageCountsWanted,
+) -> Option<PendingStageCountsFold<'a>> {
+    Some(PendingStageCountsFold {
+        row: StageCountsEvidence {
+            slots: wanted.get(&entry.key)?.as_slice(),
+            is_wire,
+            is_reverse: entry.metadata.is_reverse,
+            stage: entry.tcp_handshake_state,
+            fwd_packets: entry.fwd_packets,
+            rev_packets: entry.rev_packets,
+        },
+        next_slot: 0,
+    })
+}
+
+/// Fold at most the remaining work allowance into output slots; an
+/// unfinished fan-out resumes in a later bounded chunk, still outside locks.
+fn fold_stage_count_row(
+    pending: &mut PendingStageCountsFold<'_>,
     out: &mut [(u8, u64, u64)],
+    chunk_work: &mut usize,
 ) {
-    let Some(slots) = wanted.get(&entry.key) else {
-        return;
-    };
-    for &(index, wire_only) in slots {
-        if wire_only && !is_wire {
+    while pending.next_slot < pending.row.slots.len()
+        && *chunk_work < STAGE_COUNTS_LOCK_CHUNK_18662
+    {
+        let (index, wire_only) = pending.row.slots[pending.next_slot];
+        pending.next_slot += 1;
+        *chunk_work += 1;
+        if wire_only && !pending.row.is_wire {
             continue;
         }
         let slot = &mut out[index];
-        if !entry.metadata.is_reverse {
-            slot.0 = slot.0.max(entry.tcp_handshake_state);
+        if !pending.row.is_reverse {
+            slot.0 = slot.0.max(pending.row.stage);
         }
-        slot.1 = slot.1.max(entry.fwd_packets);
-        slot.2 = slot.2.max(entry.rev_packets);
+        slot.1 = slot.1.max(pending.row.fwd_packets);
+        slot.2 = slot.2.max(pending.row.rev_packets);
     }
 }
 
 /// #18662: lookup only the requested canonical/reverse keys and exact
 /// `entry.key` alias buckets. Publish/remove/displacement and established
-/// alias restamps maintain the wire alias index. Each lock hold visits at
-/// most `STAGE_COUNTS_LOCK_CHUNK_18662` lookup candidates and fetches no
-/// more than that many rows before releasing both shared maps.
-fn stage_and_counts_pass(
+/// alias restamps maintain the wire alias index. Each map-lock hold fetches
+/// at most the fixed row/candidate budget; output-slot folds are also charged
+/// against that budget and continue in later chunks after the locks are released.
+pub(super) fn stage_and_counts_pass(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     wire_index: &Arc<Mutex<SharedEntryKeyIndex>>,
@@ -443,80 +522,141 @@ fn stage_and_counts_pass(
     out: &mut [(u8, u64, u64)],
     requested: &[SessionKey],
 ) -> (usize, usize, usize) {
+    stage_and_counts_pass_with_hook(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        wire_index,
+        wanted,
+        out,
+        requested,
+        || {},
+    )
+}
+
+pub(super) fn stage_and_counts_pass_with_hook<F>(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    wire_index: &Arc<Mutex<SharedEntryKeyIndex>>,
+    wanted: &StageCountsWanted,
+    out: &mut [(u8, u64, u64)],
+    requested: &[SessionKey],
+    mut after_chunk: F,
+) -> (usize, usize, usize)
+where
+    F: FnMut(),
+{
     let mut key_cursor = 0usize;
     let mut alias_cursor = 0usize;
     let mut total_visited = 0usize;
     let mut max_hold = 0usize;
     let mut max_work = 0usize;
-    while key_cursor < requested.len() {
-        let holders = lock_shared_recover(shared_sessions);
-        let wires = lock_shared_recover(shared_forward_wire_sessions);
-        let wire_index = lock_shared_recover(wire_index);
+    let mut folds = [None; STAGE_COUNTS_LOCK_CHUNK_18662];
+    let mut folds_len = 0usize;
+    let mut folds_cursor = 0usize;
+    while key_cursor < requested.len() || folds_cursor < folds_len {
+        let mut chunk_work = 0usize;
         let mut hold_visited = 0usize;
-        let mut hold_work = 0usize;
-        while key_cursor < requested.len()
-            && hold_work + 2 <= STAGE_COUNTS_LOCK_CHUNK_18662
-        {
-            let key = &requested[key_cursor];
-            if alias_cursor == 0 {
-                if let Some(entry) = holders.get(key) {
-                    hold_visited += 1;
-                    if entry.key == *key {
-                        fold_stage_count_row(entry, false, wanted, out);
-                    }
-                }
-                if let Some(entry) = wires.get(key) {
-                    hold_visited += 1;
-                    if wanted.contains_key(&entry.key) {
-                        fold_stage_count_row(entry, true, wanted, out);
-                    }
-                }
-                hold_work += 2;
-            }
-            let Some(map_keys) = wire_index.get(key) else {
-                key_cursor += 1;
-                alias_cursor = 0;
-                continue;
-            };
-            // The index can shrink between lock chunks; do not leave the
-            // cursor past the new bucket end and spin forever.
-            alias_cursor = alias_cursor.min(map_keys.len());
-            while alias_cursor < map_keys.len()
-                && hold_work < STAGE_COUNTS_LOCK_CHUNK_18662
+        if folds_cursor == folds_len {
+            folds_cursor = 0;
+            folds_len = 0;
+            let holders = lock_shared_recover(shared_sessions);
+            let wires = lock_shared_recover(shared_forward_wire_sessions);
+            let wire_index = lock_shared_recover(wire_index);
+            while key_cursor < requested.len()
+                && chunk_work + 2 <= STAGE_COUNTS_LOCK_CHUNK_18662
             {
-                let slot = alias_cursor;
-                alias_cursor += 1;
-                hold_work += 1;
-                let alias = &map_keys[slot];
-                if !alias.live {
-                    continue;
+                let key = &requested[key_cursor];
+                if alias_cursor == 0 {
+                    if let Some(entry) = holders.get(key) {
+                        hold_visited += 1;
+                        if entry.key == *key
+                            && let Some(row) = stage_counts_evidence(entry, false, wanted)
+                        {
+                            debug_assert!(folds_len < STAGE_COUNTS_LOCK_CHUNK_18662);
+                            folds[folds_len] = Some(row);
+                            folds_len += 1;
+                        }
+                    }
+                    if let Some(entry) = wires.get(key) {
+                        hold_visited += 1;
+                        if wanted.contains_key(&entry.key)
+                            && let Some(row) = stage_counts_evidence(entry, true, wanted)
+                        {
+                            debug_assert!(folds_len < STAGE_COUNTS_LOCK_CHUNK_18662);
+                            folds[folds_len] = Some(row);
+                            folds_len += 1;
+                        }
+                    }
+                    chunk_work += 2;
                 }
-                let map_key = &alias.map_key;
-                if wanted.contains_key(map_key) {
+                let Some(map_keys) = wire_index.get(key) else {
+                    key_cursor += 1;
+                    alias_cursor = 0;
                     continue;
-                }
-                if let Some(entry) = wires.get(map_key) {
-                    hold_visited += 1;
-                    if entry.key == *key {
-                        fold_stage_count_row(entry, true, wanted, out);
+                };
+                // The index can shrink between lock chunks; do not leave the
+                // cursor past the new bucket end and spin forever.
+                alias_cursor = alias_cursor.min(map_keys.len());
+                while alias_cursor < map_keys.len()
+                    && chunk_work < STAGE_COUNTS_LOCK_CHUNK_18662
+                {
+                    let slot = alias_cursor;
+                    alias_cursor += 1;
+                    chunk_work += 1;
+                    let alias = &map_keys[slot];
+                    if !alias.live {
+                        continue;
+                    }
+                    let map_key = &alias.map_key;
+                    if wanted.contains_key(map_key) {
+                        continue;
+                    }
+                    if let Some(entry) = wires.get(map_key) {
+                        hold_visited += 1;
+                        if entry.key == *key
+                            && let Some(row) = stage_counts_evidence(entry, true, wanted)
+                        {
+                            debug_assert!(folds_len < STAGE_COUNTS_LOCK_CHUNK_18662);
+                            folds[folds_len] = Some(row);
+                            folds_len += 1;
+                        }
                     }
                 }
+                if alias_cursor == map_keys.len() {
+                    key_cursor += 1;
+                    alias_cursor = 0;
+                }
             }
-            if alias_cursor == map_keys.len() {
-                key_cursor += 1;
-                alias_cursor = 0;
+            drop(wire_index);
+            drop(wires);
+            drop(holders);
+            total_visited += hold_visited;
+            max_hold = max_hold.max(hold_visited);
+        }
+
+        while folds_cursor < folds_len
+            && chunk_work < STAGE_COUNTS_LOCK_CHUNK_18662
+        {
+            let pending = folds[folds_cursor]
+                .as_mut()
+                .expect("pending stage-count fold slot populated");
+            fold_stage_count_row(pending, out, &mut chunk_work);
+            if pending.next_slot == pending.row.slots.len() {
+                folds_cursor += 1;
+            } else {
+                break;
             }
         }
-        total_visited += hold_visited;
-        max_hold = max_hold.max(hold_visited);
-        max_work = max_work.max(hold_work);
+        max_work = max_work.max(chunk_work);
+        after_chunk();
     }
     (total_visited, max_hold, max_work)
 }
 
+
 // #18655/#18662: per-thread `(calls, rows fetched, max rows in one mutex
-// hold, max lookup candidates in one hold, requested worker keys)`. The
-// lock-hold fields count rows and candidates, not just query keys.
+// hold, max lookup-plus-slot-fold work in one bounded chunk, requested worker
+// keys)`. The fold contribution makes fan-out work visible in the budget.
 #[cfg(test)]
 thread_local! {
     pub(in crate::afxdp) static STAGE_COUNTS_WORK_18655: std::cell::Cell<(u64, u64, u64, u64, u64)> =
@@ -702,6 +842,10 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
             aliased.tcp_handshake_state = established;
             let map_key = wire_key.clone();
             wire_sessions.insert(wire_key, aliased);
+            // `nat` is captured from this session's installed decision;
+            // publish indexed that same wire key. If displaced, its stable
+            // tombstone remains, so a completing packet revives the old slot
+            // instead of growing the side index on the hot path.
             update_stage_counts_entry_key_index(
                 &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
                 &map_key,

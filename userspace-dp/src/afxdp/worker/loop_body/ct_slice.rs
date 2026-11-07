@@ -175,10 +175,10 @@ impl CtSlicePairSet {
 /// state, so replicas reaped at 20 s despite a promoted serving pair.
 ///
 /// #18655/#18662: the node-wide work uses a persistent table cursor and
-/// advances at most `CT_EVIDENCE_CHUNK` worker slots per ct-slice. Each
-/// slice restamps only that chunk, so map lookup and dedup work cannot
-/// grow with the table. Stage/count alias reads additionally visit at
-/// most 128 shared rows per dual-map lock hold.
+/// advances at most `CT_EVIDENCE_CHUNK` worker slots per ct-slice. Pending
+/// shared-evidence rows use one map-lock pair per chunk. Stage/count indexed
+/// reads fetch at most 128 rows per map hold and charge lookup plus output-slot
+/// folds to 128 work units per chunk, releasing all locks before each fold.
 #[inline(never)]
 fn run_shared_evidence_leg(
     sessions: &mut crate::session::SessionTable,
@@ -199,13 +199,14 @@ fn run_shared_evidence_leg(
     // counter stamps in `node_served_evidence`. Shared
     // Established is OUTPUT only (the restamp below), never an
     // input, so there is no chicken-and-egg.
-    let shared_evidence = |key: &SessionKey| {
-        crate::afxdp::shared_ops::shared_completion_evidence(
-            shared_sessions,
-            shared_forward_wire_sessions,
-            key,
-        )
-    };
+    let shared_evidence =
+        |candidates: &mut [crate::session::NodeServedForwardCandidate]| {
+            crate::afxdp::shared_ops::shared_completion_evidence_batch(
+                shared_sessions,
+                shared_forward_wire_sessions,
+                candidates,
+            );
+        };
     // #16217 (fw1 rev=0 leg): stamp EVERY forward pair this
     // worker's table holds -- any origin incl. `SyncImport`
     // replicas, any stage -- with its OWN live counters BEFORE
@@ -322,10 +323,10 @@ fn run_shared_evidence_leg(
                 emit_keys.push(pair.clone());
             }
         }
-        // #18655: ONE pass over the shared maps for the whole batch
-        // (the former per-key helper scanned both whole maps under
-        // both mutexes for EVERY key). Values are read after the
-        // restamps above, exactly as before.
+        // #18655/#18662: one indexed batch for the emit set; it reads the
+        // requested canonical/reverse rows and exact entry.key alias slots,
+        // releasing both shared-map locks after at most one fixed chunk.
+        // The former per-key helper scanned both whole maps for every key.
         let rows = crate::afxdp::shared_ops::shared_rows_stage_and_counts(
             shared_sessions,
             shared_forward_wire_sessions,

@@ -280,3 +280,164 @@ fn ct_slice_shared_evidence_cursor_advances_in_bounded_chunks_18662() {
     assert_eq!(work().0 - after.0, 1, "#18662: the next cycle starts a bounded chunk");
     assert_eq!(clocks.4, super::super::slice_pacing::CT_EVIDENCE_CHUNK);
 }
+
+/// #18662: shared pending-row evidence is gathered under one lock pair per
+/// bounded worker chunk, not one pair for every row.
+#[test]
+fn ct_slice_batches_pending_shared_evidence_lock_pair_18662() {
+    const PENDING: usize = 2048;
+    let mut sessions = crate::session::SessionTable::new();
+    let shared: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+        Arc::new(Mutex::new(FastMap::default()));
+    let wire_map: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+        Arc::new(Mutex::new(FastMap::default()));
+    let indexes = SharedSessionOwnerRgIndexes::default();
+    let server = fx::v4(172, 16, 80, 200);
+    for i in 0..PENDING {
+        let forward = fx::key(
+            fx::v4(10, 0, (i >> 8) as u8, i as u8),
+            21_000 + i as u16,
+            server,
+            5201,
+            crate::ip_proto::PROTO_TCP,
+        );
+        let nat = fx::snat(Some(45_000 + i as u16));
+        let entry = fx::row(
+            &forward,
+            nat,
+            TcpHandshakeState::HandshakePending.to_wire(),
+            0,
+            0,
+            false,
+            20_000 + i as u64,
+        );
+        assert!(sessions.upsert_synced_with_origin(
+            SessionInstall {
+                key: forward,
+                decision: entry.decision,
+                metadata: entry.metadata.clone(),
+                source_nat_static: None,
+                origin: SessionOrigin::WorkerLocalImport,
+                now_ns: 1_000_000_000,
+                protocol: crate::ip_proto::PROTO_TCP,
+                tcp_flags: 0,
+                session_id: entry.session_id,
+                tcp_close_class: 0,
+                tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+                persistent_lease_hold: None,
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            false,
+        ));
+    }
+    let before = crate::afxdp::shared_ops::SHARED_COMPLETION_EVIDENCE_BATCH_LOCK_PAIRS_18662
+        .with(|count| {
+            let before = count.get();
+            count.set(0);
+            before
+        });
+    let pending_before =
+        crate::afxdp::shared_ops::SHARED_COMPLETION_EVIDENCE_BATCH_PENDING_ROWS_18662
+            .with(|count| {
+                let before = count.get();
+                count.set(0);
+                before
+            });
+    let mut cursor = 0usize;
+    run_shared_evidence_leg(
+        &mut sessions,
+        &shared,
+        &wire_map,
+        &indexes,
+        &mut cursor,
+    );
+    let acquired =
+        crate::afxdp::shared_ops::SHARED_COMPLETION_EVIDENCE_BATCH_LOCK_PAIRS_18662
+            .with(|count| {
+                let acquired = count.get();
+                count.set(before);
+                acquired
+            });
+    let pending_rows =
+        crate::afxdp::shared_ops::SHARED_COMPLETION_EVIDENCE_BATCH_PENDING_ROWS_18662
+            .with(|count| {
+                let pending_rows = count.get();
+                count.set(pending_before);
+                pending_rows
+            });
+    assert_eq!(acquired, 1, "2,048 pending rows need one shared-map lock pair");
+    assert_eq!(pending_rows, PENDING as u64, "the batch covers all pending rows");
+    assert_eq!(cursor, 0, "the 2,048-row worker chunk completes in one pass");
+}
+
+/// A worker row replaced in a slab slot already passed by this cycle is
+/// deferred until the cursor wraps, then picked up from the beginning.
+#[test]
+fn ct_slice_worker_row_reinsert_after_pass_is_seen_next_cycle_18662() {
+    const CHUNK: usize = 2048;
+    let (mut sessions, _shared, _wire_map, _indexes, announced) =
+        slice_fixture_18655(CHUNK + 1);
+    let target = announced[0].clone();
+    let mut first = Vec::new();
+    assert_eq!(
+        sessions.ct_slice_forward_pairs(0, CHUNK, &mut first),
+        CHUNK,
+        "fixture: first worker chunk leaves one row"
+    );
+    assert!(first.iter().any(|(key, _, _, _, _)| key == &target));
+
+    // Reinstall the first row in the slab slot the cursor has already passed.
+    // The slab's free slot is reused, so the remaining current-cycle chunk
+    // must not see this new incarnation.
+    sessions.delete(&target);
+    let replacement = fx::row(
+        &target,
+        fx::snat(Some(42_000)),
+        TcpHandshakeState::HandshakePending.to_wire(),
+        99,
+        3,
+        false,
+        99_999,
+    );
+    assert!(sessions.upsert_synced_with_origin(
+        SessionInstall {
+            key: target.clone(),
+            decision: replacement.decision,
+            metadata: replacement.metadata.clone(),
+            source_nat_static: None,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: 2_000_000_000,
+            protocol: crate::ip_proto::PROTO_TCP,
+            tcp_flags: 0,
+            session_id: replacement.session_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: TcpHandshakeState::HandshakePending.to_wire(),
+            persistent_lease_hold: None,
+            fwd_packets: 99,
+            rev_packets: 3,
+        },
+        false,
+    ));
+    let mut rest_of_cycle = Vec::new();
+    assert_eq!(
+        sessions.ct_slice_forward_pairs(CHUNK, CHUNK, &mut rest_of_cycle),
+        0,
+        "fixture: cursor wraps at the table end"
+    );
+    assert!(
+        !rest_of_cycle.iter().any(|(key, _, _, _, _)| key == &target),
+        "replacement in the passed slot is deferred for this cycle"
+    );
+
+    let mut next_cycle = Vec::new();
+    let _ = sessions.ct_slice_forward_pairs(0, CHUNK, &mut next_cycle);
+    assert_eq!(
+        next_cycle
+            .iter()
+            .find(|(key, _, _, _, _)| key == &target)
+            .map(|(_, _, fwd, rev, _)| (*fwd, *rev)),
+        Some((99, 3)),
+        "the next cycle restarts at slot zero and observes the replacement"
+    );
+}
