@@ -132,7 +132,9 @@ Triggers `networkctl reload` only when files actually changed.
   networkd ignore. The daemon's `BindInterfaceToVRF` owns the binding. Cells:
   `keep_master_18597_test.go` plus the #18605 dataplane model cells. The
   compiler excludes dual-claimed and retained quarantined devices while
-  preserving same-RI list plus stanza claims. Removing the last applicable
+  preserving same-RI list plus stanza claims and giving unit tunnel stanzas
+  precedence over interface stanzas on the same device. Conflicting
+  different-RI unit-stanza claims remain unmarked. Removing the last applicable
   bind drops `KeepMaster=yes` on the next compile.
   Residual: a DISABLED management-class row takes the always-down early return
   without `KeepMaster=yes` (#18607).

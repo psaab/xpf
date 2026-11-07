@@ -2478,11 +2478,21 @@ func fillRoutingInstanceVRFNames(cfg *config.Config, result *CompileResult) {
 		if ifc == nil {
 			continue
 		}
-		addTunnelClaim(ifc.Tunnel)
+		// Unit tunnel stanzas take precedence over the interface stanza on
+		// the same Linux device. Process units first and suppress only that
+		// device's parent claim. Conflicting unit claims are already filtered.
+		parentTunnelOverridden := false
 		for _, unit := range ifc.Units {
-			if unit != nil {
-				addTunnelClaim(unit.Tunnel)
+			if unit == nil || unit.Tunnel == nil {
+				continue
 			}
+			if ifc.Tunnel != nil && unit.Tunnel.Name == ifc.Tunnel.Name {
+				parentTunnelOverridden = true
+			}
+			addTunnelClaim(unit.Tunnel)
+		}
+		if ifc.Tunnel != nil && !parentTunnelOverridden {
+			addTunnelClaim(ifc.Tunnel)
 		}
 	}
 	for i := range result.ManagedInterfaces {

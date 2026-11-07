@@ -98,6 +98,41 @@ func TestTunnelStanzaRoutingInstanceKeepsMaster18605(t *testing.T) {
 		assertVRFName18605(t, result, "gr-0-0-0", "vrf-blue")
 	})
 
+	t.Run("unit stanza overrides interface stanza on same device", func(t *testing.T) {
+		cfg := tunnelStanzaConfig18605("blue",
+			&config.RoutingInstanceConfig{Name: "blue"},
+			&config.RoutingInstanceConfig{Name: "red"},
+		)
+		cfg.Interfaces.Interfaces["gr-0/0/0"].Units[0].Tunnel = &config.TunnelConfig{
+			Name: "gr-0-0-0", RoutingInstance: "red",
+		}
+		result := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, result, "gr-0-0-0", "vrf-red")
+	})
+
+	t.Run("different unit stanzas on same device conflict", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"gr-0/0/0": {
+				Name: "gr-0/0/0",
+				Units: map[int]*config.InterfaceUnit{
+					0: {Number: 0, Tunnel: &config.TunnelConfig{
+						Name: "gr-0-0-0", RoutingInstance: "blue",
+					}},
+					1: {Number: 1, Tunnel: &config.TunnelConfig{
+						Name: "gr-0-0-0", RoutingInstance: "red",
+					}},
+				},
+			},
+		}
+		cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+			{Name: "blue"},
+			{Name: "red"},
+		}
+		result := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, result, "gr-0-0-0", "")
+	})
+
 	t.Run("stanza removal", func(t *testing.T) {
 		cfg := tunnelStanzaConfig18605("blue", &config.RoutingInstanceConfig{Name: "blue"})
 		before := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
