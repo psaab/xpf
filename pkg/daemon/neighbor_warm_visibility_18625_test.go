@@ -94,6 +94,53 @@ func TestWarmPrimaryNotHeldWarnsOnceAfterGrace18625(t *testing.T) {
 	}
 }
 
+// #18634: primary-not-held must name RETH units only. A non-RETH unit no
+// node holds an address on is unremarkable — local() there is just an
+// unassigned physical interface, not a cluster failover that stranded a
+// VIP — so the plan must not record it and the health note must not Warn
+// for it, even well past the grace. RED if the isReth gate at the
+// primaryNotHeld append goes (mutant W5 from #18625 review): rgHeld is
+// true for every non-RETH unit (rgHeld := !isReth || rgPrimary), so
+// without isReth the phantom keys "rg0 <ifname> <prefix>" would appear
+// here and notePrimaryNotHeld would Warn after the grace.
+func TestWarmPrimaryNotHeldExcludesNonRethUnit_18634(t *testing.T) {
+	in := splitWarmInputs18617(map[int]bool{1: true})
+	base := in.localAddrs
+	in.localAddrs = func(ifname string) []netip.Prefix {
+		if ifname == "fxp0" {
+			return nil // management address not landed; no node owns it
+		}
+		return base(ifname)
+	}
+	plan := buildNeighborWarmPlan(splitWarmConfig18617(), in)
+	for _, k := range plan.primaryNotHeld {
+		if strings.HasPrefix(k, "rg0 ") || strings.Contains(k, " fxp0 ") {
+			t.Fatalf("non-RETH unit leaked into primaryNotHeld: %q (all: %v)", k, plan.primaryNotHeld)
+		}
+	}
+	if len(plan.primaryNotHeld) != 0 {
+		t.Fatalf("primaryNotHeld = %v, want none: only fxp0 (non-RETH) is unheld and every RETH prefix this node is primary for is held", plan.primaryNotHeld)
+	}
+	var h neighborWarmHealth
+	t0 := time.Unix(1000, 0)
+	if w := h.notePrimaryNotHeld(plan.primaryNotHeld, t0); len(w) != 0 {
+		t.Fatalf("warned on first sight for non-RETH plan: %v", w)
+	}
+	if w := h.notePrimaryNotHeld(plan.primaryNotHeld, t0.Add(60*time.Second)); len(w) != 0 {
+		t.Fatalf("warned past the grace for non-RETH plan: %v", w)
+	}
+	if len(h.notHeldSince) != 0 {
+		t.Fatalf("notHeldSince tracked %v keys for a non-RETH-only plan, want none", h.notHeldSince)
+	}
+	// The pass counts stay clean too.
+	d := &Daemon{neighborWarmDialer: newCountingWarmDialer(), neighborWarmPlanInputs: in}
+	d.setDataplane(&warmNeighborTestDP{store: &warmEndpointStore18617{v4: [][2]netip.Addr{{lanHost4, wanTarget4}}}})
+	d.warmNeighborCacheFor(splitWarmConfig18617())
+	if c := d.lastNeighborWarmCounts.Load(); c == nil || c.primaryNotHeld != 0 {
+		t.Fatalf("pass counts primaryNotHeld=%v, want 0 for non-RETH-only unheld", c)
+	}
+}
+
 type failingWarmDialer struct{ opens int }
 
 func (f *failingWarmDialer) open(string, string) (neighborWarmConn, error) {
