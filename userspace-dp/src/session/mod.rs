@@ -8322,8 +8322,9 @@ mod close_refresh_gate_10885_tests;
 #[cfg(test)]
 #[path = "tcp_seq_15753_tests.rs"]
 mod tcp_seq_15753_tests;
-// #18562: the punt-seed directory's publish / retire / fence / deadline /
-// cap contract, driven through the table's own install and removal paths.
+// #18562/#18624: the punt-seed directory's publish / retire / fence /
+// deadline / cap / tombstone-reservation contract, driven through the table's
+// own install and removal paths.
 #[cfg(test)]
 #[path = "punt_seed_directory_18562_tests.rs"]
 mod punt_seed_directory_18562_tests;

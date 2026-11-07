@@ -654,3 +654,35 @@ fn churn_at_the_cap_never_resizes_the_shard_18562() {
     assert!(worst_call <= budget, "a single churn publish did {worst_call} units of work");
     assert_eq!(dir.len(), cap);
 }
+
+/// A drained shard keeps its reservation even when tombstones exhaust
+/// `HashMap::capacity()`. RED on the old capacity-as-first-use predicate: it
+/// reserves again and grows the table despite `row_cap` recording prior use.
+#[test]
+fn tombstoned_empty_shard_does_not_rereserve_18624() {
+    let dir = PuntSeedDirectory::new();
+    let key = keys_in_one_shard(&dir, 1).remove(0);
+    let shard = dir.shard_of_for_test(&key);
+    assert!(dir.publish(&key, row_at(T0 + 1_000_000_000, 1), T0));
+    let reserved = dir.rows_capacity_for_test(shard);
+    assert!(reserved > 0, "the first publish reserved the table");
+
+    dir.retire(&key, 1, 1);
+    assert_eq!(dir.len(), 0, "the live directory is empty");
+    assert_eq!(dir.rows_capacity_for_test(shard), reserved);
+
+    dir.tombstone_empty_shard_for_test(shard, &key, row_at(T0 + 1_000_000_000, 2));
+    assert_eq!(dir.len(), 0, "test-only tombstones do not represent live rows");
+    assert_eq!(
+        dir.rows_capacity_for_test(shard),
+        0,
+        "premise: an empty map at exhausted capacity"
+    );
+
+    assert!(dir.publish(&key, row_at(T0 + 1_000_000_000, 2), T0 + 1));
+    assert!(
+        dir.rows_capacity_for_test(shard) <= reserved,
+        "the drained shard grew beyond its existing reservation"
+    );
+    assert_eq!(dir.len(), 1);
+}

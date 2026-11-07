@@ -306,7 +306,7 @@ impl PuntSeedDirectory {
     /// practically never needs to; the queue's reservation is never exceeded
     /// (`QUEUE_CAP`). The reservation is kept once made (see the memory note).
     fn reserve_on_first_publish(shard: &mut Shard) {
-        if shard.rows.capacity() == 0 {
+        if shard.row_cap == 0 {
             shard.rows.reserve(ROWS_RESERVE);
             // Right after reserving into an EMPTY map, `capacity()` is the
             // table's full item capacity (no tombstones yet). Derived, not
@@ -443,6 +443,60 @@ impl PuntSeedDirectory {
     #[cfg(test)]
     pub(crate) fn rows_capacity_for_test(&self, index: usize) -> usize {
         self.lock(index).rows.capacity()
+    }
+
+    /// Construct an empty, previously reserved map whose insertion budget is
+    /// consumed by tombstones. Ordinary row-cap churn rehashes before reaching
+    /// this extreme, so the seam pins the capacity-vs-first-use distinction.
+    #[cfg(test)]
+    pub(crate) fn tombstone_empty_shard_for_test(
+        &self,
+        index: usize,
+        target: &SessionKey,
+        row: PuntSeedRow,
+    ) {
+        use std::hash::BuildHasher;
+
+        let mut shard = self.lock(index);
+        assert_eq!(shard.rows.len(), 0, "the fixture starts empty");
+        assert_ne!(shard.row_cap, 0, "the shard has already been reserved");
+        let reserved_capacity = shard.rows.capacity();
+        assert_ne!(reserved_capacity, 0, "the shard table is allocated");
+        // HashMap uses power-of-two buckets. Make a collision cluster covering
+        // its full 7/8 growth threshold, then delete it to leave tombstones.
+        let bucket_mask = reserved_capacity.next_power_of_two() - 1;
+        let target_bucket = shard.rows.hasher().hash_one(target) as usize & bucket_mask;
+        let mut keys = Vec::with_capacity(reserved_capacity);
+        let mut candidate = 0u64;
+        while keys.len() < reserved_capacity {
+            let key = SessionKey {
+                src_port: candidate as u16,
+                dst_port: (candidate >> 16) as u16,
+                ..target.clone()
+            };
+            if shard.rows.hasher().hash_one(&key) as usize & bucket_mask == target_bucket {
+                keys.push(key);
+            }
+            candidate += 1;
+        }
+
+        for key in &keys {
+            assert!(shard.rows.insert(key.clone(), row.clone()).is_none());
+        }
+        assert_eq!(
+            shard.rows.capacity(),
+            reserved_capacity,
+            "fixture construction must not resize the reserved table"
+        );
+        for key in &keys {
+            assert!(shard.rows.remove(key).is_some());
+        }
+        assert_eq!(shard.rows.len(), 0, "the tombstoned fixture is empty");
+        assert_eq!(
+            shard.rows.capacity(),
+            0,
+            "all insertion capacity is consumed by tombstones"
+        );
     }
 
     /// Run `f` while holding shard `index`'s lock (contention cell).
