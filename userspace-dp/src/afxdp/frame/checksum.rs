@@ -204,7 +204,7 @@ pub(in crate::afxdp::frame) fn checksum_family_of(addr_family: u8) -> Option<Che
 ///
 /// SCOPE (#1839): this is the single source of truth for the
 /// computed-zero rule across the incremental `adjust_l4_checksum_*`
-/// sites, the descriptor fast path (`rewrite/ipv6.rs`), the port
+/// sites, the descriptor fast paths (`rewrite/ipv6.rs`, `rewrite/ipv4.rs`), the port
 /// adjust (`adjust_l4_checksum_port`), and — by matching arithmetic —
 /// `recompute_l4_checksum_ipv6` (UDP and ICMPv6 arms canonicalize; TCP
 /// does not: a computed TCP 0x0000 is valid on the wire and matches v4

@@ -87,6 +87,7 @@ pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv6(
     Some((rel_l4, l4_checksum_field_offset))
 }
 
+/// Infallible mutation half of the IPv6 descriptor rewrite. MUST be called
 /// only after `validate_rewrite_descriptor_ipv6` cleared the gates; `rel_l4`
 /// and the optional L4 checksum-field offset relative to the IP header are
 /// that call's returns. No path returns `None` — every write is bounds-safe
