@@ -167,6 +167,8 @@ func assertRenderedKeepMaster18605(t *testing.T, result *CompileResult, name str
 	// Apply writes the generated files before reload. Fail the stubbed reload
 	// deliberately so the test checks real output without running the tail's
 	// host sysctl writes.
+	networkd.ResetReloadDebtForTest()
+	t.Cleanup(networkd.ResetReloadDebtForTest)
 	binDir := t.TempDir()
 	networkctl := filepath.Join(binDir, "networkctl")
 	script := "#!/bin/sh\nif [ \"$1\" = reload ]; then exit 1; fi\nexit 0\n"
@@ -177,8 +179,9 @@ func assertRenderedKeepMaster18605(t *testing.T, result *CompileResult, name str
 
 	networkDir := t.TempDir()
 	err := networkd.NewInDir(networkDir).Apply(result.ManagedInterfaces)
-	if err == nil || !strings.Contains(err.Error(), "networkctl reload") {
-		t.Fatalf("networkd Apply error = %v, want stubbed reload failure after rendering files", err)
+	networkd.ResetReloadDebtForTest()
+	if err == nil || err.Error() != "networkctl reload: exit status 1" {
+		t.Fatalf("networkd Apply error = %v, want only the stubbed reload failure", err)
 	}
 
 	path := filepath.Join(networkDir, networkd.FilePrefix+name+".network")

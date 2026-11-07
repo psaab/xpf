@@ -444,6 +444,17 @@ func NoteReloadResult(epoch uint64, err error) {
 // external reload owner performs. See Manager.activationPending.
 func ReloadDebtOutstanding() bool { return reloadDebtOutstanding() }
 
+// ResetReloadDebtForTest clears process-scoped reload state for external
+// package tests. Production code must never call this: it would erase a real
+// activation obligation.
+func ResetReloadDebtForTest() {
+	reloadDebt.mu.Lock()
+	defer reloadDebt.mu.Unlock()
+	reloadDebt.pending = false
+	reloadDebt.epoch = 0
+	reloadDebt.tailPending = false
+}
+
 // SetProtectedResolver registers the management protected-set provider so
 // Apply can exempt the lifeline's files from the stale-file sweep. Called once
 // at daemon init alongside the dataplane protected resolver.
