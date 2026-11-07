@@ -11,15 +11,12 @@
 //! peer queue on the plain promote leg (which is the no-conntrack
 //! wrapper, so it says nothing about fds); cell 4 pins
 //! `ConntrackFds.v4` and the deferred-promotion `Tick.ns` graft on
-//! the `_with_conntrack` promotion leg (origin-bit write — that
-//! seam is family-dispatched in production code, so the legacy
-//! sentinel in `v4` is genuinely transposition-sensitive there);
-//! cell 2 pins `ConntrackFds.v4` + peer queue on the purge leg,
-//! where the delete seam accepts the legacy sentinel in either
-//! slot, so cell 2 uses the family-sensitive
-//! `CONNTRACK_TEST_MAP_FD_V6` in `v4` (#16261); cell 3 pins
-//! only the `detached`/`with_conntrack_tick` constructor values.
-//! No cell observes a `Tick.secs` consumer: the resolve path's
+//! the `_with_conntrack` promotion leg (origin-bit write, dispatched
+//! through the family-aware conntrack target);
+//! cell 2 pins `ConntrackFds.v4` and the peer queue on the purge leg.
+//! A v4/v6 transposition selects `NoMap` rather than the test rows.
+//! Cell 3 pins only the `detached`/`with_conntrack_tick` constructor
+//! values. No cell observes a `Tick.secs` consumer: the resolve path's
 //! seconds reading is exercised by the existing HA resolution
 //! tests through their own bundles, not asserted here. #17069:
 //! the `tick_from_ns_derives_secs_17069` and
@@ -202,18 +199,13 @@ fn shared_refs_maps_and_peer_queue_reach_promote_16185() {
 /// the bundle's peer queue, on `purge_translated_synced_hit_with_context`
 /// via the deferred purge in `maybe_promote_synced_session_with_conntrack`.
 ///
-/// #16261 family-sensitive form: the bundle carries
-/// `v4 = CONNTRACK_TEST_MAP_FD_V6` (recognised only in the slot
-/// matching the key's family) and `v6 = -1`, deliberately NOT the
-/// old `CONNTRACK_TEST_MAP_FD` sentinel: the delete seams accept
-/// that sentinel in either slot, so with it a transposed bundle
-/// (`v4: -1, v6: <sentinel>`) would still delete this IPv4 row and
-/// the cell would pass on swapped wiring. With the family-sensitive
-/// sentinel a transposition reaches the real-BPF branch on a
-/// negative fd, the lookup errors, and the row survives — turning
-/// this cell red. The key stays IPv4 (the purge leg's translated
-/// forward key is derived from the IPv4 fixture); a v6 purge key
-/// would need a NAT64 fixture this cell does not build.
+/// The bundle carries the shared test fd only in the v4 slot and `-1` in
+/// v6. The single conntrack target selects a test map only from the slot
+/// matching the key family; a transposed bundle (`v4: -1, v6: <test fd>`)
+/// therefore selects `NoMap`, leaves this IPv4 row present, and turns the
+/// cell red. The key stays IPv4 (the purge leg's translated forward key is
+/// derived from the IPv4 fixture); a v6 purge key would need a NAT64 fixture
+/// this cell does not build.
 #[test]
 fn shared_refs_conntrack_v4_reaches_purge_16185() {
     crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
@@ -299,7 +291,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: empty_worker_commands_by_id(),
         conntrack: ConntrackFds {
-            v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD_V6,
+            v4: crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
             v6: -1,
         },
         tick: Tick::from_parts(1_000_000, 9),

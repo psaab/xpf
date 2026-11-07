@@ -2297,6 +2297,179 @@ fn conntrack_rmw_app_id_succeeds_without_lease_13668() {
     );
 }
 
+// #17271: the selected-family test fd is shared by every conntrack operation.
+// A v4/v6 transposition must never read, write, or delete the test row.
+#[test]
+fn conntrack_test_rows_use_only_the_selected_family_fd_17271() {
+    let mut v4_key = plain_key();
+    v4_key.src_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 71));
+    v4_key.dst_ip = std::net::IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 71));
+    v4_key.src_port = 47_071;
+    v4_key.dst_port = 47_072;
+    let mut v6_key = v4_key.clone();
+    v6_key.addr_family = libc::AF_INET6 as u8;
+    v6_key.src_ip = std::net::IpAddr::V6("2001:db8:172:71::1".parse().unwrap());
+    v6_key.dst_ip = std::net::IpAddr::V6("2001:db8:172:71::2".parse().unwrap());
+    let test_fd = crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD;
+    let cases = [
+        (&v4_key, test_fd, -1, -1, test_fd),
+        (&v6_key, -1, test_fd, test_fd, -1),
+    ];
+
+    for (key, good_v4, good_v6, wrong_v4, wrong_v6) in cases {
+        crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+        let decision = local_delivery_decision(0);
+        let metadata = synced_forward_metadata();
+        let publish = |v4_fd, v6_fd| {
+            crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+                v4_fd,
+                v6_fd,
+                key,
+                decision,
+                &metadata,
+                &FastMap::default(),
+                0,
+                11,
+                42,
+                60,
+                SessionOrigin::SyncImport,
+            )
+        };
+
+        assert_eq!(
+            publish(wrong_v4, wrong_v6),
+            crate::afxdp::bpf_map::ConntrackPublishResult::NoMap,
+            "wrong-family test fd must not select the test backend for {key:?}",
+        );
+        assert!(
+            crate::afxdp::bpf_map::conntrack_row_for_test(key).is_none(),
+            "wrong-family publish must leave {key:?} absent",
+        );
+        assert_eq!(
+            publish(good_v4, good_v6),
+            crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+            "the selected-family fd must reach the test backend for {key:?}",
+        );
+        let original =
+            crate::afxdp::bpf_map::conntrack_row_for_test(key).expect("selected-family publish");
+        let snapshot = crate::afxdp::bpf_map::snapshot_bpf_conntrack_entry_under_gate(
+            good_v4, good_v6, key,
+        )
+        .unwrap()
+        .expect("selected-family snapshot");
+
+        assert!(
+            crate::afxdp::bpf_map::snapshot_bpf_conntrack_entry_under_gate(
+                wrong_v4, wrong_v6, key,
+            )
+            .unwrap()
+            .is_none(),
+            "wrong-family snapshot must not read {key:?}",
+        );
+        assert_eq!(
+            conntrack_entry_session_id(wrong_v4, wrong_v6, key),
+            Err(()),
+            "wrong-family lookup must not read {key:?}",
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::delete_bpf_conntrack_entry_result(
+                wrong_v4, wrong_v6, key,
+            ),
+            crate::afxdp::bpf_map::ConntrackDeleteResult::KernelError,
+            "wrong-family delete must not select {key:?}'s test row",
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_result(
+                wrong_v4, wrong_v6, key, 42,
+            ),
+            crate::afxdp::bpf_map::ConntrackDeleteResult::KernelError,
+            "wrong-family session lookup/delete must not select {key:?}'s test row",
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_row_for_test(key),
+            Some(original.clone()),
+            "wrong-family lookup/delete must leave the row byte-for-byte unchanged",
+        );
+
+        assert!(
+            crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+                wrong_v4, wrong_v6, key, 77,
+            ),
+            "a missing selected map remains a successful no-op",
+        );
+        crate::afxdp::bpf_map::update_session_cluster_synced_origin(
+            wrong_v4, wrong_v6, key, false,
+        );
+        let mut table = crate::session::SessionTable::new();
+        assert!(table.install_with_protocol(
+            key.clone(),
+            decision,
+            metadata.clone(),
+            1_000_000,
+            key.protocol,
+            0x10,
+        ));
+        let policy = crate::policy::PolicyState::default();
+        let _ = crate::afxdp::bpf_map::refresh_bpf_conntrack_last_seen(
+            wrong_v4, wrong_v6, &table, &policy, 2_000_000_000, 0, 4096,
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(),
+            0,
+            "wrong-family refresh must not reach the test backend",
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_row_for_test(key),
+            Some(original.clone()),
+            "wrong-family app-id/origin/refresh paths must leave the row unchanged",
+        );
+
+        assert!(crate::afxdp::bpf_map::restamp_bpf_conntrack_app_id(
+            good_v4, good_v6, key, 77,
+        ));
+        crate::afxdp::bpf_map::update_session_cluster_synced_origin(
+            good_v4, good_v6, key, false,
+        );
+        let _ = crate::afxdp::bpf_map::refresh_bpf_conntrack_last_seen(
+            good_v4, good_v6, &table, &policy, 2_000_000_000, 0, 4096,
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_refresh_writes_for_test(),
+            1,
+            "selected-family refresh must reach the test backend",
+        );
+        let updated =
+            crate::afxdp::bpf_map::conntrack_row_for_test(key).expect("row remains");
+        assert_eq!(updated.app_id, 77);
+        assert!(!updated.cluster_synced);
+
+        assert_eq!(
+            crate::afxdp::bpf_map::delete_bpf_conntrack_entry_for_session_result(
+                good_v4, good_v6, key, 42,
+            ),
+            crate::afxdp::bpf_map::ConntrackDeleteResult::Deleted,
+        );
+        assert!(crate::afxdp::bpf_map::conntrack_row_for_test(key).is_none());
+        assert!(
+            !crate::afxdp::bpf_map::restore_bpf_conntrack_entry_under_gate(
+                wrong_v4, wrong_v6, &snapshot,
+            ),
+            "wrong-family restore must not recreate {key:?}",
+        );
+        assert!(crate::afxdp::bpf_map::conntrack_row_for_test(key).is_none());
+        assert!(
+            crate::afxdp::bpf_map::restore_bpf_conntrack_entry_under_gate(
+                good_v4, good_v6, &snapshot,
+            ),
+            "selected-family restore must recreate {key:?}",
+        );
+        assert_eq!(
+            crate::afxdp::bpf_map::conntrack_row_for_test(key),
+            Some(original),
+        );
+    }
+}
+
 // #18696: `delete_all_map_keys` (the conntrack-map clear) reads the next key
 // before deleting the current one. `HtabModel` models the kernel hash map's
 // iteration: get_next_key on a PRESENT key continues from its bucket; on a

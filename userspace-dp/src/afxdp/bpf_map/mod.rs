@@ -1,6 +1,8 @@
 use super::*;
 mod tuple_gate;
 pub(crate) use tuple_gate::*;
+mod conntrack_io;
+pub(crate) use conntrack_io::*;
 
 /// #9517: `has_routing_domains` DEMOTES a `PASS_TO_KERNEL` row to `REDIRECT`,
 /// for the same reason the `lo0`-filter gate in `session_glue` already does.
@@ -904,18 +906,6 @@ thread_local! {
         const { std::cell::RefCell::new(std::collections::VecDeque::new()) };
 }
 
-#[cfg(test)]
-pub(crate) const CONNTRACK_TEST_MAP_FD: c_int = -2;
-
-/// #16261: family-distinct second test fd. The single sentinel above is
-/// accepted in either slot by the delete/lookup seams
-/// (`conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd ==
-/// CONNTRACK_TEST_MAP_FD`), so a wiring cell placing it only in `v4`
-/// cannot distinguish a v4/v6 transposition through those seams. This
-/// value is recognised only in the family-correct slot of the delete
-/// path.
-#[cfg(test)]
-pub(crate) const CONNTRACK_TEST_MAP_FD_V6: c_int = -3;
 
 #[cfg(test)]
 thread_local! {
@@ -1174,10 +1164,13 @@ fn publish_bpf_conntrack_entry_raw(
     flags = source_nat_provenance_flags(flags, source_nat_static);
     flags = cluster_synced_flags(flags, origin.is_cluster_synced_origin());
 
-    let result = match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
+    #[cfg(test)]
+    let test_target = target.is_test_map();
+    let result = match (target, &key.src_ip, &key.dst_ip) {
+        (ConntrackTarget::V4(fd), IpAddr::V4(src), IpAddr::V4(dst)) => {
             publish_conntrack::publish_v4_session(
-                conntrack_v4_fd,
+                fd,
                 key,
                 *src,
                 *dst,
@@ -1193,9 +1186,9 @@ fn publish_bpf_conntrack_entry_raw(
                 timeout_secs,
             )
         }
-        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+        (ConntrackTarget::V6(fd), IpAddr::V6(src), IpAddr::V6(dst)) => {
             publish_conntrack::publish_v6_session(
-                conntrack_v6_fd,
+                fd,
                 key,
                 *src,
                 *dst,
@@ -1211,14 +1204,12 @@ fn publish_bpf_conntrack_entry_raw(
                 timeout_secs,
             )
         }
-        (libc::AF_INET, IpAddr::V4(..), IpAddr::V4(..)) => ConntrackPublishResult::NoMap,
-        (libc::AF_INET6, IpAddr::V6(..), IpAddr::V6(..)) => ConntrackPublishResult::NoMap,
+        (ConntrackTarget::NoMap { .. }, _, _) => ConntrackPublishResult::NoMap,
+        (ConntrackTarget::CrossFamily, _, _) => ConntrackPublishResult::IntentionallySkipped,
         _ => ConntrackPublishResult::IntentionallySkipped,
     };
     #[cfg(test)]
-    let result = if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD
-        || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD
-    {
+    let result = if test_target {
         ConntrackPublishResult::Written
     } else {
         result
@@ -1236,11 +1227,7 @@ fn publish_bpf_conntrack_entry_raw(
                 record.clone()
             })
         });
-        if result == ConntrackPublishResult::Written
-            && (conntrack_v4_fd == CONNTRACK_TEST_MAP_FD
-                || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD)
-            && let Some(record) = record
-        {
+        if result == ConntrackPublishResult::Written && test_target && let Some(record) = record {
             CONNTRACK_TEST_ROWS.with(|rows| {
                 rows.borrow_mut()
                     .insert(bare_conntrack_test_key(&record.key), record);
@@ -1291,19 +1278,20 @@ pub(crate) fn snapshot_bpf_conntrack_entry_under_gate(
     conntrack_v6_fd: c_int,
     key: &SessionKey,
 ) -> Result<Option<ConntrackEntrySnapshot>, ()> {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
     #[cfg(test)]
-    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         return Ok(conntrack_row_for_test(key)
             .map(|record| ConntrackEntrySnapshot(ConntrackEntrySnapshotData::Test(record))));
     }
-    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+    match (target, &key.src_ip, &key.dst_ip) {
+        (ConntrackTarget::V4(fd), IpAddr::V4(src), IpAddr::V4(dst)) => {
             let bpf_key =
                 bpf_session_key_v4(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
             let mut value = [0u8; std::mem::size_of::<BpfSessionValueV4>()];
             let rc = unsafe {
                 libbpf_sys::bpf_map_lookup_elem(
-                    conntrack_v4_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                     value.as_mut_ptr().cast::<c_void>(),
                 )
@@ -1329,13 +1317,13 @@ pub(crate) fn snapshot_bpf_conntrack_entry_under_gate(
                 Err(())
             }
         }
-        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+        (ConntrackTarget::V6(fd), IpAddr::V6(src), IpAddr::V6(dst)) => {
             let bpf_key =
                 bpf_session_key_v6(src.octets(), dst.octets(), key.src_port, key.dst_port, key.protocol);
             let mut value = [0u8; std::mem::size_of::<BpfSessionValueV6>()];
             let rc = unsafe {
                 libbpf_sys::bpf_map_lookup_elem(
-                    conntrack_v6_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                     value.as_mut_ptr().cast::<c_void>(),
                 )
@@ -1390,11 +1378,9 @@ pub(crate) fn restore_bpf_conntrack_entry_under_gate(
             ) == 0
         },
         #[cfg(test)]
-        ConntrackEntrySnapshotData::Test(record)
-            if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD
-                || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD =>
-        {
-            if CONNTRACK_RESTORE_FAIL.with(std::cell::Cell::get) {
+        ConntrackEntrySnapshotData::Test(record) => {
+            let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, &record.key);
+            if !target.is_test_map() || CONNTRACK_RESTORE_FAIL.with(std::cell::Cell::get) {
                 return false;
             }
             CONNTRACK_TEST_ROWS.with(|rows| {
@@ -1431,18 +1417,7 @@ pub(crate) fn delete_bpf_conntrack_entry_result(
 }
 
 fn conntrack_maps_unavailable(conntrack_v4_fd: c_int, conntrack_v6_fd: c_int) -> bool {
-    #[cfg(test)]
-    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
-        return false;
-    }
-    // #16261: the family-sensitive sentinel also means a test map is
-    // present; without this a `-2`-free pair of negatives looks
-    // unavailable and the caller's delete silently no-ops.
-    #[cfg(test)]
-    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD_V6 || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD_V6 {
-        return false;
-    }
-    conntrack_v4_fd < 0 && conntrack_v6_fd < 0
+    !conntrack_fd_available(conntrack_v4_fd) && !conntrack_fd_available(conntrack_v6_fd)
 }
 
 /// Delete only the conntrack incarnation that the teardown removed.
@@ -1479,22 +1454,13 @@ fn conntrack_entry_session_id(
     conntrack_v6_fd: c_int,
     key: &SessionKey,
 ) -> Result<Option<u64>, ()> {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
     #[cfg(test)]
-    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         return Ok(conntrack_row_for_test(key).map(|row| row.session_id));
     }
-    // #16261: family-sensitive sentinel (see CONNTRACK_TEST_MAP_FD_V6):
-    // honoured only in the slot matching the key's address family, so a
-    // v4/v6 transposition falls through to the real-BPF branch on a
-    // negative fd and errors instead of touching the test rows.
-    #[cfg(test)]
-    if (matches!(key.src_ip, IpAddr::V4(_)) && conntrack_v4_fd == CONNTRACK_TEST_MAP_FD_V6)
-        || (matches!(key.src_ip, IpAddr::V6(_)) && conntrack_v6_fd == CONNTRACK_TEST_MAP_FD_V6)
-    {
-        return Ok(conntrack_row_for_test(key).map(|row| row.session_id));
-    }
-    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+    match (target, &key.src_ip, &key.dst_ip) {
+        (ConntrackTarget::V4(fd), IpAddr::V4(src), IpAddr::V4(dst)) => {
             let bpf_key = bpf_session_key_v4(
                 src.octets(),
                 dst.octets(),
@@ -1505,7 +1471,7 @@ fn conntrack_entry_session_id(
             let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
             let rc = unsafe {
                 libbpf_sys::bpf_map_lookup_elem(
-                    conntrack_v4_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                     (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
                 )
@@ -1518,7 +1484,7 @@ fn conntrack_entry_session_id(
                 Err(())
             }
         }
-        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+        (ConntrackTarget::V6(fd), IpAddr::V6(src), IpAddr::V6(dst)) => {
             let bpf_key = bpf_session_key_v6(
                 src.octets(),
                 dst.octets(),
@@ -1529,7 +1495,7 @@ fn conntrack_entry_session_id(
             let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
             let rc = unsafe {
                 libbpf_sys::bpf_map_lookup_elem(
-                    conntrack_v6_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                     (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
                 )
@@ -1546,30 +1512,20 @@ fn conntrack_entry_session_id(
     }
 }
 
-
 fn delete_bpf_conntrack_entry_raw(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
 ) -> bool {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
     #[cfg(test)]
-    if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD || conntrack_v6_fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         return CONNTRACK_TEST_ROWS
             .with(|rows| rows.borrow_mut().remove(&bare_conntrack_test_key(key)))
             .is_some();
     }
-    // #16261: family-sensitive sentinel (see conntrack_entry_session_id);
-    // a transposed pair leaves the test row untouched.
-    #[cfg(test)]
-    if (matches!(key.src_ip, IpAddr::V4(_)) && conntrack_v4_fd == CONNTRACK_TEST_MAP_FD_V6)
-        || (matches!(key.src_ip, IpAddr::V6(_)) && conntrack_v6_fd == CONNTRACK_TEST_MAP_FD_V6)
-    {
-        return CONNTRACK_TEST_ROWS
-            .with(|rows| rows.borrow_mut().remove(&bare_conntrack_test_key(key)))
-            .is_some();
-    }
-    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
+    match (target, &key.src_ip, &key.dst_ip) {
+        (ConntrackTarget::V4(fd), IpAddr::V4(src), IpAddr::V4(dst)) => {
             let bpf_key = bpf_session_key_v4(
                 src.octets(),
                 dst.octets(),
@@ -1579,13 +1535,13 @@ fn delete_bpf_conntrack_entry_raw(
             );
             let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
-                    conntrack_v4_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                 )
             };
             rc >= 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::ENOENT)
         }
-        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+        (ConntrackTarget::V6(fd), IpAddr::V6(src), IpAddr::V6(dst)) => {
             let bpf_key = bpf_session_key_v6(
                 src.octets(),
                 dst.octets(),
@@ -1595,7 +1551,7 @@ fn delete_bpf_conntrack_entry_raw(
             );
             let rc = unsafe {
                 libbpf_sys::bpf_map_delete_elem(
-                    conntrack_v6_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                 )
             };
@@ -1822,18 +1778,19 @@ fn restamp_bpf_conntrack_policy_raw(
     key: &SessionKey,
     metadata: &SessionMetadata,
 ) -> bool {
-    if key.addr_family as i32 == libc::AF_INET {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
+    if let Some(fd) = target.v4_fd() {
         let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
         // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
         #[cfg(test)]
-        if record_restamp_attempt(key.addr_family, conntrack_v4_fd) {
+        if record_restamp_attempt(libc::AF_INET as u8, fd) {
             return false;
         }
         // Unit tests and builds without a pinned conntrack map deliberately
         // pass -1. There is no map state to restamp, so this is not a failure.
-        if conntrack_v4_fd < 0 {
+        if fd < 0 {
             return true;
         }
         let bpf_key = bpf_session_key_v4(
@@ -1846,7 +1803,7 @@ fn restamp_bpf_conntrack_policy_raw(
         let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
         let found = unsafe {
             libbpf_sys::bpf_map_lookup_elem(
-                conntrack_v4_fd,
+                fd,
                 (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                 (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
             )
@@ -1857,7 +1814,7 @@ fn restamp_bpf_conntrack_policy_raw(
         restamp_bpf_value_v4(&mut value, metadata);
         let updated = unsafe {
             libbpf_sys::bpf_map_update_elem(
-                conntrack_v4_fd,
+                fd,
                 (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                 (&value as *const BpfSessionValueV4).cast::<c_void>(),
                 libbpf_sys::BPF_EXIST as u64,
@@ -1865,16 +1822,16 @@ fn restamp_bpf_conntrack_policy_raw(
         };
         return updated == 0;
     }
-    if key.addr_family as i32 == libc::AF_INET6 {
+    if let Some(fd) = target.v6_fd() {
         let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
         // #10590: test seam (record + fail-on-N hook); compiled out in non-test builds.
         #[cfg(test)]
-        if record_restamp_attempt(key.addr_family, conntrack_v6_fd) {
+        if record_restamp_attempt(libc::AF_INET6 as u8, fd) {
             return false;
         }
-        if conntrack_v6_fd < 0 {
+        if fd < 0 {
             return true;
         }
         let bpf_key = bpf_session_key_v6(
@@ -1887,7 +1844,7 @@ fn restamp_bpf_conntrack_policy_raw(
         let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
         let found = unsafe {
             libbpf_sys::bpf_map_lookup_elem(
-                conntrack_v6_fd,
+                fd,
                 (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                 (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
             )
@@ -1898,7 +1855,7 @@ fn restamp_bpf_conntrack_policy_raw(
         restamp_bpf_value_v6(&mut value, metadata);
         let updated = unsafe {
             libbpf_sys::bpf_map_update_elem(
-                conntrack_v6_fd,
+                fd,
                 (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                 (&value as *const BpfSessionValueV6).cast::<c_void>(),
                 libbpf_sys::BPF_EXIST as u64,
@@ -1909,34 +1866,24 @@ fn restamp_bpf_conntrack_policy_raw(
     false
 }
 
-/// Test builds route the sentinel fd to the test syscall model.
-/// Always false outside test builds, so the `fd < 0` early-true in
-/// `restamp_bpf_conntrack_app_id` keeps its exact production meaning.
-fn is_conntrack_test_fd(fd: c_int) -> bool {
-    #[cfg(test)]
-    if fd == CONNTRACK_TEST_MAP_FD {
-        return true;
-    }
-    #[cfg(not(test))]
-    let _ = fd;
-    false
-}
-
 /// #12191 test seam for the AppID restamp lookup.
 ///
-/// For `CONNTRACK_TEST_MAP_FD` this models only the lookup syscall: it fills
+/// For the selected test fd this models only the lookup syscall: it fills
 /// `value.app_id` from `CONNTRACK_TEST_ROWS` and reports found (0) or missing
 /// (-1, the ENOENT shape). The equal-AppID skip stays production code shared
 /// with non-test builds, so the same-AppID test pins the real decision:
 /// deleting the skip must surface as restamp writes. Other fds run libbpf.
 fn restamp_conntrack_lookup_v4(
-    fd: c_int,
+    target: ConntrackTarget,
     session_key: &SessionKey,
     bpf_key: &BpfSessionKeyV4,
     value: &mut BpfSessionValueV4,
 ) -> c_int {
+    let Some(fd) = target.v4_fd() else {
+        return -1;
+    };
     #[cfg(test)]
-    if fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         return match CONNTRACK_TEST_ROWS.with(|rows| {
             rows.borrow()
@@ -1963,13 +1910,16 @@ fn restamp_conntrack_lookup_v4(
 
 /// IPv6 counterpart to [`restamp_conntrack_lookup_v4`].
 fn restamp_conntrack_lookup_v6(
-    fd: c_int,
+    target: ConntrackTarget,
     session_key: &SessionKey,
     bpf_key: &BpfSessionKeyV6,
     value: &mut BpfSessionValueV6,
 ) -> c_int {
+    let Some(fd) = target.v6_fd() else {
+        return -1;
+    };
     #[cfg(test)]
-    if fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         CONNTRACK_TEST_APP_ID_RESTAMP_LOOKUPS.with(|lookups| lookups.set(lookups.get() + 1));
         return match CONNTRACK_TEST_ROWS.with(|rows| {
             rows.borrow()
@@ -1996,18 +1946,21 @@ fn restamp_conntrack_lookup_v6(
 
 /// #12191 test seam for the AppID restamp update.
 ///
-/// For `CONNTRACK_TEST_MAP_FD` this models only the `BPF_EXIST` update
-/// syscall: it rewrites the stored row's AppID from the value production
-/// just stamped and counts one restamp write. A missing row fails (-1) like
-/// `BPF_EXIST` on an absent key. Other fds run libbpf.
+/// For the selected test fd this models only the `BPF_EXIST` update syscall:
+/// it rewrites the stored row's AppID from the value production just stamped
+/// and counts one restamp write. A missing row fails (-1) like `BPF_EXIST` on
+/// an absent key. Other fds run libbpf.
 fn restamp_conntrack_update_v4(
-    fd: c_int,
+    target: ConntrackTarget,
     session_key: &SessionKey,
     bpf_key: &BpfSessionKeyV4,
     value: &BpfSessionValueV4,
 ) -> c_int {
+    let Some(fd) = target.v4_fd() else {
+        return -1;
+    };
     #[cfg(test)]
-    if fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         let found = CONNTRACK_TEST_ROWS.with(|rows| {
             rows.borrow_mut()
                 .get_mut(&bare_conntrack_test_key(session_key))
@@ -2035,13 +1988,16 @@ fn restamp_conntrack_update_v4(
 
 /// IPv6 counterpart to [`restamp_conntrack_update_v4`].
 fn restamp_conntrack_update_v6(
-    fd: c_int,
+    target: ConntrackTarget,
     session_key: &SessionKey,
     bpf_key: &BpfSessionKeyV6,
     value: &BpfSessionValueV6,
 ) -> c_int {
+    let Some(fd) = target.v6_fd() else {
+        return -1;
+    };
     #[cfg(test)]
-    if fd == CONNTRACK_TEST_MAP_FD {
+    if target.is_test_map() {
         let found = CONNTRACK_TEST_ROWS.with(|rows| {
             rows.borrow_mut()
                 .get_mut(&bare_conntrack_test_key(session_key))
@@ -2087,11 +2043,12 @@ fn restamp_bpf_conntrack_app_id_raw(
     key: &SessionKey,
     app_id: u16,
 ) -> bool {
-    if key.addr_family as i32 == libc::AF_INET {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
+    if let Some(fd) = target.v4_fd() {
         let (IpAddr::V4(src), IpAddr::V4(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
-        if conntrack_v4_fd < 0 && !is_conntrack_test_fd(conntrack_v4_fd) {
+        if fd < 0 && !target.is_test_map() {
             return true;
         }
         let bpf_key = bpf_session_key_v4(
@@ -2102,20 +2059,20 @@ fn restamp_bpf_conntrack_app_id_raw(
             key.protocol,
         );
         let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
-        if restamp_conntrack_lookup_v4(conntrack_v4_fd, key, &bpf_key, &mut value) != 0 {
+        if restamp_conntrack_lookup_v4(target, key, &bpf_key, &mut value) != 0 {
             return false;
         }
         if value.app_id == app_id {
             return true;
         }
         value.app_id = app_id;
-        return restamp_conntrack_update_v4(conntrack_v4_fd, key, &bpf_key, &value) == 0;
+        return restamp_conntrack_update_v4(target, key, &bpf_key, &value) == 0;
     }
-    if key.addr_family as i32 == libc::AF_INET6 {
+    if let Some(fd) = target.v6_fd() {
         let (IpAddr::V6(src), IpAddr::V6(dst)) = (key.src_ip, key.dst_ip) else {
             return false;
         };
-        if conntrack_v6_fd < 0 && !is_conntrack_test_fd(conntrack_v6_fd) {
+        if fd < 0 && !target.is_test_map() {
             return true;
         }
         let bpf_key = bpf_session_key_v6(
@@ -2126,14 +2083,14 @@ fn restamp_bpf_conntrack_app_id_raw(
             key.protocol,
         );
         let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
-        if restamp_conntrack_lookup_v6(conntrack_v6_fd, key, &bpf_key, &mut value) != 0 {
+        if restamp_conntrack_lookup_v6(target, key, &bpf_key, &mut value) != 0 {
             return false;
         }
         if value.app_id == app_id {
             return true;
         }
         value.app_id = app_id;
-        return restamp_conntrack_update_v6(conntrack_v6_fd, key, &bpf_key, &value) == 0;
+        return restamp_conntrack_update_v6(target, key, &bpf_key, &value) == 0;
     }
     false
 }
@@ -2278,144 +2235,147 @@ pub(super) fn refresh_bpf_conntrack_last_seen(
             // after a live policy reorder).
             let reresolved_policy_id = policy
                 .reresolve_session_policy_id(metadata.policy_counter.as_ref(), metadata.policy_id);
-            let _rmw = with_conntrack_rmw(key, (), || { #[cfg(test)] if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD { let exists = CONNTRACK_TEST_ROWS.with(|rows| rows.borrow().contains_key(&bare_conntrack_test_key(key))); if exists { CONNTRACK_TEST_REFRESH_WRITES.with(|w| w.set(w.get() + 1)); } return; } match (key.addr_family as i32, &key.src_ip, &key.dst_ip) { (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst)) if conntrack_v4_fd >= 0 => {
-                let bpf_key = bpf_session_key_v4(
-                    src.octets(),
-                    dst.octets(),
-                    key.src_port,
-                    key.dst_port,
-                    key.protocol,
-                );
-                // #13668 test seam: model lookup+write on test rows.
+            let _rmw = with_conntrack_rmw(key, (), || {
+                let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
                 #[cfg(test)]
-                if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD {
-                    let exists = CONNTRACK_TEST_ROWS.with(|rows| {
-                        rows.borrow().contains_key(&bare_conntrack_test_key(key))
-                    });
+                if target.is_test_map() {
+                    let exists = CONNTRACK_TEST_ROWS
+                        .with(|rows| rows.borrow().contains_key(&bare_conntrack_test_key(key)));
                     if exists {
-                        CONNTRACK_TEST_REFRESH_WRITES.with(|w| w.set(w.get() + 1));
+                        CONNTRACK_TEST_REFRESH_WRITES.with(|writes| writes.set(writes.get() + 1));
                     }
                     return;
                 }
-                let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
-                let rc = unsafe {
-                    libbpf_sys::bpf_map_lookup_elem(
-                        conntrack_v4_fd,
-                        (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
-                        (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
-                    )
-                };
-                if rc == 0 {
-                    // Compute last_seen from session's actual idle, not now.
-                    let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
-                    value.last_seen = actual_last_seen;
-                    // #3395: re-stamp the re-resolved current positional policy_id
-                    // so a live policy reorder no longer mis-attributes this
-                    // established session's row.
-                    value.policy_id = reresolved_policy_id;
-                    // #8125: re-stamp the session's OWN window. The publisher
-                    // stamps a constant 1800 at install, so without this the
-                    // column reports the Junos established-timeout default for
-                    // every session whatever window is in force — including a
-                    // half-closed session on a 30 s (or configured 3 s) closing
-                    // window, where the reap behaviour differs by an order of
-                    // magnitude and the column does not.
-                    //
-                    // Zero is not written: it would render as an immediate
-                    // expiry the session is not on. The walk only reaches
-                    // occupied slots, so a zero here means the window itself is
-                    // unset rather than the entry being absent.
-                    if expires_after_ns > 0 {
-                        value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                match (target, &key.src_ip, &key.dst_ip) {
+                    (ConntrackTarget::V4(fd), IpAddr::V4(src), IpAddr::V4(dst)) => {
+                        let bpf_key = bpf_session_key_v4(
+                            src.octets(),
+                            dst.octets(),
+                            key.src_port,
+                            key.dst_port,
+                            key.protocol,
+                        );
+                        let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+                        let rc = unsafe {
+                            libbpf_sys::bpf_map_lookup_elem(
+                                fd,
+                                (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                                (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
+                            )
+                        };
+                        if rc == 0 {
+                            // Compute last_seen from session's actual idle, not now.
+                            let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
+                            value.last_seen = actual_last_seen;
+                            // #3395: re-stamp the re-resolved current positional policy_id
+                            // so a live policy reorder no longer mis-attributes this
+                            // established session's row.
+                            value.policy_id = reresolved_policy_id;
+                            // #8125: re-stamp the session's OWN window. The publisher
+                            // stamps a constant 1800 at install, so without this the
+                            // column reports the Junos established-timeout default for
+                            // every session whatever window is in force — including a
+                            // half-closed session on a 30 s (or configured 3 s) closing
+                            // window, where the reap behaviour differs by an order of
+                            // magnitude and the column does not.
+                            //
+                            // Zero is not written: it would render as an immediate
+                            // expiry the session is not on. The walk only reaches
+                            // occupied slots, so a zero here means the window itself is
+                            // unset rather than the entry being absent.
+                            if expires_after_ns > 0 {
+                                value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                            }
+                            // #2501: surface live per-session volume so `show security
+                            // flow session` reports real byte/packet counts.
+                            // #7919: an all-zero entry is a SIBLING WORKER's replica of
+                            // a live session and must not overwrite the owner's volume.
+                            let (fp, fb, rp, rb) = mirrored_counters(
+                                (
+                                    value.fwd_packets,
+                                    value.fwd_bytes,
+                                    value.rev_packets,
+                                    value.rev_bytes,
+                                ),
+                                &counters,
+                            );
+                            value.fwd_packets = fp;
+                            value.fwd_bytes = fb;
+                            value.rev_packets = rp;
+                            value.rev_bytes = rb;
+                            // The lookup value may carry an origin bit from a stale
+                            // sibling read. Re-stamp only that bit from the live table
+                            // provenance before the full-value BPF_EXIST write.
+                            value.flags = refresh_cluster_synced_flags(value.flags, origin);
+                            let _ = unsafe {
+                                libbpf_sys::bpf_map_update_elem(
+                                    fd,
+                                    (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
+                                    (&value as *const BpfSessionValueV4).cast::<c_void>(),
+                                    libbpf_sys::BPF_EXIST as u64, // avoid recreating deleted entries
+                                )
+                            };
+                        }
                     }
-                    // #2501: surface live per-session volume so `show security
-                    // flow session` reports real byte/packet counts.
-                    // #7919: an all-zero entry is a SIBLING WORKER's replica of
-                    // a live session and must not overwrite the owner's volume.
-                    let (fp, fb, rp, rb) = mirrored_counters(
-                        (
-                            value.fwd_packets,
-                            value.fwd_bytes,
-                            value.rev_packets,
-                            value.rev_bytes,
-                        ),
-                        &counters,
-                    );
-                    value.fwd_packets = fp;
-                    value.fwd_bytes = fb;
-                    value.rev_packets = rp;
-                    value.rev_bytes = rb;
-                    // The lookup value may carry an origin bit from a stale
-                    // sibling read. Re-stamp only that bit from the live table
-                    // provenance before the full-value BPF_EXIST write.
-                    value.flags = refresh_cluster_synced_flags(value.flags, origin);
-                    let _ = unsafe {
-                        libbpf_sys::bpf_map_update_elem(
-                            conntrack_v4_fd,
-                            (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
-                            (&value as *const BpfSessionValueV4).cast::<c_void>(),
-                            libbpf_sys::BPF_EXIST as u64, // avoid recreating deleted entries
-                        )
-                    };
-                }
-            }
-            (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
-                let bpf_key = bpf_session_key_v6(
-                    src.octets(),
-                    dst.octets(),
-                    key.src_port,
-                    key.dst_port,
-                    key.protocol,
-                );
-                let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
-                let rc = unsafe {
-                    libbpf_sys::bpf_map_lookup_elem(
-                        conntrack_v6_fd,
-                        (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
-                        (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
-                    )
-                };
-                if rc == 0 {
-                    let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
-                    value.last_seen = actual_last_seen;
-                    // #3395: re-stamp the re-resolved current positional policy_id
-                    // (see v4 arm).
-                    value.policy_id = reresolved_policy_id;
-                    // #8125: re-stamp the session's own window (see v4 arm).
-                    if expires_after_ns > 0 {
-                        value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                    (ConntrackTarget::V6(fd), IpAddr::V6(src), IpAddr::V6(dst)) => {
+                        let bpf_key = bpf_session_key_v6(
+                            src.octets(),
+                            dst.octets(),
+                            key.src_port,
+                            key.dst_port,
+                            key.protocol,
+                        );
+                        let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+                        let rc = unsafe {
+                            libbpf_sys::bpf_map_lookup_elem(
+                                fd,
+                                (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                                (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
+                            )
+                        };
+                        if rc == 0 {
+                            let actual_last_seen = now_secs.saturating_sub(idle_ns / 1_000_000_000);
+                            value.last_seen = actual_last_seen;
+                            // #3395: re-stamp the re-resolved current positional policy_id
+                            // (see v4 arm).
+                            value.policy_id = reresolved_policy_id;
+                            // #8125: re-stamp the session's own window (see v4 arm).
+                            if expires_after_ns > 0 {
+                                value.timeout = (expires_after_ns / 1_000_000_000) as u32;
+                            }
+                            // #2501: surface live per-session volume (see v4 arm).
+                            // #7919: an all-zero entry is a SIBLING WORKER's replica of
+                            // a live session and must not overwrite the owner's volume.
+                            let (fp, fb, rp, rb) = mirrored_counters(
+                                (
+                                    value.fwd_packets,
+                                    value.fwd_bytes,
+                                    value.rev_packets,
+                                    value.rev_bytes,
+                                ),
+                                &counters,
+                            );
+                            value.fwd_packets = fp;
+                            value.fwd_bytes = fb;
+                            value.rev_packets = rp;
+                            value.rev_bytes = rb;
+                            // Keep refresh provenance aligned with the live session;
+                            // this prevents a sibling read/clear/write from restoring
+                            // a deletable peer-origin stamp.
+                            value.flags = refresh_cluster_synced_flags(value.flags, origin);
+                            let _ = unsafe {
+                                libbpf_sys::bpf_map_update_elem(
+                                    fd,
+                                    (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
+                                    (&value as *const BpfSessionValueV6).cast::<c_void>(),
+                                    libbpf_sys::BPF_EXIST as u64,
+                                )
+                            };
+                        }
                     }
-                    // #2501: surface live per-session volume (see v4 arm).
-                    // #7919: an all-zero entry is a SIBLING WORKER's replica of
-                    // a live session and must not overwrite the owner's volume.
-                    let (fp, fb, rp, rb) = mirrored_counters(
-                        (
-                            value.fwd_packets,
-                            value.fwd_bytes,
-                            value.rev_packets,
-                            value.rev_bytes,
-                        ),
-                        &counters,
-                    );
-                    value.fwd_packets = fp;
-                    value.fwd_bytes = fb;
-                    value.rev_packets = rp;
-                    value.rev_bytes = rb;
-                    // Keep refresh provenance aligned with the live session;
-                    // this prevents a sibling read/clear/write from restoring
-                    // a deletable peer-origin stamp.
-                    value.flags = refresh_cluster_synced_flags(value.flags, origin);
-                    let _ = unsafe {
-                        libbpf_sys::bpf_map_update_elem(
-                            conntrack_v6_fd,
-                            (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
-                            (&value as *const BpfSessionValueV6).cast::<c_void>(),
-                            libbpf_sys::BPF_EXIST as u64,
-                        )
-                    };
+                    _ => {}
                 }
-            }
-            _ => {} } });
+            });
         },
     );
     RefreshSliceOutcome {
@@ -2489,20 +2449,18 @@ fn update_session_cluster_synced_origin_raw(
     key: &SessionKey,
     peer_synced: bool,
 ) {
-    match (key.addr_family as i32, &key.src_ip, &key.dst_ip) {
-        (libc::AF_INET, IpAddr::V4(src), IpAddr::V4(dst))
-            if conntrack_v4_fd >= 0 || is_conntrack_test_fd(conntrack_v4_fd) =>
-        {
-            // #13668 test seam: model the origin-bit write on test rows.
-            #[cfg(test)]
-            if conntrack_v4_fd == CONNTRACK_TEST_MAP_FD {
-                CONNTRACK_TEST_ROWS.with(|rows| {
-                    if let Some(row) = rows.borrow_mut().get_mut(&bare_conntrack_test_key(key)) {
-                        row.cluster_synced = peer_synced;
-                    }
-                });
-                return;
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
+    #[cfg(test)]
+    if target.is_test_map() {
+        CONNTRACK_TEST_ROWS.with(|rows| {
+            if let Some(row) = rows.borrow_mut().get_mut(&bare_conntrack_test_key(key)) {
+                row.cluster_synced = peer_synced;
             }
+        });
+        return;
+    }
+    match (target, &key.src_ip, &key.dst_ip) {
+        (ConntrackTarget::V4(fd), IpAddr::V4(src), IpAddr::V4(dst)) => {
             let bpf_key = bpf_session_key_v4(
                 src.octets(),
                 dst.octets(),
@@ -2513,7 +2471,7 @@ fn update_session_cluster_synced_origin_raw(
             let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
             let found = unsafe {
                 libbpf_sys::bpf_map_lookup_elem(
-                    conntrack_v4_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                     (&mut value as *mut BpfSessionValueV4).cast::<c_void>(),
                 )
@@ -2522,7 +2480,7 @@ fn update_session_cluster_synced_origin_raw(
                 value.flags = cluster_synced_flags(value.flags, peer_synced);
                 let _ = unsafe {
                     libbpf_sys::bpf_map_update_elem(
-                        conntrack_v4_fd,
+                        fd,
                         (&bpf_key as *const BpfSessionKeyV4).cast::<c_void>(),
                         (&value as *const BpfSessionValueV4).cast::<c_void>(),
                         libbpf_sys::BPF_EXIST as u64,
@@ -2530,7 +2488,7 @@ fn update_session_cluster_synced_origin_raw(
                 };
             }
         }
-        (libc::AF_INET6, IpAddr::V6(src), IpAddr::V6(dst)) if conntrack_v6_fd >= 0 => {
+        (ConntrackTarget::V6(fd), IpAddr::V6(src), IpAddr::V6(dst)) => {
             let bpf_key = bpf_session_key_v6(
                 src.octets(),
                 dst.octets(),
@@ -2541,7 +2499,7 @@ fn update_session_cluster_synced_origin_raw(
             let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
             let found = unsafe {
                 libbpf_sys::bpf_map_lookup_elem(
-                    conntrack_v6_fd,
+                    fd,
                     (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                     (&mut value as *mut BpfSessionValueV6).cast::<c_void>(),
                 )
@@ -2550,7 +2508,7 @@ fn update_session_cluster_synced_origin_raw(
                 value.flags = cluster_synced_flags(value.flags, peer_synced);
                 let _ = unsafe {
                     libbpf_sys::bpf_map_update_elem(
-                        conntrack_v6_fd,
+                        fd,
                         (&bpf_key as *const BpfSessionKeyV6).cast::<c_void>(),
                         (&value as *const BpfSessionValueV6).cast::<c_void>(),
                         libbpf_sys::BPF_EXIST as u64,
