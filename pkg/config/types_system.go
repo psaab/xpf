@@ -767,9 +767,6 @@ type SNMPConfig struct {
 // secrets) and pass through unchanged. The in-memory maps (and their
 // lookup-by-community-string in pkg/snmp) are untouched.
 func (s SNMPConfig) MarshalJSON() ([]byte, error) {
-	// NOTE: the snmpAlias projection below is intentionally duplicated in
-	// MarshalYAML; the two MUST stay in sync. If you add/rename a field here,
-	// mirror it in MarshalYAML or the JSON and YAML redaction surfaces diverge.
 	type snmpAlias struct {
 		Location    string
 		Contact     string
@@ -806,58 +803,14 @@ func (s SNMPConfig) MarshalJSON() ([]byte, error) {
 	return json.Marshal(a)
 }
 
-// MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller,
-// redacting the community-string map keys by rendering Communities as a
-// sorted slice (future-proofing; no config YAML marshaller exists today —
-// #2053).
-func (s SNMPConfig) MarshalYAML() (any, error) {
-	// Keep this projection in sync with MarshalJSON above (same snmpAlias +
-	// Communities map->sorted-slice redaction).
-	type snmpAlias struct {
-		Location    string
-		Contact     string
-		Description string
-		Communities []*SNMPCommunity
-		TrapGroups  []*SNMPTrapGroup
-		V3Users     map[string]*SNMPv3User
-		// #9416: the alias enumerates fields EXPLICITLY, so a field added to
-		// SNMPConfig and not added here silently vanishes from the API surface.
-		// A client-list name and its prefixes are not secrets (the community
-		// string is), and an operator inspecting why a community is restricted
-		// needs to see the list it names.
-		ClientLists map[string][]SNMPClient `json:",omitempty"`
-	}
-	a := snmpAlias{
-		Location:    s.Location,
-		Contact:     s.Contact,
-		Description: s.Description,
-		V3Users:     s.V3Users,
-		ClientLists: s.ClientLists,
-	}
-	if len(s.Communities) > 0 {
-		names := make([]string, 0, len(s.Communities))
-		for name := range s.Communities {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		a.Communities = make([]*SNMPCommunity, 0, len(names))
-		for _, name := range names {
-			a.Communities = append(a.Communities, s.Communities[name])
-		}
-	}
-	a.TrapGroups = redactedTrapGroupSlice(s.TrapGroups)
-	return a, nil
-}
-
 // SNMPCommunity defines an SNMP community string.
 //
 // Name is the SNMPv1/v2c community string, which IS the shared secret (it
 // authorizes the request on the wire). It is also the key of the
 // SNMPConfig.Communities map, so it stays a plain string (the map lookup in
 // pkg/snmp/agent.go is by the on-wire community string). Redaction on the
-// JSON/YAML surface is applied via the targeted MarshalJSON / MarshalYAML
-// below; keeping Name a string leaves the map key and the compiler assignment
-// unchanged.
+// JSON surface is applied via the targeted MarshalJSON below; keeping Name
+// a string leaves the map key and the compiler assignment unchanged.
 //
 // The cost of that choice is that Name is the ONE operator secret in the
 // config tree not covered by the Secret newtype's String() redaction (#2053) —
@@ -870,8 +823,8 @@ func (s SNMPConfig) MarshalYAML() (any, error) {
 // (ast_redact.go, #4051), which matches the community on the AST key path.
 // SNMPTrapGroup.Name carries the same burden since #16728: it is the
 // v1/v2c trap community (#15052), so the same three renders mask it with
-// the same helper and predicate, and its JSON/YAML form redacts via
-// SNMPTrapGroup.MarshalJSON/MarshalYAML.
+// the same helper and predicate, and its JSON form redacts via
+// SNMPTrapGroup.MarshalJSON.
 type SNMPCommunity struct {
 	Name          string
 	Authorization string // "read-only" or "read-write"
@@ -938,18 +891,6 @@ func (c SNMPCommunity) MarshalJSON() ([]byte, error) {
 	return json.Marshal(alias{Name: NewSecret(c.Name), Authorization: c.Authorization, Clients: c.Clients, ClientListNames: c.ClientListNames})
 }
 
-// MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller
-// (future-proofing; no config YAML marshaller exists today — #2053).
-func (c SNMPCommunity) MarshalYAML() (any, error) {
-	return struct {
-		Name          Secret
-		Authorization string
-		Clients       []SNMPClient `yaml:",omitempty"`
-		// #9416: kept in sync with MarshalJSON above, per this type's own rule.
-		ClientListNames []string `yaml:",omitempty"`
-	}{Name: NewSecret(c.Name), Authorization: c.Authorization, Clients: c.Clients, ClientListNames: c.ClientListNames}, nil
-}
-
 // SNMPCommunityDisplayName returns the token an operator-facing TEXT renderer
 // must print in place of an SNMPv1/v2c community name. It is the single
 // implementation of the community-masking rule, shared by every render surface
@@ -1005,7 +946,7 @@ type SNMPTrapGroup struct {
 }
 
 // redactedTrapGroupSlice renders the TrapGroups map as a name-sorted
-// slice for the JSON/YAML surface (#16728). The map key IS the trap
+// slice for the JSON surface (#16728). The map key IS the trap
 // community, so emitting the map would leak it as an object key even
 // with SNMPTrapGroup.MarshalJSON redacting the value's Name. Nil slots
 // (#10439 lenient loads) render as redacted empty groups, never a panic.
@@ -1037,17 +978,6 @@ func (g SNMPTrapGroup) MarshalJSON() ([]byte, error) {
 		Categories []string `json:",omitempty"`
 	}
 	return json.Marshal(alias{Name: NewSecret(g.Name), Targets: g.Targets, Version: g.Version, Categories: g.Categories})
-}
-
-// MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller
-// (future-proofing; no config YAML marshaller exists today — #2053).
-func (g SNMPTrapGroup) MarshalYAML() (any, error) {
-	return struct {
-		Name       Secret
-		Targets    []string
-		Version    string
-		Categories []string `yaml:",omitempty"`
-	}{Name: NewSecret(g.Name), Targets: g.Targets, Version: g.Version, Categories: g.Categories}, nil
 }
 
 // SNMPv3User defines an SNMPv3 USM user with authentication and privacy.
@@ -2183,13 +2113,13 @@ type DHCPServerGroup struct {
 	// every group — just less robust than an explicit binding, which is why the
 	// selector is emitted at all.
 	//
-	// It is excluded from every marshal (`json:"-"`, `yaml:"-"`): it describes
-	// this PROCESS's current mastership view, not the operator's configuration,
+	// It is excluded from JSON (`json:"-"`): it describes this PROCESS's
+	// current mastership view, not the operator's configuration,
 	// so it must not appear in the compiled-config dump (GET /api/v1/config),
 	// in the golden compile baseline, or in anything the cluster config-sync
 	// carries to the peer — where it would be read as a committed value the
 	// peer's own filter should not inherit.
-	MembersFiltered bool `json:"-" yaml:"-"`
+	MembersFiltered bool `json:"-"`
 }
 
 // DHCPPool defines an address pool for DHCP leases.

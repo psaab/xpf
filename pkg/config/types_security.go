@@ -2382,18 +2382,6 @@ func (p PKICAProfile) MarshalJSON() ([]byte, error) {
 	return json.Marshal(v)
 }
 
-// MarshalYAML mirrors MarshalJSON for the gopkg.in/yaml.v3 marshaller
-// (future-proofing; no config YAML marshaller exists today — #2053
-// doctrine), so the JSON and YAML redaction surfaces cannot diverge.
-// Keep the redaction above and this projection in sync.
-func (p PKICAProfile) MarshalYAML() (any, error) {
-	type alias PKICAProfile
-	v := alias(p)
-	v.EnrollmentURL = RedactURL(v.EnrollmentURL)
-	v.CRLURL = RedactURL(v.CRLURL)
-	return v, nil
-}
-
 // PKICAProfile is one `security pki ca-profile <name>` stanza.
 type PKICAProfile struct {
 	Name                    string

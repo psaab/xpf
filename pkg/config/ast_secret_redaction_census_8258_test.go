@@ -178,7 +178,7 @@ var astLeafForSecretField = map[string]secretLeafClaim{
 		set: `set system root-authentication encrypted-password "%s"`,
 	},
 	// #8258 point 3: NOT a `Secret`-typed field. `SNMPCommunity.Name` is a
-	// plain string converted to `Secret` inside MarshalJSON/MarshalYAML, so the
+	// plain string converted to `Secret` inside MarshalJSON, so the
 	// reflection census above cannot see it and the coercion census in
 	// ast_secret_coercion_census_8258_test.go enrols it instead. The secret here
 	// is the CONTAINER-IDENTITY token — the community string IS the SNMP v1/v2c

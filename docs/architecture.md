@@ -311,7 +311,7 @@ editing cmdtree.
     `ast_secret_redaction_census_8258_test.go` — or because it is CONVERTED to
     `Secret` at marshal time, which reflection cannot see because the field's
     type is still `string`. `SNMPCommunity.Name` is the live instance: a plain
-    string wrapped as `Secret(c.Name)` inside `MarshalJSON`/`MarshalYAML`, and
+    string wrapped as `Secret(c.Name)` inside `MarshalJSON`, and
     the SNMP v1/v2c community string is the v1/v2c authenticator. That route is
     enumerated with `go/ast` in
     `ast_secret_coercion_census_8258_test.go` — a conversion inside a method is

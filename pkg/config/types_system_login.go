@@ -133,8 +133,9 @@ type LoginClass struct {
 	MappedPermissions []LoginClassPermission // coarse xpf perms derived from Permissions
 	IdleTimeout       int                    // minutes; retained only for legacy config, never enforced
 	// IdleTimeoutSet records explicit leaf presence (including value 0) so
-	// strict commit validation can reject the unsupported setting (#10828).
-	IdleTimeoutSet     bool   `json:"-" yaml:"-"`
+	// strict commit validation can reject the unsupported setting (#10828). It
+	// is commit-time state and is not included in JSON output.
+	IdleTimeoutSet     bool   `json:"-"`
 	AllowCommands      string // additive regex; enforced as an allowlist (#7172)
 	DenyCommands       string // restrictive regex; enforced; see DenyLeavesPresent
 	AllowConfiguration string // additive regex; enforced as an allowlist (#7172)
@@ -182,9 +183,9 @@ type LoginClass struct {
 	// duplicate — an earlier deny silently overwritten by a later block —
 	// is invisible to any compiled-config gate. One distinct value is the
 	// normal case; >1 is a strict-commit rejection / tolerant warning.
-	// Not serialized: it is commit-time diagnostic provenance, rebuilt on
-	// every compile from the authored tree.
-	RegexValues15712 map[string][]string `json:"-" yaml:"-"`
+	// Not serialized to JSON: it is commit-time diagnostic provenance,
+	// rebuilt on every compile from the authored tree.
+	RegexValues15712 map[string][]string `json:"-"`
 }
 
 // mapJunosPermissions maps a custom login class's Junos permission tokens onto

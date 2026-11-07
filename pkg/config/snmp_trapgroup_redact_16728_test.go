@@ -5,14 +5,12 @@ import (
 	"errors"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // #16728: since #15052 the `snmp trap-group <name>` identity IS the v1/v2c
 // trap community sent on the wire (pkg/snmp trapCommunityForGroup returns
 // tg.Name), yet every redacted surface printed it in cleartext. These tests
-// pin the canary absent from the AST render, SNMPConfig JSON/YAML and the
+// pin the canary absent from the AST render, SNMPConfig JSON and the
 // schema-pinned registry resolution, with the query-community control
 // unchanged. RED-on-revert: dropping the trap-group case from
 // secretIndices, the ByRoot entry, or the SNMPTrapGroup marshalers makes
@@ -159,17 +157,6 @@ func TestSNMPTrapGroupMarshalRedactsName16728(t *testing.T) {
 				}
 			}
 		})
-	}
-	// YAML mirrors JSON.
-	yb, err := yaml.Marshal(cfg)
-	if err != nil {
-		t.Fatalf("yaml marshal: %v", err)
-	}
-	if strings.Contains(string(yb), trapGroupCanary16728) || strings.Contains(string(yb), "query-secret") {
-		t.Errorf("YAML leaked secret: %s", yb)
-	}
-	if !strings.Contains(string(yb), "192.0.2.10") {
-		t.Errorf("YAML over-redacted targets: %s", yb)
 	}
 	// In-memory names untouched (pkg/snmp lookup-by-name still works).
 	if cfg.TrapGroups[trapGroupCanary16728].Name != trapGroupCanary16728 {

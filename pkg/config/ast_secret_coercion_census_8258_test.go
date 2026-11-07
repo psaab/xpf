@@ -21,7 +21,7 @@ import (
 // That was wrong in a specific way, and #8258's own starting point 3 —
 // "anything with a `MarshalJSON` that transforms a value" — is what surfaced
 // it. `SNMPCommunity.Name` is declared `string`. It becomes a `Secret` only
-// inside `MarshalJSON`/`MarshalYAML`, by conversion:
+// inside `MarshalJSON`, by conversion:
 //
 //	return json.Marshal(alias{Name: NewSecret(c.Name), ...})
 //
@@ -162,8 +162,7 @@ func TestEverySecretCoercionIsMapped(t *testing.T) {
 	const known = "SNMPCommunity.Name"
 	if !containsString(coerced, known) {
 		t.Fatalf("the coercion scan did not find %s, which is the instance this file "+
-			"exists for (types_system.go converts it inside MarshalJSON and "+
-			"MarshalYAML). Found: %v.\n\nThe scan is broken, not the tree — a clean "+
+			"exists for (types_system.go converts it inside MarshalJSON). Found: %v.\n\nThe scan is broken, not the tree — a clean "+
 			"result here would mean nothing.", known, coerced)
 	}
 

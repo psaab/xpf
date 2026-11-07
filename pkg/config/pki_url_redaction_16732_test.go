@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
-
-	"gopkg.in/yaml.v3"
 )
 
 // #16732: PKICAProfile.EnrollmentURL and CRLURL marshalled verbatim
@@ -79,16 +77,6 @@ func TestPKICAProfileMarshalRedactsURLCredentials16732(t *testing.T) {
 			for _, s := range tc.mustPresent {
 				if !strings.Contains(string(b), s) {
 					t.Errorf("marshalled PKICAProfile lost %q:\n%s", s, b)
-				}
-			}
-			// yaml.Marshal honours MarshalYAML; the two surfaces agree.
-			yb, err := yaml.Marshal(tc.profile)
-			if err != nil {
-				t.Fatalf("yaml marshal profile: %v", err)
-			}
-			for _, s := range tc.mustAbsent {
-				if strings.Contains(string(yb), s) {
-					t.Errorf("YAML-marshalled PKICAProfile contains %q verbatim:\n%s", s, yb)
 				}
 			}
 		})

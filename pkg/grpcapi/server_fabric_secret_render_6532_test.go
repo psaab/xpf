@@ -1179,7 +1179,7 @@ func secretExprTail(e ast.Expr) string {
 // (types_system.go), which a bare `field.Type == Ident("Secret")` match would
 // miss even though `string(x.APIKeys[i])` is a direct field conversion.
 //
-// File scope matters: the SNMPCommunity MarshalJSON/MarshalYAML bodies declare
+// File scope matters: the SNMPCommunity MarshalJSON body declares
 // LOCAL alias structs with a `Name Secret` field, and folding that generic
 // name into the set would flag `string(x.Name)` all over the package. Walking
 // only file-scope type declarations excludes them.
