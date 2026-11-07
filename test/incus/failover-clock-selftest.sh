@@ -1194,13 +1194,13 @@ ntp_mixed_fw1_result=$FC_NTP_CELL_RESULT
 ntp_mixed_fw1_detail=$FC_NTP_CELL_DETAIL
 ntp_mixed_fw1_commands=$(wc -l <"$FC_CALLS")
 fc_ntp_cell_case unreadable error 162.159.200.1 0.000 Normal present 91.189.91.112 0.000 Normal ""
+ntp_unreadable_rc=$FC_NTP_CELL_RC
+ntp_unreadable_result=$FC_NTP_CELL_RESULT
+ntp_unreadable_detail=$FC_NTP_CELL_DETAIL
 fc_ntp_cell_case comment-inactive present "" 0.000 "Not synchronised" present 91.189.91.112 0.000 "Not synchronised" "" normal comment-inactive repeat
 ntp_comment_inactive_rc=$FC_NTP_CELL_RC
 ntp_comment_inactive_result=$FC_NTP_CELL_RESULT
 ntp_comment_inactive_hosts=$(cat "$FC_PROBE_ARGS")
-ntp_unreadable_rc=$FC_NTP_CELL_RC
-ntp_unreadable_result=$FC_NTP_CELL_RESULT
-ntp_unreadable_detail=$FC_NTP_CELL_DETAIL
 fc_ntp_cell_case noisy present 162.159.200.1 0.000 Normal present 91.189.91.112 0.150 Normal "" noisy
 ntp_noisy_rc=$FC_NTP_CELL_RC
 ntp_noisy_result=$FC_NTP_CELL_RESULT
