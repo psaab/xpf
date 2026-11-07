@@ -84,12 +84,6 @@ static TUNNEL_IDENTIFICATION: DatagramIdentification = DatagramIdentification::n
 pub(crate) static NAT64_IPV4_IDENTIFICATION: DatagramIdentification = DatagramIdentification::new();
 pub(crate) static NAT64_IPV6_IDENTIFICATION: DatagramIdentification = DatagramIdentification::new();
 
-/// Next raw tunnel-domain Identification value.
-#[inline]
-pub(crate) fn next_datagram_identification() -> u32 {
-    TUNNEL_IDENTIFICATION.next()
-}
-
 /// Map a raw sequence value into the non-zero IPv4 Identification space.
 /// Raw 0 is never issued (skipped at wrap), so adjacent values never
 /// collide; values 65535 apart share an ID by 16-bit necessity.
