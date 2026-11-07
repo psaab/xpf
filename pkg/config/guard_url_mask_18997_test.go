@@ -200,6 +200,29 @@ func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
 	}
 }
 
+// Pivot-rewrite pin (Kimi delta at ce13f620ae): the merged span is
+// emitted as a pivot and rewritten once (raw and strconv.Quote forms)
+// in the final output — assert exactly one sentinel and no pivot
+// residue in either a raw or a %q-rendered diagnostic. Removing the
+// Quote(pivot) rewrite leaks the escaped marker spelling.
+func TestSchemaExitScrubPivotRewrittenOnce18997(t *testing.T) {
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "@host<redacted>" password "s3cr3t"`,
+	})
+	for _, foreign := range []error{
+		fmt.Errorf("archive fetch failed for @host<redacted>"),
+		fmt.Errorf("archive fetch failed for %q", "@host<redacted>"),
+	} {
+		got := scrubSchemaErrorSecrets(tree, foreign).Error()
+		if strings.Contains(got, "xpf-redacted-pivot") || strings.Contains(got, "@host") {
+			t.Errorf("pivot not rewritten to sentinel (#18997): %v", got)
+		}
+		if n := strings.Count(got, SecretRedacted); n != 1 {
+			t.Errorf("merged pivot span must yield exactly one sentinel, got %d: %v", n, got)
+		}
+	}
+}
+
 // #18997 sentinel-containing credential arm (Kimi delta at 6f14ef160e):
 // a password that merely CONTAINS the sentinel spelling
 // ("only<redacted>credential") is a real credential — dropping its
