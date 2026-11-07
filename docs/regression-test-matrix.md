@@ -135,6 +135,12 @@ to be red, until their issue closes; any other red cell is a new failure.
   baseline (master plus #18556) misses the targets, so HA PRs are gated on H10's
   master-relative numbers until #18559 closes.
   <!-- Expires-when: #18559 closed -->
+
+## Resolved product-failure records (historical)
+
+These entries preserve prior findings and dispositions; they do not extend the
+active exceptions permitted by "Known product failures (tracked)" above.
+
 - **MTR / traceroute cells: #18174, fixed by #18556.** Every cluster MTR
   cell in `test-connectivity`: "mtr LAN→WAN gateway (via RETH link-local)",
   "mtr LAN→internet IPv4 (via RETH link-local)", "mtr LAN→internet IPv6
