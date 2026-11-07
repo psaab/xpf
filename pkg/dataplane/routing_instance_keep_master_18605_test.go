@@ -339,5 +339,20 @@ func TestDisabledRoutingInstanceMemberKeepsMaster18607(t *testing.T) {
 	}}
 	result := compileNetworkdRows18605(t, cfg, "ge-0-0-0")
 	assertVRFName18605(t, result, "ge-0-0-0", "vrf-blue")
+	// The combined cell must prove the compiled row really is the
+	// always-down shape (Disable propagated), not merely a VRF row
+	// that happens to render KeepMaster through the enabled arm.
+	found := false
+	for _, row := range result.ManagedInterfaces {
+		if row.Name == "ge-0-0-0" {
+			found = true
+			if !row.Disable {
+				t.Fatalf("compiled RI member row lost its Disable flag: %+v", row)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("compiled result has no ge-0-0-0 row")
+	}
 	assertRenderedKeepMaster18605(t, result, "ge-0-0-0", true)
 }
