@@ -34,6 +34,30 @@ func rethDupVlanLines14573() []string {
 	}
 }
 
+// rethUnitNumberVsVlanLines14573 builds the paired unit-number/VLAN fixture.
+// A source-less interface GRE stanza is a strict-fixture credential for the
+// #15034 AST gate; it intentionally does not create a TunnelNameMap entry.
+func rethUnitNumberVsVlanLines14573(tunnelCredential bool) []string {
+	lines := []string{
+		"set interfaces reth1 redundant-ether-options redundancy-group 1",
+		"set interfaces reth1 vlan-tagging",
+	}
+	if tunnelCredential {
+		lines = append(lines, "set interfaces reth1 tunnel mode gre")
+	}
+	return append(lines,
+		"set interfaces reth1 unit 100 family inet address 10.0.100.1/24",
+		"set interfaces reth1 unit 200 vlan-id 100 family inet address 10.0.200.1/24",
+		"set chassis cluster reth-count 2",
+		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
+		"set chassis cluster control-interface em0",
+		"set chassis cluster peer-address 10.99.0.2",
+		"set chassis cluster redundancy-group 1 node 0 priority 200",
+		"set chassis cluster redundancy-group 1 node 1 priority 100",
+		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
+	)
+}
+
 // FAIL-ON-REVERT: restoring the whole-reth skip in pass 3 (or dropping the
 // intra-reth subOwner check) makes strict CompileConfig accept this again.
 func TestRethDuplicateVlanIDStrictReject14573(t *testing.T) {
@@ -51,32 +75,36 @@ func TestRethDuplicateVlanIDStrictReject14573(t *testing.T) {
 	}
 }
 
-// The untagged unit-number derivation would collide with unit 200's vlan-id
-// 100 on the reth member. The strict compiler's #15034/#16583 gate rejects
-// that non-zero untagged unit first, so this cell pins gate order rather than
-// reaching #14573. The duplicate-vlan sibling above pins the collision check.
+// The source-less tunnel stanza satisfies the #15034/#16583 strict AST
+// exemption without changing ResolveKernelIfName: TunnelNameMap only maps an
+// interface tunnel with a source (or WireGuard mode), so unit 100 still uses
+// its unit-number device while unit 200 uses vlan-id 100. This is a
+// strict-fixture credential, not a claim that a runtime tunnel endpoint exists.
+func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
+	err := compileSet7795(t, rethUnitNumberVsVlanLines14573(true)...)
+	if err == nil {
+		t.Fatal("strict CompileConfig accepted reth1 unit 100 (unit-number device) " +
+			"beside reth1 unit 200 vlan-id 100; both resolve to ge-0-0-1.100 (#14573)")
+	}
+	t.Logf("strict collision refusal: %v", err)
+	for _, want := range []string{
+		"reth1.100", "reth1.200", "ge-0-0-1.100",
+		"both resolve to the same Linux device name",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("collision error must name %q; got: %v", want, err)
+		}
+	}
+}
+
+// The same fixture without that tunnel-stanza credential is rejected by
+// #15034/#16583 first. This pins the strict gate order independently of the
+// reachable #14573 collision fixture above.
 func TestRethUnitNumberVsVlanIDUnitGatePrecedesCollision14573(t *testing.T) {
-	// #16583 applies even though reth1 enables vlan-tagging: a positive tag is
-	// required on unit 100 itself. reth1 is neither irb, a loopback nor a secure
-	// tunnel, and this unit/interface has no tunnel stanza, so no gate exemption
-	// applies. Keep the original no-vlan premise; adding vlan-id 100 would turn
-	// this into the duplicate-vlan path already covered above.
-	err := compileSet7795(t,
-		"set interfaces reth1 redundant-ether-options redundancy-group 1",
-		"set interfaces reth1 vlan-tagging",
-		"set interfaces reth1 unit 100 family inet address 10.0.100.1/24",
-		"set interfaces reth1 unit 200 vlan-id 100 family inet address 10.0.200.1/24",
-		"set chassis cluster reth-count 2",
-		"set chassis cluster authentication-key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=",
-		"set chassis cluster control-interface em0",
-		"set chassis cluster peer-address 10.99.0.2",
-		"set chassis cluster redundancy-group 1 node 0 priority 200",
-		"set chassis cluster redundancy-group 1 node 1 priority 100",
-		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
-	)
+	err := compileSet7795(t, rethUnitNumberVsVlanLines14573(false)...)
 	if err == nil {
 		t.Fatal("strict CompileConfig accepted an untagged non-zero reth unit; "+
-			"expected #15034/#16583 to refuse before the hypothetical #14573 collision")
+			"expected #15034/#16583 to refuse before #14573")
 	}
 	t.Logf("strict unit-gate refusal: %v", err)
 	for _, want := range []string{"#15034", "reth1 unit 100", "non-zero unit without"} {
