@@ -373,3 +373,42 @@ func TestCompileConfigLenientPackedNamelessPolicyTermWarns17257(t *testing.T) {
 		t.Fatalf("packed policy term = %#v, want neutral nameless placeholder", term)
 	}
 }
+
+func TestPolicyNamelessPlaceholderKeepsAuthoredOrdinal17257(t *testing.T) {
+	// probe companion: placeholder must ALSO land after a leading named term.
+	cfg2, err2 := CompileConfigLenient(hierTree(t, `policy-options {
+    policy-statement P {
+        term B { then reject; }
+        term { then accept; }
+    }
+}`))
+	if err2 != nil {
+		t.Fatalf("lenient compile: %v", err2)
+	}
+	ps2 := cfg2.PolicyOptions.PolicyStatements["P"]
+	if ps2 == nil || len(ps2.Terms) != 2 || ps2.Terms[0].Name != "B" || !ps2.Terms[1].nameless {
+		t.Fatalf("leading-named order = %#v, want [B, placeholder]", ps2)
+	}
+
+	// GLM residual: blind-append of the policy placeholder must RED.
+	// Authored: [placeholder(then), named B] — placeholder at index 0.
+	cfg, err := CompileConfigLenient(hierTree(t, `policy-options {
+    policy-statement P {
+        term { then accept; }
+        term B { then reject; }
+    }
+}`))
+	if err != nil {
+		t.Fatalf("lenient compile: %v", err)
+	}
+	ps := cfg.PolicyOptions.PolicyStatements["P"]
+	if ps == nil || len(ps.Terms) != 2 {
+		t.Fatalf("compiled terms = %#v, want [placeholder, B]", ps)
+	}
+	if !ps.Terms[0].nameless {
+		t.Errorf("first term = %#v, want the nameless placeholder at authored ordinal 0", ps.Terms[0])
+	}
+	if ps.Terms[1].Name != "B" || ps.Terms[1].Action != "reject" {
+		t.Errorf("second term = %#v, want named B reject", ps.Terms[1])
+	}
+}
