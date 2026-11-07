@@ -56,8 +56,9 @@ var readReauthInterval9051 = 5 * time.Second
 func (s *Server) watchReadAuthorization(r *http.Request, required config.LoginClassPermission) (*http.Request, func()) {
 	ctx, cancel := context.WithCancel(r.Context())
 	done := make(chan struct{})
+	interval := readReauthInterval9051
 	go func() {
-		t := time.NewTicker(readReauthInterval9051)
+		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {
 			select {

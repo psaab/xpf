@@ -252,3 +252,27 @@ func TestSSEReadIsTerminatedWhenShowLogIsDenied10829(t *testing.T) {
 		})
 	}
 }
+
+// TestQ53RESTReauthIntervalReadRacesCleanup pins the synchronization contract:
+// the test-only interval must be read before a watcher is launched, not when
+// its goroutine eventually starts after cleanup restores the package variable.
+func TestQ53RESTReauthIntervalReadRacesCleanup(t *testing.T) {
+	usePasswdFixture(t)
+	oldInterval := readReauthInterval9051
+	readReauthInterval9051 = 100 * time.Millisecond
+	t.Cleanup(func() { readReauthInterval9051 = oldInterval })
+
+	s, _ := authzServer(t, Config{
+		Addr: "127.0.0.1:0", Store: authzStore(t, authzTestConfig),
+		PeerLookupFn: fixedPeerUID(4242),
+	})
+	connCtx := s.connContext(context.Background(), slotConn{
+		client: tcpAddr6974("127.0.0.1", 40051),
+		server: tcpAddr6974("127.0.0.1", 8080),
+	})
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/events/stream", nil).WithContext(connCtx)
+	for range 100 {
+		_, stop := s.watchReadAuthorization(req, config.PermView)
+		stop()
+	}
+}
