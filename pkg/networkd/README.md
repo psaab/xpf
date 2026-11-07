@@ -163,12 +163,15 @@ Triggers `networkctl reload` only when files actually changed.
   `configuring` is deliberately not in the set, because a DHCP link waiting
   for a lease reads `configuring` and would churn. Cells: `keep_master_18597_test.go` (unrelated commit, failed link,
   query error, each of the three inherited-obligation terms).
-- **`KeepMaster=yes` needs the explicit `LinkLocalAddressing=ipv6` beside it
-  (#18597).** systemd.network(5): with `KeepMaster=` enabled, the
-  `LinkLocalAddressing=` default becomes `no`. Every non-disabled row already
-  renders `LinkLocalAddressing=ipv6`; dropping that line would silently remove
-  IPv6 link-local from em0/fxp0/fab*. `TestKeepMasterRowsKeepExplicitLinkLocal18597`
-  pins the pair.
+- **Enabled VRF rows with `KeepMaster=yes` need explicit
+  `LinkLocalAddressing=ipv6` (#18597).** systemd.network(5): with
+  `KeepMaster=` enabled, the `LinkLocalAddressing=` default becomes `no`.
+  Every enabled management row already renders `LinkLocalAddressing=ipv6`;
+  dropping that line would silently remove IPv6 link-local from em0/fxp0/fab*.
+  Disabled and unmanaged rows are the deliberate exception: their
+  always-down units render `LinkLocalAddressing=no`, including when they retain
+  `KeepMaster=yes` (#18607). `TestKeepMasterRowsKeepExplicitLinkLocal18597`
+  pins the enabled-row pair.
 - **Upgrade / downgrade across #18597.** The first apply of the new binary
   rewrites each management row (`VRF=` → `KeepMaster=yes`); networkd reloads
   and reconfigures those links with the NEW file, so it keeps the master. A

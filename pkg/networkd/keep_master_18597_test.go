@@ -32,6 +32,13 @@ import (
 // reconfigure-every-interface tail and the unrelated-commit cell reds.
 
 func TestManagementVRFRowRendersKeepMaster18597(t *testing.T) {
+	resetReloadDebtForTest(t)
+	rpFilterFixture(t)
+	rec := stubNetworkctl18597(t)
+	origFailedLinks := networkdFailedLinks
+	networkdFailedLinks = func() (map[string]bool, error) { return map[string]bool{}, nil }
+	t.Cleanup(func() { networkdFailedLinks = origFailedLinks })
+
 	m := New()
 	cases := []struct {
 		name           string
@@ -44,7 +51,7 @@ func TestManagementVRFRowRendersKeepMaster18597(t *testing.T) {
 		{"vlan parent", InterfaceConfig{Name: "fxp0", IsVLANParent: true, VRFName: "vrf-mgmt"}, true, ""},
 		{"dhcp mgmt", InterfaceConfig{Name: "fxp0", DHCPv4: true, VRFName: "vrf-mgmt"}, true, ""},
 		{"disabled management", InterfaceConfig{Name: "em0", VRFName: "vrf-mgmt", Disable: true}, true, ""},
-		{"unmanaged management", InterfaceConfig{Name: "fxp0", VRFName: "vrf-mgmt", Unmanaged: true}, true, ""},
+		{"unmanaged management without external match", InterfaceConfig{Name: "fxp0", VRFName: "vrf-mgmt", Unmanaged: true}, true, ""},
 		{"disabled without VRF", InterfaceConfig{Name: "em1", Disable: true}, false, ""},
 		{"unmanaged without VRF", InterfaceConfig{Name: "em2", Unmanaged: true}, false, ""},
 		{"disabled bond member", InterfaceConfig{Name: "em3", BondMaster: "fab0", VRFName: "vrf-mgmt", Disable: true}, false, ""},
@@ -55,6 +62,7 @@ func TestManagementVRFRowRendersKeepMaster18597(t *testing.T) {
 		{"bridge member", InterfaceConfig{Name: "em2", BridgeMaster: "br-bd0", VRFName: "vrf-mgmt"}, false, "Bridge=br-bd0\n"},
 		{"data link", InterfaceConfig{Name: "ge-0-0-1", Addresses: []string{"10.0.1.1/24"}}, false, ""},
 	}
+	appliedRows := 0
 	for _, tc := range cases {
 		got := m.generateNetwork(tc.ifc)
 		if strings.Contains(got, "VRF=") {
@@ -66,6 +74,38 @@ func TestManagementVRFRowRendersKeepMaster18597(t *testing.T) {
 		if tc.wantLine != "" && !strings.Contains(got, tc.wantLine) {
 			t.Errorf("%s: missing %q:\n%s", tc.name, tc.wantLine, got)
 		}
+
+		if !tc.ifc.Disable && !tc.ifc.Unmanaged {
+			continue
+		}
+		dir := t.TempDir()
+		if err := NewInDir(dir).Apply([]InterfaceConfig{tc.ifc}); err != nil {
+			t.Fatalf("%s: Apply: %v", tc.name, err)
+		}
+		appliedRows++
+		raw, err := os.ReadFile(filepath.Join(dir, filePrefix+tc.ifc.Name+".network"))
+		if err != nil {
+			t.Fatalf("%s: read applied .network: %v", tc.name, err)
+		}
+		applied := string(raw)
+		if !strings.Contains(applied, "ActivationPolicy=always-down\n") {
+			t.Errorf("%s: applied unit lost always-down policy:\n%s", tc.name, applied)
+		}
+		if has := strings.Contains(applied, "KeepMaster=yes\n"); has != tc.wantKeepMaster {
+			t.Errorf("%s: applied KeepMaster=yes=%v, want %v:\n%s", tc.name, has, tc.wantKeepMaster, applied)
+		}
+		if !strings.Contains(applied, "LinkLocalAddressing=no\n") {
+			t.Errorf("%s: always-down unit must retain LinkLocalAddressing=no:\n%s", tc.name, applied)
+		}
+		if strings.Contains(applied, "VRF=") {
+			t.Errorf("%s: applied unit leaked unresolved VRF= assignment:\n%s", tc.name, applied)
+		}
+	}
+	if rec.reloads != appliedRows {
+		t.Errorf("Apply reloads=%d, want %d for the always-down rows", rec.reloads, appliedRows)
+	}
+	if len(rec.reconfigure) != 0 {
+		t.Errorf("Apply reconfigured always-down rows: %v", rec.reconfigure)
 	}
 }
 
