@@ -2696,6 +2696,41 @@ fn completing_cache_hit_derives_tcp_seq_ack_once_17268() {
 }
 
 #[test]
+fn completing_cache_hit_progress_shaped_derives_once_17268() {
+    // A payload-bearing completing hit: the classic arm completes and
+    // the progress helper is shaped on the same hit; derivations stay
+    // 1. (The two-consumer memo proof is crossed_resurrection_* below,
+    // where both progress resolves actually run.)
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let mut frame = tcp_v4_ack_frame();
+    let l3 = 18usize;
+    let total = u16::from_be_bytes([frame[l3 + 2], frame[l3 + 3]]) + 4;
+    frame[l3 + 2..l3 + 4].copy_from_slice(&total.to_be_bytes());
+    frame.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let before = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        cached_entry(),
+        0,
+        StageSeed {
+            install_handshake_pending: true,
+            expected_ack: Some(1),
+            ..StageSeed::default()
+        },
+    );
+    let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served hit");
+    assert_eq!(
+        run.sessions.handshake_state_wire_for(&test_key()),
+        crate::session::TcpHandshakeState::Established.to_wire(),
+        "the matching ACK completes via the classic arm"
+    );
+    assert_eq!(derivations, 1, "the completing hit derives the ACK exactly once");
+}
+
+#[test]
 fn live_flow_cache_callsite_accounts_debug_forward_and_tx_6304() {
     let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
     let in_place = run_stage(&fixture, &tcp_v4_ack_frame(), 0);
@@ -8912,4 +8947,89 @@ fn idle_crossed_hit_counts_idle_crossed_arm_18656() {
     assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadIdleCrossed as usize], 1);
     assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadNoRecord as usize], 0);
     assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDead as usize], 0);
+}
+
+#[test]
+fn established_reverse_cache_hit_skips_tcp_seq_ack_frame_parse_17268() {
+    // Kimi #17268 (real reverse shape): server->client tuple in key,
+    // frame, meta AND flow, reverse entry, Consumed premise asserted.
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let mut entry = cached_entry();
+    entry.key = crate::session::SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 200)),
+        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 50, 8)),
+        src_port: 443,
+        dst_port: 45678,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    entry.metadata.is_reverse = true;
+    let mut frame = tcp_v4_ack_frame();
+    frame[30..34].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
+    frame[34..38].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 8).octets());
+    frame[38..40].copy_from_slice(&443u16.to_be_bytes());
+    frame[40..42].copy_from_slice(&45678u16.to_be_bytes());
+    let mut meta = test_meta(&frame);
+    let mut src_addr = [0u8; 16];
+    src_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 200).octets());
+    let mut dst_addr = [0u8; 16];
+    dst_addr[..4].copy_from_slice(&Ipv4Addr::new(172, 16, 50, 8).octets());
+    meta.flow_src_addr = src_addr;
+    meta.flow_dst_addr = dst_addr;
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 45678;
+    let flow = SessionFlow {
+        src_ip: entry.key.src_ip,
+        dst_ip: entry.key.dst_ip,
+        forward_key: entry.key.clone(),
+    };
+    let key = entry.key.clone();
+    let before = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        meta,
+        entry,
+        0,
+        StageSeed { flow: Some(flow), ..StageSeed::default() },
+    );
+    let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served REVERSE hit for {key:?}");
+    assert_eq!(
+        derivations, 0,
+        "steady-state REVERSE established hit must not re-derive the TCP ACK"
+    );
+}
+
+#[test]
+fn crossed_resurrection_derives_tcp_seq_ack_once_17268() {
+    // Kimi delta-2: an idle-crossed hit whose companion progressed calls
+    // cache_hit_handshake_progress TWICE (crossed arm + completion arm),
+    // each resolving the ACK — the memo must keep derivations at 1.
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let mut frame = tcp_v4_ack_frame();
+    let l3 = 18usize;
+    let total = u16::from_be_bytes([frame[l3 + 2], frame[l3 + 3]]) + 4;
+    frame[l3 + 2..l3 + 4].copy_from_slice(&total.to_be_bytes());
+    frame.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let established_ns = crate::session::SessionTimeouts::default().tcp_established_ns;
+    let before = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test();
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        cached_entry(),
+        0,
+        StageSeed {
+            install_handshake_pending: true,
+            expected_ack: Some(1),
+            now_ns: 1_000_000 + established_ns + 1_000_000_000,
+            ..StageSeed::default()
+        },
+    );
+    let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: crossed hit resurrected and served");
+    assert_eq!(derivations, 1, "two progress-arm resolves share one ACK derivation");
 }
