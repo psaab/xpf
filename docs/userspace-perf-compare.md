@@ -30,7 +30,7 @@ What it does:
 2. ensures `cluster-userspace-host` is still accepting IPv6 RAs
 3. detects the active userspace firewall instead of assuming `fw0`
 4. records basic IPv4 and IPv6 reachability from `cluster-userspace-host`
-5. runs one IPv4 `iperf3` capture to `172.16.80.200`
+5. runs one IPv4 `iperf3` capture to `$IPERF_TARGET4`
 6. runs one IPv6 `iperf3` capture to `2001:559:8585:80::200`
 7. records `perf` on the active firewall for each family
 8. computes interval-level sustain metrics from the `iperf3 -J` artifacts

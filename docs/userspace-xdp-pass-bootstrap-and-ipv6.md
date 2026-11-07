@@ -133,7 +133,8 @@ With both nodes running the new code, fw1 takes over in ~2.25s and forwards traf
 
 ```bash
 # IPv4 transit (steady state)
-incus exec loss:cluster-userspace-host -- ping -c 5 -W 1 172.16.80.200
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+incus exec loss:cluster-userspace-host -- ping -c 5 -W 1 "$IPERF_TARGET4"
 # 5/5, 0% loss
 
 # IPv6 transit (was completely broken)

@@ -131,7 +131,8 @@ problem — `{aᵢ}` will not be flat (this section), and given a
 non-flat `{aᵢ}` the per-flow CoV cannot beat `Cstruct` (above).
 
 This is a canonical reference for the recurring observation that
-`iperf3 -c 172.16.80.200 -p 5210 -P 6` shows a stable bimodal
+`iperf3 -c "$IPERF_TARGET4" -p 5210 -P 6` (after sourcing
+`test/incus/cluster-env.sh`) shows a stable bimodal
 per-flow split: ~2 flows pinned slow sharing one worker, ~4 flows
 solo, ≥1 worker idle. **That is the floor, not a scheduler bug.**
 Cross-references: #1333 (symptom report), #1304, #1649 (this

@@ -260,7 +260,7 @@ per-leg evidence lives in `docs/log/16215.md`, `docs/log/16222.md`,
 
 **Acceptance (unchanged, never met live):** all-node0 posture
 (RG0/RG1/RG2 primary on node0, asserted by the harness before
-traffic), P4 iperf3 60 s to `172.16.80.200:5211`, RG1 fw0→fw1 at
+traffic), P4 iperf3 60 s to `$IPERF_TARGET4` port 5211, RG1 fw0→fw1 at
 **30 s measured stream age at the RG transition instant**, **zero**
 aggregate (`[SUM]`) and per-stream zero intervals, and a zero delta
 in `xpf_userspace_snat_revoked_sessions_total` on both nodes

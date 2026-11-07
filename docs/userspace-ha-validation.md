@@ -28,7 +28,7 @@ validation workflow has to catch two classes of failure:
   two seconds
 
 On `cluster-userspace-host`, the minimum correctness bar remains:
-- IPv4 reachability to `172.16.80.200`
+- IPv4 reachability to `$IPERF_TARGET4`
 - IPv6 reachability to `2001:559:8585:80::200`
 - IPv6 default route learned from RA on `eth0`
 
@@ -161,7 +161,7 @@ The validator does this in order:
     trace — it is gated by the controlled ping/TTL/iperf3 legs to the
     in-control WAN target (see #1303)
 13. runs one unmeasured warm-up `iperf3` pass for IPv4 and IPv6
-14. runs repeated IPv4 `iperf3` to `172.16.80.200`
+14. runs repeated IPv4 `iperf3` to `$IPERF_TARGET4`
 15. runs repeated IPv6 `iperf3` to `2001:559:8585:80::200`
 16. pulls `iperf3 -J` JSON back to the repo host, parses it locally, and fails
     if throughput cliffs after startup
@@ -807,7 +807,7 @@ The validator treats forwarding correctness and traceroute visibility as
 distinct concerns. It does not require every internet hop to answer. It does
 require:
 
-- the controlled LAN-to-WAN-target ping (`172.16.80.200` /
+- the controlled LAN-to-WAN-target ping (`$IPERF_TARGET4` /
   `2001:559:8585:80::200`) to receive replies for both families. The LAN
   host reaches these WAN-side targets only by transiting the userspace
   dataplane, so this is the controlled IPv6/IPv4 forwarding-correctness gate

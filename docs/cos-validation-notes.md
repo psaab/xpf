@@ -375,12 +375,16 @@ bulk data-plane traffic** — it only sees slow-path packets that fell back
 through the kernel. This makes firewall-side netdev captures useless for
 confirming what reached or left the dataplane on the hot path.
 
+<!-- Expires-when: #18576 closed -->
 The `iperf-grpc-tcpdump` skill in `.codex/skills/iperf-grpc-tcpdump/SKILL.md`
-solves this by running `tcpdump` on the iperf3 **server** over a gRPC
-capture endpoint at `172.16.80.200:50051`, synchronised with LAN/WAN
-captures on the active firewall and an iperf3 run from the client.
+solves this by running `tcpdump` on the iperf3 **server** over a family-6-only
+gRPC capture endpoint at `172.16.80.200:50051` on the external v6-only target
+box, synchronised with LAN/WAN captures on the active firewall and an iperf3
+run from the client. For family 4, capture on the IPv4 target container with
+`tcpdump` (`MOUSE_TARGET_NAME`); do not use this gRPC endpoint.
 
-Ad-hoc capture (no iperf3 coordination) looks like:
+<!-- Expires-when: #18576 closed -->
+Ad-hoc family-6 capture (no iperf3 coordination) looks like:
 
 ```bash
 grpcurl -plaintext -d '{"iface":"eth0","duration_s":30,"filter":"tcp port 5201"}' \
@@ -507,9 +511,13 @@ The lesson: **do not conclude "ECN isn't negotiated" from a
 firewall-side tcpdump that shows `tos 0x0`**. AF_XDP means the
 firewall-side capture doesn't see dataplane traffic at all, and even a
 local client-side capture can be misleading if the path crosses a VLAN
-boundary. Use the gRPC server-side capture at `172.16.80.200:50051` to
-disambiguate where in the chain the ECT bits are being lost (or
-mis-read).
+boundary.
+
+<!-- Expires-when: #18576 closed -->
+For family 6 only, use the gRPC server-side capture at
+`172.16.80.200:50051` to disambiguate where in the chain the ECT bits are
+being lost (or mis-read). For family 4, capture on the IPv4 target container
+with `tcpdump` (or use the skill's `--family 4` helper).
 
 The verification command still works — the conclusion to draw from it
 is narrower than before:

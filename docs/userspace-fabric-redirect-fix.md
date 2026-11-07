@@ -188,16 +188,17 @@ for rg in 0 1 2; do
 done
 
 # Verify normal traffic
-ping -c 10 172.16.80.200   # expect: 0% loss, TTL=63
+source test/incus/cluster-env.sh   # IPERF_TARGET4: loss 172.16.80.202 (#18576)
+ping -c 10 "$IPERF_TARGET4"   # expect: 0% loss, TTL=63
 
 # Failover RG1 (WAN) to node1
 echo "request chassis cluster failover redundancy-group 1 node 1" | cli
 
 # Verify split-RG fabric redirect
-ping -c 20 172.16.80.200   # expect: 0% loss (fabric redirect)
-iperf3 -c 172.16.80.200 -P 4 -t 5   # expect: >10 Gbps through fabric
+ping -c 20 "$IPERF_TARGET4"   # expect: 0% loss (fabric redirect)
+iperf3 -c "$IPERF_TARGET4" -P 4 -t 5   # expect: >10 Gbps through fabric
 
 # Verify TTL consistency
-ping -c 50 -i 0.1 172.16.80.200 | grep ttl=
+ping -c 50 -i 0.1 "$IPERF_TARGET4" | grep ttl=
 # expect: ALL packets TTL=63, no TTL=62
 ```

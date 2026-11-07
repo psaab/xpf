@@ -74,7 +74,8 @@ loss:xpf-userspace-fw{0,1} — node-id 0 / 1, /etc/xpf/node-id present:
                          reth0.80  172.16.80.8/24      —   data path target VLAN
 ```
 
-Smoke iperf3 target: `172.16.80.200` / `2001:559:8585:80::200` (on
+Smoke iperf3 target: `$IPERF_TARGET4` (loss `172.16.80.202`) /
+`2001:559:8585:80::200` (on
 reth0.80 WAN path, AF_XDP zero-copy fast path). Per-class iperf3 servers
 live on ports 5200-5211 matching `test/incus/cos-iperf-config.set`. Do
 NOT use `172.16.100.x` — that reaches a different `loss:` uplink path
