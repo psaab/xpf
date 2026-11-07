@@ -2253,6 +2253,34 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (family string, na
 	return family, narrow, true
 }
 
+// natAddressNameReference reports whether name is defined, whether it is a
+// direct dynamic-address feed binding, and the shared address-book resolution
+// verdict for static names. Keeping NAT's two name gates on this single path
+// preserves the #3303/#3418 feed carve-out and #3425's
+// policyMatchAddressBookResolves semantics.
+func natAddressNameReference(cfg *Config, name string) (defined, directFeed bool, cause error, dnsUnavailableOnly bool) {
+	if name == "" {
+		return true, false, nil, false
+	}
+	if cfg == nil {
+		return false, false, nil, false
+	}
+	if _, ok := cfg.Security.DynamicAddress.AddressBindings[name]; ok {
+		return true, true, nil, false
+	}
+	ab := cfg.Security.AddressBook
+	if ab == nil {
+		return false, false, nil, false
+	}
+	if _, ok := ab.Addresses[name]; !ok {
+		if _, ok := ab.AddressSets[name]; !ok {
+			return false, false, nil, false
+		}
+	}
+	cause, dnsUnavailableOnly = policyMatchAddressBookResolution(ab, name)
+	return true, false, cause, dnsUnavailableOnly
+}
+
 // validateNATSourceAddressNameReferencesStrict hard-rejects a source or
 // destination NAT rule whose `match source-address-name <name>` OR `match
 // destination-address-name <name>` (#3229) names an address-book entry that
@@ -2307,37 +2335,21 @@ func addressBookNameFamily16600(ab *AddressBook, name string) (family string, na
 // still BOOTS (#1960); the dataplane then fails closed for the unresolved
 // reference. Rule-sets are walked source-first then destination, in slice
 // order, for a deterministic first error.
+
 func validateNATSourceAddressNameReferencesStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
-	}
-	ab := cfg.Security.AddressBook
-	feedBinding := func(name string) bool {
-		if name == "" {
-			return false
-		}
-		_, ok := cfg.Security.DynamicAddress.AddressBindings[name]
-		return ok
-	}
-	defined := func(name string) bool {
-		if name == "" || ab == nil {
-			return false
-		}
-		if _, ok := ab.Addresses[name]; ok {
-			return true
-		}
-		_, ok := ab.AddressSets[name]
-		return ok
 	}
 	// nameError returns nil when the reference is valid, or the strict
 	// rejection error otherwise. field is "source-address-name" /
 	// "destination-address-name" and scope is "source scope" / "destination
 	// scope" for the operator-facing message.
 	nameError := func(natType, ruleSet, ruleName, field, scope, name string) error {
-		if name == "" || feedBinding(name) {
+		defined, _, cause, _ := natAddressNameReference(cfg, name)
+		if name == "" || (defined && cause == nil) {
 			return nil
 		}
-		if !defined(name) {
+		if !defined {
 			return fmt.Errorf(
 				"%s NAT rule-set %q rule %q references undefined "+
 					"%s %q (define `security address-book "+
@@ -2351,16 +2363,13 @@ func validateNATSourceAddressNameReferencesStrict(cfg *Config) error {
 		// member). Runtime poisons the whole closure and retains a prefixed,
 		// unparseable fallback token; a CIDR-shaped name cannot become a
 		// literal prefix (#12626).
-		if cause := policyMatchAddressBookResolves(ab, name); cause != nil {
-			return fmt.Errorf(
-				"%s NAT rule-set %q rule %q match %s %q does not resolve to "+
-					"any address: %w — the lenient path retains an unparseable "+
-					"fallback token for the %s, so the rule matches nothing "+
-					"(#12626; add at least one resolvable member / a usable prefix "+
-					"to the address, or remove the reference) (#3425)",
-				natType, ruleSet, ruleName, field, name, cause, scope)
-		}
-		return nil
+		return fmt.Errorf(
+			"%s NAT rule-set %q rule %q match %s %q does not resolve to "+
+				"any address: %w — the lenient path retains an unparseable "+
+				"fallback token for the %s, so the rule matches nothing "+
+				"(#12626; add at least one resolvable member / a usable prefix "+
+				"to the address, or remove the reference) (#3425)",
+			natType, ruleSet, ruleName, field, name, cause, scope)
 	}
 	check := func(natType string, rs *NATRuleSet) error {
 		if rs == nil {
@@ -3956,7 +3965,7 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 	return warnings, nil
 }
 
-// validateNAT64ScopeStrict (#15678/#15932/#16049/#16550) validates the
+// validateNAT64ScopeStrict (#15678/#15932/#16049/#16550/#17256) validates the
 // optional NAT64 ingress scoping (`from zone|routing-instance`, `match
 // source-address[-name]`).
 //
@@ -3964,18 +3973,20 @@ func validateNAT64PrefixStrict(cfg *Config, lenient bool) ([]string, error) {
 // dataplane ANDs the axes, which the operator never authored as a
 // conjunction, and the Junos single-kind rule forbids it), an undefined
 // from-zone / routing-instance, an unparsable or non-IPv6
-// source-address, and an undefined source-address-name. #16550: a
-// source-address-name whose static closure resolves only to IPv4 (or
-// to no usable prefix at all) is likewise rejected — it has the same
-// never-match consequence as a literal IPv4 source. A closure with
-// at least one IPv6 prefix (mixed v4+v6) still commits; the v4
-// members simply never match an IPv6 source. Multiple values of the
-// SAME kind are a legitimate list: compileNAT64 unions them into
-// FromZones / FromRoutingInstances on the single authored rule-set,
-// and every member is checked here. Lenient: warn per defect (#1960);
-// the dataplane still fails closed — an unknown zone/RI name never
-// equals a packet's resolved scope, and an all-unparseable source
-// list matches nothing.
+// source-address, an undefined source-address-name, or a defined name
+// whose closure cannot resolve to an address (#3425/#17256). Direct
+// dynamic-address feed names are accepted by the shared NAT name
+// predicate (#3303/#3418), and a closure blocked only by cold/failed
+// DNS remains a runtime dependency (#15930/#16595). #16550: a resolved
+// source-name closure that is IPv4-only is also rejected — it has the
+// same never-match consequence as a literal IPv4 source. A mixed
+// v4+v6 closure still commits; the v4 members simply never match an
+// IPv6 source. Multiple values of the SAME kind are a legitimate list:
+// compileNAT64 unions them into FromZones / FromRoutingInstances on the
+// single authored rule-set, and every member is checked here. Lenient:
+// warn per defect (#1960); the dataplane still fails closed — an unknown
+// zone/RI name never equals a packet's resolved scope, and an
+// all-unparseable source list matches nothing.
 func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
@@ -4067,23 +4078,13 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 			if _, _, isWildcard := PolicyAddressWildcardFamilies(n); isWildcard {
 				continue
 			}
-			// #16550: a direct dynamic-address feed binding carries no
-			// static closure to judge — its prefixes arrive via the
-			// live feed overlay at snapshot build (mirrors the
-			// validateNATSourceAddressNameReferencesStrict carve-out).
-			if _, isFeed := cfg.Security.DynamicAddress.AddressBindings[n]; isFeed {
+			defined, directFeed, cause, dnsUnavailableOnly := natAddressNameReference(cfg, n)
+			if directFeed {
+				// A feed overlay, not a same-named static book entry, is
+				// authoritative for this direct reference.
 				continue
 			}
-			found := false
-			if ab := cfg.Security.AddressBook; ab != nil {
-				if _, ok := ab.Addresses[n]; ok {
-					found = true
-				}
-				if _, ok := ab.AddressSets[n]; ok {
-					found = true
-				}
-			}
-			if !found {
+			if !defined {
 				if err := emit(fmt.Sprintf(
 					"security nat nat64 rule-set %q match source-address-name %q is not defined in the address book; define `security address-book global address %s <prefix>` in the same commit (#15678)",
 					rs.Name, n, n)); err != nil {
@@ -4091,19 +4092,21 @@ func validateNAT64ScopeStrict(cfg *Config, lenient bool) ([]string, error) {
 				}
 				continue
 			}
-			// #16550: resolve the static closure with the same static
-			// expander the other NAT strict gates use. A closure
-			// proven to yield no IPv6 prefix (IPv4-only, an empty
-			// set, or a closure whose members are all usable IPv4)
-			// can never match an IPv6 NAT64 source — reject it
-			// exactly like a literal IPv4 `match source-address`.
-			// A mixed v4+v6 closure commits; only the v6 members
-			// can match. A closure that is not statically decidable
-			// (dns-name with no snapshot yet, a dangling/unusable/
-			// tainted member, a failed expansion) is NOT rejected
-			// here: those states are runtime-resolved or already
-			// fail closed at the builder, and #15930 deliberately
-			// admits a defined dns-name at commit.
+			// Preserve #15930/#16595: a cold or failed DNS answer is a
+			// runtime dependency, not a statically invalid address name.
+			// The shared resolver distinguishes that case from a closure
+			// that also contains an empty/dangling static member.
+			if cause != nil && !dnsUnavailableOnly {
+				if err := emit(fmt.Sprintf(
+					"security nat nat64 rule-set %q match source-address-name %q does not resolve to any address: %v — the NAT64 source-name scope matches nothing (#3425/#17256)",
+					rs.Name, n, cause)); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			// #16550: a closure proven to contain no IPv6 prefix can
+			// never match a NAT64 source. A mixed v4+v6 closure commits;
+			// only its v6 members can match.
 			if nat64NameClosureNoIPv6(cfg.Security.AddressBook, n) {
 				if err := emit(fmt.Sprintf(
 					"security nat nat64 rule-set %q match source-address-name %q does not resolve to any IPv6 address; NAT64 sources are IPv6 — an IPv4-only address-book entry/set can never match (#16550)",

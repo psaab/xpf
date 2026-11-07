@@ -308,37 +308,35 @@ func policyMatchEmptyAppSetError(scope, policyName, name string, lenient bool) e
 // FIRST member that does not resolve / the empty expansion that makes the
 // gate refuse to arm.
 //
-// The fail-closed semantics are copied verbatim from the runtime so the commit
-// gate and the runtime gate cannot diverge:
-//
-//   - a defined `address` with a non-empty UsableValue resolves (accumulates
-//     one literal); an `address` with an EMPTY usable value does NOT (the
-//     runtime returns false on addr.UsableValue() == "" — #14967 extends
-//     this to duplicate-prefix and trailing-token taints).
-//   - an `address-set` resolves only if EVERY direct and nested member resolves
-//     AND it has at least one member (resolvedAny). A dangling member (a name
-//     that is neither a defined address nor a defined set) fails the WHOLE set
-//     — the runtime's `if !resolve(member) { return false }`. A defined-but-
-//     EMPTY set fails (resolvedAny stays false).
-//   - a cycle short-circuits to "resolved" for the inner visit (the runtime's
-//     `if seenSets[ref] { return true }`), but a name that expands to ZERO
-//     literals (e.g. a pure self-cycle) is still rejected by the outer
-//     len(values) == 0 check that expandUserspacePolicyAddresses applies.
-//
-// `seen` is NOT backtracked (no defer delete), matching the runtime's
-// persistent seenSets — this is deliberately distinct from ExpandAddressSet
-// (predefined.go), whose visited map backtracks for a different purpose.
+// `dnsUnavailableOnly` from policyMatchAddressBookResolution distinguishes a
+// closure blocked solely by a cold/failed dns-name from a closure that also
+// contains a statically invalid member. Callers that deliberately admit a
+// runtime DNS dependency may use that distinction without overlooking an
+// empty or dangling sibling.
 func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
+	cause, _ := policyMatchAddressBookResolution(ab, name)
+	return cause
+}
+
+// policyMatchAddressBookResolution is the shared recursive resolver verdict.
+// The first return value preserves policyMatchAddressBookResolves' diagnostic;
+// the second is true only when an otherwise structurally resolvable closure
+// fails solely because at least one dns-name has no current answer due to a
+// cold cache or lookup failure. A successful zero-answer DNS lookup is not
+// transient and remains a resolution failure.
+func policyMatchAddressBookResolution(ab *AddressBook, name string) (error, bool) {
 	show := displayPolicyAddressBookName
 	seen := make(map[string]bool)
 	count := 0 // literal addresses accumulated (mirrors expanded slice length)
 	var firstErr error
+	var hasDNSUnavailable, hasStaticFailure bool
 	var resolve func(ref string) bool
 	resolve = func(ref string) bool {
 		if ref == "" {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("empty member reference")
 			}
+			hasStaticFailure = true
 			return false
 		}
 		if addr := ab.Addresses[ref]; addr != nil {
@@ -347,14 +345,26 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 			// runtime resolver (resolveUserspaceAddressBookEntry) refuses it.
 			// #15673: count every usable prefix (range/wildcard/DNS entries
 			// expand to many); an empty expansion still fails closed.
-			if len(addr.UsableValues()) == 0 {
+			values := addr.UsableValues()
+			if len(values) == 0 {
+				dnsUnavailable := addr.DNSName != "" &&
+					(addr.DNSLookupFailed || addr.DNSUnresolved) &&
+					addr.Value == "" && len(addr.ExpandedPrefixes) == 0 &&
+					len(addr.UnimplementedForms) == 0 &&
+					len(addr.DuplicatePrefixes) == 0 &&
+					len(addr.TrailingTokens) == 0 && addr.OversizedRange == ""
 				if firstErr == nil {
 					firstErr = fmt.Errorf("address %q has no configured prefix "+
 						"(it resolves to no usable address)", show(ref))
 				}
+				if dnsUnavailable {
+					hasDNSUnavailable = true
+				} else {
+					hasStaticFailure = true
+				}
 				return false
 			}
-			count += len(addr.UsableValues())
+			count += len(values)
 			return true
 		}
 		set := ab.AddressSets[ref]
@@ -363,6 +373,7 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 				firstErr = fmt.Errorf("member %q is not a defined address or "+
 					"address-set", show(ref))
 			}
+			hasStaticFailure = true
 			return false
 		}
 		if len(set.UnknownMembers) > 0 {
@@ -371,46 +382,54 @@ func policyMatchAddressBookResolves(ab *AddressBook, name string) error {
 					"the dropped member leaves the set under-populated",
 					show(ref), set.UnknownMembers[0])
 			}
+			hasStaticFailure = true
 			return false
 		}
 		if seen[ref] {
 			return true // cycle: already counted up the stack (mirror runtime)
 		}
 		seen[ref] = true
-		resolvedAny := false
-		for _, m := range set.Addresses {
-			if !resolve(m) {
-				return false
-			}
-			resolvedAny = true
-		}
-		for _, m := range set.AddressSets {
-			if !resolve(m) {
-				return false
-			}
-			resolvedAny = true
-		}
-		if !resolvedAny {
+		members := len(set.Addresses) + len(set.AddressSets)
+		if members == 0 {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("address-set %q is empty "+
 					"(it expands to no addresses)", show(ref))
 			}
+			hasStaticFailure = true
 			return false
 		}
-		return true
+		allResolved := true
+		for _, m := range set.Addresses {
+			if !resolve(m) {
+				allResolved = false
+				if hasStaticFailure {
+					return false
+				}
+			}
+		}
+		for _, m := range set.AddressSets {
+			if !resolve(m) {
+				allResolved = false
+				if hasStaticFailure {
+					return false
+				}
+			}
+		}
+		return allResolved
 	}
 	if !resolve(name) {
 		if firstErr == nil {
 			firstErr = fmt.Errorf("%q resolves to no address", show(name))
+			hasStaticFailure = true
 		}
-		return firstErr
+		return firstErr, hasDNSUnavailable && !hasStaticFailure
 	}
 	if count == 0 {
 		// Resolved true but accumulated no literal (e.g. a pure cycle):
 		// mirrors expandUserspacePolicyAddresses' len(values) == 0 reject.
-		return fmt.Errorf("address-set %q expands to no addresses", show(name))
+		return fmt.Errorf("address-set %q expands to no addresses", show(name)), false
 	}
-	return nil
+	return nil, false
 }
 
 // validatePolicyMatchAddressSetMembersStrict hard-rejects a security-policy

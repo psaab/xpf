@@ -16284,8 +16284,13 @@ NAT rule-sets: `from zone <z>` XOR `from routing-instance <ri>`, and
 `match source-address <ipv6-prefix>` / `match source-address-name <name>`
 (multi-value). `NAT64RuleSet` carries the scope, `compileNAT64` reads it
 via `collectNATScopes`, and `validateNAT64ScopeStrict` rejects mixed from
-axes, undefined zone/RI, non-IPv6/unparsable source entries, and undefined
-address-book names at strict commit (lenient warns). `NAT64RuleSnapshot`
+axes, undefined zone/RI, non-IPv6/unparsable source entries, undefined
+address-book names, and defined-but-unresolvable source-name closures
+(#3425/#17256; lenient mode warns). The NAT64 name arm shares the NAT
+address-name resolver with source/destination NAT, so empty/dangling
+closures cannot commit; direct feed bindings remain accepted (#3303/#3418/
+#16550), while a name empty solely because DNS is cold/failed remains a
+runtime dependency (#15930/#16595). `NAT64RuleSnapshot`
 carries the scope (names pre-resolved, feed-aware) under ProtocolVersion
 60; the Rust `Nat64Prefix` enforces first-match on (/96, zone, RI, source)
 via `classify_ipv6_packet_scoped`, failing closed on an all-unparseable
@@ -16295,6 +16300,7 @@ owner key and shadowing is scope-aware. The retired-eBPF
 every rule-set now gets a pool ID and persistent-NAT registration; the
 Rust #6982 aggregate budget is the only bound. Tests:
 `nat64_scope_15678_test.go` (config + userspace),
+`nat64_name_resolvable_17256_test.go` (shared name resolution),
 `compiler_nat64_cap_15678_test.go`, `nat64_scoped_*_15678` (Rust).
 
 ### #16049 — NAT64 `from routing-instance` list union

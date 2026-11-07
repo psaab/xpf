@@ -263,24 +263,36 @@ func TestNAT64SrcShadowWildcardPoisonedName16873(t *testing.T) {
 // F2 (review fold): an empty NESTED address-set poisons the whole
 // runtime closure (expandBookNameRecursive), even when sibling leaves
 // survive. The static proof must not flatten it away: `parents`
-// (wide + empty-set) must not prove coverage of b. Removing the empty
-// member is the positive control and does shadow b.
+// (wide + empty-set) must not prove coverage of b. #17256 now rejects
+// this config at strict commit, so exercise the downstream shadow and
+// owner analysis directly against its typed shape. Removing the empty
+// member remains the positive control and does shadow b.
 func TestNAT64SrcShadowNestedEmptySetPoison16873(t *testing.T) {
-	bookLines := []string{
-		"set security address-book global address wide 2001:db8::/48",
-		"set security address-book global address-set empty description none",
-		"set security address-book global address-set parents address wide",
-		"set security address-book global address-set parents address-set empty",
+	a := &NAT64RuleSet{
+		Name: "a", Prefix: "64:ff9b::/96", SourcePool: "p1",
+		SourceAddressNames: []string{"parents"},
 	}
-	aName := []string{"set security nat nat64 rule-set a match source-address-name parents"}
-	cmds := append(append([]string{}, bookLines...),
-		nat64SrcShadowCmds("p1", "p2", aName, bSrc("2001:db8:0:1::/64"))...)
-	cfg, err := CompileConfig(natOverlapTree(t, cmds...))
-	if err != nil {
-		t.Fatalf("nested-empty-set config must compile (member-definedness gate passes): %v", err)
+	b := &NAT64RuleSet{
+		Name: "b", Prefix: "64:ff9b::/96", SourcePool: "p2",
+		SourceAddresses: []string{"2001:db8:0:1::/64"},
 	}
-	if w := unreachableWarning9555(cfg, "b"); w != "" {
-		t.Fatalf("a's closure is poisoned by the empty nested set, so b is reachable; must not warn; got %q", w)
+	cfg := &Config{}
+	cfg.Security.AddressBook = &AddressBook{
+		Addresses: map[string]*Address{
+			"wide": {Name: "wide", Value: "2001:db8::/48"},
+		},
+		AddressSets: map[string]*AddressSet{
+			"empty":   {Name: "empty"},
+			"parents": {Name: "parents", Addresses: []string{"wide"}, AddressSets: []string{"empty"}},
+		},
+	}
+	cfg.Security.NAT.SourcePools = map[string]*NATPool{
+		"p1": {Name: "p1", Addresses: []string{"198.51.100.1/32"}},
+		"p2": {Name: "p2", Addresses: []string{"198.51.100.2/32"}},
+	}
+	cfg.Security.NAT.NAT64 = []*NAT64RuleSet{a, b}
+	if _, shadowed := nat64ShadowedRuleSets(cfg)[b]; shadowed {
+		t.Fatal("a's closure is poisoned by the empty nested set, so b is reachable; must not mark it shadowed")
 	}
 	foundB := false
 	for _, o := range natPoolOverlapOwners(cfg) {
@@ -297,7 +309,9 @@ func TestNAT64SrcShadowNestedEmptySetPoison16873(t *testing.T) {
 		"set security address-book global address-set parents address wide",
 	}
 	ctrl := append(append([]string{}, ctrlLines...),
-		nat64SrcShadowCmds("p1", "p2", aName, bSrc("2001:db8:0:1::/64"))...)
+		nat64SrcShadowCmds("p1", "p2",
+			[]string{"set security nat nat64 rule-set a match source-address-name parents"},
+			bSrc("2001:db8:0:1::/64"))...)
 	acceptedWithUnreachable9555(t, "b", ctrl...)
 }
 
