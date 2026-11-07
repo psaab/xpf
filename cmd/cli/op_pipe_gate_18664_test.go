@@ -65,6 +65,9 @@ func (f *rec18664) ShowRollback(_ context.Context, in *pb.ShowRollbackRequest, _
 
 func (f *rec18664) ShowText(_ context.Context, in *pb.ShowTextRequest, _ ...grpc.CallOption) (*pb.ShowTextResponse, error) {
 	f.text = append(f.text, in.GetTopic())
+	if in.GetTopic() == "class-of-service:reth0.80" {
+		return &pb.ShowTextResponse{Output: "Interface: reth0.80\n"}, nil
+	}
 	return &pb.ShowTextResponse{Output: "node0 primary\nnode1 secondary\nother line\n"}, nil
 }
 
@@ -143,6 +146,24 @@ func TestOpPipeOnOtherCommands18664(t *testing.T) {
 		f, out, err := dispatch18664(t, "show route | count", false)
 		if err != nil || !reflect.DeepEqual(f.text, []string{"route-all"}) {
 			t.Fatalf("err=%v topics=%v; want ShowText(route-all)", err, f.text)
+		}
+		if out != "Count: 3 lines\n" {
+			t.Fatalf("output %q; want Count: 3 lines", out)
+		}
+	})
+	t.Run("show version | match secondary", func(t *testing.T) {
+		f, out, err := dispatch18664(t, "show version | match secondary", false)
+		if err != nil || !reflect.DeepEqual(f.text, []string{"version"}) {
+			t.Fatalf("err=%v topics=%v; want ShowText(version)", err, f.text)
+		}
+		if out != "node1 secondary\n" {
+			t.Fatalf("output %q; want only the matching line", out)
+		}
+	})
+	t.Run("show version | count", func(t *testing.T) {
+		f, out, err := dispatch18664(t, "show version | count", false)
+		if err != nil || !reflect.DeepEqual(f.text, []string{"version"}) {
+			t.Fatalf("err=%v topics=%v; want ShowText(version)", err, f.text)
 		}
 		if out != "Count: 3 lines\n" {
 			t.Fatalf("output %q; want Count: 3 lines", out)
@@ -384,6 +405,55 @@ func TestOpLeafOutputModifierRefused18666(t *testing.T) {
 			}
 			if f.calls() != 0 || out != "" {
 				t.Fatalf("dispatch(%q) calls=%d output=%q; want refusal before handler/RPC", tc.line, f.calls(), out)
+			}
+		})
+	}
+}
+
+// TestOpLeafUnconsumedSuffixRefused18666 covers the two spellings that used to
+// make show version run while silently discarding the suffix. Both cases must
+// fail before the renderer or any RPC is reached.
+func TestOpLeafUnconsumedSuffixRefused18666(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"show version extra | display xml", "unknown show version command: extra"},
+		{"show version |display xml", `unknown show version command: |display (separate the pipe with spaces: "| display")`},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			f, out, err := dispatch18664(t, tc.line, false)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
+			}
+			if f.calls() != 0 || out != "" {
+				t.Fatalf("dispatch(%q) calls=%d output=%q; want refusal before render/RPC", tc.line, f.calls(), out)
+			}
+		})
+	}
+}
+
+// TestOpClassOfServiceOptionalSelector18666 proves the CoS leaf's single
+// optional selector reaches the filtered ShowText view, while neither a bare
+// display pipe nor one after the selector is consumed by that handler.
+func TestOpClassOfServiceOptionalSelector18666(t *testing.T) {
+	f, out, err := dispatch18664(t, "show class-of-service interface reth0.80", false)
+	if err != nil || !reflect.DeepEqual(f.text, []string{"class-of-service:reth0.80"}) {
+		t.Fatalf("dispatch(selector) err=%v topics=%v; want filtered ShowText topic", err, f.text)
+	}
+	if out != "Interface: reth0.80\n" {
+		t.Fatalf("selector output %q; want filtered interface view", out)
+	}
+
+	for _, line := range []string{
+		"show class-of-service interface | display xml",
+		"show class-of-service interface reth0.80 | display xml",
+	} {
+		t.Run(line, func(t *testing.T) {
+			f, out, err := dispatch18664(t, line, false)
+			want := `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`
+			if err == nil || err.Error() != want {
+				t.Fatalf("dispatch(%q) = %v; want %q", line, err, want)
+			}
+			if f.calls() != 0 || out != "" {
+				t.Fatalf("dispatch(%q) calls=%d output=%q; want refusal before RPC/output", line, f.calls(), out)
 			}
 		})
 	}

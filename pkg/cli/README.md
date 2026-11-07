@@ -35,10 +35,14 @@ shared with `cmd/cli`; both surfaces use the same unknown-command, glued-pipe,
 and output-modifier errors. It examines only words before the first bare `|`
 and refuses a pipe directly under a keyword-only node unless its handler parses
 that handler-level display or compare pipe (currently `show configuration`).
-It also refuses a bare output pipe after a pure keyword leaf, such as
-`show version | display xml`, before its handler can silently drop it.
-Pipes after value slots or `AcceptsArgs` tails remain with their existing
-handlers.
+It also refuses any unconsumed suffix after a pure keyword leaf, such as
+`show version | display xml` or `show version extra | display xml`, before the
+handler can silently drop trailing words. A glued pipe suffix (for example
+`show version |display xml`) is refused as an unknown word with a spacing hint.
+The `show class-of-service interface` leaf is explicitly bounded to one
+optional selector; that selector remains accepted, but a display pipe after the
+leaf or selector is refused. Pipes after value slots or `AcceptsArgs` tails
+remain with their existing handlers.
 
 ## Request / diagnostic command files (#4653)
 

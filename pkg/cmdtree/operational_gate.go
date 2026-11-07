@@ -11,21 +11,23 @@ import (
 // canonical command path. The handlers differ per surface: the remote handler
 // splits with splitShowPipe, the local one with splitDisplayPipe.
 //
-// Only keyword-only nodes and pure keyword leaves need an entry. A pipe after
-// a value slot or an AcceptsArgs tail is outside the #16798 gate
-// (ValidateOperationalLine returns ok=false there) and reaches its handler
-// unchanged. Unregistered terminal leaf pipes are refused by
-// ValidateOperationalGate; this is why `show system rollback <N> | display
-// set` and `show configuration security | display set` never needed listing:
-// rollback is a value slot, and configuration is the registered consumer.
-// Output filters (`| match`, `| count`, ...) are not handler-level pipes
-// either: dispatch peels them with cliterm.SplitPipe before
-// dispatchOperational runs.
+// Only keyword-only nodes and pure keyword leaves whose handlers consume
+// handler-level pipes need an entry. A pipe after a value slot or an
+// AcceptsArgs tail is outside the #16798 gate (ValidateOperationalLine returns
+// ok=false there) and reaches its handler unchanged. Otherwise a terminal leaf
+// cannot consume arbitrary trailing words: ValidateOperationalGate refuses
+// those suffixes unless the leaf is explicitly registered. This is why
+// `show system rollback <N> | display set` and
+// `show configuration security | display set` never needed listing: rollback
+// is a value slot, and configuration is the registered consumer. Output
+// filters (`| match`, `| count`, ...) are not handler-level pipes either:
+// dispatch peels them with cliterm.SplitPipe before dispatchOperational runs.
 // A missing entry fails CLOSED with a pipe-specific syntax error, never as a
 // silent success, so a new handler that starts parsing a pipe under a
 // keyword-only node or after a leaf must be added here;
 // TestOperationalPipeConsumers18664 pins that every entry really reaches
 // its handler.
+//
 
 var OperationalPipeConsumers = map[string]bool{
 	"show configuration": true,
@@ -35,45 +37,22 @@ var OperationalPipeConsumers = map[string]bool{
 // since #18664.
 //
 // The output pipe is not operational-tree grammar (#9628 made the same
-// correction in the login-class gate). Running ValidateOperationalLine over
-// the whole line judged the bare `|` as an unknown trailing keyword, so
-// `show configuration | display set` was refused as `unknown show
-// configuration command: |` before the handler that parses the pipe could
-// run. The gate therefore validates only the words before the first bare `|`,
-// so an unknown token BEFORE the pipe still refuses exactly as #16798 does.
+// correction in the login-class gate). The gate validates words before the
+// first bare `|` so unknown tokens before the pipe still refuse exactly as
+// #16798 does. It separately checks whether a pipe sits directly under a
+// keyword-only node; only an OperationalPipeConsumers command may receive it.
 //
-// Removing the pipe from the judged words must not reopen #16798 for piped
-// lines. A pipe placed directly under a keyword-only node is a shape #16798
-// already refused: on the remote console `show chassis | display set`
-// exited 1 with `unknown show chassis command: |` before #18664. (The
-// local console returned nil for the same line until #18668 shared this
-// gate.) #18664 keeps that refusal and changes
-// only its message, which now names the modifier. Admitting the pipe instead
-// would hand it to a handler that prints help or runs the bare command and
-// drops the modifier, exiting 0 (`clear security | display set`,
-// `show chassis | display set`). The pipe position is located by asking the
-// same validator about the words up to and including that `|`. The answer
-// bad == "|" means the pipe sits under a keyword-only node, and only an
-// OperationalPipeConsumers command may receive it. The keyword-only
-// predicate stays defined once, in pkg/cmdtree.
-//
-// #18666: a pipe after a leaf — a childless keyword whose pre-pipe words
-// canonicalize cleanly (`show version | display xml`) — was judged neither
-// as a keyword-only failure (the pipe sits after a leaf, not under a node
-// with keyword children) nor, on either console, by the leaf handler, which
-// never looks at trailing words: it ran in its default format and exited 0,
-// silently dropping the modifier. The same terminal rule therefore also
-// refuses a bare pipe whose pre-pipe words canonicalize to exactly such a
-// leaf, unless the command is an OperationalPipeConsumers entry. Words with
-// a value head (`show configuration | display set`) resolve below it through
-// an AcceptsArgs tail, so their line canonicalizes to the consumer path
-// itself. A bare `|` also refuses: it is the same dropped-modifier class.
-// Pipes after a value slot, an option tail or an AcceptsArgs tail whose
-// pre-pipe line does NOT canonicalize are NOT leaves: they stay their
-// handlers' domain, which parses or refuses them (`show system rollback
-// <N> | display set`, `show configuration security | display set`, a `show
-// interfaces <name>` value). Filter pipes (`| match`, `| count`, ...) are
-// peeled by dispatch before the gate and never reach here.
+// #18666 closes the other silent-drop shape: handlers may ignore words after
+// a pure keyword leaf, so any unconsumed suffix after such a leaf is refused.
+// This includes a bare `| display`, a trailing unknown command word, and a
+// glued pipe token such as `|display` (which gets the same spacing hint as a
+// glued pipe under a keyword-only node). The leaf walk excludes value slots
+// and uses a Canonicalize probe to preserve childless AcceptsArgs handlers.
+// Pipes after value slots or AcceptsArgs tails whose command path does not
+// canonicalize to a pure leaf remain in their handlers' domain
+// (`show system rollback <N> | display set`,
+// `show configuration security | display set`). Implemented filters
+// (`| match`, `| count`, ...) are peeled by dispatch before the gate.
 func ValidateOperationalGate(words []string) error {
 	cut := firstBarePipe(words)
 	cmdWords := words
@@ -85,7 +64,7 @@ func ValidateOperationalGate(words []string) error {
 		switch {
 		case ambiguous:
 			return fmt.Errorf("ambiguous %s command: %s", path, bad)
-		case strings.Contains(bad, "|"):
+		case strings.Contains(bad, "|") && !isQuotedOperationalWord(bad):
 			// A `|` glued to a word is not the pipe operator on any
 			// surface (the first-bare-pipe scan, cliterm.SplitPipe,
 			// pkg/cli's splitAtPipe, and the handlers' pipe splits
@@ -97,89 +76,125 @@ func ValidateOperationalGate(words []string) error {
 		}
 		return fmt.Errorf("unknown %s command: %s", path, bad)
 	}
-	if cut < 0 {
-		return nil
+	if cut >= 0 {
+		prefix, bad, _, ok := ValidateOperationalLine(words[:cut+1])
+		if ok && bad == "|" {
+			path := strings.Join(prefix, " ")
+			if OperationalPipeConsumers[path] {
+				return nil
+			}
+			return fmt.Errorf("syntax error: %q does not accept the output modifier %q",
+				path, strings.Join(words[cut:], " "))
+		}
 	}
-	prefix, bad, _, ok := ValidateOperationalLine(words[:cut+1])
-	if ok && bad == "|" {
-		path := strings.Join(prefix, " ")
+	// #18666: ValidateOperationalLine deliberately leaves trailing words after
+	// a leaf to the handler (#16798). Some leaf handlers ignore those words,
+	// so locate a pure keyword leaf anywhere in the line and reject any
+	// unconsumed suffix, including a bare or glued pipe. Filters do not reach
+	// this gate: dispatch strips implemented filter stages first.
+	if path, consumed, optionalSelector, leaf := canonicalKeywordLeafPrefix(words); leaf && consumed < len(words) {
 		if OperationalPipeConsumers[path] {
 			return nil
 		}
-		return fmt.Errorf("syntax error: %q does not accept the output modifier %q",
-			path, strings.Join(words[cut:], " "))
-	}
-	// #18666: the pipe may sit after a pure keyword leaf. ValidateOperationalLine
-	// leaves that position unjudged (ok=false, #16798), so check whether the
-	// pre-pipe words resolve entirely as keywords to a childless keyword with
-	// no value slot: if so, `|` is a dropped output modifier, not handler data.
-	if path, leaf := canonicalLeafPath(cmdWords); leaf {
-		if OperationalPipeConsumers[path] {
-			return nil
+		optionsReentry := false
+		if consumed < len(cmdWords) {
+			if _, res := Canonicalize(OperationalTree, cmdWords); res == CanonicalOK {
+				// #12527: an Options container may resume at its siblings
+				// after a terminal-looking option (for example
+				// `summary zone trust`). Those words are consumed by the
+				// handler. A trailing pipe remains a separate modifier and
+				// must still be checked below.
+				if cut < 0 {
+					return nil
+				}
+				consumed = cut
+				optionsReentry = true
+			}
 		}
-		return fmt.Errorf("syntax error: %q does not accept the output modifier %q",
-			path, strings.Join(words[cut:], " "))
+		tail := words[consumed:]
+		if !optionsReentry && optionalSelector && tail[0] != "|" &&
+			(!strings.Contains(tail[0], "|") || isQuotedOperationalWord(tail[0])) {
+			// A small number of terminal handlers consume exactly one
+			// optional selector. Metadata marks that bound explicitly;
+			// it does not admit a pipe or any second trailing token.
+			consumed++
+			if consumed == len(words) {
+				return nil
+			}
+			tail = words[consumed:]
+		}
+		switch {
+		case tail[0] == "|":
+			return fmt.Errorf("syntax error: %q does not accept the output modifier %q",
+				path, strings.Join(tail, " "))
+		case strings.Contains(tail[0], "|") && !isQuotedOperationalWord(tail[0]):
+			return fmt.Errorf("unknown %s command: %s (separate the pipe with spaces: %q)",
+				path, tail[0], strings.Join(strings.Fields(strings.ReplaceAll(tail[0], "|", " | ")), " "))
+		default:
+			return fmt.Errorf("unknown %s command: %s", path, tail[0])
+		}
 	}
-	// The pipe follows a value slot or an AcceptsArgs tail: the handler's
-	// domain, unchanged by #18664/#18666.
 	return nil
 }
 
-// canonicalLeafPath reports whether words resolve as keywords only and end
-// at a childless keyword with no value slot, returning the canonical path.
-// A value or free-form argument ending is not a pure keyword leaf even if its
-// accepting node has no keyword children.
-func canonicalLeafPath(words []string) (string, bool) {
+// canonicalKeywordLeafPrefix reports the first pure keyword leaf reached in
+// words, including when unconsumed words follow it. A value or free-form
+// argument ending is not a pure keyword leaf even if its accepting node has no
+// keyword children.
+func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, optionalSelector bool, ok bool) {
 	if len(words) == 0 {
-		return "", false
+		return "", 0, false, false
 	}
 	current := OperationalTree
 	var node *Node
 	canonicalLen := 0
-	for _, word := range words {
+	for i, word := range words {
 		if node != nil && (node.IsTypedLeaf() ||
 			(node.RequiresValue && node.HasDynamic())) {
 			// A pending value slot cannot be skipped by resolving a child
 			// keyword; Canonicalize rejects that shape.
-			return "", false
+			return "", 0, false, false
 		}
 		name, next, _, resolved := resolveTreeWord(current, word)
 		if !resolved {
-			return "", false
+			return "", 0, false, false
 		}
 		canonicalLen += len(name) + 1
 		node = next
 		current = next.Children
-	}
-	if node == nil || len(node.Children) != 0 || node.HasDynamic() || node.IsTypedLeaf() {
-		return "", false
-	}
-	// A childless AcceptsArgs node also has no keyword children, but its
-	// dispatcher accepts a raw tail rather than a pure keyword command. Probe
-	// one impossible trailing token through Canonicalize: it is consumed only
-	// by an argument-tail handler. This keeps the gate from changing value /
-	// free-form handler semantics without widening AcceptsArgs' scope.
-	probe := make([]string, len(words)+1)
-	copy(probe, words)
-	probe[len(words)] = "\x00"
-	if _, res := Canonicalize(OperationalTree, probe); res == CanonicalOK {
-		return "", false
-	}
-	var path strings.Builder
-	path.Grow(canonicalLen - 1)
-	current = OperationalTree
-	for i, word := range words {
-		name, next, _, resolved := resolveTreeWord(current, word)
-		if !resolved {
-			return "", false
+		if i == len(words)-1 || len(node.Children) != 0 {
+			continue
 		}
-		if i > 0 {
-			path.WriteByte(' ')
+		if node.HasDynamic() || node.IsTypedLeaf() {
+			return "", 0, false, false
 		}
-		path.WriteString(name)
-		current = next.Children
+		// A childless AcceptsArgs node has no keyword children either, but
+		// accepts a free-form tail. Probe one impossible trailing token
+		// through Canonicalize to preserve its handler domain without
+		// widening AcceptsArgs' scope.
+		probe := make([]string, i+2)
+		copy(probe, words[:i+1])
+		probe[i+1] = "\x00"
+		if _, res := Canonicalize(OperationalTree, probe); res == CanonicalOK {
+			return "", 0, false, false
+		}
+		var canonical strings.Builder
+		canonical.Grow(canonicalLen - 1)
+		current = OperationalTree
+		for j, part := range words[:i+1] {
+			name, next, _, resolved := resolveTreeWord(current, part)
+			if !resolved {
+				return "", 0, false, false
+			}
+			if j > 0 {
+				canonical.WriteByte(' ')
+			}
+			canonical.WriteString(name)
+			current = next.Children
+		}
+		return canonical.String(), i + 1, node.OptionalSelector, true
 	}
-	return path.String(), true
+	return "", 0, false, false
 }
 
 // ClassifyComparePipe reports whether words contain an operational compare
@@ -276,4 +291,15 @@ func firstBarePipe(words []string) int {
 		}
 	}
 	return -1
+}
+
+// isQuotedOperationalWord keeps pipe bytes inside single- or double-quoted
+// command words as data. dispatchOperational's strings.Fields tokenization
+// preserves the quote characters, and all pipe splitters ignore quoted pipes.
+func isQuotedOperationalWord(word string) bool {
+	if len(word) < 2 {
+		return false
+	}
+	quote := word[0]
+	return (quote == '\'' || quote == '"') && word[len(word)-1] == quote
 }

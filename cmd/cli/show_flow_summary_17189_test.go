@@ -137,3 +137,37 @@ func TestRemoteFilteredSummaryForwardsSelector17189(t *testing.T) {
 		t.Errorf("summary protocol 0 = %q, want %q (absent would widen to all protocols)", got, "0")
 	}
 }
+
+// TestRemoteOptionsReentryThroughDispatch18666 proves the leaf walk does not
+// mistake a valid Options re-entry (`summary zone trust`) for an unconsumed
+// suffix, while a display pipe after the handler-owned options still refuses.
+func TestRemoteOptionsReentryThroughDispatch18666(t *testing.T) {
+	fake := &summary17189Client{zones: []*pb.ZoneInfo{{Name: "trust", Id: 7}}}
+	c := &ctl{client: fake}
+	var err error
+	out := captureStdout(t, func() {
+		err = c.dispatch("show security flow session summary zone trust")
+	})
+	if err != nil {
+		t.Fatalf("dispatch(summary zone trust) = %v; want valid Options re-entry", err)
+	}
+	if len(fake.sumReqs) != 1 || fake.sumReqs[0].GetZone() != 7 {
+		t.Fatalf("dispatch summary requests = %+v; want one request for zone 7", fake.sumReqs)
+	}
+	if !strings.Contains(out, "Unicast-sessions: 3") {
+		t.Fatalf("dispatch summary output missing response:\n%s", out)
+	}
+
+	fakePipe := &summary17189Client{zones: []*pb.ZoneInfo{{Name: "trust", Id: 7}}}
+	cPipe := &ctl{client: fakePipe}
+	want := `syntax error: "show security flow session summary" does not accept the output modifier "| display xml"`
+	out = captureStdout(t, func() {
+		err = cPipe.dispatch("show security flow session summary zone trust | display xml")
+	})
+	if err == nil || err.Error() != want {
+		t.Fatalf("dispatch(summary zone trust | display xml) = %v; want %q", err, want)
+	}
+	if len(fakePipe.sumReqs) != 0 || out != "" {
+		t.Fatalf("refused summary pipe issued %d RPCs and output %q; want no handler/RPC", len(fakePipe.sumReqs), out)
+	}
+}

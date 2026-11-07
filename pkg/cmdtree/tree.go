@@ -140,6 +140,11 @@ type Node struct {
 	// end a command form at an AcceptsArgs node, as the pkg/cli walk did
 	// before the move; that is a deliberate second reader, not drift.
 	AcceptsArgs bool
+	// OptionalSelector marks a terminal command whose handler consumes at most
+	// one optional word immediately after the keyword path. It is narrower
+	// than AcceptsArgs: arbitrary tails and output pipes are not admitted.
+	// ValidateOperationalGate uses it only for that selector position.
+	OptionalSelector bool
 
 	// Options marks a node whose dispatcher parses its children as combinable
 	// OPTIONS, in any order (#9505): `show security flow session zone trust
@@ -449,7 +454,7 @@ var OperationalTree = map[string]*Node{
 			"routing-engine": {Desc: "Show Routing Engine status"},
 		}},
 		"class-of-service": {Desc: "Show class-of-service information", Children: map[string]*Node{
-			"interface": {Desc: "Show per-interface CoS configuration"},
+			"interface": {Desc: "Show per-interface CoS configuration", OptionalSelector: true},
 			"classifier": {Desc: "Show configured CoS classifiers", DynamicFn: func(cfg *config.Config) []string {
 				return cosClassifierNames(cfg)
 			}, Children: map[string]*Node{

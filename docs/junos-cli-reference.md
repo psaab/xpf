@@ -3199,13 +3199,21 @@ configuration mode, `run show configuration | display set` does the same.
   `syntax error: "request chassis cluster" does not accept the output modifier "| display set"`;
   `show chassis | display set` ->
   `syntax error: "show chassis" does not accept the output modifier "| display set"`.
-- A bare output pipe after a pure keyword leaf is refused on both consoles,
-  rather than silently returning the default text output:
+- Any unconsumed suffix after a pure keyword leaf is refused on both consoles,
+  rather than silently rendering the default output. A separated `| display`
+  gets the modifier-specific error:
   `show version | display xml` ->
   `syntax error: "show version" does not accept the output modifier "| display xml"`.
+  An extra command word is rejected before dispatch:
+  `show version extra | display xml` -> `unknown show version command: extra`.
+  A glued pipe is not parsed as a modifier and is refused with a spacing hint:
+  `show version |display xml` ->
+  `unknown show version command: |display (separate the pipe with spaces: "| display")`.
   `show configuration | display set` remains a supported registered
-  consumer, as do the handler-parsed pipes after value slots and
-  `AcceptsArgs` tails.
+  consumer, as do the handler-parsed pipes after value slots and `AcceptsArgs`
+  tails. The CoS interface leaf consumes one optional selector,
+  `show class-of-service interface reth0.80`, but does not consume `| display`;
+  both a pipe directly after the leaf and one after its selector are refused.
 - Operational `show configuration [<path>] | compare rollback <N>` is
   supported on both the remote and local xpf consoles. It compares rollback
   N against the ACTIVE configuration, not the candidate; a path before the

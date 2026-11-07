@@ -181,11 +181,15 @@ pipe (#9628: the pipe is not tree grammar). A `|` passed in is judged as a
 trailing word, so a pipe directly under a keyword-only node is reported as
 `bad == "|"`. The shared `ValidateOperationalGate` (`operational_gate.go`,
 #18664) validates the pre-pipe words and uses that report to locate the pipe;
-both CLI dispatchers call it. #18666 additionally refuses a pipe after a
-pure keyword leaf: `ValidateOperationalLine` deliberately leaves trailing
-words after leaves to handlers, so the gate checks for a childless, no-value
-keyword path before the first pipe. Registered pipe consumers still work, as
-do pipes after value slots and `AcceptsArgs` tails. The tests
+both CLI dispatchers call it. #18666 also refuses any unconsumed suffix after
+a pure keyword leaf, not just a separated pipe: `ValidateOperationalLine`
+deliberately leaves trailing words after leaves to handlers, while a handler
+may silently ignore those words. The gate finds the leaf prefix in the full
+word list and refuses a trailing keyword or glued pipe (`show version extra`,
+`show version |display xml`) as well as a bare output modifier. A
+`Canonicalize` probe preserves childless `AcceptsArgs` handlers, and
+registered pipe consumers still work. Pipes after value slots and `AcceptsArgs`
+tails remain with their handlers. The tests
 `TestValidateOperationalLinePipePosition18664` and
 `TestOperationalGate18668` pin these contracts.
 
@@ -209,6 +213,13 @@ clear-all. The command
 is refused by the box, and the tree refusing it is the two agreeing. Marking it
 would assert a command that does not exist — the mirror defect of #8304, and
 the one #8057's canonicalize-to-self check exists to catch.
+
+`OptionalSelector` is separate from `AcceptsArgs`: it marks a pure keyword
+leaf whose handler consumes exactly one optional selector, without admitting
+arbitrary trailing words. For example, `show class-of-service interface
+reth0.80` remains valid, while a pipe or second suffix after that selector is
+refused. Valid `Options` re-entry such as
+`show security flow session summary zone trust` remains handler-owned.
 
 ## A value slot takes ONE value, and option lists are declared (#9505)
 

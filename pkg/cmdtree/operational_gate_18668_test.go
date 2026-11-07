@@ -40,11 +40,61 @@ func TestOperationalGate18668(t *testing.T) {
 			words: []string{"show", "system", "license", "|", "display", "json"},
 			want:  `syntax error: "show system license" does not accept the output modifier "| display json"`,
 		},
+		{
+			name:  "leaf trailing bare pipe",
+			words: []string{"show", "version", "|"},
+			want:  `syntax error: "show version" does not accept the output modifier "|"`,
+		},
+		{
+			name:  "leaf owns multiple pipes",
+			words: []string{"show", "version", "|", "display", "xml", "|", "match", "x"},
+			want:  `syntax error: "show version" does not accept the output modifier "| display xml | match x"`,
+		},
+		{
+			name:  "options re-entry leaf pipe",
+			words: []string{"show", "security", "flow", "session", "summary", "zone", "trust", "|", "display", "xml"},
+			want:  `syntax error: "show security flow session summary" does not accept the output modifier "| display xml"`,
+		},
 
+		{
+			name:  "leaf trailing word before pipe",
+			words: []string{"show", "version", "extra", "|", "display", "xml"},
+			want:  "unknown show version command: extra",
+		},
+		{
+			name:  "leaf glued output pipe",
+			words: []string{"show", "version", "|display", "xml"},
+			want:  `unknown show version command: |display (separate the pipe with spaces: "| display")`,
+		},
+		{
+			name:  "leaf trailing word without pipe",
+			words: []string{"show", "version", "extra"},
+			want:  "unknown show version command: extra",
+		},
 		{
 			name:  "unknown token before pipe",
 			words: []string{"clear", "security", "ike", "|", "display", "set"},
 			want:  "unknown clear security command: ike",
+		},
+		{
+			name:  "quoted pipe token is an ordinary unknown word",
+			words: []string{"clear", "security", "'|'"},
+			want:  "unknown clear security command: '|'",
+		},
+		{
+			name:  "selector leaf bare pipe",
+			words: []string{"show", "class-of-service", "interface", "|", "display", "xml"},
+			want:  `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`,
+		},
+		{
+			name:  "selector leaf pipe after selector",
+			words: []string{"show", "class-of-service", "interface", "reth0.80", "|", "display", "xml"},
+			want:  `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`,
+		},
+		{
+			name:  "selector leaf rejects a second trailing word",
+			words: []string{"show", "class-of-service", "interface", "reth0.80", "extra"},
+			want:  "unknown show class-of-service interface command: extra",
 		},
 		{
 			name:  "first bare pipe owns the suffix",
@@ -88,9 +138,39 @@ func TestOperationalGateControls18668(t *testing.T) {
 		{"show", "configuration", "|", "display", "set"},
 		{"show", "system", "rollback", "1", "|", "display", "set"},
 		{"show", "configuration", "security", "|", "display", "set"},
+		{"show", "system", "rollback"},
+		{"show", "configuration", "security", "'|'"},
+		{"show", "security", "flow", "session", "summary", "zone", "trust"},
+		{"show", "class-of-service", "interface", "reth0.80"},
+		{"show", "class-of-service", "interface", "'|'"},
 	} {
 		if err := ValidateOperationalGate(words); err != nil {
 			t.Errorf("ValidateOperationalGate(%q) = %v; want nil", words, err)
 		}
+	}
+	if !OperationalTree["show"].Children["class-of-service"].Children["interface"].OptionalSelector {
+		t.Fatal("show class-of-service interface must declare its one optional selector")
+	}
+}
+
+func TestOperationalGateKeepsHandlerOwnedGrammar18668(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		words []string
+	}{
+		{
+			name:  "incomplete required value remains handler-owned",
+			words: []string{"show", "system", "rollback"},
+		},
+		{
+			name:  "quoted pipe argument remains data",
+			words: []string{"show", "configuration", "security", "'|'"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := ValidateOperationalGate(tc.words); err != nil {
+				t.Fatalf("ValidateOperationalGate(%q) = %v; want handler-owned command", tc.words, err)
+			}
+		})
 	}
 }

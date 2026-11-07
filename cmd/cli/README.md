@@ -62,12 +62,17 @@ the pipe. The rules:
   instead of `unknown <path> command: |`. `cmd/cli` already refused these
   shapes before #18664 (exit 1); #18664 changed its message. The local CLI
   previously let help-printing / pipe-dropping handlers succeed for them;
-  #18666 additionally refuses a bare output pipe after a pure keyword leaf
-  with the same modifier-specific error (`show version | display xml` ->
+  #18666 also refuses any unconsumed suffix after a pure keyword leaf, since
+  the handler may ignore trailing words. A separated output pipe gets the
+  modifier-specific error (`show version | display xml` ->
   `syntax error: "show version" does not accept the output modifier "| display xml"`).
-  Pipes after a value slot or an `AcceptsArgs` tail remain with the handler:
-  `show configuration security | display set` and `show system rollback 1
-  | display json` still work.
+  Other suffixes fail as unknown words, including a glued pipe with a spacing
+  hint (`show version extra | display xml` -> `unknown show version command:
+  extra`; `show version |display xml` -> `unknown show version command: |display
+  Pipes after a value slot or an `AcceptsArgs` tail remain with the handler: `show configuration security
+  | display set` and `show system rollback 1 | display json` still work. The
+  `show class-of-service interface` leaf has one bounded optional selector;
+  `reth0.80` works, but a display pipe after the leaf or selector is refused.
 - Output filters (`| match`, `| count`, ...) never reach the gate. They
   are peeled first by `cliterm.SplitPipe` in each surface's `dispatch`, so a
   chained `show configuration | display set | match x` reaches the gate as

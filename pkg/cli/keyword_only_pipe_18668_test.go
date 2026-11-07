@@ -21,9 +21,12 @@ package cli
 // AND that no `Possible completions:` help was printed.
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/pkg/dataplane"
 )
 
 // committedStore18668 builds a committed store holding
@@ -43,6 +46,33 @@ func committedStore18668(t *testing.T) *CLI {
 	}
 	store.ExitConfigure()
 	return &CLI{store: store}
+}
+
+func committedCoSStore18666(t *testing.T) *CLI {
+	t.Helper()
+	c := committedStore18668(t)
+	if err := c.store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure for CoS fixture: %v", err)
+	}
+	for _, line := range []string{
+		"set interfaces reth0 vlan-tagging",
+		"set interfaces reth1 vlan-tagging",
+		"set interfaces reth0 unit 80 vlan-id 80",
+		"set interfaces reth1 unit 80 vlan-id 80",
+		"set interfaces reth0 unit 80 family inet address 192.0.2.1/24",
+		"set interfaces reth1 unit 80 family inet address 198.51.100.1/24",
+		"set class-of-service interfaces reth0 unit 80 shaping-rate 10m",
+		"set class-of-service interfaces reth1 unit 80 shaping-rate 20m",
+	} {
+		if _, err := c.store.LoadSet(line); err != nil {
+			t.Fatalf("LoadSet(%q): %v", line, err)
+		}
+	}
+	if _, err := c.store.Commit(); err != nil {
+		t.Fatalf("Commit CoS fixture: %v", err)
+	}
+	c.store.ExitConfigure()
+	return c
 }
 
 // TestLocalKeywordOnlyPipeRefused18668: a bare `|` directly under a
@@ -235,6 +265,8 @@ func TestLocalLeafOutputModifierRefused18666(t *testing.T) {
 		{"show version | display set", `syntax error: "show version" does not accept the output modifier "| display set"`},
 		{"show chassis hardware | display xml", `syntax error: "show chassis hardware" does not accept the output modifier "| display xml"`},
 		{"show system license | display json", `syntax error: "show system license" does not accept the output modifier "| display json"`},
+		{"show version extra | display xml", "unknown show version command: extra"},
+		{"show version |display xml", `unknown show version command: |display (separate the pipe with spaces: "| display")`},
 	} {
 		t.Run(tc.line, func(t *testing.T) {
 			c := committedStore18668(t)
@@ -247,5 +279,136 @@ func TestLocalLeafOutputModifierRefused18666(t *testing.T) {
 				t.Fatalf("dispatch(%q) output=%q; want refusal before handler", tc.line, out)
 			}
 		})
+	}
+}
+
+// TestLocalLeafOutputFiltersStillWork18666 verifies full dispatch still peels
+// implemented filters before the operational leaf gate.
+func TestLocalLeafOutputFiltersStillWork18666(t *testing.T) {
+	for _, tc := range []struct {
+		name, line string
+		want       func(plain string) string
+	}{
+		{
+			name: "match",
+			line: "show version | match 18666",
+			want: func(string) string { return "xpf stateful firewall 18666\n" },
+		},
+		{
+			name: "count",
+			line: "show version | count",
+			want: func(plain string) string { return fmt.Sprintf("Count: %d lines\n", strings.Count(plain, "\n")) },
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := committedStore18668(t)
+			c.SetVersion("18666")
+			var plainErr error
+			plain := captureStdout(t, func() { plainErr = c.dispatch("show version") })
+			if plainErr != nil {
+				t.Fatalf("dispatch(show version) = %v", plainErr)
+			}
+
+			var err error
+			out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+			if err != nil {
+				t.Fatalf("dispatch(%q) = %v; want implemented filter to work", tc.line, err)
+			}
+			if want := tc.want(plain); out != want {
+				t.Fatalf("dispatch(%q) output=%q; want %q", tc.line, out, want)
+			}
+		})
+	}
+}
+
+// TestLocalCoSOptionalSelector18666 pins the CoS leaf's one optional selector
+// through full dispatch and refuses display pipes both before and after it.
+func TestLocalCoSOptionalSelector18666(t *testing.T) {
+	c := committedCoSStore18666(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = c.dispatch("show class-of-service interface reth0.80")
+	})
+	if err != nil {
+		t.Fatalf("dispatch(selector) = %v; want a filtered CoS view", err)
+	}
+	if !strings.Contains(out, "Interface: reth0.80") || strings.Contains(out, "Interface: reth1.80") {
+		t.Fatalf("selector output did not filter the configured CoS view:\n%s", out)
+	}
+
+	for _, line := range []string{
+		"show class-of-service interface | display xml",
+		"show class-of-service interface reth0.80 | display xml",
+	} {
+		t.Run(line, func(t *testing.T) {
+			c := committedCoSStore18666(t)
+			var err error
+			out := captureStdout(t, func() { err = c.dispatch(line) })
+			want := `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`
+			if err == nil || err.Error() != want {
+				t.Fatalf("dispatch(%q) = %v; want %q", line, err, want)
+			}
+			if out != "" {
+				t.Fatalf("dispatch(%q) output=%q; want refusal before handler", line, out)
+			}
+		})
+	}
+}
+
+type optionsSummaryCLIDP18666 struct {
+	*summaryMaxCLIDP
+}
+
+func (d *optionsSummaryCLIDP18666) LastApplyResult() *dataplane.ApplyResult {
+	return &dataplane.ApplyResult{ZoneIDs: map[string]uint32{"trust": 7}}
+}
+
+func committedOptionsSummaryStore18666(t *testing.T) *CLI {
+	t.Helper()
+	c := committedStore18668(t)
+	if err := c.store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure for summary fixture: %v", err)
+	}
+	if _, err := c.store.LoadSet("set interfaces eth0 unit 0 family inet address 10.0.0.1/24"); err != nil {
+		t.Fatalf("LoadSet trust interface: %v", err)
+	}
+	if _, err := c.store.LoadSet("set security zones security-zone trust interfaces eth0"); err != nil {
+		t.Fatalf("LoadSet trust zone: %v", err)
+	}
+	if _, err := c.store.Commit(); err != nil {
+		t.Fatalf("Commit trust zone: %v", err)
+	}
+	c.store.ExitConfigure()
+	c.dp = &optionsSummaryCLIDP18666{
+		summaryMaxCLIDP: &summaryMaxCLIDP{Manager: dataplane.New(), maxSessions: 100},
+	}
+	return c
+}
+
+// TestLocalOptionsReentryThroughDispatch18666 keeps the local full-dispatch
+// `summary zone trust` handler path while refusing an unconsumed display pipe.
+func TestLocalOptionsReentryThroughDispatch18666(t *testing.T) {
+	c := committedOptionsSummaryStore18666(t)
+	var err error
+	out := captureStdout(t, func() {
+		err = c.dispatch("show security flow session summary zone trust")
+	})
+	if err != nil {
+		t.Fatalf("dispatch(summary zone trust) = %v; want valid Options re-entry", err)
+	}
+	if !strings.Contains(out, "Unicast-sessions: 0") || !strings.Contains(out, "Maximum-sessions: 100") {
+		t.Fatalf("dispatch summary output missing local response:\n%s", out)
+	}
+
+	c = committedOptionsSummaryStore18666(t)
+	out = captureStdout(t, func() {
+		err = c.dispatch("show security flow session summary zone trust | display xml")
+	})
+	want := `syntax error: "show security flow session summary" does not accept the output modifier "| display xml"`
+	if err == nil || err.Error() != want {
+		t.Fatalf("dispatch(summary zone trust | display xml) = %v; want %q", err, want)
+	}
+	if out != "" {
+		t.Fatalf("refused summary pipe output=%q; want refusal before handler", out)
 	}
 }
