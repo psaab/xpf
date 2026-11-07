@@ -155,6 +155,29 @@ func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 	}
 }
 
+
+// Escaped arm of the same cell shape: a sentinel-containing credential
+// with a newline renders under %q with escapes; raw-only spanning (the
+// first sentinel fix) cannot match it. The pivot substitution covers
+// raw, Quote, and interior forms, so the %q text is scrubbed too.
+func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
+	secret := "only<redacted>credential\nTAIL"
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "scp://u:p@h/d" password "` + secret + `"`,
+	})
+	if err := SchemaValidate(tree); err != nil {
+		t.Fatalf("premise: escaped sentinel-containing password must validate: %v", err)
+	}
+	foreign := fmt.Errorf("archive fetch failed with password %q", secret)
+	got := scrubSchemaErrorSecrets(tree, foreign).Error()
+	if strings.Contains(got, "TAIL") || strings.Contains(got, "only<redacted>credential") {
+		t.Errorf("escaped sentinel-containing credential echoed (#18997): %v", got)
+	}
+	if strings.Contains(got, "<<redacted>>") {
+		t.Errorf("sentinel corrupted by pivot substitution: %v", got)
+	}
+}
+
 // #18997 sentinel-containing credential arm (Kimi delta at 6f14ef160e):
 // a password that merely CONTAINS the sentinel spelling
 // ("only<redacted>credential") is a real credential — dropping its
