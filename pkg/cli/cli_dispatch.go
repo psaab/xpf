@@ -126,11 +126,12 @@ func (c *CLI) dispatch(line string) error {
 		if holder, locked := c.store.ConfigHolder(); locked && holder != "" && holder != localConfigSessionID {
 			foreign = true
 		}
-		// The prompt is operational unless this CLI owns the edit session.
-		// Preserve owned config-mode candidate compares; only operational
-		// compare shapes use the active-baseline handler, including the legacy
-		// no-RBAC ownerless window.
-		if !c.configOwnedNow() && operationalShowConfigurationCompare(line) {
+		// Store session ownership, not the cached CLI flag, determines whether
+		// this console still owns config mode after a forced release/reclaim.
+		// Preserve owned candidate compares; an ownerless or stale-owned CLI
+		// has an operational prompt and uses the active-baseline handler.
+		if !c.store.InConfigModeForSession(localConfigSessionID) &&
+			operationalShowConfigurationCompare(line) {
 			// Route before checkConfigModePerm so accepted prefixes like `sh`
 			// are resolved and priced by dispatchOperational.
 			return c.dispatchOperational(line)

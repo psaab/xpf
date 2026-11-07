@@ -413,6 +413,99 @@ func TestCLIShowConfigurationOwnedCompareKeepsCandidateBaseline18669(t *testing.
 	}
 }
 
+func staleOwnedForeignShowCompareCLI18669(t *testing.T) (*CLI, *configstore.Store) {
+	t.Helper()
+	store := showCompareStore18669(t)
+	store.ExitConfigure()
+	c := &CLI{store: store}
+	if err := c.dispatch("configure"); err != nil {
+		t.Fatalf("dispatch(configure): %v", err)
+	}
+	if !c.configOwnedNow() || !store.InConfigModeForSession(localConfigSessionID) {
+		t.Fatal("CLI did not acquire its local config session")
+	}
+
+	store.ForceExitConfigure()
+	if !c.configOwnedNow() {
+		t.Fatal("force exit unexpectedly refreshed the CLI's cached ownership flag")
+	}
+	if err := store.EnterConfigureExclusive("foreign-stale-owner-18669"); err != nil {
+		t.Fatalf("EnterConfigureExclusive(foreign): %v", err)
+	}
+	if _, err := store.LoadSet(strings.Join([]string{
+		"set system domain-name candidate-18669.invalid",
+		"set system host-name " + candidateCanary18669,
+	}, "\n")); err != nil {
+		t.Fatalf("LoadSet(foreign candidate): %v", err)
+	}
+	if !store.IsDirty() {
+		t.Fatal("foreign candidate is not dirty")
+	}
+	if holder, locked := store.ConfigHolder(); !locked || holder != "foreign-stale-owner-18669" {
+		t.Fatalf("ConfigHolder() = (%q, %v), want foreign stale owner", holder, locked)
+	}
+	if got, want := c.promptForCurrentMode(), c.operationalPrompt(); got != want {
+		t.Fatalf("promptForCurrentMode() = %q, want operational prompt %q", got, want)
+	}
+	return c, store
+}
+
+func TestCLIShowConfigurationCompareDispatchStaleOwned18669(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		line    string
+		wantIn  []string
+		wantOut []string
+	}{
+		{
+			name:    "global",
+			line:    "show configuration | compare rollback 1",
+			wantIn:  []string{activeDomain18669, activeInterface18669},
+			wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
+		},
+		{
+			name:    "scoped",
+			line:    "show configuration system | compare rollback 1",
+			wantIn:  []string{activeDomain18669},
+			wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, store := staleOwnedForeignShowCompareCLI18669(t)
+			if !c.configOwnedNow() || store.InConfigModeForSession(localConfigSessionID) {
+				t.Fatal("fixture does not retain stale local ownership after foreign takeover")
+			}
+			var err error
+			out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+			if err != nil {
+				t.Fatalf("dispatch(%q): %v", tc.line, err)
+			}
+			for _, value := range tc.wantIn {
+				if !strings.Contains(out, value) {
+					t.Errorf("dispatch(%q) output missing active-baseline value %q:\n%s", tc.line, value, out)
+				}
+			}
+			for _, value := range tc.wantOut {
+				if strings.Contains(out, value) {
+					t.Errorf("dispatch(%q) output contains foreign candidate value %q:\n%s", tc.line, value, out)
+				}
+			}
+		})
+	}
+
+	t.Run("bare", func(t *testing.T) {
+		c, _ := staleOwnedForeignShowCompareCLI18669(t)
+		var err error
+		out := captureStdout(t, func() { err = c.dispatch("show configuration | compare") })
+		if err == nil || err.Error() != "syntax error: | compare on operational show configuration requires rollback <N>" {
+			t.Fatalf("dispatch(bare compare) = (%q, %v); want operational compare refusal", out, err)
+		}
+		if out != "" {
+			t.Errorf("bare compare printed before refusing: %q", out)
+		}
+	})
+}
+
 func TestCLIShowConfigurationGluedCompareRollbackRefusedUnderForeignHolder18669(t *testing.T) {
 	store := foreignShowCompareStore18669(t)
 	c := &CLI{store: store, userClass: "super-user"}
