@@ -4,6 +4,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,6 +62,94 @@ func TestRemovedRoutingInstanceMemberDropsKeepMaster18605(t *testing.T) {
 	assertVRFName18605(t, removed, "ge-0-0-0", "")
 }
 
+func TestTunnelStanzaRoutingInstanceKeepsMaster18605(t *testing.T) {
+	t.Run("stanza only", func(t *testing.T) {
+		cfg := tunnelStanzaConfig18605("blue", &config.RoutingInstanceConfig{Name: "blue"})
+		result := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, result, "gr-0-0-0", "vrf-blue")
+	})
+
+	t.Run("unit-level stanza only", func(t *testing.T) {
+		cfg := &config.Config{}
+		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+			"gr-0/0/0": {
+				Name: "gr-0/0/0",
+				Units: map[int]*config.InterfaceUnit{
+					0: {
+						Number: 0,
+						Tunnel: &config.TunnelConfig{
+							Name: "gr-0-0-0", Source: "192.0.2.1",
+							Destination: "192.0.2.2", RoutingInstance: "blue",
+						},
+					},
+				},
+			},
+		}
+		cfg.RoutingInstances = []*config.RoutingInstanceConfig{{Name: "blue"}}
+		result := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, result, "gr-0-0-0", "vrf-blue")
+	})
+
+	t.Run("stanza and same RI list", func(t *testing.T) {
+		cfg := tunnelStanzaConfig18605("blue", &config.RoutingInstanceConfig{
+			Name: "blue", Interfaces: []string{"gr-0/0/0.0"},
+		})
+		result := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, result, "gr-0-0-0", "vrf-blue")
+	})
+
+	t.Run("stanza removal", func(t *testing.T) {
+		cfg := tunnelStanzaConfig18605("blue", &config.RoutingInstanceConfig{Name: "blue"})
+		before := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, before, "gr-0-0-0", "vrf-blue")
+
+		cfg.Interfaces.Interfaces["gr-0/0/0"].Tunnel.RoutingInstance = ""
+		after := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
+		assertVRFName18605(t, after, "gr-0-0-0", "")
+	})
+}
+
+func TestBackslashRoutingInstanceNameRendersKeepMaster18605(t *testing.T) {
+	const riName = "trailing\\"
+	treeText := "routing-instances {\n    " + strconv.Quote(riName) +
+		" { instance-type virtual-router; }\n}\n"
+	tree, parseErrs := config.NewParser(treeText).Parse()
+	if len(parseErrs) != 0 {
+		t.Fatalf("parse RI fixture: %v", parseErrs)
+	}
+	cfg, err := config.CompileConfig(tree)
+	if err != nil {
+		t.Fatalf("compile routing-instance name accepted by the kernel-name gate: %v", err)
+	}
+	if len(cfg.RoutingInstances) != 1 || cfg.RoutingInstances[0].Name != riName {
+		t.Fatalf("compiled routing instances = %+v, want one named %q", cfg.RoutingInstances, riName)
+	}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/6": {Name: "ge-0/0/6", Units: map[int]*config.InterfaceUnit{0: {Number: 0}}},
+	}
+	cfg.RoutingInstances[0].Interfaces = []string{"ge-0/0/6"}
+	result := compileNetworkdRows18605(t, cfg, "ge-0-0-6")
+	assertVRFName18605(t, result, "ge-0-0-6", "vrf-"+riName)
+}
+
+func tunnelStanzaConfig18605(
+	stanzaRI string, routingInstances ...*config.RoutingInstanceConfig,
+) *config.Config {
+	cfg := &config.Config{}
+	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"gr-0/0/0": {
+			Name: "gr-0/0/0",
+			Tunnel: &config.TunnelConfig{
+				Name: "gr-0-0-0", Source: "192.0.2.1",
+				Destination: "192.0.2.2", RoutingInstance: stanzaRI,
+			},
+			Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
+		},
+	}
+	cfg.RoutingInstances = routingInstances
+	return cfg
+}
+
 func TestRoutingInstanceKeepMasterExclusions18605(t *testing.T) {
 	t.Run("dual claim", func(t *testing.T) {
 		cfg := &config.Config{}
@@ -111,18 +200,21 @@ func TestRoutingInstanceKeepMasterExclusions18605(t *testing.T) {
 		assertVRFName18605(t, withoutConflict, "ge-0-0-3", "vrf-blue")
 	})
 
-	t.Run("tunnel stanza owner", func(t *testing.T) {
+	t.Run("tunnel stanza/list conflict", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
 			"gr-0/0/0": {
-				Name:   "gr-0/0/0",
-				Tunnel: &config.TunnelConfig{Name: "gr-0-0-0", RoutingInstance: "blue"},
-				Units:  map[int]*config.InterfaceUnit{0: {Number: 0}},
+				Name: "gr-0/0/0",
+				Tunnel: &config.TunnelConfig{
+					Name: "gr-0-0-0", RoutingInstance: "red",
+				},
+				Units: map[int]*config.InterfaceUnit{0: {Number: 0}},
 			},
 		}
-		cfg.RoutingInstances = []*config.RoutingInstanceConfig{{
-			Name: "blue", Interfaces: []string{"gr-0/0/0"},
-		}}
+		cfg.RoutingInstances = []*config.RoutingInstanceConfig{
+			{Name: "blue", Interfaces: []string{"gr-0/0/0"}},
+			{Name: "red"},
+		}
 		result := compileNetworkdRows18605(t, cfg, "gr-0-0-0")
 		assertVRFName18605(t, result, "gr-0-0-0", "")
 	})
@@ -182,6 +274,9 @@ func assertRenderedKeepMaster18605(t *testing.T, result *CompileResult, name str
 	networkd.ResetReloadDebtForTest()
 	if err == nil || err.Error() != "networkctl reload: exit status 1" {
 		t.Fatalf("networkd Apply error = %v, want only the stubbed reload failure", err)
+	}
+	if err := networkd.NewInDir(networkDir).Apply(result.ManagedInterfaces); err != nil {
+		t.Fatalf("byte-identical Apply after debt reset = %v, want no error", err)
 	}
 
 	path := filepath.Join(networkDir, networkd.FilePrefix+name+".network")

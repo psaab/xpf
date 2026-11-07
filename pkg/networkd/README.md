@@ -114,9 +114,10 @@ Triggers `networkctl reload` only when files actually changed.
   VRF xpf uses (`vrf-mgmt` and the routing-instance `vrf-*`) is created by
   `pkg/routing` over netlink, not as a networkd `.netdev`. Management rows
   carry `VRFName=vrf-mgmt`; the compiler's post-build pass also fills it for
-  members of non-forwarding, non-reserved routing instances (#18605). A
-  `VRF=vrf-mgmt` line never resolved: networkd logged `vrf-mgmt NetDev could not be
-  found, ignoring assignment` on every reload, treated the link as having NO
+  non-forwarding, non-reserved RI list members and explicit tunnel stanza
+  owners (#18605). A `VRF=vrf-mgmt` line never resolved: networkd logged
+  `vrf-mgmt NetDev could not be found, ignoring assignment` on every reload,
+  treated the link as having NO
   master, and on every reconfigure set `IFLA_MASTER=0`. The kernel VRF driver
   cycles a link on every enslave and release, so each commit took em0 (the
   cluster control link) and fxp0/fab0 down and up and removed their
@@ -130,9 +131,9 @@ Triggers `networkctl reload` only when files actually changed.
   networkd-owned `Bond=` or `Bridge=` master, which `KeepMaster` would make
   networkd ignore. The daemon's `BindInterfaceToVRF` owns the binding. Cells:
   `keep_master_18597_test.go` plus the #18605 dataplane model cells. The
-  compiler excludes dual-claimed and retained quarantined devices, as well as
-  tunnel devices owned by an explicit tunnel `routing-instance` stanza; a
-  removed RI member therefore loses `KeepMaster=yes` on its next compile.
+  compiler excludes dual-claimed and retained quarantined devices while
+  preserving same-RI list plus stanza claims. Removing the last applicable
+  bind drops `KeepMaster=yes` on the next compile.
   Residual: a DISABLED management-class row takes the always-down early return
   without `KeepMaster=yes` (#18607).
 - **The activation tail reconfigures only interfaces whose files changed

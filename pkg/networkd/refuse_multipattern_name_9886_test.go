@@ -289,12 +289,6 @@ func TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718(t *testing.T) {
 		beforeWant string
 	}{
 		{
-			name: "VRF", field: "VRF",
-			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
-				Addresses: []string{"10.0.0.1/24"}, VRFName: "vrf-mgmt"},
-			poison: func(ifc *InterfaceConfig) { ifc.VRFName = "vrf-mgmt\nDHCP=yes" },
-		},
-		{
 			name: "Bond", field: "Bond",
 			base: InterfaceConfig{Name: "ge-0-0-0", MACAddress: "52:54:00:aa:bb:cc",
 				Addresses: []string{"10.0.0.1/24"}, BondMaster: "ae0"},
@@ -410,6 +404,29 @@ func TestApplyRefusesUnsafeUnitFieldsAndSweeps_10718(t *testing.T) {
 				t.Errorf("unrelated good interface was not preserved: read err=%v content=%q", err, raw)
 			}
 		})
+	}
+}
+
+func TestApplyTreatsVRFNameAsOpaqueKeepMasterMarker18605(t *testing.T) {
+	stubNetworkctl9886(t)
+	dir := t.TempDir()
+	ifc := InterfaceConfig{
+		Name:    "ge-0-0-0",
+		VRFName: "vrf-mgmt\n[Network]\nDHCP=yes",
+	}
+	if err := NewInDir(dir).Apply([]InterfaceConfig{ifc}); err != nil {
+		t.Fatalf("Apply of an opaque VRF marker must succeed: %v", err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, filePrefix+"ge-0-0-0.network"))
+	if err != nil {
+		t.Fatalf("read .network file: %v", err)
+	}
+	if !strings.Contains(string(raw), "KeepMaster=yes\n") {
+		t.Fatalf("VRF marker must render KeepMaster=yes:\n%s", raw)
+	}
+	if strings.Contains(string(raw), "VRF=") || strings.Contains(string(raw), "DHCP=yes") ||
+		strings.Contains(string(raw), "vrf-mgmt") {
+		t.Fatalf("VRF marker leaked into generated unit:\n%s", raw)
 	}
 }
 

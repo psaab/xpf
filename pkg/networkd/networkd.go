@@ -1692,8 +1692,12 @@ func unitTokenError(field, value string) error {
 // renderedUnitTokenError returns the first unsafe single-token field actually
 // emitted for ifc. It mirrors generator conditions: link fields are checked
 // only when a .link file will be generated; bond .netdev fields are checked
-// even on disabled/unmanaged rows; VRF, reference and address fields are checked
+// even on disabled/unmanaged rows; reference and address fields are checked
 // only when the .network generator reaches them.
+//
+// #18605: VRFName is an internal marker for KeepMaster=yes, not a rendered
+// token. pkg/routing owns the actual VRF device via netlink; do not validate
+// this marker as a systemd VRF= value.
 func renderedUnitTokenError(ifc InterfaceConfig) error {
 	if ifc.MACAddress != "" && !ifc.Unmanaged {
 		if ifc.OriginalName == "" {
@@ -1739,11 +1743,6 @@ func renderedUnitTokenError(ifc InterfaceConfig) error {
 
 	if ifc.Unmanaged || ifc.Disable {
 		return nil
-	}
-	if ifc.VRFName != "" {
-		if err := unitTokenError("VRF", ifc.VRFName); err != nil {
-			return err
-		}
 	}
 	if ifc.BondMaster != "" {
 		if err := unitTokenError("Bond", ifc.BondMaster); err != nil {

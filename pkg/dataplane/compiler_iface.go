@@ -2414,15 +2414,13 @@ func buildBridgeDomainModels(cfg *config.Config, result *CompileResult, seen map
 
 }
 
-// fillRoutingInstanceVRFNames fills an empty networkd VRFName for each
+// fillRoutingInstanceVRFNames fills an empty networkd VRFName for every
 // managed row the daemon binds to a non-forwarding, non-reserved
-// routing-instance VRF. The three model builders above only stamp the
-// management VRF (#18597); this post-build pass is the one place routing-
-// instance members gain the same treatment, so their rows render
-// KeepMaster=yes and networkd no longer releases them from vrf-<ri> when
-// their own files change (#18605). An existing name always wins. Devices
-// owned by explicit tunnel routing-instance stanzas, dual claims, or retained
-// quarantined conflicts are never stamped.
+// routing-instance VRF. List members and explicit tunnel stanza owners share
+// this post-build pass so their rows render KeepMaster=yes and networkd no
+// longer releases them from vrf-<ri> when their own files change (#18605).
+// Existing names always win; dual claims and retained quarantined conflicts
+// remain excluded.
 func fillRoutingInstanceVRFNames(cfg *config.Config, result *CompileResult) {
 	if cfg == nil || result == nil || len(result.ManagedInterfaces) == 0 {
 		return
@@ -2437,25 +2435,11 @@ func fillRoutingInstanceVRFNames(cfg *config.Config, result *CompileResult) {
 			excluded[conflict.LinuxName] = true
 		}
 	}
-	for _, ifc := range cfg.Interfaces.Interfaces {
-		if ifc == nil {
-			continue
-		}
-		if tc := ifc.Tunnel; tc != nil && tc.RoutingInstance != "" && tc.Name != "" {
-			excluded[tc.Name] = true
-		}
-		for _, unit := range ifc.Units {
-			if unit == nil || unit.Tunnel == nil {
-				continue
-			}
-			tc := unit.Tunnel
-			if tc.RoutingInstance != "" && tc.Name != "" {
-				excluded[tc.Name] = true
-			}
-		}
-	}
+	// The conflict helper includes both list and explicit tunnel stanza claims;
+	// repeated claims by the same instance stay eligible.
 
 	vrfByLinuxName := make(map[string]string)
+	vrfByInstance := make(map[string]string)
 	for _, ri := range cfg.RoutingInstances {
 		if ri == nil || ri.Name == "" || ri.InstanceType == "forwarding" ||
 			config.IsReservedRoutingInstanceName(ri.Name) {
@@ -2465,12 +2449,39 @@ func fillRoutingInstanceVRFNames(cfg *config.Config, result *CompileResult) {
 		if vrfName == "" {
 			continue
 		}
+		vrfByInstance[ri.Name] = vrfName
 		for _, linuxName := range config.RoutingInstanceMemberLinuxNamesForInstance(cfg, tunnelNames, ri) {
 			if linuxName == "" || excluded[linuxName] {
 				continue
 			}
 			if _, exists := vrfByLinuxName[linuxName]; !exists {
 				vrfByLinuxName[linuxName] = vrfName
+			}
+		}
+	}
+	// Explicit tunnel routing-instance stanzas are independent bind owners,
+	// even when no RI interface list names them. Same-RI list+stanza claims are
+	// harmless; conflicting owners were removed by excluded above.
+	addTunnelClaim := func(tc *config.TunnelConfig) {
+		if tc == nil || tc.Name == "" || tc.RoutingInstance == "" || excluded[tc.Name] {
+			return
+		}
+		vrfName := vrfByInstance[tc.RoutingInstance]
+		if vrfName == "" {
+			return
+		}
+		if _, exists := vrfByLinuxName[tc.Name]; !exists {
+			vrfByLinuxName[tc.Name] = vrfName
+		}
+	}
+	for _, ifc := range cfg.Interfaces.Interfaces {
+		if ifc == nil {
+			continue
+		}
+		addTunnelClaim(ifc.Tunnel)
+		for _, unit := range ifc.Units {
+			if unit != nil {
+				addTunnelClaim(unit.Tunnel)
 			}
 		}
 	}
