@@ -13,7 +13,7 @@ import (
 // pin the canary absent from the AST render, SNMPConfig JSON and the
 // schema-pinned registry resolution, with the query-community control
 // unchanged. RED-on-revert: dropping the trap-group case from
-// secretIndices, the ByRoot entry, or the SNMPTrapGroup marshalers makes
+// secretIndices, the ByRoot entry, or the SNMPTrapGroup JSON marshaler makes
 // the canary reappear.
 
 const trapGroupCanary16728 = "TRAPSECRET16728"

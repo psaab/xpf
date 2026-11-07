@@ -13,7 +13,8 @@ import (
 // ast_redact.go masks secret leaf VALUES in the raw-AST render paths.
 //
 // #2053 made the TYPED compiled-config render safe: the config.Secret newtype
-// redacts every operator secret on JSON/YAML marshal, so GET /api/v1/config
+// redacts Secret-typed secrets on JSON marshal (and YAML for Secret-typed
+// fields), so GET /api/v1/config
 // (which json-encodes the compiled *config.Config) no longer leaks cleartext.
 // But the AST-render surface — Format / FormatSet / FormatJSON / FormatXML /
 // FormatInheritance / FormatCompare in ast_format.go — walks the *ConfigTree

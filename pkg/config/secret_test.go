@@ -198,7 +198,7 @@ func TestSecretIsComparable(t *testing.T) {
 
 // TestSNMPCommunityMarshalRedactsName covers the targeted struct marshaller
 // (#2053): SNMPCommunity keeps Name a plain string so it stays the map key
-// and the text show paths are unchanged, but its JSON/YAML form redacts the
+// and the text show paths are unchanged, but its JSON form redacts the
 // community string (the secret) while leaving Authorization in the clear.
 func TestSNMPCommunityMarshalRedactsName(t *testing.T) {
 	c := SNMPCommunity{Name: "publiclikesecret", Authorization: "read-only"}
