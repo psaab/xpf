@@ -1037,11 +1037,11 @@ fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
     panic!("could not find {n} distinct-slot IPv4 sources in 10000 probes");
 }
 
-/// #15248 (A67-01) HEADLINE fail-on-revert, IPv6 /64 cell — updated by
-/// #16510: ONE host rotating IIDs inside its own /64 must not drain the
-/// zone aggregate and starve an unrelated victim source. The attacker offers
-/// 16 IIDs at 10/s each over 10s (1600 attempts at the production 1000/s
-/// aggregate); the victim asks for one reply at the end.
+/// #15248 (A67-01), updated by #18404 and #18674: per-/128 trickle
+/// admission — ONE host rotating IIDs inside its own /64, each IID
+/// occupying a distinct host slot, gets its full 10/s trickle admitted.
+/// The attacker offers 16 IIDs at 10/s each over 10s (1600 attempts at
+/// the production 1000/s aggregate).
 ///
 /// The old fixed-IID fixture's `>=1520` admission assertion was seed-random:
 /// under an iid-uniform approximation to the outputs of the shared per-process
@@ -1055,20 +1055,22 @@ fn distinct_slot_ipv4_sources(n: usize) -> Vec<IpAddr> {
 /// Select 16 distinct host slots from the same /64 instead: every 10/s
 /// trickle stays below its host's 15/s + burst-15 budget, and the combined
 /// 160/s offer stays below the /64 outer tier's 480/s + burst-480 budget.
-/// Require all 1600 attempts to pass; the victim-survival assertion remains.
-/// The binding rotation bound is proven with a saturating rotation in
-/// `rotating_v6_iids_saturate_at_prefix64_cap_16510`; removing the /64
-/// tier reds THAT cell (rotation admits the host-tier sum), and removing
-/// the host tier reds the #16510 same-/64 cells below.
+/// Require all 1600 attempts to pass.
+///
+/// The cross-/64 probe is only a fairness sanity check: at a 160/s offer
+/// against the 1000/s aggregate, the zone budget is never near exhaustion.
+/// Starvation detection belongs to
+/// `rotating_v6_iids_saturate_at_prefix64_cap_16510` and
+/// `colliding_sources_share_one_slot_budget_9901`.
 #[test]
-fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
+fn rotating_v6_iids_admit_per_iid_trickle_15248() {
     let _g = global_bucket_test_lock();
     let reason = GeneratedErrorReason::TimeExceeded;
     let zone = 15_248u32;
     let t0 = 15_000_000_000u64;
     let forwarding = forwarding_with_all_zone_buckets(&[zone]);
     let attackers = distinct_host_slot_rotation_sources_v6(16);
-    let victim = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x99, 0, 0, 0, 0, 1));
+    let probe = IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 0x99, 0, 0, 0, 0, 1));
     assert!(
         attackers
             .iter()
@@ -1111,12 +1113,12 @@ fn rotating_v6_iids_in_one_64_do_not_starve_victim_15248() {
             &forwarding,
             reason,
             zone,
-            Some(victim),
+            Some(probe),
             t_end,
             DEFAULT_RATE_PER_SEC,
             DEFAULT_BURST
         ),
-        "victim in another /64 must NOT be starved by one host rotating IIDs in its own /64"
+        "cross-/64 victim passes under the deliberately unloaded offer"
     );
 }
 
