@@ -43,9 +43,10 @@ import (
 // config that an older binary accepted still BOOTS (#1960 fail-closed-on-
 // load doctrine; the runtime resolves every consumer declared-first, so a
 // leniently-loaded colliding member is CONSISTENT — attributed to the
-// declared side — now with an operator-visible warning). Wired DEAD-LAST in
-// runUniformGates so it can only claim the first-error slot when nothing
-// else failed (#9424 invariant #6).
+// declared side — now with an operator-visible warning).
+//
+// The pinned #9821 regressions require #7795 kernel-device and earlier
+// unit-reference diagnostics to retain precedence over this collision.
 func validateRIMemberDeclaredCollisionStrict(cfg *Config) error {
 	if cfg == nil {
 		return nil
@@ -126,8 +127,7 @@ func validateRIMemberDeclaredCollisionStrict(cfg *Config) error {
 // instance to another object's row); lenient on load / peer-sync
 // (downgrade to a warning so an already-persisted colliding config still
 // boots — #1960 no-brick; every runtime consumer resolves declared-first,
-// so the leniently-loaded member is consistent). Called DEAD-LAST from
-// runUniformGates; see its comment.
+// so the leniently-loaded member is consistent).
 func runUniformGatesRIMemberCollision(_ *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := validateRIMemberDeclaredCollisionStrict(cfg); err != nil {
 		if opts.lenientRIMemberCollision {

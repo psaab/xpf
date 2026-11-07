@@ -100,10 +100,7 @@ func validateRoutingInstanceTypeStrict9814(cfg *Config) error {
 // validateRoutingInstanceTypeStrict9814 into the P6b uniform-gate phase.
 // Strict on commit / commit-check (hard-reject); lenient on load /
 // peer-sync (downgrade to a warning — #1960 no-brick; the raw value stays
-// live as a VRF, see above). Called DEAD-LAST from runUniformGates, after
-// the #9821 gate — same doctrine as its comment: a NEW gate inserted
-// between existing ones would steal the first-error slot from a config that
-// trips two.
+// live as a VRF, see above).
 func runUniformGatesRoutingInstanceType9814(_ *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := validateRoutingInstanceTypeStrict9814(cfg); err != nil {
 		if opts.lenientRoutingInstanceType9814 {

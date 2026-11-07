@@ -3,11 +3,9 @@ package config
 import "fmt"
 
 // runUniformGatesInterfaceAddr runs the interface sub-run of the P6b
-// uniform fail-open gate phase (#9424, #9837). It is appended at the END of
-// the phase rather than inserted among the pre-existing gates: the gate order
-// is observable (first failing gate wins the strict error slot, invariant
-// #6), so a new gate placed in the middle would change which error an
-// operator sees for a config that trips two of them.
+// uniform fail-open gate phase (#9424, #9837). Its current position
+// follows the pre-existing gates; this execution order does not establish
+// a cross-gate diagnostic-priority contract.
 func runUniformGatesInterfaceAddr(_ *ConfigTree, cfg *Config, opts compileOpts) error {
 	// #9424 bracketed interface-address-list gate. Strict on commit /
 	// commit-check (hard-reject a token inside `address [ ... ]` that is neither

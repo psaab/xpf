@@ -17,20 +17,12 @@ import "fmt"
 // is an AST pre-walk, so the phase also reads the group-expanded,
 // inactive-pruned *ConfigTree; it is read-only there.)
 //
-// Behavior-preserving invariants (do NOT reorder relative to master): the
-// source order of every gate is observable — on the strict path the FIRST
-// failing gate wins the returned error slot (invariant #6), and on the
-// tolerant path all gates run and their warnings accumulate in this exact
-// sequence (invariant #7). This is a verbatim contiguous lift of the gate run;
-// it runs AFTER P6a's early-strict + folds accumulator and BEFORE the P7 tail
-// gates. Covered by the reusable golden-output gate in
-// compile_golden_4406_test.go.
-//
-// The gate run is decomposed (#6423) into per-domain sub-runs living in
-// compiler_uniformgates_<domain>.go sibling files. Each sub-run is a verbatim
-// contiguous slice of the original flat gate sequence, and runUniformGates
-// dispatches them in the SAME order, so the observable first-error and
-// warning-accumulation ordering is unchanged.
+// Gate order is an execution detail, not a validation-priority API.
+// Cross-gate first-error identity and tolerant-warning order are unpinned artefacts of execution order, not priority contracts.
+// Current execution order of the newer gates is:
+// #11794 -> #14397 -> #16628/#17680 -> #15935 -> #11823 -> #12089 -> #15001 -> #15278 -> #15717 -> #12217 -> #16770.
+// This list records implementation sequence only; it does not promise which
+// cross-gate diagnostic or warning appears first.
 func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesCoSPlatform(tree, cfg, opts); err != nil {
 		return err
@@ -68,48 +60,32 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRoutingRibRPM(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #9424: appended at the END of the phase deliberately. The source order of
-	// the gates is observable — on the strict path the FIRST failing gate wins
-	// the returned error slot (invariant #6) — so a NEW gate inserted between
-	// existing ones would change which error an operator is shown for a config
-	// that trips two. Last means it can only claim the slot when nothing else
-	// failed.
+	// #9424 validates bracketed interface-address lists, and #9837 validates
+	// tagged-unit MTUs.
 	if err := runUniformGatesInterfaceAddr(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #9821: appended at the END of the phase deliberately, after the #9424
-	// gate above — same doctrine as its comment: a NEW gate inserted between
-	// existing ones would steal the first-error slot from a config that trips
-	// two. Dead-last means the member-collision error only surfaces when no
-	// earlier gate (in particular the #5832 canonical-name and #7795
-	// kernel-device collision gates, which also see these shapes) failed.
+	// #9821 detects the remaining declared-name/unit-key collision. The
+	// collision regressions pin its precedence behind #7795 and unit-reference
+	// diagnostics; gate order elsewhere is not a priority contract.
 	if err := runUniformGatesRIMemberCollision(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #9814: appended at the END of the phase deliberately, after the #9821
-	// gate above — same doctrine as its comment: a NEW gate inserted between
-	// existing ones would steal the first-error slot from a config that trips
-	// two. Dead-last means the instance-type error only surfaces when no
-	// earlier gate failed.
+	// #9814 rejects explicitly configured, unsupported routing-instance types.
 	if err := runUniformGatesRoutingInstanceType9814(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #11060: keep dual routing-instance membership dead-last as well. The
-	// order of uniform gates is observable: do not steal the first-error slot
-	// from an existing validation.
+	// #11060 detects dual routing-instance membership claims. Its tolerant
+	// path records quarantine evidence consumed by #12089 below.
 	if err := runUniformGatesRIDualClaim11060(tree, cfg, opts); err != nil {
 		return err
 	}
 
-	// #11310: appended after #11060 at the end of this phase, preserving the
-	// existing first-error order. Gates appended after this one must preserve
-	// its diagnostic priority. Protocol interface references must match the
-	// routing-instance membership of the resolved Linux device. A global
-	// protocol cannot claim an RI-owned device, and an RI protocol must
-	// reference a device owned by that same instance; otherwise FRR activates
-	// the interface in a different routing context from the configured device.
-	// Known aliases are compared by kernel identity, while undeclared refs
-	// remain owned by the #9405 advisory.
+	// #11310 validates protocol interface references against routing-instance
+	// membership: global protocols cannot claim RI-owned devices, and an RI
+	// protocol must reference a device owned by that same instance. Known
+	// aliases are compared by kernel identity; undeclared refs remain owned
+	// by the #9405 advisory.
 	if mismatches := protocolInterfaceMembershipMismatches11310(cfg); len(mismatches) > 0 {
 		if opts.lenientProtocolInterfaceMembership11310 {
 			for _, mismatch := range mismatches {
@@ -122,17 +98,13 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
-	// #11312 follows #11310 at the tail of the phase, preserving its first-error
-	// priority while remaining after #11060 so dual claims keep their existing
-	// cross-instance diagnostic priority. The tolerant dual-claim path defers
-	// quarantine until after all gates, so forwarding members are still visible
-	// here to warn.
+	// #11312 checks forwarding-instance members. Tolerant dual-claim handling
+	// leaves those memberships visible here for warning evaluation.
 	if err := runUniformGatesForwardingInstanceMembers11312(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #11392 follows the existing routing-instance membership gates so their
-	// strict diagnostic priority remains unchanged. Management-class devices
-	// are owned by vrf-mgmt, never by a tenant VRF.
+	// #11392 checks that management-class devices belong to vrf-mgmt rather
+	// than a tenant routing instance.
 	if err := runUniformGatesRIMgmtMember11392(tree, cfg, opts); err != nil {
 		return err
 	}
@@ -142,9 +114,7 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesRILifelineMember11364(tree, cfg, opts); err != nil {
 		return err
 	}
-	// #11313 runs after all existing tail gates so it cannot steal an
-	// established first-error diagnostic. A missing router AS is checked on
-	// the fully-derived config after routing-options inheritance is resolved.
+	// #11313 validates router AS after routing-options inheritance is resolved.
 	if err := validateBGPRouterASStrict(cfg); err != nil {
 		if opts.lenientBGPRouterAS {
 			cfg.Warnings = append(cfg.Warnings,
@@ -153,9 +123,8 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #11445: appended after all existing uniform gates so sampling source
-	// validation cannot change which established error wins. Tolerant loads
-	// retain the invalid value with a warning (#1960).
+	// #11445 validates sampling source addresses. Tolerant loads retain the
+	// invalid value with a warning (#1960).
 	if err := validateSamplingSourceAddressesStrict(cfg); err != nil {
 		if opts.lenientSamplingSourceAddress {
 			cfg.Warnings = append(cfg.Warnings,
@@ -164,8 +133,7 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #11400: appended after every established uniform gate so the OSPF area
-	// reuse diagnosis cannot displace an existing first-error slot.
+	// #11400 validates OSPF area reuse.
 	if err := validateOSPFAreaInterfaceReuse11400(cfg); err != nil {
 		if opts.lenientOSPFAreaInterface11400 {
 			cfg.Warnings = append(cfg.Warnings,
@@ -174,31 +142,26 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #11575 follows every established uniform gate to preserve strict
-	// first-error priority. Unknown zone children are warned on tolerant
-	// compile; since #12623 (owner option (b)) ANY unknown child leaves
-	// the zone unbound on the tolerant path.
+	// #11575 warns about unknown zone children on tolerant compile; since
+	// #12623 (owner option (b)) ANY unknown child leaves the zone unbound.
 	if err := runUniformGatesUnknownSecurityZoneChild11575(cfg, opts); err != nil {
 		return err
 	}
-	// #11387 follows every existing gate so bridge-port validation cannot
-	// displace an established first-error diagnostic.
+	// #11387 validates bridge-domain membership.
 	if err := runUniformGatesBridgeDomainMembership11387(tree, cfg, opts); err != nil {
 		return err
 	}
 	// #11456: a contributing-route policy on a generate route cannot be
-	// evaluated against xpf's incomplete contributor feed. Append after every
-	// established gate so its unsupported-shape error does not steal an
-	// existing first-error slot. Strict compilation rejects it; the tolerant
-	// path preserves the config and lets ValidateConfig add the warning used by
-	// the alarm surface. Both renderers omit the aggregate.
+	// evaluated against xpf's incomplete contributor feed. Strict compilation
+	// rejects this unsupported shape; the tolerant path preserves the config
+	// and lets ValidateConfig add the warning used by the alarm surface. Both
+	// renderers omit the aggregate.
 	if err := validateGenerateRoutePolicyStrict(cfg); err != nil && !opts.lenientGenerateRoutePolicy {
 		return err
 	}
-	// #11794: a key-id outside FRR's 1..255 domain must not reach the renderer.
-	// Appended after existing uniform gates so a new error cannot steal their
-	// established first-error priority. Tolerant loads preserve the config with
-	// a warning; the renderer omits an invalid MD5 authentication block.
+	// #11794 rejects OSPF MD5 key IDs outside FRR's 1..255 domain. Tolerant
+	// loads preserve the config with a warning; the renderer omits an invalid
+	// MD5 authentication block.
 	if err := validateOSPFMD5KeyIDs11794(cfg); err != nil {
 		if opts.lenientOSPFMD5KeyID11794 {
 			cfg.Warnings = append(cfg.Warnings,
@@ -207,33 +170,26 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #14397: an OSPF authentication type with no key (md5 with every key
-	// empty, or simple-password with an empty password) must not reach the
-	// renderer, which would otherwise activate the interface with NO
-	// authentication. Appended beside the #11794 gate so a new error cannot
-	// steal established first-error priority. Tolerant loads preserve the
-	// config with a warning; the renderer omits the keyless-auth interface.
+	// #14397 rejects OSPF authentication types without a key (MD5 with every
+	// key empty, or simple-password with an empty password). Tolerant loads
+	// preserve the config with a warning; the renderer omits the keyless-auth
+	// interface.
 	if w, err := validateOSPFAuthKeyPresenceStrict(cfg, opts.lenientOSPFAuthKeyPresence14397); err != nil {
 		return err
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
-	// #16628/#17680: an OSPF MD5 key over 16 bytes or a
-	// simple-password over 8 bytes is silently truncated by ospfd, so every
-	// frr-reload deletes and re-adds it (perpetual diff) and the
-	// effective key diverges from `show configuration`. Appended
-	// beside the #14397 gate so a new error cannot steal established
-	// first-error priority. Runs after decodeJunos9AtCompile (#15051,
-	// first in runUniformGatesLogFeedRouting), so the bound applies
-	// to the decoded plaintext. Tolerant loads preserve the config
-	// with a warning; the renderer withholds the over-long key.
+	// #16628/#17680 rejects OSPF MD5 keys over 16 bytes and simple-passwords
+	// over 8 bytes, which FRR silently truncates. Validation runs after
+	// decodeJunos9AtCompile (#15051, first in runUniformGatesLogFeedRouting),
+	// so the bound applies to decoded plaintext. Tolerant loads preserve the
+	// config with a warning; the renderer withholds the over-long key.
 	if w, err := validateOSPFKeyLengthStrict(cfg, opts.lenientOSPFKeyLength16628); err != nil {
 		return err
 	} else {
 		cfg.Warnings = append(cfg.Warnings, w...)
 	}
-	// #15935: same-ID OSPF MD5 restated with a different key. Appended
-	// beside #14397 so it cannot steal established first-error priority.
+	// #15935 rejects the same OSPF MD5 key ID restated with a different key.
 	if err := validateOSPFMD5DuplicateKeys15935(cfg); err != nil {
 		if opts.lenientOSPFMD5DuplicateKey15935 {
 			cfg.Warnings = append(cfg.Warnings,
@@ -242,9 +198,9 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #11823 follows existing routing gates to preserve strict first-error
-	// priority. Tolerant loads retain invalid values with a warning; the FRR
-	// renderer omits out-of-domain metrics.
+	// #11823 validates IS-IS interface metric values. Tolerant loads retain
+	// invalid values with a warning; the FRR renderer omits out-of-domain
+	// metrics.
 	if err := validateISISMetrics11823(cfg); err != nil {
 		if opts.lenientISISMetric11823 {
 			cfg.Warnings = append(cfg.Warnings,
@@ -253,12 +209,10 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 			return err
 		}
 	}
-	// #12089: run after the routing-instance membership tail gates (#11060,
-	// #11312, #11392, #11364) so those diagnostics retain priority and
-	// forwarding/dual-claim memberships are not mistaken for VRF owners.
+	// #12089 checks IPsec gateway routing-instance warnings. It consumes the
+	// #11060 quarantine evidence recorded above to exclude tolerant conflicts.
 	// Effective local-address selection follows the renderer (VPN, gateway,
-	// then external-interface-derived); tolerant conflicts are excluded using
-	// the #11060 quarantine evidence recorded above.
+	// then external-interface-derived).
 	gatewayRIRoutingWarnings, err := validateIPsecGatewayRoutingInstance12089(
 		cfg, opts.lenientIPsecGatewayVRF12089)
 	if err != nil {
@@ -266,12 +220,9 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	}
 	cfg.Warnings = append(cfg.Warnings, gatewayRIRoutingWarnings...)
 
-	// #15001 (A08-04) NAT undefined-zone gate, appended dead-last so it
-	// cannot steal an established first-error slot (invariant #6): a
-	// config tripping an older gate still reports that gate first, and
-	// a config whose ONLY defect is the zone typo is rejected here.
-	// Strict rejects naming rule-set and zone; tolerant warns per
-	// offender and records the rule-sets for dataplane skip (#1960).
+	// #15001 (A08-04) validates NAT zones. Strict compilation rejects a
+	// rule-set naming an undefined zone; the tolerant path warns per offender
+	// and records the rule-sets for dataplane skip (#1960).
 	if err := validateNATUndefinedZoneStrict(cfg); err != nil {
 		if opts.lenientNATUndefinedZone {
 			for _, offender := range natUndefinedZoneOffenders(cfg) {
@@ -303,8 +254,7 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 		}
 	}
 
-	// #15717: post-compile login-class gate, appended dead-last so it
-	// cannot steal an established first-error slot (invariant #6): a
+	// #15717 validates post-compile login-class references: a
 	// `system login user <n> class <c>` whose class is neither built-in
 	// nor defined in the effective config (e.g. defined only in an
 	// un-applied group, which the permissive schema-refs union passes)
@@ -321,10 +271,9 @@ func runUniformGates(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	if err := runUniformGatesUnknownSecurityPoliciesChild12217(cfg, opts); err != nil {
 		return err
 	}
-	// #16770: appended dead-last so it cannot steal an established
-	// first-error slot. An ssh-known-hosts entry whose host/key the
-	// daemon renderer would skip must fail strict commit; tolerant
-	// loads warn and the daemon revokes the stale managed file.
+	// #16770 rejects ssh-known-hosts entries whose host/key the daemon
+	// renderer would skip; tolerant loads warn and the daemon revokes the
+	// stale managed file.
 	if err := ValidateSSHKnownHostsStrict(cfg); err != nil {
 		if opts.lenientSSHKnownHosts16770 {
 			cfg.Warnings = append(cfg.Warnings,
