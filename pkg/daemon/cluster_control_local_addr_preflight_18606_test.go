@@ -38,7 +38,16 @@ func TestControlLocalAddressDecision18606(t *testing.T) {
 		{"renumber is refused", "10.99.14.1", running, []string{"10.99.14.5/30"}, "", "", "", "", true},
 		{"unchanged passes", "10.99.14.1", running, []string{"10.99.14.1/30"}, "", "", "", "", false},
 		{"a mask change alone passes", "10.99.14.1", running, []string{"10.99.14.1/29"}, "", "", "", "", false},
-		{"still configured beside a new address passes", "10.99.14.1", running, []string{"192.0.2.9/24", "10.99.14.1/30"}, "", "", "", "", false},
+		{"still configured beside a new address passes when selected first", "10.99.14.1", running, []string{"10.99.14.1/30", "192.0.2.9/24"}, "", "", "", "", false},
+		{"new same-family address before bound changes fresh bind and is refused", "10.99.14.1",
+			[]string{"10.99.14.1/24"}, []string{"10.99.14.3/24", "10.99.14.1/24"},
+			"", "", "", "", true},
+		{"reorder-only same-family change switches fresh bind and is refused", "10.99.14.1",
+			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.3/24", "10.99.14.1/24"},
+			"", "", "", "", true},
+		{"prefix joins preferred subnet and switches fresh bind", "10.99.14.129",
+			[]string{"10.99.14.129/24", "10.99.14.193/25"}, []string{"10.99.14.129/25", "10.99.14.193/25"},
+			"", "", "10.99.14.193/25", "10.99.14.193/25", true},
 		{"primary change switches fresh bind and is refused", "10.99.14.1",
 			[]string{"10.99.14.1/24", "10.99.14.3/24"}, []string{"10.99.14.1/24", "10.99.14.3/24"},
 			"10.99.14.1/24", "10.99.14.3/24", "", "", true},
@@ -336,6 +345,79 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 	taggedParentManager.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "hb.1")
 	if err := clusterControlLocalAddressCommitPreflight(taggedParentManager, taggedParentDHCP, taggedParentWithoutStatic); err == nil {
 		t.Fatal("unplanned VLAN-parent unit-0 static removal must refuse despite DHCP on unit 7")
+	}
+
+	// A zoned DHCP-managed VLAN parent renders no static IPv4 for the managed
+	// family, even if the unit keeps its authored static address.
+	plannedParentStatic := configWithControl("hb.1", "10.99.14.2",
+		"interfaces hb.1 vlan-tagging",
+		"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+		"security zones security-zone trust interfaces hb.1.0")
+	plannedParentDHCP := configWithControl("hb.1", "10.99.14.2",
+		"interfaces hb.1 vlan-tagging",
+		"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+		"interfaces hb.1 unit 0 family inet dhcp",
+		"security zones security-zone trust interfaces hb.1.0")
+	if state := controlLinkState18606(plannedParentDHCP, "hb.1"); len(state.addrs) != 0 {
+		t.Fatalf("planned DHCP-managed VLAN parent retained its rendered IPv4 static: %v", state.addrs)
+	}
+	plannedParentManager := cluster.NewManager(0, 1)
+	plannedParentManager.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "hb.1")
+	if err := clusterControlLocalAddressCommitPreflight(plannedParentManager, plannedParentStatic, plannedParentDHCP); err == nil {
+		t.Fatal("a planned DHCP-managed VLAN parent must refuse removal of the bound rendered static")
+	}
+
+	// Strict config rejects vlan-id without tagging, while lenient peer-sync
+	// retains it and the regular networkd row still renders the unit on its
+	// untagged parent. The preflight must use that same rendered address fold.
+	lenientUntaggedVLAN := func(primary string) *config.Config {
+		t.Helper()
+		tree := &config.ConfigTree{}
+		address1 := "interfaces hb.1 unit 100 family inet address 10.99.14.1/24"
+		address3 := "interfaces hb.1 unit 100 family inet address 10.99.14.3/24"
+		if primary == "10.99.14.1/24" {
+			address1 += " primary"
+		} else {
+			address3 += " primary"
+		}
+		lines := []string{
+			"chassis cluster cluster-id 1",
+			"chassis cluster node 0",
+			"chassis cluster control-interface hb.1",
+			"chassis cluster peer-address 10.99.14.2",
+			"interfaces hb.1 unit 100 vlan-id 100",
+			address1,
+			address3,
+		}
+		for _, line := range lines {
+			path, err := config.ParseSetCommand("set " + line)
+			if err != nil {
+				t.Fatalf("ParseSetCommand(%q): %v", line, err)
+			}
+			if err := tree.SetPath(path); err != nil {
+				t.Fatalf("SetPath(%q): %v", line, err)
+			}
+		}
+		cfg, err := config.CompileConfigLenient(tree)
+		if err != nil {
+			t.Fatalf("CompileConfigLenient: %v", err)
+		}
+		return cfg
+	}
+	lenientVLANRunning := lenientUntaggedVLAN("10.99.14.1/24")
+	lenientVLANCandidate := lenientUntaggedVLAN("10.99.14.3/24")
+	if state := controlLinkState18606(lenientVLANRunning, "hb.1"); len(state.addrs) != 2 ||
+		state.primary != "10.99.14.1/24" {
+		t.Fatalf("lenient non-tagging vlan-id running fold = %+v; want both parent addresses and primary .1", state)
+	}
+	if state := controlLinkState18606(lenientVLANCandidate, "hb.1"); len(state.addrs) != 2 ||
+		state.primary != "10.99.14.3/24" {
+		t.Fatalf("lenient non-tagging vlan-id candidate fold = %+v; want both parent addresses and primary .3", state)
+	}
+	lenientVLANManager := cluster.NewManager(0, 1)
+	lenientVLANManager.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "hb.1")
+	if err := clusterControlLocalAddressCommitPreflight(lenientVLANManager, lenientVLANRunning, lenientVLANCandidate); err == nil {
+		t.Fatal("lenient non-tagging vlan-id primary swap must be refused on the rendered bare parent")
 	}
 
 	secureTunnel := configWithControl("st0", "10.99.14.2",

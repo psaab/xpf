@@ -251,17 +251,19 @@ ends of a point-to-point control link atomically from one end of it.**
   The predicate is "this commit removes the address the running heartbeat
   is bound to": the bound address (`Manager.HeartbeatLocalAddr()`) is a
   configured static address of the RUNNING config's control-link unit and
-  the candidate's unit no longer carries it. It also refuses when a changed
-  `primary`/`preferred` selection changes the address a fresh bind would pick
-  (networkd ordering followed by `selectClusterBindAddr`) while the bound
-  address remains configured. It compares the running and candidate selections,
-  so unchanged selections and mere address-list/kernel-order differences do
-  not refuse unrelated commits. The running-config half matters: a unit with
-  `dhcp` and a static address binds the lease (networkd renders no static IPv4
-  for a DHCPv4 row), and a foreign address listed first can win the bind;
-  neither is removed by any commit, and a gate that compared the candidate
-  alone would refuse every commit on such a node. A static -> DHCP change,
-  which strands the bound address, is refused. It abstains when no heartbeat
+  the candidate's unit no longer carries it. It also recomputes fresh-bind
+  selection whenever selectors or the rendered CIDR list changes. Address
+  membership, configured order, and prefix length can all change networkd's
+  primary/preferred-subnet ordering; it refuses when the candidate would select
+  away from both the bound address and the running selection. Changes that
+  preserve the selected address remain admissible. This models configured
+  networkd order, not kernel enumeration.
+  The running-config half matters: a unit with `dhcp` and a static address
+  binds the lease (networkd renders no static IPv4 for a DHCPv4 row), and a
+  foreign address listed first can win the bind; neither is removed by any
+  commit, and a gate that compared the candidate alone would refuse every
+  commit on such a node. A static -> DHCP change, which strands the bound
+  address, is refused. It abstains when no heartbeat
   is running (boot applies run before comms start, a first cluster commit has
   none, a fabric-transport epoch never starts one, and node-id changes are
   #6192's and land through the boot path) and when the candidate has no
@@ -309,13 +311,16 @@ the existing #6720 contract.
   and start both. A boot apply runs no preflight, and the heartbeat starts
   fresh on the new address.
 
-  The address set compared is the one networkd RENDERS: a family whose DHCP
-  client is on renders none of its static addresses, so adding `dhcp` to the
-  control unit while keeping the bound static address is refused like any
-  renumber. Residuals: removing `dhcp` from a dhcp+static unit while the
-  heartbeat is on the lease (the lease is in no config, so the gate
-  abstains), and a reboot-recovered pending `commit confirmed` whose
-  rollback runs no cluster gates (as for #8965).
+  The rendered-address proof also follows the networkd row shape. Ordinary
+  control rows suppress static addresses for a DHCP-managed family. A tagged
+  VLAN parent does so only when a zone plan marks it to skip addresses: an
+  unplanned parent retains its statics even if another unit requests DHCP, and
+  the gate keeps those statics too. A directly planned parent with a
+  DHCP-managed family suppresses that static in both renderer and gate. Other
+  residuals are removing `dhcp` from a dhcp+static unit while the heartbeat is
+  on the lease (the lease is in no config, so the gate abstains), and a
+  reboot-recovered pending `commit confirmed` whose rollback runs no cluster
+  gates (as for #8965).
 
 **#9178 — the address gate passed the DELETION case.** #8965's decision
 returned nil whenever *either* side was empty, on the reasoning that

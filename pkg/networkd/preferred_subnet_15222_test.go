@@ -111,6 +111,25 @@ func TestPreferredRespectsPrefixBoundary15222(t *testing.T) {
 	}
 }
 
+func TestPreferredPrefixChangeJoinsSubnetAndChangesRenderedOrder18623(t *testing.T) {
+	running := renderAddrs15222(t, InterfaceConfig{
+		Name:             "trust0",
+		Addresses:        []string{"10.99.14.129/24", "10.99.14.193/25"},
+		PreferredAddress: "10.99.14.193/25",
+	})
+	if want := []string{"10.99.14.129/24", "10.99.14.193/25"}; !equalAddrs15222(running, want) {
+		t.Fatalf("running order=%v, want %v", running, want)
+	}
+	candidate := renderAddrs15222(t, InterfaceConfig{
+		Name:             "trust0",
+		Addresses:        []string{"10.99.14.129/25", "10.99.14.193/25"},
+		PreferredAddress: "10.99.14.193/25",
+	})
+	if want := []string{"10.99.14.193/25", "10.99.14.129/25"}; !equalAddrs15222(candidate, want) {
+		t.Fatalf("candidate order=%v, want %v", candidate, want)
+	}
+}
+
 // Controls: no preferred keeps config order; primary still first overall;
 // primary+same preferred stays first; preferred already first is a no-op.
 func TestPreferredControls15222(t *testing.T) {

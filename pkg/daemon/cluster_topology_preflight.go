@@ -611,8 +611,8 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 		return nil
 	}
 	runningControlInterface := runningPeerView.Chassis.Cluster.ControlInterface
-	runningStaticAddrs := controlLinkState18606(runningPeerView, runningControlInterface).addrs
-	if !cidrListHasIP18606(runningStaticAddrs, net.ParseIP(peerAddr)) {
+	runningControlState := controlLinkState18606(runningPeerView, runningControlInterface)
+	if !cidrListHasIP18606(runningControlState.addrs, net.ParseIP(peerAddr)) {
 		// DHCP-derived and foreign heartbeat addresses are not being removed by
 		// this config candidate, so unrelated commits must remain admissible.
 		return nil
@@ -626,31 +626,54 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 		return fmt.Errorf("commit rejected: cannot compile candidate for peer node %d control-address preflight: %w",
 			peerNodeID, err)
 	}
-	var controlInterface string
+	var controlInterface, candidateBindPeerAddress string
 	if peerView != nil && peerView.Chassis.Cluster != nil {
 		controlInterface = peerView.Chassis.Cluster.ControlInterface
+		candidateBindPeerAddress = peerView.Chassis.Cluster.PeerAddress
 	}
-	return peerControlAddressDecision18630(peerAddr, runningStaticAddrs,
-		controlLinkState18606(peerView, controlInterface).addrs)
+	return peerControlAddressDecision18630(peerAddr, runningControlState,
+		controlLinkState18606(peerView, controlInterface),
+		runningPeerView.Chassis.Cluster.PeerAddress, candidateBindPeerAddress)
 }
 
-// peerControlAddressDecision18630 refuses only when the running heartbeat peer
-// address is statically rendered by the running peer view and disappears from
-// the candidate peer view.
-func peerControlAddressDecision18630(runningPeerAddr string, runningStaticAddrs, peerRenderedAddrs []string) error {
+// peerControlAddressDecision18630 refuses when the running heartbeat peer
+// address is statically rendered by the running peer view and either disappears
+// or a changed rendered selection would make the peer bind a different address
+// on its next heartbeat start. The two peer-address inputs are the running and
+// candidate peer views' actual resolver family selectors.
+func peerControlAddressDecision18630(runningPeerAddr string, runningState, peerCandidate controlLinkAddrs18606, runningBindPeerAddr, candidateBindPeerAddr string) error {
 	peerIP := net.ParseIP(runningPeerAddr)
-	if peerIP == nil ||
-		!cidrListHasIP18606(runningStaticAddrs, peerIP) ||
-		cidrListHasIP18606(peerRenderedAddrs, peerIP) {
+	if peerIP == nil || !cidrListHasIP18606(runningState.addrs, peerIP) {
 		return nil
 	}
+	if !cidrListHasIP18606(peerCandidate.addrs, peerIP) {
+		return peerControlAddressRefusal18630(runningPeerAddr,
+			freshBindSelection18606(peerCandidate, candidateBindPeerAddr))
+	}
+	if sameFreshBindInputs18606(runningState, peerCandidate) &&
+		runningBindPeerAddr == candidateBindPeerAddr {
+		return nil
+	}
+	oldWant := freshBindSelection18606(runningState, runningBindPeerAddr)
+	want := freshBindSelection18606(peerCandidate, candidateBindPeerAddr)
+	if want != "" && want != runningPeerAddr && want != oldWant {
+		return peerControlAddressRefusal18630(runningPeerAddr, want)
+	}
+	return nil
+}
+
+func peerControlAddressRefusal18630(runningPeerAddr, nextBind string) error {
+	if nextBind == "" {
+		nextBind = "no static address"
+	}
 	return fmt.Errorf("commit rejected: the peer's chassis cluster control-link "+
-		"address no longer includes %s, the address this node's running heartbeat "+
-		"uses to reach it; the peer will reject this config and remain on the old "+
-		"text, so later config pushes will not converge the pair.\n"+
+		"address no longer includes %s as its selected startup bind address; "+
+		"it would select %s while this node's running heartbeat uses %s to reach "+
+		"it. The peer will reject this config and remain on the old text, so "+
+		"later config pushes will not converge the pair.\n"+
 		"To renumber the control link: set the new address on BOTH nodes and "+
 		"restart xpfd on both, offline — stop xpfd on both nodes, put the new "+
 		"address in each node's boot configuration, and start both. Do NOT commit "+
 		"the change on each node separately while both are running — that produces "+
-		"the same divergence by hand", runningPeerAddr)
+		"the same divergence by hand", runningPeerAddr, nextBind, runningPeerAddr)
 }

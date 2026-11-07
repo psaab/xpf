@@ -29,9 +29,9 @@ import (
 // THE PREDICATE is "this commit moves the address the running heartbeat is
 // bound to, or WOULD bind to on a fresh start": the bound address
 // (Manager.HeartbeatLocalAddr) is a configured static address of the RUNNING
-// config's control-link unit, and either the candidate's unit no longer
-// carries it, or the candidate's primary/preferred selection changes what a
-// fresh bind would SELECT while still carrying it (#18623). Both halves of
+// config's resolved control-link netdev, and either the candidate netdev no
+// longer renders it, or a changed rendered address list/selection changes what
+// a fresh bind would SELECT while still carrying it (#18623). Both halves of
 // the original predicate matter:
 //   - the running-config half: if the heartbeat is bound to an address
 //     config never named — a DHCP lease (networkd renders no static IPv4 for a
@@ -44,11 +44,11 @@ import (
 // orders primary addresses first (per family/subnet for dual-stack) and
 // preferred addresses first within their subnet (#15222/#15653), then
 // selectClusterBindAddr picks the first address of the peer's family. Compare
-// that pick for the running and candidate configs, and refuse only when a
-// changed primary/preferred setting changes the pick away from the bound
-// address while the bound address remains configured. This avoids refusing an
-// unrelated commit when the kernel's enumeration order differs from
-// networkd's configured order.
+// that pick for the running and candidate configs whenever their effective
+// rendered address/selection inputs differ, and refuse only when the
+// candidate would select away from the bound address and changes the running
+// selection. This catches selector edits and order/prefix changes without
+// refusing an unrelated edit when the rendered selection stays the same.
 //
 // A candidate that removes every static address (static -> DHCP) and so strands
 // the bound one is refused like any renumber.
@@ -93,8 +93,8 @@ func clusterControlLocalAddressCommitPreflight(running *cluster.Manager, oldCfg,
 		controlLinkState18606(newCfg, cc.ControlInterface), cc.PeerAddress)
 }
 
-// controlLinkAddrs18606 is the control-link unit's rendered static addresses
-// plus the per-family primary/preferred selections that order them on a
+// controlLinkAddrs18606 is the resolved control-link netdev's ordered rendered
+// static CIDRs plus its family-specific primary/preferred selections for a
 // fresh bind (#18623). Empty primary/preferred means "no selection".
 type controlLinkAddrs18606 struct {
 	addrs       []string
@@ -106,21 +106,20 @@ type controlLinkAddrs18606 struct {
 
 // controlLocalAddressDecision18606 is the DECISION, split from the accessors so
 // every arm is unit testable without a running heartbeat. have is the running
-// heartbeat's bound address; runningCfg and candidate are the running and the
-// candidate configs' control-link unit state (rendered addresses + primary/
-// preferred selections); peer is the candidate peer address used by fresh-bind
-// selection for both configs so the comparison isolates selection changes.
+// heartbeat's bound address; runningCfg and candidate are the running and
+// candidate resolved control-link netdev states (ordered rendered CIDRs plus
+// primary/preferred selections); peer is the candidate peer address used for
+// fresh-bind selection in both states so the comparison isolates changes.
 func controlLocalAddressDecision18606(have string, runningCfg, candidate controlLinkAddrs18606, peer string) error {
 	haveIP := net.ParseIP(have)
 	if haveIP == nil || !cidrListHasIP18606(runningCfg.addrs, haveIP) {
 		return nil
 	}
 	if cidrListHasIP18606(candidate.addrs, haveIP) {
-		// Do not compare selected addresses by themselves: the kernel may
-		// resolve configured addresses in either order. Only a changed
-		// primary/preferred setting that changes the fresh bind selection
-		// relative to the running config creates this deferred renumber.
-		if !sameAddressSelection18606(runningCfg, candidate) {
+		// Prefixes and address order are inputs to networkd's selection
+		// (including preferred-per-subnet grouping), even when the selector
+		// strings themselves are unchanged.
+		if !sameFreshBindInputs18606(runningCfg, candidate) {
 			oldWant := freshBindSelection18606(runningCfg, peer)
 			want := freshBindSelection18606(candidate, peer)
 			if want != "" && want != have && want != oldWant {
@@ -136,11 +135,24 @@ func controlLocalAddressDecision18606(have string, runningCfg, candidate control
 	return controlLocalAddressMoveRefusal18606(have, want)
 }
 
-func sameAddressSelection18606(a, b controlLinkAddrs18606) bool {
-	return a.primary == b.primary &&
-		a.primaryV6 == b.primaryV6 &&
-		a.preferred == b.preferred &&
-		a.preferredV6 == b.preferredV6
+// sameFreshBindInputs18606 recognizes changes to any input that can affect
+// networkd's address ordering: selectors plus the rendered CIDR list in order.
+// Comparing only selector strings misses both list reorders and prefix changes
+// that alter preferred-address subnet grouping.
+func sameFreshBindInputs18606(a, b controlLinkAddrs18606) bool {
+	if a.primary != b.primary ||
+		a.primaryV6 != b.primaryV6 ||
+		a.preferred != b.preferred ||
+		a.preferredV6 != b.preferredV6 ||
+		len(a.addrs) != len(b.addrs) {
+		return false
+	}
+	for i, addr := range a.addrs {
+		if addr != b.addrs[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // freshBindSelection18606 reproduces what a fresh comms start would bind:
@@ -277,7 +289,7 @@ func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606
 			// Secure-tunnel interface units have per-unit netdevs.
 			return controlLinkUnitState18606(declared.Units[0])
 		}
-		return controlLinkInterfaceState18606(declared)
+		return controlLinkInterfaceState18606(cfg, declared)
 	}
 	split := cfg.SplitInterfaceUnitRef(ref)
 	unit := 0
@@ -295,16 +307,16 @@ func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606
 	if split.HasUnit && (unit != 0 || config.IsSecureTunnelIfName(split.Base)) {
 		return controlLinkUnitState18606(ifc.Units[unit])
 	}
-	return controlLinkInterfaceState18606(ifc)
+	return controlLinkInterfaceState18606(cfg, ifc)
 }
 
-// controlLinkInterfaceState18606 mirrors the bare-device address fold: enabled
-// untagged units contribute when they have no tunnel or their tunnel shares the
-// bare device. Numeric order determines the first selector per family; tagged
-// children and tunnels assigned to a different netdev are excluded. VLAN-parent
-// family filtering depends on the renderer's address plan, so statics are kept
-// there because this preflight has no plan view.
-func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddrs18606 {
+// controlLinkInterfaceState18606 mirrors the resolved bare-device fold:
+// numeric unit order, enabled units whose tunnel shares the bare device, and
+// tagged-child exclusion only when the parent has VLAN tagging enabled. Regular
+// interface rows render every enabled unit, including a malformed VLAN ID
+// accepted on lenient paths. A VLAN-parent row filters DHCP-owned families only
+// when a non-quarantined zone ref actually plans a DHCP-managed parent.
+func controlLinkInterfaceState18606(cfg *config.Config, ifc *config.InterfaceConfig) controlLinkAddrs18606 {
 	if ifc == nil {
 		return controlLinkAddrs18606{}
 	}
@@ -319,7 +331,8 @@ func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddr
 	bareDevice := config.LinuxIfName(ifc.Name)
 	for _, n := range unitNumbers {
 		unit := ifc.Units[n]
-		if unit == nil || unit.Disable || unit.VlanID > 0 ||
+		if unit == nil || unit.Disable ||
+			(ifc.TaggingEnabled() && unit.VlanID > 0) ||
 			(unit.Tunnel != nil && unit.Tunnel.Name != bareDevice) {
 			continue
 		}
@@ -346,7 +359,8 @@ func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddr
 			}
 		}
 	}
-	if (dhcpv4 || dhcpv6) && !ifc.TaggingEnabled() {
+	if (dhcpv4 || dhcpv6) &&
+		(!ifc.TaggingEnabled() || controlLinkVLANParentSkipsAddrs18606(cfg, ifc)) {
 		kept := out.addrs[:0]
 		for _, addr := range out.addrs {
 			ip, _, err := net.ParseCIDR(addr)
@@ -358,6 +372,62 @@ func controlLinkInterfaceState18606(ifc *config.InterfaceConfig) controlLinkAddr
 		out.addrs = kept
 	}
 	return out
+}
+
+// controlLinkVLANParentSkipsAddrs18606 mirrors planPhysDesired's condition
+// for suppressing static addresses on a VLAN parent. Unzoned parents retain
+// the renderer's legacy statics; only a non-quarantined, non-excluded zone
+// ref that plans the parent can enable plan.skipAddrs.
+func controlLinkVLANParentSkipsAddrs18606(cfg *config.Config, ifc *config.InterfaceConfig) bool {
+	if cfg == nil || ifc == nil || !ifc.TaggingEnabled() {
+		return false
+	}
+	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
+	quarantined := config.QuarantinedZoneInterfaceKeys(cfg)
+	parentSkip := ifc.RedundancyGroup > 0 || ifc.LocalFabricMember != ""
+	bareDevice := config.LinuxIfName(ifc.Name)
+	for zoneName, zone := range cfg.Security.Zones {
+		if zone == nil {
+			continue
+		}
+		if _, excluded := excludedZones[zoneName]; excluded {
+			continue
+		}
+		for _, ref := range zone.Interfaces {
+			isQuarantined := false
+			for _, key := range config.InterfaceUnitRefKeys(cfg, ref) {
+				if _, ok := quarantined[key]; ok {
+					isQuarantined = true
+					break
+				}
+			}
+			if isQuarantined {
+				continue
+			}
+			split := cfg.SplitInterfaceUnitRef(ref)
+			if split.Base != ifc.Name {
+				continue
+			}
+			unitNumber := 0
+			if split.HasUnit {
+				n, err := strconv.Atoi(split.UnitTok)
+				if err != nil {
+					continue
+				}
+				unitNumber = n
+			}
+			unit := ifc.Units[unitNumber]
+			if unit != nil && (unit.VlanID != 0 ||
+				unit.Tunnel != nil && unit.Tunnel.Name != bareDevice) {
+				continue
+			}
+			if parentSkip || unit != nil && !unit.Disable &&
+				(unit.DHCP || unit.DHCPv6 || unit.DHCPv6Client != nil) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func controlLinkUnitState18606(unit *config.InterfaceUnit) controlLinkAddrs18606 {

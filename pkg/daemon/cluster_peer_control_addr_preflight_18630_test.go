@@ -60,6 +60,26 @@ func peerControlAddrStore18630(t *testing.T, candidatePeerAddr string) *configst
 	return store
 }
 
+func peerControlAddrSelectionStore18630(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	if err := store.DeleteFromInput("groups node1 interfaces em0 unit 0 family inet address " + peerControlAddrOld18630); err != nil {
+		t.Fatalf("delete /30 peer control address: %v", err)
+	}
+	for _, addr := range []string{"10.99.14.2/24", "10.99.14.5/24"} {
+		if err := store.SetFromInput("groups node1 interfaces em0 unit 0 family inet address " + addr); err != nil {
+			t.Fatalf("set running peer address %s: %v", addr, err)
+		}
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit running peer address list: %v", err)
+	}
+	if err := store.SetFromInput("groups node1 interfaces em0 unit 0 family inet address 10.99.14.5/24 primary"); err != nil {
+		t.Fatalf("set candidate peer primary: %v", err)
+	}
+	return store
+}
+
 func peerControlAddrDHCPStore18630(t *testing.T) *configstore.Store {
 	t.Helper()
 	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
@@ -71,6 +91,26 @@ func peerControlAddrDHCPStore18630(t *testing.T) *configstore.Store {
 	}
 	if err := store.SetFromInput("system host-name unrelated-dhcp-edit-18630"); err != nil {
 		t.Fatalf("stage unrelated candidate: %v", err)
+	}
+	return store
+}
+
+func peerControlAddrPlannedVLANDHCPStore18630(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	for _, line := range []string{
+		"groups node1 interfaces em0 vlan-tagging",
+		"security zones security-zone trust interfaces em0.0",
+	} {
+		if err := store.SetFromInput(line); err != nil {
+			t.Fatalf("set planned VLAN-parent input %q: %v", line, err)
+		}
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit peer VLAN parent plan: %v", err)
+	}
+	if err := store.SetFromInput("groups node1 interfaces em0 unit 0 family inet dhcp"); err != nil {
+		t.Fatalf("set peer unit-0 DHCP: %v", err)
 	}
 	return store
 }
@@ -153,6 +193,96 @@ func TestPeerControlAddressRenumberRefusedAtCommitConfirmed_18630(t *testing.T) 
 	}
 }
 
+func TestPeerControlAddressSelectionSwapRefusedAtCommitBothPaths18630(t *testing.T) {
+	for _, confirmed := range []bool{false, true} {
+		name := "plain commit"
+		if confirmed {
+			name = "confirmed commit"
+		}
+		t.Run(name, func(t *testing.T) {
+			store := peerControlAddrSelectionStore18630(t)
+			activeTree, candidateTree := store.ActiveTree(), store.CandidateTree()
+			runningPeerView, err := config.CompileConfigForNodeLenient(activeTree, 1)
+			if err != nil {
+				t.Fatalf("compile running peer view: %v", err)
+			}
+			candidatePeerView, err := config.CompileConfigForNodeLenient(candidateTree, 1)
+			if err != nil {
+				t.Fatalf("compile candidate peer view: %v", err)
+			}
+			runningState := controlLinkState18606(runningPeerView, "em0")
+			candidateState := controlLinkState18606(candidatePeerView, "em0")
+			if got := freshBindSelection18606(runningState, runningPeerView.Chassis.Cluster.PeerAddress); got != "10.99.14.2" {
+				t.Fatalf("running peer resolver selects %s, want 10.99.14.2", got)
+			}
+			if got := freshBindSelection18606(candidateState, candidatePeerView.Chassis.Cluster.PeerAddress); got != "10.99.14.5" {
+				t.Fatalf("candidate peer resolver selects %s, want 10.99.14.5", got)
+			}
+
+			activeBefore, candidateBefore := activeTree.Format(), candidateTree.Format()
+			d := runningPeerControlDaemon18630(store)
+			if confirmed {
+				_, err = d.commitConfirmedAndApply(
+					context.Background(), configstore.InternalCommitter(), 5, peerSyncNever)
+			} else {
+				_, err = d.commitAndApply(
+					context.Background(), configstore.InternalCommitter(), "peer primary swap", peerSyncNever)
+			}
+			requirePeerControlAddressRefusal18630(t, err)
+			if got := store.ActiveTree().Format(); got != activeBefore {
+				t.Fatalf("refused peer selection change modified active config:\n--- before\n%s\n--- after\n%s", activeBefore, got)
+			}
+			if got := store.CandidateTree().Format(); got != candidateBefore {
+				t.Fatalf("refused peer selection change modified candidate config:\n--- before\n%s\n--- after\n%s", candidateBefore, got)
+			}
+		})
+	}
+
+	// The peer's own local gate must refuse the same pending selector change
+	// when it evaluates its node-1 running and candidate views.
+	store := peerControlAddrSelectionStore18630(t)
+	runningPeerView, err := config.CompileConfigForNodeLenient(store.ActiveTree(), 1)
+	if err != nil {
+		t.Fatalf("compile node-1 running view: %v", err)
+	}
+	candidatePeerView, err := config.CompileConfigForNodeLenient(store.CandidateTree(), 1)
+	if err != nil {
+		t.Fatalf("compile node-1 candidate view: %v", err)
+	}
+	local := cluster.NewManager(1, 1)
+	local.SetHeartbeatEndpointForTesting("10.99.14.2", "10.99.14.1", "em0")
+	if err := clusterControlLocalAddressCommitPreflight(local, runningPeerView, candidatePeerView); err == nil {
+		t.Fatal("node-1 local preflight must refuse the primary swap while its heartbeat remains bound to 10.99.14.2")
+	}
+}
+
+func TestPeerControlAddressSelectionUsesPeerResolverFamily18630(t *testing.T) {
+	running := controlLinkAddrs18606{addrs: []string{
+		"10.99.14.2/24", "2001:db8:14::1/64", "2001:db8:14::3/64",
+	}}
+	candidate := controlLinkAddrs18606{
+		addrs:     running.addrs,
+		primaryV6: "2001:db8:14::3/64",
+	}
+	const localPeerAddress = "10.99.14.2"
+	const peerResolverAddress = "2001:db8:14::2"
+	if got := freshBindSelection18606(running, localPeerAddress); got != localPeerAddress {
+		t.Fatalf("local v4 resolver control selects %s, want %s", got, localPeerAddress)
+	}
+	if got := freshBindSelection18606(running, peerResolverAddress); got != "2001:db8:14::1" {
+		t.Fatalf("running peer resolver selects %s, want 2001:db8:14::1", got)
+	}
+	if got := freshBindSelection18606(candidate, peerResolverAddress); got != "2001:db8:14::3" {
+		t.Fatalf("candidate peer resolver selects %s, want 2001:db8:14::3", got)
+	}
+	err := peerControlAddressDecision18630(localPeerAddress, running, candidate,
+		peerResolverAddress, peerResolverAddress)
+	requirePeerControlAddressRefusal18630(t, err)
+	if !strings.Contains(err.Error(), "2001:db8:14::3") {
+		t.Fatalf("peer-family refusal does not name the candidate bind: %v", err)
+	}
+}
+
 func TestPeerControlAddressUnchangedCommitPasses_18630(t *testing.T) {
 	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
 	d := runningPeerControlDaemon18630(store)
@@ -229,6 +359,45 @@ func TestPeerControlAddressDHCPAndForeignBindingsPassBothCommitPaths18630(t *tes
 				}
 			})
 		}
+	}
+}
+
+func TestPeerControlAddressPlannedVLANParentDHCPRefused18630(t *testing.T) {
+	store := peerControlAddrPlannedVLANDHCPStore18630(t)
+	runningPeerView, err := config.CompileConfigForNodeLenient(store.ActiveTree(), 1)
+	if err != nil {
+		t.Fatalf("compile running peer view: %v", err)
+	}
+	candidatePeerView, err := config.CompileConfigForNodeLenient(store.CandidateTree(), 1)
+	if err != nil {
+		t.Fatalf("compile candidate peer view: %v", err)
+	}
+	runningState := controlLinkState18606(runningPeerView, "em0")
+	candidateState := controlLinkState18606(candidatePeerView, "em0")
+	peerIP := net.ParseIP("10.99.14.2")
+	if !cidrListHasIP18606(runningState.addrs, peerIP) {
+		t.Fatalf("running peer VLAN-parent state omitted its rendered static: %v", runningState.addrs)
+	}
+	if cidrListHasIP18606(candidateState.addrs, peerIP) {
+		t.Fatalf("planned DHCP candidate retained a static suppressed by networkd: %v", candidateState.addrs)
+	}
+
+	activeBefore, candidateBefore := store.ActiveTree().Format(), store.CandidateTree().Format()
+	d := runningPeerControlDaemon18630(store)
+	_, err = d.commitAndApply(context.Background(), configstore.InternalCommitter(),
+		"planned peer VLAN parent DHCP", peerSyncNever)
+	requirePeerControlAddressRefusal18630(t, err)
+	if got := store.ActiveTree().Format(); got != activeBefore {
+		t.Fatalf("refused peer DHCP change modified active config:\n--- before\n%s\n--- after\n%s", activeBefore, got)
+	}
+	if got := store.CandidateTree().Format(); got != candidateBefore {
+		t.Fatalf("refused peer DHCP change modified candidate config:\n--- before\n%s\n--- after\n%s", candidateBefore, got)
+	}
+
+	local := cluster.NewManager(1, 1)
+	local.SetHeartbeatEndpointForTesting("10.99.14.2", "10.99.14.1", "em0")
+	if err := clusterControlLocalAddressCommitPreflight(local, runningPeerView, candidatePeerView); err == nil {
+		t.Fatal("node-1 local gate must refuse the planned VLAN-parent DHCP transition too")
 	}
 }
 

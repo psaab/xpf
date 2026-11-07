@@ -60,3 +60,44 @@ func TestVlanTaggingControlNetworkdModel14574(t *testing.T) {
 		t.Fatalf("missing models parent=%v sub=%v in %+v", parent, sub, result.ManagedInterfaces)
 	}
 }
+
+func TestLenientNonTaggingVLANIDUsesParentNetworkdModel14574(t *testing.T) {
+	tree := &config.ConfigTree{}
+	for _, command := range []string{
+		"set interfaces ge-0/0/1 unit 100 vlan-id 100",
+		"set interfaces ge-0/0/1 unit 100 family inet address 10.0.1.1/24",
+		"set interfaces ge-0/0/1 unit 100 family inet address 10.0.1.2/24",
+	} {
+		path, err := config.ParseSetCommand(command)
+		if err != nil {
+			t.Fatalf("ParseSetCommand %q: %v", command, err)
+		}
+		if err := tree.SetPath(path); err != nil {
+			t.Fatalf("SetPath %q: %v", command, err)
+		}
+	}
+	cfg, err := config.CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("lenient non-tagging vlan-id config must compile: %v", err)
+	}
+	result := &CompileResult{ifCache: map[string]*net.Interface{
+		"ge-0-0-1": {Index: 10, Name: "ge-0-0-1", HardwareAddr: net.HardwareAddr{0x02, 0, 0, 0, 0, 1}},
+	}}
+	buildInterfaceNetworkdModels(cfg, result, map[string]bool{})
+	var parent bool
+	for _, model := range result.ManagedInterfaces {
+		if model.Name == "ge-0-0-1" {
+			parent = true
+			if len(model.Addresses) != 2 || model.Addresses[0] != "10.0.1.1/24" ||
+				model.Addresses[1] != "10.0.1.2/24" {
+				t.Fatalf("lenient non-tagging parent addresses=%v, want both unit-100 statics", model.Addresses)
+			}
+		}
+		if model.Name == "ge-0-0-1.100" {
+			t.Fatalf("untagged interface unexpectedly rendered tagged child: %+v", model)
+		}
+	}
+	if !parent {
+		t.Fatalf("no parent model emitted: %+v", result.ManagedInterfaces)
+	}
+}
