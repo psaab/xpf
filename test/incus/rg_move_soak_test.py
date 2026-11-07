@@ -774,10 +774,12 @@ class FakeCluster:
 
 
 def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
-             v6=False, restore=True, files=None, strict_cost=False):
+             v6=False, restore=True, files=None, strict_cost=False, managed_v6=None):
     with tempfile.TemporaryDirectory() as d:
         cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=traffic,
                           helper_check=helper_check, restore=restore, strict_cost=strict_cost,
+                          iperf4_on_mouse_target=True,
+                          iperf6_on_mouse_target=v6 if managed_v6 is None else managed_v6,
                           budget=soak.Budget(converge_s=sleep_s), outdir=d, run_id="t",
                           target4="172.16.80.200", target6="2001:db8::200" if v6 else "",
                           lan_vip4="10.0.61.1")
@@ -793,6 +795,29 @@ def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=Tr
 def verdicts(res):
     return [m["verdict"] for m in res["moves"]]
 
+
+
+
+class IperfTargetManagedness(unittest.TestCase):
+    def test_loss_split_target_and_same_host_target_mapping_18631(self):
+        self.assertEqual(
+            soak.iperf_target_managedness(
+                "172.16.80.202", "2001:559:8585:80::200",
+                "172.16.80.201", "2001:559:8585:80::201",
+                "172.16.80.202", "no"),
+            (True, False))
+        self.assertEqual(
+            soak.iperf_target_managedness(
+                "172.16.80.210", "2001:559:8585:80::210",
+                "172.16.80.210", "2001:559:8585:80::210", "",
+                "yes"),
+            (True, True))
+        self.assertEqual(
+            soak.iperf_target_managedness(
+                "172.16.80.202", "2001:559:8585:80::201",
+                "172.16.80.201", "2001:559:8585:80::201",
+                "172.16.80.202", "unknown"),
+            (True, False))
 
 
 class IncusTargetPreflight(unittest.TestCase):
@@ -1069,6 +1094,15 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(c.mouse_target.restarted, [])
         self.assertEqual(c.mouse_target.established, {5210: 88})
 
+    def test_preflight_skips_external_split_v6_port_18631(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, stale_iperf_ports={5210: 88})
+        rc, res, _ = run_fake(c, clock, moves=2, v6=True, managed_v6=False)
+        self.assertEqual(rc, 0, res.get("void", res.get("summary")))
+        self.assertEqual(c.mouse_target.checked_ports, [5211])
+        self.assertEqual(c.mouse_target.restarted, [])
+        self.assertEqual(c.mouse_target.established, {5210: 88})
+        self.assertEqual(res["summary"]["counts"]["PASS"], 2)
 
     def test_preflight_voids_when_iperf_reset_fails_18631(self):
         clock = FakeClock()

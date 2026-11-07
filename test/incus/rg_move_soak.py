@@ -919,6 +919,8 @@ class Config:
     restore: bool = True
     target4: str = ""
     target6: str = ""
+    iperf4_on_mouse_target: bool = False
+    iperf6_on_mouse_target: bool = False
     lan_vip4: str = ""
     iperf_port: int = 5211
     iperf6_port: int = 5210
@@ -1221,10 +1223,14 @@ class Soak:
         t_start = self.now()
         try:
             if cfg.traffic:
-                # The lock serializes test cells; before our generators start,
-                # ESTABLISHED sockets on used families are leftovers. Do not
-                # reset an unused port (5210 can belong to an external v6 target).
-                iperf_ports = [port for _, _, port, _ in self.families()]
+                # This is lock-protected and before our generators start.
+                # Reset only ESTABLISHED clients for families whose target
+                # address is pinned on this mouse host; loss v6 is external.
+                iperf_ports = []
+                if cfg.iperf4_on_mouse_target:
+                    iperf_ports.append(cfg.iperf_port)
+                if cfg.target6 and cfg.iperf6_on_mouse_target:
+                    iperf_ports.append(cfg.iperf6_port)
                 bad = self.c.prepare_iperf(iperf_ports)
                 if bad:
                     raise VoidRun(f"iperf socket preflight: {bad}")
@@ -1343,6 +1349,17 @@ def _env_float(name, default):
     return float(v) if v else default
 
 
+
+def iperf_target_managedness(target4: str, target6: str, mouse4: str, mouse6: str,
+                             alias4: str, same_host: str) -> Tuple[bool, bool]:
+    """Return which iperf family targets are addressed on the managed mouse host."""
+    v4 = bool(target4 and (target4 == mouse4 or (alias4 and target4 == alias4)))
+    # Exact configured mouse-v6 address is required. An explicit split or
+    # unknown same-host flag is evidence not to reset the mouse's v6 service.
+    v6 = bool(target6 and mouse6 and target6 == mouse6 and same_host in ("", "yes"))
+    return v4, v6
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--fw0", required=True)
@@ -1365,6 +1382,15 @@ def main(argv=None) -> int:
         max_cost_stall_ms=_env_float("SOAK_MAX_COST_STALL_MS", 10000.0),
     )
     v6 = os.environ.get("SOAK_IPV6", "1") != "0"
+    target6 = a.target6 if v6 else ""
+    iperf4_on_mouse_target, iperf6_on_mouse_target = iperf_target_managedness(
+        a.target4,
+        target6,
+        os.environ.get("MOUSE_TARGET_V4", ""),
+        os.environ.get("MOUSE_TARGET_V6", ""),
+        os.environ.get("TARGET_ALIAS_V4", ""),
+        os.environ.get("IPERF_TARGET_V4_V6_SAME_HOST", ""),
+    )
     cfg = Config(
         moves=int(os.environ.get("SOAK_MOVES", "20")),
         sleep_s=sleep_s,
@@ -1376,7 +1402,9 @@ def main(argv=None) -> int:
         strict_cost=os.environ.get("SOAK_STRICT_COST", "0") == "1",
         restore=os.environ.get("SOAK_RESTORE", "1") != "0",
         target4=a.target4,
-        target6=a.target6 if v6 else "",
+        target6=target6,
+        iperf4_on_mouse_target=iperf4_on_mouse_target,
+        iperf6_on_mouse_target=iperf6_on_mouse_target,
         lan_vip4=a.lan_vip4,
         iperf_port=int(os.environ.get("SOAK_IPERF_PORT", "5211")),
         iperf6_port=int(os.environ.get("SOAK_IPERF6_PORT", "5210")),
