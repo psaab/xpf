@@ -29,6 +29,14 @@ pub(crate) const TPID_READER_REGISTRY_17258: [&str; 6] = [
 /// protocol fields that happen to use payload bytes 12/13 (or the same offsets
 /// in an address/checksum word).
 pub(crate) fn count_tpid_reads_17258(src: &str) -> usize {
+    count_tpid_reads_impl_17258(src, None)
+}
+
+fn count_tpid_reads_for_function_17258(src: &str, function: &str) -> usize {
+    count_tpid_reads_impl_17258(src, Some(function))
+}
+
+fn count_tpid_reads_impl_17258(src: &str, expected_function: Option<&str>) -> usize {
     let compact: String = blank_comments_and_strings(src)
         .chars()
         .filter(|ch| !ch.is_ascii_whitespace())
@@ -43,40 +51,53 @@ pub(crate) fn count_tpid_reads_17258(src: &str) -> usize {
             break;
         };
         let read = &compact[start..start + end_relative];
-        if read.contains("[12]") && read.contains("[13]") {
-            let function_start = compact[..marker_start].rfind("fn");
-            if let Some(function_start) = function_start
-                && let Some(open_rel) = compact[function_start..].find('{')
-            {
-                let open = function_start + open_rel;
-                let mut depth = 0usize;
-                let mut close = None;
-                for (offset, byte) in compact.as_bytes()[open..].iter().enumerate() {
-                    match byte {
-                        b'{' => depth += 1,
-                        b'}' => {
-                            depth -= 1;
-                            if depth == 0 {
-                                close = Some(open + offset);
-                                break;
-                            }
-                        }
-                        _ => {}
+        cursor = start + end_relative + 2;
+        if !read.contains("[12]") || !read.contains("[13]") {
+            continue;
+        }
+        let Some(function_start) = compact[..marker_start].rfind("fn") else {
+            continue;
+        };
+        let function_name_start = function_start + "fn".len();
+        let Some(function_name_end) = compact[function_name_start..]
+            .find(|ch| matches!(ch, '(' | '<'))
+        else {
+            continue;
+        };
+        let function_name =
+            &compact[function_name_start..function_name_start + function_name_end];
+        if expected_function.is_some_and(|expected| expected != function_name) {
+            continue;
+        }
+        let Some(open_rel) = compact[function_start..].find('{') else {
+            continue;
+        };
+        let open = function_start + open_rel;
+        let mut depth = 0usize;
+        let mut close = None;
+        for (offset, byte) in compact.as_bytes()[open..].iter().enumerate() {
+            match byte {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + offset);
+                        break;
                     }
                 }
-                if let Some(close) = close {
-                    let body = compact[open + 1..close].to_ascii_lowercase();
-                    if body.contains("0x8100")
-                        || body.contains("0x88a8")
-                        || body.contains("ethertype_vlan")
-                        || body.contains("tpid_8021")
-                    {
-                        count += 1;
-                    }
-                }
+                _ => {}
             }
         }
-        cursor = start + end_relative + 2;
+        if let Some(close) = close {
+            let body = compact[open + 1..close].to_ascii_lowercase();
+            if body.contains("0x8100")
+                || body.contains("0x88a8")
+                || body.contains("ethertype_vlan")
+                || body.contains("tpid_8021")
+            {
+                count += 1;
+            }
+        }
     }
     count
 }
@@ -1021,9 +1042,11 @@ fn tpid_reader_census_17258() {
             code.contains(&format!("{name}(")) || code.contains(&format!("{name}<")),
             "#17258 registry entry {site} no longer names a source function"
         );
-        assert!(
-            count_tpid_reads_17258(&code) > 0,
-            "#17258 registry entry {site} no longer contains an L2 type read"
+        let function_reads = count_tpid_reads_for_function_17258(&code, function);
+        assert_eq!(
+            function_reads, 1,
+            "#17258 registry entry {site} must have exactly one TPID read in {function}; \
+             found {function_reads}"
         );
     }
 
@@ -1044,10 +1067,32 @@ fn tpid_reader_census_detects_unregistered_site_17258() {
     let unregistered = "fn new_reader(frame: &[u8]) { \
         let outer = u16::from_be_bytes([frame[12], frame[13]]); \
         if matches!(outer, 0x8100 | 0x88a8) {} }";
+    let combined = format!("{registered}{unregistered}");
     assert_eq!(count_tpid_reads_17258(registered), 1);
     assert_eq!(
-        count_tpid_reads_17258(&format!("{registered}{unregistered}")),
-        2,
-        "a seventh literal TPID-reader site must make the census count drift"
+        count_tpid_reads_for_function_17258(registered, "parse_eth_offsets"),
+        1
+    );
+    assert_eq!(count_tpid_reads_17258(&combined), 2);
+    assert_eq!(
+        count_tpid_reads_for_function_17258(&combined, "new_reader"),
+        1
+    );
+
+    // A file-level read count alone would incorrectly accept this case:
+    // the registered function lost its read, but an unregistered sibling
+    // replaced it, leaving the file total at one.
+    let displaced = "fn parse_eth_offsets(frame: &[u8]) {} \
+        fn replacement_reader(frame: &[u8]) { \
+            let outer = u16::from_be_bytes([frame[12], frame[13]]); \
+            if matches!(outer, 0x8100 | 0x88a8) {} }";
+    assert_eq!(count_tpid_reads_17258(displaced), 1);
+    assert_eq!(
+        count_tpid_reads_for_function_17258(displaced, "parse_eth_offsets"),
+        0
+    );
+    assert_eq!(
+        count_tpid_reads_for_function_17258(displaced, "replacement_reader"),
+        1
     );
 }
