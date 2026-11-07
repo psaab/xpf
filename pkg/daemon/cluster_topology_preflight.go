@@ -569,6 +569,7 @@ func syncEndpointMoveRefusal9121(have, want syncEndpoint9121) error {
 		"produces the same partition by hand",
 		have.addr, have.iface, have.mode, want.addr, want.iface, want.mode)
 }
+
 // clusterPeerControlAddressCommitPreflight refuses a primary candidate that
 // renumbers the peer's control address currently used by this node's running
 // heartbeat (#18630). The config registry's peer-effective checks cannot see
@@ -613,17 +614,17 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 // peerControlAddressDecision18630 compares the rendered control-unit
 // addresses with the peer address the running heartbeat actually dials.
 func peerControlAddressDecision18630(runningPeerAddr string, peerRenderedAddrs []string) error {
-    peerIP := net.ParseIP(runningPeerAddr)
-    if peerIP == nil || cidrListHasIP18606(peerRenderedAddrs, peerIP) {
-        return nil
-    }
-    return fmt.Errorf("commit rejected: the peer's chassis cluster control-link "+
-        "address no longer includes %s, the address this node's running heartbeat "+
-        "uses to reach it; the peer will reject this config and remain on the old "+
-        "text, so later config pushes will not converge the pair.\n"+
-        "To renumber the control link: set the new address on BOTH nodes and "+
-        "restart xpfd on both, offline — stop xpfd on both nodes, put the new "+
-        "address in each node's boot configuration, and start both. Do NOT commit "+
-        "the change on each node separately while both are running — that produces "+
-        "the same divergence by hand", runningPeerAddr)
+	peerIP := net.ParseIP(runningPeerAddr)
+	if peerIP == nil || cidrListHasIP18606(peerRenderedAddrs, peerIP) {
+		return nil
+	}
+	return fmt.Errorf("commit rejected: the peer's chassis cluster control-link "+
+		"address no longer includes %s, the address this node's running heartbeat "+
+		"uses to reach it; the peer will reject this config and remain on the old "+
+		"text, so later config pushes will not converge the pair.\n"+
+		"To renumber the control link: set the new address on BOTH nodes and "+
+		"restart xpfd on both, offline — stop xpfd on both nodes, put the new "+
+		"address in each node's boot configuration, and start both. Do NOT commit "+
+		"the change on each node separately while both are running — that produces "+
+		"the same divergence by hand", runningPeerAddr)
 }
