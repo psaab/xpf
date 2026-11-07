@@ -114,9 +114,10 @@ pub(in crate::afxdp) fn compute_l4_csum_delta(
 /// Address family for the L4 checksum-offset / zero-checksum helpers.
 /// Only ever passed as a compile-time-literal at the call sites, so the
 /// `#[inline(always)]` helpers fold the match to a constant. Visible to
-/// the rest of `frame/` (#1839/#1840): the descriptor v6 arm
-/// (`rewrite/ipv6.rs`) and the port-rewrite path (`frame/mod.rs`)
-/// route their zero-checksum decisions through the same predicates.
+/// the rest of `frame/` (#1839/#1840): the descriptor v4/v6 arms
+/// (`rewrite/ipv4.rs`, `rewrite/ipv6.rs`) and the port-rewrite path
+/// (`frame/mod.rs`) route their zero-checksum decisions through the same
+/// predicates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 // #9069: crate-visible so the NAT64 translator can consult THE rule rather
 // than re-implementing the matrix. It was frame-private, which is why a second

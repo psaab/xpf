@@ -38,7 +38,8 @@ use crate::afxdp::{MmapArea, RewriteDescriptor, UserspaceDpMeta, XdpDesc};
 ///
 /// **Returns** `Some(InPlaceRewriteResult)` on success, `None` when the
 /// frame fails any validation (TTL expired, header too short, port
-/// mismatch — caller falls back to generic rewrite).
+/// mismatch, or a truncated L4 checksum field when a non-zero NAT delta
+/// will be folded — caller falls back to generic rewrite).
 ///
 /// **Scope**: IPv4/IPv6 TCP and UDP only (flow cache gates on
 /// ACK-only TCP + UDP). Does NOT handle: ICMP identifier repair,
@@ -80,9 +81,10 @@ pub(in crate::afxdp) fn apply_rewrite_descriptor(
     // #5466: make the descriptor rewrite transactional. Compute the eth
     // rewrite plan WITHOUT mutating UMEM, then run every bail gate
     // (non-first-fragment, header length, TTL/hop-limit, DMA-race port
-    // mismatch) against the PRISTINE frame. `rewrite_commit_eth_from_plan`
-    // mutates the buffer (eth-header write + VLAN-push memmove), so any gate
-    // that can still return `None` MUST run before the commit — otherwise
+    // mismatch, and the fold-gated L4-checksum-field bound) against the
+    // PRISTINE frame. `rewrite_commit_eth_from_plan` mutates the buffer
+    // (eth-header write + VLAN-push memmove), so any gate that can still
+    // return `None` MUST run before the commit — otherwise
     // the caller's `.or_else(generic-rewrite)` fallback reprocesses a frame
     // we already clobbered (corrupt eth header / shifted payload). The gates
     // read the ORIGINAL L3 payload at `plan.l3`; because the commit's memmove
@@ -101,8 +103,9 @@ pub(in crate::afxdp) fn apply_rewrite_descriptor(
     }
     let skip_ttl = plan.prep.skip_ttl;
     let apply_nat = plan.prep.apply_nat;
+    let fold_l4_csum = apply_nat && rd.l4_csum_delta != 0;
 
-    let rel_l4 = {
+    let (rel_l4, l4_checksum_field_offset) = {
         let frame = area.slice(desc.addr as usize, desc.len as usize)?;
         let l3_end = plan.l3.checked_add(plan.payload_len)?;
         let l3_payload = frame.get(plan.l3..l3_end)?;
@@ -118,10 +121,22 @@ pub(in crate::afxdp) fn apply_rewrite_descriptor(
         }
         match rd.ether_type {
             0x0800 => {
-                validate_rewrite_descriptor_ipv4(l3_payload, skip_ttl, meta, expected_ports)?
+                validate_rewrite_descriptor_ipv4(
+                    l3_payload,
+                    skip_ttl,
+                    meta,
+                    expected_ports,
+                    fold_l4_csum,
+                )?
             }
             0x86dd => {
-                validate_rewrite_descriptor_ipv6(l3_payload, skip_ttl, meta, expected_ports)?
+                validate_rewrite_descriptor_ipv6(
+                    l3_payload,
+                    skip_ttl,
+                    meta,
+                    expected_ports,
+                    fold_l4_csum,
+                )?
             }
             _ => return None,
         }
@@ -139,8 +154,26 @@ pub(in crate::afxdp) fn apply_rewrite_descriptor(
     let ip = plan.prep.ip_start;
 
     match rd.ether_type {
-        0x0800 => apply_rewrite_descriptor_ipv4(packet, ip, rel_l4, skip_ttl, apply_nat, meta, rd),
-        0x86dd => apply_rewrite_descriptor_ipv6(packet, ip, rel_l4, skip_ttl, apply_nat, meta, rd),
+        0x0800 => apply_rewrite_descriptor_ipv4(
+            packet,
+            ip,
+            rel_l4,
+            l4_checksum_field_offset,
+            skip_ttl,
+            apply_nat,
+            meta,
+            rd,
+        ),
+        0x86dd => apply_rewrite_descriptor_ipv6(
+            packet,
+            ip,
+            rel_l4,
+            l4_checksum_field_offset,
+            skip_ttl,
+            apply_nat,
+            meta,
+            rd,
+        ),
         // Unreachable: `rd.ether_type` was validated above before the commit.
         _ => return None,
     }

@@ -5,17 +5,18 @@
 //! extension-header walk) and an infallible
 //! `apply_rewrite_descriptor_ipv6` (mutation only). #5466 requires the
 //! gates to run against the PRISTINE frame BEFORE the eth-header write /
-//! VLAN-push memmove commit. The apply body is byte-identical to the
-//! pre-split mutation block, so success-path output is unchanged.
+//! VLAN-push memmove commit. The apply half preserves the pre-split
+//! success-path behavior; the validator checks any folding L4 checksum
+//! field before commit.
 
 use super::super::byte_writes::{
     write_ipv6_dst, write_ipv6_src, write_l4_dst_port, write_l4_src_port,
 };
-use super::super::checksum::{adjust_zero_checksum_illegal, ChecksumFamily};
-use super::super::v6_rel_l4_offset;
-use crate::afxdp::{
-    RewriteDescriptor, UserspaceDpMeta, PROTO_ICMPV6, PROTO_TCP, PROTO_UDP,
+use super::super::checksum::{
+    adjust_zero_checksum_illegal, l4_checksum_field_delta_v6, ChecksumFamily,
 };
+use super::super::v6_rel_l4_offset;
+use crate::afxdp::{RewriteDescriptor, UserspaceDpMeta, PROTO_TCP, PROTO_UDP};
 use crate::ip_proto::has_l4_ports;
 use std::net::IpAddr;
 
@@ -23,17 +24,19 @@ use std::net::IpAddr;
 /// the frame from the L3 offset onward (`&frame[ip..ip + payload_len]`),
 /// so every check is relative to offset 0 and yields identical decisions
 /// whether run on the ORIGINAL frame (pre-commit) or the committed TX
-/// frame (the commit's memmove is a pure relocation). Returns the L4
-/// offset relative to the IP header on success; `None` on any bail (header
-/// too short, hop-limit expired, unparseable L4 offset, DMA-race port
-/// mismatch).
+/// frame (the commit's memmove is a pure relocation). Returns the L4 offset
+/// relative to the IP header and, when the fold gate applies, its validated
+/// checksum-field offset relative to the IP header; `None` on any bail (header
+/// too short, hop-limit expired, unparseable L4 offset, DMA-race port mismatch,
+/// or a truncated checksum field when the descriptor will fold).
 #[inline(always)]
 pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv6(
     l3_payload: &[u8],
     skip_ttl: bool,
     meta: UserspaceDpMeta,
     expected_ports: Option<(u16, u16)>,
-) -> Option<usize> {
+    fold_l4_csum: bool,
+) -> Option<(usize, Option<usize>)> {
     // No IP header checksum; only L4 pseudo-header changes matter.
     if l3_payload.len() < 40 {
         return None;
@@ -54,6 +57,22 @@ pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv6(
     // rule structurally identical to the generic path's.
     let rel_l4 =
         v6_rel_l4_offset(l3_payload, meta.l3_offset, meta.l4_offset, meta.addr_family)?;
+    // #4965: match the apply half's exact fold gate. A short packet with a
+    // truncated field must decline before commit instead of rewriting addresses
+    // and then silently skipping the out-of-bounds checksum fold.
+    let l4_checksum_field_offset = if fold_l4_csum {
+        if let Some(delta) = l4_checksum_field_delta_v6(meta.protocol) {
+            let field_offset = rel_l4 + delta;
+            if l3_payload.len() < field_offset + 2 {
+                return None;
+            }
+            Some(field_offset)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Port validation (DMA race guard).
     if let Some((exp_src, exp_dst)) = expected_ports {
@@ -65,18 +84,19 @@ pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv6(
             }
         }
     }
-    Some(rel_l4)
+    Some((rel_l4, l4_checksum_field_offset))
 }
 
-/// Infallible mutation half of the IPv6 descriptor rewrite. MUST be called
 /// only after `validate_rewrite_descriptor_ipv6` cleared the gates; `rel_l4`
-/// is that call's return. No path returns `None` — every write is bounds-safe
-/// given the validated `packet.len() >= ip + 40` / `>= ip + rel_l4` layout.
+/// and the optional L4 checksum-field offset relative to the IP header are
+/// that call's returns. No path returns `None` — every write is bounds-safe
+/// given the validated header/rel_l4 layout and fold-gated checksum field bound.
 #[inline(always)]
 pub(in crate::afxdp::frame) fn apply_rewrite_descriptor_ipv6(
     packet: &mut [u8],
     ip: usize,
     rel_l4: usize,
+    l4_checksum_field_offset: Option<usize>,
     skip_ttl: bool,
     apply_nat: bool,
     meta: UserspaceDpMeta,
@@ -115,13 +135,9 @@ pub(in crate::afxdp::frame) fn apply_rewrite_descriptor_ipv6(
 
     // L4 checksum: precomputed delta covers IPv6 address + port changes.
     if apply_nat && rd.l4_csum_delta != 0 {
-        let l4_csum_off = match meta.protocol {
-            PROTO_TCP => l4 + 16,
-            PROTO_UDP => l4 + 6,
-            PROTO_ICMPV6 => l4 + 2,
-            _ => 0,
-        };
-        if l4_csum_off > 0 && packet.len() >= l4_csum_off + 2 {
+        if let Some(field_offset) = l4_checksum_field_offset {
+            let l4_csum_off = ip + field_offset;
+            debug_assert!(packet.len() >= l4_csum_off + 2);
             let old_l4_csum =
                 u16::from_be_bytes([packet[l4_csum_off], packet[l4_csum_off + 1]]);
             let mut l4sum = (!old_l4_csum as u32) & 0xffff;

@@ -7,11 +7,15 @@
 //! VLAN-push memmove commit, so the orchestrator calls `validate_*` on
 //! the original L3 payload and only calls `apply_*` after the commit —
 //! keeping the rewrite transactional (no UMEM mutation before a possible
-//! `None`). The apply body is byte-identical to the pre-split mutation
-//! block, so the success-path output is unchanged.
+//! `None`). The apply half preserves the pre-split success-path behavior,
+//! while the validator now checks a folding L4 checksum field before commit.
 
 use super::super::byte_writes::{
     write_ipv4_dst, write_ipv4_src, write_l4_dst_port, write_l4_src_port,
+};
+use super::super::checksum::{
+    adjust_zero_checksum_illegal, l4_checksum_field_delta_v4, l4_udp_checksum_optional,
+    ChecksumFamily,
 };
 use crate::afxdp::{RewriteDescriptor, UserspaceDpMeta, PROTO_TCP, PROTO_UDP};
 use crate::ip_proto::has_l4_ports;
@@ -23,15 +27,18 @@ use std::net::IpAddr;
 /// makes the gate decisions identical whether run on the ORIGINAL frame
 /// (pre-commit, at `plan.l3`) or the committed TX frame (at `eth_len`),
 /// because the commit's memmove is a pure relocation. Returns the L4
-/// offset relative to the IP header (the IHL) on success; `None` on any
-/// bail (header too short, TTL expired, DMA-race port mismatch).
+/// offset relative to the IP header (the IHL) and, when the fold gate
+/// applies, its validated checksum-field offset relative to the IP header;
+/// `None` on any bail (header too short, TTL expired, DMA-race port mismatch,
+/// or a truncated L4 checksum field when the descriptor will fold its delta).
 #[inline(always)]
 pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv4(
     l3_payload: &[u8],
     skip_ttl: bool,
     meta: UserspaceDpMeta,
     expected_ports: Option<(u16, u16)>,
-) -> Option<usize> {
+    fold_l4_csum: bool,
+) -> Option<(usize, Option<usize>)> {
     if l3_payload.len() < 20 {
         return None;
     }
@@ -42,6 +49,23 @@ pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv4(
     if !skip_ttl && l3_payload[8] <= 1 {
         return None; // TTL expired
     }
+    // #4965: the apply half folds into the L4 checksum only when both
+    // `apply_nat` and the descriptor delta are non-zero. Validate the
+    // checksum field before the eth commit so a short packet cannot half-apply
+    // its address/port and IPv4-header rewrites.
+    let l4_checksum_field_offset = if fold_l4_csum {
+        if let Some(delta) = l4_checksum_field_delta_v4(meta.protocol) {
+            let field_offset = ihl + delta;
+            if l3_payload.len() < field_offset + 2 {
+                return None;
+            }
+            Some(field_offset)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // Port validation (DMA race guard).
     // If ports don't match, fall back to generic path for repair.
@@ -54,18 +78,19 @@ pub(in crate::afxdp::frame) fn validate_rewrite_descriptor_ipv4(
             }
         }
     }
-    Some(ihl)
+    Some((ihl, l4_checksum_field_offset))
 }
 
-/// Infallible mutation half of the IPv4 descriptor rewrite. MUST be called
 /// only after `validate_rewrite_descriptor_ipv4` cleared the gates; `rel_l4`
-/// is that call's return (the IHL). No path returns `None` — every write is
-/// bounds-safe given the validated `packet.len() >= ip + rel_l4` layout.
+/// and the optional L4 checksum-field offset relative to the IP header are
+/// that call's returns. No path returns `None` — every write is bounds-safe
+/// given the validated header layout and, for L4 folds, field bound.
 #[inline(always)]
 pub(in crate::afxdp::frame) fn apply_rewrite_descriptor_ipv4(
     packet: &mut [u8],
     ip: usize,
     rel_l4: usize,
+    l4_checksum_field_offset: Option<usize>,
     skip_ttl: bool,
     apply_nat: bool,
     meta: UserspaceDpMeta,
@@ -128,28 +153,25 @@ pub(in crate::afxdp::frame) fn apply_rewrite_descriptor_ipv4(
 
     // L4 checksum: precomputed delta covers IP + port changes.
     if apply_nat && rd.l4_csum_delta != 0 {
-        let l4_csum_off = match meta.protocol {
-            PROTO_TCP => l4 + 16,
-            PROTO_UDP => l4 + 6,
-            _ => 0,
-        };
-        if l4_csum_off > 0 && packet.len() >= l4_csum_off + 2 {
+        if let Some(field_offset) = l4_checksum_field_offset {
+            let l4_csum_off = ip + field_offset;
+            debug_assert!(packet.len() >= l4_csum_off + 2);
             let old_l4_csum =
                 u16::from_be_bytes([packet[l4_csum_off], packet[l4_csum_off + 1]]);
-            // Skip UDP checksum update if zero (no checksum, RFC 768).
-            if meta.protocol != PROTO_UDP || old_l4_csum != 0 {
+            // Skip IPv4 UDP checksum update if zero (no checksum, RFC 768).
+            if !l4_udp_checksum_optional(meta.protocol, ChecksumFamily::V4) || old_l4_csum != 0 {
                 let mut l4sum = (!old_l4_csum as u32) & 0xffff;
                 l4sum += rd.l4_csum_delta as u32;
                 while (l4sum >> 16) != 0 {
                     l4sum = (l4sum & 0xffff) + (l4sum >> 16);
                 }
                 let new_l4 = !(l4sum as u16);
-                // UDP: 0x0000 means "no checksum" — use 0xFFFF (RFC 768).
-                let final_csum = if meta.protocol == PROTO_UDP && new_l4 == 0 {
-                    0xFFFFu16
-                } else {
-                    new_l4
-                };
+                let final_csum =
+                    if new_l4 == 0 && adjust_zero_checksum_illegal(meta.protocol, ChecksumFamily::V4) {
+                        0xFFFFu16
+                    } else {
+                        new_l4
+                    };
                 packet[l4_csum_off..l4_csum_off + 2]
                     .copy_from_slice(&final_csum.to_be_bytes());
             }

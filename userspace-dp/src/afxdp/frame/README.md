@@ -97,7 +97,11 @@ inspect or rewrite a packet sitting in a UMEM frame.
   rewrite mutates ZERO UMEM bytes.
     - **Descriptor fast path** (`apply_rewrite_descriptor`, #5466): gates are
       `is_non_first_fragment` + `validate_rewrite_descriptor_ipv4/ipv6`
-      (header length, TTL/hop-limit, DMA-race port mismatch).
+      (header length, TTL/hop-limit, DMA-race port mismatch, and — when
+      `apply_nat && rd.l4_csum_delta != 0` — the L4 checksum field being in
+      bounds at `ihl/rel_l4 + l4_checksum_field_delta_v4/v6(protocol)`).
+      The descriptor validators and apply halves use the shared checksum
+      field-offset helpers.
     - **Generic in-place rewrite** (`rewrite_forwarded_frame_in_place`,
       #4965): gates are `validate_generic_rewrite_v4/v6` (header length,
       TTL/hop-limit, IPv6 ext-chain L4-offset resolvability via

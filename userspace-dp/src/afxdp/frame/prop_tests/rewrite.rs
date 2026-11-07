@@ -645,6 +645,189 @@ fn declined_rewrite_leaves_umem_byte_identical_4965() {
         );
     }
 }
+/// #17261 FAIL-ON-REVERT: the descriptor fast path must carry the same
+/// #4965 L4-checksum-field bound as the generic path, gated on the actual
+/// fold predicate (`apply_nat && rd.l4_csum_delta != 0`).
+///
+/// Leg A (SNAT, both families): a first fragment whose L4 bytes are
+/// truncated so the TCP checksum field lies outside the frame must be
+/// declined by BOTH paths, with the UMEM frame byte-identical after the
+/// descriptor decline (no half-rewrite of address/TTL/header-checksum).
+/// At base the descriptor returns `Some` here (fold silently skipped
+/// after earlier writes) — RED.
+///
+/// Leg B (no-NAT control): the same truncated frames with a default
+/// (non-folding) descriptor must still forward (`Some`) on the
+/// descriptor path. Reds an unconditional bound.
+///
+/// Leg C (pure NPTv6): a truncated v6 first fragment with a pure
+/// single-sided NPTv6 rewrite (`l4_csum_delta == 0`, checksum-neutral)
+/// must still forward (`Some`) with the L4 prefix untouched. Reds an
+/// any-NAT-gated bound.
+#[test]
+fn pin_17261_descriptor_truncated_l4_csum_first_fragment_declines() {
+    let v4_descriptor_declined;
+    let v4_descriptor_untouched;
+    let v4_generic_declined;
+    let v6_descriptor_declined;
+    let v6_descriptor_untouched;
+    let v6_generic_declined;
+    // ---- Leg A/B: IPv4 first fragment, truncated TCP checksum field ----
+    {
+        let pkt = pin_packet(false, PROTO_TCP, 64, Vec::new());
+        let mut bytes = pkt.frame.clone();
+        // First fragment: MF set (0x20 in byte l3+6), offset 0.
+        bytes[pkt.l3 + 6] = 0x20;
+        bytes[pkt.l3 + 7] = 0x00;
+        // Keep the IPv4 header valid after setting MF.
+        bytes[pkt.l3 + 10..pkt.l3 + 12].fill(0);
+        let ip_csum = checksum16(&bytes[pkt.l3..pkt.l3 + 20]);
+        bytes[pkt.l3 + 10..pkt.l3 + 12].copy_from_slice(&ip_csum.to_be_bytes());
+        // Keep the full IPv4 header (20B) but only 16 L4 bytes: TCP
+        // checksum at ihl+16 needs L3 len >= 38; we give 36.
+        bytes.truncate(pkt.l3 + 36);
+        let before = bytes.clone();
+        let mut trunc_pkt = pkt.clone();
+        trunc_pkt.frame = bytes.clone();
+        let desc = XdpDesc {
+            addr: DIFF_ADDR as u64,
+            len: bytes.len() as u32,
+            options: 0,
+        };
+        // Leg A: SNAT with a non-zero L4 fold.
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 7))),
+            ..NatDecision::default()
+        };
+        let rd = descriptor_for_packet(&trunc_pkt, nat, 0);
+        assert_ne!(
+            rd.l4_csum_delta, 0,
+            "#17261 Leg A precondition: SNAT descriptor must carry a non-zero L4 csum delta"
+        );
+        let area = area_with_frame(&bytes);
+        v4_descriptor_declined =
+            apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none();
+        v4_descriptor_untouched =
+            area.slice(DIFF_ADDR, bytes.len()).unwrap() == &before[..];
+        let area_g = area_with_frame(&bytes);
+        v4_generic_declined = rewrite_forwarded_frame_in_place(
+            &area_g,
+            desc,
+            pkt.meta,
+            &make_decision(&trunc_pkt, nat, 0),
+            false,
+            None,
+            0,
+        )
+        .is_none();
+        // Leg B: no NAT -> no fold -> descriptor still forwards.
+        let rd_b = descriptor_for_packet(&trunc_pkt, NatDecision::default(), 0);
+        assert_eq!(rd_b.l4_csum_delta, 0, "#17261 Leg B precondition: no-NAT delta is zero");
+        let area_b = area_with_frame(&bytes);
+        assert!(
+            apply_rewrite_descriptor(&area_b, desc, pkt.meta, &rd_b, None).is_some(),
+            "#17261 Leg B: descriptor must forward truncated first fragment when no L4 fold applies (v4)"
+        );
+    }
+    // ---- Leg A/B/C: IPv6 first fragment (fragment ext header), truncated ----
+    {
+        let pkt = pin_packet(true, PROTO_TCP, 64, vec![ExtHdr::Fragment]);
+        assert_eq!(pkt.rel_l4, 48, "one fragment header -> L4 at 48");
+        let mut bytes = pkt.frame.clone();
+        // Fragment header at l3+40: bytes 40..48; offset/M field is
+        // bytes 42..44 of the L3 header (frag header bytes 2..4). Set
+        // M-bit (low bit of byte l3+43), keep offset 0 -> first fragment.
+        bytes[pkt.l3 + 43] |= 0x01;
+        // Keep 40B fixed + 8B fragment header + only 16 L4 bytes: TCP
+        // checksum at rel_l4+16 (=64) needs L3 len >= 66; we give 64.
+        bytes.truncate(pkt.l3 + 64);
+        let before = bytes.clone();
+        let mut trunc_pkt = pkt.clone();
+        trunc_pkt.frame = bytes.clone();
+        let desc = XdpDesc {
+            addr: DIFF_ADDR as u64,
+            len: bytes.len() as u32,
+            options: 0,
+        };
+        // Leg A: SNAT (v6) with a non-zero L4 fold.
+        let nat = NatDecision {
+            rewrite_src: Some(IpAddr::V6("2001:db8::7".parse().unwrap())),
+            ..NatDecision::default()
+        };
+        let rd = descriptor_for_packet(&trunc_pkt, nat, 0);
+        assert_ne!(
+            rd.l4_csum_delta, 0,
+            "#17261 Leg A precondition: v6 SNAT descriptor must carry a non-zero L4 csum delta"
+        );
+        let area = area_with_frame(&bytes);
+        v6_descriptor_declined =
+            apply_rewrite_descriptor(&area, desc, pkt.meta, &rd, None).is_none();
+        v6_descriptor_untouched =
+            area.slice(DIFF_ADDR, bytes.len()).unwrap() == &before[..];
+        let area_g = area_with_frame(&bytes);
+        v6_generic_declined = rewrite_forwarded_frame_in_place(
+            &area_g,
+            desc,
+            pkt.meta,
+            &make_decision(&trunc_pkt, nat, 0),
+            false,
+            None,
+            0,
+        )
+        .is_none();
+        // Leg B: no NAT -> descriptor still forwards.
+        let rd_b = descriptor_for_packet(&trunc_pkt, NatDecision::default(), 0);
+        assert_eq!(rd_b.l4_csum_delta, 0, "#17261 Leg B precondition: no-NAT delta is zero (v6)");
+        let area_b = area_with_frame(&bytes);
+        assert!(
+            apply_rewrite_descriptor(&area_b, desc, pkt.meta, &rd_b, None).is_some(),
+            "#17261 Leg B: descriptor must forward truncated first fragment when no L4 fold applies (v6)"
+        );
+        // Leg C: pure single-sided NPTv6 (checksum-neutral, delta 0).
+        let nptv6_nat = NatDecision {
+            rewrite_src: Some(IpAddr::V6("fd00::66".parse().unwrap())),
+            nptv6: true,
+            ..NatDecision::default()
+        };
+        let rd_c = descriptor_for_packet(&trunc_pkt, nptv6_nat, 0);
+        assert_eq!(
+            rd_c.l4_csum_delta, 0,
+            "#17261 Leg C precondition: pure NPTv6 descriptor is checksum-neutral (delta 0)"
+        );
+        let area_c = area_with_frame(&bytes);
+        let res_c = apply_rewrite_descriptor(&area_c, desc, pkt.meta, &rd_c, None);
+        assert!(
+            res_c.is_some(),
+            "#17261 Leg C: pure NPTv6 truncated first fragment must still forward (Some)"
+        );
+        let res_c = res_c.unwrap();
+        let out_c = area_c.slice(res_c.offset as usize, res_c.len as usize).unwrap();
+        // L4 prefix (ports etc. within the truncated 16 bytes) untouched:
+        // compare L4 region of output vs input (same 14B eth header).
+        assert_eq!(
+            &out_c[14 + pkt.rel_l4..],
+            &before[pkt.l3 + pkt.rel_l4..],
+            "#17261 Leg C: NPTv6 must leave the truncated L4 prefix untouched"
+        );
+    }
+    assert!(
+        v4_descriptor_declined
+            && v4_descriptor_untouched
+            && v4_generic_declined
+            && v6_descriptor_declined
+            && v6_descriptor_untouched
+            && v6_generic_declined,
+        "#17261 Leg A requires both families to decline atomically and match generic \
+         (v4: descriptor_declined={}, byte_identical={}, generic_declined={}; \
+         v6: descriptor_declined={}, byte_identical={}, generic_declined={})",
+        v4_descriptor_declined,
+        v4_descriptor_untouched,
+        v4_generic_declined,
+        v6_descriptor_declined,
+        v6_descriptor_untouched,
+        v6_generic_declined,
+    );
+}
 
 /// (b) Descriptor port-mismatch (DMA-race guard,
 /// `validate_rewrite_descriptor_ipv4`) → `None` with the WHOLE frame
