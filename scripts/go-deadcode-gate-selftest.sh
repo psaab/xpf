@@ -27,6 +27,10 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 	echo "      control below would pass on the missing file instead of on the gate."
 	exit 1
 }
+if [ ! -f "$ROOT/scripts/resolve-deadcode-go.sh" ]; then
+	echo "FAIL: $ROOT/scripts/resolve-deadcode-go.sh not found — resolver exit cells cannot run."
+	exit 1
+fi
 if ! command -v python3 >/dev/null 2>&1; then
 	echo "SKIP: python3 not installed — cannot run the deadcode gate self-test"
 	exit 77
@@ -37,6 +41,7 @@ WORK=$(mktemp -d) || { echo "FATAL: mktemp -d failed (TMPDIR=${TMPDIR:-unset})" 
 trap 'rm -rf "$WORK"' EXIT
 
 GATE="$ROOT/scripts/go-deadcode-gate.sh"
+RESOLVER="$ROOT/scripts/resolve-deadcode-go.sh"
 
 # Fixture analyser output: two production rows (one a method), one test
 # helper. Line numbers are deliberately arbitrary — the gate must compare
@@ -59,6 +64,60 @@ EOF
 run_gate() { # run_gate <out> <allow> -> merged output; rc in $?
 	DEADCODE_OUTPUT="$1" DEADCODE_ALLOWLIST="$2" GO_DEADCODE_ROOT="$WORK" sh "$GATE" 2>&1
 }
+# ── 0. Shared toolchain resolver / scoped-target exit controls (#18753). ─
+FAKE_GO="$WORK/fake-go"
+cat > "$FAKE_GO" <<'EOF'
+#!/bin/sh
+case "${1:-}" in
+	version) echo 'go version go1.26.9 linux/amd64' ;;
+	run)
+		case "${FAKE_DEADCODE_MODE:-crash}" in
+			crash) echo 'panic: fixture analyser crash' >&2; exit 42 ;;
+			findings) echo 'pkg/nftables/deadcode_fixture.go:1:6: unreachable func: deadFixture' ;;
+			clean) exit 0 ;;
+			*) exit 99 ;;
+		esac
+		;;
+	*) exit 99 ;;
+esac
+EOF
+chmod +x "$FAKE_GO"
+
+DEADCODE_GO_CANDIDATES="$FAKE_GO" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
+[ "$rc" = "0" ] && [ "$(cat "$WORK/resolver.out")" = "$FAKE_GO" ] &&
+	ok "resolver prints only the first usable Go 1.26 binary" ||
+	bad "resolver did not print the fixture Go binary (rc=$rc): $(cat "$WORK/resolver.err")"
+
+DEADCODE_GO_CANDIDATES="$WORK/missing-go" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
+[ "$rc" = "77" ] && [ ! -s "$WORK/resolver.out" ] && grep -q "NOT-EXAMINED" "$WORK/resolver.err" &&
+	ok "missing Go 1.26 toolchain is NOT-EXAMINED (exit 77)" ||
+	bad "missing toolchain was not exit 77 / NOT-EXAMINED (rc=$rc): $(cat "$WORK/resolver.err")"
+
+XPF_DEADCODE_REQUIRE=1 DEADCODE_GO_CANDIDATES="$WORK/missing-go" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
+[ "$rc" = "1" ] && [ ! -s "$WORK/resolver.out" ] && grep -q "FAIL: no go1.26" "$WORK/resolver.err" &&
+	ok "XPF_DEADCODE_REQUIRE=1 makes missing toolchain a hard failure (exit 1)" ||
+	bad "REQUIRE did not hard-fail a missing toolchain (rc=$rc): $(cat "$WORK/resolver.err")"
+out=$(DEADCODE_GO_CANDIDATES="$WORK/missing-go" make -s -C "$ROOT" check-nft-deadcode GO="$WORK/missing-go" 2>&1); rc=$?
+[ "$rc" = "2" ] && echo "$out" | grep -q "NOT-EXAMINED" && echo "$out" | grep -q "Error 77" &&
+	ok "scoped target propagates no-toolchain NOT-EXAMINED (recipe exit 77)" ||
+	bad "scoped target did not propagate exit 77 (rc=$rc): $out"
+
+out=$(XPF_DEADCODE_REQUIRE=1 DEADCODE_GO_CANDIDATES="$WORK/missing-go" make -s -C "$ROOT" check-nft-deadcode GO="$WORK/missing-go" 2>&1); rc=$?
+[ "$rc" = "2" ] && echo "$out" | grep -q "FAIL: no go1.26" && echo "$out" | grep -q "Error 1" &&
+	ok "scoped target enforces REQUIRE as recipe exit 1" ||
+	bad "scoped target did not enforce REQUIRE (rc=$rc): $out"
+
+
+out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=crash make -s -C "$ROOT" check-nft-deadcode GO="$FAKE_GO" 2>&1); rc=$?
+[ "$rc" = "2" ] && echo "$out" | grep -q "analyser crashed" && echo "$out" | grep -q "panic: fixture analyser crash" &&
+	ok "scoped target labels analyser failure as a crash (exit 2)" ||
+	bad "analyser failure was not labelled crash (rc=$rc): $out"
+
+out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=findings make -s -C "$ROOT" check-nft-deadcode GO="$FAKE_GO" 2>&1); rc=$?
+[ "$rc" = "2" ] && echo "$out" | grep -q "unreachable code found" && echo "$out" | grep -q "Error 1" &&
+	ok "scoped target reports filtered findings as recipe exit 1" ||
+	bad "filtered finding was not recipe exit 1 (rc=$rc): $out"
+
 
 # ── 1. Exact match is green, and the census states its reach ────────
 out=$(run_gate "$BASE_OUT" "$BASE_ALLOW"); rc=$?

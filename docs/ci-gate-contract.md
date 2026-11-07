@@ -24,6 +24,14 @@ are recorded.
 | Go build and affected tests | `go build ./...`, then `make check-nft-deadcode`, then `bash scripts/ci_affected_go_tests.sh "$BASE_SHA" "$HEAD_SHA"` (changed packages + reverse importers; unresolved non-Go changes seed all, never-read allowlist paths do not; tree-census packages always run; test source-read edges cover relative and repo-root paths; renames select both sides); any HEAD-red package fails the build — the strict pre-#16723 gate, no base comparison. `--packages-file scripts/go-16723-packages.txt` runs the #16723 cohort through the same selection plus a base differential: `PASS → FAIL` blocks, `FAIL → FAIL` is reported as baseline-red, and build/timeout/no-verdict states are VOID and fail closed. `scripts/ci_affected_go_tests_selftest.sh` commits fixture-only changes in each cohort package, pins green→red/red→red behavior, and asserts the default two-SHA mode stays strict on a base-red/head-red package. | `test.yml` job `go` (`Go build and affected tests`) |
 | Rust workspace compile check | `cargo check --manifest-path userspace-dp/Cargo.toml --workspace --all-targets`, then `make clippy-rust` (#17200: leg 1 is the full `--all-targets` clippy with `-D unfulfilled_lint_expectations`, so a stale `#[expect(clippy::…)]` reds it — that lint is warn-level, so the targeted deny, not `-D warnings`, makes it gating — plus leg 2 denying `clippy::correctness`/`clippy::suspicious` with `clippy::duplicate_mod` allowed for the intentional shim-parity multi-load) | `test.yml` job `rust`, steps `Check Rust workspace and all targets` and `Clippy Rust workspace and all targets (#17200)` |
 | Proto header and regen check | `make proto-check`, then `make proto-regen-check` (pinned protoc regen-diff; #16195) | `test.yml` job `proto` |
+Scoped deadcode is the exception to the Go job's main toolchain: that
+job still uses `go-version-file: go.mod` (go1.24.9), provisions go1.26.9
+only for `make check-nft-deadcode`, sets `XPF_DEADCODE_REQUIRE=1` for
+that step, and restores the main toolchain before affected Go tests.
+The target shares `scripts/resolve-deadcode-go.sh` with the module-wide
+gate and pins `deadcode@v0.38.0`; missing go1.26 is NOT-EXAMINED (recipe
+exit 77 unless required), analyser failure is labelled and exits 2, and
+filtered findings exit 1.
 
 ### Advisory tooling leg (#16197) — not a merge gate
 

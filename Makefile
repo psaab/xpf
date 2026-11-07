@@ -461,17 +461,19 @@ test-go: test-race-dp
 	sh scripts/go-deadcode-gate.sh; dc=$$?; if [ $$dc -eq 77 ]; then echo "test-go: go-deadcode-gate SKIPPED (no go1.26 toolchain; see script header)"; elif [ $$dc -ne 0 ] && [ $$status -eq 0 ]; then status=$$dc; fi; \
 	exit $$status
 
-# #17008: require pkg/nftables and daemon nft mirrors to remain free of
-# unreachable code, including test-only helpers. deadcode filters packages, not
-# files, so analyze daemon/nftables and inspect only the requested file paths.
-# the go.mod tool directive pins x/tools; go.sum checksums its telemetry dependency.
+# #17008/#18753: keep this scoped reachability gate on the analyser version
+# measured by #17154 and on a resolver-selected toolchain that can run its SSA
+# builder. The x/tools version in go.mod's tool directive may drift separately.
 .PHONY: check-nft-deadcode
 check-nft-deadcode:
-	@out=$$($(GO) tool deadcode -test -filter 'pkg/(daemon|nftables)' ./cmd/xpfd ./pkg/daemon ./pkg/nftables 2>&1); status=$$?; \
-	if [ $$status -ne 0 ]; then printf '%s\n' "$$out"; exit $$status; fi; \
-	findings=$$(printf '%s\n' "$$out" | grep -E '^pkg/nftables/|^pkg/daemon/daemon_nft[^/]*\.go:' || true); \
-	if [ -n "$$findings" ]; then printf '%s\n' "$$findings"; echo "check-nft-deadcode: unreachable code found" >&2; exit 1; fi; \
-	test -z "$$findings"
+	@if GO_BIN=$$(GO="$(GO)" sh scripts/resolve-deadcode-go.sh); then \
+		out=$$("$$GO_BIN" run golang.org/x/tools/cmd/deadcode@v0.38.0 -test -filter 'pkg/(daemon|nftables)' ./cmd/xpfd ./pkg/daemon ./pkg/nftables 2>&1); status=$$?; \
+		if [ $$status -ne 0 ]; then printf '%s\n' "$$out"; echo "check-nft-deadcode: FAIL: analyser crashed (deadcode v0.38.0 exited $$status)" >&2; exit 2; fi; \
+		findings=$$(printf '%s\n' "$$out" | grep -E '^pkg/nftables/|^pkg/daemon/daemon_nft[^/]*\.go:' || true); \
+		if [ -n "$$findings" ]; then printf '%s\n' "$$findings"; echo "check-nft-deadcode: unreachable code found" >&2; exit 1; fi; \
+	else \
+		status=$$?; exit $$status; \
+	fi
 
 
 # #2114 scoped race gate: the dataplane-cell publication races

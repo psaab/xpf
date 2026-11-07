@@ -64,17 +64,15 @@
 #   ./pkg/cluster and ./cmd/...; the pinned CI check-nft-deadcode leg is
 #   exposed to the same crash when CI's toolchain moves to 1.27).
 #   go1.26.9 runs the pinned analyser cleanly (this gate's baseline:
-#   196 rows). So the gate RESOLVES a usable toolchain instead of
-#   reporting a panic as a finding: $GO if it reports go1.26.*, else a
-#   go1.26.* binary under /usr/lib/go-1.26*/bin, /usr/local/go/bin or
-#   $HOME/sdk/go1.26*/bin. With none, it exits 77 (SKIP — the measurement
-#   did not happen) rather than red or green; `make test-go` treats 77
-#   as a skip-with-message. Today the gate therefore enforces only on
-#   `make test-go` hosts with a go1.26 toolchain. XPF_DEADCODE_REQUIRE=1
-#   turns the skip into a hard failure where it is set, but it is wired
-#   nowhere today: CI uses go 1.24.9 via go-version-file (go.mod) and
-#   never runs `make test-go`. Hardening REQUIRE in CI is pending until
-#   the workflow installs go1.26 and sets XPF_DEADCODE_REQUIRE=1.
+#   196 rows). #18753 extracts the go1.26.* resolver into
+#   `scripts/resolve-deadcode-go.sh`, shared with the scoped
+#   `make check-nft-deadcode` target. The resolver checks $DEADCODE_GO,
+#   $GO, PATH `go`, then the conventional install locations. With none,
+#   it exits 77 (NOT-EXAMINED) rather than red or green; `make test-go`
+#   treats 77 as a skip-with-message. XPF_DEADCODE_REQUIRE=1 turns that
+#   into a hard failure; CI provisions go1.26.9 only for the scoped
+#   deadcode step and sets REQUIRE there, while the main toolchain stays
+#   go1.24.9 from go-version-file.
 #
 # OVERRIDES (hermetic self-test and fixtures)
 #
@@ -83,7 +81,7 @@
 #   DEADCODE_ALLOWLIST=<f>  allowlist path (default docs/deadcode-allowlist.txt).
 #   DEADCODE_GO=<go>        go binary used for `go run` (default: resolved).
 #   GO_DEADCODE_ROOT=<dir>  tree to cd into (default: this script's repo).
-#   XPF_DEADCODE_REQUIRE=1  a missing go1.26 toolchain is exit 1, not 77 (not set by CI today; see TOOLCHAIN PIN above).
+#   XPF_DEADCODE_REQUIRE=1  a missing go1.26 toolchain is exit 1, not 77 (set by CI for check-nft-deadcode; see TOOLCHAIN PIN above).
 #
 # Exit: 0 = exact match, 1 = mismatch/malformed, 2 = analyser/toolchain
 # error, 77 = SKIP (no usable toolchain and not required).
@@ -118,34 +116,19 @@ if [ -n "${DEADCODE_OUTPUT:-}" ]; then
 	cp "$DEADCODE_OUTPUT" "$SCRATCH/deadcode.raw"
 	echo "go-deadcode-gate: using recorded analyser output $DEADCODE_OUTPUT (DEADCODE_OUTPUT override)"
 else
-	# Resolve a go1.26.* toolchain: the pinned analyser's SSA builder
-	# panics under go1.27 (see header). Prefer $DEADCODE_GO, then $GO,
-	# then PATH `go`, then the conventional install locations.
-	GO_CANDIDATES="${DEADCODE_GO:-} ${GO:-} go /usr/lib/go-1.26/bin/go /usr/lib/go-1.26.*/bin/go /usr/local/go/bin/go $HOME/sdk/go1.26*/bin/go"
-	GO_BIN=""
-	for cand in $GO_CANDIDATES; do
-		[ -n "$cand" ] || continue
-		command -v "$cand" >/dev/null 2>&1 || [ -x "$cand" ] || continue
-		ver=$("$cand" version 2>/dev/null | sed -n 's/.*\(go1\.26\.[0-9]*\).*/\1/p')
-		if [ -n "$ver" ]; then
-			GO_BIN=$cand
-			GO_VER=$ver
-			break
+	# Resolve go1.26.* with the shared resolver; stdout is its binary path.
+	# The pinned analyser's SSA builder panics under go1.27 (see header).
+	if GO_BIN=$(sh "$ROOT/scripts/resolve-deadcode-go.sh"); then
+		GO_VER=$("$GO_BIN" version 2>/dev/null | sed -n 's/.*\(go1\.26\.[0-9]*\).*/\1/p')
+		echo "go-deadcode-gate: running golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION -test ./... with $GO_BIN ($GO_VER)"
+		if ! "$GO_BIN" run "golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION" -test ./... >"$SCRATCH/deadcode.raw" 2>"$SCRATCH/deadcode.err"; then
+			echo "go-deadcode-gate: FAIL: deadcode $DEADCODE_VERSION exited nonzero:" >&2
+			cat "$SCRATCH/deadcode.err" >&2
+			exit 2
 		fi
-	done
-	if [ -z "$GO_BIN" ]; then
-		if [ "${XPF_DEADCODE_REQUIRE:-}" = "1" ]; then
-			echo "go-deadcode-gate: FAIL: no go1.26.* toolchain found (XPF_DEADCODE_REQUIRE=1); deadcode $DEADCODE_VERSION panics under go1.27 — install go1.26 or set DEADCODE_GO" >&2
-			exit 1
-		fi
-		echo "SKIP: go-deadcode-gate needs a go1.26.* toolchain (deadcode $DEADCODE_VERSION's SSA builder panics under go1.27); none found — set DEADCODE_GO or install go1.26"
-		exit 77
-	fi
-	echo "go-deadcode-gate: running golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION -test ./... with $GO_BIN ($GO_VER)"
-	if ! "$GO_BIN" run "golang.org/x/tools/cmd/deadcode@$DEADCODE_VERSION" -test ./... >"$SCRATCH/deadcode.raw" 2>"$SCRATCH/deadcode.err"; then
-		echo "go-deadcode-gate: FAIL: deadcode $DEADCODE_VERSION exited nonzero:" >&2
-		cat "$SCRATCH/deadcode.err" >&2
-		exit 2
+	else
+		rc=$?
+		exit "$rc"
 	fi
 fi
 
