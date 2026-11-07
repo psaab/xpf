@@ -2589,11 +2589,104 @@ fn established_icmp_drops_after_egress_zone_move_13924() {
     );
 }
 
+fn establish_on_port(fw: &ForwardingState, sessions: &mut SessionTable, client_port: u16) {
+    let prior_session_count = session_count(sessions);
+    let syn = drive(
+        fw,
+        sessions,
+        tcp(
+            CLIENT,
+            VIP,
+            client_port,
+            VIP_PORT,
+            TCP_SYN,
+            WAN_IFINDEX,
+        ),
+    );
+    assert_eq!(syn.tx, 1, "the WAN SYN must be admitted and forwarded");
+    assert_eq!(
+        session_count(sessions),
+        prior_session_count + 2,
+        "admission must install exactly one pair"
+    );
+
+    let syn_ack = drive(
+        fw,
+        sessions,
+        tcp(
+            REAL,
+            CLIENT,
+            REAL_PORT,
+            client_port,
+            TCP_SYN | TCP_ACK,
+            LAN_IFINDEX,
+        ),
+    );
+    assert_eq!(syn_ack.session_hit, 1, "the server SYN-ACK must hit");
+    assert_eq!(syn_ack.tx, 1, "the server SYN-ACK must forward");
+
+    let ack = drive(
+        fw,
+        sessions,
+        tcp(
+            CLIENT,
+            VIP,
+            client_port,
+            VIP_PORT,
+            TCP_ACK,
+            WAN_IFINDEX,
+        ),
+    );
+    assert_eq!(ack.session_hit, 1, "the final ACK must hit");
+    assert_eq!(ack.tx, 1, "the final ACK must forward");
+}
+
+fn closing_pair_keys_for_port(
+    sessions: &SessionTable,
+    client_port: u16,
+) -> (crate::session::SessionKey, crate::session::SessionKey) {
+    let mut forward = None;
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if !metadata.is_reverse && key.src_port == client_port {
+            forward = Some((key.clone(), decision.nat));
+        }
+    });
+    let (forward, nat) = forward.expect("session pair has the requested forward half");
+    let reverse = reverse_session_key(&forward, nat);
+    (forward, reverse)
+}
+
+
+fn established_rst(client_port: u16) -> (Vec<u8>, UserspaceDpMeta) {
+    let (mut frame, meta) = tcp(
+        CLIENT,
+        VIP,
+        client_port,
+        VIP_PORT,
+        TCP_RST,
+        WAN_IFINDEX,
+    );
+    // The client SYN's seq=1 consumes one sequence number; seq=2 is the
+    // receive-next established by the completed SYN/SYN-ACK handshake.
+    let seq_offset = meta.l4_offset as usize + 4;
+    frame[seq_offset..seq_offset + 4].copy_from_slice(&2u32.to_be_bytes());
+    (frame, meta)
+}
+
 #[test]
 fn established_transit_rst_hit_has_no_allocations_17272() {
     let mut fw = forwarding(WAN_ONLY);
     fw.tcp_rst_invalidate_session = true;
-    let mut sessions = admitted(&fw);
+
+    // Both pairs live in one SessionTable: the sacrificial RST warms the
+    // close-deadline wheel bucket without closing the measured Established pair.
+    let mut sessions = SessionTable::new();
+    establish_on_port(&fw, &mut sessions, CLIENT_PORT);
+    let (forward_key, reverse_key) = closing_pair_keys_for_port(&sessions, CLIENT_PORT);
+    establish_on_port(&fw, &mut sessions, CLIENT_PORT + 1);
+    let (warm_forward, warm_reverse) =
+        closing_pair_keys_for_port(&sessions, CLIENT_PORT + 1);
+
     let mut binding = binding(WAN_IFINDEX);
     binding.tx_pipeline.pending_tx_prepared.reserve(64);
     assert!(
@@ -2602,34 +2695,95 @@ fn established_transit_rst_hit_has_no_allocations_17272() {
     );
     let mut harness = TxnHarness::new(&binding);
     let ha_state = txn_ha_state();
-    let (frame, meta) = tcp(
-        CLIENT,
-        VIP,
-        CLIENT_PORT,
-        VIP_PORT,
-        TCP_RST,
-        WAN_IFINDEX,
-    );
 
+    let (warm_frame, warm_meta) = established_rst(CLIENT_PORT + 1);
     let ((warm_batch, warm_dbg), _) = harness.run(
         &mut binding,
         &mut sessions,
         &fw,
         &ha_state,
-        &frame,
-        meta,
+        &warm_frame,
+        warm_meta,
     );
     assert_eq!(warm_batch.validated_packets, 1);
-    assert_eq!(warm_dbg.session_hit, 1, "warmup must reach the established session");
+    assert_eq!(warm_dbg.session_hit, 1, "warmup must hit the sacrificial Established session");
     assert_eq!(warm_dbg.tx, 1, "warmup must transmit the admitted transit packet");
     assert_eq!(
-        txn_flow_cache_entries(&binding),
+        binding.scratch.scratch_rst_teardowns.len(),
+        1,
+        "warmup RST must queue one teardown against the sacrificial pair"
+    );
+    assert_ne!(
+        sessions.close_class_wire_for(&warm_forward),
         0,
-        "RST-invalidate packet must not be diverted into the flow-cache arm"
+        "warmup must close the sacrificial forward half"
+    );
+    assert_ne!(
+        sessions.close_class_wire_for(&warm_reverse),
+        0,
+        "warmup must close the sacrificial reverse half"
+    );
+    assert_eq!(
+        sessions.close_class_wire_for(&forward_key),
+        0,
+        "warmup must leave the measured forward half open"
+    );
+    assert_eq!(
+        sessions.close_class_wire_for(&reverse_key),
+        0,
+        "warmup must leave the measured reverse half open"
     );
     binding.scratch.scratch_rst_teardowns.clear();
     binding.tx_pipeline.pending_tx_prepared.clear();
 
+    // Prime this exact pair in the shared descriptor harness with ordinary
+    // established traffic before its first RST; this ACK leaves it open.
+    let (warm_ack_frame, warm_ack_meta) = tcp(
+        CLIENT,
+        VIP,
+        CLIENT_PORT,
+        VIP_PORT,
+        TCP_ACK,
+        WAN_IFINDEX,
+    );
+    let ((warm_ack_batch, warm_ack_dbg), _) = harness.run(
+        &mut binding,
+        &mut sessions,
+        &fw,
+        &ha_state,
+        &warm_ack_frame,
+        warm_ack_meta,
+    );
+    assert_eq!(warm_ack_batch.validated_packets, 1);
+    assert_eq!(warm_ack_dbg.session_hit, 1, "warm ACK must hit the measured pair");
+    assert_eq!(warm_ack_dbg.tx, 1, "warm ACK must forward through the harness");
+    binding.scratch.scratch_forwards.clear();
+    binding.scratch.scratch_post_recycles.clear();
+    binding.tx_pipeline.pending_tx_prepared.clear();
+
+    for (direction, key) in [("forward", &forward_key), ("reverse", &reverse_key)] {
+        assert_eq!(
+            sessions.handshake_state_wire_for(key),
+            4,
+            "precondition: {direction} handshake wire state is Established"
+        );
+        assert_eq!(
+            sessions.close_class_wire_for(key),
+            0,
+            "precondition: {direction} session is still open before the counted hit"
+        );
+    }
+    assert!(
+        sessions.forward_established_with_traffic(&forward_key),
+        "precondition: forward session is live Established with admitted traffic"
+    );
+    assert_eq!(
+        sessions.tcp_closing_seq_verdict(&forward_key, 2, TCP_RST),
+        crate::session::SeqVerdict::Valid,
+        "precondition: the measured RST sequence is valid for the live session"
+    );
+
+    let (frame, meta) = established_rst(CLIENT_PORT);
     let ((batch, dbg), allocations) = harness.run(
         &mut binding,
         &mut sessions,

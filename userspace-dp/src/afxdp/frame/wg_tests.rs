@@ -1933,15 +1933,7 @@ fn non_wg_forward_keeps_the_tx_ifindex_fast_path_6345() {
 /// header and no type-4 record, so re-pointing the arm reds here too.
 #[test]
 fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
-    let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
-    install_v4_peer_next_hop_neighbor(&mut state);
-    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
-    state
-        .wg_engines
-        .insert(1, Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")));
-
-    let decision = wg_encap_decision();
-    let frame = inner_v4_frame();
+    let (state, decision, frame) = wireguard_builder_fixture();
 
     let built = crate::afxdp::frame::build_forwarded_frame_from_frame(
         &frame,
@@ -1991,6 +1983,149 @@ fn build_forwarded_frame_from_frame_encapsulates_wireguard_7167() {
         "the UDP payload must open with the WireGuard type-4 transport-data \
          header — this is what distinguishes a real WG encapsulation from any \
          other builder the dispatcher could have selected"
+    );
+}
+
+fn wireguard_builder_fixture() -> (ForwardingState, SessionDecision, Vec<u8>) {
+    let mut state = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut state);
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    state
+        .wg_engines
+        .insert(1, Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")));
+    (state, wg_encap_decision(), inner_v4_frame())
+}
+
+// Today the live path has a source-backed lower bound of at least two
+// allocations: the forwarded-frame builder's inner Vec and the WireGuard
+// output Vec. The zero assertion is intentionally ignored until #19008; this
+// does not claim either allocation is unavoidable.
+#[test]
+#[ignore = "#19008: pool-backed tunnel output design tracked"]
+fn wireguard_live_forwarded_builder_has_no_allocations_17272() {
+    let mut forwarding = build_forwarding_state(&wg_outer_mtu_snapshot());
+    install_v4_peer_next_hop_neighbor(&mut forwarding);
+    let peer_ep: std::net::SocketAddr = "203.0.113.7:51820".parse().unwrap();
+    forwarding.wg_engines.insert(
+        1,
+        Arc::new(established_initiator_engine(peer_ep, "10.123.0.0/24")),
+    );
+    let ha_state = crate::afxdp::tests_support::txn_ha_state();
+    let mut bindings = vec![
+        crate::afxdp::BindingWorker::new_for_mirror_test(0, 0, 24, 0),
+        crate::afxdp::BindingWorker::new_for_mirror_test(1, 0, 6, 0),
+    ];
+    bindings[0].interface = std::sync::Arc::<str>::from("reth1.0");
+    bindings[1].interface = std::sync::Arc::<str>::from("reth0");
+    let mut harness =
+        crate::afxdp::tests_support::LiveTunnelAllocHarness::new(&bindings);
+    harness.seed_static_neighbors(&forwarding);
+
+    // The pending request is a real Live descriptor view into ingress UMEM;
+    // only the production TX enqueue/build/encapsulation is measured.
+    let source = std::net::Ipv4Addr::new(10, 0, 61, 50);
+    let destination = std::net::Ipv4Addr::new(10, 123, 0, 9);
+    let mut frame = inner_v4_frame();
+    frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
+    let mut packet_meta =
+        crate::afxdp::tests_support::txn_meta_v4(24, 0, frame.len() as u16);
+    packet_meta.protocol = PROTO_UDP;
+    packet_meta.payload_offset = 42;
+    packet_meta.flow_src_addr[..4].copy_from_slice(&source.octets());
+    packet_meta.flow_dst_addr[..4].copy_from_slice(&destination.octets());
+    packet_meta.flow_src_port = 4000;
+    packet_meta.flow_dst_port = 5000;
+
+    let mut decision = wg_encap_decision();
+    assert_eq!(
+        decision.resolution.disposition,
+        ForwardingDisposition::ForwardCandidate
+    );
+    assert_eq!(decision.resolution.egress_ifindex, 400);
+    assert_eq!(decision.resolution.tunnel_endpoint_id, 1);
+    decision.resolution.tx_ifindex = 6;
+    decision.resolution.tx_vlan_id = 80;
+
+    let mut sessions = SessionTable::new();
+    let warm_request = crate::afxdp::tests_support::LiveTunnelAllocHarness::live_request(
+        &mut bindings,
+        0,
+        &frame,
+        packet_meta,
+        decision,
+        6,
+        1,
+    );
+    let warm = harness.warm_live_request_and_enqueue(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        warm_request,
+    );
+    assert_wireguard_live_egress(
+        warm.egress
+            .as_deref()
+            .expect("warm Live request must emit WireGuard"),
+    );
+    assert_eq!(warm.dbg.enqueue_ok, 1, "warm WG forward must be enqueued");
+    assert_eq!(warm.batch.forward_build_failures, 0);
+    assert_eq!(warm.batch.no_egress_binding_drops, 0);
+
+    let measured_request = crate::afxdp::tests_support::LiveTunnelAllocHarness::live_request(
+        &mut bindings,
+        0,
+        &frame,
+        packet_meta,
+        decision,
+        6,
+        1,
+    );
+    let (measured, allocations) = harness.measure_live_request_enqueue(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        measured_request,
+    );
+    let egress = measured
+        .egress
+        .as_deref()
+        .expect("measured Live request must emit WireGuard");
+    assert_wireguard_live_egress(egress);
+    assert_eq!(measured.dbg.enqueue_ok, 1, "measured WG forward must be enqueued");
+    assert_eq!(measured.batch.forward_build_failures, 0, "WG builder must not fail");
+    assert_eq!(measured.batch.no_egress_binding_drops, 0, "WG egress binding must exist");
+    assert_eq!(measured.dbg.build_fail, 0, "WG builder debug failure counter");
+    assert_eq!(measured.dbg.no_egress_binding, 0, "WG egress debug drop counter");
+    assert_eq!(
+        allocations, 0,
+        "#17272: warmed live WireGuard forwarding enqueue/build/encapsulation must not allocate"
+    );
+}
+
+fn assert_wireguard_live_egress(built: &[u8]) {
+    assert_eq!(&built[12..14], &[0x81, 0x00], "outer egress must be VLAN tagged");
+    assert_eq!(
+        u16::from_be_bytes([built[14], built[15]]) & 0x0fff,
+        80,
+        "outer egress VLAN must be 80"
+    );
+    assert_eq!(&built[16..18], &[0x08, 0x00], "WireGuard outer must be IPv4");
+    assert_eq!(built[18] >> 4, 4, "outer network header must be IPv4");
+    assert_eq!(built[18 + 9], PROTO_UDP, "WireGuard outer transport must be UDP");
+    assert_eq!(&built[34..38], &[203, 0, 113, 7], "outer dst must be the WG peer");
+    assert_eq!(
+        u16::from_be_bytes([built[40], built[41]]),
+        51820,
+        "outer UDP destination must be the WG peer port"
+    );
+    assert_eq!(
+        &built[46..50],
+        &[0x04, 0x00, 0x00, 0x00],
+        "UDP payload must contain a WireGuard type-4 transport-data header"
     );
 }
 

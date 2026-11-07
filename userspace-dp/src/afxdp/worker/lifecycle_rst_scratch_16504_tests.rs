@@ -178,6 +178,63 @@ fn rst_drain_restores_scratch_capacities_16504() {
 }
 
 #[test]
+fn rst_drain_reuses_trigger_scratch_without_allocations_17272() {
+    // #17272 (c): count the production drain itself. The session-hit cell
+    // counts poll_binding_process_descriptor; this paired cell covers the
+    // post-descriptor RST teardown drain, including the reusable trigger set.
+    let mut fx = DrainFixture::new();
+    let flow = key(54321);
+    let trigger_addr = 0x4000;
+    let teardowns_cap = fx.current.scratch.scratch_rst_teardowns.capacity();
+    let keeps_cap = fx.current.scratch.scratch_rst_trigger_keeps.capacity();
+    assert!(
+        teardowns_cap >= 16 && keeps_cap >= 16,
+        "precondition: RST scratch buffers are pre-sized \
+         (teardowns={teardowns_cap}, keeps={keeps_cap})"
+    );
+    let queue_trigger = |fx: &mut DrainFixture| {
+        fx.current.scratch.scratch_rst_teardowns.push((
+            flow.clone(),
+            NatDecision::default(),
+            Some((flow.clone(), trigger_addr)),
+        ));
+    };
+
+    queue_trigger(&mut fx);
+    fx.drain();
+    assert_eq!(
+        fx.current.scratch.scratch_rst_trigger_keeps,
+        vec![(flow.clone(), trigger_addr)],
+        "warmup must drain the real queued trigger through production code"
+    );
+    // The fake BPF steering-map write recorder has its own Vec; warm and
+    // clear it here so the counted production drain sees reused probe storage.
+    crate::afxdp::bpf_map::clear_session_map_writes();
+
+    queue_trigger(&mut fx);
+    let (_, allocations) = crate::test_alloc::count_allocs(|| fx.drain());
+    assert_eq!(
+        allocations, 0,
+        "#17272: warmed production RST teardown drain must reuse trigger scratch"
+    );
+    assert!(fx.current.scratch.scratch_rst_teardowns.is_empty());
+    assert_eq!(
+        fx.current.scratch.scratch_rst_teardowns.capacity(),
+        teardowns_cap
+    );
+    assert_eq!(
+        fx.current.scratch.scratch_rst_trigger_keeps,
+        vec![(flow.clone(), trigger_addr)],
+        "measured production drain must keep exactly the queued RST trigger"
+    );
+    assert_eq!(
+        fx.current.scratch.scratch_rst_trigger_keeps.capacity(),
+        keeps_cap,
+        "measured drain must return the pre-sized trigger buffer"
+    );
+}
+
+#[test]
 fn rst_drain_keeps_batch_triggers_and_recycles_siblings_16504() {
     // #15947 (H29-01) through the production drain: two accepted RSTs
     // for one session in one batch must not cross-cancel — both

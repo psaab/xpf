@@ -2458,7 +2458,7 @@ impl TxnHarness {
             counters: &mut batch,
         };
         let area_handle = UmemAreaHandle::from_umem(&binding.umem);
-        let (_, allocations) = crate::test_alloc::count_allocs(|| {
+        let mut poll = || {
             poll_binding_process_descriptor(
                 binding,
                 0,
@@ -2480,12 +2480,420 @@ impl TxnHarness {
                 -1,
                 &worker_ctx,
                 &mut telemetry,
-            )
-        });
+            );
+        };
+        let (_, allocations) = crate::test_alloc::count_allocs(|| poll());
+        drop(poll);
         assert_descriptor_arrived_10646(&batch, &dbg);
         ((batch, dbg), allocations)
     }
 }
+/// #17272: setup-once multi-binding live harness for tunnel allocation cells.
+///
+/// Unlike `txn_run_multi_binding_with_shared_maps`, which rebuilds its
+/// `WorkerBindingLookup` and neighbor map on every call, this harness owns
+/// that backing state once. It creates only stack worker context for each
+/// pass, so the counted window can isolate the production
+/// `enqueue_pending_forwards_with_dynamic` sequence. Frame staging and egress
+/// capture stay outside the counted closure.
+pub(super) struct LiveTunnelAllocHarness {
+    binding_lookup: WorkerBindingLookup,
+    mirror_targets: MirrorTargetMap,
+    dynamic_neighbors: Arc<ShardedNeighborMap>,
+    shared_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: SharedSessionOwnerRgIndexes,
+    ike_exchanges: Arc<crate::afxdp::forwarding::IkeExchangeTable>,
+    local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+    recent_exceptions: Arc<Mutex<ExceptionEventRing>>,
+    last_resolution: Arc<Mutex<Option<ResolutionEvent>>>,
+    pptp_control: Arc<crate::session::pptp_control::PptpControlInbox>,
+    rg_epochs: [AtomicU32; MAX_RG_EPOCHS],
+    screen: ScreenState,
+    worker_commands_by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>>,
+}
+
+/// Counters and first sibling egress frame from one harness pass.
+pub(super) struct LiveTunnelPass {
+    pub(super) batch: BatchCounters,
+    pub(super) dbg: DebugPollCounters,
+    pub(super) egress: Option<Vec<u8>>,
+}
+
+impl LiveTunnelAllocHarness {
+    pub(super) fn new(bindings: &[BindingWorker]) -> Self {
+        Self {
+            binding_lookup: WorkerBindingLookup::from_bindings(bindings),
+            mirror_targets: MirrorTargetMap::default(),
+            dynamic_neighbors: Arc::new(ShardedNeighborMap::default()),
+            shared_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_nat_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
+            shared_owner_rg_indexes: SharedSessionOwnerRgIndexes::default(),
+            ike_exchanges: Arc::new(crate::afxdp::forwarding::IkeExchangeTable::new()),
+            local_tunnel_deliveries: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
+            recent_exceptions: Arc::new(Mutex::new(ExceptionEventRing::new())),
+            last_resolution: Arc::new(Mutex::new(None)),
+            pptp_control: Arc::new(crate::session::pptp_control::PptpControlInbox::default()),
+            rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
+            screen: ScreenState::new(),
+            worker_commands_by_id: BTreeMap::new(),
+        }
+    }
+
+    /// Seed every static neighbor from the forwarding snapshot (the
+    /// production static-neighbor source), outside any counted window.
+    pub(super) fn seed_static_neighbors(&self, forwarding: &ForwardingState) {
+        for ((ifindex, ip), mac) in production_static_neighbors_15958b(forwarding) {
+            self.dynamic_neighbors
+                .insert((ifindex, ip), NeighborEntry { mac });
+        }
+    }
+
+    /// Stage one descriptor on the ingress binding (outside the count).
+    pub(super) fn stage(
+        bindings: &mut [BindingWorker],
+        ingress_index: usize,
+        frame: &[u8],
+        meta: UserspaceDpMeta,
+    ) {
+        let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+        let frame_offset = 128usize;
+        let meta_offset = frame_offset - meta_len;
+        let meta_bytes = unsafe {
+            std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+        };
+        let ingress = &mut bindings[ingress_index];
+        unsafe {
+            ingress
+                .umem
+                .area()
+                .slice_mut_unchecked(meta_offset, meta_len)
+                .expect("meta slice")
+                .copy_from_slice(meta_bytes);
+            ingress
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("frame slice")
+                .copy_from_slice(frame);
+        }
+        ingress.xsk.rx.push_for_test(XdpDesc {
+            addr: frame_offset as u64,
+            len: frame.len() as u32,
+            options: 0,
+        });
+    }
+    /// Prepare a Live forward request without an RX poll. This lets tunnel
+    /// builder cells isolate the production TX dispatch while still reading
+    /// the original packet from ingress UMEM as the real Live arm does.
+    pub(super) fn live_request(
+        bindings: &mut [BindingWorker],
+        ingress_index: usize,
+        frame: &[u8],
+        meta: UserspaceDpMeta,
+        decision: SessionDecision,
+        target_ifindex: i32,
+        target_binding_index: usize,
+    ) -> PendingForwardRequest {
+        let frame_offset = 128usize;
+        let ingress = &mut bindings[ingress_index];
+        unsafe {
+            ingress
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("live frame slice")
+                .copy_from_slice(frame);
+        }
+        let expected_ports = Some((meta.flow_src_port, meta.flow_dst_port));
+        PendingForwardRequest {
+            target_ifindex,
+            target_binding_index: Some(target_binding_index),
+            ingress_queue_id: 0,
+            desc: XdpDesc {
+                addr: frame_offset as u64,
+                len: frame.len() as u32,
+                options: 0,
+            },
+            frame: PendingForwardFrame::Live,
+            meta: meta.into(),
+            decision,
+            apply_nat_on_fabric: false,
+            expected_ports,
+            flow_key: None,
+            nat64_reverse: None,
+            overlap_admissions: None,
+            cos_queue_id: None,
+            dscp_rewrite: None,
+            cos_tx_selection_resolved: true,
+        }
+    }
+
+    fn run_pass(
+        &mut self,
+        bindings: &mut Vec<BindingWorker>,
+        ingress_index: usize,
+        sessions: &mut SessionTable,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        measure_enqueue: bool,
+        pending_request: Option<PendingForwardRequest>,
+    ) -> (LiveTunnelPass, u64) {
+        let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let (left, rest) = bindings.split_at_mut(ingress_index);
+        let (binding, right) = rest.split_first_mut().expect("ingress binding");
+        let ident = binding.identity();
+        let worker_ctx = WorkerContext {
+            pptp_control: &self.pptp_control,
+            ident: &ident,
+            binding_lookup: &self.binding_lookup,
+            mirror_targets: &self.mirror_targets,
+            forwarding,
+            ha_state,
+            forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
+            dynamic_neighbors: &self.dynamic_neighbors,
+            neighbor_resolver: None,
+            shared_sessions: &self.shared_sessions,
+            shared_nat_sessions: &self.shared_nat_sessions,
+            shared_forward_wire_sessions: &self.shared_forward_wire_sessions,
+            shared_owner_rg_indexes: &self.shared_owner_rg_indexes,
+            ike_exchanges: &self.ike_exchanges,
+            slow_path: None,
+            event_stream: None,
+            local_tunnel_deliveries: &self.local_tunnel_deliveries,
+            recent_exceptions: &self.recent_exceptions,
+            last_resolution: &self.last_resolution,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
+            rg_epochs: &self.rg_epochs,
+            cold_path_sample_mask: 0xff,
+        };
+        let mut batch = BatchCounters::default();
+        let mut dbg = DebugPollCounters::default();
+        let area_handle = UmemAreaHandle::from_umem(&binding.umem);
+        let ingress_ident = binding.identity();
+        let ingress_live_ptr = &*binding.live as *const BindingLiveState;
+
+        if let Some(request) = pending_request {
+            binding.scratch.scratch_forwards.clear();
+            binding.scratch.scratch_post_recycles.clear();
+            binding.scratch.scratch_forwards.push(request);
+        } else {
+            // The descriptor poll is real and uncounted. It constructs the
+            // queued PendingForwardRequest; only the production enqueue/build/
+            // encapsulation call below is measured.
+            let mut telemetry = TelemetryContext {
+                dbg: &mut dbg,
+                counters: &mut batch,
+            };
+            super::poll_descriptor::poll_binding_process_descriptor_with_injection(
+                binding,
+                ingress_index,
+                left,
+                right,
+                &area_handle,
+                1,
+                None,
+                sessions,
+                &mut self.screen,
+                ValidationState {
+                    snapshot_installed: true,
+                    config_generation: 7,
+                    fib_generation: 9,
+                    neighbor_generation: 0,
+                },
+                123_000_000_000,
+                123,
+                0,
+                0,
+                -1,
+                -1,
+                &worker_ctx,
+                &mut telemetry,
+            );
+            assert_descriptor_arrived_10646(&batch, &dbg);
+        }
+        let mut pending_forwards = core::mem::take(&mut binding.scratch.scratch_forwards);
+        let mut post_recycles = core::mem::take(&mut binding.scratch.scratch_post_recycles);
+        assert_eq!(
+            pending_forwards.len(),
+            1,
+            "one live forward request must be queued"
+        );
+        assert_ne!(
+            pending_forwards[0].decision.resolution.tunnel_endpoint_id,
+            0,
+            "the pending forward must carry a live tunnel decision"
+        );
+        let mut enqueue_dbg = DebugPollCounters::default();
+        let mut enqueue_counters = BatchCounters::default();
+        let allocations = {
+            let mut enqueue = || {
+                super::tx::dispatch::enqueue_pending_forwards_with_dynamic(
+                    left,
+                    ingress_index,
+                    binding,
+                    right,
+                    &self.binding_lookup,
+                    &self.mirror_targets,
+                    &mut pending_forwards,
+                    &mut post_recycles,
+                    123_000_000_000,
+                    forwarding,
+                    None,
+                    &ingress_ident,
+                    unsafe { &*ingress_live_ptr },
+                    None,
+                    &self.local_tunnel_deliveries,
+                    &self.recent_exceptions,
+                    &mut enqueue_dbg,
+                    &mut enqueue_counters,
+                    0,
+                    &self.worker_commands_by_id,
+                    Some(&self.dynamic_neighbors),
+                );
+            };
+            if measure_enqueue {
+                let (_, allocations) = crate::test_alloc::count_allocs(enqueue);
+                allocations
+            } else {
+                enqueue();
+                0
+            }
+        };
+        binding.scratch.scratch_forwards = pending_forwards;
+        binding.scratch.scratch_post_recycles = post_recycles;
+
+        batch.touched |= enqueue_counters.touched;
+        batch.forward_build_failures += enqueue_counters.forward_build_failures;
+        batch.no_egress_binding_drops += enqueue_counters.no_egress_binding_drops;
+        dbg.build_fail += enqueue_dbg.build_fail;
+        dbg.no_egress_binding += enqueue_dbg.no_egress_binding;
+        dbg.enqueue_ok += enqueue_dbg.enqueue_ok;
+        dbg.enqueue_inplace += enqueue_dbg.enqueue_inplace;
+        dbg.enqueue_direct += enqueue_dbg.enqueue_direct;
+        dbg.enqueue_copy += enqueue_dbg.enqueue_copy;
+        dbg.tx_bytes_total += enqueue_dbg.tx_bytes_total;
+        dbg.tx_max_frame = dbg.tx_max_frame.max(enqueue_dbg.tx_max_frame);
+        // Capture the emitted frame before drain consumes the TX queue.
+        let mut egress: Option<Vec<u8>> = None;
+        for sibling in left.iter().chain(right.iter()) {
+            if let Some(req) = sibling.tx_pipeline.pending_tx_prepared.front() {
+                egress = sibling
+                    .umem
+                    .area()
+                    .slice(req.offset as usize, req.len as usize)
+                    .map(|bytes| bytes.to_vec());
+                break;
+            }
+            if let Some(req) = sibling.tx_pipeline.pending_tx_local.front() {
+                egress = Some(req.bytes.clone());
+                break;
+            }
+        }
+
+        // Drain so the next staged pass starts from empty TX queues.
+        let mut shared_recycles: Vec<(u32, u64)> = Vec::new();
+        super::tx::drain::drain_pending_tx(
+            binding,
+            123_000_000_000,
+            &mut shared_recycles,
+            forwarding,
+            0,
+            &self.worker_commands_by_id,
+        );
+        for sibling in left.iter_mut().chain(right.iter_mut()) {
+            super::tx::drain::drain_pending_tx(
+                sibling,
+                123_000_000_000,
+                &mut shared_recycles,
+                forwarding,
+                0,
+                &self.worker_commands_by_id,
+            );
+        }
+        (
+            LiveTunnelPass {
+                batch,
+                dbg,
+                egress,
+            },
+            allocations,
+        )
+    }
+
+    /// Uncounted warm pass: a descriptor is polled into scratch, then its
+    /// queued forward traverses the production enqueue/build/encap path.
+    pub(super) fn warm_poll_and_enqueue(
+        &mut self,
+        bindings: &mut Vec<BindingWorker>,
+        ingress_index: usize,
+        sessions: &mut SessionTable,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    ) -> LiveTunnelPass {
+        self.run_pass(bindings, ingress_index, sessions, forwarding, ha_state, false, None)
+            .0
+    }
+
+    /// Counted enqueue: a real descriptor poll creates the pending forward
+    /// outside the window; only `enqueue_pending_forwards_with_dynamic` is counted.
+    pub(super) fn measure_live_enqueue_after_poll(
+        &mut self,
+        bindings: &mut Vec<BindingWorker>,
+        ingress_index: usize,
+        sessions: &mut SessionTable,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    ) -> (LiveTunnelPass, u64) {
+        self.run_pass(bindings, ingress_index, sessions, forwarding, ha_state, true, None)
+    }
+    /// Uncounted warm pass using a prepared Live request and real ingress UMEM.
+    pub(super) fn warm_live_request_and_enqueue(
+        &mut self,
+        bindings: &mut Vec<BindingWorker>,
+        ingress_index: usize,
+        sessions: &mut SessionTable,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        request: PendingForwardRequest,
+    ) -> LiveTunnelPass {
+        self.run_pass(
+            bindings,
+            ingress_index,
+            sessions,
+            forwarding,
+            ha_state,
+            false,
+            Some(request),
+        )
+        .0
+    }
+
+    /// Count only production enqueue/build/encapsulation on a prepared Live request.
+    pub(super) fn measure_live_request_enqueue(
+        &mut self,
+        bindings: &mut Vec<BindingWorker>,
+        ingress_index: usize,
+        sessions: &mut SessionTable,
+        forwarding: &ForwardingState,
+        ha_state: &BTreeMap<i32, HAGroupRuntime>,
+        request: PendingForwardRequest,
+    ) -> (LiveTunnelPass, u64) {
+        self.run_pass(
+            bindings,
+            ingress_index,
+            sessions,
+            forwarding,
+            ha_state,
+            true,
+            Some(request),
+        )
+    }
+}
+
 
 
 /// `txn_run_descriptor` with an event stream wired so a cold-path emit (deny /

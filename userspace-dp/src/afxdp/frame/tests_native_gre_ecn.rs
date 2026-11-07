@@ -189,6 +189,27 @@ fn native_gre_decap_leaves_inner_unchanged_when_outer_not_congested() {
 
 #[test]
 fn build_forwarded_frame_from_frame_encapsulates_native_gre() {
+    let (state, inner, inner_meta, decision) = native_gre_builder_fixture();
+    let built = build_forwarded_frame_from_frame(
+        &inner,
+        inner_meta,
+        &decision,
+        &state,
+        false,
+        Some((0x1234, 0)), None).map(|(frame, _)| frame)
+    .expect("encapsulated gre frame");
+    assert_eq!(&built[12..16], &[0x81, 0x00, 0x00, 0x50]);
+    assert_eq!(&built[16..18], &[0x86, 0xdd]);
+    assert_eq!(&built[22..24], &[0x00, 0x20]);
+    assert_eq!(built[24], PROTO_GRE);
+    assert_eq!(built[25], 64);
+    assert_eq!(&built[60..62], &[0x08, 0x00]);
+    assert_eq!(built[70], 63);
+    assert_eq!(&built[74..78], &[10, 0, 61, 102]);
+    assert_eq!(&built[78..82], &[8, 8, 8, 8]);
+}
+
+fn native_gre_builder_fixture() -> (ForwardingState, Vec<u8>, UserspaceDpMeta, SessionDecision) {
     let state = build_forwarding_state(&native_gre_snapshot(true));
     let inner =
         build_icmp_echo_frame_v4(Ipv4Addr::new(10, 0, 61, 102), Ipv4Addr::new(8, 8, 8, 8), 64);
@@ -231,23 +252,198 @@ fn build_forwarded_frame_from_frame_encapsulates_native_gre() {
         install_table_domain: 0,
         install_table_check: 0,
     };
-    let built = build_forwarded_frame_from_frame(
-        &inner,
-        inner_meta,
-        &decision,
-        &state,
-        false,
-        Some((0x1234, 0)), None).map(|(frame, _)| frame)
-    .expect("encapsulated gre frame");
-    assert_eq!(&built[12..16], &[0x81, 0x00, 0x00, 0x50]);
-    assert_eq!(&built[16..18], &[0x86, 0xdd]);
-    assert_eq!(&built[22..24], &[0x00, 0x20]);
-    assert_eq!(built[24], PROTO_GRE);
-    assert_eq!(built[25], 64);
-    assert_eq!(&built[60..62], &[0x08, 0x00]);
-    assert_eq!(built[70], 63);
-    assert_eq!(&built[74..78], &[10, 0, 61, 102]);
-    assert_eq!(&built[78..82], &[8, 8, 8, 8]);
+    (state, inner, inner_meta, decision)
+}
+
+// Today the live path has a source-backed lower bound of at least two
+// allocations: the forwarded-frame builder's inner Vec and the GRE output
+// Vec. The zero assertion is intentionally ignored until #19008; this does
+// not claim either allocation is unavoidable.
+#[test]
+#[ignore = "#19008: pool-backed tunnel output design tracked"]
+fn native_gre_live_forwarded_builder_has_no_allocations_17272() {
+    let mut snapshot = native_gre_pbr_snapshot(true);
+    snapshot.default_policy = "deny".to_string();
+    snapshot.policies = vec![crate::PolicyRuleSnapshot {
+        name: "lan-sfmix".to_string(),
+        from_zone: "lan".to_string(),
+        to_zone: "sfmix".to_string(),
+        source_addresses: vec!["any".to_string()],
+        destination_addresses: vec!["any".to_string()],
+        applications: vec!["any".to_string()],
+        application_terms: Vec::new(),
+        action: "permit".to_string(),
+        ..Default::default()
+    }];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = crate::afxdp::tests_support::txn_ha_state();
+    let mut bindings = vec![
+        crate::afxdp::BindingWorker::new_for_mirror_test(0, 0, 5, 0),
+        crate::afxdp::BindingWorker::new_for_mirror_test(1, 0, 6, 0),
+    ];
+    bindings[0].interface = std::sync::Arc::<str>::from("reth1.0");
+    bindings[1].interface = std::sync::Arc::<str>::from("reth0");
+    let mut sessions = SessionTable::new();
+    let mut harness =
+        crate::afxdp::tests_support::LiveTunnelAllocHarness::new(&bindings);
+    harness.seed_static_neighbors(&forwarding);
+
+    let source = Ipv4Addr::new(10, 0, 61, 100);
+    let destination = Ipv4Addr::new(10, 255, 192, 41);
+    let ingress_mac = crate::afxdp::tests_support::TEST_RETH1_PARENT_MAC;
+    let syn = crate::afxdp::tests_support::build_txn_tcp_syn_frame_v4(
+        source,
+        destination,
+        12345,
+        443,
+        0x02,
+        ingress_mac,
+    );
+    let mut syn_meta = crate::afxdp::tests_support::txn_meta_v4(5, 0x02, syn.len() as u16);
+    syn_meta.flow_src_addr[..4].copy_from_slice(&source.octets());
+    syn_meta.flow_dst_addr[..4].copy_from_slice(&destination.octets());
+    assert!(
+        !forwarding.bindless_ipsec_selector_fence.matches_with_nat(
+            IpAddr::V4(source),
+            IpAddr::V4(destination),
+            NatDecision::default(),
+        ),
+        "fixture must not match bindless IPsec selector fence"
+    );
+    assert!(
+        !crate::afxdp::poll_descriptor::transit_source_class_drop(
+            &forwarding,
+            ForwardingDisposition::ForwardCandidate,
+            IpAddr::V4(source),
+            0,
+            syn_meta.into(),
+            None,
+        ),
+        "fixture source must not be classified as transit martian"
+    );
+    crate::afxdp::tests_support::LiveTunnelAllocHarness::stage(
+        &mut bindings,
+        0,
+        &syn,
+        syn_meta,
+    );
+    let syn_pass = harness.warm_poll_and_enqueue(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+    );
+    let syn_egress = syn_pass.egress.as_deref().unwrap_or_else(|| {
+        panic!(
+            "SYN must emit native GRE: tx={} forward={} session_hit={} session_miss={} \
+             no_route={} missing_neigh={} enqueue_ok={} build_fail={} no_egress={} \
+             forward_build_failures={} no_egress_binding_drops={}",
+            syn_pass.dbg.tx,
+            syn_pass.dbg.forward,
+            syn_pass.dbg.session_hit,
+            syn_pass.dbg.session_miss,
+            syn_pass.dbg.no_route,
+            syn_pass.dbg.missing_neigh,
+            syn_pass.dbg.enqueue_ok,
+            syn_pass.dbg.build_fail,
+            syn_pass.dbg.no_egress_binding,
+            syn_pass.batch.forward_build_failures,
+            syn_pass.batch.no_egress_binding_drops,
+        )
+    });
+    assert_native_gre_live_egress(syn_egress);
+    assert_eq!(syn_pass.dbg.enqueue_ok, 1, "SYN must be enqueued");
+    assert_eq!(syn_pass.batch.forward_build_failures, 0);
+    assert_eq!(syn_pass.batch.no_egress_binding_drops, 0);
+
+    // The first ACK seeds the ordinary tunnel flow-cache entry; the next
+    // identical ACK traverses the established cached session hit.
+    let ack = crate::afxdp::tests_support::build_txn_tcp_syn_frame_v4(
+        source,
+        destination,
+        12345,
+        443,
+        0x10,
+        ingress_mac,
+    );
+    let mut ack_meta = crate::afxdp::tests_support::txn_meta_v4(5, 0x10, ack.len() as u16);
+    ack_meta.flow_src_addr[..4].copy_from_slice(&source.octets());
+    ack_meta.flow_dst_addr[..4].copy_from_slice(&destination.octets());
+    crate::afxdp::tests_support::LiveTunnelAllocHarness::stage(
+        &mut bindings,
+        0,
+        &ack,
+        ack_meta,
+    );
+    let warm = harness.warm_poll_and_enqueue(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+    );
+    assert_native_gre_live_egress(warm.egress.as_deref().expect("ACK warmup must emit GRE"));
+    assert_eq!(warm.dbg.enqueue_ok, 1, "ACK warmup must be enqueued");
+    assert_eq!(warm.batch.forward_build_failures, 0);
+    assert_eq!(warm.batch.no_egress_binding_drops, 0);
+    assert_eq!(
+        crate::afxdp::tests_support::txn_flow_cache_entries(&bindings[0]),
+        1,
+        "the ACK must warm one live GRE flow-cache entry"
+    );
+
+    crate::afxdp::tests_support::LiveTunnelAllocHarness::stage(
+        &mut bindings,
+        0,
+        &ack,
+        ack_meta,
+    );
+    let flow_cache_hits_before = bindings[0].flow.flow_cache.hits;
+    let (measured, allocations) = harness.measure_live_enqueue_after_poll(
+        &mut bindings,
+        0,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+    );
+    let egress = measured
+        .egress
+        .as_deref()
+        .expect("measured cached ACK must emit native GRE");
+    assert_native_gre_live_egress(egress);
+    assert_eq!(
+        bindings[0].flow.flow_cache.hits,
+        flow_cache_hits_before + 1,
+        "measured packet must hit the warmed flow cache"
+    );
+    assert_eq!(measured.dbg.enqueue_ok, 1, "measured forward must be enqueued");
+    assert_eq!(measured.batch.forward_build_failures, 0, "GRE builder must not fail");
+    assert_eq!(measured.batch.no_egress_binding_drops, 0, "GRE egress binding must exist");
+    assert_eq!(measured.dbg.build_fail, 0, "GRE builder debug failure counter");
+    assert_eq!(measured.dbg.no_egress_binding, 0, "GRE egress debug drop counter");
+    assert_eq!(
+        allocations, 0,
+        "#17272: warmed live GRE forwarding enqueue/build/encapsulation must not allocate"
+    );
+}
+
+fn assert_native_gre_live_egress(built: &[u8]) {
+    assert_eq!(&built[12..14], &[0x81, 0x00], "outer egress must be VLAN tagged");
+    assert_eq!(&built[14..16], &[0x00, 0x50], "outer egress VLAN must be 80");
+    assert_eq!(&built[16..18], &[0x86, 0xdd], "native GRE outer must be IPv6");
+    assert_eq!(built[18] >> 4, 6, "outer network header must be IPv6");
+    assert_eq!(built[24], PROTO_GRE, "outer IPv6 next-header must be GRE");
+    assert_eq!(
+        &built[42..58],
+        &"2602:ffd3:0:2::7".parse::<Ipv6Addr>().unwrap().octets(),
+        "outer destination must be the configured native-GRE peer"
+    );
+    assert_eq!(
+        &built[60..62],
+        &[0x08, 0x00],
+        "GRE payload protocol must be IPv4"
+    );
 }
 
 #[test]

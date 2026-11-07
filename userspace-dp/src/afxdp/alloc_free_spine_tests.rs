@@ -129,7 +129,7 @@ fn established_forward_v6_cache_hit_has_no_allocations_17272() {
 }
 
 #[test]
-#[ignore = "#19005"]
+#[ignore = "#19005: challenge path still allocates"]
 fn syn_cookie_pool_challenge_has_no_allocations_17272() {
     // #19005 expiry: the pool fence, session-miss spine, and owned reply still allocate.
     let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot();
