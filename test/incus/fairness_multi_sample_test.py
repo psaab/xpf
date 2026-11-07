@@ -618,6 +618,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     set -euo pipefail
                     touch "$CURL_SENTINEL"
                     cat <<'PROM'
+                    xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="2"} 1
                     xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="2"} 1
                     xpf_fairness_equal_flow_sampled_active_workers{ifindex="14",queue_id="2"} 2
                     xpf_fairness_equal_flow_unsampled_active_workers{ifindex="14",queue_id="2"} 0
@@ -651,7 +652,10 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 # The harness defines SKIP_TARGET_PRECHECK for exactly this; the
                 # test predates the precheck and had been failing invisibly
                 # since, because nothing ran this file.
+                # #11769 added a preflight that confirms the sourced cluster
+                # LAN generator and active-flow metric before sweeping.
                 "SKIP_TARGET_PRECHECK": "1",
+                "IPERF_LAUNCH_ARG_2": "loss:cluster-userspace-host",
                 "PATH": f"{tmp_path}:{os.environ['PATH']}",
                 "ARTIFACT_ROOT": str(out_root),
                 "CAPTURE_DATAPLANE": "0",
@@ -749,6 +753,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                     set -euo pipefail
                     touch "$CURL_SENTINEL"
                     cat <<'PROM'
+                    xpf_userspace_cos_active_flow_count{ifindex="14",queue_id="2"} 1
                     xpf_fairness_equal_flow_estimate_valid{ifindex="14",queue_id="2"} 1
                     xpf_fairness_equal_flow_sampled_active_workers{ifindex="14",queue_id="2"} 1.5
                     xpf_fairness_equal_flow_unsampled_active_workers{ifindex="14",queue_id="2"} 0
@@ -774,6 +779,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
                 # The harness defines SKIP_TARGET_PRECHECK for exactly this; the
                 # test predates the precheck and had been failing invisibly
                 # since, because nothing ran this file.
+                "IPERF_LAUNCH_ARG_2": "loss:cluster-userspace-host",
                 "SKIP_TARGET_PRECHECK": "1",
                 "PATH": f"{tmp_path}:{os.environ['PATH']}",
                 "ARTIFACT_ROOT": str(out_root),
@@ -1528,6 +1534,14 @@ class FairnessMultiSampleTest(unittest.TestCase):
         # written and the cell reports FileNotFoundError instead of its verdict.
         cos_lib = HARNESS_PATH.with_name("cos-apply-lib.sh")
         (tmp_path / cos_lib.name).write_text(cos_lib.read_text(encoding="utf-8"), encoding="utf-8")
+        # #11769 made the harness also source its sibling cluster-env.sh
+        # (TARGET defaults to IPERF_TARGET4). Without that sibling the
+        # copy dies on the `source` line before the precheck, so the stub
+        # log is never written. Copy it beside the harness like cos_lib.
+        cluster_env = HARNESS_PATH.with_name("cluster-env.sh")
+        (tmp_path / cluster_env.name).write_text(
+            cluster_env.read_text(encoding="utf-8"), encoding="utf-8"
+        )
         stub_log = tmp_path / "precheck.log"
         stub = tmp_path / "target-services.sh"
         stub.write_text(
@@ -1560,6 +1574,7 @@ class FairnessMultiSampleTest(unittest.TestCase):
         )
         iperf3.chmod(0o755)
         env = {k: v for k, v in os.environ.items() if k != "SKIP_TARGET_PRECHECK"}
+        env["PROJECT_ROOT"] = str(HARNESS_PATH.parents[2])
         env["PRECHECK_LOG"] = str(stub_log)
         env["IPERF3_LOG"] = str(self.iperf3_log)
         env["PATH"] = f"{bindir}{os.pathsep}{env.get('PATH', '')}"
