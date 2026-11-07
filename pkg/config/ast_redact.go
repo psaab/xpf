@@ -1584,8 +1584,9 @@ func checkRedactionPlaceholder(t *ConfigTree) error {
 	if t == nil {
 		return nil
 	}
-	// Fold 5 (#16090): "(at %q)" names the stanza/leaf NAME path only, never
-	// the rendered flattened path, which may contain operator-supplied values.
+	// Fold 5 (#16090): "(at %q)" names the stanza/leaf path as rendered by
+	// redactedLocName — names plus safely-masked URL context (RedactURL),
+	// never a raw flattened path carrying operator-supplied values.
 	var secretLoc, urlLoc string
 	walkSecretSites(t.Children, nil, func(site redactionSiteList) bool {
 		for _, idx := range site.secrets {
