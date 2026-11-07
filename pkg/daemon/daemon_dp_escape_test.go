@@ -73,9 +73,9 @@ func newEscapeTestDaemon(t *testing.T) *Daemon {
 
 // startEscapeTestGRPC runs the PRODUCTION server-startup path and returns
 // the constructed server. The context is cancelled immediately so the
-// serve loop exits without waiting; d.grpcSrv is assigned synchronously
-// inside startGRPCServer, before the goroutine, so the handler is
-// reachable regardless.
+// serve loop exits without waiting; the server reference is published
+// synchronously inside startGRPCServer, before the goroutine, so the
+// handler is reachable regardless.
 func startEscapeTestGRPC(t *testing.T, d *Daemon) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -83,14 +83,14 @@ func startEscapeTestGRPC(t *testing.T, d *Daemon) {
 	var wg sync.WaitGroup
 	d.startGRPCServer(ctx, &wg, nil, nil)
 	t.Cleanup(wg.Wait)
-	if d.grpcSrv == nil {
+	if d.loadGRPCSrv() == nil {
 		t.Fatal("startGRPCServer did not construct a server")
 	}
 }
 
 func clearPolicyCountersViaGRPC(t *testing.T, d *Daemon) (*pb.SystemActionResponse, error) {
 	t.Helper()
-	return d.grpcSrv.SystemAction(context.Background(),
+	return d.loadGRPCSrv().SystemAction(context.Background(),
 		&pb.SystemActionRequest{Action: "clear-policy-counters"})
 }
 

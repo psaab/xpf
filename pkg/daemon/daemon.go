@@ -1612,8 +1612,16 @@ type Daemon struct {
 	syncPeerAddr1         string
 	syncPeerAddr1Disabled bool
 
-	// gRPC server reference for starting fabric listener in cluster mode.
-	grpcSrv *grpcapi.Server
+	// grpcSrv is the gRPC server published by startGRPCServer for the
+	// fabric listener and live readers (#17264). grpcReady is closed once,
+	// strictly after the first Store, so a waiter that observes the close
+	// is guaranteed a non-nil Load. The channel is created lazily by
+	// grpcReadyChan because Daemon is built by &Daemon{} literals that
+	// never run a constructor.
+	grpcSrv       atomic.Pointer[grpcapi.Server]
+	grpcReady     chan struct{}
+	grpcReadyInit sync.Once
+	grpcReadyOnce sync.Once
 
 	// daemonCtx is the parent context from Run(), used to derive
 	// independently-cancellable sub-contexts for the daemon-lifetime
@@ -2278,6 +2286,46 @@ type Daemon struct {
 	fabricNeighSubscribe func(ch chan<- netlink.NeighUpdate, done <-chan struct{}, onErr func(error)) error
 	// fabricStateResubBackoff: Zero ⇒ nlWatchBackoffDefault (#4031).
 	fabricStateResubBackoff time.Duration
+}
+
+// grpcReadyChan returns the lazily initialized notification channel for
+// gRPC-server publication. Both waiters and publishers use this accessor so
+// a waiter created before the server never snapshots a nil channel.
+func (d *Daemon) grpcReadyChan() chan struct{} {
+	d.grpcReadyInit.Do(func() {
+		d.grpcReady = make(chan struct{})
+	})
+	return d.grpcReady
+}
+
+// publishGRPCSrv publishes srv and wakes waiters. A nil server is not a
+// publication. Store must precede close so observing readiness synchronizes
+// with the pointer load in awaitGRPCSrv.
+func (d *Daemon) publishGRPCSrv(srv *grpcapi.Server) {
+	if srv == nil {
+		return
+	}
+	ready := d.grpcReadyChan()
+	d.grpcSrv.Store(srv)
+	d.grpcReadyOnce.Do(func() {
+		close(ready)
+	})
+}
+
+// loadGRPCSrv returns the currently published gRPC server, or nil.
+func (d *Daemon) loadGRPCSrv() *grpcapi.Server {
+	return d.grpcSrv.Load()
+}
+
+// awaitGRPCSrv waits until a server is published or ctx is cancelled.
+func (d *Daemon) awaitGRPCSrv(ctx context.Context) (*grpcapi.Server, bool) {
+	select {
+	case <-d.grpcReadyChan():
+		srv := d.loadGRPCSrv()
+		return srv, srv != nil
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // dataplane returns the currently published runtime dataplane, or nil.

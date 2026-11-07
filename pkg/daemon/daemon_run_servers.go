@@ -39,8 +39,8 @@ import (
 //     the reconciler is absent (empty --api-addr, listener never started).
 func (d *Daemon) effectiveListeners() sysservices.Listeners {
 	var ls sysservices.Listeners
-	if d.grpcSrv != nil {
-		ls.GRPC = d.grpcSrv.EffectiveListener()
+	if srv := d.loadGRPCSrv(); srv != nil {
+		ls.GRPC = srv.EffectiveListener()
 	} else {
 		// Server not yet constructed — the pre-bind startup window. gRPC always
 		// binds on loopback, so report the requested address as Listening.
@@ -299,7 +299,7 @@ func (d *Daemon) startGRPCServer(ctx context.Context, wg *sync.WaitGroup, eventB
 		// the two surfaces can never diverge.
 		ListenersFn: d.effectiveListeners,
 	})
-	d.grpcSrv = grpcSrv
+	d.publishGRPCSrv(grpcSrv)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -646,14 +646,15 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 			}
 			return agent.ServeBudgetStats()
 		},
-		// #16478: fabric gRPC connection-bound telemetry. d.grpcSrv is
-		// assigned after startHTTPServer runs (startGRPCServer is the next
+		// #16478: fabric gRPC connection-bound telemetry. The server is
+		// published after startHTTPServer runs (startGRPCServer is the next
 		// phase-5 step), so read it live per scrape; nil reports zeros.
 		FabricConnStatsFn: func() (uint64, int64) {
-			if d.grpcSrv == nil {
+			srv := d.loadGRPCSrv()
+			if srv == nil {
 				return 0, 0
 			}
-			return d.grpcSrv.FabricConnStats()
+			return srv.FabricConnStats()
 		},
 		// #5054: HTTP/REST commits sync to the peer on the SAME
 		// RG0-ownership policy as gRPC/local-shell. Peer convergence
@@ -1110,10 +1111,11 @@ func (d *Daemon) apiServerConfig(eventBuf *logging.EventBuffer) api.Config {
 		// a non-nil typed-nil), keeping REST local-only until the gRPC
 		// server is up.
 		ClusterSessionFn: func() api.ClusterSessionService {
-			if d.grpcSrv == nil {
+			srv := d.loadGRPCSrv()
+			if srv == nil {
 				return nil
 			}
-			return d.grpcSrv
+			return srv
 		},
 	}
 }

@@ -8,20 +8,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/grpcapi"
 	"github.com/vishvananda/netlink"
 )
 
+// newVRFBindingRetryDaemon12168 uses real loopback sockets in the testguard
+// network namespace (class N); initialize and verify that namespace locally.
 func newVRFBindingRetryDaemon12168(t *testing.T, lines []string, withGRPC bool) *Daemon {
 	t.Helper()
+	testguard.RequireDisposable(t)
+	ensureLoopbackForSyncPair12210(t)
 	store := testStoreWithSetConfig(t, lines)
 	ctx, cancel := context.WithCancel(context.Background())
 	manager := cluster.NewManager(0, 1)
 	d := &Daemon{store: store, cluster: manager, daemonCtx: ctx}
 	if withGRPC {
-		d.grpcSrv = grpcapi.NewServer("", grpcapi.Config{Store: store, Cluster: manager})
+		d.publishGRPCSrv(grpcapi.NewServer("", grpcapi.Config{Store: store, Cluster: manager}))
 	}
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: config.ManagementVRFDeviceName, Index: 77}}
 	link := &netlink.Dummy{LinkAttrs: netlink.LinkAttrs{Name: "lo", Index: 1}}
@@ -103,7 +108,7 @@ func waitFabricListenerUp12168(t *testing.T, d *Daemon, addr string) {
 	t.Helper()
 	deadline := time.Now().Add(6 * time.Second)
 	for time.Now().Before(deadline) {
-		if d.grpcSrv.FabricListenerUp(addr) {
+		if srv := d.loadGRPCSrv(); srv != nil && srv.FabricListenerUp(addr) {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -176,10 +181,8 @@ func TestSessionSyncResolvesVRFBindingPerAttempt12168(t *testing.T) {
 
 // The fabric gRPC supervisor must refresh the device on each bind retry.
 // Publish the server before starting comms, then join session-sync startup
-// before waiting for repeated gRPC resolver calls. The production late
-// grpcSrv assignment in daemon_run_servers.go:301 still races the poller read
-// in daemon_ha_comms_wiring.go:229; that pre-existing race is not fixed here,
-// and this test does not reproduce it to pin the M8 resolver.
+// before waiting for repeated gRPC resolver calls. This test does not
+// reproduce publication timing; it pins the M8 resolver.
 func TestFabricGRPCResolvesVRFBindingPerAttempt12168(t *testing.T) {
 	occupier, err := net.Listen("tcp4", "127.0.0.1:50051")
 	if err != nil {

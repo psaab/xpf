@@ -122,7 +122,7 @@ func newKernelVRFRetryFixture12168(t *testing.T) (*Daemon, *config.Config, netli
 		daemonCtx: ctx,
 		opts:      Options{NoDataplane: true},
 	}
-	d.grpcSrv = grpcapi.NewServer("", grpcapi.Config{Store: store, Cluster: d.cluster})
+	d.publishGRPCSrv(grpcapi.NewServer("", grpcapi.Config{Store: store, Cluster: d.cluster}))
 	t.Cleanup(func() {
 		d.stopClusterComms()
 		d.cluster.Stop() // join keyed-epoch persistence before the state mount is removed
@@ -728,7 +728,7 @@ func newDualFabricVRFFixture12168(t *testing.T, includeFab1 bool) *Daemon {
 		opts:      Options{NoDataplane: true},
 		routing:   routing.NewManagerWithLinkOpsForTest(handle),
 	}
-	d.grpcSrv = grpcapi.NewServer("", grpcapi.Config{Store: store, Cluster: d.cluster})
+	d.publishGRPCSrv(grpcapi.NewServer("", grpcapi.Config{Store: store, Cluster: d.cluster}))
 	members := map[string]bool{"fab0": true, "fab1": true}
 	d.publishMgmtVRFIfaces(members)
 	t.Cleanup(func() {

@@ -198,7 +198,11 @@ func (d *statusProbeDP) Status() (dpuserspace.ProcessStatus, error) {
 
 func showTextTopic(t *testing.T, d *Daemon, topic string) string {
 	t.Helper()
-	resp, err := d.grpcSrv.ShowText(context.Background(), &pb.ShowTextRequest{Topic: topic})
+	srv := d.loadGRPCSrv()
+	if srv == nil {
+		t.Fatal("gRPC server has not been published")
+	}
+	resp, err := srv.ShowText(context.Background(), &pb.ShowTextRequest{Topic: topic})
 	if err != nil {
 		t.Fatalf("ShowText(%q): %v", topic, err)
 	}
@@ -415,7 +419,11 @@ func TestSystemAction_ClearPersistentNATResolvesOnce(t *testing.T) {
 				panicked, panicSeen = r, true
 			}
 		}()
-		resp, err = d.grpcSrv.SystemAction(context.Background(),
+		srv := d.loadGRPCSrv()
+		if srv == nil {
+			t.Fatal("gRPC server has not been published")
+		}
+		resp, err = srv.SystemAction(context.Background(),
 			&pb.SystemActionRequest{Action: "clear-persistent-nat"})
 	}()
 

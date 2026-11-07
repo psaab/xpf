@@ -250,37 +250,33 @@ func (d *Daemon) fabricPeerAddrs() []string {
 	return addrs
 }
 
-// startFabricGRPCListeners spawns the poller that starts the gRPC fabric
-// listener(s) once d.grpcSrv exists (it is set after startClusterComms
-// returns). Extracted verbatim from startClusterComms (#6428) — pure code
-// motion; the goroutine is spawned at the same point in the sequence.
+// startFabricGRPCListeners waits for gRPC-server publication, then starts
+// the fabric listener(s). Extracted verbatim from startClusterComms (#6428) —
+// the goroutine is spawned at the same point in the sequence.
 func (d *Daemon) startFabricGRPCListeners(commsCtx context.Context, syncIP, syncLocal1 string, vrfDeviceFn func() string) {
 	// Start gRPC fabric listener(s) so peer can proxy monitor requests.
-	// d.grpcSrv is set after startClusterComms returns, so we poll briefly.
 	// Uses the sync interface address (fabric or control-link).
 	// When dual-fabric is configured, listen on both fabric IPs.
 	go func() {
-		for i := 0; i < 30; i++ {
-			if d.grpcSrv != nil {
-				// #8597 (muse-004 K29 siblings): these are LISTEN addresses, and
-				// an IPv6 fabric literal formatted as "%s:50051" yields
-				// `2001:db8::2:50051` — which is not an address, so the fabric
-				// gRPC listener never binds and the peer-proxy path is dark on
-				// an IPv6-only fabric. Same class as the dial site in
-				// `grpcapi/server_diag.go` and as #4909's `pkg/cli/peer.go`.
-				grpcAddr := net.JoinHostPort(syncIP, "50051")
-				if syncLocal1 != "" {
-					// Extract fab1 local IP (syncLocal1 is "ip:4785").
-					fab1Host, _, _ := net.SplitHostPort(syncLocal1)
-					grpcAddr1 := net.JoinHostPort(fab1Host, "50051")
-					go d.grpcSrv.RunFabricListenerWithVRFDeviceFunc(commsCtx, grpcAddr1, vrfDeviceFn)
-					slog.Info("gRPC dual fabric listeners", "fab0", grpcAddr, "fab1", grpcAddr1)
-				}
-				d.grpcSrv.RunFabricListenerWithVRFDeviceFunc(commsCtx, grpcAddr, vrfDeviceFn)
-				return
-			}
-			time.Sleep(time.Second)
+		srv, ok := d.awaitGRPCSrv(commsCtx)
+		if !ok {
+			return
 		}
+		// #8597 (muse-004 K29 siblings): these are LISTEN addresses, and
+		// an IPv6 fabric literal formatted as "%s:50051" yields
+		// `2001:db8::2:50051` — which is not an address, so the fabric
+		// gRPC listener never binds and the peer-proxy path is dark on
+		// an IPv6-only fabric. Same class as the dial site in
+		// `grpcapi/server_diag.go` and as #4909's `pkg/cli/peer.go`.
+		grpcAddr := net.JoinHostPort(syncIP, "50051")
+		if syncLocal1 != "" {
+			// Extract fab1 local IP (syncLocal1 is "ip:4785").
+			fab1Host, _, _ := net.SplitHostPort(syncLocal1)
+			grpcAddr1 := net.JoinHostPort(fab1Host, "50051")
+			go srv.RunFabricListenerWithVRFDeviceFunc(commsCtx, grpcAddr1, vrfDeviceFn)
+			slog.Info("gRPC dual fabric listeners", "fab0", grpcAddr, "fab1", grpcAddr1)
+		}
+		srv.RunFabricListenerWithVRFDeviceFunc(commsCtx, grpcAddr, vrfDeviceFn)
 	}()
 }
 

@@ -1030,10 +1030,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		shell.SetPeerSnapshotProtocolAlarmFn(d.peerSnapshotProtocolDeferredAlarm)
 		shell.SetDeltaSchemaWithheldFn(d.UserspaceDeltaSchemaWithheldCount)
 		shell.SetFabricAuthUnarmedAlarmFn(func() string {
-			if d.grpcSrv == nil {
+			srv := d.loadGRPCSrv()
+			if srv == nil {
 				return ""
 			}
-			return d.grpcSrv.FabricAuthUnarmedAlarm()
+			return srv.FabricAuthUnarmedAlarm()
 		})
 		shell.SetFeedsFn(func() map[string]feeds.FeedInfo {
 			if d.feeds != nil {
