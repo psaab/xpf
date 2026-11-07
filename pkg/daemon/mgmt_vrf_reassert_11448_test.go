@@ -196,6 +196,65 @@ func TestFab1LocalAddressMismatchWarnsOncePerEpoch18613(t *testing.T) {
 	}
 }
 
+// #18613 race arm (GLM delta): the resolve runs unlocked; an epoch
+// replacement DURING it must not let the stale result warn against
+// (or spend the allowance of) the successor epoch. The injected
+// resolver hook swaps the epoch mid-resolution.
+func TestFab1MismatchStaleResolveDoesNotWarnAgainstSuccessor18613(t *testing.T) {
+	store := testStoreWithSetConfig(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster authentication-key test-fab1-address-18613",
+		"set chassis cluster fabric-interface lo",
+		"set chassis cluster fabric-peer-address 127.0.0.2",
+		"set chassis cluster fabric1-interface lo",
+		"set chassis cluster fabric1-peer-address 2001:db8::3",
+	})
+	d := &Daemon{store: store, applySem: semaphore.NewWeighted(1)}
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	publish := func(localHost string) uint64 {
+		_, gen, cancel := d.beginClusterCommsEpoch(context.Background())
+		t.Cleanup(cancel)
+		ss := cluster.NewDualSessionSync(
+			"127.0.0.1:4785", "127.0.0.2:4785",
+			net.JoinHostPort(localHost, "4785"), net.JoinHostPort("2001:db8::3", "4785"), nil)
+		if !d.publishSessionSyncIfCurrent(gen, ss) {
+			t.Fatalf("publish epoch %d", gen)
+		}
+		d.publishFab1LocalHostIfCurrent(gen, net.JoinHostPort(localHost, "4785"))
+		return gen
+	}
+	gen1 := publish("2001:db8::1")
+
+	swapped := false
+	previousAddrs := clusterInterfaceAddrsByName
+	clusterInterfaceAddrsByName = func(_ *config.Config, _ string) ([]net.Addr, error) {
+		if !swapped {
+			swapped = true
+			publish("2001:db8::2") // successor epoch replaces gen1 mid-resolve
+		}
+		ip := net.ParseIP("2001:db8::9")
+		return []net.Addr{&net.IPNet{IP: ip, Mask: net.CIDRMask(64, 128)}}, nil
+	}
+	t.Cleanup(func() { clusterInterfaceAddrsByName = previousAddrs })
+
+	d.warnFab1LocalAddressMismatch(store.ActiveConfig())
+	if strings.Contains(logs.String(), "cluster: fab1 local address differs") {
+		t.Fatalf("stale resolve warned against the successor epoch: %s", logs.String())
+	}
+	d.fabricMu.RLock()
+	warned := d.fab1LocalWarnedGen
+	d.fabricMu.RUnlock()
+	if warned == gen1+1 || warned == gen1 {
+		t.Fatalf("stale resolve spent a warning allowance (warnedGen=%d)", warned)
+	}
+	_ = gen1
+}
+
 func TestFab1MismatchSkipsResolveWithoutDualEpochHost18613(t *testing.T) {
 	cfg := &config.Config{Chassis: config.ChassisConfig{Cluster: &config.ClusterConfig{
 		FabricInterface: "fab0", FabricPeerAddress: "10.99.0.2",
