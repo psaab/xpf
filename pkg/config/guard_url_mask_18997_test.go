@@ -56,6 +56,9 @@ func TestPlaceholderGuardNeverEchoesPrecedingURLCredential18997(t *testing.T) {
 	if !IsRedactionPlaceholderIngestError(err) {
 		t.Fatalf("SchemaValidate err lost placeholder classification: %v", err)
 	}
+	if strings.Contains(err.Error(), "pw@") || strings.Contains(err.Error(), "user:pw") {
+		t.Errorf("SchemaValidate error echoed the preceding URL credential (#18997): %v", err)
+	}
 	if !strings.Contains(err.Error(), SecretDataPlaceholder) ||
 		!strings.Contains(err.Error(), "scp://<redacted>@host/dir") {
 		t.Errorf("SchemaValidate error lost placeholder/URL masking: %v", err)
