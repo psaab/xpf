@@ -431,8 +431,10 @@ GOTESTJSON ?=
 # busted the cache by accident, so a stale pass survived one commit instead
 # of many.
 #
-# Scoped to these packages, not the whole suite: measured at ~10.7s uncached
-# against ~0.1s cached, which is noise on a suite that already runs
+# Scoped to these packages, not the whole suite: the original set measured
+# ~10.7s uncached against ~0.1s cached (pre-#19002 membership; the leg now
+# also carries pkg/config, whose added cost is unmeasured), which is noise on
+# a suite that already runs
 # minutes, whereas -count=1 on ./... would forfeit caching everywhere.
 # Deliberately NOT narrowed further with -run: a name predicate silently
 # stops covering the next tree-reading test added here, which is the
