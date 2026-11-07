@@ -2,14 +2,18 @@ package dataplane
 
 import (
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/networkd"
 )
 
 // #18605: networkd needs KeepMaster=yes on every row the daemon binds to a
-// routing-instance VRF. This drives compileZones through its model builders and
-// post-build pass; pkg/networkd's KeepMaster18597 cells pin the rendered line.
+// routing-instance VRF. These tests drive compileZones through its model
+// builders and assert the rendered .network files produced by networkd.Apply.
 func TestRoutingInstanceMembersKeepMaster18605(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
@@ -150,8 +154,40 @@ func assertVRFName18605(t *testing.T, result *CompileResult, name, want string) 
 			if row.VRFName != want {
 				t.Fatalf("networkd row %s VRFName = %q, want %q: %+v", name, row.VRFName, want, row)
 			}
+			assertRenderedKeepMaster18605(t, result, name, want != "")
 			return
 		}
 	}
 	t.Fatalf("no networkd model for %s: %+v", name, result.ManagedInterfaces)
+}
+
+func assertRenderedKeepMaster18605(t *testing.T, result *CompileResult, name string, want bool) {
+	t.Helper()
+
+	// Apply writes the generated files before reload. Fail the stubbed reload
+	// deliberately so the test checks real output without running the tail's
+	// host sysctl writes.
+	binDir := t.TempDir()
+	networkctl := filepath.Join(binDir, "networkctl")
+	script := "#!/bin/sh\nif [ \"$1\" = reload ]; then exit 1; fi\nexit 0\n"
+	if err := os.WriteFile(networkctl, []byte(script), 0o755); err != nil {
+		t.Fatalf("write networkctl stub: %v", err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	networkDir := t.TempDir()
+	err := networkd.NewInDir(networkDir).Apply(result.ManagedInterfaces)
+	if err == nil || !strings.Contains(err.Error(), "networkctl reload") {
+		t.Fatalf("networkd Apply error = %v, want stubbed reload failure after rendering files", err)
+	}
+
+	path := filepath.Join(networkDir, networkd.FilePrefix+name+".network")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read rendered networkd file for %s: %v", name, err)
+	}
+	got := strings.Contains(string(content), "KeepMaster=yes\n")
+	if got != want {
+		t.Fatalf("%s rendered KeepMaster = %v, want %v; file:\n%s", name, got, want, content)
+	}
 }
