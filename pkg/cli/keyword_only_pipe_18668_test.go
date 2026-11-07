@@ -322,7 +322,7 @@ func TestLocalLeafOutputFiltersStillWork18666(t *testing.T) {
 }
 
 // TestLocalCoSOptionalSelector18666 pins the CoS leaf's one optional selector
-// through full dispatch and refuses display pipes both before and after it.
+// through full dispatch and refuses pipes or a second suffix before rendering.
 func TestLocalCoSOptionalSelector18666(t *testing.T) {
 	c := committedCoSStore18666(t)
 	var err error
@@ -336,20 +336,21 @@ func TestLocalCoSOptionalSelector18666(t *testing.T) {
 		t.Fatalf("selector output did not filter the configured CoS view:\n%s", out)
 	}
 
-	for _, line := range []string{
-		"show class-of-service interface | display xml",
-		"show class-of-service interface reth0.80 | display xml",
+	for _, tc := range []struct{ line, want string }{
+		{"show class-of-service interface | display xml", `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`},
+		{"show class-of-service interface reth0.80 | display xml", `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`},
+		{"show class-of-service interface |display xml", `unknown show class-of-service interface command: |display (separate the pipe with spaces: "| display")`},
+		{"show class-of-service interface reth0.80 extra", "unknown show class-of-service interface command: extra"},
 	} {
-		t.Run(line, func(t *testing.T) {
+		t.Run(tc.line, func(t *testing.T) {
 			c := committedCoSStore18666(t)
 			var err error
-			out := captureStdout(t, func() { err = c.dispatch(line) })
-			want := `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`
-			if err == nil || err.Error() != want {
-				t.Fatalf("dispatch(%q) = %v; want %q", line, err, want)
+			out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
 			}
 			if out != "" {
-				t.Fatalf("dispatch(%q) output=%q; want refusal before handler", line, out)
+				t.Fatalf("dispatch(%q) output=%q; want refusal before handler", tc.line, out)
 			}
 		})
 	}

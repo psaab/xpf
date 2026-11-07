@@ -431,8 +431,8 @@ func TestOpLeafUnconsumedSuffixRefused18666(t *testing.T) {
 }
 
 // TestOpClassOfServiceOptionalSelector18666 proves the CoS leaf's single
-// optional selector reaches the filtered ShowText view, while neither a bare
-// display pipe nor one after the selector is consumed by that handler.
+// optional selector reaches the filtered ShowText view, and full dispatch
+// refuses glued/separated pipes and a second word before rendering or RPC.
 func TestOpClassOfServiceOptionalSelector18666(t *testing.T) {
 	f, out, err := dispatch18664(t, "show class-of-service interface reth0.80", false)
 	if err != nil || !reflect.DeepEqual(f.text, []string{"class-of-service:reth0.80"}) {
@@ -442,18 +442,19 @@ func TestOpClassOfServiceOptionalSelector18666(t *testing.T) {
 		t.Fatalf("selector output %q; want filtered interface view", out)
 	}
 
-	for _, line := range []string{
-		"show class-of-service interface | display xml",
-		"show class-of-service interface reth0.80 | display xml",
+	for _, tc := range []struct{ line, want string }{
+		{"show class-of-service interface | display xml", `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`},
+		{"show class-of-service interface reth0.80 | display xml", `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`},
+		{"show class-of-service interface |display xml", `unknown show class-of-service interface command: |display (separate the pipe with spaces: "| display")`},
+		{"show class-of-service interface reth0.80 extra", "unknown show class-of-service interface command: extra"},
 	} {
-		t.Run(line, func(t *testing.T) {
-			f, out, err := dispatch18664(t, line, false)
-			want := `syntax error: "show class-of-service interface" does not accept the output modifier "| display xml"`
-			if err == nil || err.Error() != want {
-				t.Fatalf("dispatch(%q) = %v; want %q", line, err, want)
+		t.Run(tc.line, func(t *testing.T) {
+			f, out, err := dispatch18664(t, tc.line, false)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
 			}
 			if f.calls() != 0 || out != "" {
-				t.Fatalf("dispatch(%q) calls=%d output=%q; want refusal before RPC/output", line, f.calls(), out)
+				t.Fatalf("dispatch(%q) calls=%d output=%q; want refusal before RPC/output", tc.line, f.calls(), out)
 			}
 		})
 	}
