@@ -488,6 +488,68 @@ func (m *Manager) prepareDeferredPolicySnapshotLocked() bool {
 	return ready
 }
 
+// requestHelperStatusAtSocket reads a full helper status using the same
+// socket/hook path as the periodic poll. The hook path mirrors statusLoop's
+// round-trip liveness accounting; production requests are accounted for by
+// requestDetailedAtSocket.
+func (m *Manager) requestHelperStatusAtSocket(controlSocket string, requestHook func(ControlRequest, *ProcessStatus) error) (ProcessStatus, error) {
+	var status ProcessStatus
+	if requestHook != nil {
+		m.controlReqMu.Lock()
+		hookStart, hookGen := time.Now(), m.liveTrack.generation()
+		err := requestHook(ControlRequest{Type: "status"}, &status)
+		m.liveTrack.noteRoundTrip(hookGen, hookStart, time.Now(), err, errors.Is(err, errStatusDecode))
+		m.controlReqMu.Unlock()
+		return status, err
+	}
+	response, err := m.requestDetailedAtSocket(ControlRequest{Type: "status"}, controlSocket)
+	if err != nil {
+		if isResponseCapError(err) {
+			return ProcessStatus{}, &statusDecodeError{cause: err}
+		}
+		return ProcessStatus{}, err
+	}
+	if verr := validateRequiredStatusReply("status", response.Status); verr != nil {
+		return ProcessStatus{}, &statusDecodeError{cause: verr}
+	}
+	if response.Status != nil {
+		status = *response.Status
+	}
+	return status, nil
+}
+
+func hasAnyEventStreamSessionDeltaLossCounter(status *ProcessStatus) bool {
+	return status != nil && (status.EventStreamSessionDeltaLostOpen != nil ||
+		status.EventStreamSessionDeltaLostClose != nil ||
+		status.EventStreamSessionDeltaLostUpdate != nil)
+}
+
+func hasAllEventStreamSessionDeltaLossCounters(status *ProcessStatus) bool {
+	return status != nil && status.EventStreamSessionDeltaLostOpen != nil &&
+		status.EventStreamSessionDeltaLostClose != nil &&
+		status.EventStreamSessionDeltaLostUpdate != nil
+}
+
+// refreshEventStreamSessionDeltaLossStatusAtSocket prevents a status response
+// projected before an enqueue failure from becoming fresh manager evidence
+// after that failure. The returned status is the second, post-response read;
+// no counters from the pre-captured status are published as current.
+func (m *Manager) refreshEventStreamSessionDeltaLossStatusAtSocket(status ProcessStatus, controlSocket string, requestHook func(ControlRequest, *ProcessStatus) error) (ProcessStatus, error) {
+	refreshed, err := m.requestHelperStatusAtSocket(controlSocket, requestHook)
+	if err != nil {
+		return ProcessStatus{}, fmt.Errorf("refresh event-stream HA session-delta loss status: %w", err)
+	}
+	if !hasAllEventStreamSessionDeltaLossCounters(&refreshed) {
+		return ProcessStatus{}, &statusDecodeError{cause: fmt.Errorf(
+			"status refresh omitted event-stream HA session-delta loss counters")}
+	}
+	if status.PID != refreshed.PID {
+		return ProcessStatus{}, &statusDecodeError{cause: fmt.Errorf(
+			"status refresh helper PID changed from %d to %d", status.PID, refreshed.PID)}
+	}
+	return refreshed, nil
+}
+
 func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 	// Read the seams once: the loop must not re-read the package vars while
 	// running (tests restore them at cleanup).
@@ -585,32 +647,16 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 			controlSocket, requestHook := m.cfg.ControlSocket, m.controlRequestHook
 			m.mu.Unlock()
 			var pollErr error
-			if requestHook != nil {
-				m.controlReqMu.Lock()
-				hookStart, hookGen := time.Now(), m.liveTrack.generation()
-				pollErr = requestHook(ControlRequest{Type: "status"}, &status)
-				// #18685: the hook stands in for the socket round trip (tests),
-				// so it records the same liveness evidence at the same point.
-				m.liveTrack.noteRoundTrip(hookGen, hookStart, time.Now(), pollErr, errors.Is(pollErr, errStatusDecode))
-				m.controlReqMu.Unlock()
-			} else {
-				var response ControlResponse
-				response, pollErr = m.requestDetailedAtSocket(ControlRequest{Type: "status"}, controlSocket)
-				if pollErr == nil {
-					if verr := validateRequiredStatusReply("status", response.Status); verr != nil {
-						// #18293: the helper answered with a status object Go
-						// cannot use (absent/partial). That is an answered-
-						// but-undecodable poll, not silence.
-						pollErr = &statusDecodeError{cause: verr}
-					} else if response.Status != nil {
-						status = *response.Status
-					}
-				} else if isResponseCapError(pollErr) {
-					// #18293: our cap truncated a status the helper DID
-					// answer (responseCapError text says so). Answered, not
-					// silence. Other verbs keep the bare cap error.
-					pollErr = &statusDecodeError{cause: pollErr}
-				}
+			status, pollErr = m.requestHelperStatusAtSocket(controlSocket, requestHook)
+			// The first helper response projects the event-stream counters
+			// before it is encoded. A worker may record loss while that
+			// response is in flight to this manager; do not attach a fresh
+			// Go publication sequence to that stale zero. For helpers that
+			// advertise these counters, use a second status read as the
+			// published snapshot. Old helpers omit all keys and remain
+			// unknown to the idle predicate.
+			if pollErr == nil && hasAnyEventStreamSessionDeltaLossCounter(&status) {
+				status, pollErr = m.refreshEventStreamSessionDeltaLossStatusAtSocket(status, controlSocket, requestHook)
 			}
 			// #18685 (review): the heartbeat-age reference is when the round
 			// trip RETURNED, taken before re-acquiring m.mu. The reply's

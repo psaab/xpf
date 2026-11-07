@@ -2583,7 +2583,7 @@ fn from_shared_carries_every_shared_field_on_bulk_open_and_purge_close_17122() {
             crate::session::ExportProvenance::Incremental,
             "{name}: provenance"
         );
-        assert!(!delta.bulk_resync, "{name}: bulk_resync");
+        assert_eq!(delta.bulk_resync, name == "open", "{name}: bulk_resync");
         assert!(!delta.is_admission, "{name}: is_admission");
         assert_eq!(delta.policy_generation, 0, "{name}: policy_generation");
         assert!(!delta.purge_retirement, "{name}: purge_retirement");

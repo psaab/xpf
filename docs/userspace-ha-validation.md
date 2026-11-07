@@ -237,15 +237,23 @@ before the fw0 crash and before the RG1 failback) and this validator
 move an RG. They share one sample predicate, `ha_session_sync_idle_sample` in
 `test/incus/ha-assurance-lib.sh`.
 
-**The property.** Idle = N fresh helper-status publications at an unchanged
-floor, with no create outstanding beyond that floor and nothing pending at
-those reads, followed by one more fresh publication before PASS. N is
+**The property.** Idle = N paired fresh source-AND-target helper-status
+publications at an unchanged floor, with no create outstanding beyond that
+floor and nothing pending at those reads, followed by one more fresh
+publication from both endpoints before PASS. N is
 `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
 
-- The `Helper status observation sequence` is manager-owned and advances for
-  each successful helper-status publication. A repeated CLI read of the
-  manager's cached status does not count as a sample; the final publication
-  after the stable streak prevents a stale cache from proving idle.
+- `Helper status observation sequence` is manager-owned per node. It advances
+  when Go publishes a helper status; a repeated CLI read of either node's
+  cached status does not count as a sample. Both source and target sequences
+  must advance for each counted sample and the final confirmation, because
+  sent/loss evidence is source-side while received/pending/drained evidence is
+  target-side.
+- For helpers that report the three additive event-stream loss counters, the
+  Go status loop issues a second `status` read after the first response and
+  publishes the second response. This avoids attaching a fresh Go publication
+  sequence to counters projected before a worker recorded loss. A failed
+  refresh or a refresh missing any counter is not published as valid status.
 - "Pending" covers both the target's helper delta queue
   (`Session delta pending`) and the source's helper delta buffer.
 - The source's `Session delta dropped` fallback count and

@@ -1,8 +1,10 @@
 package userspace
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
+	"time"
 )
 
 // #7919: the Go half of the session-volume high-water wire contract.
@@ -153,4 +155,155 @@ func TestHelperStatusObservationSequenceAdvancesOnPublication18635(t *testing.T)
 				cachedAgain.HelperStatusObservationSequence, want)
 		}
 	}
+}
+
+func TestEventStreamLossSecondReadRejectsStaleProjection18635(t *testing.T) {
+	m := New()
+	projected := make(chan struct{})
+	release := make(chan struct{})
+	type statusResult struct {
+		status ProcessStatus
+		err    error
+	}
+	firstResult := make(chan statusResult, 1)
+	var loss uint64
+	var calls int
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type != "status" {
+			t.Errorf("request type = %q, want status", req.Type)
+		}
+		calls++
+		open, zero := loss, uint64(0)
+		*status = ProcessStatus{
+			PID:                              4242,
+			EventStreamSessionDeltaLostOpen:   &open,
+			EventStreamSessionDeltaLostClose:  &zero,
+			EventStreamSessionDeltaLostUpdate: &zero,
+		}
+		if calls == 1 {
+			close(projected) // the helper has projected loss=0 into this response
+			<-release        // hold it while the worker records loss
+		}
+		return nil
+	}
+
+	go func() {
+		status, err := m.requestHelperStatusAtSocket("", m.controlRequestHook)
+		firstResult <- statusResult{status: status, err: err}
+	}()
+	<-projected
+	loss = 1
+	close(release)
+	first := <-firstResult
+	if first.err != nil {
+		t.Fatalf("first helper status read: %v", first.err)
+	}
+	if first.status.EventStreamSessionDeltaLostOpen == nil ||
+		*first.status.EventStreamSessionDeltaLostOpen != 0 {
+		t.Fatalf("held pre-loss projection = %v, want zero", first.status.EventStreamSessionDeltaLostOpen)
+	}
+
+	published, err := m.refreshEventStreamSessionDeltaLossStatusAtSocket(
+		first.status, "", m.controlRequestHook)
+	if err != nil {
+		t.Fatalf("second status read: %v", err)
+	}
+	if published.EventStreamSessionDeltaLostOpen == nil ||
+		*published.EventStreamSessionDeltaLostOpen != 1 {
+		t.Fatalf("status selected for publication = %v, want second-read loss=1",
+			published.EventStreamSessionDeltaLostOpen)
+	}
+	if calls != 2 {
+		t.Fatalf("helper status reads = %d, want first projection plus one confirmation read", calls)
+	}
+}
+
+func TestEventStreamLossRefreshErrorIsNotPublishable18635(t *testing.T) {
+	m := New()
+	zero := uint64(0)
+	projected := ProcessStatus{
+		PID:                              4242,
+		EventStreamSessionDeltaLostOpen:   &zero,
+		EventStreamSessionDeltaLostClose:  &zero,
+		EventStreamSessionDeltaLostUpdate: &zero,
+	}
+	m.controlRequestHook = func(ControlRequest, *ProcessStatus) error {
+		return errStatusDecode
+	}
+	if _, err := m.refreshEventStreamSessionDeltaLossStatusAtSocket(projected, "", m.controlRequestHook); err == nil {
+		t.Fatal("a failed confirmation read returned a publishable status")
+	}
+}
+
+func TestStatusLoopPublishesPostProjectionLossRead18635(t *testing.T) {
+	oldInterval := statusLoopInterval
+	statusLoopInterval = 5 * time.Millisecond
+	t.Cleanup(func() { statusLoopInterval = oldInterval })
+
+	m, _ := stalePollManager16653(t)
+	projected := make(chan struct{})
+	release := make(chan struct{})
+	var loss uint64
+	var calls int
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type != "status" {
+			t.Errorf("request type = %q, want status", req.Type)
+		}
+		calls++
+		currentLoss, zero := loss, uint64(0)
+		snapshot := *readyHelperStatus()
+		snapshot.PID = 4242
+		snapshot.EventStreamSessionDeltaLostOpen = &currentLoss
+		snapshot.EventStreamSessionDeltaLostClose = &zero
+		snapshot.EventStreamSessionDeltaLostUpdate = &zero
+		*status = snapshot
+		if calls == 1 {
+			close(projected) // Rust projected zero before the RPC response was held.
+			<-release        // The worker records loss before Go can publish it.
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.statusLoop(ctx, false)
+	}()
+	select {
+	case <-projected:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("status loop did not reach the held pre-loss projection")
+	}
+	loss = 1
+	close(release)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		sequence := m.lastStatus.HelperStatusObservationSequence
+		publishedLoss := m.lastStatus.EventStreamSessionDeltaLostOpen
+		var got uint64
+		if publishedLoss != nil {
+			got = *publishedLoss
+		}
+		m.mu.Unlock()
+		if sequence != 0 {
+			cancel()
+			<-done
+			if publishedLoss == nil || got != 1 {
+				t.Fatalf("published status sequence=%d loss=%v, want second-read loss=1",
+					sequence, publishedLoss)
+			}
+			if calls < 2 {
+				t.Fatalf("status requests = %d, want a confirmation read before publication", calls)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("status loop never published the confirmed helper response")
 }

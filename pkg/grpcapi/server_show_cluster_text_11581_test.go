@@ -166,6 +166,10 @@ func processStatus11581() dpuserspace.ProcessStatus {
 				SessionHits: 20, SessionMisses: 2,
 			},
 		},
+		HelperStatusObservationSequence: 1,
+		EventStreamSessionDeltaLostOpen:  new(uint64),
+		EventStreamSessionDeltaLostClose: new(uint64),
+		EventStreamSessionDeltaLostUpdate: new(uint64),
 	}
 }
 

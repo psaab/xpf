@@ -872,15 +872,18 @@ EOF
 write_seq_pair() {
 	# Index/calls live in files: captures run inside $(...) subshells in
 	# the failover loop, so shell variables would reset every attempt.
-	# sent/received/target-pending[/source-pending/source-dropped/source-event-loss/status-sequence].
-	local idx pair sent recv pending src_pending src_dropped src_event_lost status_seq calls
+	# sent/recv/target-pending[/source-pending/source-dropped/source-event-loss/source-seq/target-seq].
+	local idx pair sent recv pending src_pending src_dropped src_event_lost source_status_seq target_status_seq calls
 	idx="$(cat "${SEQ_INDEX_FILE}")"
 	pair="${SEQ[$idx]}"
-	IFS=/ read -r sent recv pending src_pending src_dropped src_event_lost status_seq <<< "$pair"
-	write_runner_fixture "$SEQ_SOURCE" "$sent" 0 "${src_pending:-0}" "${src_dropped:-0}" "${src_event_lost:-0}" "${status_seq:-$(($(cat "${SEQ_CALLS_FILE}") + 1))}"
-	write_runner_fixture "$SEQ_TARGET" 0 "$recv" "$pending" 0 0 "${status_seq:-$(($(cat "${SEQ_CALLS_FILE}") + 1))}"
+	IFS=/ read -r sent recv pending src_pending src_dropped src_event_lost source_status_seq target_status_seq <<< "$pair"
+	calls="$(cat "${SEQ_CALLS_FILE}")"
+	source_status_seq="${source_status_seq:-$((calls + 1))}"
+	target_status_seq="${target_status_seq:-$source_status_seq}"
+	write_runner_fixture "$SEQ_SOURCE" "$sent" 0 "${src_pending:-0}" "${src_dropped:-0}" "${src_event_lost:-0}" "$source_status_seq"
+	write_runner_fixture "$SEQ_TARGET" 0 "$recv" "$pending" 0 0 "$target_status_seq"
 	if (( idx < ${#SEQ[@]} - 1 )); then printf '%s\n' "$((idx + 1))" > "${SEQ_INDEX_FILE}"; fi
-	calls="$(cat "${SEQ_CALLS_FILE}")"; printf '%s\n' "$((calls + 1))" > "${SEQ_CALLS_FILE}"
+	printf '%s\n' "$((calls + 1))" > "${SEQ_CALLS_FILE}"
 }
 ha_capture_sync_stats() {
 	# #18632: the failover loop captures TARGET then source per attempt;
@@ -966,6 +969,7 @@ VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: received catch-up requir
 # the next fresh sequence carries the loss.
 run_sync_loop_case failover 7 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
+session sync node0->node1 cached helper status observation did not advance (source fresh=0 target fresh=0)
 session sync node0->node1 not idle: the source lost 1 HA event-stream session delta(s) since the baseline (lost=1 baseline=0)
 FAIL-MARK loop: session sync did not become idle within 7 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
 LOOPRC=1
@@ -973,6 +977,42 @@ VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'failover loop: late loss after cached pu
 run_sync_loop_case userspace 7 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=1
 VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'userspace loop: late loss after cached publication blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
+# Hold-after-projection race: the first helper response projected loss=0;
+# while it was in flight the worker incremented loss to 1. The Go publisher's
+# second status read is the source capture below, so a fresh manager sequence
+# cannot attach to the stale projected zero at final confirmation.
+run_sync_loop_case failover 6 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
+session sync node0->node1 not idle: the source lost 1 HA event-stream session delta(s) since the baseline (lost=1 baseline=0)
+FAIL-MARK loop: session sync did not become idle within 6 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=6' 'failover loop: held zero projection is replaced by the second loss read' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
+run_sync_loop_case userspace 6 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=6' 'userspace loop: held zero projection is replaced by the second loss read' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
+
+# A fresh source publication cannot certify a stale target pending/received
+# snapshot. Both sides need new observations, including the final confirmation.
+run_sync_loop_case failover 6 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
+session sync node0->node1 cached helper status observation did not advance (source fresh=1 target fresh=0)
+FAIL-MARK loop: session sync did not become idle within 6 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=6' 'failover loop: source fresh and target stale sample does not count' '15/174/0/0/0/0/1/1' '16/174/0/0/0/0/2/2' '16/175/0/0/0/0/3/3' '16/175/0/0/0/0/4/3' '16/175/0/0/0/0/5/4' '16/175/0/0/0/0/6/5'
+run_sync_loop_case userspace 6 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=6' 'userspace loop: source fresh and target stale sample does not count' '15/174/0/0/0/0/1/1' '16/174/0/0/0/0/2/2' '16/175/0/0/0/0/3/3' '16/175/0/0/0/0/4/3' '16/175/0/0/0/0/5/4' '16/175/0/0/0/0/6/5'
+# A stale target on the final confirmation also blocks PASS, even when the
+# source publishes a new sequence for that read.
+run_sync_loop_case failover 6 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
+session sync node0->node1 cached helper status observation did not advance (source fresh=1 target fresh=0)
+FAIL-MARK loop: session sync did not become idle within 6 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=6' 'failover loop: target cache cannot confirm idle' '15/174/0/0/0/0/1/1' '16/174/0/0/0/0/2/2' '16/175/0/0/0/0/3/3' '16/175/0/0/0/0/4/4' '16/175/0/0/0/0/5/5' '16/175/0/0/0/0/6/5'
+run_sync_loop_case userspace 6 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=6' 'userspace loop: target cache cannot confirm idle' '15/174/0/0/0/0/1/1' '16/174/0/0/0/0/2/2' '16/175/0/0/0/0/3/3' '16/175/0/0/0/0/4/4' '16/175/0/0/0/0/5/5' '16/175/0/0/0/0/6/5'
 # Rewind-only re-baseline: 15/174 -> restart 2/3 -> 2/3 x3 -> PASS sample 6.
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 session sync node0->node1 not idle: counters rewound since baseline (source sent=2 baseline=15, target received=3 baseline=174, pending=0); re-baseline required
@@ -2153,12 +2193,12 @@ PY
 }
 LIB_FN_MUTANT_LIB="$LOOP_HELPERS" assert_lib_fn_control_holds sync-status-observation \
 	ha_wait_for_session_sync_idle \
-	'if (( source_observation_fresh != 0 && stable < SESSION_SYNC_IDLE_STABLE_SAMPLES )); then' \
+	'if (( source_observation_fresh == 0 || target_observation_fresh == 0 )); then' \
 	1 '' run_sync_observation_case
 sync_status_observation_mutant="$(LIB_FN_MUTANT_LIB="$LOOP_HELPERS" lib_fn_mutant \
 	ha_wait_for_session_sync_idle sync-status-observation \
-	'if (( source_observation_fresh != 0 && stable < SESSION_SYNC_IDLE_STABLE_SAMPLES )); then' \
-	'if (( stable < SESSION_SYNC_IDLE_STABLE_SAMPLES )); then')" ||
+	'if (( source_observation_fresh == 0 || target_observation_fresh == 0 )); then' \
+	'if (( 0 )); then')" ||
 	fail_test 'lib_fn_mutant refused the status-observation freshness mutant'
 LOOP_MUTANT_HELPERS="${LOOP_DIR}/wait-loops-status-observation-mutant.sh"
 python3 - "${LOOP_HELPERS}" "$sync_status_observation_mutant" "$LOOP_MUTANT_HELPERS" <<'PY'

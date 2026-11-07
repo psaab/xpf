@@ -180,8 +180,10 @@ type ProcessStatus struct {
 	EventStreamSessionDeltaLostOpen   *uint64 `json:"event_stream_session_delta_lost_open,omitempty"`
 	EventStreamSessionDeltaLostClose  *uint64 `json:"event_stream_session_delta_lost_close,omitempty"`
 	EventStreamSessionDeltaLostUpdate *uint64 `json:"event_stream_session_delta_lost_update,omitempty"`
-	// Manager-owned sequence of successful helper-status observations. The
-	// HA idle wait uses it to reject repeated reads of one cached publication.
+	// Manager-owned sequence of successful helper-status publications. This
+	// is a cache/publication counter, not a helper measurement epoch; statusLoop
+	// confirms event-stream loss counters before publishing them. The HA idle
+	// wait requires it to advance independently on both endpoints.
 	HelperStatusObservationSequence uint64 `json:"helper_status_observation_sequence,omitempty"`
 	// #1642: the Rust helper serializes these three flat event-stream
 	// fields on ProcessStatus (protocol/control.rs) alongside _sent /
