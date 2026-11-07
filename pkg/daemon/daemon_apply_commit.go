@@ -839,6 +839,9 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		// there is no active-config session state to invalidate.
 		return compiled, nil
 	}
+	// #5840: fail closed on a peer-synced standalone<->cluster transition.
+	// SyncApplyGated above has already promoted the accepted peer config to
+	// active (the store converges with the peer — no divergence, matching the
 	// device-map passive-admission philosophy below), but the boot-only cluster
 	// runtime cannot be constructed/torn down live (see
 	// clusterTopologyCommitPreflight). Arming the dataplane under the
@@ -857,7 +860,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		slog.Error("cluster: refusing to apply a peer-synced standalone<->cluster "+
 			"topology transition live; a restart is required to (de)construct the "+
 			"HA runtime", "err", terr)
-		// #6720: SyncApply has already promoted this config, so the AUTHORIZATION
+		// #6720: SyncApplyGated has already promoted this config, so the AUTHORIZATION
 		// it carries is live policy even though the dataplane must not be armed
 		// under it. The backstop's constraint is boot-only HA runtime
 		// construction; reconcileWebManagement has no such constraint, and
@@ -868,7 +871,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	}
 
 	// #6192: fail closed on a peer-synced node-id / cluster-id identity change,
-	// mirroring the topology backstop above. SyncApply has already promoted the
+	// mirroring the topology backstop above. SyncApplyGated has already promoted the
 	// peer config to active, but the boot-constructed HA manager cannot be
 	// re-keyed live (heartbeat/RETH-MAC/election identity is boot-only). Return
 	// BEFORE applyConfigLocked so the live dataplane is never armed under a
@@ -887,7 +890,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 		d.reconcileManagementAfterPromotion(compiled, "peer-synced identity change refused")
 		return nil, ierr
 	}
-	// #5564: SyncApply (above) has ALREADY promoted the peer config to active,
+	// #5564: SyncApplyGated above has ALREADY promoted the peer config to active,
 	// and once applyConfigLocked arms the dataplane snapshot this node is
 	// forwarding under it. The three session invalidators
 	// (clearSessionsForPolicyChanges: the #4234 deletion-clear, the
@@ -908,7 +911,7 @@ func (d *Daemon) syncAndApplyWithAncestry(
 	// a genuinely-fatal apply (see below), where the config is not live-forwarding
 	// and there is no session state to invalidate.
 
-	// #6296: capture the convergence digest of the tree SyncApply just promoted,
+	// #6296: capture the convergence digest of the tree SyncApplyGated just promoted,
 	// while applySem is still held and BEFORE applyConfigLocked. The applied
 	// marker is stamped from this captured value in the deferred below (only on
 	// full success), so it records the config THIS sync actually applied — not a
