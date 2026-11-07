@@ -9,6 +9,7 @@ on clock skew, every move back prints "already primary".
 import json
 import os
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -799,10 +800,53 @@ def verdicts(res):
 
 
 class IperfTargetManagedness(unittest.TestCase):
+    @staticmethod
+    def _fresh_cluster_env(filename):
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        root = os.path.abspath(os.path.join(script_dir, "../.."))
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "HOME": os.environ.get("HOME", "/tmp"),
+            "PROJECT_ROOT": root,
+            "BPFRX_CLUSTER_ENV": os.path.join(script_dir, filename),
+            "CLUSTER_ENV_SCRIPT": os.path.join(script_dir, "cluster-env.sh"),
+        }
+        proc = subprocess.run(
+            ["bash", "-c", 'source "$CLUSTER_ENV_SCRIPT" && env -0'],
+            cwd=root, env=env, capture_output=True, check=True)
+        return {entry.split(b"=", 1)[0].decode(): entry.split(b"=", 1)[1].decode()
+                for entry in proc.stdout.split(b"\0") if entry}
+
+    def _production_reset(self, env, target6):
+        target4 = env["IPERF_TARGET4"]
+        mouse4, mouse6 = env["MOUSE_TARGET_V4"], env["MOUSE_TARGET_V6"]
+        managed4, managed6 = soak.iperf_target_managedness(
+            target4, target6, mouse4, mouse6, env.get("TARGET_ALIAS_V4", ""),
+            env.get("IPERF_TARGET_V4_V6_SAME_HOST", ""))
+        ports = ([5211] if managed4 else []) + ([5210] if managed6 else [])
+        cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", env["MOUSE_TARGET_REF"])
+        calls, restarted = [], set()
+
+        def fake_exec(ref, argv, timeout=None):
+            calls.append((ref, argv))
+            if argv[:2] == ["systemctl", "restart"]:
+                restarted.add(int(re.search(r"@(\d+)\.service$", argv[2]).group(1)))
+                return 0, ""
+            match = re.search(r"state (established|listening).*:([0-9]+)", argv[2])
+            self.assertIsNotNone(match, argv)
+            state, port = match.group(1), int(match.group(2))
+            if state == "established":
+                return (0, "ESTAB stale-client") if port == 5210 and port not in restarted else (0, "")
+            return 0, f"LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:*"
+
+        cluster._exec = fake_exec
+        error = cluster.prepare_iperf(ports)
+        return error, calls, restarted, (managed4, managed6)
+
     def test_loss_split_target_and_same_host_target_mapping_18631(self):
         self.assertEqual(
             soak.iperf_target_managedness(
-                "172.16.80.202", "2001:559:8585:80::200",
+                "172.16.80.202", "2001:559:8585:80::201",
                 "172.16.80.201", "2001:559:8585:80::201",
                 "172.16.80.202", "no"),
             (True, False))
@@ -810,7 +854,7 @@ class IperfTargetManagedness(unittest.TestCase):
             soak.iperf_target_managedness(
                 "172.16.80.210", "2001:559:8585:80::210",
                 "172.16.80.210", "2001:559:8585:80::210", "",
-                "yes"),
+                ""),
             (True, True))
         self.assertEqual(
             soak.iperf_target_managedness(
@@ -818,6 +862,39 @@ class IperfTargetManagedness(unittest.TestCase):
                 "172.16.80.201", "2001:559:8585:80::201",
                 "172.16.80.202", "unknown"),
             (True, False))
+        self.assertEqual(
+            soak.iperf_target_managedness(
+                "172.16.80.202", "2001:559:8585:80::201",
+                "172.16.80.201", "2001:559:8585:80::201",
+                "172.16.80.202", ""),
+            (True, False))
+
+    def test_fresh_loss_env_exports_split_veto_even_for_equal_stale_v6_18631(self):
+        env = self._fresh_cluster_env("loss-userspace-cluster.env")
+        self.assertEqual(env["IPERF_TARGET_V4_V6_SAME_HOST"], "no")
+        self.assertIn("IPERF_TARGET6_SPLIT_HOLDER", env)
+        error, calls, restarted, managed = self._production_reset(
+            env, target6=env["MOUSE_TARGET_V6"])
+        self.assertIsNone(error)
+        self.assertEqual(managed, (True, False))
+        self.assertNotIn(5210, restarted)
+        self.assertFalse(any("5210" in " ".join(argv) for _, argv in calls))
+
+    def test_fresh_tcp_udp_equal_targets_restart_managed_5210_18631(self):
+        for filename in ("tcp-userspace-cluster.env", "udp-userspace-cluster.env"):
+            with self.subTest(filename=filename):
+                env = self._fresh_cluster_env(filename)
+                self.assertEqual(env["IPERF_TARGET4"], env["MOUSE_TARGET_V4"])
+                self.assertEqual(env["IPERF_TARGET6"], env["MOUSE_TARGET_V6"])
+                error, calls, restarted, managed = self._production_reset(
+                    env, target6=env["IPERF_TARGET6"])
+                self.assertIsNone(error)
+                self.assertEqual(managed, (True, True))
+                self.assertIn(5210, restarted)
+                self.assertIn(
+                    ["systemctl", "restart", "mouse-iperf3@5210.service"],
+                    [argv for _, argv in calls])
+                self.assertTrue(all(ref == env["MOUSE_TARGET_REF"] for ref, _ in calls))
 
 
 class IncusTargetPreflight(unittest.TestCase):
@@ -859,6 +936,36 @@ class IncusTargetPreflight(unittest.TestCase):
         self.assertTrue(all(ref == "loss:mouse-target" for ref, _ in calls))
 
 
+    def test_prepare_iperf_rechecks_ready_port_until_all_are_clean_18631(self):
+        cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "loss:mouse-target")
+        established_reads = {5210: 0, 5211: 0}
+        listening_reads = {5210: 0, 5211: 0}
+
+        def fake_exec(ref, argv, timeout=None):
+            if argv[:2] == ["systemctl", "restart"]:
+                return 0, ""
+            match = re.search(r"state (established|listening).*:([0-9]+)", argv[2])
+            self.assertIsNotNone(match, argv)
+            state, port = match.group(1), int(match.group(2))
+            if state == "established":
+                established_reads[port] += 1
+                if established_reads[port] == 1:
+                    return 0, "ESTAB stale-before-restart"
+                if port == 5210 and established_reads[port] == 3:
+                    return 0, "ESTAB reconnected-after-listen"
+                if port == 5211 and established_reads[port] == 2:
+                    return 0, "ESTAB still-draining"
+                return 0, ""
+            listening_reads[port] += 1
+            if port == 5211 and listening_reads[port] == 1:
+                return 0, ""
+            return 0, f"LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:*"
+
+        cluster._exec = fake_exec
+        self.assertIsNone(cluster.prepare_iperf([5210, 5211]))
+        self.assertEqual(established_reads, {5210: 4, 5211: 4})
+        self.assertEqual(listening_reads, {5210: 3, 5211: 3})
+
     def test_prepare_iperf_readiness_timeout_18631(self):
         cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "loss:mouse-target")
         established_reads = 0
@@ -887,6 +994,7 @@ class IncusTargetPreflight(unittest.TestCase):
         self.assertEqual(established_reads, 2)
         self.assertEqual(listening_reads, 1)
         sleep.assert_not_called()
+
     def test_prepare_iperf_reports_restart_failure_without_polling_18631(self):
         cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "loss:mouse-target")
         commands = []
@@ -1047,6 +1155,69 @@ class Orchestration(unittest.TestCase):
         rc, res, _ = run_fake(c, clock, moves=3)  # ends with RG2 on node1
         self.assertEqual(c.owner[2], 0)
         self.assertIn("restored", res["preflight"]["restore"])
+
+    def test_fault_after_one_rg_before_record_restores_and_records_result_18631(self):
+        class VoidOnSecondHelperRead(FakeCluster):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.helper_reads = {0: 0, 1: 0}
+
+            def helper(self, node):
+                self.helper_reads[node] += 1
+                if self.helper_reads[node] > 1:
+                    raise soak.VoidRun("injected fault on second helpers read")
+                return super().helper(node)
+
+        clock = FakeClock()
+        c = VoidOnSecondHelperRead(clock, {2: 0})
+        rc, result, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("second helpers read", result["void"])
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(c.owner[2], 0)
+        self.assertIn("restored", result["preflight"]["restore"])
+        self.assertEqual([cmd.rsplit(" ", 1)[-1] for _, cmd in c.commands], ["1", "0"])
+
+    def test_restore_refreshes_owner_when_one_rg_cli_throws_after_change_18631(self):
+        class ApplyThenVoid(FakeCluster):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.injected = False
+
+            def cli(self, node, cmd):
+                if not self.injected and cmd.endswith("node 1"):
+                    self.injected = True
+                    super().cli(node, cmd)
+                    raise soak.VoidRun("injected fault after CLI changed owner")
+                return super().cli(node, cmd)
+
+        clock = FakeClock()
+        c = ApplyThenVoid(clock, {2: 0})
+        rc, result, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("CLI changed owner", result["void"])
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(c.owner[2], 0)
+        self.assertIn("restored", result["preflight"]["restore"])
+        self.assertEqual([cmd.rsplit(" ", 1)[-1] for _, cmd in c.commands], ["1", "0"])
+
+
+    def test_owner_change_without_one_rg_cli_still_restores_18631(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+
+        def fail_after_owner_change(soak_run):
+            soak_run.c.owner[2] = 1
+            return "injected traffic-preflight failure after owner change"
+
+        with mock.patch.object(soak.Soak, "traffic_preflight", fail_after_owner_change):
+            rc, result, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("owner change", result["void"])
+        self.assertEqual(result["moves"], [])
+        self.assertEqual(c.owner[2], 0)
+        self.assertIn("restored", result["preflight"]["restore"])
+        self.assertEqual([cmd.rsplit(" ", 1)[-1] for _, cmd in c.commands], ["0"])
 
     def test_preflight_records_peer_clock_line(self):
         clock = FakeClock()

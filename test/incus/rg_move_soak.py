@@ -806,24 +806,27 @@ class IncusCluster:
                 detail = out.strip() or f"systemctl exited {rc}"
                 return f"could not restart {unit} after finding {count} ESTABLISHED sockets: {detail}"
 
-        pending = set(stale)
+        pending = set()
         deadline = time.monotonic() + timeout
-        while pending:
-            for port in list(pending):
+        while True:
+            pending.clear()
+            # Recheck every reset port on every pass: a client may reconnect
+            # to a listener that became ready while another port was draining.
+            for port in sorted(stale):
                 listeners, error = self._socket_rows(port, "listening", listening=True)
                 if listeners is None:
                     return f"cannot verify LISTEN on {self.mouse_target}:{port} after reset: {error}"
                 established, error = self._socket_rows(port, "established")
                 if established is None:
                     return f"cannot verify zero ESTABLISHED sockets on {self.mouse_target}:{port}: {error}"
-                if listeners and not established:
-                    pending.remove(port)
-            if pending:
-                if time.monotonic() >= deadline:
-                    ports_text = ", ".join(str(port) for port in sorted(pending))
-                    return f"mouse iperf reset timed out waiting for LISTEN with zero ESTABLISHED sockets on port(s) {ports_text}"
-                time.sleep(0.2)
-        return None
+                if not listeners or established:
+                    pending.add(port)
+            if not pending:
+                return None
+            if time.monotonic() >= deadline:
+                ports_text = ", ".join(str(port) for port in sorted(pending))
+                return f"mouse iperf reset timed out waiting for LISTEN with zero ESTABLISHED sockets on port(s) {ports_text}"
+            time.sleep(0.2)
 
     def cli(self, node: int, cmd: str) -> Tuple[int, str]:
         return self._exec(self.fw[node], ["cli", "-c", cmd])
@@ -945,6 +948,8 @@ class Soak:
         self.traffic_started = False
         self.terminated = False
         self.v6_router: Optional[Tuple[str, str]] = None
+
+        self.move_commands_issued = 0
 
     # -- helpers --------------------------------------------------------
 
@@ -1094,6 +1099,7 @@ class Soak:
     def one_rg(self, rg: int, target: int, pre: Ownership) -> Tuple[RGMoveResult, float]:
         cmd = f"request chassis cluster failover redundancy-group {rg} node {target}"
         t0 = self.now()
+        self.move_commands_issued += 1
         rc, out = self.c.cli(self.cfg.issuer, cmd)
         t_ret = self.now()
         cls, first = classify_cli(rc, out, rg)
@@ -1149,9 +1155,19 @@ class Soak:
             out["v6"] = self.macs.get(mac, (None, ""))[0] if mac else None
         return out
 
+    def _refresh_owners(self, rgs: List[int]) -> Dict[int, Optional[int]]:
+        """Read and cache the current single-owner view for every tracked RG."""
+        v0, v1 = self.views()
+        self._owners = {rg: rg_ownership(rg, v0, v1) for rg in rgs}
+        return {rg: own.owner for rg, own in self._owners.items()}
+
     def restore_node0(self, rgs: List[int]) -> str:
         """Matrix row D3: leave node0 primary. A local pull on node0 per RG not
         already there; reported, never folded into the moves' verdicts."""
+        try:
+            self._refresh_owners(rgs)
+        except Exception as e:
+            return f"WARNING: cannot inspect ownership before restore: {e}; restore by hand"
         moved = []
         for rg in rgs:
             if self._owners.get(rg) is not None and self._owners[rg].owner == 0:
@@ -1170,6 +1186,7 @@ class Soak:
 
     def run(self) -> int:
         cfg = self.cfg
+        self.move_commands_issued = 0
         why, info = self.preflight()
         self.log(f"preflight: {json.dumps(info, sort_keys=True, default=str)}")
         skew = info.get("node1_minus_node0_s")
@@ -1214,13 +1231,15 @@ class Soak:
         # First target per RG: away from its current owner. Alternate strictly
         # afterwards, like the operator's loop, whatever happened.
         targets = {rg: 1 - info["owners"][rg] for rg in rgs}
+        initial_owners = dict(info["owners"])
         moves: List[MoveRecord] = []
         disabled = []
         if not cfg.traffic:
             disabled.append("traffic (SOAK_TRAFFIC=0): no traffic-follow, loss or stall evidence")
         if not cfg.helper_check:
             disabled.append("helper (SOAK_HELPER_CHECK=0): no ha_groups or RETH-member counter evidence")
-        t_start = self.now()
+        void_reason: Optional[str] = None
+
         try:
             if cfg.traffic:
                 # This is lock-protected and before our generators start.
@@ -1280,9 +1299,8 @@ class Soak:
             if moves:
                 moves[-1].t_next_lan = self.lan_time(self.now())
         except VoidRun as e:
-            self.log(f"FATAL: {e}")
-            self._write({"preflight": info, "void": str(e), "moves": [asdict(m) for m in moves]})
-            return 2
+            void_reason = str(e)
+            self.log(f"FATAL: {void_reason}")
         except (SystemExit, KeyboardInterrupt):
             # Terminated: the lock wrapper may have died from the same signal,
             # so no further RG move (the node0 restore) may run unlocked.
@@ -1293,14 +1311,22 @@ class Soak:
                 if not self.terminated:
                     self.sleep(1.0)
                 self.stop_traffic()
-            # A pre-move VOID has no ownership change to restore. In particular,
-            # do not issue an unrecorded failover while reporting zero moves.
-            if cfg.restore and moves and not self.terminated:
-                info["restore"] = self.restore_node0(rgs)
-                self.log(f"restore: {info['restore']}")
+            if cfg.restore and not self.terminated:
+                owner_changed = False
+                try:
+                    current_owners = self._refresh_owners(rgs)
+                    owner_changed = any(current_owners.get(rg) != initial_owners.get(rg) for rg in rgs)
+                except Exception as e:
+                    self.log(f"WARNING: could not read current RG owners before restore decision: {e}")
+                if self.move_commands_issued or owner_changed:
+                    info["restore"] = self.restore_node0(rgs)
+                    self.log(f"restore: {info['restore']}")
         end_offs = {n: measure_offset(self.c.clock, self.c.fw[n], self.now) for n in (0, 1)}
         if end_offs[0] and end_offs[1]:
             info["end_node1_minus_node0_s"] = round(end_offs[1][0] - end_offs[0][0], 2)
+        if void_reason is not None:
+            self._write({"preflight": info, "void": void_reason, "moves": [asdict(m) for m in moves]})
+            return 2
         return self.finish(moves, info, disabled)
 
     def finish(self, moves: List[MoveRecord], info: Dict, disabled: List[str]) -> int:
@@ -1354,9 +1380,13 @@ def iperf_target_managedness(target4: str, target6: str, mouse4: str, mouse6: st
                              alias4: str, same_host: str) -> Tuple[bool, bool]:
     """Return which iperf family targets are addressed on the managed mouse host."""
     v4 = bool(target4 and (target4 == mouse4 or (alias4 and target4 == alias4)))
-    # Exact configured mouse-v6 address is required. An explicit split or
-    # unknown same-host flag is evidence not to reset the mouse's v6 service.
-    v6 = bool(target6 and mouse6 and target6 == mouse6 and same_host in ("", "yes"))
+    mouse_v6_match = bool(target6 and mouse6 and target6 == mouse6)
+    # An explicit no or unknown flag vetoes v6 reset. With no flag, only the
+    # same-host default profiles whose v4 and v6 destinations both exactly
+    # equal the mouse's primary addresses provide positive evidence.
+    same_host_confirmed = same_host == "yes" or (
+        not same_host and target4 and mouse4 and target4 == mouse4)
+    v6 = bool(mouse_v6_match and same_host_confirmed)
     return v4, v6
 
 
