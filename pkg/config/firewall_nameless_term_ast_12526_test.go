@@ -251,3 +251,53 @@ func TestCompileConfigLenientPackedTermBeforeTypedNamelessMarkerKeepsBoth17257(t
 		t.Fatalf("third term = %+v, want named allow accept after both nameless terms", term)
 	}
 }
+
+func TestCompileConfigLenientNamelessAfterContainerKeepsAuthoredOrder17257(t *testing.T) {
+	// Sol MAJOR: a one-key container lowers to TWO compiled terms; the
+	// later empty nameless term must land AFTER both, not at its AST
+	// ordinal between them. Authored: [allow-tcp, allow-udp, DISCARD].
+	src := `firewall { family inet { filter F {
+		term {
+			allow-tcp { from { protocol tcp; } then accept; }
+			allow-udp { from { protocol udp; } then accept; }
+		}
+		term { }
+	} } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 3 {
+		t.Fatalf("filter = %+v, want [allow-tcp allow-udp placeholder]", filter)
+	}
+	if term := filter.Terms[0]; term == nil || term.Name != "allow-tcp" || term.Action != FilterActionAccept {
+		t.Fatalf("first term = %+v, want allow-tcp accept", term)
+	}
+	if term := filter.Terms[1]; term == nil || term.Name != "allow-udp" || term.Action != FilterActionAccept {
+		t.Fatalf("second term = %+v, want allow-udp accept (not pre-empted by the placeholder)", term)
+	}
+	if term := filter.Terms[2]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("third term = %+v, want the nameless discard at its authored end position", term)
+	}
+}
+
+func TestCompileConfigLenientNamelessInsideContainerKeepsSiblingOrder17257(t *testing.T) {
+	// A nameless statement INSIDE a container: its expanded index must
+	// count the named siblings authored before it inside the container.
+	src := `firewall { filter { F term { allow { then accept; } then discard; } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 2 {
+		t.Fatalf("filter = %+v, want [allow placeholder]", filter)
+	}
+	if term := filter.Terms[0]; term == nil || term.Name != "allow" || term.Action != FilterActionAccept {
+		t.Fatalf("first term = %+v, want named allow accept", term)
+	}
+	if term := filter.Terms[1]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("second term = %+v, want the nameless discard after allow", term)
+	}
+}

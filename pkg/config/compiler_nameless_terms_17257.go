@@ -57,7 +57,7 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 			if filter == nil {
 				continue
 			}
-			index := site.ordinal
+			index := site.expanded
 			placeholder := &FirewallFilterTerm{
 				Name:     firewallNamelessPlaceholderName17257(site.first, site.ordinal, filter.Terms),
 				Action:   FilterActionDiscard,

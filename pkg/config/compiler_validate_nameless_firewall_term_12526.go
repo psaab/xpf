@@ -104,6 +104,33 @@ type firewallNamelessSite17257 struct {
 	filter  string
 	first   string
 	ordinal int
+	// expanded counts compiled terms authored BEFORE this site, expanding
+	// one-key containers exactly as compileFirewall's namedInstances does.
+	// ordinal counts AST term nodes; expanded is the only safe insert index
+	// into the compiled term list (#17257 Sol MAJOR).
+	expanded int
+}
+
+// expandedFirewallTermCount17257 counts compiled terms the authored terms
+// before index authoredUpTo lower to: a >=2-key term yields one, a one-key
+// container yields one per child block, and malformed terms yield zero
+// (they never reach the compiled list; their placeholder takes the slot).
+func expandedFirewallTermCount17257(terms []*Node, authoredUpTo int) int {
+	count := 0
+	for i, term := range terms {
+		if i >= authoredUpTo {
+			break
+		}
+		if _, malformed := firewallNamelessTermBody12526(term); malformed {
+			continue
+		}
+		if len(term.Keys) >= 2 {
+			count++
+			continue
+		}
+		count += len(term.Children)
+	}
+	return count
 }
 
 // scanFirewallNamelessTerms12526 clones and unpacks the tree, then returns
@@ -139,7 +166,7 @@ func scanFirewallNamelessTerms12526(tree *ConfigTree) (all []firewallNamelessSit
 			if !malformed {
 				continue
 			}
-			site := firewallNamelessSite17257{family: family, filter: filter, first: first, ordinal: i}
+			site := firewallNamelessSite17257{family: family, filter: filter, first: first, ordinal: i, expanded: expandedFirewallTermCount17257(terms, i)}
 			all = append(all, site)
 			_, existedBeforeUnpack := pre[term]
 			if !existedBeforeUnpack || (len(term.Keys) == 1 && len(term.Children) == 0) {
