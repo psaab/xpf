@@ -3,12 +3,8 @@ package config
 import "fmt"
 
 // runUniformGatesFilter runs the filter sub-run of the P6b uniform
-// fail-open gate phase. It is a verbatim contiguous slice of the
-// original runUniformGates god-function (#6423 decomposition): the
-// gate order here and the segment-call order in runUniformGates together
-// reproduce the exact flat gate sequence, so the first-failing-gate-wins
-// strict ordering (invariant #6) and the tolerant warning-accumulation
-// order (invariant #7) are preserved. See runUniformGates.
+// fail-open gate phase. The cross-gate order doctrine and pinned precedence
+// exceptions are documented in the runUniformGates header.
 func runUniformGatesFilter(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	// #2175 firewall-filter `from protocol <token>` fail-open gate. Strict on
 	// commit / commit-check (hard-reject a term whose protocol token is not

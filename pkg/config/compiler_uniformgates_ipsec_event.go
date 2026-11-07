@@ -2,13 +2,9 @@ package config
 
 import "fmt"
 
-// runUniformGatesIPsecEvent runs the ipsec event sub-run of the P6b uniform
-// fail-open gate phase. It is a verbatim contiguous slice of the
-// original runUniformGates god-function (#6423 decomposition): the
-// gate order here and the segment-call order in runUniformGates together
-// reproduce the exact flat gate sequence, so the first-failing-gate-wins
-// strict ordering (invariant #6) and the tolerant warning-accumulation
-// order (invariant #7) are preserved. See runUniformGates.
+// runUniformGatesIPsecEvent runs the IPsec event sub-run of the P6b uniform
+// fail-open gate phase. The cross-gate order doctrine and pinned precedence
+// exceptions are documented in the runUniformGates header.
 func runUniformGatesIPsecEvent(tree *ConfigTree, cfg *Config, opts compileOpts) error {
 	// #2073 (+ #9919 F-090 vpn→policy link) IPsec (Phase 2) reference-chain
 	// gate. Strict on commit / commit-check (hard-reject a dangling chain

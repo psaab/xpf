@@ -3,9 +3,8 @@ package config
 import "fmt"
 
 // runUniformGatesInterfaceAddr runs the interface sub-run of the P6b
-// uniform fail-open gate phase (#9424, #9837). Its current position
-// follows the pre-existing gates; this execution order does not establish
-// a cross-gate diagnostic-priority contract.
+// uniform fail-open gate phase (#9424, #9837). Its execution position and
+// cross-gate order doctrine are covered by the runUniformGates header.
 func runUniformGatesInterfaceAddr(_ *ConfigTree, cfg *Config, opts compileOpts) error {
 	// #9424 bracketed interface-address-list gate. Strict on commit /
 	// commit-check (hard-reject a token inside `address [ ... ]` that is neither
@@ -30,8 +29,7 @@ func runUniformGatesInterfaceAddr(_ *ConfigTree, cfg *Config, opts compileOpts) 
 	// parent's, so the committed value would never be realised). Lenient on
 	// load / peer-sync (warn so an already-persisted or peer-synced config
 	// still boots — #1960 no-brick; the runtime warning already covers the
-	// leniently-loaded case). Runs AFTER the address-list gate so a
-	// malformed-address error still wins the first-error slot.
+	// leniently-loaded case).
 	if err := validateVlanUnitMTUStrict(cfg); err != nil {
 		if opts.lenientVlanUnitMTU {
 			cfg.Warnings = append(cfg.Warnings,
@@ -47,8 +45,7 @@ func runUniformGatesInterfaceAddr(_ *ConfigTree, cfg *Config, opts compileOpts) 
 	// netdev would take the MTU, but no frame that large can reach a
 	// worker, so the commit would succeed and then drop at line rate).
 	// Lenient on load / peer-sync (warn so an already-persisted or
-	// peer-synced jumbo config still boots — #1960 no-brick). Runs before
-	// the #13936 gate below, so an over-budget error wins that slot.
+	// peer-synced jumbo config still boots — #1960 no-brick).
 	if err := validateUserspaceRxMTUStrict(cfg); err != nil {
 		if opts.lenientUserspaceRxMTU16244 {
 			cfg.Warnings = append(cfg.Warnings,
