@@ -154,6 +154,54 @@ func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 	}
 }
 
+// #18997 sentinel-containing credential arm (Kimi delta at 6f14ef160e):
+// a password that merely CONTAINS the sentinel spelling
+// ("only<redacted>credential") is a real credential — dropping its
+// needle (the first span implementation) fails OPEN. Such needles
+// keep their raw form only (quoted forms would corrupt rendered
+// sentinels); the raw span replaces the whole value.
+func TestSchemaExitScrubSentinelContainingCredential18997(t *testing.T) {
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "scp://u:p@h/d" password "only<redacted>credential"`,
+	})
+	if err := SchemaValidate(tree); err != nil {
+		t.Fatalf("premise: sentinel-containing password must validate: %v", err)
+	}
+	foreign := fmt.Errorf("archive fetch failed with password only<redacted>credential")
+	got := scrubSchemaErrorSecrets(tree, foreign).Error()
+	if strings.Contains(got, "only<redacted>credential") {
+		t.Errorf("sentinel-containing credential echoed (#18997): %v", got)
+	}
+	if strings.Contains(got, "<<redacted>>") {
+		t.Errorf("sentinel corrupted by its own needle: %v", got)
+	}
+}
+
+// #18997 quoted-overlap arm (Sol/Kimi deltas at 6f14ef160e): the span
+// pass must cover the QUOTED and quoted-interior renderings too, not
+// only raw occurrences. Values carrying a newline render under %q
+// with \n escapes, so the diagnostic text contains neither raw value
+// whole; their interior forms overlap partially ("user:pw\nw@host"
+// and "w@host\n?SECRET" share "w@host\n"). Sequential interior
+// replacement leaves a credential half standing in either order
+// (parent probe); only span-merging the interior forms covers it.
+// Drives the exit scrub SchemaValidate applies, with the foreign
+// %q-error shape that surface exists to catch.
+func TestSchemaValidateQuotedOverlapNeverEchoes18997(t *testing.T) {
+	tree := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "user:pw\nw@host" password "s3cr3t"`,
+		`set system archival configuration archive-sites "w@host\n?SECRET" password "s3cr3t"`,
+	})
+	foreign := fmt.Errorf("archive fetch failed for %q", "user:pw\nw@host\n?SECRET")
+	got := scrubSchemaErrorSecrets(tree, foreign).Error()
+	if strings.Contains(got, "user:pw") {
+		t.Errorf("quoted partially-overlapping userinfo echoed (#18997): %v", got)
+	}
+	if strings.Contains(got, "SECRET") {
+		t.Errorf("quoted partially-overlapping query credential echoed (#18997): %v", got)
+	}
+}
+
 // #18997 short-URL arm (Kimi seat): a credential-bearing URL token can be
 // shorter than beltSecretValues' 4-byte floor ("a@b" is 3 bytes, ":p@"
 // carries an inline password) yet is still transformed by RedactURL.

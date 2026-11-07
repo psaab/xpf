@@ -415,84 +415,96 @@ func collectURLValues(tree *ConfigTree) []string {
 // command, is still found because matching is on the final rendered
 // bytes, not on which formatter produced them.
 func scrubSecretValuesText(values []string, text string) string {
-	// Longest first (Kimi fold at b141027483): sequential ReplaceAll
-	// lets a shorter needle that is a substring of a longer one fire
-	// first and corrupt the longer match — "@" (collected from an
-	// archive-sites token) rewriting ":p@" to ":p<redacted>" leaves the
-	// inline password standing. collectURLValues returns traversal
-	// order, so sort a copy here where every consumer is safe.
+	// Needle forms: raw, strconv.Quote, and quoted-interior renderings
+	// of every value. Partially overlapping needles of ANY form defeat
+	// sequential ReplaceAll in either order (each first pass destroys
+	// the other's match and leaves a credential half standing, and
+	// repetition cannot recover a destroyed match), so occurrences of
+	// every form are computed as spans over the ORIGINAL text and
+	// overlapping spans merge into one sentinel. A needle CONTAINING
+	// the SecretRedacted spelling as part of a longer credential is
+	// kept in raw form only (its quoted forms would corrupt rendered
+	// sentinels); the raw span replaces the whole value, so neither
+	// leak nor corruption results.
+	//
+	// Longest-first sorting is retained only to order form generation
+	// deterministically; span merging, not order, is what makes
+	// containment and partial overlaps safe.
 	ordered := append([]string(nil), values...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return len(ordered[i]) > len(ordered[j])
 	})
-	// Partially overlapping needles (Kimi fold at 72276114f0) defeat
-	// sequential ReplaceAll in EITHER order: "user:pw@host" and
-	// "@host?SECRET" share "@host", so the first replacement destroys
-	// the other's match and leaves its credential half standing
-	// ("?SECRET" / "user:pw"); repetition cannot recover a destroyed
-	// match. Occurrences are therefore computed as spans over the
-	// ORIGINAL text and merged before replacement — overlapping
-	// spans become one sentinel. Needles containing the SecretRedacted
-	// sentinel substring are dropped: they would match inside already
-	// rendered locations (diagnostic integrity; the sentinel spelling
-	// is a contract). Quoted and quoted-interior forms keep the
-	// sequential longest-first pass below: their renderings are
-	// distinct strings the raw spans cannot match.
-	needles := make([]string, 0, len(ordered))
-	for _, v := range ordered {
-		if v == "" || strings.Contains(v, SecretRedacted) {
-			continue
-		}
-		needles = append(needles, v)
-	}
 	type span struct{ lo, hi int }
 	var spans []span
-	for _, v := range needles {
+	addSpans := func(needle string) {
+		if needle == "" {
+			return
+		}
 		for at := 0; ; {
-			i := strings.Index(text[at:], v)
+			i := strings.Index(text[at:], needle)
 			if i < 0 {
 				break
 			}
-			spans = append(spans, span{at + i, at + i + len(v)})
+			spans = append(spans, span{at + i, at + i + len(needle)})
 			at += i + 1
 		}
 	}
-	if len(spans) > 0 {
-		sort.Slice(spans, func(i, j int) bool {
-			if spans[i].lo != spans[j].lo {
-				return spans[i].lo < spans[j].lo
-			}
-			return spans[i].hi > spans[j].hi
-		})
-		var b strings.Builder
-		pos, end := 0, -1
-		for _, sp := range spans {
-			if end >= 0 && sp.lo < end {
-				if sp.hi > end {
-					end = sp.hi
-				}
-				continue
-			}
-			if end >= 0 {
-				b.WriteString(SecretRedacted)
-				pos = end
-			}
-			b.WriteString(text[pos:sp.lo])
-			pos, end = sp.lo, sp.hi
+	for _, v := range ordered {
+		if v == "" {
+			continue
 		}
-		b.WriteString(SecretRedacted)
-		b.WriteString(text[end:])
-		text = b.String()
-	}
-	for _, v := range needles {
+		if strings.Contains(v, SecretRedacted) {
+			// A value CONTAINING the sentinel spelling (e.g. a password
+			// "only<redacted>credential") is a real credential: dropping
+			// its needle fails OPEN (Kimi delta). Keep only its raw
+			// form: the quoted renderings of such a value would match
+			// inside already-rendered sentinels. The raw span replaces
+			// the whole value, sentinel substring included, so no
+			// "<<redacted>>" corruption and no leak. The exact sentinel
+			// itself never reaches here as a live secret (ingest
+			// refuses it); if it does, the raw span is still correct.
+			addSpans(v)
+			continue
+		}
+		addSpans(v)
 		if q := strconv.Quote(v); q != v {
-			text = strings.ReplaceAll(text, q, strconv.Quote(SecretRedacted))
+			addSpans(q)
 		}
 		if in := quotedInterior(v); in != v && len(in) >= 2 {
-			text = strings.ReplaceAll(text, in, SecretRedacted)
+			addSpans(in)
 		}
 	}
-	return text
+	if len(spans) == 0 {
+		return text
+	}
+	sort.Slice(spans, func(i, j int) bool {
+		if spans[i].lo != spans[j].lo {
+			return spans[i].lo < spans[j].lo
+		}
+		return spans[i].hi > spans[j].hi
+	})
+	var b strings.Builder
+	pos, end := 0, -1
+	writeSpan := func() {
+		b.WriteString(SecretRedacted)
+		pos = end
+	}
+	for _, sp := range spans {
+		if end >= 0 && sp.lo < end {
+			if sp.hi > end {
+				end = sp.hi
+			}
+			continue
+		}
+		if end >= 0 {
+			writeSpan()
+		}
+		b.WriteString(text[pos:sp.lo])
+		pos, end = sp.lo, sp.hi
+	}
+	writeSpan()
+	b.WriteString(text[end:])
+	return b.String()
 }
 func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	joined := strings.Join(redactSecretPath(path), " ")
