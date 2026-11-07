@@ -3,9 +3,10 @@
 //! `live_by_flow` was the residual bottleneck: one
 //! `Mutex<PortAllocatorLiveState>` serialized every new-flow
 //! alloc/release (measured p50 391ns @M=1 -> 12,928ns @M=8, ~59%
-//! contended @M=8). The flow map now lives in 16 shards keyed by
-//! FxHash of the flow key; persistent-lease / ownership / GC state
-//! stays in the retained `live` RwLock. PAT admission also takes the
+//! contended @M=8). The flow map now lives in 16 cache-padded shards
+//! selected by the process-keyed hot-path hash of the flow key;
+//! persistent-lease / ownership / GC state stays in the retained `live` RwLock.
+//! PAT admission also takes the
 //! `live` write guard to make the reverse-identity check and owner
 //! publication atomic with the flow insert: it tries the guard first,
 //! and falls back to the serialized path on contention.
@@ -41,19 +42,19 @@
 
 use super::LiveAllocation;
 use crate::nat::SourceNatFlowKey;
+use crate::sharded::{ShardedLock, shard_index_with_seed};
 use rustc_hash::FxHashMap;
-use std::hash::Hasher;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 pub(in crate::nat::allocator) const LIVE_SHARDS: usize = 16;
 
 pub(in crate::nat::allocator) fn live_shard_index(flow: &SourceNatFlowKey) -> usize {
-    let mut hasher = rustc_hash::FxHasher::default();
-    std::hash::Hash::hash(flow, &mut hasher);
-    (hasher.finish() as usize) & (LIVE_SHARDS - 1)
+    shard_index_with_seed::<SourceNatFlowKey, LIVE_SHARDS>(
+        flow,
+        crate::hot_hash_seed::hot_path_hash_seed(),
+    )
 }
-
 // Visible to `nat::` (not just the allocator) so the cfg(test)
 // `debug_hold_flow_shard` guard type can be named by nat tests.
 #[derive(Debug, Default)]
@@ -66,7 +67,7 @@ pub(in crate::nat) struct LiveFlowShard {
 // len/iter/clear), preserving the old FxHashMap semantics.
 #[derive(Debug)]
 pub(in crate::nat::allocator) struct LiveFlowMap {
-    pub(in crate::nat::allocator) shards: Vec<Mutex<LiveFlowShard>>,
+    pub(in crate::nat::allocator) shards: ShardedLock<Mutex<LiveFlowShard>, LIVE_SHARDS>,
     pub(in crate::nat::allocator) count: AtomicUsize,
     /// Fold 2: shared atomic admission counter (see module doc).
     /// Incremented ONLY by `admit_one`, decremented ONLY by a
@@ -85,9 +86,7 @@ impl Default for LiveFlowMap {
 impl LiveFlowMap {
     pub(in crate::nat::allocator) fn new() -> Self {
         Self {
-            shards: (0..LIVE_SHARDS)
-                .map(|_| Mutex::new(LiveFlowShard::default()))
-                .collect(),
+            shards: ShardedLock::new(),
             count: AtomicUsize::new(0),
             admission: AtomicUsize::new(0),
         }
@@ -127,9 +126,7 @@ impl LiveFlowMap {
         &'a self,
         flow: &SourceNatFlowKey,
     ) -> MutexGuard<'a, LiveFlowShard> {
-        self.shards[live_shard_index(flow)]
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.shards.shard_for(flow).lock()
     }
 
     fn write_shard(
@@ -206,7 +203,7 @@ impl LiveFlowMap {
         contended: &std::sync::atomic::AtomicU64,
     ) -> MutexGuard<'a, LiveFlowShard> {
         acquisitions.fetch_add(1, Ordering::Relaxed);
-        let shard = &self.shards[live_shard_index(flow)];
+        let shard = self.shards.shard_for(flow).get();
         match shard.try_lock() {
             Ok(g) => return g,
             Err(std::sync::TryLockError::Poisoned(p)) => return p.into_inner(),
@@ -288,13 +285,13 @@ impl LiveFlowMap {
 
 
     /// Snapshot of all entries (cold paths: retire_worker, snapshot
-    /// debug walks). Takes each shard read lock in index order.
+    /// debug walks). Locks each shard's mutex in index order.
     pub(in crate::nat::allocator) fn entries(
         &self,
     ) -> Vec<(SourceNatFlowKey, LiveAllocation)> {
         let mut out = Vec::new();
-        for shard in &self.shards {
-            let guard = shard.lock().unwrap_or_else(|e| e.into_inner());
+        for shard in self.shards.shards() {
+            let guard = shard.lock();
             out.extend(guard.map.iter().map(|(k, v)| (*k, *v)));
         }
         out

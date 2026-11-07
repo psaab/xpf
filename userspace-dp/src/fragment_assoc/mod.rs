@@ -112,9 +112,10 @@
 //! config reloads inside `Nat64State::from_snapshots_with_previous` so in-flight
 //! datagrams keep translating. Deliberately left for a separate change.
 
-use crate::hot_hash_seed::{frag_assoc_shard_seed, keyed_shard_index};
+use crate::hot_hash_seed::frag_assoc_shard_seed;
 use crate::nat64::{Nat64ReverseInfo, ipv6_fragment_header};
 use crate::session::{SessionDecision, SessionKey};
+use crate::sharded::{ShardedLock, shard_index_from_hash};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -178,7 +179,6 @@ pub(crate) static FRAG_QUOTA_REFUSALS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FRAG_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const FRAG_SHARDS: usize = 16;
-const _: () = assert!(FRAG_SHARDS >= 2 && FRAG_SHARDS.is_power_of_two());
 /// Fixed per-shard entry cap. Total ceiling is
 /// `FRAG_SHARDS * FRAG_CAP_PER_SHARD` = 1024 entries. Each entry carries a fixed
 /// 1 KiB fragment-coverage bitmap, so coverage state adds at most 1 MiB without
@@ -495,7 +495,7 @@ struct FragEntry {
 /// on any other worker.
 #[derive(Clone)]
 pub(crate) struct FragAssoc {
-    shards: Arc<Vec<Mutex<Vec<FragEntry>>>>,
+    shards: Arc<ShardedLock<Mutex<Vec<FragEntry>>, FRAG_SHARDS>>,
 }
 
 impl std::fmt::Debug for FragAssoc {
@@ -538,7 +538,7 @@ pub(crate) fn frag_shard_index_seeded(key: &FragKey, seed: u64) -> usize {
     for &b in &buf[..n] {
         mix(b);
     }
-    keyed_shard_index(h, seed, 0x6672_6167_6173_7301, FRAG_SHARDS)
+    shard_index_from_hash::<FRAG_SHARDS>(h, seed, 0x6672_6167_6173_7301)
 }
 
 pub(crate) fn frag_shard_index(key: &FragKey) -> usize {
@@ -568,12 +568,11 @@ fn frag_entry_live(e: &FragEntry, now_ns: u64) -> bool {
 
 impl FragAssoc {
     pub(crate) fn new() -> Self {
-        let mut shards = Vec::with_capacity(FRAG_SHARDS);
-        for _ in 0..FRAG_SHARDS {
-            shards.push(Mutex::new(Vec::with_capacity(FRAG_CAP_PER_SHARD)));
-        }
         Self {
-            shards: Arc::new(shards),
+            shards: Arc::new(ShardedLock::with_seed_and(
+                frag_assoc_shard_seed(),
+                || Mutex::new(Vec::with_capacity(FRAG_CAP_PER_SHARD)),
+            )),
         }
     }
 
@@ -627,7 +626,7 @@ impl FragAssoc {
     ) -> bool {
         let deadline_ns = now_ns.saturating_add(FRAG_TTL_NS);
         let idx = frag_shard_index(&key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(pos) = shard.iter().position(|e| e.key == key) {
@@ -742,7 +741,7 @@ impl FragAssoc {
     /// association while holding its shard lock. Returns true iff it released.
     pub(crate) fn record_fragment(&self, key: &FragKey, range: FragmentRange) -> bool {
         let idx = frag_shard_index(key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(pos) = shard.iter().position(|e| e.key == *key) else {
@@ -811,7 +810,7 @@ impl FragAssoc {
         owner_rg_forwarding_active: impl Fn(i32) -> bool,
     ) -> Option<(SessionDecision, Option<Nat64ReverseInfo>)> {
         let idx = frag_shard_index(key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         shard.retain(|e| frag_entry_live(e, now_ns));
@@ -902,7 +901,7 @@ impl FragAssoc {
     #[cfg(test)]
     pub(crate) fn release(&self, key: &FragKey) -> bool {
         let idx = frag_shard_index(key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(pos) = shard.iter().position(|e| e.key == *key) {
@@ -935,9 +934,10 @@ impl FragAssoc {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shards
+            .shards()
             .iter()
             .map(|s| {
-                s.lock()
+                s.get().lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .len()
             })

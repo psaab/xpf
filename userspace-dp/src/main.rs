@@ -40,6 +40,7 @@ mod policy;
 mod prefix;
 mod prefix_set;
 mod screen;
+mod sharded;
 mod session;
 mod slowpath;
 mod slowpath_reinject_9506;

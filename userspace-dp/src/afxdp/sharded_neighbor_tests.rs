@@ -130,7 +130,7 @@ fn len_releases_each_shard_before_waiting_for_the_next() {
     // The bounded wait lets the old all-shards-at-once implementation
     // proceed after the assertion state is sampled rather than hanging.
     let reached_boundary = reached_last_rx.recv_timeout(Duration::from_secs(5)).is_ok();
-    let lower_shard_available = map.shards[0].0.try_lock().is_ok();
+    let lower_shard_available = map.shards.shard_at(0).get().try_lock().is_ok();
     continue_tx.send(()).unwrap();
     drop(last_shard);
     let _ = worker.join().unwrap();
@@ -183,7 +183,7 @@ fn with_all_shards_atomic_replace() {
 
 #[test]
 fn padded_shard_align_at_least_64() {
-    assert!(std::mem::align_of::<PaddedShard>() >= 64);
+    assert!(std::mem::align_of::<crate::sharded::PaddedShard<std::sync::Mutex<()>>>() >= 64);
 }
 
 /// Distribution test: /24 LAN with constant ifindex. Real-world
@@ -280,7 +280,12 @@ fn poison_recovered_via_into_inner() {
     // Force a poison: spawn a thread that locks the shard then panics.
     let map_clone = Arc::clone(&map);
     let _ = thread::spawn(move || {
-        let _g = map_clone.shards[shard_idx(&k)].0.lock().unwrap();
+        let _g = map_clone
+            .shards
+            .shard_at(shard_idx(&k))
+            .get()
+            .lock()
+            .unwrap();
         panic!("intentional poison");
     })
     .join();

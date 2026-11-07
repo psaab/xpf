@@ -60,7 +60,6 @@
 //! ownerless and delete it after a publish landed in between. A claim is recorded only
 //! after its write succeeded.
 
-use std::hash::BuildHasher;
 use std::io;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
@@ -68,15 +67,12 @@ use smallvec::SmallVec;
 
 use crate::afxdp::types::FastMap;
 use crate::session::SessionKey;
+use crate::sharded::{PaddedShard, ShardedLock, shard_index_with_seed};
 
 /// The steering-map row a key occupies: the 40 bytes the shim looks up.
 pub(crate) type SteeringRow = [u8; 40];
 
 const NUM_SHARDS: usize = 64;
-const _: () = assert!(
-    NUM_SHARDS.is_power_of_two(),
-    "shard selection masks keyed hash bits"
-);
 const _: () = assert!(
     crate::nat::MAX_NAT_HOLDER_WORKERS == u128::BITS,
     "every plannable worker id must have a bit in the u128 holder mask"
@@ -196,27 +192,17 @@ pub(crate) enum OwnerRemoval {
     Unregistered,
 }
 
-/// One mutex-guarded shard, padded so adjacent shards do not share a cache line
-/// (the `sharded_neighbor.rs` shape).
-#[repr(align(64))]
-struct PaddedShard<T>(Mutex<T>);
-
-impl<T: Default> Default for PaddedShard<T> {
-    fn default() -> Self {
-        Self(Mutex::new(T::default()))
-    }
-}
 
 pub(crate) struct SteeringRowOwners {
-    rows: [PaddedShard<FastMap<SteeringRow, Owners>>; NUM_SHARDS],
-    holdings: [PaddedShard<FastMap<SessionKey, Held>>; NUM_SHARDS],
+    rows: ShardedLock<Mutex<FastMap<SteeringRow, Owners>>, NUM_SHARDS>,
+    holdings: ShardedLock<Mutex<FastMap<SessionKey, Held>>, NUM_SHARDS>,
 }
 
 impl Default for SteeringRowOwners {
     fn default() -> Self {
         Self {
-            rows: std::array::from_fn(|_| PaddedShard::default()),
-            holdings: std::array::from_fn(|_| PaddedShard::default()),
+            rows: ShardedLock::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
+            holdings: ShardedLock::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
         }
     }
 }
@@ -225,18 +211,13 @@ impl Default for SteeringRowOwners {
 static SHARD_SEED: LazyLock<u64> =
     LazyLock::new(crate::hot_hash_seed::hot_path_hash_seed);
 
-fn shard_of(hash: u64) -> usize {
-    (hash as usize) & (NUM_SHARDS - 1)
-}
 
 fn row_shard_idx_with(seed: u64, row: &SteeringRow) -> usize {
-    let state = crate::hot_hash_seed::HotPathSeededState::new(seed);
-    shard_of(state.hash_one(row))
+    shard_index_with_seed::<SteeringRow, NUM_SHARDS>(row, seed)
 }
 
 fn key_shard_idx_with(seed: u64, key: &SessionKey) -> usize {
-    let state = crate::hot_hash_seed::HotPathSeededState::new(seed);
-    shard_of(state.hash_one(key))
+    shard_index_with_seed::<SessionKey, NUM_SHARDS>(key, seed)
 }
 
 fn row_shard_idx(row: &SteeringRow) -> usize {
@@ -247,10 +228,13 @@ fn key_shard_idx(key: &SessionKey) -> usize {
     key_shard_idx_with(*SHARD_SEED, key)
 }
 
-fn lock<T>(shard: &PaddedShard<T>) -> MutexGuard<'_, T> {
+fn lock<T>(shard: &PaddedShard<Mutex<T>>) -> MutexGuard<'_, T> {
     // Poison-tolerant (engineering-style): a panic under one shard's lock must not
     // wedge every later steering write that lands in the same shard.
-    shard.0.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    shard
+        .get()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Clear `claim` from `owner`'s claim on `row` and report what is left of the row.
@@ -306,11 +290,11 @@ fn held_rows(
 
 impl SteeringRowOwners {
     fn row_shard(&self, row: &SteeringRow) -> MutexGuard<'_, FastMap<SteeringRow, Owners>> {
-        lock(&self.rows[row_shard_idx(row)])
+        lock(self.rows.shard_at(row_shard_idx(row)))
     }
 
     fn holdings_shard(&self, key: &SessionKey) -> MutexGuard<'_, FastMap<SessionKey, Held>> {
-        lock(&self.holdings[key_shard_idx(key)])
+        lock(self.holdings.shard_at(key_shard_idx(key)))
     }
 
     /// Write ONE row for `owner` as `holder` with action byte `action`,
@@ -447,7 +431,7 @@ impl SteeringRowOwners {
         // Rows first (mirrors the old ordering rationale): a racing
         // coordinator delete that finds a row workerless still sees any
         // coordinator claim, so it cannot delete a coordinator-held row.
-        for shard in &self.rows {
+        for shard in self.rows.shards().iter() {
             let mut rows = lock(shard);
             rows.retain(|_, owners| {
                 owners.retain_mut(|(_, claim, _)| {
@@ -457,7 +441,7 @@ impl SteeringRowOwners {
                 !owners.is_empty()
             });
         }
-        for shard in &self.holdings {
+        for shard in self.holdings.shards().iter() {
             let mut holdings = lock(shard);
             holdings.retain(|_, held| {
                 held.retain_mut(|(_, claim, _)| {
@@ -482,7 +466,7 @@ impl SteeringRowOwners {
             return 0;
         }
         let mut retired = 0;
-        for shard in &self.holdings {
+        for shard in self.holdings.shards().iter() {
             let mut holdings = lock(shard);
             let owners: SmallVec<[SessionKey; 8]> = holdings.keys().cloned().collect();
             for owner in &owners {
@@ -584,7 +568,11 @@ impl SteeringRowOwners {
     /// Whether `row`'s shard is locked at this instant.
     #[cfg(test)]
     pub(crate) fn shard_is_locked(&self, row: &SteeringRow) -> bool {
-        self.rows[row_shard_idx(row)].0.try_lock().is_err()
+        self.rows
+            .shard_at(row_shard_idx(row))
+            .get()
+            .try_lock()
+            .is_err()
     }
 
     /// The owners of `row`, counted as (entry key, holder) claims.

@@ -10,8 +10,8 @@
 //! - 64 shards (`NUM_SHARDS = 64`). Standard choice; matches `dashmap`.
 //! - Shard selection uses the per-process keyed hash state shared by the
 //!   hot-path placement code, then masks to one of 64 shards (#12794).
-//! - Cache-line padding via `#[repr(align(64))]` ensures adjacent
-//!   shards do not share cache lines (false-sharing prevention).
+//! - The shared `ShardedLock` pads each shard to 64 bytes, preventing
+//!   adjacent shards from sharing cache lines.
 //! - Bulk operations via `BulkShardGuard`: locks all 64 shards in
 //!   shard-index order. Deadlock-free as long as every other caller
 //!   that wants more than one shard also locks in ascending order.
@@ -25,7 +25,7 @@
 //!   so the safer choice is to recover-from-poison and keep forwarding.
 
 use super::types::{FastMap, FastSet, NeighborEntry};
-use std::hash::{BuildHasher, Hash, Hasher};
+use crate::sharded::{ShardedLock, shard_index_with_seed};
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 #[cfg(test)]
@@ -151,15 +151,6 @@ pub(crate) struct ProbedNeighbor {
     pub(crate) probed_at_ns: u64,
 }
 
-/// One mutex-guarded shard of ARP solicitation evidence.
-#[repr(align(64))]
-struct SolicitedShard(Mutex<FastMap<(i32, IpAddr), ProbedNeighbor>>);
-
-impl SolicitedShard {
-    fn new() -> Self {
-        Self(Mutex::new(FastMap::default()))
-    }
-}
 
 /// Dynamic-neighbor metadata kept private to the sharded map. RX source
 /// learns and XSK ARP/NDP learns carry an age lease; kernel and
@@ -186,20 +177,10 @@ impl NeighborRecord {
     }
 }
 
-/// One mutex-guarded shard, padded to 64 bytes so adjacent shards do
-/// not share cache lines.
-#[repr(align(64))]
-pub(super) struct PaddedShard(Mutex<FastMap<(i32, IpAddr), NeighborRecord>>);
-
-impl PaddedShard {
-    fn new() -> Self {
-        Self(Mutex::new(FastMap::default()))
-    }
-}
 
 /// 64-shard mutex map for the dynamic neighbor cache.
 pub(crate) struct ShardedNeighborMap {
-    shards: [PaddedShard; NUM_SHARDS],
+    shards: ShardedLock<Mutex<FastMap<(i32, IpAddr), NeighborRecord>>, NUM_SHARDS>,
     /// #7156: monotonic count of neighbour INSERTS across all shards.
     ///
     /// Read by each worker's `pending_neigh` sweep to answer one question in a
@@ -256,7 +237,7 @@ pub(crate) struct ShardedNeighborMap {
     /// #10704: bounded evidence that this router recently probed an ARP key.
     /// Entries are keyed/sharded exactly like `shards`; no allocation or
     /// extra work occurs for non-ARP packets.
-    arp_solicited_at: [SolicitedShard; NUM_SHARDS],
+    arp_solicited_at: ShardedLock<Mutex<FastMap<(i32, IpAddr), ProbedNeighbor>>, NUM_SHARDS>,
     /// #10704: cumulative count of unsolicited ARP/neighbor updates refused
     /// because they tried to replace a live differing MAC.
     arp_overwrite_refusals: AtomicU64,
@@ -278,14 +259,11 @@ pub(crate) struct ShardedNeighborMap {
 /// Seeded keyed-hash shard selection prevents offline targeting of the
 /// per-shard learn cap (#7752/#12794). The process seed is node-local and stable
 /// for this process.
-const _: () = assert!(NUM_SHARDS.is_power_of_two());
 static SHARD_SEED: LazyLock<u64> = LazyLock::new(crate::hot_hash_seed::hot_path_hash_seed);
 
 #[inline]
 fn shard_idx_with(seed: u64, key: &(i32, IpAddr)) -> usize {
-    let mut hasher = crate::hot_hash_seed::HotPathSeededState::new(seed).build_hasher();
-    key.hash(&mut hasher);
-    (hasher.finish() as usize) & (NUM_SHARDS - 1)
+    shard_index_with_seed::<(i32, IpAddr), NUM_SHARDS>(key, seed)
 }
 
 fn shard_idx(key: &(i32, IpAddr)) -> usize {
@@ -295,8 +273,8 @@ fn shard_idx(key: &(i32, IpAddr)) -> usize {
 impl ShardedNeighborMap {
     pub(crate) fn new() -> Self {
         Self {
-            shards: std::array::from_fn(|_| PaddedShard::new()),
-            arp_solicited_at: std::array::from_fn(|_| SolicitedShard::new()),
+            shards: ShardedLock::new(),
+            arp_solicited_at: ShardedLock::new(),
             shard_mac_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
             learn_cap_drops: AtomicU64::new(0),
             insert_generation: AtomicU64::new(0),
@@ -367,8 +345,7 @@ impl ShardedNeighborMap {
         // Family-agnostic: IPv4 ARP (#10704) and IPv6 kernel-neighbor
         // solicitation (#13660) share this one-shot evidence store.
         let idx = shard_idx(&key);
-        let mut shard = self.arp_solicited_at[idx]
-            .0
+        let mut shard = self.arp_solicited_at.shard_at(idx).get()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if let Some(existing) = shard.get(&key) {
@@ -401,8 +378,7 @@ impl ShardedNeighborMap {
     /// unaffected — it is a fresh, dataplane-initiated probe.)
     pub(crate) fn clear_neighbor_probe(&self, key: &(i32, IpAddr)) {
         let idx = shard_idx(key);
-        let mut shard = self.arp_solicited_at[idx]
-            .0
+        let mut shard = self.arp_solicited_at.shard_at(idx).get()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         shard.remove(key);
@@ -414,8 +390,7 @@ impl ShardedNeighborMap {
     /// move converge when its answer arrives.
     pub(crate) fn clear_mac_bound_neighbor_probe(&self, key: &(i32, IpAddr)) {
         let idx = shard_idx(key);
-        let mut shard = self.arp_solicited_at[idx]
-            .0
+        let mut shard = self.arp_solicited_at.shard_at(idx).get()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if shard.get(key).is_some_and(|probed| probed.mac.is_some()) {
@@ -450,8 +425,7 @@ impl ShardedNeighborMap {
         now_ns: u64,
     ) -> bool {
         let idx = shard_idx(key);
-        let shard = self.arp_solicited_at[idx]
-            .0
+        let shard = self.arp_solicited_at.shard_at(idx).get()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         match shard.get(key) {
@@ -470,8 +444,7 @@ impl ShardedNeighborMap {
     /// #10704: consume the recent-probe evidence for one ARP reply.
     pub(crate) fn take_arp_reply_solicited(&self, key: &(i32, IpAddr), now_ns: u64) -> bool {
         let idx = shard_idx(key);
-        let mut shard = self.arp_solicited_at[idx]
-            .0
+        let mut shard = self.arp_solicited_at.shard_at(idx).get()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         match shard.remove(key) {
@@ -591,7 +564,7 @@ impl ShardedNeighborMap {
     }
 
     fn lock_shard(&self, idx: usize) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
-        match self.shards[idx].0.lock() {
+        match self.shards.shard_at(idx).get().lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
         }

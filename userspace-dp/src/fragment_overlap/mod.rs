@@ -145,7 +145,8 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
-use crate::hot_hash_seed::{frag_overlap_shard_seed, keyed_shard_index};
+use crate::hot_hash_seed::frag_overlap_shard_seed;
+use crate::sharded::{ShardedLock, shard_index_from_hash};
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6};
 use crate::nat::NatDecision;
 
@@ -195,7 +196,6 @@ pub(crate) static FRAG_OVERLAP_POST_NAT_DROPPED: AtomicU64 = AtomicU64::new(0);
 pub(crate) static FRAG_OVERLAP_MAX_LIFETIME_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) const OVERLAP_SHARDS: usize = 16;
-const _: () = assert!(OVERLAP_SHARDS >= 2 && OVERLAP_SHARDS.is_power_of_two());
 pub(crate) const OVERLAP_CAP_PER_SHARD: usize = 64;
 /// Max entries one sender holds per shard (#10658).
 pub(crate) const OVERLAP_CAP_PER_SENDER_PER_SHARD: usize = 8;
@@ -280,7 +280,7 @@ pub(crate) enum OverlapParse {
 /// Cross-worker overlap tracker. Cheap to `Clone` (Arc-backed shards).
 #[derive(Clone)]
 pub(crate) struct OverlapTracker {
-    shards: Arc<Vec<Mutex<Vec<OverlapEntry>>>>,
+    shards: Arc<ShardedLock<Mutex<Vec<OverlapEntry>>, OVERLAP_SHARDS>>,
     next_revision: Arc<AtomicU64>,
     seed: u64,
 }
@@ -333,7 +333,7 @@ pub(crate) fn overlap_shard_index_seeded(key: &OverlapKey, seed: u64) -> usize {
     for b in key.ident.to_be_bytes() {
         mix(b);
     }
-    keyed_shard_index(h, seed, 0x6f76_6572_6c61_7001, OVERLAP_SHARDS)
+    shard_index_from_hash::<OVERLAP_SHARDS>(h, seed, 0x6f76_6572_6c61_7001)
 }
 
 #[cfg(test)]
@@ -672,12 +672,11 @@ impl OverlapTracker {
     }
 
     fn with_seed(seed: u64) -> Self {
-        let mut shards = Vec::with_capacity(OVERLAP_SHARDS);
-        for _ in 0..OVERLAP_SHARDS {
-            shards.push(Mutex::new(Vec::with_capacity(OVERLAP_CAP_PER_SHARD)));
-        }
         Self {
-            shards: Arc::new(shards),
+            shards: Arc::new(ShardedLock::with_seed_and(
+                seed,
+                || Mutex::new(Vec::with_capacity(OVERLAP_CAP_PER_SHARD)),
+            )),
             next_revision: Arc::new(AtomicU64::new(1)),
             seed,
         }
@@ -744,7 +743,7 @@ impl OverlapTracker {
             };
         }
         let idx = self.shard_index(&key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut lifetime_evictions = 0;
@@ -891,7 +890,7 @@ impl OverlapTracker {
             };
         }
         let idx = self.shard_index(&key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut lifetime_evictions = 0;
@@ -1216,7 +1215,7 @@ impl OverlapTracker {
     /// entry itself remains recorded either way.
     pub(crate) fn commit_admission(&self, token: OverlapAdmissionToken) -> bool {
         let idx = self.shard_index(&token.key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &token.key)) else {
@@ -1242,7 +1241,7 @@ impl OverlapTracker {
     /// never be reclaimed by later completion coverage.
     pub(crate) fn fail_admission(&self, token: OverlapAdmissionToken) -> bool {
         let idx = self.shard_index(&token.key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &token.key)) else {
@@ -1262,7 +1261,7 @@ impl OverlapTracker {
     #[cfg(test)]
     pub(crate) fn release_completed(&self, token: OverlapCompletionToken) -> bool {
         let idx = self.shard_index(&token.key);
-        let mut shard = self.shards[idx]
+        let mut shard = self.shards.shard_at(idx).get()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let Some(pos) = shard.iter().position(|e| overlap_same_datagram(&e.key, &token.key)) else {
@@ -1283,9 +1282,10 @@ impl OverlapTracker {
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.shards
+            .shards()
             .iter()
             .map(|s| {
-                s.lock()
+                s.get().lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .len()
             })
@@ -4251,7 +4251,7 @@ mod tests {
             (t, s_entries, zone_b, shard)
         };
         let zone_count = |t: &OverlapTracker, shard: usize, zone: u32| -> usize {
-            t.shards[shard]
+            t.shards.shard_at(shard).get()
                 .lock()
                 .unwrap()
                 .iter()
