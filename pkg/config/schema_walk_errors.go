@@ -415,43 +415,25 @@ func collectURLValues(tree *ConfigTree) []string {
 // command, is still found because matching is on the final rendered
 // bytes, not on which formatter produced them.
 func scrubSecretValuesText(values []string, text string) string {
-	// Span-merging over the ORIGINAL text is the mechanism: sequential
-	// ReplaceAll lets an earlier needle destroy a partially overlapping
-	// later one's match and leaves a credential half standing, in
-	// either order, for raw, strconv.Quote, and quoted-interior forms
-	// alike (Kimi folds). Occurrences of every form become spans;
-	// overlapping spans merge into one sentinel.
-	//
-	// Sentinel-containing values ("only<redacted>credential" is a real
-	// password SchemaValidate accepts) join the SAME span pass, but
-	// their inserted replacement cannot be SecretRedacted itself: a
-	// later needle ("redacted") would match inside it. Their spans are
-	// instead emitted as a NUL-wrapped PIVOT (the pivot string never
-	// appears in a rendered diagnostic; the lexer tolerates NUL bytes
-	// inside quoted values but no producer emits this exact token), rewritten to
-	// SecretRedacted once, after all spanning. Because the pivot
-	// substitution happens in the span pass itself (not as a text
-	// pre-pass), an ordinary needle partially overlapping a
-	// sentinel-containing value still merges with its span instead of
-	// being destroyed before matching (Sol fold at f33328217a). The
-	// quoted pivot's final rewrite covers both raw and Quote forms.
-	// Collision residual (accepted): a diagnostic literally containing
-	// the pivot string itself would be rewritten — config text cannot
-	// practically carry it (it would have to be planted as an exact
-	// NUL-wrapped token in a quoted value, which the lexer tolerates
-	// but no producer emits), and the rewrite fails toward redaction,
-	// never toward disclosure.
-	const pivot = "\x00xpf-redacted-pivot\x00"
+	// Span-merging over the ORIGINAL text is the only mechanism:
+	// sequential ReplaceAll lets an earlier needle destroy a partially
+	// overlapping later one's match and leaves a credential half
+	// standing, in either order, for raw, strconv.Quote, and
+	// quoted-interior forms alike (Kimi folds). Occurrences of every
+	// form become spans; overlapping spans merge into one sentinel.
+	// Because all matching reads the original text and replacements
+	// are emitted only after spanning, an inserted sentinel is never
+	// re-matched by a later needle — sentinel-containing values
+	// ("only<redacted>credential" is a real password SchemaValidate
+	// accepts) need no special handling at all (pivot apparatus
+	// removed: GLM M2 proved direct emission byte-identical).
 	ordered := append([]string(nil), values...)
 	sort.SliceStable(ordered, func(i, j int) bool {
 		return len(ordered[i]) > len(ordered[j])
 	})
-	type span struct {
-		lo, hi int
-		pivot  bool
-	}
+	type span struct{ lo, hi int }
 	var spans []span
-	addSpans := func(needle string, pivot bool) {
+	addSpans := func(needle string) {
 		if needle == "" {
 			return
 		}
@@ -460,7 +442,7 @@ func scrubSecretValuesText(values []string, text string) string {
 			if i < 0 {
 				break
 			}
-			spans = append(spans, span{at + i, at + i + len(needle), pivot})
+			spans = append(spans, span{at + i, at + i + len(needle)})
 			at += i + 1
 		}
 	}
@@ -468,13 +450,12 @@ func scrubSecretValuesText(values []string, text string) string {
 		if v == "" {
 			continue
 		}
-		pivotValue := strings.Contains(v, SecretRedacted)
-		addSpans(v, pivotValue)
+		addSpans(v)
 		if q := strconv.Quote(v); q != v {
-			addSpans(q, pivotValue)
+			addSpans(q)
 		}
 		if in := quotedInterior(v); in != v && len(in) >= 2 {
-			addSpans(in, pivotValue)
+			addSpans(in)
 		}
 	}
 	if len(spans) == 0 {
@@ -488,13 +469,8 @@ func scrubSecretValuesText(values []string, text string) string {
 	})
 	var b strings.Builder
 	pos, end := 0, -1
-	pivotSpan := false
-	flush := func() {
-		if pivotSpan {
-			b.WriteString(pivot)
-		} else {
-			b.WriteString(SecretRedacted)
-		}
+	writeSpan := func() {
+		b.WriteString(SecretRedacted)
 		pos = end
 	}
 	for _, sp := range spans {
@@ -502,20 +478,17 @@ func scrubSecretValuesText(values []string, text string) string {
 			if sp.hi > end {
 				end = sp.hi
 			}
-			pivotSpan = pivotSpan || sp.pivot
 			continue
 		}
 		if end >= 0 {
-			flush()
+			writeSpan()
 		}
 		b.WriteString(text[pos:sp.lo])
-		pos, end, pivotSpan = sp.lo, sp.hi, sp.pivot
+		pos, end = sp.lo, sp.hi
 	}
-	flush()
+	writeSpan()
 	b.WriteString(text[end:])
-	out := b.String()
-	out = strings.ReplaceAll(out, strconv.Quote(pivot), strconv.Quote(SecretRedacted))
-	return strings.ReplaceAll(out, pivot, SecretRedacted)
+	return b.String()
 }
 func typedLeafInvalidErrorf(path []string, tok string, err error) error {
 	joined := strings.Join(redactSecretPath(path), " ")

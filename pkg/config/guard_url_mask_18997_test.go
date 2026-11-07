@@ -200,11 +200,10 @@ func TestSchemaExitScrubSentinelContainingEscapedCredential18997(t *testing.T) {
 	}
 }
 
-// Pivot-rewrite pin (Kimi delta at ce13f620ae): the merged span is
-// emitted as a pivot and rewritten once (raw and strconv.Quote forms)
-// in the final output — assert exactly one sentinel and no pivot
-// residue in either a raw or a %q-rendered diagnostic. Removing the
-// Quote(pivot) rewrite leaks the escaped marker spelling.
+// Sentinel-emission pin: a sentinel-containing span merges with
+// ordinary spans and yields exactly one sentinel in raw and
+// %q-rendered diagnostics (pivot apparatus removed — direct emission
+// proved byte-identical because matching reads the original text).
 func TestSchemaExitScrubPivotRewrittenOnce18997(t *testing.T) {
 	tree := buildRedactTree(t, []string{
 		`set system archival configuration archive-sites "@host<redacted>" password "s3cr3t"`,
