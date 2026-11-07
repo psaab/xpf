@@ -60,10 +60,9 @@ func isOptsField17153(n ast.Node, field string) bool {
 	return ok && id.Name == "opts"
 }
 
-// validatorsGovernedBy17153 returns, for flag, the sorted validator names
-// invoked in an `if err := validateX(...); err != nil { if opts.<flag> ... }`
-// (or `if !opts.<flag> { if err := validateX ... }` pre-walk) pattern in
-// non-test sources, plus the enclosing func name for helper-pattern sites.
+// validatorsGovernedBy17153 returns validator names governed by a lenient flag
+// whether it is tested around the call, used to wrap it in pre-walk, or passed
+// as the validator's explicit mode argument.
 func validatorsGovernedBy17153(files map[string]*ast.File, flag string) map[string]bool {
 	out := map[string]bool{}
 	for _, f := range files {
@@ -127,6 +126,31 @@ func validatorsGovernedBy17153(files map[string]*ast.File, flag string) map[stri
 					}
 					return true
 				})
+				return true
+			})
+			// Pattern C: validateX(..., opts.flag), used by A-shaped AST gates
+			// that need the mode in order to return warnings and sites.
+			ast.Inspect(fd.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				id, ok := call.Fun.(*ast.Ident)
+				if !ok || (!strings.HasPrefix(id.Name, "validate") && !strings.HasPrefix(id.Name, "Validate")) {
+					return true
+				}
+				governed := false
+				for _, arg := range call.Args {
+					ast.Inspect(arg, func(m ast.Node) bool {
+						if isOptsField17153(m, flag) {
+							governed = true
+						}
+						return true
+					})
+				}
+				if governed {
+					out[id.Name] = true
+				}
 				return true
 			})
 		}

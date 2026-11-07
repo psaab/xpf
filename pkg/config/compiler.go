@@ -1090,6 +1090,8 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	uncovered16001 := preWalk.uncovered16001
 	applicationNameCollisions := preWalk.applicationNameCollisions
 	firewallFilterCollisions := preWalk.firewallFilterCollisions
+	firewallNamelessSites17257 := preWalk.firewallNameless17257
+	policyNamelessSites17257 := preWalk.policyNameless17257
 	// #15037: the any-node physical-interface set arrives via opts (compileTree
 	// computed it pre-expansion; this tree is already expanded)
 	// and is stamped onto cfg below for the interface-monitor name gate.
@@ -1265,6 +1267,11 @@ func compileExpanded(tree *ConfigTree, opts compileOpts) (*Config, error) {
 	if err := runUniformGates(tree, cfg, opts); err != nil {
 		return nil, err
 	}
+	// #17257: the typed section compilers cannot retain packed nameless terms.
+	// Restore a fail-closed placeholder at each pre-walk site after typed gates
+	// have observed the compiled config, but before tail validation derives
+	// active-config state.
+	neutralizePackedNamelessTerms17257(cfg, firewallNamelessSites17257, policyNamelessSites17257)
 
 	// P7 (#4406 step 3): tail validation / finalization gates. Extracted into
 	// runTailGates (compiler_tailgates.go) — the contiguous trailing gate

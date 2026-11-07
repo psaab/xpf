@@ -1163,6 +1163,7 @@ func (c *CLI) handleShowSystem(args []string) error {
 			warnings = append(warnings, config.ToleratedTypedLeafWarnings(cfg)...)
 			warnings = append(warnings, config.ToleratedUnknownTopLevelStanzaWarnings(cfg)...)
 			warnings = append(warnings, config.UnimplementedAAAWarnings(cfg)...)
+			warnings = append(warnings, config.NamelessTermAlarmWarnings17257(cfg)...)
 			warnings = append(warnings, config.ZoneInterfaceQuarantineAlarmWarnings(cfg)...)
 		}
 		// #10025: daemon-resident pre-break fabric-auth clock alarms remain

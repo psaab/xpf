@@ -2518,12 +2518,17 @@ Other unread statements under `flexible-match-range`, such as
 schema walk. `SchemaValidate` runs first on the commit path, so the typed-leaf
 (#1319) and #8437 messages keep precedence, and `Store.Load` still records its
 `[typed-leaf-tolerated]` warning for the same config. A first version ran
-before the walk and hid both. Nameless terms are skipped by the family-less
-packed `filter { F term { ... } }` section compiler path, so strict pre-walk
-now runs the #12526 AST validator before lowering; #10294 retains its typed
-diagnostic for other shapes, and #12526 also refuses them before `load merge`
-flattens them. The compact `term T { from is-fragment then
-discard; }` stays with #8437 and the `from then` gate.
+before the walk and hid both. The family-less packed `filter { F term { ... } }`
+path also disappears before the typed #10294 gate. The #12526 AST validator now
+runs on both strict and tolerant compiles at its historical pre-walk position:
+strict still refuses; tolerant warns for packed sites and restores a minimal
+discard placeholder at the authored ordinal. The retained nameless marker
+re-derives a persistent configuration alarm on both system/security alarm
+surfaces. This fallback may discard more traffic than the lost match scope
+intended (fail-closed availability impact); it is not a demonstrated fail-open.
+Typed-visible nameless terms remain owned by #10294, and the compact
+`term T { from is-fragment then discard; }` stays with #8437 and the `from then`
+gate.
 
 Fail-on-revert coverage is in `pkg/config/firewall_fused_then_12528_test.go`
 and `pkg/configstore/firewall_fused_then_12528_test.go`.
@@ -18077,10 +18082,14 @@ controls remain in `pkg/config/nested_zonepair_7523_test.go`.
 
 A one-key hierarchical `term` container has no authored term name. The base
 compiler skipped these containers, silently dropping their statements from
-the compiled policy. A tolerant load now warns and replaces each malformed
-container with one neutral placeholder, so its matches and actions do not
-change the policy's existing fallback. If a malformed container also holds a
-named nested term, that nested child is not compiled.
+the compiled policy. A tolerant load warns and replaces each malformed
+typed-visible container with one neutral placeholder, so its matches and
+actions do not change the policy's existing fallback. Packed policy-statement
+key runs are also scanned before lowering; when the section compiler drops one,
+tolerant compilation restores a neutral marker at its authored ordinal. The
+retained marker re-derives a persistent #12521 alarm instead of relying on the
+transient compile-warning slice. If a malformed container also holds a named
+nested term, that nested child is not compiled.
 
 Strict compilation and operator `CommitCheck` reject nameless term bodies with
 a diagnostic naming the policy-statement and first body token. The strict AST

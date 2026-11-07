@@ -186,36 +186,54 @@ func unpackPolicyScanNode12521(node *Node, ancestors []string) {
 	node.IsLeaf = false
 }
 
-// ValidatePolicyNamelessTermsAST12521 checks literal hierarchical input before
-// lowering it to set paths. A clone is unpacked into logical paths outside term
-// bodies so packed heads are visible without changing body-shape classification.
-// Groups are deliberately not expanded: references may resolve against the
-// candidate, and inactive/variable references remain deferred to normal loading.
-func ValidatePolicyNamelessTermsAST12521(tree *ConfigTree) error {
+// policyNamelessSite17257 is one packed nameless policy term found by the AST
+// scan. The packed compiler spelling can disappear before the typed policy
+// compiler sees the term, so the site carries its authored ordinal forward.
+type policyNamelessSite17257 struct {
+	policy  string
+	first   string
+	ordinal int
+}
+
+func scanPolicyNamelessTerms12521(tree *ConfigTree) (all []policyNamelessSite17257, packed []policyNamelessSite17257) {
 	if tree == nil {
-		return nil
+		return nil, nil
 	}
 	logicalTree := tree.Clone()
+	pre := make(map[*Node]struct{})
+	var markPre func(*Node)
+	markPre = func(n *Node) {
+		if n == nil {
+			return
+		}
+		pre[n] = struct{}{}
+		for _, c := range n.Children {
+			markPre(c)
+		}
+	}
+	for _, root := range logicalTree.Children {
+		markPre(root)
+	}
 	for _, root := range logicalTree.Children {
 		unpackPolicyScanNode12521(root, nil)
 	}
-	type occurrence struct {
-		policy string
-		first  string
-	}
-	var occurrences []occurrence
 	scanPolicyOptions := func(po *Node) {
 		for _, ps := range namedInstances(po.FindChildren("policy-statement")) {
 			if ps.node == nil {
 				continue
 			}
-			for _, term := range ps.node.FindChildren("term") {
+			for ordinal, term := range ps.node.FindChildren("term") {
 				if term.Inactive {
 					continue
 				}
 				_, first, nameless := policyNamelessTermBody12521(term)
-				if nameless {
-					occurrences = append(occurrences, occurrence{policy: ps.name, first: first})
+				if !nameless {
+					continue
+				}
+				site := policyNamelessSite17257{policy: ps.name, first: first, ordinal: ordinal}
+				all = append(all, site)
+				if _, existedBeforeUnpack := pre[term]; !existedBeforeUnpack {
+					packed = append(packed, site)
 				}
 			}
 		}
@@ -240,13 +258,40 @@ func ValidatePolicyNamelessTermsAST12521(tree *ConfigTree) error {
 			visitGroupBody(group)
 		}
 	}
-	sort.SliceStable(occurrences, func(i, j int) bool {
-		return occurrences[i].policy < occurrences[j].policy
+	sort.SliceStable(all, func(i, j int) bool {
+		return all[i].policy < all[j].policy
 	})
-	if len(occurrences) > 0 {
-		return policyNamelessTermError12521(occurrences[0].policy, occurrences[0].first)
+	sort.SliceStable(packed, func(i, j int) bool {
+		return packed[i].policy < packed[j].policy
+	})
+	return all, packed
+}
+
+// ValidatePolicyNamelessTermsAST12521 checks literal hierarchical input before
+// lowering it to set paths. A clone is unpacked into logical paths outside term
+// bodies so packed heads are visible without changing body-shape classification.
+// Groups are deliberately not expanded: references may resolve against the
+// candidate, and inactive/variable references remain deferred to normal loading.
+func ValidatePolicyNamelessTermsAST12521(tree *ConfigTree) error {
+	_, _, err := validatePolicyNamelessTermsAST12521(tree, false)
+	return err
+}
+
+// validatePolicyNamelessTermsAST12521 preserves the strict validator's
+// historical error while also exposing packed sites to the tolerant compiler.
+func validatePolicyNamelessTermsAST12521(tree *ConfigTree, lenient bool) ([]string, []policyNamelessSite17257, error) {
+	all, packed := scanPolicyNamelessTerms12521(tree)
+	if len(all) == 0 {
+		return nil, nil, nil
 	}
-	return nil
+	if !lenient {
+		return nil, nil, policyNamelessTermError12521(all[0].policy, all[0].first)
+	}
+	warnings := make([]string, 0, len(packed))
+	for _, site := range packed {
+		warnings = append(warnings, policyNamelessTermError12521(site.policy, site.first).Error())
+	}
+	return warnings, packed, nil
 }
 
 // ValidateInactiveNamelessPolicyTermReplay12598 refuses inactive terms whose

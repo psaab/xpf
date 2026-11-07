@@ -96,20 +96,57 @@ func firewallNamelessTermBody12526(term *Node) (first string, malformed bool) {
 	return "", len(term.Children) == 0
 }
 
-// ValidateFirewallNamelessTermsAST12526 checks literal hierarchical input
-// before LoadMerge flattens term bodies into ordinary set paths. Only terms
-// authored inside firewall filters are considered; flat set semantics and
-// policy-group expansion retain their existing behavior.
-func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
+// firewallNamelessSite17257 is one packed nameless firewall term found by
+// the AST scan: the section compiler cannot see it (it never enters the
+// compiled Config), so the tolerant path neutralizes it from this site.
+type firewallNamelessSite17257 struct {
+	family  string
+	filter  string
+	first   string
+	ordinal int
+}
+
+// scanFirewallNamelessTerms12526 clones and unpacks the tree, then returns
+// every nameless firewall term in stable (family, filter, source) order. A
+// site is packed when its term node was synthesized by unpacking, or when an
+// empty term has no typed term representation; visible sites stay with #10294.
+func scanFirewallNamelessTerms12526(tree *ConfigTree) (all []firewallNamelessSite17257, packed []firewallNamelessSite17257) {
 	if tree == nil {
-		return nil
+		return nil, nil
 	}
 	logicalTree := tree.Clone()
+	pre := make(map[*Node]struct{})
+	var markPre func(*Node)
+	markPre = func(n *Node) {
+		if n == nil {
+			return
+		}
+		pre[n] = struct{}{}
+		for _, c := range n.Children {
+			markPre(c)
+		}
+	}
+	for _, root := range logicalTree.Children {
+		markPre(root)
+	}
 	for _, root := range logicalTree.Children {
 		unpackFirewallScanNode12526(root, nil)
 	}
-	type occurrence struct{ family, filter, first string }
-	var found []occurrence
+	record := func(family, filter string, node *Node) {
+		terms := node.FindChildren("term")
+		for i, term := range terms {
+			first, malformed := firewallNamelessTermBody12526(term)
+			if !malformed {
+				continue
+			}
+			site := firewallNamelessSite17257{family: family, filter: filter, first: first, ordinal: i}
+			all = append(all, site)
+			_, existedBeforeUnpack := pre[term]
+			if !existedBeforeUnpack || (len(term.Keys) == 1 && len(term.Children) == 0) {
+				packed = append(packed, site)
+			}
+		}
+	}
 	var visit func(*Node)
 	visit = func(node *Node) {
 		if node == nil {
@@ -120,24 +157,12 @@ func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
 				if child.Name() == "family" {
 					for _, member := range familyMembers(child) {
 						for _, filter := range namedInstances(member.AfNode.FindChildren("filter")) {
-							for _, term := range filter.node.FindChildren("term") {
-								first, malformed := firewallNamelessTermBody12526(term)
-								if malformed {
-									found = append(found, occurrence{member.Af, filter.name, first})
-								}
-							}
+							record(member.Af, filter.name, filter.node)
 						}
 					}
 				} else if child.Name() == "filter" {
-					// The family-less `firewall filter F` spelling has no
-					// family to report.
 					for _, filter := range namedInstances([]*Node{child}) {
-						for _, term := range filter.node.FindChildren("term") {
-							first, malformed := firewallNamelessTermBody12526(term)
-							if malformed {
-								found = append(found, occurrence{"", filter.name, first})
-							}
-						}
+						record("", filter.name, filter.node)
 					}
 				}
 				visit(child)
@@ -151,19 +176,51 @@ func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
 	for _, root := range logicalTree.Children {
 		visit(root)
 	}
-	if len(found) == 0 {
-		return nil
-	}
-	sort.SliceStable(found, func(i, j int) bool {
-		if found[i].family != found[j].family {
-			return found[i].family < found[j].family
+	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].family != all[j].family {
+			return all[i].family < all[j].family
 		}
-		return found[i].filter < found[j].filter
+		return all[i].filter < all[j].filter
 	})
-	bad := found[0]
-	where := fmt.Sprintf("firewall filter %q", bad.filter)
-	if bad.family != "" {
-		where = fmt.Sprintf("firewall family %s filter %q", bad.family, bad.filter)
+	sort.SliceStable(packed, func(i, j int) bool {
+		if packed[i].family != packed[j].family {
+			return packed[i].family < packed[j].family
+		}
+		return packed[i].filter < packed[j].filter
+	})
+	return all, packed
+}
+
+func firewallNamelessError12526(s firewallNamelessSite17257) error {
+	where := fmt.Sprintf("firewall filter %q", s.filter)
+	if s.family != "" {
+		where = fmt.Sprintf("firewall family %s filter %q", s.family, s.filter)
 	}
-	return fmt.Errorf("%s contains a nameless `term` block starting with %q (#10294/#12092/#12526): give every term an explicit name", where, bad.first)
+	return fmt.Errorf("%s contains a nameless `term` block starting with %q (#10294/#12092/#12526): give every term an explicit name", where, s.first)
+}
+
+// ValidateFirewallNamelessTermsAST12526 checks literal hierarchical input
+// before LoadMerge flattens term bodies into ordinary set paths. Only terms
+// authored inside firewall filters are considered; flat set semantics and
+// policy-group expansion retain their existing behavior.
+func ValidateFirewallNamelessTermsAST12526(tree *ConfigTree) error {
+	_, _, err := validateFirewallNamelessTermsAST12526(tree, false)
+	return err
+}
+
+// validateFirewallNamelessTermsAST12526 preserves the strict validator's
+// historical error while also exposing packed sites to the tolerant compiler.
+func validateFirewallNamelessTermsAST12526(tree *ConfigTree, lenient bool) ([]string, []firewallNamelessSite17257, error) {
+	all, packed := scanFirewallNamelessTerms12526(tree)
+	if len(all) == 0 {
+		return nil, nil, nil
+	}
+	if !lenient {
+		return nil, nil, firewallNamelessError12526(all[0])
+	}
+	warnings := make([]string, 0, len(packed))
+	for _, s := range packed {
+		warnings = append(warnings, firewallNamelessError12526(s).Error())
+	}
+	return warnings, packed, nil
 }

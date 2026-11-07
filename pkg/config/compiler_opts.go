@@ -1577,7 +1577,7 @@ type compileOpts struct {
 	// validateFirewallFilterReferencesStrict,
 	// validateFilterRoutingInstanceDirectionStrict,
 	// validateFirewallUnknownChildrenStrict,
-	// ValidateFirewallNamelessTermsAST12526 (pre-walk),
+	// validateFirewallNamelessTermsAST12526 (pre-walk),
 	// validateNATSourceAddressNameReferencesStrict,
 	// validateStaticNATThenTargetStrict,
 	// validateStaticNATInetTargetStrict,
@@ -3354,7 +3354,8 @@ type compileOpts struct {
 	// Action=reject.
 	lenientPolicyThenOperands bool
 	// lenientPolicyNamelessTerm12521 downgrades the routing-policy nameless
-	// term gate to a warning on tolerant load / peer-sync.
+	// term gate `validatePolicyNamelessTermsAST12521` to a warning on tolerant
+	// load / peer-sync.
 	lenientPolicyNamelessTerm12521 bool
 	// lenientPolicyReservedRedistName (#5116/#12065) downgrades the reserved
 	// route-map-suffix gate (validatePolicyReservedRedistNameStrict) from a

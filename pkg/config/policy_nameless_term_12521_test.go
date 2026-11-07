@@ -350,3 +350,26 @@ func TestPolicyEmptyNamedTermIsPreserved12521(t *testing.T) {
 		})
 	}
 }
+
+func TestCompileConfigLenientPackedNamelessPolicyTermWarns17257(t *testing.T) {
+	tree := hierTree(t, `policy-options { policy-statement { P term { then reject; } } }`)
+	cfg, err := CompileConfigLenient(tree)
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if strings.Count(warnings, "#12521") != 1 ||
+		!strings.Contains(warnings, `policy-statement "P"`) ||
+		!strings.Contains(warnings, `starting with "then"`) {
+		t.Fatalf("packed policy warnings = %q, want one #12521 warning naming P and then", cfg.Warnings)
+	}
+	statement := cfg.PolicyOptions.PolicyStatements["P"]
+	if statement == nil || len(statement.Terms) != 1 {
+		t.Fatalf("packed policy statement = %#v, want one retained term", statement)
+	}
+	term := statement.Terms[0]
+	if !term.nameless || term.Action != "" ||
+		len(term.FromProtocols) != 0 || len(term.RouteFilters) != 0 {
+		t.Fatalf("packed policy term = %#v, want neutral nameless placeholder", term)
+	}
+}

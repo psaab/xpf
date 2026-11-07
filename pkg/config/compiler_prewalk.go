@@ -25,20 +25,16 @@ import "fmt"
 // section dispatch (P4). It is covered by the reusable golden-output gate in
 // compile_golden_4406_test.go.
 
-// preWalkResult is the single result channel of runPreWalkGates
-// (#17157): the ordered warnings, the #16001 uncovered-family except
-// sites, and the two collision sets (#3339 application names, #3884
-// firewall filters). Every field returns as an ordinary return value
-// here — the phase no longer writes results through pointer
-// out-parameters on compileOpts (the pre-#17157
-// opts.applicationNameCollisions / opts.firewallFilterCollisions
-// channels), so a caller cannot silently drop a result by leaving a
-// pointer nil.
+// preWalkResult is the single result channel of runPreWalkGates (#17157):
+// ordered warnings, uncovered-family except sites, collision sets, and the
+// retained nameless-term sites needed for post-compilation neutralization.
 type preWalkResult struct {
 	warnings                  []string
 	uncovered16001            []uncoveredFamilyExceptSite16001
 	applicationNameCollisions map[string]struct{}
 	firewallFilterCollisions  map[string]struct{}
+	firewallNameless17257     []firewallNamelessSite17257
+	policyNameless17257       []policyNamelessSite17257
 }
 
 func runPreWalkGates(tree *ConfigTree, opts compileOpts) (preWalkResult, error) {
@@ -58,28 +54,20 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) (preWalkResult, error) 
 		return preWalkResult{}, err
 	}
 
-	// #12601: a packed `policy-statement { P term { ... } }` can leave the
-	// nameless term's action in the raw tree while compilePolicyOptions sees
-	// only `P` as a statement child and silently skips the term. The compiled
-	// Config therefore cannot expose it to the existing #12521 typed gate.
-	// Validate the expanded AST before lowering it; tolerant compilation keeps
-	// the established #12521 placeholder-and-warning behavior.
-	if !opts.lenientPolicyNamelessTerm12521 {
-		if err := ValidatePolicyNamelessTermsAST12521(tree); err != nil {
-			return preWalkResult{}, err
-		}
+	// #12601/#12777: preserve both historical gate positions after #1798.
+	// Strict compilation still rejects the first sorted occurrence before
+	// the VRRP gates; tolerant compilation warns for packed AST sites because
+	// the typed gates cannot see those terms. Typed-visible sites remain owned
+	// by the existing #12521/#10294 compiled gates.
+	policyNamelessWarnings, policyNamelessSites, err :=
+		validatePolicyNamelessTermsAST12521(tree, opts.lenientPolicyNamelessTerm12521)
+	if err != nil {
+		return preWalkResult{}, err
 	}
-
-	// #12777: a one-key firewall `filter` container can keep its term subtree
-	// in the AST while the section compiler misses it, silently dropping an
-	// authored discard action. The compiled Config cannot expose such terms to
-	// the existing #10294 typed gate. Run the #12526 AST validator before
-	// lowering on strict paths; tolerant load/peer-sync retains the existing
-	// #10294 warning behavior.
-	if !opts.lenientFirewallRefs {
-		if err := ValidateFirewallNamelessTermsAST12526(tree); err != nil {
-			return preWalkResult{}, err
-		}
+	firewallNamelessWarnings, firewallNamelessSites, err :=
+		validateFirewallNamelessTermsAST12526(tree, opts.lenientFirewallRefs)
+	if err != nil {
+		return preWalkResult{}, err
 	}
 
 	// #1814 VRRP track-interface AST pre-walk. Runs on the group-expanded
@@ -1024,6 +1012,8 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) (preWalkResult, error) 
 
 	var warnings []string
 	warnings = append(warnings, ctrlCharWarnings...)
+	warnings = append(warnings, policyNamelessWarnings...)
+	warnings = append(warnings, firewallNamelessWarnings...)
 	warnings = append(warnings, trackWarnings...)
 	warnings = append(warnings, vrrpAuthWarnings...)
 	warnings = append(warnings, mssWarnings...)
@@ -1084,5 +1074,7 @@ func runPreWalkGates(tree *ConfigTree, opts compileOpts) (preWalkResult, error) 
 		uncovered16001:            uncovered16001,
 		applicationNameCollisions: appCollisionNames,
 		firewallFilterCollisions:  fwColliding,
+		firewallNameless17257:     firewallNamelessSites,
+		policyNameless17257:       policyNamelessSites,
 	}, nil
 }

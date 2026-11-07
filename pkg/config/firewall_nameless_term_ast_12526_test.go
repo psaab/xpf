@@ -170,20 +170,63 @@ func TestCompileConfigLenientNamelessFirewallTermStillWarns12526(t *testing.T) {
 }
 
 func TestCompileConfigLenientPackedNamelessFirewallTermWarns12526(t *testing.T) {
-	// The packed-container issue shape on the tolerant path: the existing
-	// lenient nameless warning fires and the term is neutralized (kept
-	// inert), never silently enforced — the #1960 no-brick posture. The
-	// strict/commit-check gate (#12777) owns refusal.
-	cfg, err := CompileConfigLenient(hierTree(t, `firewall { filter F { term { then discard; } } }`))
+	// The packed-container issue shape on the tolerant path (#17257): the
+	// #12526 warning fires and the term is neutralized (kept fail-closed
+	// at its authored ordinal), never silently dropped — the #1960
+	// no-brick posture. The strict/commit-check gate (#12777) owns refusal.
+	cfg, err := CompileConfigLenient(hierTree(t, `firewall { filter { F term { then discard; } } }`))
 	if err != nil {
 		t.Fatalf("tolerant compile rejected nameless term: %v", err)
 	}
 	warnings := strings.Join(cfg.Warnings, "\n")
-	if !strings.Contains(warnings, "nameless") || !strings.Contains(warnings, "#10294") {
-		t.Fatalf("tolerant packed nameless shape warnings = %q, want the nameless warning", cfg.Warnings)
+	if strings.Count(warnings, "#12526") != 1 ||
+		!strings.Contains(warnings, `filter "F"`) ||
+		!strings.Contains(warnings, "nameless") {
+		t.Fatalf("tolerant packed nameless shape warnings = %q, want one #12526 warning naming F", cfg.Warnings)
 	}
 	f := cfg.Firewall.FiltersInet["F"]
 	if f == nil || len(f.Terms) != 1 {
 		t.Fatalf("tolerant packed nameless shape filter = %+v, want one neutralized term", f)
+	}
+	if !f.Terms[0].nameless || f.Terms[0].Action != FilterActionDiscard {
+		t.Fatalf("tolerant packed nameless term = %+v, want nameless fail-closed discard placeholder", f.Terms[0])
+	}
+}
+
+func TestCompileConfigLenientPackedNamelessFirewallRow3Warns17257(t *testing.T) {
+	src := `firewall { filter { F term { from { source-address 10.0.0.0/8; } then discard; } term T2 { then accept; } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	warnings := strings.Join(cfg.Warnings, "\n")
+	if !strings.Contains(warnings, `filter "F"`) || !strings.Contains(warnings, "#12526") {
+		t.Fatalf("packed row-3 warnings = %q, want a #12526 warning naming F", cfg.Warnings)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 1 ||
+		!filter.Terms[0].nameless || filter.Terms[0].Action != FilterActionDiscard {
+		t.Fatalf("packed row-3 filter = %+v, want one nameless discard placeholder", filter)
+	}
+}
+
+func TestCompileConfigLenientNamelessDiscardKeepsAuthoredPosition17257(t *testing.T) {
+	// The packed nameless term disappears from the section compiler's output;
+	// a later named accept supplies the same filter. Restoration must insert
+	// at ordinal zero, not append a discard after the accept.
+	src := `firewall { filter { F term { then discard; term allow { then accept; } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 2 {
+		t.Fatalf("filter = %+v, want the nameless discard followed by named allow", filter)
+	}
+	if term := filter.Terms[0]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("first term = %+v, want the nameless discard at authored ordinal zero", term)
+	}
+	if term := filter.Terms[1]; term == nil || term.Name != "allow" || term.Action != FilterActionAccept {
+		t.Fatalf("second term = %+v, want named allow accept after the nameless discard", term)
 	}
 }
