@@ -25,6 +25,12 @@ var uncachedCensusPackages14649 = []string{
 	// TestManagedBinaryDriftCanary) builds its census scope from
 	// `git ls-files`. A newly tracked shell site holding a stale BINS=
 	// list changes only the index, so the cached leg returned "ok".
+	// #19002: pkg/config's cluster-key census (#18744,
+	// TestNoTrackedFileCarriesARealClusterKey18744) builds its census
+	// scope from `git ls-files`. A newly tracked *.conf/*.set/*.md file
+	// carrying a real key changes only the index, so the cached leg
+	// returned "ok" without running.
+	"./pkg/config/",
 	"./pkg/upgrade/manifest/",
 }
 
@@ -117,41 +123,41 @@ func TestUncachedCensusGuardRejectsStaleShapes14649(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "all five uncached on one leg",
+			name: "all six uncached on one leg",
 			mk: "test-go:\n" +
-				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/\n\n",
+				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/config/ ./pkg/upgrade/manifest/\n\n",
 			want: nil,
 		},
 		{
 			name: "refactoraudit only is the pre-14649 shape",
 			mk: "test-go:\n" +
 				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" -count=1 ./pkg/refactoraudit/\n\n",
-			want: []string{"./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/upgrade/manifest/"},
+			want: []string{"./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/config/", "./pkg/upgrade/manifest/"},
 		},
 		{
 			name: "named without -count=1 is cached",
 			mk: "test-go:\n" +
-				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/\n\n",
-			want: []string{"./pkg/refactoraudit/", "./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/upgrade/manifest/"},
+				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/config/ ./pkg/upgrade/manifest/\n\n",
+			want: []string{"./pkg/refactoraudit/", "./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/config/", "./pkg/upgrade/manifest/"},
 		},
 		{
 			name: "named only in a comment proves nothing",
 			mk: "test-go:\n" +
-				"\t# -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/\n" +
+				"\t# -count=1 ./pkg/refactoraudit/ ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/config/ ./pkg/upgrade/manifest/\n" +
 				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" -count=1 ./pkg/refactoraudit/\n\n",
-			want: []string{"./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/upgrade/manifest/"},
+			want: []string{"./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/config/", "./pkg/upgrade/manifest/"},
 		},
 		{
 			name: "count1 on another line does not uncache this one",
 			mk: "test-go:\n" +
 				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" -count=1 ./pkg/refactoraudit/\n" +
-				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/upgrade/manifest/\n\n",
-			want: []string{"./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/upgrade/manifest/"},
+				"\tbash ./scripts/go-test-json.sh \"\" \"$(GO)\" ./pkg/docsref/ ./pkg/memlockcensus/ ./pkg/dataplane/ ./pkg/config/ ./pkg/upgrade/manifest/\n\n",
+			want: []string{"./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/config/", "./pkg/upgrade/manifest/"},
 		},
 		{
 			name: "no test-go target at all",
 			mk:   "test:\n\t@true\n",
-			want: []string{"./pkg/refactoraudit/", "./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/upgrade/manifest/"},
+			want: []string{"./pkg/refactoraudit/", "./pkg/docsref/", "./pkg/memlockcensus/", "./pkg/dataplane/", "./pkg/config/", "./pkg/upgrade/manifest/"},
 		},
 	}
 	for _, tc := range cases {
