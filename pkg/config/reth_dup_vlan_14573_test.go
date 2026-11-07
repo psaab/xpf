@@ -43,6 +43,7 @@ func TestRethDuplicateVlanIDStrictReject14573(t *testing.T) {
 			"vlan-id 100; both resolve to ge-0-0-1.100, so one unit's zone/filter " +
 			"silently wins on the shared ifindex (#14573)")
 	}
+	t.Logf("strict collision refusal: %v", err)
 	for _, want := range []string{"reth1.100", "reth1.200", "ge-0-0-1.100"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("duplicate-vlan error %q does not name %q", err, want)
@@ -50,15 +51,16 @@ func TestRethDuplicateVlanIDStrictReject14573(t *testing.T) {
 	}
 }
 
-// The derivation covers the unit-number arm too: a no-vlan unit resolves by
-// unit number, so `unit 100` (no vlan-id) and `unit 200 vlan-id 100` of the
-// same reth also share one device. FAIL-ON-REVERT: a gate re-deriving only
-// base + "." + vlan-id accepts this.
-func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
-	// #15034 migration: reth1 now carries `vlan-tagging`. Without it the
-	// untagged unit 100 is the #15034 defect itself (rejected by that
-	// gate before this collision is reached); the tagged form keeps
-	// this cell exercising the #14573 unit-number-vs-vlan-id collision.
+// The untagged unit-number derivation would collide with unit 200's vlan-id
+// 100 on the reth member. The strict compiler's #15034/#16583 gate rejects
+// that non-zero untagged unit first, so this cell pins gate order rather than
+// reaching #14573. The duplicate-vlan sibling above pins the collision check.
+func TestRethUnitNumberVsVlanIDUnitGatePrecedesCollision14573(t *testing.T) {
+	// #16583 applies even though reth1 enables vlan-tagging: a positive tag is
+	// required on unit 100 itself. reth1 is neither irb, a loopback nor a secure
+	// tunnel, and this unit/interface has no tunnel stanza, so no gate exemption
+	// applies. Keep the original no-vlan premise; adding vlan-id 100 would turn
+	// this into the duplicate-vlan path already covered above.
 	err := compileSet7795(t,
 		"set interfaces reth1 redundant-ether-options redundancy-group 1",
 		"set interfaces reth1 vlan-tagging",
@@ -73,11 +75,14 @@ func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
 		"set interfaces ge-0/0/1 gigether-options redundant-parent reth1",
 	)
 	if err == nil {
-		t.Fatal("strict CompileConfig accepted reth1 unit 100 (unit-number device) " +
-			"beside reth1 unit 200 vlan-id 100; both resolve to ge-0-0-1.100 (#14573)")
+		t.Fatal("strict CompileConfig accepted an untagged non-zero reth unit; "+
+			"expected #15034/#16583 to refuse before the hypothetical #14573 collision")
 	}
-	if !strings.Contains(err.Error(), "reth1.100") || !strings.Contains(err.Error(), "reth1.200") {
-		t.Errorf("error must name reth1.100 and reth1.200; got: %v", err)
+	t.Logf("strict unit-gate refusal: %v", err)
+	for _, want := range []string{"#15034", "reth1 unit 100", "non-zero unit without"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("first refusal must name %q; got: %v", want, err)
+		}
 	}
 }
 
