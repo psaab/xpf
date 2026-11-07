@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"net"
+	"net/netip"
 	"reflect"
 	"strings"
 	"time"
@@ -1166,6 +1167,86 @@ func (d *Daemon) getSessionSync() *cluster.SessionSync {
 	return ss
 }
 
+// normalizeFab1Host returns a comparable host representation for a resolved
+// fab1 bind address. Resolver output is an IP literal; netip canonicalizes
+// equivalent spellings and unmaps IPv4-mapped IPv6 addresses.
+func normalizeFab1Host(host string) string {
+	addr, err := netip.ParseAddr(host)
+	if err == nil {
+		return addr.Unmap().String()
+	}
+	return strings.ToLower(strings.TrimSpace(host))
+}
+
+// publishFab1LocalHostIfCurrent records the secondary-fabric address captured
+// by the SessionSync constructor. The nested lock order matches fabric-slot
+// publication: clusterCommsMu fences the generation before fabricMu writes.
+func (d *Daemon) publishFab1LocalHostIfCurrent(gen uint64, syncLocal1 string) {
+	host := ""
+	if syncLocal1 != "" {
+		host, _, _ = net.SplitHostPort(syncLocal1)
+		host = normalizeFab1Host(host)
+	}
+
+	d.clusterCommsMu.Lock()
+	if d.clusterCommsGen != gen {
+		d.clusterCommsMu.Unlock()
+		return
+	}
+	d.fabricMu.Lock()
+	d.fab1LocalHost = host
+	d.fab1LocalGen = gen
+	d.fab1LocalWarnedGen = 0
+	d.fabricMu.Unlock()
+	d.clusterCommsMu.Unlock()
+}
+
+// warnFab1LocalAddressMismatch warns once when the active config resolves a
+// different fab1 local address from the one captured by this epoch's dual
+// SessionSync. It deliberately does not turn the mismatch into transport debt:
+// the existing SessionSync remains intact until an ordinary config change
+// restarts comms.
+func (d *Daemon) warnFab1LocalAddressMismatch(cfg *config.Config) {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return
+	}
+	cc := cfg.Chassis.Cluster
+	_, _, transport := clusterSyncTransport(cc)
+	if transport != "fabric" || cc.Fabric1Interface == "" || cc.Fabric1PeerAddress == "" {
+		return
+	}
+	currentHost := normalizeFab1Host(resolveClusterInterfaceAddr(
+		cfg, cc.Fabric1Interface, cc.Fabric1PeerAddress, ""))
+	if currentHost == "" {
+		return
+	}
+
+	d.clusterCommsMu.Lock()
+	ss := d.sessionSync
+	gen := d.clusterCommsGen
+	if ss == nil || !ss.IsDualFabric() {
+		d.clusterCommsMu.Unlock()
+		return
+	}
+	d.fabricMu.Lock()
+	epochHost := d.fab1LocalHost
+	if d.fab1LocalGen != gen || epochHost == "" ||
+		normalizeFab1Host(epochHost) == currentHost || d.fab1LocalWarnedGen == gen {
+		d.fabricMu.Unlock()
+		d.clusterCommsMu.Unlock()
+		return
+	}
+	d.fab1LocalWarnedGen = gen
+	d.fabricMu.Unlock()
+	d.clusterCommsMu.Unlock()
+
+	slog.Warn("cluster: fab1 local address differs from the active session-sync epoch; session sync remains bound to the epoch address",
+		"interface", cc.Fabric1Interface,
+		"epoch_local", epochHost,
+		"current_local", currentHost,
+		"epoch", gen)
+}
+
 // getClusterCommsCtx returns the live cluster-comms sub-context under
 // clusterCommsMu (#4958). Nil when comms are stopped. Comms-scoped loops that
 // (re)launch from the apply path (e.g. the DHCP lease-sync loop) read it here
@@ -1712,6 +1793,7 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 				// sync address; abort before wiring cluster state or binding.
 				return
 			}
+			d.publishFab1LocalHostIfCurrent(commsGen, syncLocal1)
 			d.wireSessionSyncTransportRefs(ss, cc, syncTransport, syncPeerAddr, syncLocal1)
 
 			d.startFabricGRPCListeners(commsCtx, syncIP, syncLocal1, func() string {

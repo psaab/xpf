@@ -962,6 +962,9 @@ func (d *Daemon) clearFabricSlots() {
 		s.lastLog = time.Time{}
 		s.probePending = false
 	}
+	d.fab1LocalHost = ""
+	d.fab1LocalGen = 0
+	d.fab1LocalWarnedGen = 0
 	for i := range staleCount {
 		dpuserspace.RegisterFabricPeerMACConstraint(staleConstraints[i], nil)
 	}

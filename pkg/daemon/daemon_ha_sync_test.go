@@ -196,7 +196,17 @@ func TestStartClusterCommsRebuildsDualSessionSyncWhenFab1AddressArrivesLate(t *t
 	d.fabricMu.RLock()
 	disabled2 := d.syncPeerAddr1Disabled
 	peer1 := d.syncPeerAddr1
+	localHost, localGen := d.fab1LocalHost, d.fab1LocalGen
 	d.fabricMu.RUnlock()
+	d.clusterCommsMu.Lock()
+	gen2 := d.clusterCommsGen
+	d.clusterCommsMu.Unlock()
+	wantLocalHost := normalizeFab1Host(resolveClusterInterfaceAddr(
+		cfg, cfg.Chassis.Cluster.Fabric1Interface, cfg.Chassis.Cluster.Fabric1PeerAddress, ""))
+	if localHost != wantLocalHost || localGen != gen2 {
+		t.Fatalf("epoch 2 fab1 local host = %q at generation %d, want %q at generation %d",
+			localHost, localGen, wantLocalHost, gen2)
+	}
 	if disabled2 {
 		t.Fatal("syncPeerAddr1Disabled still latched after the dual rebuild (#15687)")
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
@@ -96,6 +97,102 @@ func TestMgmtVRFReassertLeavesHealthyManagementInterfacesAlone11448(t *testing.T
 	}
 	if routeRefreshes != 0 {
 		t.Errorf("healthy management-VRF members refreshed routes %d times, want no writes", routeRefreshes)
+	}
+}
+
+// #18613: a dual-fabric epoch keeps its constructor-captured fab1 bind, but
+// periodic reassert warns once when the active config resolves a different
+// local address. The warning is diagnostic only: it does not replace the
+// SessionSync, and a successor epoch gets its own warning allowance.
+func TestFab1LocalAddressMismatchWarnsOncePerEpoch18613(t *testing.T) {
+	store := testStoreWithSetConfig(t, []string{
+		"set chassis cluster cluster-id 1",
+		"set chassis cluster node 0",
+		"set chassis cluster authentication-key test-fab1-address-18613",
+		"set chassis cluster fabric-interface lo",
+		"set chassis cluster fabric-peer-address 127.0.0.2",
+		"set chassis cluster fabric1-interface lo",
+		"set chassis cluster fabric1-peer-address 2001:db8::3",
+	})
+	currentHost := "2001:db8::1"
+	previousAddrs := clusterInterfaceAddrsByName
+	clusterInterfaceAddrsByName = func(_ *config.Config, ifname string) ([]net.Addr, error) {
+		if ifname != "lo" {
+			return nil, errors.New("unexpected interface " + ifname)
+		}
+		ip := net.ParseIP(currentHost)
+		bits, prefix := 128, 64
+		if ip.To4() != nil {
+			bits, prefix = 32, 24
+		}
+		return []net.Addr{&net.IPNet{
+			IP:   ip,
+			Mask: net.CIDRMask(prefix, bits),
+		}}, nil
+	}
+	t.Cleanup(func() { clusterInterfaceAddrsByName = previousAddrs })
+
+	d := &Daemon{
+		store:    store,
+		applySem: semaphore.NewWeighted(1),
+	}
+	var logs bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	publishEpoch := func(localHost string) (*cluster.SessionSync, uint64) {
+		t.Helper()
+		_, gen, cancel := d.beginClusterCommsEpoch(context.Background())
+		t.Cleanup(cancel)
+		ss := cluster.NewDualSessionSync(
+			"127.0.0.1:4785", "127.0.0.2:4785",
+			net.JoinHostPort(localHost, "4785"), net.JoinHostPort("2001:db8::3", "4785"), nil)
+		if !d.publishSessionSyncIfCurrent(gen, ss) {
+			t.Fatalf("could not publish SessionSync for epoch %d", gen)
+		}
+		d.publishFab1LocalHostIfCurrent(gen, net.JoinHostPort(localHost, "4785"))
+		return ss, gen
+	}
+
+	ss1, gen1 := publishEpoch("2001:0db8:0:0:0:0:0:1")
+	// Equivalent IPv6 spellings must not trigger the mismatch warning.
+	d.reassertMgmtVRFOnce(context.Background())
+	if got := strings.Count(logs.String(), "fab1 local address differs"); got != 0 {
+		t.Fatalf("equivalent host spellings emitted %d mismatch warnings: %s", got, logs.String())
+	}
+	if got := d.getSessionSync(); got != ss1 {
+		t.Fatalf("equal-address reassert replaced SessionSync in epoch %d: got %p, want %p", gen1, got, ss1)
+	}
+	currentHost = "2001:db8::2"
+	for range 3 {
+		d.reassertMgmtVRFOnce(context.Background())
+		if got := d.getSessionSync(); got != ss1 {
+			t.Fatalf("fab1 mismatch replaced SessionSync in epoch %d: got %p, want %p", gen1, got, ss1)
+		}
+	}
+	const warning = "cluster: fab1 local address differs from the active session-sync epoch"
+	if got := strings.Count(logs.String(), warning); got != 1 {
+		t.Fatalf("epoch %d emitted %d fab1 mismatch warnings across repeated reasserts, want one: %s",
+			gen1, got, logs.String())
+	}
+
+	// A replacement epoch captures the then-current host. A further address
+	// move gets one new warning without changing that epoch's SessionSync.
+	currentHost = "2001:db8::3"
+	ss2, gen2 := publishEpoch("2001:db8::2")
+	if gen2 == gen1 {
+		t.Fatalf("new epoch retained generation %d", gen1)
+	}
+	for range 3 {
+		d.reassertMgmtVRFOnce(context.Background())
+		if got := d.getSessionSync(); got != ss2 {
+			t.Fatalf("fab1 mismatch replaced SessionSync in epoch %d: got %p, want %p", gen2, got, ss2)
+		}
+	}
+	if got := strings.Count(logs.String(), warning); got != 2 {
+		t.Fatalf("two mismatched epochs emitted %d fab1 mismatch warnings, want one per epoch: %s",
+			got, logs.String())
 	}
 }
 

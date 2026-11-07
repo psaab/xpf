@@ -31,14 +31,19 @@ func (d *Daemon) mgmtVRFReassertLoop(ctx context.Context) {
 // reassertMgmtVRFOnce restores drifted members under applySem, then refreshes
 // their DHCP routes in the management table. Its quick gate also watches the
 // active transport's sticky binding mismatch, since kernel drift may already
-// have been repaired before the background pass runs. #16842: a fab1-debt
-// epoch whose fab1 has become resolvable also passes the gate, so the
-// background tick — not only the next commit — performs the one dual
-// upgrade; a fab1-debt epoch whose fab1 is still unaddressed does NOT
+// have been repaired before the background pass runs.
+// Before that quick gate, a dual-fabric epoch also warns once if its captured
+// fab1 local bind no longer matches the active config (#18613).
+// #16842: a fab1-debt epoch whose fab1 has become resolvable also passes the
+// gate, so the background tick — not only the next commit — performs the one
+// dual upgrade; a fab1-debt epoch whose fab1 is still unaddressed does NOT
 // pass, which is what stops the 30 s teardown/rebuild churn.
 func (d *Daemon) reassertMgmtVRFOnce(ctx context.Context) {
 	if d.applySem == nil {
 		return
+	}
+	if d.store != nil {
+		d.warnFab1LocalAddressMismatch(d.store.ActiveConfig())
 	}
 	active := d.activeTransport()
 	bindingChanged := active.BindingChanged

@@ -1611,6 +1611,14 @@ type Daemon struct {
 	// gRPC peer dialing failover.
 	syncPeerAddr1         string
 	syncPeerAddr1Disabled bool
+	// fab1LocalHost is the fab1 local host (no port) the live dual-fabric
+	// SessionSync bound at epoch construction (#18613). Guarded by fabricMu
+	// and only valid when fab1LocalGen matches clusterCommsGen.
+	fab1LocalHost string
+	fab1LocalGen  uint64
+	// fab1LocalWarnedGen records the comms generation for which the #18613
+	// fab1-local mismatch warning was already emitted. A new epoch warns again.
+	fab1LocalWarnedGen uint64
 
 	// grpcSrv is the gRPC server published by startGRPCServer for the
 	// fabric listener and live readers (#17264). grpcReady is closed once,
