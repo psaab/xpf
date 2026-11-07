@@ -1611,7 +1611,7 @@ shrinks a group, and `subnetInterface` omits the selector for such a group —
 falling back to Kea address-based subnet selection, the same mechanism every
 multi-interface group already uses. This never changes WHICH subnets are served,
 only how Kea selects among them. `MembersFiltered` is a runtime marker, excluded
-from every marshal (`json:"-"`, `yaml:"-"`) so it cannot reach the
+from JSON marshal (`json:"-"`) so it cannot reach the
 compiled-config dump, the golden compile baseline, or the peer over cluster
 config-sync.
 

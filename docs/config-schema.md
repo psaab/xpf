@@ -15488,7 +15488,7 @@ fail-on-revert), plus `destination_port_except_unresolved_fails_closed_3205` /
 boundary pin). Scope: ports only; `packet-length` from the same review-039
 finding is NOT implemented here.
 
-### #2053 — Config secret redaction at JSON/YAML marshal time
+### #2053 — Config secret redaction at JSON marshal time (Secret also guards YAML)
 
 The compiled `*config.Config` carries every operator secret verbatim in
 memory (it must — the reconciler/render paths need the cleartext). The
