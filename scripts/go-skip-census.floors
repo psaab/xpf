@@ -164,9 +164,9 @@
 # pkg/nfqueue/measure_memory_test.go: after a successful SO_SNDBUF
 # request/read-back, M2 skips if the effective value is below the tested
 # 8 MiB floor.
-# The STEP-0 map reports an unmodified base of 675 total (139 priv-absent,
-# 18 priv-present, 517 other, 1 unparsed). The first assigned-worktree recount
-# measured 676 (139/18/518/1); its extra pkg/grpcapi ActiveConfig skip was an
+# The STEP-0 map reports an unmodified base of 676 total (139 priv-absent,
+# 18 priv-present, 518 other, 1 unparsed; clean-archive replay). The first assigned-worktree recount
+# also measured 676 (139/18/518/1); its extra pkg/grpcapi ActiveConfig skip was an
 # invalid test-fixture guard and now fails loudly instead of hiding the test.
 # After fixing that guard, the unreachable-receiver skip, 16 direct-mode
 # precondition skips, the fail-closed FRR skip, and the inverted DDNS skip, the
