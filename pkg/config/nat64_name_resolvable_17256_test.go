@@ -112,4 +112,12 @@ func TestNAT64SourceAddressNameMixedColdDNSAndEmptyRejected17256(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not resolve") {
 		t.Fatalf("error must carry the shared unresolvable diagnostic, got: %v", err)
 	}
+	// Sol/GLM: the culprit named must be the static member, not the
+	// tolerated cold-DNS member walked first.
+	if !strings.Contains(err.Error(), "inner-empty") {
+		t.Fatalf("error must name the static culprit inner-empty, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "cold-dns") && !strings.Contains(err.Error(), "inner-empty") {
+		t.Fatalf("error names only the tolerated DNS member, got: %v", err)
+	}
 }

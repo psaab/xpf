@@ -329,6 +329,7 @@ func policyMatchAddressBookResolution(ab *AddressBook, name string) (error, bool
 	seen := make(map[string]bool)
 	count := 0 // literal addresses accumulated (mirrors expanded slice length)
 	var firstErr error
+	var staticErr error
 	var hasDNSUnavailable, hasStaticFailure bool
 	var resolve func(ref string) bool
 	resolve = func(ref string) bool {
@@ -353,13 +354,20 @@ func policyMatchAddressBookResolution(ab *AddressBook, name string) (error, bool
 					len(addr.UnimplementedForms) == 0 &&
 					len(addr.DuplicatePrefixes) == 0 &&
 					len(addr.TrailingTokens) == 0 && addr.OversizedRange == ""
-				if firstErr == nil {
-					firstErr = fmt.Errorf("address %q has no configured prefix "+
-						"(it resolves to no usable address)", show(ref))
-				}
 				if dnsUnavailable {
+					if firstErr == nil {
+						firstErr = fmt.Errorf("address %q has no configured prefix "+
+							"(it resolves to no usable address)", show(ref))
+					}
 					hasDNSUnavailable = true
 				} else {
+					if staticErr == nil {
+						staticErr = fmt.Errorf("address %q has no configured prefix "+
+							"(it resolves to no usable address)", show(ref))
+					}
+					if firstErr == nil {
+						firstErr = staticErr
+					}
 					hasStaticFailure = true
 				}
 				return false
@@ -369,18 +377,24 @@ func policyMatchAddressBookResolution(ab *AddressBook, name string) (error, bool
 		}
 		set := ab.AddressSets[ref]
 		if set == nil {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("member %q is not a defined address or "+
+			if staticErr == nil {
+				staticErr = fmt.Errorf("member %q is not a defined address or "+
 					"address-set", show(ref))
+			}
+			if firstErr == nil {
+				firstErr = staticErr
 			}
 			hasStaticFailure = true
 			return false
 		}
 		if len(set.UnknownMembers) > 0 {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("address-set %q has unknown member statement %q; "+
+			if staticErr == nil {
+				staticErr = fmt.Errorf("address-set %q has unknown member statement %q; "+
 					"the dropped member leaves the set under-populated",
 					show(ref), set.UnknownMembers[0])
+			}
+			if firstErr == nil {
+				firstErr = staticErr
 			}
 			hasStaticFailure = true
 			return false
@@ -391,9 +405,12 @@ func policyMatchAddressBookResolution(ab *AddressBook, name string) (error, bool
 		seen[ref] = true
 		members := len(set.Addresses) + len(set.AddressSets)
 		if members == 0 {
-			if firstErr == nil {
-				firstErr = fmt.Errorf("address-set %q is empty "+
+			if staticErr == nil {
+				staticErr = fmt.Errorf("address-set %q is empty "+
 					"(it expands to no addresses)", show(ref))
+			}
+			if firstErr == nil {
+				firstErr = staticErr
 			}
 			hasStaticFailure = true
 			return false
@@ -421,6 +438,11 @@ func policyMatchAddressBookResolution(ab *AddressBook, name string) (error, bool
 		if firstErr == nil {
 			firstErr = fmt.Errorf("%q resolves to no address", show(name))
 			hasStaticFailure = true
+		}
+		if hasStaticFailure && staticErr != nil {
+			// Sol/GLM #17256: name the static culprit, not the tolerated
+			// transient DNS member that happened to be walked first.
+			return staticErr, false
 		}
 		return firstErr, hasDNSUnavailable && !hasStaticFailure
 	}
