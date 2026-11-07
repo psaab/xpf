@@ -45,6 +45,10 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	// Always publish this daemon-owned counter family, including while the
 	// helper is stopped, so its series do not disappear during a restart.
 	status.EventStream = &es
+	// #18635: stamp a publication sequence only for a decoded helper status;
+	// repeated CLI reads of this cache therefore carry the same value.
+	m.helperStatusObservationSequence++
+	status.HelperStatusObservationSequence = m.helperStatusObservationSequence
 	m.setLastStatusLocked(*status)
 }
 

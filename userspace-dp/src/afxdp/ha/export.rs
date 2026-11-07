@@ -454,12 +454,14 @@ impl crate::afxdp::Coordinator {
             }
 
             // #17122: the entry->delta mapping lives once in
-            // `SessionDelta::from_shared`; the only site-local stamp is
-            // the #16217 handshake restamp below.
+            // `SessionDelta::from_shared`. Producer-local stamps below retain
+            // FullResync provenance and the #16217 handshake restamp.
             let mut delta = crate::session::SessionDelta::from_shared(
                 entry,
                 crate::session::SessionDeltaKind::Open,
             );
+            // This AllSessionsExport is a peer full-resync snapshot, not an incremental Open.
+            delta.bulk_resync = true;
             // #16217 (export stamp): Established when node-wide
             // completion evidence holds for this tuple over the
             // shared maps; otherwise the row's own wire (already on

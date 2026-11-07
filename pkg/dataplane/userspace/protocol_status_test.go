@@ -97,12 +97,61 @@ func TestEventStreamSessionDeltaLossWire18635(t *testing.T) {
 	if err := json.Unmarshal([]byte(payload), &status); err != nil {
 		t.Fatalf("decode HA session-delta loss counters: %v", err)
 	}
-	if status.EventStreamSessionDeltaLostOpen != 11 ||
-		status.EventStreamSessionDeltaLostClose != 22 ||
-		status.EventStreamSessionDeltaLostUpdate != 33 {
-		t.Fatalf("HA session-delta loss counters = open=%d close=%d update=%d, want 11/22/33",
+	if status.EventStreamSessionDeltaLostOpen == nil ||
+		*status.EventStreamSessionDeltaLostOpen != 11 ||
+		status.EventStreamSessionDeltaLostClose == nil ||
+		*status.EventStreamSessionDeltaLostClose != 22 ||
+		status.EventStreamSessionDeltaLostUpdate == nil ||
+		*status.EventStreamSessionDeltaLostUpdate != 33 {
+		t.Fatalf("HA session-delta loss counters = open=%v close=%v update=%v, want 11/22/33",
 			status.EventStreamSessionDeltaLostOpen,
 			status.EventStreamSessionDeltaLostClose,
 			status.EventStreamSessionDeltaLostUpdate)
+	}
+}
+
+func TestEventStreamSessionDeltaLossMissingKeysStayUnknown18635(t *testing.T) {
+	var status ProcessStatus
+	if err := json.Unmarshal([]byte(`{"pid":1234}`), &status); err != nil {
+		t.Fatalf("decode pre-#18635 helper status: %v", err)
+	}
+	if status.EventStreamSessionDeltaLostOpen != nil ||
+		status.EventStreamSessionDeltaLostClose != nil ||
+		status.EventStreamSessionDeltaLostUpdate != nil {
+		t.Fatalf("missing pre-#18635 loss keys decoded as known values: open=%v close=%v update=%v",
+			status.EventStreamSessionDeltaLostOpen,
+			status.EventStreamSessionDeltaLostClose,
+			status.EventStreamSessionDeltaLostUpdate)
+	}
+}
+
+
+func TestHelperStatusObservationSequenceAdvancesOnPublication18635(t *testing.T) {
+	m := New()
+	for want := uint64(1); want <= 2; want++ {
+		m.mu.Lock()
+		status := ProcessStatus{PID: 1234}
+		m.recordHelperStatusLocked(&status)
+		m.mu.Unlock()
+		if status.HelperStatusObservationSequence != want {
+			t.Fatalf("published helper status sequence = %d, want %d",
+				status.HelperStatusObservationSequence, want)
+		}
+		published, err := m.Status()
+		if err != nil {
+			t.Fatalf("read published helper status: %v", err)
+		}
+		if published.HelperStatusObservationSequence != want {
+			t.Fatalf("cached helper status sequence = %d, want %d",
+				published.HelperStatusObservationSequence, want)
+		}
+		cachedAgain, err := m.Status()
+		if err != nil {
+			t.Fatalf("read cached helper status again: %v", err)
+		}
+		if cachedAgain.HelperStatusObservationSequence != want {
+			t.Fatalf("ordinary cached status read advanced observation sequence to %d, want %d",
+				cachedAgain.HelperStatusObservationSequence, want)
+		}
 	}
 }

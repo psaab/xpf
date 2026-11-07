@@ -792,7 +792,9 @@ write_src_side_source 22049 0 4 0
 assert_helper_status 3 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 1
 printf 'Services Synchronized:\nSession create 22049 0\n\nSession delta pending: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\n' >"${SYNC_SRC_SIDE_SOURCE}"
 SYNC_EVENT_LOSS_MISSING="${TMP_DIR}/sync-event-loss-missing.txt"
-printf 'Services Synchronized:\nSession create 22049 0\n\nSession delta pending: 0\nSession delta dropped: 4\nSession delta drained: 0\n' >"${SYNC_EVENT_LOSS_MISSING}"
+# #18635: an older helper's missing JSON counters remain unknown through
+# formatting; the manager sequence is present, but idle evidence is VOID.
+printf 'Services Synchronized:\nHelper status observation sequence: 1\nSession create 22049 0\n\nSession delta pending: 0\nSession delta dropped: 4\nSession delta drained: 0\n' >"${SYNC_EVENT_LOSS_MISSING}"
 assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_EVENT_LOSS_MISSING}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
 assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" 22047 129486 4 0
 assert_helper_status 2 ha_session_sync_idle_sample node0 node1 "${SYNC_SRC_SIDE_SOURCE}" "${SYNC_LOSS_TARGET}" '' '' '' ''
@@ -855,7 +857,7 @@ void() { VOID=$((VOID + 1)); printf "VOID-MARK %s\n" "$*"; }
 sleep() { :; }
 run_vm() { :; }
 write_runner_fixture() {
-	# $1=path $2=sent $3=received $4=pending [$5=dropped]
+	# $1=path $2=sent $3=received $4=pending [$5=dropped $6=event-lost $7=status-sequence]
 	cat >"$1" <<EOF
 Services Synchronized:
 Session create $2 $3
@@ -863,19 +865,20 @@ Session create $2 $3
 Session delta pending: $4
 Session delta dropped: ${5:-0}
 Session delta drained: 0
-Event stream HA session delta lost: 0
+Event stream HA session delta lost: ${6:-0}
+Helper status observation sequence: ${7:-0}
 EOF
 }
 write_seq_pair() {
 	# Index/calls live in files: captures run inside $(...) subshells in
 	# the failover loop, so shell variables would reset every attempt.
-	# A pair is sent/received/target-pending[/source-pending/source-dropped].
-	local idx pair sent recv pending src_pending src_dropped calls
+	# sent/received/target-pending[/source-pending/source-dropped/source-event-loss/status-sequence].
+	local idx pair sent recv pending src_pending src_dropped src_event_lost status_seq calls
 	idx="$(cat "${SEQ_INDEX_FILE}")"
 	pair="${SEQ[$idx]}"
-	IFS=/ read -r sent recv pending src_pending src_dropped <<< "$pair"
-	write_runner_fixture "$SEQ_SOURCE" "$sent" 0 "${src_pending:-0}" "${src_dropped:-0}"
-	write_runner_fixture "$SEQ_TARGET" 0 "$recv" "$pending"
+	IFS=/ read -r sent recv pending src_pending src_dropped src_event_lost status_seq <<< "$pair"
+	write_runner_fixture "$SEQ_SOURCE" "$sent" 0 "${src_pending:-0}" "${src_dropped:-0}" "${src_event_lost:-0}" "${status_seq:-$(($(cat "${SEQ_CALLS_FILE}") + 1))}"
+	write_runner_fixture "$SEQ_TARGET" 0 "$recv" "$pending" 0 0 "${status_seq:-$(($(cat "${SEQ_CALLS_FILE}") + 1))}"
 	if (( idx < ${#SEQ[@]} - 1 )); then printf '%s\n' "$((idx + 1))" > "${SEQ_INDEX_FILE}"; fi
 	calls="$(cat "${SEQ_CALLS_FILE}")"; printf '%s\n' "$((calls + 1))" > "${SEQ_CALLS_FILE}"
 }
@@ -947,43 +950,57 @@ VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'failover loop: unreceived send is never 
 run_sync_loop_case userspace 8 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=174 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=1
 VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'userspace loop: unreceived send is never absorbed' '15/174/0' '16/174/0'
-# Catch-up: 15/174 -> 16/174 -> 16/175 x3 idle samples -> PASS at sample 5.
-run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+	# Catch-up: three fresh idle publications reach the floor; a fourth
+	# publication is required for the final confirmation sample.
+	run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'failover loop: received catch-up idles' '15/174/0' '16/174/0' '16/175/0'
-run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'failover loop: received catch-up requires final publication' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6'
+	run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'userspace loop: received catch-up idles' '15/174/0' '16/174/0' '16/175/0'
-# Rewind-only re-baseline: 15/174 -> restart 2/3 -> 2/3 x3 -> PASS sample 5.
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: received catch-up requires final publication' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/6'
+
+# Late source loss after the last idle publication is not hidden by the CLI's
+# cached copy: a repeated sequence cannot complete the final confirmation, and
+# the next fresh sequence carries the loss.
+run_sync_loop_case failover 7 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
+session sync node0->node1 not idle: source sent=16 (baseline 15), target received=174 (baseline 174), outstanding beyond floor=1, pending=0
+session sync node0->node1 not idle: the source lost 1 HA event-stream session delta(s) since the baseline (lost=1 baseline=0)
+FAIL-MARK loop: session sync did not become idle within 7 attempts (Ns; 3 of 3 samples at the floor) (node0->node1)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'failover loop: late loss after cached publication blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
+run_sync_loop_case userspace 7 'FAIL-MARK loop: session sync did not become idle before timeout (source_sent=16 target_recv=175 target_delta_pending=0 target_delta_drained=0)
+LOOPRC=1
+VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=7' 'userspace loop: late loss after cached publication blocks idle' '15/174/0/0/0/0/1' '16/174/0/0/0/0/2' '16/175/0/0/0/0/3' '16/175/0/0/0/0/4' '16/175/0/0/0/0/5' '16/175/0/0/0/0/5' '16/175/0/0/0/1/6'
+# Rewind-only re-baseline: 15/174 -> restart 2/3 -> 2/3 x3 -> PASS sample 6.
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 session sync node0->node1 not idle: counters rewound since baseline (source sent=2 baseline=15, target received=3 baseline=174, pending=0); re-baseline required
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'failover loop: rewind re-baselines then idles' '15/174/0' '2/3/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'failover loop: rewind re-baselines then idles' '15/174/0' '2/3/0'
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=2 target_recv=3 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'userspace loop: rewind re-baselines then idles' '15/174/0' '2/3/0'
-# First sample establishes the baseline (minimum 4 samples to PASS).
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: rewind re-baselines then idles' '15/174/0' '2/3/0'
+# First sample establishes the baseline (minimum 5 fresh samples to PASS).
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=15, target received=174, pending=0
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'failover loop: first sample is never idle alone' '15/174/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'failover loop: first sample is never idle alone' '15/174/0'
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=15 target_recv=174 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=4' 'userspace loop: first sample is never idle alone' '15/174/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'userspace loop: first sample is never idle alone' '15/174/0'
 # #16500 -> #18632 shrinking gap: baseline 20/17 with 3 in flight,
 # delivered to 20/20 (repeated). Sample 2 is a NEW FLOOR (re-baseline,
-# streak restarts), then 3 idle samples -> PASS at sample 5.
+# streak restarts), then 3 idle samples plus the final confirmation -> sample 6.
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=20, target received=17, pending=0
 session sync node0->node1 new floor: source sent=20, target received=20 is 3 below the baseline (sent=20 received=17), pending=0; re-baseline
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'failover loop: shrinking in-flight gap re-baselines then idles' '20/17/0' '20/20/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'failover loop: shrinking in-flight gap re-baselines then idles' '20/17/0' '20/20/0'
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=20 target_recv=20 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=5' 'userspace loop: shrinking in-flight gap re-baselines then idles' '20/17/0' '20/20/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: shrinking in-flight gap re-baselines then idles' '20/17/0' '20/20/0'
 # #18632: a backlog still DRAINING never reads idle. Sent holds at 30
 # while received climbs 20, 21, ... one per sample: every sample is a new
 # floor, so the streak never builds; timeout 8 FAILs. (The old fixed
@@ -1005,15 +1022,15 @@ VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=8' 'userspace loop: a draining backlog never
 # #18632: a new floor mid-streak RESTARTS the streak. Two idle samples
 # at 20/20, then 20/21 (a bulk frame or a delivered in-flight create):
 # the earlier "idle" samples sat above the real floor, so they do not
-# count. PASS needs 3 more samples at the new floor: sample 7, not 5.
+# count. PASS needs 3 more samples at the new floor plus confirmation: sample 8.
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=20, target received=20, pending=0
 session sync node0->node1 new floor: source sent=20, target received=21 is 1 below the baseline (sent=20 received=20), pending=0; re-baseline
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=7' 'failover loop: a new floor mid-streak restarts the streak' '20/20/0' '20/20/0' '20/20/0' '20/21/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=8' 'failover loop: a new floor mid-streak restarts the streak' '20/20/0' '20/20/0' '20/20/0' '20/21/0'
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=20 target_recv=21 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=7' 'userspace loop: a new floor mid-streak restarts the streak' '20/20/0' '20/20/0' '20/20/0' '20/21/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=8' 'userspace loop: a new floor mid-streak restarts the streak' '20/20/0' '20/20/0' '20/20/0' '20/21/0'
 # #18632 source side: the source drops a session delta after the floor
 # (dropped 0 -> 1). Every later sample stays not idle (the baseline keeps
 # the old dropped count), so the wait FAILs at its timeout.
@@ -1029,16 +1046,16 @@ run_sync_loop_case userspace 5 'FAIL-MARK loop: session sync did not become idle
 LOOPRC=1
 VERDICTS PASS=0 FAIL=1 VOID=0 CALLS=5' 'userspace loop: a source delta drop is never absorbed' '20/20/0/0/0' '20/20/0/0/1'
 # #18632 source side: a delta the source still holds keeps the pair not
-# idle until it drains (source pending 2, 2, then 0 x3): PASS at sample 6.
+# idle until it drains (source pending 2, 2, then 0 x3): confirmation at sample 7.
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=20, target received=20, pending=0
 session sync node0->node1 not idle: at the floor, but the source holds 2 undrained session delta(s)
 session sync node0->node1 not idle: at the floor, but the source holds 2 undrained session delta(s)
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'failover loop: an undrained source delta holds the wait until it drains' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/0/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=7' 'failover loop: an undrained source delta holds the wait until it drains' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/0/0'
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=20 target_recv=20 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: an undrained source delta holds the wait until it drains' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/0/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=7' 'userspace loop: an undrained source delta holds the wait until it drains' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/2/0' '20/20/0/0/0'
 # #18632 (AC seat): an UNKNOWN helper verdict VOIDs in BOTH loops.
 FORCE_SAMPLE_RC=7 run_sync_loop_case failover 5 'VOID-MARK loop: session sync sample verdict 7 unknown (node0->node1)
 LOOPRC=2
@@ -1048,21 +1065,23 @@ LOOPRC=0
 VERDICTS PASS=0 FAIL=0 VOID=1 CALLS=1' 'userspace loop: an unknown verdict is VOID' '20/20/0'
 # #18632: the N floor samples need NOT be consecutive. An above-floor
 # sample (a create landing between the reads) neither counts nor resets
-# the count: floor, above, floor, above, floor -> PASS at sample 6 (a
-# consecutive rule would need samples 6-8).
+# the count: floor, above, floor, above, floor -> stable streak at sample 6,
+# then one fresh publication confirms PASS at sample 7 (a consecutive rule
+# would need samples 6-8).
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=20, target received=20, pending=0
 session sync node0->node1 not idle: source sent=21 (baseline 20), target received=20 (baseline 20), outstanding beyond floor=1, pending=0
 session sync node0->node1 not idle: source sent=22 (baseline 20), target received=21 (baseline 20), outstanding beyond floor=1, pending=0
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'failover loop: floor samples need not be consecutive' '20/20/0' '20/20/0' '21/20/0' '21/21/0' '22/21/0' '22/22/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=7' 'failover loop: floor samples need not be consecutive' '20/20/0' '20/20/0' '21/20/0' '21/21/0' '22/21/0' '22/22/0'
 run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=22 target_recv=22 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=6' 'userspace loop: floor samples need not be consecutive' '20/20/0' '20/20/0' '21/20/0' '21/21/0' '22/21/0' '22/22/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=7' 'userspace loop: floor samples need not be consecutive' '20/20/0' '20/20/0' '21/20/0' '21/21/0' '22/21/0' '22/22/0'
 # #18632 LIVE REPLAY: the 30 samples of loss run 2's "before fw0 crash"
 # wait (0.0.26680, mirror sweep ~4 creates/s), read target first. Floor
 # readings came in pairs and never 3 in a row, so the consecutive rule
-# FAILed this healthy pair; counting floor samples PASSes at sample 8.
+# FAILed this healthy pair; counting floor samples reaches the stable streak
+# at sample 8, then one fresh publication confirms PASS at sample 9.
 run_sync_loop_case failover 30 'session sync node0->node1 baseline: source sent=51312, target received=68284, pending=0
 session sync node0->node1 not idle: source sent=51323 (baseline 51312), target received=68292 (baseline 68284), outstanding beyond floor=3, pending=0
 session sync node0->node1 not idle: source sent=51332 (baseline 51312), target received=68301 (baseline 68284), outstanding beyond floor=3, pending=0
@@ -1070,10 +1089,10 @@ session sync node0->node1 not idle: source sent=51356 (baseline 51312), target r
 session sync node0->node1 not idle: source sent=51365 (baseline 51312), target received=68333 (baseline 68284), outstanding beyond floor=4, pending=0
 PASS-MARK loop: session sync idle (node0->node1, 3 samples at the floor)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=8' 'failover loop: the loss run-2 sweep sequence PASSes by sample 8' '51312/68284/0/0/0' '51323/68292/0/0/0' '51332/68301/0/0/0' '51337/68309/0/0/0' '51347/68319/0/0/0' '51356/68326/0/0/0' '51365/68333/0/0/0' '51370/68342/0/0/0' '51387/68359/0/0/0' '51395/68364/0/0/0' '51404/68376/0/0/0' '51412/68384/0/0/0' '51421/68390/0/0/0' '51439/68404/0/0/0' '51442/68414/0/0/0' '51450/68422/0/0/0' '51459/68427/0/0/0' '51471/68438/0/0/0' '51474/68446/0/0/0' '51482/68454/0/0/0' '51494/68464/0/0/0' '51503/68469/0/0/0' '51506/68478/0/0/0' '51514/68486/0/0/0' '51526/68493/0/0/0' '51535/68502/0/0/0' '51539/68511/0/0/0' '51551/68523/0/0/0' '51565/68532/0/0/0' '51568/68540/0/0/0'
-run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=51370 target_recv=68342 target_delta_pending=0 target_delta_drained=0)
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=9' 'failover loop: the loss run-2 sweep sequence PASSes by sample 9' '51312/68284/0/0/0' '51323/68292/0/0/0' '51332/68301/0/0/0' '51337/68309/0/0/0' '51347/68319/0/0/0' '51356/68326/0/0/0' '51365/68333/0/0/0' '51370/68342/0/0/0' '51387/68359/0/0/0' '51395/68364/0/0/0' '51404/68376/0/0/0' '51412/68384/0/0/0' '51421/68390/0/0/0' '51439/68404/0/0/0' '51442/68414/0/0/0' '51450/68422/0/0/0' '51459/68427/0/0/0' '51471/68438/0/0/0' '51474/68446/0/0/0' '51482/68454/0/0/0' '51494/68464/0/0/0' '51503/68469/0/0/0' '51506/68478/0/0/0' '51514/68486/0/0/0' '51526/68493/0/0/0' '51535/68502/0/0/0' '51539/68511/0/0/0' '51551/68523/0/0/0' '51565/68532/0/0/0' '51568/68540/0/0/0'
+run_sync_loop_case userspace 30 'PASS-MARK loop: session sync idle (source_sent=51387 target_recv=68359 target_delta_pending=0 target_delta_drained=0)
 LOOPRC=0
-VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=8' 'userspace loop: the loss run-2 sweep sequence PASSes by sample 8' '51312/68284/0/0/0' '51323/68292/0/0/0' '51332/68301/0/0/0' '51337/68309/0/0/0' '51347/68319/0/0/0' '51356/68326/0/0/0' '51365/68333/0/0/0' '51370/68342/0/0/0' '51387/68359/0/0/0' '51395/68364/0/0/0' '51404/68376/0/0/0' '51412/68384/0/0/0' '51421/68390/0/0/0' '51439/68404/0/0/0' '51442/68414/0/0/0' '51450/68422/0/0/0' '51459/68427/0/0/0' '51471/68438/0/0/0' '51474/68446/0/0/0' '51482/68454/0/0/0' '51494/68464/0/0/0' '51503/68469/0/0/0' '51506/68478/0/0/0' '51514/68486/0/0/0' '51526/68493/0/0/0' '51535/68502/0/0/0' '51539/68511/0/0/0' '51551/68523/0/0/0' '51565/68532/0/0/0' '51568/68540/0/0/0'
+VERDICTS PASS=1 FAIL=0 VOID=0 CALLS=9' 'userspace loop: the loss run-2 sweep sequence PASSes by sample 9' '51312/68284/0/0/0' '51323/68292/0/0/0' '51332/68301/0/0/0' '51337/68309/0/0/0' '51347/68319/0/0/0' '51356/68326/0/0/0' '51365/68333/0/0/0' '51370/68342/0/0/0' '51387/68359/0/0/0' '51395/68364/0/0/0' '51404/68376/0/0/0' '51412/68384/0/0/0' '51421/68390/0/0/0' '51439/68404/0/0/0' '51442/68414/0/0/0' '51450/68422/0/0/0' '51459/68427/0/0/0' '51471/68438/0/0/0' '51474/68446/0/0/0' '51482/68454/0/0/0' '51494/68464/0/0/0' '51503/68469/0/0/0' '51506/68478/0/0/0' '51514/68486/0/0/0' '51526/68493/0/0/0' '51535/68502/0/0/0' '51539/68511/0/0/0' '51551/68523/0/0/0' '51565/68532/0/0/0' '51568/68540/0/0/0'
 # #18632: the LATEST sample must be one of the counted. The count reaches
 # N-1 (2), then a create is lost and D never returns to the floor: no
 # later sample can complete the count, so the wait FAILs ("2 of 3").
@@ -1160,6 +1179,7 @@ tl_capture() {
 	local now sent="$TL_SENT_BASE" received="$TL_RECV_BASE" ev enq rcv n
 	local -a events=()
 	now="$(cat "${TL_CLOCK_FILE}")"
+	n="$(cat "${TL_CAPTURES_FILE}")"
 	IFS="," read -r -a events <<< "$TL_EVENTS"
 	for ev in "${events[@]}"; do
 		[[ -n "$ev" ]] || continue
@@ -1168,9 +1188,9 @@ tl_capture() {
 		if [[ "$rcv" != never ]] && (( rcv <= now )); then received=$((received + 1)); fi
 	done
 	if [[ "$1" == S ]]; then
-		printf 'Services Synchronized:\nSession create %s 0\n\nSession delta pending: 0\nSession delta dropped: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\n' "$sent" >"$2"
+		printf 'Services Synchronized:\nSession create %s 0\n\nSession delta pending: 0\nSession delta dropped: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\nHelper status observation sequence: %s\n' "$sent" "$n" >"$2"
 	else
-		printf 'Services Synchronized:\nSession create 0 %s\n\nSession delta pending: 0\nSession delta dropped: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\n' "$received" >"$2"
+		printf 'Services Synchronized:\nSession create 0 %s\n\nSession delta pending: 0\nSession delta dropped: 0\nSession delta drained: 0\nEvent stream HA session delta lost: 0\nHelper status observation sequence: %s\n' "$received" "$n" >"$2"
 	fi
 	printf '%s' "$1" >>"${TL_ORDER_FILE}"
 	printf '%s\n' "$(( now + 5 ))" >"${TL_CLOCK_FILE}"
@@ -1215,17 +1235,19 @@ run_timeline_case() {
 	assert_eq "$out" "$4" "$5"
 }
 for tl_loop in failover userspace; do
-	# Quiet pair: the floor is the first sample, PASS on attempt 4.
+	# Quiet pair: the floor is the first sample; 3 fresh idle samples and
+	# a final fresh publication PASS on attempt 5.
 	run_timeline_case "$tl_loop" 30 '' \
-		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS' \
+		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS' \
 		"${tl_loop} timeline: quiet pair idles, target read first"
 	# THE #18632 SHAPE: a create sent at 0.2 s and received at 0.3 s, i.e.
 	# BETWEEN the first attempt's two reads. Target-first reads it as sent
 	# but not yet received (D one high), attempt 2 is a new floor, and the
-	# wait PASSes on attempt 5. Source-first read it as received but not
-	# sent: a baseline one BELOW the floor, then FAIL for the whole wait.
+	# wait PASSes on attempt 6 including its final fresh publication.
+	# Source-first read it as received but not sent: a baseline one BELOW
+	# the floor, then FAIL for the whole wait.
 	run_timeline_case "$tl_loop" 30 '2:3' \
-		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS' \
+		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS TS' \
 		"${tl_loop} timeline: a create between the first two reads cannot lock in a phantom deficit"
 	# POSITIVE CONTROL for loss: a create sent at 2.5 s (attempt 2) and
 	# NEVER received. D stays one above the floor forever: FAIL, never
@@ -1249,13 +1271,13 @@ for tl_loop in failover userspace; do
 	# per-create epoch, not counters. This cell pins the limitation, so a
 	# change to it is a deliberate, reviewed one.
 	run_timeline_case "$tl_loop" 30 '1:15,2:15,10:never' \
-		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS' \
+		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS TS' \
 		"${tl_loop} timeline: KNOWN LIMIT a create lost while others are still in flight is absorbed"
 	# Its control without the lost create, and its sibling with the loss
 	# AFTER the two landed (3.0 s; attempt 2 already saw the true floor),
 	# which is NOT absorbed: FAIL.
 	run_timeline_case "$tl_loop" 30 '1:15,2:15' \
-		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS' \
+		'TIMELINE rc=0 PASS=1 FAIL=0 VOID=0 ORDER=TS TS TS TS TS TS' \
 		"${tl_loop} timeline: two creates in flight at the first sample land, then idle"
 	run_timeline_case "$tl_loop" 8 '1:15,2:15,30:never' \
 		'TIMELINE rc=1 PASS=0 FAIL=1 VOID=0 ORDER=TS TS TS TS TS TS TS TS ' \
@@ -2099,6 +2121,66 @@ else
 fi
 [[ "$sync_event_stream_loss_mutant_rc" == 0 ]] ||
 	fail_test "event-stream loss comparison mutant scored ${sync_event_stream_loss_mutant_rc}, want idle escape 0"
+
+# #18635: repeated cached status publications cannot build the stable streak.
+SYNC_OBSERVATION_SEQUENCE='15/174/0/0/0/0/1,16/174/0/0/0/0/2,16/175/0/0/0/0/3,16/175/0/0/0/0/3,16/175/0/0/0/0/3,16/175/0/0/0/0/4'
+LOOP_CASE_HELPERS="${LOOP_HELPERS}"
+run_sync_observation_case() {
+	local out current_wait current_helpers
+	if ! declare -F ha_wait_for_session_sync_idle >/dev/null; then
+		source "$LOOP_CASE_HELPERS"
+	fi
+	current_wait="${LOOP_DIR}/current-wait-for-session-sync-idle.sh"
+	current_helpers="${LOOP_DIR}/current-wait-loop-helpers.sh"
+	declare -f ha_wait_for_session_sync_idle >"$current_wait"
+	python3 - "$LOOP_CASE_HELPERS" "$current_wait" "$current_helpers" <<'PY'
+import pathlib, re, sys
+base, current, output = map(pathlib.Path, sys.argv[1:])
+text = base.read_text(encoding="utf-8")
+replacement = current.read_text(encoding="utf-8")
+pattern = re.compile(r"^ha_wait_for_session_sync_idle\(\) \{\n.*?^\}\n", re.M | re.S)
+match = pattern.search(text)
+if not match:
+    raise SystemExit("cannot install current failover wait function in loop fixture")
+output.write_text(text[:match.start()] + replacement + text[match.end():], encoding="utf-8")
+PY
+	out="$(SEQ_CSV="$SYNC_OBSERVATION_SEQUENCE" SESSION_SYNC_IDLE_TIMEOUT=6 SESSION_SYNC_IDLE_STABLE_SAMPLES=3 \
+		SEQ_SOURCE="${LOOP_DIR}/seq-source-observation.txt" SEQ_TARGET="${LOOP_DIR}/seq-target-observation.txt" \
+		SEQ_INDEX_FILE="${LOOP_DIR}/seq-index-observation" SEQ_CALLS_FILE="${LOOP_DIR}/seq-calls-observation" \
+		ARTIFACT_DIR="$LOOP_DIR" SOURCE_NODE=0 TARGET_NODE=1 FW0=fw0 FW1=fw1 SEQ_EXPORT=1 \
+		bash -euo pipefail "$LOOP_RUNNER_FILE" "$LOOP_DIR/lib.sh" "$current_helpers" failover 2>&1)"
+	[[ "$out" == *"PASS-MARK loop: session sync idle"* ]]
+}
+LIB_FN_MUTANT_LIB="$LOOP_HELPERS" assert_lib_fn_control_holds sync-status-observation \
+	ha_wait_for_session_sync_idle \
+	'if (( source_observation_fresh != 0 && stable < SESSION_SYNC_IDLE_STABLE_SAMPLES )); then' \
+	1 '' run_sync_observation_case
+sync_status_observation_mutant="$(LIB_FN_MUTANT_LIB="$LOOP_HELPERS" lib_fn_mutant \
+	ha_wait_for_session_sync_idle sync-status-observation \
+	'if (( source_observation_fresh != 0 && stable < SESSION_SYNC_IDLE_STABLE_SAMPLES )); then' \
+	'if (( stable < SESSION_SYNC_IDLE_STABLE_SAMPLES )); then')" ||
+	fail_test 'lib_fn_mutant refused the status-observation freshness mutant'
+LOOP_MUTANT_HELPERS="${LOOP_DIR}/wait-loops-status-observation-mutant.sh"
+python3 - "${LOOP_HELPERS}" "$sync_status_observation_mutant" "$LOOP_MUTANT_HELPERS" <<'PY'
+import pathlib, re, sys
+base, mutant, output = map(pathlib.Path, sys.argv[1:])
+text = base.read_text(encoding="utf-8")
+replacement = mutant.read_text(encoding="utf-8")
+pattern = re.compile(r"^ha_wait_for_session_sync_idle\(\) \{\n.*?^\}\n", re.M | re.S)
+match = pattern.search(text)
+if not match:
+    raise SystemExit("cannot replace failover wait function with freshness mutant")
+text = text[:match.start()] + replacement + text[match.end():]
+output.write_text(text, encoding="utf-8")
+PY
+LOOP_CASE_HELPERS="$LOOP_MUTANT_HELPERS"
+if run_sync_observation_case; then
+	sync_status_observation_mutant_rc=0
+else
+	sync_status_observation_mutant_rc=$?
+fi
+[[ "$sync_status_observation_mutant_rc" == 0 ]] ||
+	fail_test "status-observation freshness mutant scored ${sync_status_observation_mutant_rc}, want cached-status idle escape 0"
 
 printf 'lib_fn_mutant refuses extractions that could score for the wrong reason (#18694)\n'
 LIB_FN_FIXTURE="${TMP_DIR}/lib-fn-mutant-fixture.sh"
@@ -3120,6 +3202,7 @@ LIB_FN_EXPECTED='plain control-fixture-plain
 control-g1-pass control-g1-fail g1-strict g1-node0only g1-node1only
 g1-missing g1-malformed g1-rewound g1-pidmismatch g1-pidonesided
 g1-pidunwired control-sync-event-stream-loss sync-event-stream-loss
+control-sync-status-observation sync-status-observation
 control-g7-pass control-g7-identity g7-ownline
 g7-linefirstwins g7-entryfirstwins g7-prefix g7-nohint g7-noidentity'
 LIB_FN_BUILT="${TMP_DIR}/lib-fn-mutants.built"

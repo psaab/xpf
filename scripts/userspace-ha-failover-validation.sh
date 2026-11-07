@@ -433,6 +433,7 @@ wait_for_session_sync_idle() {
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
 	local baseline_sent="" baseline_received="" baseline_dropped="" baseline_event_stream_lost=""
+	local last_status_observation="" final_confirmation_observation=""
 	while (( tries > 0 )); do
 		# #18632: TARGET first, then source (see ha_session_sync_idle_sample):
 		# sent - received then reads high, not low; only a source stall
@@ -443,11 +444,32 @@ wait_for_session_sync_idle() {
 		local source_path target_path
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
+		local next_status_observation source_observation_fresh=1
+		if ! next_status_observation="$(ha_status_summary_value "$source_path" "Helper status observation sequence")" ||
+			[[ ! "$next_status_observation" =~ ^[0-9]+$ ]]; then
+			void "${label}: helper status observation sequence malformed"
+			return 0
+		fi
+		if [[ -n "$last_status_observation" ]]; then
+			if (( next_status_observation < last_status_observation )); then
+				# A manager restart starts a new publication epoch; the
+				# counter predicate below re-baselines any accompanying reset.
+				stable=0
+				final_confirmation_observation=""
+			elif (( next_status_observation == last_status_observation )); then
+				source_observation_fresh=0
+			fi
+		fi
+		last_status_observation="$next_status_observation"
 		local sample_status sample_diagnostic
 		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" "$baseline_event_stream_lost" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
+		fi
+		if (( source_observation_fresh == 0 && sample_status == 0 )); then
+			sample_status=1
+			sample_diagnostic="cached helper status observation did not advance"
 		fi
 		if (( sample_status == 2 )); then
 			void "${label}: session sync evidence blind: ${sample_diagnostic}"
@@ -469,10 +491,18 @@ wait_for_session_sync_idle() {
 		target_pending="$(ha_status_summary_value "$target_path" "Session delta pending")"
 		target_drained="$(ha_status_summary_value "$target_path" "Session delta drained")"
 		if (( sample_status == 0 )); then
-			stable=$((stable + 1))
+			if (( stable < stable_needed )); then
+				stable=$((stable + 1))
+			fi
 			if (( stable >= stable_needed )); then
-				pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
-				return 0
+				# Require one helper publication after the idle streak;
+				# a repeated manager cache is never a fresh final sample.
+				if [[ -z "$final_confirmation_observation" ]]; then
+					final_confirmation_observation="$next_status_observation"
+				elif (( next_status_observation > final_confirmation_observation )); then
+					pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
+					return 0
+				fi
 			fi
 		elif (( sample_status == 3 || sample_status == 4 )); then
 			# #16289: counter rewind (daemon or helper restart), or
@@ -482,6 +512,7 @@ wait_for_session_sync_idle() {
 			# absorbed. These are the ONLY re-baseline triggers; both
 			# restart the streak.
 			stable=0
+			final_confirmation_observation=""
 			baseline_sent="$source_sent"
 			baseline_received="$target_recv"
 			baseline_dropped="$source_dropped"
@@ -490,9 +521,10 @@ wait_for_session_sync_idle() {
 			# Ordinary not-idle: above the floor, or something pending.
 			# It neither counts nor resets the count (#18632: see
 			# ha_session_sync_idle_sample). Establish the baseline only
-			# when none exists yet (first sample); otherwise keep it —
-			# an outstanding unreceived delta or either source-side loss
-			# counter must persist, never be absorbed into a new baseline.
+			# when none exists yet; any pending loss remains above it.
+			if (( stable >= stable_needed )); then
+				final_confirmation_observation=""
+			fi
 			if [[ -z "$baseline_sent" ]]; then
 				baseline_sent="$source_sent"
 				baseline_received="$target_recv"

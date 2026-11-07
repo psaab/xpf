@@ -2025,6 +2025,53 @@ fn bulk_exported_pptp_session_carries_its_call_id_pair_14303() {
     );
 }
 
+/// #18635: `AllSessionsExport` produces non-incremental full-resync Opens.
+/// A failed enqueue from the real producer must not arm incremental HA loss.
+///
+/// FAIL-ON-REVERT: removing the `bulk_resync` stamp in
+/// `snapshot_all_sessions_export` makes the failed Open increment the loss
+/// counter, so this test fails.
+#[test]
+fn all_sessions_full_resync_loss_is_not_counted_as_incremental_ha_loss_18635() {
+    let (mut coordinator, _) = coordinator_with_tunnel_session(7);
+    coordinator
+        .update_ha_state(&[HAGroupStatus {
+            rg_id: 1,
+            active: true,
+            ..HAGroupStatus::default()
+        }])
+        .expect("activate RG 1");
+
+    // A disconnected sender makes the actual AllSessionsExport push fail
+    // immediately while retaining its receiver, independent of channel-close.
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(false, 16);
+    coordinator.event_stream = Some(sender);
+    let export = coordinator
+        .snapshot_all_sessions_export()
+        .expect("snapshot full-resync export");
+    assert_eq!(export.deltas_for_test().len(), 1, "fixture must export one Open");
+    assert!(
+        export.deltas_for_test()[0].bulk_resync,
+        "AllSessionsExport Open must be marked as bulk"
+    );
+    assert!(export.push().is_err(), "disconnected full-resync enqueue must fail");
+
+    let stats = coordinator
+        .event_stream
+        .as_ref()
+        .expect("event stream")
+        .stats();
+    assert_eq!(
+        (
+            stats.session_delta_lost_open,
+            stats.session_delta_lost_close,
+            stats.session_delta_lost_update,
+        ),
+        (0, 0, 0),
+        "bulk FullResync failure must not be counted as incremental HA delta loss"
+    );
+}
+
 /// #16217 (export stamp, change 1): the coordinator bulk snapshot
 /// must export `tcp_handshake_state = Established` for a tuple whose
 /// own shared row still reads HandshakePending when node-wide

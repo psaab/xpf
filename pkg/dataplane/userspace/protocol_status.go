@@ -173,12 +173,16 @@ type ProcessStatus struct {
 	EventStreamSent              uint64                     `json:"event_stream_sent,omitempty"`
 	EventStreamDropped           uint64                     `json:"event_stream_dropped,omitempty"`
 	// Non-bulk HA session deltas dropped by the helper's lossless event-stream
-	// enqueue, split by Open/Close/Update. CommandExport is not emitted on this
-	// path and bulk-resync failures do not arm the out-of-sync latch. JSON tags
-	// match Rust ProcessStatus exactly.
-	EventStreamSessionDeltaLostOpen   uint64 `json:"event_stream_session_delta_lost_open,omitempty"`
-	EventStreamSessionDeltaLostClose  uint64 `json:"event_stream_session_delta_lost_close,omitempty"`
-	EventStreamSessionDeltaLostUpdate uint64 `json:"event_stream_session_delta_lost_update,omitempty"`
+	// enqueue, split by Open/Close/Update. Pointer fields preserve the
+	// distinction between a current helper's explicit zero and a pre-#18635
+	// helper that omitted these keys; the latter must not be treated as
+	// trustworthy zero-loss evidence.
+	EventStreamSessionDeltaLostOpen   *uint64 `json:"event_stream_session_delta_lost_open,omitempty"`
+	EventStreamSessionDeltaLostClose  *uint64 `json:"event_stream_session_delta_lost_close,omitempty"`
+	EventStreamSessionDeltaLostUpdate *uint64 `json:"event_stream_session_delta_lost_update,omitempty"`
+	// Manager-owned sequence of successful helper-status observations. The
+	// HA idle wait uses it to reject repeated reads of one cached publication.
+	HelperStatusObservationSequence uint64 `json:"helper_status_observation_sequence,omitempty"`
 	// #1642: the Rust helper serializes these three flat event-stream
 	// fields on ProcessStatus (protocol/control.rs) alongside _sent /
 	// _dropped, but the Go side only declared _sent / _dropped, so

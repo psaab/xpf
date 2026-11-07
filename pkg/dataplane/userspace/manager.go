@@ -327,6 +327,10 @@ type Manager struct {
 	// the field". Both are < ProtocolVersion, and only the second is an
 	// incompatibility. Guarded by m.mu, like lastStatus itself.
 	helperStatusObserved bool
+	// helperStatusObservationSequence advances only when a decoded helper
+	// status is published into the manager cache; CLI readers use it to
+	// distinguish a new helper observation from a repeated cached snapshot.
+	helperStatusObservationSequence uint64
 	// lastStatusSeq counts helper-status PUBLICATIONS into lastStatus (#9902
 	// F-026): bumped inside setLastStatusLocked, so it advances exactly when
 	// the cache is replaced — never on a failed apply (which leaves the

@@ -1,6 +1,7 @@
 package format
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -8,6 +9,9 @@ import (
 
 	userspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
+
+func statusU64ptr(v uint64) *uint64 { return &v }
+
 
 func TestFormatStatusSummary(t *testing.T) {
 	now := time.Now().UTC()
@@ -55,9 +59,10 @@ func TestFormatStatusSummary(t *testing.T) {
 		},
 		EventStreamSent:                   101,
 		EventStreamDropped:                7,
-		EventStreamSessionDeltaLostOpen:   2,
-		EventStreamSessionDeltaLostClose:  3,
-		EventStreamSessionDeltaLostUpdate: 4,
+		EventStreamSessionDeltaLostOpen:   statusU64ptr(2),
+		EventStreamSessionDeltaLostClose:  statusU64ptr(3),
+		EventStreamSessionDeltaLostUpdate: statusU64ptr(4),
+		HelperStatusObservationSequence:  7,
 		EventStreamSessionCloseSent:       90,
 		EventStreamSessionCloseDropped:    3,
 		EventStreamSessionCreateSent:      12,
@@ -134,6 +139,7 @@ func TestFormatStatusSummary(t *testing.T) {
 		"Direct TX disallowed fb:   7",
 		"Event stream frames:       read=11 written=5 decode_errors=2 seq_gaps=3",
 		"Event stream producer:     sent=101 dropped=7",
+		"Helper status observation sequence: 7",
 		"Event stream HA session delta lost: 9 (open=2 close=3 update=4)",
 		"Event stream rt_flow:      session_close[sent=90 dropped=3] session_create[sent=12 dropped=1]",
 		"Event stream events:       policy_deny=13 screen_drop=17 screen_alarm=23 filter_log=19 session_close=29 session_create=31 unknown_drops=6",
@@ -151,6 +157,36 @@ func TestFormatStatusSummary(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Fatalf("summary missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestFormatStatusSummaryOmitsUnknownLegacyEventStreamLoss18635(t *testing.T) {
+	// A pre-#18635 Rust helper omits these additive keys. The current manager
+	// stamps its own observation sequence, but missing counters must not
+	// become a trustworthy zero in formatted evidence.
+	var status userspace.ProcessStatus
+	if err := json.Unmarshal([]byte(`{"pid":1234}`), &status); err != nil {
+		t.Fatalf("decode pre-#18635 helper status: %v", err)
+	}
+	status.HelperStatusObservationSequence = 7
+	out := FormatStatusSummary(status)
+	if !strings.Contains(out, "Helper status observation sequence: 7") {
+		t.Fatalf("summary missing manager sample sequence:\n%s", out)
+	}
+	if strings.Contains(out, "Event stream HA session delta lost:") {
+		t.Fatalf("legacy helper's missing loss counters became zero evidence:\n%s", out)
+	}
+}
+
+func TestFormatStatusSummaryShowsKnownZeroEventStreamLoss18635(t *testing.T) {
+	var status userspace.ProcessStatus
+	const currentHelper = `{"pid":1234,"event_stream_session_delta_lost_open":0,"event_stream_session_delta_lost_close":0,"event_stream_session_delta_lost_update":0}`
+	if err := json.Unmarshal([]byte(currentHelper), &status); err != nil {
+		t.Fatalf("decode current helper status with explicit zero counters: %v", err)
+	}
+	out := FormatStatusSummary(status)
+	if !strings.Contains(out, "Event stream HA session delta lost: 0 (open=0 close=0 update=0)") {
+		t.Fatalf("explicit zero loss counters did not remain known zero evidence:\n%s", out)
 	}
 }
 

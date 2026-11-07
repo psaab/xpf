@@ -237,10 +237,15 @@ before the fw0 crash and before the RG1 failback) and this validator
 move an RG. They share one sample predicate, `ha_session_sync_idle_sample` in
 `test/incus/ha-assurance-lib.sh`.
 
-**The property.** Idle = N samples at an unchanged floor, the latest of them
-included, with no create outstanding beyond that floor and nothing pending at
-those reads. N is `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
+**The property.** Idle = N fresh helper-status publications at an unchanged
+floor, with no create outstanding beyond that floor and nothing pending at
+those reads, followed by one more fresh publication before PASS. N is
+`SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
 
+- The `Helper status observation sequence` is manager-owned and advances for
+  each successful helper-status publication. A repeated CLI read of the
+  manager's cached status does not count as a sample; the final publication
+  after the stable streak prevents a stale cache from proving idle.
 - "Pending" covers both the target's helper delta queue
   (`Session delta pending`) and the source's helper delta buffer.
 - The source's `Session delta dropped` fallback count and
@@ -248,7 +253,11 @@ those reads. N is `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
   since the wait began. The latter sums only non-bulk, non-CommandExport HA
   session-delta Open/Close/Update failures from the helper's lossless event-stream enqueue;
   it is distinct from `Event stream producer: dropped=`, which also counts
-  shed RT_FLOW log events.
+  shed RT_FLOW log events. If an older helper omits the additive loss-counter
+  JSON keys, the formatter omits the loss line and the idle verdict is VOID;
+  key presence distinguishes unknown from a trustworthy zero without a status
+  protocol-version bump.
+
 A sample reads D = the source's `Session create` Sent minus the target's
 `Session create` Received (`show chassis cluster data-plane statistics`).
 The floor is the lowest D the wait has seen. "Outstanding beyond the floor" is
