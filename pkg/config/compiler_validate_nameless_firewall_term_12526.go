@@ -138,11 +138,13 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 	if term == nil {
 		return 0
 	}
-	// Compiler emits len(namedInstances([term])) for a container, minus
-	// children that are the container's own from/then body statements
-	// (they merge onto the container's single typed marker, which is
-	// itself one of the instances when a body statement exists).
-	// Packed-invisible malformed terms emit nothing (parent-probed).
+	// Compiler emits len(namedInstances([term])) for a container;
+	// firewallNamelessTermNodes members are authored-body statements
+	// that instead merge onto the container's ONE typed marker (the
+	// marker itself is not a separate instance). Packed-invisible
+	// malformed terms emit nothing (parent-probed over the shape
+	// matrix: named blocks, multi-key statements and bare leaves each
+	// emit; leaf and block from/then statements merge).
 	if len(term.Keys) >= 2 {
 		if _, malformed := firewallNamelessTermBody12526(term); malformed {
 			if _, visible := pre[term]; !visible {
@@ -159,24 +161,26 @@ func compiledFirewallTermEmissions17257(term *Node, pre map[*Node]struct{}) int 
 			return 0
 		}
 	}
-	count := 0
+	instances := namedInstances([]*Node{term})
+	count := len(instances)
+	// subtract merged body statements: children in the nameless set
+	// whose name is from/then AND (leaf or non-leaf block) — they do
+	// not emit; the +1 marker below replaces them collectively.
+	merged := 0
 	for _, child := range term.Children {
 		if child == nil {
 			continue
 		}
-		if !child.IsLeaf && len(child.Keys) == 1 {
-			count++ // named child block
-			continue
-		}
 		if child.Name() == "from" || child.Name() == "then" {
-			continue // body statement of the container marker
+			merged++
 		}
-		count++ // multi-key / bare-leaf nameless statement: own term
 	}
-	// The container's own typed marker (emitted when the container is
-	// malformed and typed-visible) is additional to body statements.
-	if _, malformed := firewallNamelessTermBody12526(term); malformed && len(term.Children) > 0 {
-		count++
+	count -= merged
+	if merged > 0 {
+		count++ // the container's single typed marker
+	}
+	if count < 0 {
+		count = 0
 	}
 	return count
 }

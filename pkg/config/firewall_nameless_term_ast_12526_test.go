@@ -446,3 +446,21 @@ func TestCompileConfigLenientPackedAfterMultiKeyChildren17257(t *testing.T) {
 		t.Fatalf("third term = %+v, want the packed discard last", term)
 	}
 }
+
+func TestCompileConfigLenientPackedAfterThenBlocks17257(t *testing.T) {
+	// Kimi delta-5: non-leaf then BLOCKS are terms of their own, not
+	// body statements; the packed site follows both.
+	src := `firewall { family inet { filter F { term { then next term { } then accept { } } term { } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 3 {
+		t.Fatalf("filter = %+v, want [then, discard, then] per compiler order", filter)
+	}
+	mid := filter.Terms[1]
+	if mid == nil || !mid.nameless || mid.Action != FilterActionDiscard {
+		t.Fatalf("middle term = %+v, want the packed discard between the two typed markers (compiler order)", mid)
+	}
+}
