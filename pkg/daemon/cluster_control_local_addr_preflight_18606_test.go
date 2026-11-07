@@ -367,6 +367,49 @@ func TestControlLocalAddressPreflightReadsTheRunningBind18606(t *testing.T) {
 		t.Fatal("a planned DHCP-managed VLAN parent must refuse removal of the bound rendered static")
 	}
 
+	t.Run("VLAN parent plan excludes unrendered sibling static", func(t *testing.T) {
+		plannedUnitZero := configWithControl("hb.1", "10.99.14.2",
+			"interfaces hb.1 vlan-tagging",
+			"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+			"interfaces hb.1 unit 7 family inet address 10.99.14.3/24",
+			"security zones security-zone trust interfaces hb.1.0")
+		siblingRemoved := configWithControl("hb.1", "10.99.14.2",
+			"interfaces hb.1 vlan-tagging",
+			"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+			"security zones security-zone trust interfaces hb.1.0")
+		if got := controlLinkState18606(plannedUnitZero, "hb.1").addrs; len(got) != 1 ||
+			got[0] != "10.99.14.1/24" {
+			t.Fatalf("planned VLAN-parent addresses = %v; unplanned unit-7 static must not render", got)
+		}
+		manager := cluster.NewManager(0, 1)
+		manager.SetHeartbeatEndpointForTesting("10.99.14.3", "10.99.14.2", "hb.1")
+		if err := clusterControlLocalAddressCommitPreflight(manager, plannedUnitZero, siblingRemoved); err != nil {
+			t.Fatalf("removing an unrendered sibling static must not trigger the running-static proof: %v", err)
+		}
+	})
+
+	t.Run("VLAN parent plan membership change refuses disappearing bind", func(t *testing.T) {
+		unitZeroPlan := configWithControl("hb.1", "10.99.14.2",
+			"interfaces hb.1 vlan-tagging",
+			"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+			"interfaces hb.1 unit 7 family inet address 10.99.14.3/24",
+			"security zones security-zone trust interfaces hb.1.0")
+		unitSevenPlan := configWithControl("hb.1", "10.99.14.2",
+			"interfaces hb.1 vlan-tagging",
+			"interfaces hb.1 unit 0 family inet address 10.99.14.1/24",
+			"interfaces hb.1 unit 7 family inet address 10.99.14.3/24",
+			"security zones security-zone trust interfaces hb.1.7")
+		if got := controlLinkState18606(unitSevenPlan, "hb.1").addrs; len(got) != 1 ||
+			got[0] != "10.99.14.3/24" {
+			t.Fatalf("candidate VLAN-parent addresses = %v; plan must select unit 7 only", got)
+		}
+		manager := cluster.NewManager(0, 1)
+		manager.SetHeartbeatEndpointForTesting("10.99.14.1", "10.99.14.2", "hb.1")
+		if err := clusterControlLocalAddressCommitPreflight(manager, unitZeroPlan, unitSevenPlan); err == nil {
+			t.Fatal("changing the VLAN-parent plan so the bound static disappears must refuse")
+		}
+	})
+
 	// Strict config rejects vlan-id without tagging, while lenient peer-sync
 	// retains it and the regular networkd row still renders the unit on its
 	// untagged parent. The preflight must use that same rendered address fold.

@@ -310,15 +310,19 @@ func controlLinkState18606(cfg *config.Config, ref string) controlLinkAddrs18606
 	return controlLinkInterfaceState18606(cfg, ifc)
 }
 
-// controlLinkInterfaceState18606 mirrors the resolved bare-device fold:
-// numeric unit order, enabled units whose tunnel shares the bare device, and
-// tagged-child exclusion only when the parent has VLAN tagging enabled. Regular
-// interface rows render every enabled unit, including a malformed VLAN ID
-// accepted on lenient paths. A VLAN-parent row filters DHCP-owned families only
-// when a non-quarantined zone ref actually plans a DHCP-managed parent.
+// controlLinkInterfaceState18606 mirrors the address fold for the resolved
+// bare device. VLAN-parent rows are further restricted to addresses selected
+// by the resolved zone plan; an unplanned parent keeps the renderer's legacy
+// untagged-address fallback.
 func controlLinkInterfaceState18606(cfg *config.Config, ifc *config.InterfaceConfig) controlLinkAddrs18606 {
-	if ifc == nil {
+	if cfg == nil || ifc == nil {
 		return controlLinkAddrs18606{}
+	}
+	tunnelNames := cfg.TunnelNameMap()
+	bareDevice := cfg.ResolveKernelIfNameWith(ifc.Name, tunnelNames)
+	var parentPlan controlLinkVLANParentPlan18606
+	if ifc.TaggingEnabled() {
+		parentPlan = controlLinkVLANParentPlan18606For(cfg, ifc, bareDevice, tunnelNames)
 	}
 	unitNumbers := make([]int, 0, len(ifc.Units))
 	for n := range ifc.Units {
@@ -328,7 +332,6 @@ func controlLinkInterfaceState18606(cfg *config.Config, ifc *config.InterfaceCon
 
 	var out controlLinkAddrs18606
 	dhcpv4, dhcpv6 := false, false
-	bareDevice := config.LinuxIfName(ifc.Name)
 	for _, n := range unitNumbers {
 		unit := ifc.Units[n]
 		if unit == nil || unit.Disable ||
@@ -359,8 +362,17 @@ func controlLinkInterfaceState18606(cfg *config.Config, ifc *config.InterfaceCon
 			}
 		}
 	}
+	if ifc.TaggingEnabled() && parentPlan.active {
+		kept := out.addrs[:0]
+		for _, addr := range out.addrs {
+			if _, planned := parentPlan.addrs[addr]; planned {
+				kept = append(kept, addr)
+			}
+		}
+		out.addrs = kept
+	}
 	if (dhcpv4 || dhcpv6) &&
-		(!ifc.TaggingEnabled() || controlLinkVLANParentSkipsAddrs18606(cfg, ifc)) {
+		(!ifc.TaggingEnabled() || parentPlan.skipAddrs) {
 		kept := out.addrs[:0]
 		for _, addr := range out.addrs {
 			ip, _, err := net.ParseCIDR(addr)
@@ -374,18 +386,23 @@ func controlLinkInterfaceState18606(cfg *config.Config, ifc *config.InterfaceCon
 	return out
 }
 
-// controlLinkVLANParentSkipsAddrs18606 mirrors planPhysDesired's condition
-// for suppressing static addresses on a VLAN parent. Unzoned parents retain
-// the renderer's legacy statics; only a non-quarantined, non-excluded zone
-// ref that plans the parent can enable plan.skipAddrs.
-func controlLinkVLANParentSkipsAddrs18606(cfg *config.Config, ifc *config.InterfaceConfig) bool {
+type controlLinkVLANParentPlan18606 struct {
+	addrs     map[string]struct{}
+	active    bool
+	skipAddrs bool
+}
+
+// controlLinkVLANParentPlan18606For mirrors the address-relevant part of
+// planPhysDesired. The config resolver supplies RETH/IRB/tunnel identity;
+// untagged numbered units are normalized to their parent's device, while
+// fabric refs keep the renderer's resolved-member identity.
+func controlLinkVLANParentPlan18606For(cfg *config.Config, ifc *config.InterfaceConfig, bareDevice string, tunnelNames map[string]string) controlLinkVLANParentPlan18606 {
+	plan := controlLinkVLANParentPlan18606{addrs: make(map[string]struct{})}
 	if cfg == nil || ifc == nil || !ifc.TaggingEnabled() {
-		return false
+		return plan
 	}
 	excludedZones := config.ZoneQuarantineExclusionsForConfig(cfg)
 	quarantined := config.QuarantinedZoneInterfaceKeys(cfg)
-	parentSkip := ifc.RedundancyGroup > 0 || ifc.LocalFabricMember != ""
-	bareDevice := config.LinuxIfName(ifc.Name)
 	for zoneName, zone := range cfg.Security.Zones {
 		if zone == nil {
 			continue
@@ -405,9 +422,6 @@ func controlLinkVLANParentSkipsAddrs18606(cfg *config.Config, ifc *config.Interf
 				continue
 			}
 			split := cfg.SplitInterfaceUnitRef(ref)
-			if split.Base != ifc.Name {
-				continue
-			}
 			unitNumber := 0
 			if split.HasUnit {
 				n, err := strconv.Atoi(split.UnitTok)
@@ -416,18 +430,56 @@ func controlLinkVLANParentSkipsAddrs18606(cfg *config.Config, ifc *config.Interf
 				}
 				unitNumber = n
 			}
-			unit := ifc.Units[unitNumber]
-			if unit != nil && (unit.VlanID != 0 ||
-				unit.Tunnel != nil && unit.Tunnel.Name != bareDevice) {
+			plannedIfc := cfg.Interfaces.Interfaces[split.Base]
+			if plannedIfc == nil {
 				continue
 			}
-			if parentSkip || unit != nil && !unit.Disable &&
-				(unit.DHCP || unit.DHCPv6 || unit.DHCPv6Client != nil) {
-				return true
+			unit := plannedIfc.Units[unitNumber]
+			vlanID := 0
+			if unit != nil {
+				vlanID = unit.VlanID
+			}
+			if vlanID != 0 || controlLinkPlanDevice18623(cfg, ref, split.Base, split.HasUnit, plannedIfc, unit, tunnelNames) != bareDevice {
+				continue
+			}
+			if plannedIfc.RedundancyGroup > 0 || plannedIfc.LocalFabricMember != "" {
+				plan.skipAddrs = true
+			}
+			if unit == nil || unit.Disable {
+				continue
+			}
+			if unit.DHCP || unit.DHCPv6 || unit.DHCPv6Client != nil {
+				plan.skipAddrs = true
+			}
+			for _, addr := range unit.Addresses {
+				plan.addrs[addr] = struct{}{}
 			}
 		}
 	}
-	return false
+	plan.active = len(plan.addrs) > 0 || plan.skipAddrs
+	return plan
+}
+
+// controlLinkPlanDevice18623 reuses config's kernel-name resolvers for aliased
+// RETH, IRB, fabric, and tunnel refs; only the resolver's per-unit suffix is
+// collapsed when the renderer folds an untagged unit onto its parent.
+func controlLinkPlanDevice18623(cfg *config.Config, ref, configName string, hasUnit bool, ifc *config.InterfaceConfig, unit *config.InterfaceUnit, tunnelNames map[string]string) string {
+	if configName == "irb" {
+		if bridge, exists := config.IRBToBridge(cfg.BridgeDomains)[ref]; exists && bridge != "" {
+			return bridge
+		}
+	}
+	if hasUnit && config.IsSecureTunnelIfName(configName) && (unit == nil || unit.VlanID == 0) {
+		return cfg.ResolveKernelIfNameWith(ref, tunnelNames)
+	}
+	device := cfg.ResolveKernelIfNameWith(configName, tunnelNames)
+	if ifc != nil && ifc.LocalFabricMember != "" {
+		device = config.LinuxIfName(cfg.ResolveFab(configName))
+	}
+	if unit != nil && unit.Tunnel != nil {
+		device = unit.Tunnel.Name
+	}
+	return device
 }
 
 func controlLinkUnitState18606(unit *config.InterfaceUnit) controlLinkAddrs18606 {
