@@ -100,3 +100,68 @@ func TestSchemaExitScrubNeverEchoesURLValue18997(t *testing.T) {
 		t.Errorf("schema exit scrub echoed the direct secret (control): %v", got)
 	}
 }
+
+// #18997 short-URL arm (Kimi seat): a credential-bearing URL token can be
+// shorter than beltSecretValues' 4-byte floor ("a@b" is 3 bytes, ":p@"
+// carries an inline password) yet is still transformed by RedactURL.
+// collectSecretValues adds such tokens, but the belt dropped them, so
+// the scrub had no needle and returned the foreign error verbatim.
+// URL-classified needles now bypass the belt via collectURLValues.
+func TestSchemaExitScrubShortURLCredential18997(t *testing.T) {
+	for _, raw := range []string{"a@b", ":p@"} {
+		if RedactURL(raw) == raw {
+			t.Fatalf("premise: RedactURL must transform %q", raw)
+		}
+		tree := buildRedactTree(t, []string{
+			`set system archival configuration archive-sites "` + raw + `" password "s3cr3t"`,
+		})
+		foreign := fmt.Errorf("archive fetch failed for %s", raw)
+		got := scrubSchemaErrorSecrets(tree, foreign)
+		if strings.Contains(got.Error(), raw) {
+			t.Errorf("schema exit scrub echoed short URL credential %q (#18997): %v", raw, got)
+		}
+	}
+}
+
+// #18997 variant matrix (Sol/Kimi seats): the committed cells must pin
+// more than the single password-bearing fixture — empty-password and
+// percent-encoded userinfo, multiple archive sites, and a
+// credential-free URL that must pass the new collection unchanged
+// (no needle for a no-op RedactURL token).
+func TestPlaceholderGuardURLVariantMatrix18997(t *testing.T) {
+	for _, u := range []string{
+		`scp://user:@host/dir`,       // empty password
+		`scp://user:p%40ss@host/dir`, // percent-encoded password
+	} {
+		tree := buildRedactTree(t, []string{
+			`set system archival configuration archive-sites "` + u + `" password "##SECRET-DATA##"`,
+		})
+		err := SchemaValidate(tree)
+		if err == nil {
+			t.Fatalf("premise: placeholder fixture must be rejected (%q)", u)
+		}
+		if strings.Contains(err.Error(), ":@") || strings.Contains(err.Error(), "p%40ss@") ||
+			strings.Contains(err.Error(), "user:") {
+			t.Errorf("variant %q leaked through SchemaValidate: %v", u, err)
+		}
+	}
+	// Multiple archive sites: neither site's credential may echo.
+	multi := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "scp://u1:p1@h1/d" password "##SECRET-DATA##"`,
+		`set system archival configuration archive-sites "scp://u2:p2@h2/d" password "s3cr3t"`,
+	})
+	if err := SchemaValidate(multi); err != nil {
+		if strings.Contains(err.Error(), "p1@") || strings.Contains(err.Error(), "p2@") ||
+			strings.Contains(err.Error(), "u1:p1") || strings.Contains(err.Error(), "u2:p2") {
+			t.Errorf("multi-site credential leaked: %v", err)
+		}
+	}
+	// Credential-free URL: RedactURL is a no-op, so collectURLValues must
+	// not return it, and a foreign error naming it stays intact.
+	free := buildRedactTree(t, []string{
+		`set system archival configuration archive-sites "https://host/dir" password "s3cr3t"`,
+	})
+	if got := collectURLValues(free); len(got) != 0 {
+		t.Errorf("credential-free URL became a scrub needle: %v", got)
+	}
+}

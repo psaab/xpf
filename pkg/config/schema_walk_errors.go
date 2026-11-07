@@ -349,6 +349,63 @@ func collectSecretValues(tree *ConfigTree) []string {
 	return values
 }
 
+// collectURLValues returns the URL-classified tokens of the tree that
+// RedactURL actually changes (direct urlLeafIndices positions plus the
+// same positions inside embedded change-configuration/commands payloads),
+// deduplicated. It exists beside collectSecretValues because the exit
+// scrub's needle set is beltSecretValues-filtered (values shorter than
+// 4 bytes and public vocabulary are dropped): a short credential-bearing
+// URL token such as "a@b" or ":p@" is RedactURL-transformed yet below
+// the belt floor, so it must reach the scrub unbelted (#18997).
+// Credential-free URLs are no-ops under RedactURL and never returned,
+// so no legitimate URL spelling becomes a scrub needle.
+func collectURLValues(tree *ConfigTree) []string {
+	if tree == nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var values []string
+	add := func(tok string) {
+		if tok != "" && !seen[tok] {
+			seen[tok] = true
+			values = append(values, tok)
+		}
+	}
+	var walk func(nodes []*Node, base []string)
+	walk = func(nodes []*Node, base []string) {
+		for _, n := range nodes {
+			if n == nil {
+				continue
+			}
+			full := append(append([]string(nil), base...), n.Keys...)
+			for _, i := range urlLeafIndices(full) {
+				if i >= 0 && i < len(full) && RedactURL(full[i]) != full[i] {
+					add(full[i])
+				}
+			}
+			for i := 0; i+1 < len(full); i++ {
+				if full[i] != "change-configuration" || full[i+1] != "commands" {
+					continue
+				}
+				for _, payload := range full[i+2:] {
+					tokens, _ := lexConfigMutationLine9938(payload)
+					if len(tokens) < 2 || tokens[0] != "set" {
+						continue
+					}
+					for _, idx := range urlLeafIndices(tokens) {
+						if idx >= 0 && idx < len(tokens) && RedactURL(tokens[idx]) != tokens[idx] {
+							add(tokens[idx])
+						}
+					}
+				}
+			}
+			walk(n.Children, full)
+		}
+	}
+	walk(tree.Children, nil)
+	return values
+}
+
 // scrubSecretValuesText is the FINAL-string-level scrub (fold 4):
 // given the candidate's secret values, replace every occurrence in
 // text in raw, strconv.Quote, and quoted-interior forms. This is the

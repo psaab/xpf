@@ -279,7 +279,16 @@ func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 		return err
 	}
 	allValues := collectSecretValues(tree)
+	// URL-classified needles bypass beltSecretValues' short-value
+	// filter: a credential-bearing URL token can be shorter than the
+	// belt's 4-byte floor ("a@b", ":p@") yet is still transformed by
+	// RedactURL, so dropping it would echo the credential verbatim
+	// (#18997, Kimi seat). collectURLValues returns only tokens
+	// RedactURL actually changes, so no credential-free URL becomes
+	// a needle; the belt's public-vocabulary guard is not applied to
+	// them for the same reason — they are values, not vocabulary.
 	values := beltSecretValues(allValues)
+	values = append(values, collectURLValues(tree)...)
 	msg := err.Error()
 	// Whole-string equality (reviewer cross-field shape): if the
 	// entire rendered error EQUALS a secret value, no substring
