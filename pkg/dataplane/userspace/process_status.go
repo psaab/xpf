@@ -543,6 +543,15 @@ func (m *Manager) refreshEventStreamSessionDeltaLossStatusAtSocket(status Proces
 		return ProcessStatus{}, &statusDecodeError{cause: fmt.Errorf(
 			"status refresh omitted event-stream HA session-delta loss counters")}
 	}
+	if status.HelperStatusMeasurementSequence == nil ||
+		refreshed.HelperStatusMeasurementSequence == nil {
+		return ProcessStatus{}, &statusDecodeError{cause: fmt.Errorf(
+			"status refresh omitted helper status measurement sequence")}
+	}
+	if *refreshed.HelperStatusMeasurementSequence <= *status.HelperStatusMeasurementSequence {
+		return ProcessStatus{}, &statusDecodeError{cause: fmt.Errorf(
+			"helper status measurement sequence did not advance across confirmation read")}
+	}
 	if status.PID != refreshed.PID {
 		return ProcessStatus{}, &statusDecodeError{cause: fmt.Errorf(
 			"status refresh helper PID changed from %d to %d", status.PID, refreshed.PID)}

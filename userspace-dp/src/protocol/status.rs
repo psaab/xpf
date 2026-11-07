@@ -1377,6 +1377,11 @@ pub(crate) struct ProcessStatus {
     pub event_stream_session_delta_lost_close: u64,
     #[serde(rename = "event_stream_session_delta_lost_update", default)]
     pub event_stream_session_delta_lost_update: u64,
+    /// Helper-owned status-projection epoch (#18635). Advanced inside each
+    /// `project_status` call and carried with that exact snapshot, so a later
+    /// Go cache publication cannot make an older helper measurement fresh.
+    #[serde(rename = "helper_status_measurement_sequence", default)]
+    pub helper_status_measurement_sequence: u64,
     /// I/O cycles in which the event-stream socket-write backlog hit its cap
     /// and the helper stopped draining the channel (stalled daemon reader,
     /// #2381). Growing → telemetry shed at the bounded channel; dataplane

@@ -683,6 +683,7 @@ pub(crate) fn run() -> Result<(), String> {
             event_stream_session_delta_lost_open: 0,
             event_stream_session_delta_lost_close: 0,
             event_stream_session_delta_lost_update: 0,
+            helper_status_measurement_sequence: 0,
             event_stream_write_stalls: 0,
             event_stream_replay_evictions: 0,
             event_stream_invalid_acks: 0,

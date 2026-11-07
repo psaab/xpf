@@ -343,6 +343,27 @@ fn ping_returns_ok_and_attaches_status() {
 }
 
 #[test]
+fn helper_status_measurement_sequence_advances_on_each_projection_18635() {
+    let state = new_state(ProcessStatus::default());
+    let first = {
+        let mut guard = state.lock().expect("state");
+        project_status(&mut guard);
+        guard.status.helper_status_measurement_sequence
+    };
+    let second = {
+        let mut guard = state.lock().expect("state");
+        project_status(&mut guard);
+        guard.status.helper_status_measurement_sequence
+    };
+    assert!(first > 0);
+    assert_eq!(
+        second,
+        first + 1,
+        "each helper status projection receives a new helper-owned epoch"
+    );
+}
+
+#[test]
 fn unknown_request_type_is_rejected_with_message() {
     let response = run_request(new_state(ProcessStatus::default()), req("does_not_exist"));
     assert!(!response.ok);

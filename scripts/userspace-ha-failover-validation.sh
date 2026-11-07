@@ -419,10 +419,10 @@ capture_sync_snapshot() {
 	run_vm "$vm" 'cli -c "show chassis cluster data-plane statistics"' >"$(sync_snapshot_path "$label" "$vm")" 2>&1 || true
 }
 
-# #18632/#18635: idle = N paired fresh SOURCE and TARGET helper-status
-# publications at an unchanged floor, with no create outstanding beyond that
-# floor and nothing pending at those reads, followed by one more fresh
-# publication from both endpoints (see ha_session_sync_idle_sample).
+# #18632/#18635: idle = N paired fresh helper-measured SOURCE and TARGET
+# status projections at an unchanged floor, with no create outstanding beyond
+# that floor and nothing pending at those reads, followed by one more fresh
+# projection from both endpoints. Go publication counters are not freshness proof.
 wait_for_session_sync_idle() {
 	local label="$1"
 	local stable_needed="$SESSION_SYNC_IDLE_STABLE_SAMPLES"
@@ -433,8 +433,8 @@ wait_for_session_sync_idle() {
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
 	local baseline_sent="" baseline_received="" baseline_dropped="" baseline_event_stream_lost=""
-	local last_source_status_observation="" last_target_status_observation=""
-	local final_source_confirmation_observation="" final_target_confirmation_observation=""
+	local last_source_measurement_sequence="" last_target_measurement_sequence=""
+	local final_source_confirmation_measurement_sequence="" final_target_confirmation_measurement_sequence=""
 	while (( tries > 0 )); do
 		# #18632: TARGET first, then source (see ha_session_sync_idle_sample):
 		# sent - received then reads high, not low; only a source stall
@@ -445,42 +445,44 @@ wait_for_session_sync_idle() {
 		local source_path target_path
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
-		local next_source_status_observation next_target_status_observation
-		local source_observation_fresh=1 target_observation_fresh=1
-		if ! next_source_status_observation="$(ha_status_summary_value "$source_path" "Helper status observation sequence")" ||
-			[[ ! "$next_source_status_observation" =~ ^[0-9]+$ ]] ||
-			! next_target_status_observation="$(ha_status_summary_value "$target_path" "Helper status observation sequence")" ||
-			[[ ! "$next_target_status_observation" =~ ^[0-9]+$ ]]; then
-			void "${label}: helper status observation sequence malformed"
+		local next_source_measurement_sequence next_target_measurement_sequence
+		local source_measurement_fresh=1 target_measurement_fresh=1
+		if ! next_source_measurement_sequence="$(ha_status_summary_value "$source_path" "Helper status measurement sequence")" ||
+			[[ ! "$next_source_measurement_sequence" =~ ^[0-9]+$ ]] ||
+			! next_target_measurement_sequence="$(ha_status_summary_value "$target_path" "Helper status measurement sequence")" ||
+			[[ ! "$next_target_measurement_sequence" =~ ^[0-9]+$ ]]; then
+			void "${label}: helper status measurement sequence malformed"
 			return 0
 		fi
-		if [[ -n "$last_source_status_observation" ]]; then
-			if (( next_source_status_observation < last_source_status_observation ||
-				next_target_status_observation < last_target_status_observation )); then
-				# A manager restart starts a new publication epoch; the
-				# counter predicate below re-baselines any accompanying reset.
+		if [[ -n "$last_source_measurement_sequence" ]]; then
+			if (( next_source_measurement_sequence < last_source_measurement_sequence )); then
 				stable=0
-				final_source_confirmation_observation=""
-				final_target_confirmation_observation=""
+				final_source_confirmation_measurement_sequence=""
+				source_measurement_fresh=0
 			fi
-			if (( next_source_status_observation == last_source_status_observation )); then
-				source_observation_fresh=0
+			if (( next_target_measurement_sequence < last_target_measurement_sequence )); then
+				stable=0
+				final_target_confirmation_measurement_sequence=""
+				target_measurement_fresh=0
 			fi
-			if (( next_target_status_observation == last_target_status_observation )); then
-				target_observation_fresh=0
+			if (( next_source_measurement_sequence == last_source_measurement_sequence )); then
+				source_measurement_fresh=0
+			fi
+			if (( next_target_measurement_sequence == last_target_measurement_sequence )); then
+				target_measurement_fresh=0
 			fi
 		fi
-		last_source_status_observation="$next_source_status_observation"
-		last_target_status_observation="$next_target_status_observation"
+		last_source_measurement_sequence="$next_source_measurement_sequence"
+		last_target_measurement_sequence="$next_target_measurement_sequence"
 		local sample_status sample_diagnostic
 		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" "$baseline_event_stream_lost" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
 		fi
-		if (( (source_observation_fresh == 0 || target_observation_fresh == 0) && sample_status == 0 )); then
+		if (( (source_measurement_fresh == 0 || target_measurement_fresh == 0) && sample_status == 0 )); then
 			sample_status=1
-			sample_diagnostic="cached source or target helper status observation did not advance"
+			sample_diagnostic="cached source or target helper status measurement sequence did not advance"
 		fi
 		if (( sample_status == 2 )); then
 			void "${label}: session sync evidence blind: ${sample_diagnostic}"
@@ -502,20 +504,20 @@ wait_for_session_sync_idle() {
 		target_pending="$(ha_status_summary_value "$target_path" "Session delta pending")"
 		target_drained="$(ha_status_summary_value "$target_path" "Session delta drained")"
 		if (( sample_status == 0 )); then
-			if (( source_observation_fresh != 0 && target_observation_fresh != 0 &&
+			if (( source_measurement_fresh != 0 && target_measurement_fresh != 0 &&
 				stable < stable_needed )); then
 				stable=$((stable + 1))
 			fi
-			if (( source_observation_fresh != 0 && target_observation_fresh != 0 &&
+			if (( source_measurement_fresh != 0 && target_measurement_fresh != 0 &&
 				stable >= stable_needed )); then
-				# Require fresh source AND target publications after the idle
-				# streak; either CLI may repeat its manager's cached status.
-				if [[ -z "$final_source_confirmation_observation" ||
-					-z "$final_target_confirmation_observation" ]]; then
-					final_source_confirmation_observation="$next_source_status_observation"
-					final_target_confirmation_observation="$next_target_status_observation"
-				elif (( next_source_status_observation > final_source_confirmation_observation &&
-					next_target_status_observation > final_target_confirmation_observation )); then
+				# Require fresh source AND target helper projections after the idle
+				# streak; manager publication alone is not freshness evidence.
+				if [[ -z "$final_source_confirmation_measurement_sequence" ||
+					-z "$final_target_confirmation_measurement_sequence" ]]; then
+					final_source_confirmation_measurement_sequence="$next_source_measurement_sequence"
+					final_target_confirmation_measurement_sequence="$next_target_measurement_sequence"
+				elif (( next_source_measurement_sequence > final_source_confirmation_measurement_sequence &&
+					next_target_measurement_sequence > final_target_confirmation_measurement_sequence )); then
 					pass "${label}: session sync idle (source_sent=${source_sent} target_recv=${target_recv} target_delta_pending=${target_pending} target_delta_drained=${target_drained})"
 					return 0
 				fi
@@ -528,8 +530,8 @@ wait_for_session_sync_idle() {
 			# absorbed. These are the ONLY re-baseline triggers; both
 			# restart the streak.
 			stable=0
-			final_source_confirmation_observation=""
-			final_target_confirmation_observation=""
+			final_source_confirmation_measurement_sequence=""
+			final_target_confirmation_measurement_sequence=""
 			baseline_sent="$source_sent"
 			baseline_received="$target_recv"
 			baseline_dropped="$source_dropped"
@@ -539,8 +541,8 @@ wait_for_session_sync_idle() {
 			# It neither counts nor resets the count (#18632: see
 			# ha_session_sync_idle_sample). Establish the baseline only
 			if (( stable >= stable_needed )); then
-				final_source_confirmation_observation=""
-				final_target_confirmation_observation=""
+				final_source_confirmation_measurement_sequence=""
+				final_target_confirmation_measurement_sequence=""
 			fi
 			if [[ -z "$baseline_sent" ]]; then
 				baseline_sent="$source_sent"

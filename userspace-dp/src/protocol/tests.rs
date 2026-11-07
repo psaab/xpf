@@ -4178,6 +4178,7 @@ fn process_status_event_stream_fields_wire_keys_1642() {
         event_stream_session_delta_lost_open: 18,
         event_stream_session_delta_lost_close: 19,
         event_stream_session_delta_lost_update: 20,
+        helper_status_measurement_sequence: 21,
         ..Default::default()
     };
     let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
@@ -4192,6 +4193,7 @@ fn process_status_event_stream_fields_wire_keys_1642() {
     assert_eq!(value["event_stream_session_delta_lost_open"], 18u64);
     assert_eq!(value["event_stream_session_delta_lost_close"], 19u64);
     assert_eq!(value["event_stream_session_delta_lost_update"], 20u64);
+    assert_eq!(value["helper_status_measurement_sequence"], 21u64);
 }
 
 #[test]

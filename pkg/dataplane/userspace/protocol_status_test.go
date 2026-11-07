@@ -94,7 +94,7 @@ func TestEventStreamProducerCountersWire10979(t *testing.T) {
 
 // #18635: per-kind HA event-stream loss survives the helper JSON boundary.
 func TestEventStreamSessionDeltaLossWire18635(t *testing.T) {
-	const payload = `{"event_stream_session_delta_lost_open":11,"event_stream_session_delta_lost_close":22,"event_stream_session_delta_lost_update":33}`
+	const payload = `{"helper_status_measurement_sequence":44,"event_stream_session_delta_lost_open":11,"event_stream_session_delta_lost_close":22,"event_stream_session_delta_lost_update":33}`
 	var status ProcessStatus
 	if err := json.Unmarshal([]byte(payload), &status); err != nil {
 		t.Fatalf("decode HA session-delta loss counters: %v", err)
@@ -110,6 +110,9 @@ func TestEventStreamSessionDeltaLossWire18635(t *testing.T) {
 			status.EventStreamSessionDeltaLostClose,
 			status.EventStreamSessionDeltaLostUpdate)
 	}
+	if status.HelperStatusMeasurementSequence == nil || *status.HelperStatusMeasurementSequence != 44 {
+		t.Fatalf("helper status measurement sequence = %v, want 44", status.HelperStatusMeasurementSequence)
+	}
 }
 
 func TestEventStreamSessionDeltaLossMissingKeysStayUnknown18635(t *testing.T) {
@@ -119,7 +122,8 @@ func TestEventStreamSessionDeltaLossMissingKeysStayUnknown18635(t *testing.T) {
 	}
 	if status.EventStreamSessionDeltaLostOpen != nil ||
 		status.EventStreamSessionDeltaLostClose != nil ||
-		status.EventStreamSessionDeltaLostUpdate != nil {
+		status.EventStreamSessionDeltaLostUpdate != nil ||
+		status.HelperStatusMeasurementSequence != nil {
 		t.Fatalf("missing pre-#18635 loss keys decoded as known values: open=%v close=%v update=%v",
 			status.EventStreamSessionDeltaLostOpen,
 			status.EventStreamSessionDeltaLostClose,
@@ -157,6 +161,43 @@ func TestHelperStatusObservationSequenceAdvancesOnPublication18635(t *testing.T)
 	}
 }
 
+func TestOfflineClearFilterCountersKeepsHelperMeasurementStamp18635(t *testing.T) {
+	m := New()
+	m.bpfShim = nil
+	helperSequence := uint64(9)
+	m.mu.Lock()
+	m.setLastStatusLocked(ProcessStatus{
+		PID:                             1234,
+		HelperStatusMeasurementSequence: &helperSequence,
+	})
+	helperPublicationSequence := m.lastStatus.HelperStatusObservationSequence
+	managerSequence := m.lastStatusSeq
+	m.mu.Unlock()
+
+	if err := m.ClearFilterCounters(); err != nil {
+		t.Fatalf("offline ClearFilterCounters: %v", err)
+	}
+	published, err := m.Status()
+	if err != nil {
+		t.Fatalf("read cache after clear: %v", err)
+	}
+	m.mu.Lock()
+	gotManagerSequence := m.lastStatusSeq
+	m.mu.Unlock()
+	if gotManagerSequence != managerSequence+1 {
+		t.Fatalf("manager publication sequence = %d, want %d", gotManagerSequence, managerSequence+1)
+	}
+	if published.HelperStatusObservationSequence != helperPublicationSequence {
+		t.Fatalf("helper publication observation changed to %d, want cache-only %d",
+			published.HelperStatusObservationSequence, helperPublicationSequence)
+	}
+	if published.HelperStatusMeasurementSequence == nil ||
+		*published.HelperStatusMeasurementSequence != helperSequence {
+		t.Fatalf("cache-only clear changed helper measurement stamp to %v, want %d",
+			published.HelperStatusMeasurementSequence, helperSequence)
+	}
+}
+
 func TestEventStreamLossSecondReadRejectsStaleProjection18635(t *testing.T) {
 	m := New()
 	projected := make(chan struct{})
@@ -174,11 +215,13 @@ func TestEventStreamLossSecondReadRejectsStaleProjection18635(t *testing.T) {
 		}
 		calls++
 		open, zero := loss, uint64(0)
+		measurementSequence := uint64(calls)
 		*status = ProcessStatus{
-			PID:                              4242,
+			PID:                               4242,
 			EventStreamSessionDeltaLostOpen:   &open,
 			EventStreamSessionDeltaLostClose:  &zero,
 			EventStreamSessionDeltaLostUpdate: &zero,
+			HelperStatusMeasurementSequence:   &measurementSequence,
 		}
 		if calls == 1 {
 			close(projected) // the helper has projected loss=0 into this response
@@ -221,11 +264,13 @@ func TestEventStreamLossSecondReadRejectsStaleProjection18635(t *testing.T) {
 func TestEventStreamLossRefreshErrorIsNotPublishable18635(t *testing.T) {
 	m := New()
 	zero := uint64(0)
+	measurementSequence := uint64(1)
 	projected := ProcessStatus{
-		PID:                              4242,
+		PID:                               4242,
 		EventStreamSessionDeltaLostOpen:   &zero,
 		EventStreamSessionDeltaLostClose:  &zero,
 		EventStreamSessionDeltaLostUpdate: &zero,
+		HelperStatusMeasurementSequence:   &measurementSequence,
 	}
 	m.controlRequestHook = func(ControlRequest, *ProcessStatus) error {
 		return errStatusDecode
@@ -251,11 +296,13 @@ func TestStatusLoopPublishesPostProjectionLossRead18635(t *testing.T) {
 		}
 		calls++
 		currentLoss, zero := loss, uint64(0)
+		measurementSequence := uint64(calls)
 		snapshot := *readyHelperStatus()
 		snapshot.PID = 4242
 		snapshot.EventStreamSessionDeltaLostOpen = &currentLoss
 		snapshot.EventStreamSessionDeltaLostClose = &zero
 		snapshot.EventStreamSessionDeltaLostUpdate = &zero
+		snapshot.HelperStatusMeasurementSequence = &measurementSequence
 		*status = snapshot
 		if calls == 1 {
 			close(projected) // Rust projected zero before the RPC response was held.
@@ -306,4 +353,84 @@ func TestStatusLoopPublishesPostProjectionLossRead18635(t *testing.T) {
 	cancel()
 	<-done
 	t.Fatal("status loop never published the confirmed helper response")
+}
+
+// #18635: a statusLoop confirmation response blocked while the worker records
+// loss must project after release; the first pre-loss response is not publishable.
+func TestStatusLoopUsesPostHoldConfirmationProjection18635(t *testing.T) {
+	oldInterval := statusLoopInterval
+	statusLoopInterval = 20 * time.Millisecond
+	t.Cleanup(func() { statusLoopInterval = oldInterval })
+
+	m, _ := stalePollManager16653(t)
+	secondReadStarted := make(chan struct{})
+	releaseSecondRead := make(chan struct{})
+	var loss uint64
+	var calls int
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		if req.Type != "status" {
+			t.Errorf("request type = %q, want status", req.Type)
+		}
+		calls++
+		if calls == 2 {
+			close(secondReadStarted)
+			<-releaseSecondRead
+		}
+		currentLoss, zero := loss, uint64(0)
+		measurementSequence := uint64(calls)
+		snapshot := *readyHelperStatus()
+		snapshot.PID = 4242
+		snapshot.EventStreamSessionDeltaLostOpen = &currentLoss
+		snapshot.EventStreamSessionDeltaLostClose = &zero
+		snapshot.EventStreamSessionDeltaLostUpdate = &zero
+		snapshot.HelperStatusMeasurementSequence = &measurementSequence
+		*status = snapshot
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		m.statusLoop(ctx, false)
+	}()
+	select {
+	case <-secondReadStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		<-done
+		t.Fatal("status loop did not reach the held confirmation response")
+	}
+	loss = 1
+	close(releaseSecondRead)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		publishedMeasurement := m.lastStatus.HelperStatusMeasurementSequence
+		publishedLoss := m.lastStatus.EventStreamSessionDeltaLostOpen
+		var sequence, got uint64
+		if publishedMeasurement != nil {
+			sequence = *publishedMeasurement
+		}
+		if publishedLoss != nil {
+			got = *publishedLoss
+		}
+		m.mu.Unlock()
+		if sequence >= 2 {
+			cancel()
+			<-done
+			if publishedLoss == nil || got != 1 {
+				t.Fatalf("published helper measurement=%d loss=%v, want confirmation loss=1",
+					sequence, publishedLoss)
+			}
+			if calls < 2 {
+				t.Fatalf("status requests = %d, want held confirmation response", calls)
+			}
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+	t.Fatal("status loop never published the post-hold confirmation projection")
 }

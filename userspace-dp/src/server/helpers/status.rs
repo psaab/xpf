@@ -54,6 +54,13 @@ pub(crate) fn supervise_tunnels(state: &mut ServerState) {
 /// Pure status projection: no `reconcile_*_liveness` call, no thread
 /// join/respawn, no delivery-map publish (#17141).
 pub(crate) fn project_status(state: &mut ServerState) {
+    // #18635: stamp this helper-owned measurement before projecting fields.
+    // The sequence advances only when this snapshot is actually derived;
+    // later Go-side publication of an older response cannot make its stamp new.
+    state.status.helper_status_measurement_sequence = state
+        .status
+        .helper_status_measurement_sequence
+        .saturating_add(1);
     state.afxdp.refresh_bindings(&mut state.status.bindings);
     // HARDENING (#15742 follow-up): project the sticky mismatch counter
     // (owned by ServerState so this rebuild cannot zero it).

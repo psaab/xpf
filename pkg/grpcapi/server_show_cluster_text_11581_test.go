@@ -109,6 +109,7 @@ func clusterManager11581() *cluster.Manager {
 //     fabric-links table against bindings column 19.
 //   - Session delta pending=0 with sent==received above: a sync-idle fixture.
 func processStatus11581() dpuserspace.ProcessStatus {
+	measurementSequence := uint64(1)
 	return dpuserspace.ProcessStatus{
 		PID:                 4242,
 		HelperMode:          "rust-native",
@@ -166,9 +167,10 @@ func processStatus11581() dpuserspace.ProcessStatus {
 				SessionHits: 20, SessionMisses: 2,
 			},
 		},
-		HelperStatusObservationSequence: 1,
-		EventStreamSessionDeltaLostOpen:  new(uint64),
-		EventStreamSessionDeltaLostClose: new(uint64),
+		HelperStatusObservationSequence:   1,
+		HelperStatusMeasurementSequence:   &measurementSequence,
+		EventStreamSessionDeltaLostOpen:   new(uint64),
+		EventStreamSessionDeltaLostClose:  new(uint64),
 		EventStreamSessionDeltaLostUpdate: new(uint64),
 	}
 }

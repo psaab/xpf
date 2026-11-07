@@ -331,7 +331,7 @@ ha_session_sync_idle_sample() {
 	local baseline_received="$6"
 	local baseline_dropped="$7"
 	local baseline_event_stream_lost="$8"
-	local sent received pending drained source_pending source_dropped source_event_stream_lost parse_status=0
+	local sent received pending drained source_pending source_dropped source_event_stream_lost source_measurement_sequence target_measurement_sequence parse_status=0
 	# Parse every evidence field before any baseline branch, so blind or
 	# malformed evidence is VOID (2) even on the baseline-establishing
 	# sample and even when the counters have rewound.
@@ -342,8 +342,16 @@ ha_session_sync_idle_sample() {
 	source_pending="$(ha_status_summary_value "$source_path" "Session delta pending")" || parse_status=2
 	source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")" || parse_status=2
 	source_event_stream_lost="$(ha_status_summary_value "$source_path" "Event stream HA session delta lost")" || parse_status=2
+	source_measurement_sequence="$(ha_status_summary_value "$source_path" "Helper status measurement sequence")" || parse_status=2
+	target_measurement_sequence="$(ha_status_summary_value "$target_path" "Helper status measurement sequence")" || parse_status=2
 	: "$drained" # Required and parseable, informational only.
 	if (( parse_status == 2 )); then return 2; fi
+	if [[ ! "$source_measurement_sequence" =~ ^[0-9]+$ ||
+		! "$target_measurement_sequence" =~ ^[0-9]+$ ]]; then
+		printf 'session sync %s->%s malformed helper status measurement sequence (source=%s target=%s)\n' \
+			"$source_node" "$target_node" "$source_measurement_sequence" "$target_measurement_sequence" >&2
+		return 2
+	fi
 	if [[ -z "$baseline_sent" && -z "$baseline_received" && -z "$baseline_dropped" && -z "$baseline_event_stream_lost" ]]; then
 		# First sample of a wait: it only establishes the baseline. It is
 		# never idle by itself, so the N-samples rule still requires

@@ -542,6 +542,9 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	// were present. A pre-#18635 helper omits them; printing default zero
 	// values would turn unknown evidence into an acceptable idle baseline.
 	fmt.Fprintf(b, "  Helper status observation sequence: %d\n", status.HelperStatusObservationSequence)
+	if status.HelperStatusMeasurementSequence != nil {
+		fmt.Fprintf(b, "  Helper status measurement sequence: %d\n", *status.HelperStatusMeasurementSequence)
+	}
 	if status.EventStreamSessionDeltaLostOpen != nil &&
 		status.EventStreamSessionDeltaLostClose != nil &&
 		status.EventStreamSessionDeltaLostUpdate != nil {

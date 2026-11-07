@@ -78,6 +78,7 @@ Userspace dataplane helper:
   Session delta generated:   6
   Session delta dropped:     0
   Helper status observation sequence: 1
+  Helper status measurement sequence: 1
   Event stream HA session delta lost: 0 (open=0 close=0 update=0)
   Session delta drained:     5
   Policy denied packets:     7

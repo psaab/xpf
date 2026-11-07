@@ -72,6 +72,7 @@ Userspace dataplane helper:
   Session delta generated:   6
   Session delta dropped:     1
   Helper status observation sequence: 7
+  Helper status measurement sequence: 8
   Event stream HA session delta lost: 9 (open=2 close=3 update=4)
   Session delta drained:     5
   Event stream frames:       read=11 written=5 decode_errors=2 seq_gaps=3
