@@ -17,6 +17,8 @@ pub(in crate::afxdp) use fast_path::{enqueue_mirror_clone, enqueue_mirror_clone_
 pub(in crate::afxdp) use fast_path::enqueue_sampled_mirror_clone_to_live;
 #[cfg(test)]
 pub(in crate::afxdp) use fast_path::enqueue_sampled_mirror_clone;
+#[cfg(test)]
+pub(crate) use fast_path::mirror_l2_view_for_test;
 pub(in crate::afxdp) use resolver::{
     admit_mirror_clone_to_live, mirror_cos_queue_id, mirror_output_filter_drops,
     record_mirror_clone_result, sample_then_admit_mirror_clone, MirrorSampleAdmission,

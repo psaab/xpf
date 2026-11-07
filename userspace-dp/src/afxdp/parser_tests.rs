@@ -344,20 +344,20 @@ fn parse_eth_offsets_handles_short_frame() {
 // ---------------------------------------------------------------------------
 // #2150 sub-fix tests + drift-guard canaries.
 //
-// The L2 canary pins the four userspace L2 offset parsers (parse_eth_offsets
-// [learning], frame/inspect::frame_l3_offset [forwarding], cos/ecn::ethernet_l3
-// [CoS ECN], nat64::frame_l3_offset [NAT64]) to AGREE on the L3 offset for
-// every L2 shape the shim can steer to userspace, so a future drift on a
-// single 0x88a8 tag (or any new tag handling) is caught at `cargo test`.
+// The single-tag L2 canary pins six production TPID readers
+// (`parse_eth_offsets`, forwarding and NAT64 `frame_l3_offset`,
+// `ethernet_l3`, `ingress_reply_l2`, and `mirror_output_frame`) to agree on
+// the L3 offset for every unified single-tag shape. Each reader has a
+// `#[cfg(test)]` L2View adapter registered here; `source_scan` pins the same
+// six names in its census.
 //
 // The IPv6 canary pins the learning NDP walker to AGREE with the shared #2148
 // forwarding walker on the L4 offset for every IPv6 extension-header chain.
 //
-// Both canaries FAIL on pre-fix code: pre-fix parse_eth_offsets returns l3=14
-// on a 0x88a8 tag (the others return 18), and pre-fix parse_ndp_neighbor_advert
-// returns None for an NA behind a hop-by-hop header (the forwarding walker
-// finds the ICMPv6). PR-2 (full parser unification) is gated on these staying
-// green.
+// QinQ is deliberately OUTSIDE the unified table in
+// `l2_qinq_shape_contract_9888`: the offset parsers return `Some(18)` while
+// `ethernet_l3` refuses a nested stack. The shim drops complete QinQ frames
+// before they reach userspace.
 //
 // #9888 extends the L2 canary to the double-tag shape
 // (`l2_qinq_shape_contract_9888` below): those frames never reach userspace
@@ -384,19 +384,45 @@ fn build_l2_frame(outer_tpid: Option<u16>, inner_ethertype: u16, body_len: usize
     f
 }
 
-/// The L2-offset parser that `nat64::frame_l3_offset` re-implements. We
-/// can't reach the private `nat64::frame_l3_offset` from this module, so
-/// `nat64_tests.rs::nat64_l2_offset_canary` proves NAT64 agrees; this
-/// mirror documents the contract the four parsers share.
+struct L2Reader {
+    name: &'static str,
+    view: fn(&[u8]) -> crate::afxdp::L2View,
+}
+
+/// All six TPID readers, in the same order as the source census registry.
+const L2_READERS: [L2Reader; 6] = [
+    L2Reader {
+        name: "afxdp/parser.rs::parse_eth_offsets",
+        view: crate::afxdp::parser_l2_view_for_test,
+    },
+    L2Reader {
+        name: "afxdp/frame/inspect.rs::frame_l3_offset",
+        view: crate::afxdp::forwarding_l2_view_for_test,
+    },
+    L2Reader {
+        name: "afxdp/cos/ecn.rs::ethernet_l3",
+        view: crate::afxdp::cos_l2_view_for_test,
+    },
+    L2Reader {
+        name: "nat64/frames.rs::frame_l3_offset",
+        view: crate::afxdp::nat64_l2_view_for_test,
+    },
+    L2Reader {
+        name: "afxdp/icmp.rs::ingress_reply_l2",
+        view: crate::afxdp::icmp_l2_view_for_test,
+    },
+    L2Reader {
+        name: "afxdp/mirror/fast_path.rs::mirror_output_frame",
+        view: crate::afxdp::mirror_l2_view_for_test,
+    },
+];
+
+/// The L3-offset contract the six registered readers share for the
+/// single-tag shapes the unified canary drives.
 fn expected_l3_for_shape(outer_tpid: Option<u16>) -> usize {
     match outer_tpid {
-        // single 0x8100 OR 0x88a8 tag → one tag → l3 at 18
         Some(0x8100) | Some(0x88a8) => 18,
-        // untagged → l3 at 14
-        None => 14,
-        // any other outer ethertype is "untagged" from the L2 parser's
-        // point of view (the ethertype IS the L3 discriminator)
-        Some(_) => 14,
+        None | Some(_) => 14,
     }
 }
 
@@ -405,11 +431,24 @@ fn l2_offset_canary_all_parsers_agree() {
     // Every L2 shape the shim steers to userspace, × IPv4 / IPv6.
     let inner_families = [0x0800u16, 0x86DDu16];
     let outer_shapes = [None, Some(0x8100u16), Some(0x88a8u16)];
+    let registry = crate::test_support::source_scan::TPID_READER_REGISTRY_17258;
+    assert_eq!(L2_READERS.len(), registry.len());
+    for (reader, registered) in L2_READERS.iter().zip(registry.iter()) {
+        assert_eq!(reader.name, *registered, "canary and census registry differ");
+    }
 
     for &outer in &outer_shapes {
         for &inner in &inner_families {
             let f = build_l2_frame(outer, inner, 64);
             let want = expected_l3_for_shape(outer);
+            for reader in &L2_READERS {
+                assert_eq!(
+                    (reader.view)(&f).l3_offset,
+                    Some(want),
+                    "{} L3 offset mismatch for outer={outer:?} inner={inner:#06x}",
+                    reader.name
+                );
+            }
 
             // L2-a learning parser.
             let (a_l3, a_ethertype) =
@@ -446,8 +485,9 @@ fn l2_offset_canary_all_parsers_agree() {
                 other => panic!("ethernet_l3 family mismatch: {other:?}"),
             }
 
-            // All three reachable parsers must agree with each other and
-            // with the documented contract.
+            // These three value-bearing parsers retain their native
+            // Ethertype/family results in addition to the six-reader view
+            // parity assertion above.
             assert_eq!(a_l3, b_l3, "parse_eth_offsets vs frame_l3_offset disagree");
             assert_eq!(b_l3, c_l3, "frame_l3_offset vs ethernet_l3 disagree");
         }

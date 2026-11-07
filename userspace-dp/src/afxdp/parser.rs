@@ -117,6 +117,13 @@ pub(super) fn parse_eth_offsets(raw_frame: &[u8]) -> Option<(usize, u16)> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn parser_l2_view_for_test(frame: &[u8]) -> super::ethernet::L2View {
+    super::ethernet::L2View {
+        l3_offset: parse_eth_offsets(frame).map(|(l3, _)| l3),
+    }
+}
+
 /// Parsed ARP reply (sender/target IP + sender MAC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ArpReply {

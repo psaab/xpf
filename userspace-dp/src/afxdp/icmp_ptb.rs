@@ -661,7 +661,7 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
         return None;
     }
     let egress = forwarding.egress.get(&ingress_ifindex)?;
-    let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
+    let (dst_mac, fallback_src_mac, ingress_tag) = super::icmp::ingress_reply_l2(frame)?;
     // Cross-interface fallbacks must be non-link-local because link-local scope
     // is tied to its source interface; prefer lo0 within the same RI.
     let src_ip = egress.primary_v4.or_else(|| {
@@ -782,7 +782,7 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
         return None;
     }
     let egress = forwarding.egress.get(&ingress_ifindex)?;
-    let (dst_mac, fallback_src_mac, ingress_tag) = ingress_reply_l2(frame)?;
+    let (dst_mac, fallback_src_mac, ingress_tag) = super::icmp::ingress_reply_l2(frame)?;
     // Cross-interface fallbacks must be non-link-local because link-local scope
     // is tied to its source interface; prefer lo0 within the same RI.
     let src_ip = egress.primary_v6.or_else(|| {
@@ -885,29 +885,6 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
     Some(out)
 }
 
-/// Parse the inbound L2 header for a reflected local-origin reply: swapped
-/// MACs plus the full ingress 802.1Q/802.1ad tag. Local copy of the
-/// icmp.rs helper so this module does not depend on a `pub` widening of a
-/// private icmp.rs function (icmp.rs is edited in parallel by #2237/#2242).
-fn ingress_reply_l2(frame: &[u8]) -> Option<([u8; 6], [u8; 6], TxVlanTag)> {
-    if frame.len() < 14 {
-        return None;
-    }
-    let dst_mac = <[u8; 6]>::try_from(frame.get(0..6)?).ok()?;
-    let src_mac = <[u8; 6]>::try_from(frame.get(6..12)?).ok()?;
-    let eth_proto = u16::from_be_bytes([frame[12], frame[13]]);
-    let ingress_tag = if matches!(eth_proto, TPID_8021Q | TPID_8021AD) {
-        let tci = u16::from_be_bytes([*frame.get(14)?, *frame.get(15)?]);
-        TxVlanTag {
-            tpid: eth_proto,
-            tci,
-            present: true,
-        }
-    } else {
-        TxVlanTag::NONE
-    };
-    Some((src_mac, dst_mac, ingress_tag))
-}
 
 #[cfg(test)]
 #[path = "icmp_ptb_tests.rs"]

@@ -89,6 +89,15 @@ pub(in crate::afxdp) fn ethernet_l3(bytes: &[u8]) -> Option<EthernetL3> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn cos_l2_view_for_test(bytes: &[u8]) -> crate::afxdp::L2View {
+    crate::afxdp::L2View {
+        l3_offset: ethernet_l3(bytes).map(|view| match view {
+            EthernetL3::Ipv4(offset) | EthernetL3::Ipv6(offset) => offset,
+        }),
+    }
+}
+
 /// Mark the IPv4 packet at `l3_offset` within `bytes` as ECN CE if it
 /// is already ECT(0) or ECT(1). Updates the IP header checksum
 /// incrementally (RFC 1624). Returns true iff the packet was marked.

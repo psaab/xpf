@@ -747,6 +747,13 @@ pub(in crate::afxdp) fn frame_l3_offset(frame: &[u8]) -> Option<usize> {
     Some(14)
 }
 
+#[cfg(test)]
+pub(crate) fn forwarding_l2_view_for_test(frame: &[u8]) -> crate::afxdp::L2View {
+    crate::afxdp::L2View {
+        l3_offset: frame_l3_offset(frame),
+    }
+}
+
 /// A nibble-checked L3 resolution: the offset plus whether the STAMP was
 /// trusted. When `stamp_trusted` is false the shim's whole offset pair is
 /// suspect (both stamps come from one parse) — the caller must ALSO distrust

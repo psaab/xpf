@@ -521,6 +521,13 @@ pub(super) fn frame_l3_offset(frame: &[u8]) -> Option<usize> {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn nat64_l2_view_for_test(frame: &[u8]) -> crate::afxdp::L2View {
+    crate::afxdp::L2View {
+        l3_offset: frame_l3_offset(frame),
+    }
+}
+
 // #2844: NAT64's private `write_eth_header` (hardcoded 0x8100 TPID,
 // bare-VID semantics) was deleted. The frame builders above now call
 // the shared SSOT `crate::afxdp::write_eth_header_slice`, the same

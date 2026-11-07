@@ -38,8 +38,8 @@ pub(in crate::afxdp) use wg::{
 // paths. The previous in-place definitions in this file were
 // moved verbatim into headers.rs.
 pub(in crate::afxdp) use headers::{
-    TPID_8021AD, TPID_8021Q, TxVlanTag, write_eth_header, write_eth_header_tagged,
-    write_ipv4_header, write_ipv4_tunnel_header, write_ipv6_header,
+    TxVlanTag, write_eth_header, write_eth_header_tagged, write_ipv4_header,
+    write_ipv4_tunnel_header, write_ipv6_header,
 };
 // #2844: re-exported `pub(crate)` so the top-level `crate::nat64`
 // module (outside `crate::afxdp`) can use the one SSOT Ethernet writer.
@@ -138,6 +138,8 @@ pub(super) use inspect::{
 };
 #[cfg(test)]
 pub(super) use inspect::parse_zone_encoded_fabric_ingress;
+#[cfg(test)]
+pub(crate) use inspect::forwarding_l2_view_for_test;
 
 // #989: TCP-specific inspection + mutation kernels relocated from
 // frame/inspect.rs and forwarding/mod.rs. Visibility split mirrors

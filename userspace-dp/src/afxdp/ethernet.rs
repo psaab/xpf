@@ -14,6 +14,14 @@ pub(super) const ETH_HDR_LEN: usize = 14;
 
 /// Size of a single 802.1Q / 802.1ad VLAN tag (TPID + TCI).
 pub(super) const VLAN_TAG_LEN: usize = 4;
+/// Test-only normalized result for an Ethernet L3-offset reader. Keeping the
+/// adapter type in the shared Ethernet module lets each private reader expose
+/// a tiny `#[cfg(test)]` view without widening its production API.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct L2View {
+    pub(crate) l3_offset: Option<usize>,
+}
 
 /// EtherType constants.
 pub(super) const ETHERTYPE_ARP: u16 = 0x0806;

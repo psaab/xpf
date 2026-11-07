@@ -352,10 +352,12 @@ inspect or rewrite a packet sitting in a UMEM frame.
   through the shared walker means the next caller cannot reintroduce the
   fixed-40 bug. IPv4 and plain (no-ext-header) IPv6 behavior is unchanged.
 - **Canonical L2 / IPv6 parse contract + drift canaries (#2150)**: the
-  userspace dataplane still has FIVE distinct Ethernet-L2 offset parsers
-  (`afxdp/parser.rs::parse_eth_offsets` [learning], `inspect.rs::frame_l3_offset`
-  [forwarding], `cos/ecn.rs::ethernet_l3` [CoS ECN], `nat64.rs::frame_l3_offset`
-  [NAT64], `afxdp/icmp.rs::ingress_reply_l2` [ICMP reply VID]). The IPv6
+  userspace dataplane has SIX distinct Ethernet-L2 TPID readers:
+  `afxdp/parser.rs::parse_eth_offsets` [learning],
+  `frame/inspect.rs::frame_l3_offset` [forwarding],
+  `cos/ecn.rs::ethernet_l3` [CoS ECN], `nat64/frames.rs::frame_l3_offset`
+  [NAT64], `afxdp/icmp.rs::ingress_reply_l2` [ICMP reply], and
+  `mirror/fast_path.rs::mirror_output_frame` [mirror egress]. The IPv6
   extension-header walk, by contrast, is ONE shared loop since #6435:
   `inspect.rs::walk_ipv6_ext_chain` (an `#[inline(always)]` core returning an
   `ExtChainOutcome` verdict — `L4` / `NoNextHeader` / `Truncated` /
@@ -442,27 +444,30 @@ inspect or rewrite a packet sitting in a UMEM frame.
     the screens fold the same sightings: `[real-first][ATOMIC]` reports the
     real first fragment (sticky first non-ATOMIC), and a second non-ATOMIC
     sighting (`second_non_atomic_seen`) rejects as `ip-malformed` (#14325).
+  #2150 fixed the two userspace paths that mishandled a single 0x88a8 tag:
+  `afxdp/parser.rs::parse_eth_offsets` treated it as the inner ethertype,
+  and `nat64/frames.rs::frame_l3_offset` treated it as untagged. The same
+  work made NDP learning walk IPv6 extension headers instead of assuming
+  the ICMPv6 message sits at a fixed L3+40 offset.
 
-  PR-1 of #2150 fixed the three parsers that DISAGREED on a single 0x88a8
-  tag / ext-headered NDP (`parse_eth_offsets` treated 0x88a8 as the inner
-  ethertype → l3=14; `nat64::frame_l3_offset` treated it as untagged →
-  l3=14; `parse_ndp_neighbor_advert` read a fixed L3+40 and missed an NA
-  behind a hop-by-hop header) and added drift-guard CANARIES
-  (`parser_tests.rs::l2_offset_canary_all_parsers_agree`,
-  `l2_qinq_shape_contract_9888`, `ipv6_walk_canary_learning_agrees_with_forwarding`,
-  `nat64_tests.rs::nat64_l2_offset_canary`) that FAIL the instant any parser
-  drifts from the contract. These bugs were LATENT not live: the shim
-  XDP_PASSes ARP / diverts NDP control / DROPs QinQ-double, so the buggy
-  learning/NAT64 parsers never received the trap frames — the fix closes the
-  trap before a future steering change springs it. **PR-2 (deferred
-  follow-up)** is the full unification: collapse all five L2 parsers + three
-  IPv6 walkers onto one canonical `parse_l2` + one `walk_ipv6_ext` (the
-  issue's `afxdp/frame/parse/` tree), gated on these PR-1 canaries staying
-  green so the refactor is provably behavior-preserving. Two parallel
-  implementations stay DELIBERATELY separate and are NOT part of either PR:
-  the XDP shim `parse_l2`/`parse_ipv6` (kernel/no_std/verifier; authority for
-  `meta.l3_offset`) and the Go `pkg/vrrp::walkIPv6ExtHeaders` (different
-  language + socket).
+  The L2 contract is pinned by a unified single-tag canary over the six
+  readers listed above (`parser_tests.rs::l2_offset_canary_all_parsers_agree`)
+  and by the source census `test_support/source_scan.rs::tpid_reader_census_17258`.
+  `nat64_tests.rs::nat64_l2_offset_canary` remains as a NAT64-specific check,
+  and `l2_qinq_shape_contract_9888` remains separate because QinQ is not in the
+  unified table. The canary is the contract; these callers remain separate
+  implementations and do not require a shared `parse_l2` parser.
+
+  The 0x88a8 canary rows protect a latent contract: the XDP shim drops
+  802.1ad-tagged frames today, so userspace does not currently receive those
+  frames. A future steering change must keep each registered reader aligned
+  with the same 14/18-byte single-tag contract. The QinQ behavior remains the
+  separate contract documented above.
+
+  There is no PR-2 parser-unification requirement or follow-up in this
+  contract. The XDP shim `parse_l2`/`parse_ipv6` remains deliberately separate
+  (kernel/no_std/verifier; authority for `meta.l3_offset`), as does Go's
+  `pkg/vrrp::walkIPv6ExtHeaders` (different language and socket).
 
 ## Property tests (`prop_tests/`, #1824)
 

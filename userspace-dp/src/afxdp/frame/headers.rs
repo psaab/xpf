@@ -38,15 +38,9 @@
 //     checksum computed" default — legal for IPv4 outer only.
 
 use super::checksum::checksum16;
+use super::super::ethernet::ETHERTYPE_VLAN;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicU16, Ordering};
-
-/// Default 802.1Q customer-VLAN TPID.
-pub(in crate::afxdp) const TPID_8021Q: u16 = 0x8100;
-/// 802.1ad service-VLAN (Q-in-Q outer) TPID. Recognized on ingress and
-/// preserved on reflected local-origin errors so an inbound 0x88a8 tag
-/// is not silently rewritten to 0x8100.
-pub(in crate::afxdp) const TPID_8021AD: u16 = 0x88a8;
 
 // RFC 6864 requires unique IDs for non-atomic IPv4 datagrams. When a tunnel
 // outer clears DF, its downstream fragments need distinct IDs for reassembly.
@@ -80,7 +74,7 @@ pub(in crate::afxdp) struct TxVlanTag {
 impl TxVlanTag {
     /// No tag — emit a bare 14-byte Ethernet header.
     pub(in crate::afxdp) const NONE: TxVlanTag = TxVlanTag {
-        tpid: TPID_8021Q,
+        tpid: ETHERTYPE_VLAN,
         tci: 0,
         present: false,
     };
@@ -125,7 +119,7 @@ impl From<u16> for TxVlanTag {
     fn from(vid: u16) -> TxVlanTag {
         let vid = vid & 0x0fff;
         TxVlanTag {
-            tpid: TPID_8021Q,
+            tpid: ETHERTYPE_VLAN,
             tci: vid,
             present: vid > 0,
         }

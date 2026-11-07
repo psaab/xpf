@@ -1,4 +1,5 @@
 use super::*;
+use super::ethernet::{ETHERTYPE_VLAN, ETHERTYPE_VLAN_8021AD};
 
 pub(super) const FABRIC_INGRESS_FLAG: u8 = 0x80;
 
@@ -551,14 +552,14 @@ pub(super) fn build_local_time_exceeded_request(
 /// priority lost, and an 802.1ad (0x88a8) tag was lost entirely.
 /// Returning a `TxVlanTag` preserves the full tag so the reflected
 /// error carries the original priority and TPID.
-fn ingress_reply_l2(frame: &[u8]) -> Option<([u8; 6], [u8; 6], TxVlanTag)> {
+pub(super) fn ingress_reply_l2(frame: &[u8]) -> Option<([u8; 6], [u8; 6], TxVlanTag)> {
     if frame.len() < 14 {
         return None;
     }
     let dst_mac = <[u8; 6]>::try_from(frame.get(0..6)?).ok()?;
     let src_mac = <[u8; 6]>::try_from(frame.get(6..12)?).ok()?;
     let eth_proto = u16::from_be_bytes([frame[12], frame[13]]);
-    let ingress_tag = if matches!(eth_proto, TPID_8021Q | TPID_8021AD) {
+    let ingress_tag = if matches!(eth_proto, ETHERTYPE_VLAN | ETHERTYPE_VLAN_8021AD) {
         let tci = u16::from_be_bytes([*frame.get(14)?, *frame.get(15)?]);
         // Preserve the full TCI (PCP | DEI | VID) and the original TPID.
         // `present: true` makes a priority-tagged VID-0 frame reflect
@@ -572,6 +573,15 @@ fn ingress_reply_l2(frame: &[u8]) -> Option<([u8; 6], [u8; 6], TxVlanTag)> {
         TxVlanTag::NONE
     };
     Some((src_mac, dst_mac, ingress_tag))
+}
+
+#[cfg(test)]
+pub(crate) fn icmp_l2_view_for_test(frame: &[u8]) -> crate::afxdp::L2View {
+    crate::afxdp::L2View {
+        l3_offset: ingress_reply_l2(frame).map(|(_, _, tag)| {
+            if tag.present { 18 } else { 14 }
+        }),
+    }
 }
 
 /// Pick the L2 tag for a reflected error. Native-VLAN units always transmit

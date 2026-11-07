@@ -12,6 +12,75 @@
 //! This module is `#[cfg(test)]`-only (declared so in `main.rs`); no
 //! production code, attribute, or hot-path behaviour changes.
 
+/// The six production readers covered by the unified single-tag L2 canary
+/// (#17258). The census below scans production Rust source for Ethernet
+/// type reads from bytes 12/13 and requires an exact match with this registry.
+pub(crate) const TPID_READER_REGISTRY_17258: [&str; 6] = [
+    "afxdp/parser.rs::parse_eth_offsets",
+    "afxdp/frame/inspect.rs::frame_l3_offset",
+    "afxdp/cos/ecn.rs::ethernet_l3",
+    "nat64/frames.rs::frame_l3_offset",
+    "afxdp/icmp.rs::ingress_reply_l2",
+    "afxdp/mirror/fast_path.rs::mirror_output_frame",
+];
+
+/// Count `u16::from_be_bytes([...12...13...])` reads whose containing
+/// function classifies the value as a VLAN TPID. This excludes unrelated
+/// protocol fields that happen to use payload bytes 12/13 (or the same offsets
+/// in an address/checksum word).
+pub(crate) fn count_tpid_reads_17258(src: &str) -> usize {
+    let compact: String = blank_comments_and_strings(src)
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace())
+        .collect();
+    let marker = "u16::from_be_bytes([";
+    let mut cursor = 0;
+    let mut count = 0;
+    while let Some(relative) = compact[cursor..].find(marker) {
+        let marker_start = cursor + relative;
+        let start = marker_start + marker.len();
+        let Some(end_relative) = compact[start..].find("])") else {
+            break;
+        };
+        let read = &compact[start..start + end_relative];
+        if read.contains("[12]") && read.contains("[13]") {
+            let function_start = compact[..marker_start].rfind("fn");
+            if let Some(function_start) = function_start
+                && let Some(open_rel) = compact[function_start..].find('{')
+            {
+                let open = function_start + open_rel;
+                let mut depth = 0usize;
+                let mut close = None;
+                for (offset, byte) in compact.as_bytes()[open..].iter().enumerate() {
+                    match byte {
+                        b'{' => depth += 1,
+                        b'}' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                close = Some(open + offset);
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(close) = close {
+                    let body = compact[open + 1..close].to_ascii_lowercase();
+                    if body.contains("0x8100")
+                        || body.contains("0x88a8")
+                        || body.contains("ethertype_vlan")
+                        || body.contains("tpid_8021")
+                    {
+                        count += 1;
+                    }
+                }
+            }
+        }
+        cursor = start + end_relative + 2;
+    }
+    count
+}
+
 /// Blank out `//` line comments, nested `/* */` blocks, string-literal bodies
 /// and char literals.
 ///
@@ -120,7 +189,16 @@ pub(crate) fn blank_comments_and_strings(src: &str) -> String {
     String::from_utf8(out).expect("blanking preserves utf8 boundaries of ascii syntax")
 }
 
-/// Blank inline `#[cfg(test)] mod` bodies before the producer census.
+const TEST_CFG_ATTRIBUTES: [&str; 2] = ["#[cfg(test)]", "#[cfg(all(test, not(miri)))]"];
+
+fn is_test_cfg_attribute(attribute: &str) -> bool {
+    TEST_CFG_ATTRIBUTES
+        .iter()
+        .any(|marker| attribute.starts_with(marker))
+}
+/// Blank inline test-gated module bodies before the producer census. This
+/// includes `#[cfg(test)]` and the property-test gate `#[cfg(all(test,
+/// not(miri)))]`.
 ///
 /// Production files can also contain test-only modules. The source walk excludes
 /// test-only files, but scanning those inline modules would report fixture
@@ -128,9 +206,16 @@ pub(crate) fn blank_comments_and_strings(src: &str) -> String {
 pub(crate) fn blank_cfg_test_modules(src: &str) -> String {
     let mut out = src.as_bytes().to_vec();
     let mut search = 0;
-    while let Some(relative) = src[search..].find("#[cfg(test)]") {
-        let attr_start = search + relative;
-        let mut cursor = attr_start + "#[cfg(test)]".len();
+    while let Some((attr_start, attr_len)) = TEST_CFG_ATTRIBUTES
+        .iter()
+        .filter_map(|marker| {
+            src[search..]
+                .find(marker)
+                .map(|relative| (search + relative, marker.len()))
+        })
+        .min_by_key(|(start, _)| *start)
+    {
+        let mut cursor = attr_start + attr_len;
 
         loop {
             while cursor < src.len() && src.as_bytes()[cursor].is_ascii_whitespace() {
@@ -220,7 +305,7 @@ pub(crate) fn blank_cfg_test_modules(src: &str) -> String {
 }
 
 /// is_fixture_with answers for one repo-relative path against a scanned set of
-/// `#[cfg(test)]` module FILES.
+/// test-gated module FILES (`#[cfg(test)]` and test-only `#[cfg(all(...))]`).
 ///
 /// Keyed on the resolved FILE PATH rather than on the module name, and that is
 /// load-bearing: **85 of this tree's 179 `#[path = "..."]` declarations give the
@@ -327,7 +412,7 @@ pub(crate) fn cfg_test_modules(root: &std::path::Path) -> std::collections::Hash
         let code = blank_comments_and_strings(&text);
         for (line, code_line) in text.lines().zip(code.lines()) {
             let t = line.trim();
-            if t.starts_with("#[cfg(test)]") {
+            if is_test_cfg_attribute(t) {
                 cfg_test = true;
                 continue;
             }
@@ -894,4 +979,75 @@ fn cfg_test_dual_mod_targets_shared_with_production_stay_production_16187() {
         "a file declared only from test-only files was left as production"
     );
     let _ = std::fs::remove_dir_all(&temp);
+}
+#[test]
+fn tpid_reader_census_17258() {
+    let src_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let fixtures = cfg_test_modules(&src_root);
+    let mut files = Vec::new();
+    afxdp_rs_files(&src_root, &mut files);
+    files.sort();
+
+    let mut observed = 0usize;
+    let mut hits = Vec::new();
+    for path in files {
+        let rel = path
+            .strip_prefix(&src_root)
+            .expect("source file under src")
+            .to_string_lossy()
+            .replace('\\', "/");
+        if is_fixture_with(&rel, &fixtures) {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)
+            .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+        let code = blank_cfg_test_modules(&blank_comments_and_strings(&raw));
+        let reads = count_tpid_reads_17258(&code);
+        if reads > 0 {
+            observed += reads;
+            hits.push(format!("{rel}: {reads}"));
+        }
+    }
+
+    for site in TPID_READER_REGISTRY_17258 {
+        let (rel, function) = site
+            .split_once("::")
+            .expect("registry entries are path::function");
+        let raw = std::fs::read_to_string(src_root.join(rel))
+            .unwrap_or_else(|err| panic!("read registered TPID reader {site}: {err}"));
+        let code = blank_cfg_test_modules(&blank_comments_and_strings(&raw));
+        let name = format!("fn {function}");
+        assert!(
+            code.contains(&format!("{name}(")) || code.contains(&format!("{name}<")),
+            "#17258 registry entry {site} no longer names a source function"
+        );
+        assert!(
+            count_tpid_reads_17258(&code) > 0,
+            "#17258 registry entry {site} no longer contains an L2 type read"
+        );
+    }
+
+    assert_eq!(
+        observed,
+        TPID_READER_REGISTRY_17258.len(),
+        "#17258: expected exactly the six registered TPID readers; found \
+         {observed} L2 type reads in {hits:?}. Register new readers or remove \
+         dead copies."
+    );
+}
+
+#[test]
+fn tpid_reader_census_detects_unregistered_site_17258() {
+    let registered = "fn parse_eth_offsets(frame: &[u8]) { \
+        let outer = u16::from_be_bytes([frame[12], frame[13]]); \
+        if outer == 0x8100 {} }";
+    let unregistered = "fn new_reader(frame: &[u8]) { \
+        let outer = u16::from_be_bytes([frame[12], frame[13]]); \
+        if matches!(outer, 0x8100 | 0x88a8) {} }";
+    assert_eq!(count_tpid_reads_17258(registered), 1);
+    assert_eq!(
+        count_tpid_reads_17258(&format!("{registered}{unregistered}")),
+        2,
+        "a seventh literal TPID-reader site must make the census count drift"
+    );
 }

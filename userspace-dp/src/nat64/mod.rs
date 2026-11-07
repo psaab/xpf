@@ -305,6 +305,8 @@ pub(crate) use icmp::*;
 pub(crate) use reserve::*;
 pub(crate) use state::*;
 pub(crate) use translate::*;
+#[cfg(test)]
+pub(crate) use frames::nat64_l2_view_for_test;
 #[allow(unused_imports)]
 use checksum::*;
 #[allow(unused_imports)]

@@ -303,6 +303,22 @@ pub(crate) use self::frame::{ExtChainOutcome, walk_ipv6_ext_chain};
 // traverses. The shim's over-limit refusal is an invariant about the session
 // map, and the map has two writers — the packet path and this import.
 pub(crate) use self::frame::ipv6_ext_header_is_traversable;
+// #17258: test-only normalized views let the single-tag TPID canary run
+// against all six production L2 readers without widening their APIs.
+#[cfg(test)]
+pub(crate) use self::cos::cos_l2_view_for_test;
+#[cfg(test)]
+pub(crate) use self::ethernet::L2View;
+#[cfg(test)]
+pub(crate) use self::frame::forwarding_l2_view_for_test;
+#[cfg(test)]
+pub(crate) use self::icmp::icmp_l2_view_for_test;
+#[cfg(test)]
+pub(crate) use self::mirror::mirror_l2_view_for_test;
+#[cfg(test)]
+pub(crate) use self::parser::parser_l2_view_for_test;
+#[cfg(test)]
+pub(crate) use crate::nat64::nat64_l2_view_for_test;
 use self::umem::*;
 
 // #4435 (test-only): a thin `pub(crate)` wrapper over the canonical

@@ -59,6 +59,23 @@ fn mirror_output_frame<'a>(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn mirror_l2_view_for_test(frame: &[u8]) -> crate::afxdp::L2View {
+    let output = mirror_output_frame(&ForwardingState::default(), 0, frame);
+    crate::afxdp::L2View {
+        // VID 0 makes a recognized single tag strip four bytes; untagged
+        // inputs pass through. The length delta exposes the parser decision
+        // without copying or re-parsing the TPID in this adapter.
+        l3_offset: output.map(|output| {
+            if frame.len().saturating_sub(output.len()) == 4 {
+                18
+            } else {
+                14
+            }
+        }),
+    }
+}
+
 /// A mirror sample selected from the original frame but not yet committed to
 /// the analyzer queue. The sample counter is committed only after the primary
 /// forward is queued; bytes are copied only when that forward rewrites in place.
