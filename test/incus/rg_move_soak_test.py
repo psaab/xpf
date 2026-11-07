@@ -11,6 +11,7 @@ import os
 import re
 import tempfile
 import unittest
+from unittest import mock
 
 import rg_move_soak as soak
 
@@ -536,6 +537,35 @@ MEMBERS = {1: {0: "ge-0-0-2", 1: "ge-7-0-2"}, 2: {0: "ge-0-0-1", 1: "ge-7-0-1"}}
 MACS = {(0, 1): "02:bf:72:16:01:00", (1, 1): "02:bf:72:16:01:01",
         (0, 2): "02:bf:72:16:02:02", (1, 2): "02:bf:72:16:02:03"}
 
+class FakeMouseTarget:
+    """Mouse-target socket state for the soak's pre-traffic reset."""
+
+    def __init__(self, stale_ports=None, reset_fail=False, reset_timeout=False):
+        self.established = dict(stale_ports or {})
+        self.listening = {5210, 5211}
+        self.reset_fail = reset_fail
+        self.reset_timeout = reset_timeout
+        self.checked_ports = []
+        self.restarted = []
+
+    def prepare_iperf(self, ports):
+        self.checked_ports = list(ports)
+        for port in sorted(set(ports)):
+            count = self.established.get(port, 0)
+            if not count:
+                continue
+            self.restarted.append(port)
+            if self.reset_fail:
+                return (f"could not restart mouse-iperf3@{port}.service after finding "
+                        f"{count} ESTABLISHED sockets: injected restart failure")
+            if self.reset_timeout:
+                return ("mouse iperf reset timed out waiting for LISTEN with zero ESTABLISHED "
+                        f"sockets on port(s) {port}")
+            self.established.pop(port, None)
+            self.listening.add(port)
+        return None
+
+
 
 class FakeCluster:
     """A two-node cluster plus a LAN host, in fake time.
@@ -552,7 +582,8 @@ class FakeCluster:
 
     def __init__(self, clock, owner, skew_s=0.0, cli_rc_on_error=0, lag_polls=0, lan_off=3.0,
                  stuck_traffic=False, revert_after_s=None, dual_after_land=False, helper_lie=False,
-                 busy_iperf=False, faults=None, dual_after_s=None):
+                 busy_iperf=False, faults=None, dual_after_s=None, stale_iperf_ports=None,
+                 iperf_reset_fail=False, iperf_reset_timeout=False):
         self.clock_ = clock
         self.owner = dict(owner)
         self.initial = dict(owner)
@@ -567,6 +598,9 @@ class FakeCluster:
         self.helper_lie = helper_lie
         self.busy_iperf = busy_iperf
         self.faults = faults or {}
+        self.mouse_target = FakeMouseTarget(stale_iperf_ports, iperf_reset_fail, iperf_reset_timeout)
+        self.target_prepared = False
+        self.target_prepared_when_generators_started = None
         self.pending = {}
         self.landed_at = {}
         self.dual_pending = 0
@@ -584,6 +618,11 @@ class FakeCluster:
         clock.listeners.append(self._tick)
 
     # -- cluster -------------------------------------------------------
+
+    def prepare_iperf(self, ports):
+        result = self.mouse_target.prepare_iperf(ports)
+        self.target_prepared = result is None
+        return result
 
     def forwarder(self, rg):
         return self.initial.get(rg, 0) if self.stuck_traffic else self.owner.get(rg, 0)
@@ -680,6 +719,7 @@ class FakeCluster:
         fam = "v6" if " -6 " in script else "v4"
         self.files[(kind, fam)] = outfile
         if self.gen_start is None:
+            self.target_prepared_when_generators_started = self.target_prepared
             self.gen_start = self.last_emit = self.clock_.t
         if kind == "iperf" and self.busy_iperf:
             with open(outfile, "a") as f:
@@ -752,6 +792,94 @@ def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=Tr
 
 def verdicts(res):
     return [m["verdict"] for m in res["moves"]]
+
+
+
+class IncusTargetPreflight(unittest.TestCase):
+    def test_prepare_iperf_restarts_only_stale_port_and_waits_for_ready_18631(self):
+        cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "loss:mouse-target")
+        calls = []
+        established_reads = {5210: 0, 5211: 0}
+        listening_reads = {}
+
+        def fake_exec(ref, argv, timeout=None):
+            calls.append((ref, argv))
+            if argv[:2] == ["systemctl", "restart"]:
+                return 0, ""
+            match = re.search(r"state (established|listening).*:([0-9]+)", argv[2])
+            self.assertIsNotNone(match, argv)
+            state, port = match.group(1), int(match.group(2))
+            if state == "established":
+                established_reads[port] += 1
+                if port == 5211:
+                    if established_reads[port] == 1:
+                        return 0, "ESTAB stale-client-1\nESTAB stale-client-2\n"
+                    if established_reads[port] < 4:
+                        return 0, "ESTAB restart-drain\n"
+                return 0, ""
+            listening_reads[port] = listening_reads.get(port, 0) + 1
+            if listening_reads[port] == 1:
+                return 0, ""
+            return 0, f"LISTEN 0 4096 0.0.0.0:{port} 0.0.0.0:*"
+
+        cluster._exec = fake_exec
+        with mock.patch.object(soak.time, "sleep") as sleep:
+            self.assertIsNone(cluster.prepare_iperf([5211, 5210]))
+
+        self.assertEqual([argv for ref, argv in calls if argv[:2] == ["systemctl", "restart"]],
+                         [["systemctl", "restart", "mouse-iperf3@5211.service"]])
+        self.assertEqual(established_reads, {5210: 1, 5211: 4})
+        self.assertEqual(listening_reads, {5211: 3})
+        self.assertEqual(sleep.call_count, 2)
+        self.assertTrue(all(ref == "loss:mouse-target" for ref, _ in calls))
+
+
+    def test_prepare_iperf_readiness_timeout_18631(self):
+        cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "loss:mouse-target")
+        established_reads = 0
+        listening_reads = 0
+
+        def fake_exec(ref, argv, timeout=None):
+            nonlocal established_reads, listening_reads
+            if argv[:2] == ["systemctl", "restart"]:
+                return 0, ""
+            match = re.search(r"state (established|listening).*:([0-9]+)", argv[2])
+            self.assertIsNotNone(match, argv)
+            state = match.group(1)
+            if state == "established":
+                established_reads += 1
+                return (0, "ESTAB stale-client") if established_reads == 1 else (0, "")
+            listening_reads += 1
+            return 0, ""
+
+        cluster._exec = fake_exec
+        with mock.patch.object(soak.time, "monotonic", side_effect=[0.0, 11.0]), \
+                mock.patch.object(soak.time, "sleep") as sleep:
+            error = cluster.prepare_iperf([5211], timeout=10.0)
+
+        self.assertIn("timed out", error)
+        self.assertIn("5211", error)
+        self.assertEqual(established_reads, 2)
+        self.assertEqual(listening_reads, 1)
+        sleep.assert_not_called()
+    def test_prepare_iperf_reports_restart_failure_without_polling_18631(self):
+        cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "loss:mouse-target")
+        commands = []
+
+        def fake_exec(ref, argv, timeout=None):
+            commands.append(argv)
+            if argv[:2] == ["systemctl", "restart"]:
+                return 1, "unit restart failed"
+            if "5211" in argv[2]:
+                return 0, "ESTAB stale-client"
+            return 0, ""
+
+        cluster._exec = fake_exec
+        error = cluster.prepare_iperf([5210, 5211])
+        self.assertIn("mouse-iperf3@5211.service", error)
+        self.assertIn("1 ESTABLISHED sockets", error)
+        self.assertIn("unit restart failed", error)
+        self.assertFalse(any("state listening" in " ".join(argv) for argv in commands))
 
 
 class Orchestration(unittest.TestCase):
@@ -920,6 +1048,59 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(res["moves"], [])
         self.assertTrue(any(line.startswith("FATAL:") for line in logs))
 
+    def test_preflight_resets_stale_iperf_sockets_18631(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, stale_iperf_ports={5211: 88})
+        rc, res, _ = run_fake(c, clock, moves=2, v6=True)
+        self.assertEqual(rc, 0, res.get("void", res.get("summary")))
+        self.assertEqual(set(c.mouse_target.checked_ports), {5210, 5211})
+        self.assertEqual(c.mouse_target.restarted, [5211])
+        self.assertNotIn(5211, c.mouse_target.established)
+        self.assertIn(5211, c.mouse_target.listening)
+        self.assertTrue(c.target_prepared_when_generators_started)
+        self.assertEqual(res["summary"]["counts"]["PASS"], 2)
+
+    def test_preflight_skips_v6_port_when_ipv6_is_disabled_18631(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, stale_iperf_ports={5210: 88})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 0, res.get("void", res.get("summary")))
+        self.assertEqual(c.mouse_target.checked_ports, [5211])
+        self.assertEqual(c.mouse_target.restarted, [])
+        self.assertEqual(c.mouse_target.established, {5210: 88})
+
+
+    def test_preflight_voids_when_iperf_reset_fails_18631(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 1}, stale_iperf_ports={5211: 88}, iperf_reset_fail=True)
+        rc, res, logs = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("iperf socket preflight", res["void"])
+        self.assertIn("mouse-iperf3@5211.service", res["void"])
+        self.assertIn("restart failure", res["void"])
+        self.assertEqual(res["moves"], [])
+        self.assertEqual(c.moves_seen, 0)
+        self.assertIsNone(c.target_prepared_when_generators_started)
+        self.assertEqual(c.files, {})
+        self.assertTrue(any(line.startswith("FATAL:") for line in logs))
+        self.assertEqual(c.owner[2], 1)
+        self.assertEqual(c.commands, [])
+
+    def test_preflight_timeout_voids_without_moving_rg_18631(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 1}, stale_iperf_ports={5211: 88}, iperf_reset_timeout=True)
+        rc, res, logs = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("iperf socket preflight", res["void"])
+        self.assertIn("timed out", res["void"])
+        self.assertEqual(res["moves"], [])
+        self.assertEqual(c.owner[2], 1)
+        self.assertEqual(c.commands, [])
+        self.assertEqual(c.moves_seen, 0)
+        self.assertIsNone(c.target_prepared_when_generators_started)
+        self.assertEqual(c.files, {})
+        self.assertTrue(any(line.startswith("FATAL:") for line in logs))
+
     def test_disabled_checks_never_exit_zero(self):
         for kw in ({"traffic": False}, {"helper_check": False}):
             clock = FakeClock()
@@ -1047,9 +1228,10 @@ class Orchestration(unittest.TestCase):
         c = FakeCluster(clock, {2: 0})
         c.config_set = lambda node: (_ for _ in ()).throw(RuntimeError("incus went away"))
         with tempfile.TemporaryDirectory() as d:
-            argv = ["--fw0", "a", "--fw1", "b", "--lan", "c", "--target4", "x", "--outdir", d]
+            argv = ["--fw0", "a", "--fw1", "b", "--lan", "c", "--target4", "x", "--mouse-target", "fake:target",
+                    "--outdir", d]
             orig = soak.IncusCluster
-            soak.IncusCluster = lambda fw, lan: c
+            soak.IncusCluster = lambda fw, lan, mouse_target: c
             try:
                 old = soak.Soak.__init__
 

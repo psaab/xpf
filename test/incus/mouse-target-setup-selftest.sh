@@ -33,9 +33,13 @@ cat > "${TMP}/bin/incus" <<'STUB'
 #!/usr/bin/env bash
 echo "$*" >> "${STUB_INCUS_LOG:?}"
 # #18038: with-cluster.sh proves both firewall targets are VMs before the
-# cell runs. Keep this hermetic stub on that contract as well.
+# cell runs. Keep this hermetic stub on that contract as well: Incus `list
+# --format json` returns an array keyed by the instance name.
 case "$*" in
-  *"--format json"*) printf '{"type":"virtual-machine"}\n'; exit 0 ;;
+  *"--format json"*)
+    if [[ "${2:-}" == *: ]]; then name="${3:-}"; else name="${2:-}"; fi
+    printf '[{"name":"%s","type":"virtual-machine"}]\n' "$name"
+    exit 0 ;;
   *"/proc/sys/kernel/random/boot_id"*) printf '00000000-0000-0000-0000-000000000001\n'; exit 0 ;;
 esac
 case "$1" in

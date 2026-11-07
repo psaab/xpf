@@ -764,9 +764,10 @@ def neigh_mac(text: str) -> Optional[str]:
 class IncusCluster:
     """Talks to the live cluster through `incus exec` only."""
 
-    def __init__(self, fw: Dict[int, str], lan: str, timeout: float = 30.0):
+    def __init__(self, fw: Dict[int, str], lan: str, mouse_target: str, timeout: float = 30.0):
         self.fw = fw
         self.lan = lan
+        self.mouse_target = mouse_target
         self.timeout = timeout
 
     def _exec(self, ref: str, argv: List[str], timeout: Optional[float] = None) -> Tuple[int, str]:
@@ -776,6 +777,53 @@ class IncusCluster:
             return p.returncode, (p.stdout or "") + (p.stderr or "")
         except subprocess.TimeoutExpired:
             return 124, f"error: incus exec {ref} timed out"
+
+    def _socket_rows(self, port: int, state: str, listening: bool = False) -> Tuple[Optional[List[str]], str]:
+        flags = "-Htnl" if listening else "-Htn"
+        rc, out = self._exec(self.mouse_target, [
+            "sh", "-c", f"ss {flags} state {state} '( sport = :{port} )'"
+        ], timeout=10)
+        if rc != 0:
+            return None, out.strip() or f"ss exited {rc}"
+        return [line for line in out.splitlines() if line.strip()], ""
+
+    def prepare_iperf(self, ports: List[int], timeout: float = 10.0) -> Optional[str]:
+        """Reset only mouse iperf servers holding stale client sockets."""
+        stale = {}
+        for port in sorted(set(ports)):
+            rows, error = self._socket_rows(port, "established")
+            if rows is None:
+                return f"cannot inspect ESTABLISHED sockets on {self.mouse_target}:{port}: {error}"
+            if rows:
+                stale[port] = len(rows)
+        if not stale:
+            return None
+
+        for port, count in stale.items():
+            unit = f"mouse-iperf3@{port}.service"
+            rc, out = self._exec(self.mouse_target, ["systemctl", "restart", unit], timeout=10)
+            if rc != 0:
+                detail = out.strip() or f"systemctl exited {rc}"
+                return f"could not restart {unit} after finding {count} ESTABLISHED sockets: {detail}"
+
+        pending = set(stale)
+        deadline = time.monotonic() + timeout
+        while pending:
+            for port in list(pending):
+                listeners, error = self._socket_rows(port, "listening", listening=True)
+                if listeners is None:
+                    return f"cannot verify LISTEN on {self.mouse_target}:{port} after reset: {error}"
+                established, error = self._socket_rows(port, "established")
+                if established is None:
+                    return f"cannot verify zero ESTABLISHED sockets on {self.mouse_target}:{port}: {error}"
+                if listeners and not established:
+                    pending.remove(port)
+            if pending:
+                if time.monotonic() >= deadline:
+                    ports_text = ", ".join(str(port) for port in sorted(pending))
+                    return f"mouse iperf reset timed out waiting for LISTEN with zero ESTABLISHED sockets on port(s) {ports_text}"
+                time.sleep(0.2)
+        return None
 
     def cli(self, node: int, cmd: str) -> Tuple[int, str]:
         return self._exec(self.fw[node], ["cli", "-c", cmd])
@@ -1173,6 +1221,13 @@ class Soak:
         t_start = self.now()
         try:
             if cfg.traffic:
+                # The lock serializes test cells; before our generators start,
+                # ESTABLISHED sockets on used families are leftovers. Do not
+                # reset an unused port (5210 can belong to an external v6 target).
+                iperf_ports = [port for _, _, port, _ in self.families()]
+                bad = self.c.prepare_iperf(iperf_ports)
+                if bad:
+                    raise VoidRun(f"iperf socket preflight: {bad}")
                 per_move = cfg.sleep_s + cfg.budget.converge_s + 4
                 self.start_traffic(int(cfg.moves * per_move * len(rgs) + 60))
                 self.sleep(cfg.warmup_s)
@@ -1232,7 +1287,9 @@ class Soak:
                 if not self.terminated:
                     self.sleep(1.0)
                 self.stop_traffic()
-            if cfg.restore and not self.terminated:
+            # A pre-move VOID has no ownership change to restore. In particular,
+            # do not issue an unrecorded failover while reporting zero moves.
+            if cfg.restore and moves and not self.terminated:
                 info["restore"] = self.restore_node0(rgs)
                 self.log(f"restore: {info['restore']}")
         end_offs = {n: measure_offset(self.c.clock, self.c.fw[n], self.now) for n in (0, 1)}
@@ -1294,6 +1351,7 @@ def main(argv=None) -> int:
     ap.add_argument("--target4", required=True)
     ap.add_argument("--target6", default="")
     ap.add_argument("--lan-vip4", default="")
+    ap.add_argument("--mouse-target", required=True)
     ap.add_argument("--lan-vip6", default="", help="ignored: IPv6 follows the LAN host's RA default router")
     ap.add_argument("--outdir", required=True)
     a = ap.parse_args(argv)
@@ -1333,7 +1391,7 @@ def main(argv=None) -> int:
     print(f"rg-move-soak: {cfg.moves} moves of RG {cfg.rgs} from node{cfg.issuer} every {cfg.sleep_s:g}s; "
           f"converge<= {budget.converge_s:g}s gap<= {budget.max_gap_ms:g}ms stall<= {budget.max_stall_ms:g}ms; "
           f"traffic={'on' if cfg.traffic else 'off'} v6={'on' if cfg.target6 else 'off'}; out={cfg.outdir}")
-    soak = Soak(cfg, IncusCluster({0: a.fw0, 1: a.fw1}, a.lan))
+    soak = Soak(cfg, IncusCluster({0: a.fw0, 1: a.fw1}, a.lan, a.mouse_target))
 
     def on_term(signum, frame):
         # Unwind through run()'s finally: stops the LAN-host generators and
