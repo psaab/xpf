@@ -39,7 +39,16 @@ func (c *CLI) configModeEntryAllowed() bool {
 // this command through dispatchConfig would compare the dirty candidate.
 func operationalShowConfigurationCompare(line string) bool {
 	parts := strings.Fields(line)
-	if len(parts) < 3 || parts[0] != "show" || parts[1] != "configuration" {
+	if len(parts) < 3 {
+		return false
+	}
+	verb, err := resolveCommand(parts[0], operationalCommands)
+	if err != nil || verb != "show" {
+		return false
+	}
+	showTree := operationalTree["show"].Children
+	subcommand, err := resolveCommand(parts[1], keysFromTree(showTree))
+	if err != nil || subcommand != "configuration" {
 		return false
 	}
 	for i := 2; i < len(parts); i++ {

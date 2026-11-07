@@ -233,7 +233,17 @@ func TestCLIShowConfigurationCompareDispatchAcrossConfigHolders18669(t *testing.
 				wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
 			},
 			{
+				line:    "sh configuration | compare rollback 1",
+				wantIn:  []string{activeDomain18669, activeInterface18669},
+				wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
+			},
+			{
 				line:    "show configuration system | compare rollback 1",
+				wantIn:  []string{activeDomain18669},
+				wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
+			},
+			{
+				line:    "show conf system | compare rollback 1",
 				wantIn:  []string{activeDomain18669},
 				wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
 			},
@@ -266,22 +276,26 @@ func TestCLIShowConfigurationCompareDispatchAcrossConfigHolders18669(t *testing.
 		}
 	}
 
-	for _, line := range []string{
-		"show configuration | compare",
-		"show configuration |compare",
-	} {
-		t.Run("foreign-holder/bare/"+line, func(t *testing.T) {
-			c := &CLI{store: foreignShowCompareStore18669(t), userClass: "compare-view-18669"}
-			var err error
-			out := captureStdout(t, func() { err = c.dispatch(line) })
-			if err == nil {
-				t.Fatalf("dispatch(%q) returned nil, output %q; want a non-nil operational compare refusal", line, out)
-			}
-			if line == "show configuration | compare" &&
-				err.Error() != "syntax error: | compare on operational show configuration requires rollback <N>" {
-				t.Fatalf("bare compare error = %q; want explicit rollback requirement", err)
-			}
-		})
+	for _, fixture := range fixtures {
+		for _, line := range []string{
+			"show configuration | compare",
+			"show conf | compare",
+			"sh configuration | compare",
+			"show configuration |compare",
+		} {
+			t.Run(fixture.name+"/bare/"+line, func(t *testing.T) {
+				c := &CLI{store: fixture.store(t), userClass: "compare-view-18669"}
+				var err error
+				out := captureStdout(t, func() { err = c.dispatch(line) })
+				if err == nil {
+					t.Fatalf("dispatch(%q) returned nil, output %q; want a non-nil operational compare refusal", line, out)
+				}
+				if strings.Contains(line, "| compare") &&
+					err.Error() != "syntax error: | compare on operational show configuration requires rollback <N>" {
+					t.Fatalf("bare compare error = %q; want explicit rollback requirement", err)
+				}
+			})
+		}
 	}
 }
 
