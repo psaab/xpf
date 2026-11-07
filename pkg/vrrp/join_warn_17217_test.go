@@ -120,14 +120,14 @@ func TestJoinFailuresWarn17217(t *testing.T) {
 		}
 	})
 
-	// Wiring: openAfPacketReceiver must route through the membership seam.
-	// Fake bind/filter setup so the AF_UNIX stand-in reaches that call without
-	// needing CAP_NET_RAW; skipping before membership would hide a broken path.
+	// Stub bind so the AF_UNIX stand-in reaches membership without CAP_NET_RAW.
+	// The real filter setup may accept or reject this socket after membership.
+	// An earlier failure would hide a broken receiver wiring path.
 	t.Run("allmulti_via_receiver", func(t *testing.T) {
 		rec := installWarnRecorder17217(t)
-		origSock, origBind, origOpt, origFilter, origMreq := afPacketSocket, afPacketBind, afPacketSetsockoptInt, afPacketSetsockoptSockFprog, packetAddAllmultiMembership
+		origSock, origBind, origOpt, origMreq := afPacketSocket, afPacketBind, afPacketSetsockoptInt, packetAddAllmultiMembership
 		t.Cleanup(func() {
-			afPacketSocket, afPacketBind, afPacketSetsockoptInt, afPacketSetsockoptSockFprog, packetAddAllmultiMembership = origSock, origBind, origOpt, origFilter, origMreq
+			afPacketSocket, afPacketBind, afPacketSetsockoptInt, packetAddAllmultiMembership = origSock, origBind, origOpt, origMreq
 		})
 		fd, err := unix.Socket(unix.AF_UNIX, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
 		if err != nil {
@@ -137,11 +137,10 @@ func TestJoinFailuresWarn17217(t *testing.T) {
 		called := false
 		afPacketSocket = func(_, _, _ int) (int, error) { return fd, nil }
 		afPacketBind = func(int, unix.Sockaddr) error { return nil }
-		afPacketSetsockoptSockFprog = func(int, int, int, *unix.SockFprog) error { return nil }
 		afPacketSetsockoptInt = func(_, _, _, _ int) error { return nil }
 		packetAddAllmultiMembership = func(int, *unix.PacketMreq) error { called = true; return unix.ENOBUFS }
-		if _, err := openAfPacketReceiver(1); err != nil {
-			t.Fatalf("openAfPacketReceiver: %v", err)
+		if _, err := openAfPacketReceiver(1); err != nil && !strings.Contains(err.Error(), "attach bpf filter") {
+			t.Fatalf("openAfPacketReceiver failed before the filter stage: %v", err)
 		}
 		if !called {
 			t.Fatal("openAfPacketReceiver did not reach the ALLMULTI membership seam")

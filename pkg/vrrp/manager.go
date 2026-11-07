@@ -1482,10 +1482,6 @@ var afPacketBind = unix.Bind
 // value) the call site uses, deterministically and without CAP_NET_RAW.
 var afPacketSetsockoptInt = unix.SetsockoptInt
 
-// afPacketSetsockoptSockFprog is the SO_ATTACH_FILTER entry point used by
-// openAfPacketReceiver. A test can reach later setup without kernel privileges.
-var afPacketSetsockoptSockFprog = unix.SetsockoptSockFprog
-
 // VRRP advertisement multicast destination MACs. IPv4 VRRP adverts go to
 // 224.0.0.18 which maps to the Ethernet multicast MAC 01:00:5e:00:00:12; IPv6
 // VRRP adverts go to ff02::12 which maps to 33:33:00:00:00:12. These are kept
@@ -1701,7 +1697,7 @@ func openAfPacketReceiver(ifIndex int) (int, error) {
 	// variants (#5088). Built by vrrpCBPFFilter so the exact instruction array
 	// the kernel runs can be exercised against synthetic frames in a bpf.VM.
 	filter := vrrpCBPFFilter()
-	if err := afPacketSetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{
+	if err := unix.SetsockoptSockFprog(fd, unix.SOL_SOCKET, unix.SO_ATTACH_FILTER, &unix.SockFprog{
 		Len:    uint16(len(filter)),
 		Filter: &filter[0],
 	}); err != nil {
