@@ -75,6 +75,9 @@ func (c *ctl) handleShow(args []string) error {
 		return c.showCommand("show chassis")
 
 	case "configuration":
+		if found, glued := cmdtree.ClassifyComparePipe(args[1:]); found && glued {
+			return fmt.Errorf("syntax error: compare pipe must be separated by spaces")
+		}
 		path, pipe, err := splitShowPipe(args[1:], nil)
 		if err != nil {
 			return err

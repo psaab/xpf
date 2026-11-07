@@ -92,6 +92,35 @@ func ValidateOperationalGate(words []string) error {
 		path, strings.Join(words[cut:], " "))
 }
 
+// ClassifyComparePipe reports whether words contain an operational compare
+// pipe and whether its `|` byte is glued to non-space text. The pipe may be
+// a standalone token followed by `compare`, or appear in a token as
+// `configuration|`, `|compare`, or `configuration|compare`. Gluing is
+// determined by adjacency to bytes in the token, not by path/token shape;
+// this also makes comment-ending bytes before `|` count as glued.
+func ClassifyComparePipe(words []string) (found, glued bool) {
+	for i, word := range words {
+		for start := 0; start < len(word); {
+			rel := strings.IndexByte(word[start:], '|')
+			if rel < 0 {
+				break
+			}
+			pipe := start + rel
+			after := word[pipe+1:]
+			compareFollows := after == "compare" ||
+				(after == "" && i+1 < len(words) && words[i+1] == "compare")
+			if compareFollows {
+				found = true
+				if pipe > 0 || after != "" {
+					glued = true
+				}
+			}
+			start = pipe + 1
+		}
+	}
+	return found, glued
+}
+
 // firstBarePipe returns the first token that is exactly the output-pipe
 // operator. Glued tokens such as `|display` and `configuration|display` are
 // ordinary command words, not pipe delimiters.

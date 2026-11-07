@@ -33,10 +33,10 @@ func (c *CLI) configModeEntryAllowed() bool {
 	return c.configOwnedNow() || c.UserClass() == ""
 }
 
-// operationalShowConfigurationCompare identifies the compare handler pipe
-// for `show configuration` on an operational prompt. It resolves the command
-// prefix the same way as dispatchOperational and accepts both spaced and
-// glued pipe spellings so malformed forms cannot fall through to config show.
+// operationalShowConfigurationCompare identifies a compare handler pipe on
+// an operational prompt. It resolves the command prefix the same way as
+// dispatchOperational and includes glued spellings so malformed forms cannot
+// fall through to config show.
 func operationalShowConfigurationCompare(line string) bool {
 	parts := strings.Fields(line)
 	if len(parts) < 2 {
@@ -46,29 +46,17 @@ func operationalShowConfigurationCompare(line string) bool {
 	if err != nil || verb != "show" {
 		return false
 	}
+	found, _ := cmdtree.ClassifyComparePipe(parts)
+	if !found {
+		return false
+	}
 	subcommandToken := parts[1]
-	gluedCompare := false
-	if before, after, hasPipe := strings.Cut(subcommandToken, "|"); hasPipe {
+	if before, _, hasPipe := strings.Cut(subcommandToken, "|"); hasPipe {
 		subcommandToken = before
-		gluedCompare = after == "compare"
 	}
 	showTree := operationalTree["show"].Children
 	subcommand, err := resolveCommand(subcommandToken, keysFromTree(showTree))
-	if err != nil || subcommand != "configuration" {
-		return false
-	}
-	if gluedCompare {
-		return true
-	}
-	for i := 2; i < len(parts); i++ {
-		if parts[i] == "|" {
-			return i+1 < len(parts) && parts[i+1] == "compare"
-		}
-		if isGluedComparePipeToken(parts[i]) {
-			return true
-		}
-	}
-	return false
+	return err == nil && subcommand == "configuration"
 }
 
 // checkConfigModePerm enforces the coarse PermConfig price of entering

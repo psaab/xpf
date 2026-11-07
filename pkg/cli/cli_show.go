@@ -25,13 +25,6 @@ const (
 	displayPipeInheritance
 )
 
-// isGluedComparePipeToken matches compare text attached to a path token.
-// Pipe parsers require a standalone `|`, so handlers must refuse this form
-// instead of treating it as part of a configuration path.
-func isGluedComparePipeToken(token string) bool {
-	return strings.HasSuffix(token, "|compare")
-}
-
 // splitDisplayPipe splits configuration-show arguments at the first bare
 // `|` token and validates the pipe exactly.
 //
@@ -130,10 +123,8 @@ func (c *CLI) handleShow(args []string) error {
 		return c.showChassis(args[1:])
 
 	case "configuration":
-		for _, token := range args[1:] {
-			if isGluedComparePipeToken(token) {
-				return fmt.Errorf("syntax error: compare pipe must be separated by spaces")
-			}
+		if found, glued := cmdtree.ClassifyComparePipe(args[1:]); found && glued {
+			return fmt.Errorf("syntax error: compare pipe must be separated by spaces")
 		}
 		// #14715: parse the display pipe token-exactly. Trailing tokens
 		// after a format are a syntax error, never silently discarded.
