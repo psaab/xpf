@@ -2805,4 +2805,3 @@ fn established_transit_rst_hit_has_no_allocations_17272() {
         "#17272: warmed transit RST session hit with invalidation must not allocate"
     );
 }
-
