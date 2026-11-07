@@ -1672,29 +1672,49 @@ func (s *SessionSync) fullSetGuardsLocked() []*fullSetSeqGuard {
 // comparing untagged authority epochs against its apply-in-progress and
 // last-applied barriers.
 func (s *SessionSync) configEpochStale(epoch uint64) bool {
+	stale, _, _, _, _ := s.configEpochStaleDetails(epoch)
+	return stale
+}
+
+// configEpochStaleDetails is configEpochStale with the exact comparison
+// threshold and branch retained for its refusal warning (#18649).
+func (s *SessionSync) configEpochStaleDetails(epoch uint64) (stale bool, threshold uint64, thresholdKind, branch string, rg0Authority bool) {
 	if epoch == 0 {
-		return false
+		return false, 0, "disabled", "epoch-zero", false
 	}
 	if s.IsPrimaryFn != nil {
 		primary := s.IsPrimaryFn()
 		s.observeConfigEpochRole(primary)
 		if primary {
 			if epoch&configEpochReverseTag == 0 || !s.peerCapabilitiesLearned() || !s.PeerConfigEpochReverseTagCapable() {
-				return false
+				return false, 0, "uncompared", "rg0-authority-tag-or-capability-mismatch", true
 			}
-			epoch &= configEpochGenMask
-			return epoch < s.authorityConfigEpochThreshold()
+			threshold, thresholdKind = s.authorityConfigEpochThresholdDetails()
+			return epoch&configEpochGenMask < threshold, threshold, thresholdKind, "rg0-authority", true
 		}
 		if epoch&configEpochReverseTag != 0 {
-			return false
+			return false, 0, "uncompared", "non-authority-tag-mismatch", false
 		}
 	}
-	barrier := s.applyingConfigGen.Load()
-	if applied := s.lastAppliedConfigGen.Load(); applied > barrier {
-		barrier = applied
+	applying := s.applyingConfigGen.Load()
+	threshold = applying
+	thresholdKind = "applying_config_gen"
+	if applied := s.lastAppliedConfigGen.Load(); applied > threshold {
+		threshold = applied
+		thresholdKind = "last_applied_config_gen"
 	}
-	return epoch < barrier
+	return epoch < threshold, threshold, thresholdKind, "local-config-barrier", false
 }
+
+// authorityConfigEpochThresholdDetails names the exact authority comparison
+// source as well as its value for operator diagnostics.
+func (s *SessionSync) authorityConfigEpochThresholdDetails() (uint64, string) {
+	if sent := s.peerIncarnationState().lastSentConfigGen.Load(); sent != 0 {
+		return sent, "last_sent_config_gen"
+	}
+	return s.configGenCounter.Load(), "config_gen_counter"
+}
+
 
 // authorityConfigEpochThreshold is the generation a reverse-tagged peer epoch
 // must reach for the RG0 authority to accept the install (#18636). From the
@@ -1710,10 +1730,8 @@ func (s *SessionSync) configEpochStale(epoch uint64) bool {
 // reservation-counter comparison, which refuses it (fail-closed) until the
 // reconnect push lands, normally within seconds.
 func (s *SessionSync) authorityConfigEpochThreshold() uint64 {
-	if sent := s.peerIncarnationState().lastSentConfigGen.Load(); sent != 0 {
-		return sent
-	}
-	return s.configGenCounter.Load()
+	threshold, _ := s.authorityConfigEpochThresholdDetails()
+	return threshold
 }
 
 // rollBackStaleConfigInstallV4 removes a synced session whose config epoch went
@@ -1793,8 +1811,9 @@ func (s *SessionSync) installClusterSyncedV4(key dataplane.SessionKey, val datap
 			"incoming_gen", val.Generation)
 		return false
 	}
-	if s.configEpochStale(val.ConfigEpoch) {
-		s.stats.SessionsStaleConfigIgnored.Add(1)
+	if stale, threshold, thresholdKind, branch, authority := s.configEpochStaleDetails(val.ConfigEpoch); stale {
+		refusals := s.stats.SessionsStaleConfigIgnored.Add(1)
+		s.maybeWarnStaleConfigRefusal(val.ConfigEpoch, threshold, thresholdKind, branch, authority, refusals)
 		slog.Debug("cluster sync: ignored stale-config-epoch v4 install (peer moved to a newer config that may deny this session)",
 			"session_config_epoch", val.ConfigEpoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
 		return false
@@ -1862,8 +1881,9 @@ func (s *SessionSync) installClusterSyncedV6(key dataplane.SessionKeyV6, val dat
 			"incoming_gen", val.Generation)
 		return false
 	}
-	if s.configEpochStale(val.ConfigEpoch) {
-		s.stats.SessionsStaleConfigIgnored.Add(1)
+	if stale, threshold, thresholdKind, branch, authority := s.configEpochStaleDetails(val.ConfigEpoch); stale {
+		refusals := s.stats.SessionsStaleConfigIgnored.Add(1)
+		s.maybeWarnStaleConfigRefusal(val.ConfigEpoch, threshold, thresholdKind, branch, authority, refusals)
 		slog.Debug("cluster sync: ignored stale-config-epoch v6 install (peer moved to a newer config that may deny this session)",
 			"session_config_epoch", val.ConfigEpoch, "applied_config_gen", s.lastAppliedConfigGen.Load())
 		return false

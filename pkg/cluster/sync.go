@@ -1928,6 +1928,10 @@ type SessionSync struct {
 	// node is still the authority. Guarded like the other marks by
 	// configGenMu; cleared with them by resetRecvGen.
 	rejectedAsAuthorityConfigGen atomic.Uint64
+	// staleConfigRefusalWarn rate-limits the #18649 operator Warn for
+	// stale-config-epoch install refusals. The limiter state is protected by
+	// applyMu, which is held across both v4/v6 install paths. Zero value is ready.
+	staleConfigRefusalWarn staleConfigRefusalWarnLimiter
 
 	// configEpochRoleMu tracks the config authority role when reverse stamps
 	// are produced. After becoming a non-authority, a retained applied mark is

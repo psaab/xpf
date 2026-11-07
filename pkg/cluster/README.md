@@ -5455,8 +5455,15 @@ it.
   one draw per tick past anything the peer was ever sent. On `loss` (#18636)
   that refused every install from a converged peer, `Sessions
   stale-config-ignored` climbed at 55-160/s on the RG0 primary, and the
-  primary never imported a session its peer created. A
-  non-authority stamps `tag | lastAppliedConfigGen` only when the peer is known
+  primary never imported a session its peer created.
+  When `SessionsStaleConfigIgnored` grows while this node's
+  `TransferReadinessSnapshot.ConfigStale` is false, the install path emits a
+  Warn immediately and then at most once per minute across IPv4 and IPv6.
+  Suppressed refusals remain counted and are reported by the next Warn, which
+  includes the decoded epoch/tag bit, the exact authority threshold or local
+  config barrier, and the comparison branch. The existing Debug refusal log
+  remains per install; neither warning changes refusal behavior.
+  A non-authority stamps `tag | lastAppliedConfigGen` only when the peer is known
   capable, received and applied marks agree and are nonzero, and the applied
   mark is newer than the floor captured on entry to the current non-authority
   tenure. An unlearned/legacy peer receives the original untagged local send
