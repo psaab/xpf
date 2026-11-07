@@ -196,7 +196,7 @@ fn ipv4_tunnel_header_df_set_performs_no_fetch_17266() {
     let counter = DatagramIdentification::new();
     let before = counter.current_for_test();
     let mut buf = [0xffu8; 20];
-    write_ipv4_tunnel_header_counted_for_test(
+    write_ipv4_tunnel_header_counted(
         &mut buf,
         Ipv4Addr::new(10, 0, 0, 1),
         Ipv4Addr::new(10, 0, 0, 2),
@@ -214,7 +214,7 @@ fn ipv4_tunnel_header_df_set_performs_no_fetch_17266() {
         "DF-set write advanced the tunnel Identification counter"
     );
     // Control: a DF-clear write through the same counter advances it.
-    write_ipv4_tunnel_header_counted_for_test(
+    write_ipv4_tunnel_header_counted(
         &mut buf,
         Ipv4Addr::new(10, 0, 0, 1),
         Ipv4Addr::new(10, 0, 0, 2),
