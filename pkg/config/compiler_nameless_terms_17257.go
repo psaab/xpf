@@ -18,6 +18,26 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 	if cfg == nil {
 		return
 	}
+	// Sites arrive in (family, filter) order, not authored order; process
+	// per filter in authored (ordinal) order with a running slot offset so
+	// multiple placeholders keep authored order and names (Sol MINOR).
+	type fwKey struct{ family, filter string }
+	fwOrder := make([]fwKey, 0, len(firewallSites))
+	fwByKey := make(map[fwKey][]firewallNamelessSite17257)
+	for _, site := range firewallSites {
+		k := fwKey{site.family, site.filter}
+		if _, seen := fwByKey[k]; !seen {
+			fwOrder = append(fwOrder, k)
+		}
+		fwByKey[k] = append(fwByKey[k], site)
+	}
+	firewallSites = firewallSites[:0]
+	for _, k := range fwOrder {
+		sites := fwByKey[k]
+		sort.SliceStable(sites, func(i, j int) bool { return sites[i].ordinal < sites[j].ordinal })
+		firewallSites = append(firewallSites, sites...)
+	}
+	insertedFW := make(map[fwKey]int)
 	for _, site := range firewallSites {
 		if _, colliding := cfg.Firewall.CollidingNames[site.filter]; colliding {
 			continue
@@ -57,7 +77,7 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 			if filter == nil {
 				continue
 			}
-			index := site.expanded
+			index := site.expanded + insertedFW[fwKey{site.family, site.filter}]
 			placeholder := &FirewallFilterTerm{
 				Name:     firewallNamelessPlaceholderName17257(site.first, site.ordinal, filter.Terms),
 				Action:   FilterActionDiscard,
@@ -69,6 +89,7 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 			filter.Terms = append(filter.Terms, nil)
 			copy(filter.Terms[index+1:], filter.Terms[index:])
 			filter.Terms[index] = placeholder
+			insertedFW[fwKey{site.family, site.filter}]++
 		}
 	}
 

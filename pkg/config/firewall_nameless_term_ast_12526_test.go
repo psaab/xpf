@@ -343,3 +343,23 @@ func TestCompileConfigLenientPackedAfterMixedContainerKeepsOrder17257(t *testing
 		t.Fatalf("third term = %+v, want the packed discard last", term)
 	}
 }
+
+func TestCompileConfigLenientTwoPackedEmptyKeepAuthoredNames17257(t *testing.T) {
+	// Sol MINOR: two packed empties both expand to 0; insertion must keep
+	// authored order (names -0 then -1), not reverse.
+	src := `firewall { family inet { filter F { term { } term { } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 2 {
+		t.Fatalf("filter = %+v, want two placeholders", filter)
+	}
+	if got := filter.Terms[0].Name; got != "nameless-term-17257-0" {
+		t.Errorf("first placeholder = %q, want nameless-term-17257-0", got)
+	}
+	if got := filter.Terms[1].Name; got != "nameless-term-17257-1" {
+		t.Errorf("second placeholder = %q, want nameless-term-17257-1", got)
+	}
+}
