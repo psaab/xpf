@@ -339,13 +339,13 @@ The NTP state of each cluster on 2026-10-31:
 - Outside a crash gate, `test-connectivity` runs #18629's one-shot NTP health
   cell: it reads each node's stanza independently and measures both Leap
   statuses once. Both stanzas are required; a stanza missing on either node,
-  unreadable configuration, or unreadable/noisy measurement is VOID. Both
-  synchronised and within `XPF_FAILOVER_CLOCK_SKEW_BOUND_S` (default 5 s)
-  PASS; one unsynchronised node FAILs. If both are unsynchronised, any
-  configured server answering the off-path probe (or an unavailable probe)
-  FAILs, while a completed probe with no answers is a lab-outage VOID. The
-  cell never waits for convergence or resyncs clocks. This surfaces chrony
-  loss or node-specific NTP reachability before a crash smoke runs.
+  an invalid skew bound, unreadable configuration, or unreadable/noisy
+  measurement is VOID. Both synchronised and within
+  `XPF_FAILOVER_CLOCK_SKEW_BOUND_S` (default 5 s) PASS; one unsynchronised
+  node FAILs. If both are unsynchronised, an answering configured server or an
+  unavailable off-path probe FAILs; a completed probe with no answers is a
+  lab-outage VOID. The cell never waits for convergence or resyncs clocks.
+  This surfaces chrony loss or node-specific NTP reachability before a crash smoke runs.
 
 `make test-failover-clock-lib` (also in `make selftest`) covers this
 hermetically, with mocked `incus`, `timeout`, `date` and `sleep` over a

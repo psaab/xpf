@@ -1141,6 +1141,11 @@ fc_ntp_cell_case configured-bound present 162.159.200.1 0.000 Normal present 91.
 ntp_bound_configured_rc=$FC_NTP_CELL_RC
 ntp_bound_configured_result=$FC_NTP_CELL_RESULT
 ntp_bound_configured_detail=$FC_NTP_CELL_DETAIL
+fc_ntp_cell_case invalid-bound present 162.159.200.1 0.000 Normal present 91.189.91.112 6.000 Normal "" normal repeat repeat 50oops
+ntp_invalid_bound_rc=$FC_NTP_CELL_RC
+ntp_invalid_bound_result=$FC_NTP_CELL_RESULT
+ntp_invalid_bound_detail=$FC_NTP_CELL_DETAIL
+ntp_invalid_bound_commands=$(wc -l <"$FC_CALLS")
 fc_ntp_cell_case one-unsynced present 162.159.200.1 0.000 "Not synchronised" present 91.189.91.112 0.000 Normal ""
 ntp_one_rc=$FC_NTP_CELL_RC
 ntp_one_result=$FC_NTP_CELL_RESULT
@@ -1192,13 +1197,14 @@ fc_ntp_cell_case noisy present 162.159.200.1 0.000 Normal present 91.189.91.112 
 ntp_noisy_rc=$FC_NTP_CELL_RC
 ntp_noisy_result=$FC_NTP_CELL_RESULT
 ntp_noisy_detail=$FC_NTP_CELL_DETAIL
-if ((ntp_synced_rc == 0 && ntp_bound_default_rc == 1 && ntp_bound_configured_rc == 0 &&
+if ((ntp_synced_rc == 0 && ntp_bound_default_rc == 1 && ntp_bound_configured_rc == 0 && ntp_invalid_bound_rc == 2 &&
     ntp_one_rc == 1 && ntp_answer_rc == 1 && ntp_bracket_rc == 1 && ntp_nested_rc == 1 &&
     ntp_outage_rc == 2 && ntp_probe_unavailable_rc == 1 && ntp_absent_rc == 2 && ntp_mixed_rc == 2 && ntp_mixed_fw1_rc == 2 &&
     ntp_unreadable_rc == 2 && ntp_noisy_rc == 2)) &&
     [[ "$ntp_synced_result" == PASS && "$ntp_synced_detail" == *"both nodes synchronised"* && "$ntp_synced_detail" == *"skew +0.150"* &&
         "$ntp_bound_default_result" == FAIL && "$ntp_bound_default_detail" == *"exceeds 5 s"* &&
         "$ntp_bound_configured_result" == PASS && "$ntp_bound_configured_detail" == *"<= 10 s"* &&
+        "$ntp_invalid_bound_result" == VOID && "$ntp_invalid_bound_detail" == *"XPF_FAILOVER_CLOCK_SKEW_BOUND_S must be a positive number"* &&
         "$ntp_one_result" == FAIL && "$ntp_one_detail" == *"fw1 synchronised (Normal) while fw0 is not (Not synchronised)"* &&
         "$ntp_answer_result" == FAIL && "$ntp_answer_detail" == *"servers answer this host (91.189.91.112)"* &&
         "$ntp_answer_hosts" == "162.159.200.1 91.189.91.112" &&
@@ -1214,8 +1220,8 @@ if ((ntp_synced_rc == 0 && ntp_bound_default_rc == 1 && ntp_bound_configured_rc 
         "$ntp_noisy_result" == VOID && "$ntp_noisy_detail" == *"clock measurement too noisy"* &&
         "$ntp_probe_unavailable_result" == FAIL && "$ntp_probe_unavailable_detail" == *"off-path SNTP probe unavailable"* &&
         "$ntp_synced_calls" == "1/1" && "$ntp_absent_commands" == 2 && "$ntp_mixed_commands" == 2 && "$ntp_mixed_fw1_commands" == 2 &&
-        "$ntp_absent_clean" == 1 && "$FC_NTP_ALL_CLEAN" == 1 ]]; then
-    ok "test-connectivity NTP cell: lattice, mixed-stanza VOID both ways, repeat/bracket/nested forms, configured skew-bound edges, no wait/write"
+        "$ntp_absent_clean" == 1 && "$ntp_invalid_bound_commands" == 0 && "$FC_NTP_ALL_CLEAN" == 1 ]]; then
+    ok "test-connectivity NTP cell: lattice, mixed-stanza VOID both ways, repeat/bracket/nested forms, skew-bound config/validation, no wait/write"
 else
     bad "test-connectivity NTP cell: rc=$ntp_synced_rc/$ntp_bound_default_rc/$ntp_bound_configured_rc/$ntp_one_rc/$ntp_answer_rc/$ntp_bracket_rc/$ntp_nested_rc/$ntp_outage_rc/$ntp_probe_unavailable_rc/$ntp_absent_rc/$ntp_mixed_rc/$ntp_unreadable_rc/$ntp_noisy_rc results=$ntp_synced_result/$ntp_bound_default_result/$ntp_bound_configured_result/$ntp_one_result/$ntp_answer_result/$ntp_bracket_result/$ntp_nested_result/$ntp_outage_result/$ntp_absent_result/$ntp_mixed_result/$ntp_unreadable_result/$ntp_noisy_result bounds='$ntp_bound_default_detail'/'$ntp_bound_configured_detail' synced='$ntp_synced_detail' one='$ntp_one_detail' answered='$ntp_answer_detail' bracket='$ntp_bracket_detail' nested='$ntp_nested_detail' outage='$ntp_outage_detail' absent='$ntp_absent_detail' mixed='$ntp_mixed_detail' unreadable='$ntp_unreadable_detail' noisy='$ntp_noisy_detail' probes='$ntp_answer_hosts/$ntp_bracket_hosts/$ntp_nested_hosts' calls=$ntp_synced_calls/$ntp_absent_commands/$ntp_mixed_commands clean=$FC_NTP_ALL_CLEAN absent-clean=$ntp_absent_clean writes='$(cat "$FC_WRITES")' untimed='$(cat "$FC_UNTIMED")'"
 fi

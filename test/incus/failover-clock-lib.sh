@@ -454,9 +454,9 @@ _failover_clock_offpath() {
 #   One instantaneous operator-health check: read each node's own NTP stanza,
 #   measure both clocks/Leap statuses once, and never wait or resync. The
 #   shared skew-bound knob defaults to 5 s; a missing stanza on either node
-#   is VOID. Different server sets are valid; their union is used only for
-#   the off-path control when neither node is synchronised. Returns 0 PASS,
-#   1 FAIL, or 2 VOID.
+#   or a non-positive/non-numeric bound is VOID. Different server sets are
+#   valid; their union is used only for the off-path control when neither node
+#   is synchronised. Returns 0 PASS, 1 FAIL, or 2 VOID.
 failover_clock_ntp_cell() {
 	local label="${1:-}" n0="${2:-}" n1="${3:-}" bound="${XPF_FAILOVER_CLOCK_SKEW_BOUND_S:-5}" verdict=VOID why=""
 	local synced0=0 synced1=0 servers="" unreadable="" server
@@ -466,6 +466,9 @@ failover_clock_ntp_cell() {
 	if (($# != 3)); then
 		verdict=VOID
 		why="refused (harness): usage: failover_clock_ntp_cell <label> <node0> <node1>"
+	elif ! [[ "$bound" =~ ^[0-9]+([.][0-9]+)?$ ]] || ! awk -v v="$bound" 'BEGIN { exit !(v > 0) }'; then
+		verdict=VOID
+		why="refused (harness): XPF_FAILOVER_CLOCK_SKEW_BOUND_S must be a positive number (got '${bound}')"
 	else
 		_failover_clock_ntp_config_one "$n0"
 		local state0="$_FC_NODE_NTP_STATE" servers0="$_FC_NODE_NTP_SERVERS"

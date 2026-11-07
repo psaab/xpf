@@ -99,8 +99,8 @@ Tests:
   `XPF_FAILOVER_CLOCK_SKEW_BOUND_S` (default 5 s) PASS; one unsynchronised
   node FAILs. If both are unsynchronised, an answering off-path server or an
   unavailable probe FAILs; a completed probe with no answers is a lab outage
-  and VOID. A stanza missing on either node, unreadable config, or
-  noisy/unreadable clock measurement is VOID. This cell never waits for
+  and VOID. A stanza missing on either node, invalid skew bound, unreadable
+  config, or noisy/unreadable clock measurement is VOID. This cell never waits for
   convergence or sets a clock.
 
 Prerequisites:
