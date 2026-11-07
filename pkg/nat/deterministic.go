@@ -546,14 +546,10 @@ func poolPortRangeV4(pool *config.NATPool) (uint16, uint16, bool) {
 // dataplane skips the whole rule rather than expanding it. parse_pool_v4's
 // caller (parse_nat64_rule, #14624) also keeps only the first occurrence
 // of each address, so BOTH modes dedupe first-occurrence. IPv6 entries are
-// skipped in both modes and pool.Address is prepended exactly as the wire
-// builders do.
+// skipped in both modes; membership comes from config.SourceNATPoolMembers,
+// preserving the singular-then-repeated order shipped to the dataplane.
 func expandPoolV4(pool *config.NATPool, mode Mode) ([]net.IP, *LookupError) {
-	addrs := make([]string, 0, len(pool.Addresses)+1)
-	if pool.Address != "" {
-		addrs = append(addrs, pool.Address)
-	}
-	addrs = append(addrs, pool.Addresses...)
+	addrs := config.SourceNATPoolMembers(pool)
 
 	var out []net.IP
 	// #14623/#14624: first-occurrence dedupe in BOTH modes — mode 1 mirrors

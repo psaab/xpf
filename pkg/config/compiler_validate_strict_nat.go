@@ -1847,14 +1847,9 @@ func validateSourceNATPoolAddressGrammarStrict(cfg *Config, lenient bool) error 
 				// Undefined reference — validateNATPoolReferencesStrict (#5626).
 				continue
 			}
-			// Mirror the snapshot builder's live address set: the DNAT-compat
-			// single Address (unused by source pools today, but included for
-			// parity) plus the source pool Addresses.
-			var addrs []string
-			if pool.Address != "" {
-				addrs = append(addrs, pool.Address)
-			}
-			addrs = append(addrs, pool.Addresses...)
+			// SourceNATPoolMembers preserves the singular Address followed by
+			// repeated Addresses in the same order shipped to the dataplane.
+			addrs := SourceNATPoolMembers(pool)
 			if len(addrs) == 0 {
 				outcome := "the commit is refused"
 				if lenient {
@@ -1966,11 +1961,7 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config, lenient bool) error {
 				// Undefined reference — validateNATPoolReferencesStrict (#5626).
 				continue
 			}
-			var addrs []string
-			if pool.Address != "" {
-				addrs = append(addrs, pool.Address)
-			}
-			addrs = append(addrs, pool.Addresses...)
+			addrs := SourceNATPoolMembers(pool)
 			for _, a := range addrs {
 				if PoolAddressHasZoneScope(a) {
 					outcome := "the commit is refused"
@@ -2044,9 +2035,8 @@ func validateSourceNATPoolAddressScopeStrict(cfg *Config, lenient bool) error {
 // un-parsed text (natCIDRIPPart), never net.IP.To4: an IPv4-mapped
 // `::ffff:192.0.2.1` pool member is v6 (Rust IpAddr::V6), so it does
 // NOT satisfy a v4 rule — the #10686 identity rule. Pool membership
-// uses the same member texts the grammar gate enumerates
-// (pool.Address + pool.Addresses, ranges already expanded); members
-// that do not parse are skipped here because the grammar/scope gates
+// uses SourceNATPoolMembers, the same membership the grammar gate enumerates;
+// members that do not parse are skipped here because the grammar/scope gates
 // own them. Strict on commit / commit-check (hard reject); the call
 // site downgrades to a warning on the tolerant load / peer-sync path
 // (#1960 no-brick) — the dataplane already fails such flows closed
@@ -2083,11 +2073,7 @@ func validateSourceNATPoolFamilyStrict(cfg *Config) error {
 			if !single {
 				continue
 			}
-			var addrs []string
-			if pool.Address != "" {
-				addrs = append(addrs, pool.Address)
-			}
-			addrs = append(addrs, pool.Addresses...)
+			addrs := SourceNATPoolMembers(pool)
 			hasFamily := false
 			for _, a := range addrs {
 				if natAddrFamily(natCIDRIPPart(a)) == family {
@@ -3191,8 +3177,8 @@ func validateNATHostMaskStrict(cfg *Config, lenient bool) ([]string, error) {
 	// parse_pool_v4 (nat64.rs) accepts ONLY a bare IPv4 or an IPv4 /32 and
 	// silently drops everything else (an IPv6 address, a non-host IPv4 mask).
 	// Range-expanded pool entries are always /32 by construction
-	// (expandAddressRange), so only an operator-authored single
-	// `pool address <X>` can trip this.
+	// (expandAddressRange), so a non-host or IPv6 member in either configured
+	// address field can trip this.
 	for _, rs := range cfg.Security.NAT.NAT64 {
 		if rs == nil || rs.SourcePool == "" {
 			continue
@@ -3201,11 +3187,7 @@ func validateNATHostMaskStrict(cfg *Config, lenient bool) ([]string, error) {
 		if !ok || pool == nil {
 			continue
 		}
-		addrs := pool.Addresses
-		if pool.Address != "" {
-			addrs = append([]string{pool.Address}, addrs...)
-		}
-		for _, a := range addrs {
+		for _, a := range SourceNATPoolMembers(pool) {
 			if a == "" {
 				continue
 			}
@@ -5719,7 +5701,7 @@ func (o natAllocOwner) expandedMembers() []string {
 	if len(o.members) > 0 {
 		return o.members
 	}
-	return poolMemberTexts(o.pool)
+	return SourceNATPoolMembers(o.pool)
 }
 
 // natV4Interval / natV6Interval is one expanded pool member as an inclusive
@@ -5784,8 +5766,8 @@ type natV6Interval struct {
 //     selected.) Two rule-sets sharing a pool under DIFFERENT prefixes are
 //     independent owners.
 //
-// Every owner's pool members (pool.Address + pool.Addresses, ranges already
-// expanded to /32s by appendPoolAddresses) are turned into family-scoped numeric
+// Every owner's pool members (SourceNATPoolMembers; ranges already expanded
+// to /32s by appendPoolAddresses) are turned into family-scoped numeric
 // intervals — v4 vs v6 bucketed by the colon-strict textual family
 // (natAddrFamily(natCIDRIPPart(...)), the Go/Rust parity rule) so an IPv4-mapped
 // IPv6 literal is never compared against a real v4 member. An O(n log n)
@@ -6924,31 +6906,13 @@ func nat64RuleSetDefinitelyBuilt(cfg *Config, rs *NAT64RuleSet) bool {
 	if pool == nil {
 		return true
 	}
-	members := make([]string, 0, len(pool.Addresses)+1)
-	if pool.Address != "" {
-		members = append(members, pool.Address)
-	}
-	members = append(members, pool.Addresses...)
+	members := SourceNATPoolMembers(pool)
 	for _, m := range members {
 		if host, _ := isNAT64PoolHostAddress(m); !host {
 			return false
 		}
 	}
 	return true
-}
-
-// poolMemberTexts returns a source pool's translated-address members: the single
-// DNAT-compat Address (empty for source pools) followed by the expanded
-// Addresses list. Mirrors nat64.go / SourceNATPoolNets member enumeration.
-func poolMemberTexts(pool *NATPool) []string {
-	if pool == nil {
-		return nil
-	}
-	out := make([]string, 0, len(pool.Addresses)+1)
-	if pool.Address != "" {
-		out = append(out, pool.Address)
-	}
-	return append(out, pool.Addresses...)
 }
 
 // natV4IntervalOf returns the inclusive [lo,hi] big-endian uint32 range (widened

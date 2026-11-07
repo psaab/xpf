@@ -24,11 +24,7 @@ func SourceNATPoolNets(nat *NATConfig, poolName string) ([]*net.IPNet, bool) {
 	if !ok || pool == nil {
 		return nil, false
 	}
-	addrs := make([]string, 0, len(pool.Addresses)+1)
-	if pool.Address != "" {
-		addrs = append(addrs, pool.Address)
-	}
-	addrs = append(addrs, pool.Addresses...)
+	addrs := SourceNATPoolMembers(pool)
 	nets := make([]*net.IPNet, 0, len(addrs))
 	for _, a := range addrs {
 		if n := parsePoolAddr(a); n != nil {

@@ -146,3 +146,15 @@ func TestNAT64SkippedEarlierRuleSetDoesNotShadow9555(t *testing.T) {
 		t.Fatalf("#9555: rule-set B must NOT be reported unreachable -- the rule-set ahead of it is never built; got %q", w)
 	}
 }
+
+// A NAT64 build decision must inspect a pool's singular-only address leaf.
+func TestNAT64BuildDecisionIncludesSingularPoolMember17262(t *testing.T) {
+	cfg := &Config{}
+	cfg.Security.NAT.SourcePools = map[string]*NATPool{
+		"p": {Name: "p", Address: "100.65.0.0/24"},
+	}
+	rs := &NAT64RuleSet{Prefix: "64:ff9b::/96", SourcePool: "p"}
+	if nat64RuleSetDefinitelyBuilt(cfg, rs) {
+		t.Fatal("a singular-only non-host pool address must make the NAT64 rule-set unbuilt")
+	}
+}
