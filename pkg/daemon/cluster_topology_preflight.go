@@ -3,9 +3,11 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"net"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/configstore"
 )
 
 // errClusterTopologyRequiresRestart is the #5840 sentinel returned when a
@@ -566,4 +568,62 @@ func syncEndpointMoveRefusal9121(have, want syncEndpoint9121) error {
 		"commit the change on each node separately while both are running — that "+
 		"produces the same partition by hand",
 		have.addr, have.iface, have.mode, want.addr, want.iface, want.mode)
+}
+// clusterPeerControlAddressCommitPreflight refuses a primary candidate that
+// renumbers the peer's control address currently used by this node's running
+// heartbeat (#18630). The config registry's peer-effective checks cannot see
+// that runtime endpoint, so the gate compiles one generation-bound candidate
+// tree for the peer node and compares the rendered control-unit addresses
+// against the manager's running peer address.
+func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running *cluster.Manager, expectedGen uint64) error {
+	if store == nil || running == nil {
+		return nil
+	}
+	peerAddr := running.HeartbeatPeerAddr()
+	if net.ParseIP(peerAddr) == nil {
+		// During boot / before the heartbeat starts, no running endpoint can
+		// be stranded by this commit.
+		return nil
+	}
+
+	tree, generation, _ := store.CandidateGateSample()
+	if generation != expectedGen {
+		return fmt.Errorf("candidate changed while sampling peer control-address preflight: %w",
+			configstore.ErrCandidateGenerationConflict)
+	}
+	if tree == nil {
+		return nil
+	}
+	peerNodeID, ok := config.PeerNodeID(running.NodeID())
+	if !ok {
+		return nil
+	}
+	peerView, err := config.CompileConfigForNodeLenient(tree, peerNodeID)
+	if err != nil {
+		return fmt.Errorf("commit rejected: cannot compile candidate for peer node %d control-address preflight: %w",
+			peerNodeID, err)
+	}
+	var controlInterface string
+	if peerView != nil && peerView.Chassis.Cluster != nil {
+		controlInterface = peerView.Chassis.Cluster.ControlInterface
+	}
+	return peerControlAddressDecision18630(peerAddr, controlLinkStaticAddrs18606(peerView, controlInterface))
+}
+
+// peerControlAddressDecision18630 compares the rendered control-unit
+// addresses with the peer address the running heartbeat actually dials.
+func peerControlAddressDecision18630(runningPeerAddr string, peerRenderedAddrs []string) error {
+    peerIP := net.ParseIP(runningPeerAddr)
+    if peerIP == nil || cidrListHasIP18606(peerRenderedAddrs, peerIP) {
+        return nil
+    }
+    return fmt.Errorf("commit rejected: the peer's chassis cluster control-link "+
+        "address no longer includes %s, the address this node's running heartbeat "+
+        "uses to reach it; the peer will reject this config and remain on the old "+
+        "text, so later config pushes will not converge the pair.\n"+
+        "To renumber the control link: set the new address on BOTH nodes and "+
+        "restart xpfd on both, offline — stop xpfd on both nodes, put the new "+
+        "address in each node's boot configuration, and start both. Do NOT commit "+
+        "the change on each node separately while both are running — that produces "+
+        "the same divergence by hand", runningPeerAddr)
 }

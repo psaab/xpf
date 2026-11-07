@@ -109,11 +109,13 @@ const maxCommitPreflightRetries = 3
 // Each attempt: snapshot+compile the candidate and read its generation token
 // atomically (CompileCandidateGen); run the caller's preflight on that immutable
 // compiled snapshot OUTSIDE the store lock (s.mu is NOT held across netlink /
-// hardware probing); then commit bound to the snapshot generation. If a
-// candidate edit landed in between, the generation-checked commit returns
-// ErrCandidateGenerationConflict and we retry against the fresh generation
-// (bounded). commitFn performs the generation-checked promotion
-// (CommitWithDescriptionGen / CommitConfirmedGen).
+// hardware probing). The preflight receives the same generation token so any
+// companion tree sample can prove it examined this candidate. Then commit bound
+// to the snapshot generation. A candidate edit detected by either the preflight
+// or generation-checked commit returns ErrCandidateGenerationConflict and retries
+// the entire preflight/commit against the fresh generation (bounded). commitFn
+// performs the generation-checked promotion (CommitWithDescriptionGen /
+// CommitConfirmedGen).
 //
 // A snapshot that fails to compile (not in configuration mode / commit-check
 // error) skips the pre-flight — there is nothing to examine — but STILL
@@ -141,7 +143,7 @@ const maxCommitPreflightRetries = 3
 // verifyRollbackDiscardLocked.
 func (d *Daemon) commitWithGenBinding(
 	discardGen uint64,
-	preflight func(cand *config.Config) error,
+	preflight func(gen uint64, cand *config.Config) error,
 	commitFn func(expectedGen uint64) (*config.Config, error),
 ) (oldActive, compiled *config.Config, err error) {
 	for attempt := 0; ; attempt++ {
@@ -156,7 +158,12 @@ func (d *Daemon) commitWithGenBinding(
 		if cerr == nil {
 			// Run the hardware pre-flight on the exact compiled snapshot,
 			// OUTSIDE the store lock (CompileCandidateGen already released it).
-			if perr := preflight(cand); perr != nil {
+			if perr := preflight(gen, cand); perr != nil {
+				if errors.Is(perr, configstore.ErrCandidateGenerationConflict) && attempt < maxCommitPreflightRetries {
+					slog.Warn("commit: candidate configuration changed during pre-flight; re-validating on the new generation",
+						"attempt", attempt+1)
+					continue
+				}
 				return nil, nil, perr
 			}
 		}
@@ -331,7 +338,7 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 	var peerSnapshotAuth *peerSnapshotProtocolAuthorization
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
-		func(cand *config.Config) error {
+		func(gen uint64, cand *config.Config) error {
 			if config.HasDNSNames(cand) && d.store.CandidateGeneration() != dnsRefreshGen {
 				return fmt.Errorf("candidate changed after DNS refresh: %w", configstore.ErrCandidateGenerationConflict)
 			}
@@ -370,6 +377,12 @@ func (d *Daemon) commitAndApply(ctx context.Context, authority configstore.Commi
 			// address, which #8965 (the peer address) cannot see.
 			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, d.store.ActiveConfig(), cand); lerr != nil {
 				return lerr
+			}
+			// #18630: compile the exact candidate tree for the peer and make sure
+			// it still renders the control address this running heartbeat dials.
+			// The config registry cannot see that runtime bind.
+			if perr := clusterPeerControlAddressCommitPreflight(d.store, d.cluster, gen); perr != nil {
+				return perr
 			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
 			// two gates above should have been keyed on. They read the
@@ -1044,7 +1057,7 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 	var rollbackConfirmGen uint64
 	oldActive, compiled, err := d.commitWithGenBinding(
 		discardGen,
-		func(cand *config.Config) error {
+		func(gen uint64, cand *config.Config) error {
 			if config.HasDNSNames(cand) && d.store.CandidateGeneration() != dnsRefreshGen {
 				return fmt.Errorf("candidate changed after DNS refresh: %w", configstore.ErrCandidateGenerationConflict)
 			}
@@ -1079,6 +1092,11 @@ func (d *Daemon) commitConfirmedAndApply(ctx context.Context, authority configst
 			// address, which #8965 (the peer address) cannot see.
 			if lerr := clusterControlLocalAddressCommitPreflight(d.cluster, d.store.ActiveConfig(), cand); lerr != nil {
 				return lerr
+			}
+			// #18630: the peer's rendered control address must retain the address
+			// this running heartbeat dials, before a confirmed commit can promote.
+			if perr := clusterPeerControlAddressCommitPreflight(d.store, d.cluster, gen); perr != nil {
+				return perr
 			}
 			// #9121: and the CONFIG-SYNC endpoint, which is the field set the
 			// two gates above should have been keyed on. They read the

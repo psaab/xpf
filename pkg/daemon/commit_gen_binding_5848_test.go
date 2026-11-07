@@ -32,7 +32,10 @@ func TestCommitWithGenBindingRepreflightsOnConcurrentEdit(t *testing.T) {
 	attempt := 0
 	oldActive, compiled, err := d.commitWithGenBinding(
 		0,
-		func(cand *config.Config) error {
+		func(gen uint64, cand *config.Config) error {
+			if current := s.CandidateGeneration(); gen != current {
+				t.Errorf("preflight generation = %d, current candidate generation = %d", gen, current)
+			}
 			examined = append(examined, cand.System.HostName)
 			if attempt == 0 {
 				// Simulate a concurrent REST edit arriving during the FIRST
@@ -78,7 +81,7 @@ func TestCommitWithGenBindingSurfacesPersistentConflict(t *testing.T) {
 	preflights := 0
 	_, _, err := d.commitWithGenBinding(
 		0,
-		func(cand *config.Config) error {
+		func(_ uint64, _ *config.Config) error {
 			preflights++
 			// Always edit the candidate → the examined generation is always
 			// stale by commit time.
@@ -98,6 +101,40 @@ func TestCommitWithGenBindingSurfacesPersistentConflict(t *testing.T) {
 	}
 }
 
+// A generation conflict returned by a preflight is retried against a fresh
+// compile/sample, not surfaced as a final commit rejection.
+func TestCommitWithGenBindingRetriesPreflightGenerationConflict(t *testing.T) {
+	s := newCommitReadyStore(t, "system host-name base", "system host-name staged1")
+	d := &Daemon{store: s}
+
+	var examined []string
+	attempt := 0
+	_, compiled, err := d.commitWithGenBinding(
+		0,
+		func(_ uint64, cand *config.Config) error {
+			examined = append(examined, cand.System.HostName)
+			if attempt == 0 {
+				attempt++
+				if err := s.SetFromInput("system host-name staged2"); err != nil {
+					t.Fatalf("concurrent edit: %v", err)
+				}
+				return fmt.Errorf("peer preflight sample became stale: %w", configstore.ErrCandidateGenerationConflict)
+			}
+			return nil
+		},
+		func(gen uint64) (*config.Config, error) { return s.CommitWithDescriptionGen("", gen) },
+	)
+	if err != nil {
+		t.Fatalf("commitWithGenBinding: %v", err)
+	}
+	if len(examined) != 2 || examined[0] != "staged1" || examined[1] != "staged2" {
+		t.Fatalf("generation-conflict retry examined %v, want [staged1 staged2]", examined)
+	}
+	if compiled == nil || compiled.System.HostName != "staged2" {
+		t.Fatalf("promoted config = %+v, want retry candidate staged2", compiled)
+	}
+}
+
 // The no-race common path: pre-flight runs once, the generation is unchanged,
 // the candidate is promoted exactly as before #5848.
 func TestCommitWithGenBindingNoRaceCommitsOnce(t *testing.T) {
@@ -107,7 +144,7 @@ func TestCommitWithGenBindingNoRaceCommitsOnce(t *testing.T) {
 	preflights := 0
 	_, compiled, err := d.commitWithGenBinding(
 		0,
-		func(cand *config.Config) error { preflights++; return nil },
+		func(_ uint64, _ *config.Config) error { preflights++; return nil },
 		func(gen uint64) (*config.Config, error) { return s.CommitWithDescriptionGen("", gen) },
 	)
 	if err != nil {
