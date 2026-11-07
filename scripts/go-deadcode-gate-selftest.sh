@@ -123,6 +123,9 @@ PINGO=$(sed -n 's/^DEADCODE_VERSION=//p' "$ROOT/scripts/go-deadcode-gate.sh" | h
 [ -n "$PINGO" ] &&
 	ok "gate DEADCODE_VERSION extraction is non-empty ($PINGO)" ||
 	bad "gate DEADCODE_VERSION extraction returned empty"
+[ "$(grep -c '^DEADCODE_VERSION=' "$ROOT/scripts/go-deadcode-gate.sh")" = "1" ] &&
+	ok "gate declares DEADCODE_VERSION exactly once (first==last derivation)" ||
+	bad "gate declares DEADCODE_VERSION more than once — Makefile/selftest derive the first, shell runs the last"
 out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=clean FAKE_DEADCODE_ARGS="$WORK/run.args" make -s -C "$ROOT" check-nft-deadcode GO="$FAKE_GO" 2>&1); rc=$?
 [ "$rc" = "0" ] && grep -q "golang.org/x/tools/cmd/deadcode@$PINGO" "$WORK/run.args" &&
 	ok "scoped target invokes the gate's pinned analyser version ($PINGO)" ||
