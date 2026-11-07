@@ -257,3 +257,22 @@ func TestKeyAccessorsRejectSkewedMask17263(t *testing.T) {
 		t.Fatalf("all-bare appendKey materialised mask fields: %s", out)
 	}
 }
+
+func TestReplaceKeysMisalignedClosedClearsBit17263(t *testing.T) {
+	// Kimi delta pin: a misaligned bracket mask with closed=true must not
+	// leave BracketedClosed trusted after the mask is discarded.
+	n := &Node{Keys: []string{"a", "b"}}
+	n.ReplaceKeys([]string{"a", "b"}, nil, []bool{true}, true)
+	if n.KeysBracketed != nil {
+		t.Fatalf("KeysBracketed = %v, want nil (misaligned mask discarded)", n.KeysBracketed)
+	}
+	if n.BracketedClosed {
+		t.Fatal("BracketedClosed stayed true after its mask was discarded")
+	}
+	// Control: aligned closed mask keeps the bit.
+	m := &Node{Keys: []string{"a", "b"}}
+	m.ReplaceKeys([]string{"a", "b"}, nil, []bool{false, true}, true)
+	if !m.BracketedClosed {
+		t.Fatal("aligned closed bracket lost BracketedClosed")
+	}
+}
