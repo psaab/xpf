@@ -12,7 +12,9 @@
 //
 // `use super::*;` chains through loop_body/mod.rs to worker/mod.rs.
 
-use super::slice_pacing::{CT_REFRESH_SLICE_BUDGET, CT_REFRESH_WINDOW_NS, CT_SLICE_INTERVAL_NS};
+use super::slice_pacing::{
+    CT_EVIDENCE_CHUNK, CT_REFRESH_SLICE_BUDGET, CT_REFRESH_WINDOW_NS, CT_SLICE_INTERVAL_NS,
+};
 use super::*;
 
 /// #16217 (FZDiag28, part b): packet-independent pending-neighbor retry.
@@ -172,53 +174,23 @@ impl CtSlicePairSet {
 /// maintenance it only ever carried the install-time Opening/Pending
 /// state, so replicas reaped at 20 s despite a promoted serving pair.
 ///
-/// #18655: this is a WHOLE-TABLE walk, and the table is not small.
-/// a936a6f802 assumed per-worker tables are small next to the
-/// 2048-slot conntrack budget, but `replicate_session_upsert` copies
-/// every session into every worker's table (`WorkerLocalImport`). So
-/// `n`, the rows walked here, is the node's whole session population,
-/// and `N`, the shared rows, is about 2n.
-///
-/// The leg therefore:
-/// - runs ONCE per conntrack-refresh cycle, on the cycle's first slice
-///   (see `run_ct_slice`), not once per slice. A cycle has
-///   ceil(slab / 2048) slices, so per-slice runs made the leg
-///   O(n^2 / 2048) per cycle.
-/// - has a latency bound, replacing #16223's "within one GC interval". A
-///   pair that completes just after a run is advanced at the next cycle
-///   start, at most
-///   max(CT_REFRESH_WINDOW_NS, ceil(slab / 2048) * CT_SLICE_INTERVAL_NS)
-///   later: 10 s at the default cap; HA imports can stretch it to about
-///   13 s. (`upsert_synced_with_origin` has no per-table cap, so with a
-///   correct peer a table peaks near 2x the cap when both nodes'
-///   populations meet: 128 slices. The only hard import bound, #5674's
-///   shared-map ceiling, is looser; see #18687.) That is inside the 20 s
-///   TCP opening window that replicas are reaped on, for a pair that
-///   completes early enough in its replica's window; one that completes
-///   late (a SYN retried at 15 s, say) can still be reaped first. A const
-///   assert in `slice_pacing.rs` fails the build if the default cap or
-///   the windows would break this bound.
-/// - stays O(n + N) per run. It takes the global shared-map mutexes for
-///   batched restamps, `CtSlicePairSet` dedup and one
-///   `shared_rows_stage_and_counts` pass for the whole emit set, plus one
-///   short acquisition of both maps per not-yet-complete forward row
-///   (`node_served_forward_slice` -> `shared_completion_evidence`). So
-///   acquisitions are O(n) per run; each hold is short, and the leg runs
-///   once per refresh cycle (#18662 tracks bounding it).
-///
-/// The pre-fix per-key whole-map scan was O(n * N) under both mutexes,
-/// on every slice. At 4000 sessions it held them ~100% of the time and
-/// stalled every worker for seconds.
+/// #18655/#18662: the node-wide work uses a persistent table cursor and
+/// advances at most `CT_EVIDENCE_CHUNK` worker slots per ct-slice. Each
+/// slice restamps only that chunk, so map lookup and dedup work cannot
+/// grow with the table. Stage/count alias reads additionally visit at
+/// most 128 shared rows per dual-map lock hold.
 #[inline(never)]
 fn run_shared_evidence_leg(
     sessions: &mut crate::session::SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     established_cursor: &mut usize,
 ) {
+    let cursor = *established_cursor;
     let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    *established_cursor =
-        sessions.established_forward_slice(*established_cursor, usize::MAX, &mut established);
+    let established_next =
+        sessions.established_forward_slice(cursor, CT_EVIDENCE_CHUNK, &mut established);
     // #16217/#16223: assemble completion evidence NODE-WIDE (the
     // shared maps are visible here): (a) any worker's local row
     // Established, (b) reverse traffic for the canonical key in
@@ -246,14 +218,11 @@ fn run_shared_evidence_leg(
     // kept the import-time rev=0 forever and no evidence arm
     // could ever fire for it. `restamp_*` take the max, so a
     // zero-count replica never regresses a served count.
-    // #18655: one batch, so each map's mutex is taken once per
-    // slice instead of once (or twice) per counted pair.
+    // #18655: one counted-row chunk is restamped per evidence slice.
     let mut counted: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> = Vec::new();
-    for (key, nat, fwd, rev, packet_seen_ns) in sessions.ct_slice_forward_pairs() {
-        if fwd > 0 || rev > 0 {
-            counted.push((key, nat, fwd, rev, packet_seen_ns));
-        }
-    }
+    let next_cursor =
+        sessions.ct_slice_forward_pairs(cursor, CT_EVIDENCE_CHUNK, &mut counted);
+    counted.retain(|(_, _, fwd, rev, _)| *fwd > 0 || *rev > 0);
     let source_namespace = sessions.session_id_namespace();
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
         shared_sessions,
@@ -262,7 +231,14 @@ fn run_shared_evidence_leg(
         &counted,
     );
     let mut node_served: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
-    sessions.node_served_forward_slice(0, usize::MAX, &shared_evidence, &mut node_served);
+    let node_next = sessions.node_served_forward_slice(
+        cursor,
+        CT_EVIDENCE_CHUNK,
+        &shared_evidence,
+        &mut node_served,
+    );
+    debug_assert_eq!(next_cursor, established_next);
+    debug_assert_eq!(next_cursor, node_next);
     // `collected` = strict-established pairs PLUS node-served
     // (evidence-collected) pairs: the stage/count/alias restamps
     // below target exactly this union.
@@ -308,6 +284,7 @@ fn run_shared_evidence_leg(
     let alias_transitioned = crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
         shared_sessions,
         shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
         &collected,
     );
     // #16217 (ct-slice HA emit): the restamps above advanced
@@ -352,12 +329,14 @@ fn run_shared_evidence_leg(
         let rows = crate::afxdp::shared_ops::shared_rows_stage_and_counts(
             shared_sessions,
             shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
             &emit_keys,
         );
         for ((key, _nat), (stage, fwd, rev)) in emit_keys.iter().zip(rows) {
             sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
         }
     }
+    *established_cursor = next_cursor;
 }
 
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
@@ -385,6 +364,7 @@ pub(super) fn run_ct_slice(
     worker_id: u32,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     established_cursor: &mut usize,
 ) {
     // Incrementally refresh last_seen in BPF conntrack entries so Go-side
@@ -399,45 +379,44 @@ pub(super) fn run_ct_slice(
     // case, so the per-tick cost stays one integer compare plus one u64
     // subtract — no allocation, no regression to the empty/idle table.
     let should_slice = *ct_refresh_cursor != 0
+        || *established_cursor != 0
         || loop_now_ns.saturating_sub(*ct_cycle_start_ns) >= CT_REFRESH_WINDOW_NS;
     if should_slice && loop_now_ns.saturating_sub(*last_ct_slice_ns) >= CT_SLICE_INTERVAL_NS {
         *last_ct_slice_ns = loop_now_ns;
         // Stamp the cycle start on the FIRST slice of a cycle (cursor at the
         // top) so successive cycles are paced to the freshness window.
-        let shared_evidence_due = *ct_refresh_cursor == 0;
-        if shared_evidence_due {
+        let new_cycle = *ct_refresh_cursor == 0 && *established_cursor == 0;
+        let shared_evidence_due = new_cycle || *established_cursor != 0;
+        if new_cycle {
             *ct_cycle_start_ns = loop_now_ns;
         }
-        let ct_outcome = refresh_bpf_conntrack_last_seen(
-            conntrack_v4_fd,
-            conntrack_v6_fd,
-            &sessions,
-            // #3395: re-resolve each live row's policy_id against the
-            // current rule table from the session's bound rule handle.
-            &forwarding.policy,
-            loop_now_ns,
-            *ct_refresh_cursor,
-            CT_REFRESH_SLICE_BUDGET,
-        );
-        *ct_refresh_cursor = ct_outcome.cursor;
-        // #7919: fold this slice's largest observed per-session volume into
-        // the worker's monotonic high-water. The walk is budgeted, so a
-        // single slice may miss a busy session; taking the max ACROSS
-        // slices is what makes a reading of 0 mean "this worker's table has
-        // never held a session with traffic" rather than "not in this
-        // slice".
-        *session_volume_high_water =
-            (*session_volume_high_water).max(ct_outcome.max_session_volume);
-        // #18655: the shared-evidence leg walks the whole table, so it
-        // runs once per refresh cycle (its first slice). Small tables
-        // finish a cycle in one slice, so their cadence (once per
-        // CT_REFRESH_WINDOW_NS) is unchanged. Large tables no longer
-        // repeat the walk on each of their ceil(slab / 2048) slices.
+        if *ct_refresh_cursor != 0 || new_cycle {
+            let ct_outcome = refresh_bpf_conntrack_last_seen(
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &sessions,
+                // #3395: re-resolve each live row's policy_id against the
+                // current rule table from the session's bound rule handle.
+                &forwarding.policy,
+                loop_now_ns,
+                *ct_refresh_cursor,
+                CT_REFRESH_SLICE_BUDGET,
+            );
+            *ct_refresh_cursor = ct_outcome.cursor;
+            // #7919: fold this slice's largest observed per-session volume
+            // into the worker's monotonic high-water.
+            *session_volume_high_water =
+                (*session_volume_high_water).max(ct_outcome.max_session_volume);
+        }
+        // #18662: the worker-table pass advances by one fixed chunk per
+        // cadence tick. It starts with the conntrack cycle and continues
+        // even if the faster BPF cursor has already wrapped.
         if shared_evidence_due {
             run_shared_evidence_leg(
                 sessions,
                 shared_sessions,
                 shared_forward_wire_sessions,
+                shared_owner_rg_indexes,
                 established_cursor,
             );
         }

@@ -34,6 +34,7 @@ fn run_fabric_swap_18534(forwarding: &mut Arc<ForwardingState>, live: Vec<Fabric
     let mut wg_batch = crate::afxdp::wg_uncovered_forward::WgUncoveredInjectedBatch::new();
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let indexes = SharedSessionOwnerRgIndexes::default();
     let (mut cursor, mut cycle_start, mut last_slice, mut high_water, mut est_cursor) =
         (0usize, 0u64, 0u64, 0u64, 0usize);
     run_ct_slice(
@@ -52,6 +53,7 @@ fn run_fabric_swap_18534(forwarding: &mut Arc<ForwardingState>, live: Vec<Fabric
         0,
         &shared_sessions,
         &shared_forward_wire_sessions,
+        &indexes,
         &mut est_cursor,
     );
 }

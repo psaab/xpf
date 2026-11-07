@@ -47,8 +47,8 @@ mod session_index;
 #[cfg(test)]
 pub(super) use session_index::WIRE_KEY_CAP_OVERRIDE;
 pub(super) use session_index::{
-    FastMap, FastSet, OwnerRgSessionIndex, SharedNatAmbiguityIndex, SharedServedAliasIndex,
-    SharedSessionOwnerRgIndexes,
+    FastMap, FastSet, OwnerRgSessionIndex, SharedEntryKeyIndex, SharedNatAmbiguityIndex,
+    SharedServedAliasIndex, SharedSessionOwnerRgIndexes,
 };
 
 /// Packet buffered while waiting for ARP/NDP neighbor resolution.

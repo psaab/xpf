@@ -1505,8 +1505,10 @@ impl Coordinator {
             // aggregate admission ceiling, refusing legitimate imports. A
             // teardown must leave every surface empty, poisoned or not.
             lock_shared_recover(&self.sessions.nat).clear();
-            lock_shared_recover(&self.sessions.forward_wire).clear();
-            self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
+            self.sessions.owner_rg_indexes.clear(
+                &self.sessions.synced,
+                &self.sessions.forward_wire,
+            );
         }
         crate::sync_util::lock_tolerant(&self.recent_exceptions).clear();
         // #6242: the pre-#6242 layout ALSO ran two per-worker content-clear

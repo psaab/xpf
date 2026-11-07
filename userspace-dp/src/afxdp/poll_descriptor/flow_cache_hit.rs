@@ -999,6 +999,7 @@ pub(super) fn stage_flow_cache_hit(
             crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
+                worker_ctx.shared_owner_rg_indexes,
                 &[(stage_forward_key.clone(), stage_forward_nat)],
             );
             // #18530: refresh the forward conntrack timeout only at this

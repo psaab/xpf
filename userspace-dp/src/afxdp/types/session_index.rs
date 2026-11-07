@@ -650,6 +650,14 @@ impl SharedServedAliasIndex {
     }
 }
 
+/// Maps a row's stable `entry.key` to every map slot that currently stores
+/// that row. Forward-wire aliases intentionally retain their canonical
+/// `entry.key`, so looking up only the derived wire tuple misses stale and
+/// caller-NAT aliases. Two inline slots cover the published alias and the
+/// established-restamp alias without a per-alias heap allocation.
+pub(in crate::afxdp) type SharedEntryKeyIndex =
+    FastMap<SessionKey, smallvec::SmallVec<[SessionKey; 2]>>;
+
 #[derive(Clone)]
 pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     pub(in crate::afxdp) sessions: Arc<Mutex<OwnerRgSessionIndex>>,
@@ -666,6 +674,9 @@ pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     /// under the shared-primary lock during publish/remove so evidence lookup
     /// cannot observe a primary/alias publication gap.
     pub(in crate::afxdp) served_aliases: Arc<Mutex<SharedServedAliasIndex>>,
+    /// #18662: exact `entry.key` -> map-slot index for forward-wire aliases
+    /// queried by the ct-slice stage/count reader.
+    pub(in crate::afxdp) stage_counts_forward_wire_sessions: Arc<Mutex<SharedEntryKeyIndex>>,
     /// #18562: the node's ONE punt-seed directory, handed to every worker's
     /// `SessionTable` in `worker_loop` (`set_punt_seed_directory`). It
     /// mirrors live worker TABLES, not the shared maps, so `clear` below
@@ -684,6 +695,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             wire_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
             bare_tuple_sessions: Arc::new(Mutex::new(SharedSessionBareTupleIndex::default())),
             served_aliases: Arc::new(Mutex::new(SharedServedAliasIndex::default())),
+            stage_counts_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             punt_seeds: Arc::new(crate::session::PuntSeedDirectory::new()),
         }
     }
@@ -698,6 +710,7 @@ impl SharedSessionOwnerRgIndexes {
     pub(in crate::afxdp) fn clear(
         &self,
         shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+        shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     ) {
         // Keep the primary map and bare-tuple index paired under the same
         // lock order used by publish, removal, and close validation.
@@ -711,6 +724,15 @@ impl SharedSessionOwnerRgIndexes {
         drop(bare_tuple_sessions);
         served_aliases.clear();
         drop(served_aliases);
+        drop(sessions);
+        let mut wire_sessions =
+            crate::afxdp::shared_ops::lock_shared_recover(shared_forward_wire_sessions);
+        let mut stage_counts_wire =
+            crate::afxdp::shared_ops::lock_shared_recover(&self.stage_counts_forward_wire_sessions);
+        wire_sessions.clear();
+        stage_counts_wire.clear();
+        drop(stage_counts_wire);
+        drop(wire_sessions);
 
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.nat_sessions).clear();

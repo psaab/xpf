@@ -2353,13 +2353,21 @@ impl SessionTable {
     /// the evidence read.
     /// The timestamp distinguishes a live sibling with a lower counter total
     /// from an idle owner row whose shared count is already at its max.
-    /// Bounded by table size, one walk per slice.
+    /// Cursor-bounded by slot count so #18662 can spread this maintenance
+    /// across ct-slices. Returns the next slot cursor (zero at the end).
     pub(crate) fn ct_slice_forward_pairs(
         &self,
-    ) -> Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> {
-        let mut out = Vec::new();
+        cursor: usize,
+        budget: usize,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)>,
+    ) -> usize {
         let cap = self.slot_high_watermark.min(self.entries.capacity());
-        for idx in 0..cap {
+        if cap == 0 || budget == 0 {
+            return 0;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
             if let Some(record) = self.entries.get(idx) {
                 if !record.entry.metadata.is_reverse && !record.entry.closing {
                     let forward_packet_seen_ns = record.entry.last_packet_seen_ns;
@@ -2380,7 +2388,7 @@ impl SessionTable {
                 }
             }
         }
-        out
+        if end >= cap { 0 } else { end }
     }
     /// Return forward-pair counters and the newest admitted packet timestamp
     /// from either half. Directional lookup stamps its own row, while ct-slice

@@ -1,6 +1,40 @@
 use super::*;
 use crate::session::ForwardingGenerationStamp;
 use std::sync::atomic::AtomicU64;
+/// Keep the #18662 `entry.key` directory paired with one primary map slot.
+/// Call only while holding that map's mutex, always before dropping it.
+pub(super) fn update_stage_counts_entry_key_index(
+    index: &Arc<Mutex<SharedEntryKeyIndex>>,
+    map_key: &SessionKey,
+    previous: Option<&SyncedSessionEntry>,
+    next: Option<&SyncedSessionEntry>,
+) {
+    let mut index = lock_shared_recover(index);
+    if let Some(previous) = previous
+        && let Some(map_keys) = index.get_mut(&previous.key)
+    {
+        // Retain an empty inline bucket while the canonical session is live.
+        // The completing-packet restamp can restore the same wire key after
+        // displacement without allocating a new index node.
+        map_keys.retain(|key| key != map_key);
+    }
+    if let Some(next) = next {
+        let map_keys = index.entry(next.key.clone()).or_default();
+        if !map_keys.contains(map_key) {
+            map_keys.push(map_key.clone());
+        }
+    }
+}
+/// Drop a reserved bucket only after its canonical session is gone.
+pub(super) fn prune_empty_stage_counts_entry_key_index(
+    index: &Arc<Mutex<SharedEntryKeyIndex>>,
+    entry_key: &SessionKey,
+) {
+    let mut index = lock_shared_recover(index);
+    if index.get(entry_key).is_some_and(|map_keys| map_keys.is_empty()) {
+        index.remove(entry_key);
+    }
+}
 use std::sync::{MutexGuard, TryLockError};
 
 /// #4800: calls to [`publish_shared_session`] — one per session published

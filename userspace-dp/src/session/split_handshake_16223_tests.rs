@@ -1284,7 +1284,8 @@ fn ct_slice_pairs_include_pending_sync_import_with_live_rev_16217() {
     assert_eq!(table.rev_packets_for(&forward), 3, "premise: fw1 local replica counters DO move when it serves");
     // Production seam: the ct-slice pair set must include this row
     // (any origin, any stage), and must not include the reverse row.
-    let pairs = table.ct_slice_forward_pairs();
+    let mut pairs = Vec::new();
+    assert_eq!(table.ct_slice_forward_pairs(0, usize::MAX, &mut pairs), 0);
     assert!(
         pairs.iter().any(|(k, _, _, _, _)| k == &forward),
         "#16217 fw1 leg: pending SyncImport forward with live rev must be in ct-slice pairs"

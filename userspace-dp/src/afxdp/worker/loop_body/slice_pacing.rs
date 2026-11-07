@@ -22,6 +22,10 @@ const _: () = assert!(EXPORT_SLICE_EMITS <= EXPORT_SLICE_BUDGET);
 pub(super) const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000; // full-table freshness target
 pub(super) const CT_SLICE_INTERVAL_NS: u64 = 100_000_000; // 100ms between slices
 pub(super) const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per slice
+/// #18662: fixed upper bound on rows advanced by the shared-evidence
+/// worker-table cursor in one ct-slice. The alias-exact stage/count read
+/// separately bounds each shared-map lock hold to this many matching rows.
+pub(super) const CT_EVIDENCE_CHUNK: usize = 2048;
 /// Maximum interval between shared-evidence passes for the current slab.
 /// `run_shared_evidence_leg` runs at the first slice of each ct-refresh cycle;
 /// oversized HA-import populations stretch the cycle beyond its 10 s target.

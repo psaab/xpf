@@ -403,52 +403,121 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
 /// keyed by the row's own `entry.key` and NOT by its map key.
 pub(super) type StageCountsWanted = FastMap<SessionKey, Vec<(usize, bool)>>;
 
-/// #18655: the single pass behind [`shared_rows_stage_and_counts`].
-///
-/// It visits each row of both maps once. For every output slot that a row
-/// vouches for, it folds in the row's stage (forward rows only) and its
-/// `fwd` / `rev` counts, all max-only. That is exactly the per-key
-/// `map.values()` scan this replaces, run once per row instead of once per
-/// row per key. Returns the number of rows visited, so a cell can pin the
-/// work at one pass per batch.
-pub(super) fn stage_and_counts_pass(
-    holders: &FastMap<SessionKey, SyncedSessionEntry>,
-    wires: &FastMap<SessionKey, SyncedSessionEntry>,
+/// #18662: at most this many shared rows are fetched during any one
+/// stage/count mutex hold, independent of table size.
+pub(in crate::afxdp) const STAGE_COUNTS_LOCK_CHUNK_18662: usize = 128;
+
+/// Fold a matching shared row into its requested output slots.
+fn fold_stage_count_row(
+    entry: &SyncedSessionEntry,
+    is_wire: bool,
     wanted: &StageCountsWanted,
     out: &mut [(u8, u64, u64)],
-) -> usize {
-    let mut visited = 0usize;
-    for (map, is_wire) in [(holders, false), (wires, true)] {
-        for entry in map.values() {
-            visited += 1;
-            let Some(slots) = wanted.get(&entry.key) else {
-                continue;
-            };
-            for &(index, wire_only) in slots {
-                if wire_only && !is_wire {
-                    continue;
-                }
-                let slot = &mut out[index];
-                if !entry.metadata.is_reverse {
-                    slot.0 = slot.0.max(entry.tcp_handshake_state);
-                }
-                slot.1 = slot.1.max(entry.fwd_packets);
-                slot.2 = slot.2.max(entry.rev_packets);
-            }
+) {
+    let Some(slots) = wanted.get(&entry.key) else {
+        return;
+    };
+    for &(index, wire_only) in slots {
+        if wire_only && !is_wire {
+            continue;
         }
+        let slot = &mut out[index];
+        if !entry.metadata.is_reverse {
+            slot.0 = slot.0.max(entry.tcp_handshake_state);
+        }
+        slot.1 = slot.1.max(entry.fwd_packets);
+        slot.2 = slot.2.max(entry.rev_packets);
     }
-    visited
 }
 
-// #18655: per-thread `(passes, rows visited)` for
-// `shared_rows_stage_and_counts`. Lets a ct-slice cell assert ONE pass
-// over the shared maps per slice whatever the batch size. The pre-fix
-// per-key scan cost `keys × rows` while holding both global mutexes.
+/// #18662: lookup only the requested canonical/reverse keys and exact
+/// `entry.key` alias buckets. Publish/remove/displacement and established
+/// alias restamps maintain the wire alias index. Each lock hold visits at
+/// most `STAGE_COUNTS_LOCK_CHUNK_18662` lookup candidates and fetches no
+/// more than that many rows before releasing both shared maps.
+fn stage_and_counts_pass(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    wire_index: &Arc<Mutex<SharedEntryKeyIndex>>,
+    wanted: &StageCountsWanted,
+    out: &mut [(u8, u64, u64)],
+    requested: &[SessionKey],
+) -> (usize, usize, usize) {
+    let mut key_cursor = 0usize;
+    let mut alias_cursor = 0usize;
+    let mut total_visited = 0usize;
+    let mut max_hold = 0usize;
+    let mut max_work = 0usize;
+    while key_cursor < requested.len() {
+        let holders = lock_shared_recover(shared_sessions);
+        let wires = lock_shared_recover(shared_forward_wire_sessions);
+        let wire_index = lock_shared_recover(wire_index);
+        let mut hold_visited = 0usize;
+        let mut hold_work = 0usize;
+        while key_cursor < requested.len()
+            && hold_work + 2 <= STAGE_COUNTS_LOCK_CHUNK_18662
+        {
+            let key = &requested[key_cursor];
+            if alias_cursor == 0 {
+                if let Some(entry) = holders.get(key) {
+                    hold_visited += 1;
+                    if entry.key == *key {
+                        fold_stage_count_row(entry, false, wanted, out);
+                    }
+                }
+                if let Some(entry) = wires.get(key) {
+                    hold_visited += 1;
+                    if wanted.contains_key(&entry.key) {
+                        fold_stage_count_row(entry, true, wanted, out);
+                    }
+                }
+                hold_work += 2;
+            }
+            let Some(map_keys) = wire_index.get(key) else {
+                key_cursor += 1;
+                alias_cursor = 0;
+                continue;
+            };
+            // The index can shrink between lock chunks; do not leave the
+            // cursor past the new bucket end and spin forever.
+            alias_cursor = alias_cursor.min(map_keys.len());
+            while alias_cursor < map_keys.len()
+                && hold_work < STAGE_COUNTS_LOCK_CHUNK_18662
+            {
+                let map_key = &map_keys[alias_cursor];
+                alias_cursor += 1;
+                hold_work += 1;
+                if wanted.contains_key(map_key) {
+                    continue;
+                }
+                if let Some(entry) = wires.get(map_key) {
+                    hold_visited += 1;
+                    if entry.key == *key {
+                        fold_stage_count_row(entry, true, wanted, out);
+                    }
+                }
+            }
+            if alias_cursor == map_keys.len() {
+                key_cursor += 1;
+                alias_cursor = 0;
+            }
+        }
+        total_visited += hold_visited;
+        max_hold = max_hold.max(hold_visited);
+        max_work = max_work.max(hold_work);
+    }
+    (total_visited, max_hold, max_work)
+}
+
+// #18655/#18662: per-thread `(calls, rows fetched, max rows in one mutex
+// hold, max lookup candidates in one hold, requested worker keys)`. The
+// lock-hold fields count rows and candidates, not just query keys.
 #[cfg(test)]
 thread_local! {
-    pub(in crate::afxdp) static STAGE_COUNTS_WORK_18655: std::cell::Cell<(u64, u64)> =
-        const { std::cell::Cell::new((0, 0)) };
+    pub(in crate::afxdp) static STAGE_COUNTS_WORK_18655: std::cell::Cell<(u64, u64, u64, u64, u64)> =
+        const { std::cell::Cell::new((0, 0, 0, 0, 0)) };
 }
+
 
 /// #16217 (ct-slice HA emit), batched by #18655. For each canonical forward
 /// key in `keys`, snapshot `(stage_wire, fwd, rev)` from the shared maps
@@ -464,28 +533,21 @@ thread_local! {
 /// - in `shared_forward_wire_sessions`, rows whose key is `F`, `R` or the
 ///   wire key `W`.
 ///
-/// Why one pass and not keyed `get()`: a forward-wire row is stored under
-/// its translated tuple, not under its own `entry.key`. A row is also not
-/// always at `forward_wire_key(entry.key, entry.nat)`: the ct-slice alias
-/// insert keys it by the caller's NAT, a removal's survivor is reinserted
-/// under the removed key, and a republish with a changed NAT leaves the old
-/// alias in place (census in `docs/log/18655.md`). So `get(F|R|W)` is not
-/// exact. The pass is exact by construction, and it costs
-/// `rows(shared) + rows(wire)` per BATCH. The old per-key scan cost
-/// `keys × rows` while holding both global mutexes. Every worker holds a
-/// copy of every session, so that was quadratic in the node's session
-/// count; at 4000 sessions it saturated the mutexes and stalled the whole
-/// dataplane (#18655).
+/// Why not keyed `get()` alone: aliases can remain under a caller-NAT or a
+/// displaced key while their row retains a different `entry.key`. The
+/// `SharedSessionOwnerRgIndexes` forward-wire directory maps each stable
+/// `entry.key` to every live map slot. Alias candidates are processed in
+/// fixed chunks, releasing BOTH shared-map mutexes between chunks; two
+/// inline index slots cover the usual publish + established-restamp pair.
 ///
-/// Lock order: `shared_sessions` THEN `shared_forward_wire_sessions`, held
-/// together for the pass, as the per-key form held them per key. The
-/// wanted-key index is built before the locks are taken. Not inlined: it
-/// runs once per slice, and keeping it a real symbol lets a uprobe time
-/// the lock-held pass on a live node (the #18655 A/B measures it).
+/// Lock order is `shared_sessions` THEN `shared_forward_wire_sessions`,
+/// followed by the wire alias index. Not inlined: it remains independently
+/// measurable on the worker hot path.
 #[inline(never)]
 pub(in crate::afxdp) fn shared_rows_stage_and_counts(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     keys: &[(SessionKey, crate::nat::NatDecision)],
 ) -> Vec<(u8, u64, u64)> {
     let mut out = vec![(0u8, 0u64, 0u64); keys.len()];
@@ -500,20 +562,31 @@ pub(in crate::afxdp) fn shared_rows_stage_and_counts(
         wanted.entry(reverse_key).or_default().push((index, false));
         wanted.entry(wire_key).or_default().push((index, true));
     }
-    let holders = lock_shared_recover(shared_sessions);
-    let wires = lock_shared_recover(shared_forward_wire_sessions);
-    let visited = stage_and_counts_pass(&holders, &wires, &wanted, &mut out);
-    drop(wires);
-    drop(holders);
+    let requested: Vec<SessionKey> = wanted.keys().cloned().collect();
+    let (visited, max_hold, max_work) = stage_and_counts_pass(
+        shared_sessions,
+        shared_forward_wire_sessions,
+        &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+        &wanted,
+        &mut out,
+        &requested,
+    );
     #[cfg(test)]
     STAGE_COUNTS_WORK_18655.with(|work| {
-        let (passes, rows) = work.get();
-        work.set((passes + 1, rows + visited as u64));
+        let (calls, rows, previous_max, previous_work, requested) = work.get();
+        work.set((
+            calls + 1,
+            rows + visited as u64,
+            previous_max.max(max_hold as u64),
+            previous_work.max(max_work as u64),
+            requested + keys.len() as u64,
+        ));
     });
     #[cfg(not(test))]
-    let _ = visited;
+    let _ = (visited, max_hold, max_work);
     out
 }
+
 
 /// #16223: periodic maintenance. Advance the shared entries for every
 /// ESTABLISHED forward key in `established_keys` to the Established
@@ -576,6 +649,7 @@ pub(in crate::afxdp) fn restamp_shared_handshakes_established(
 pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     established_keys: &[(SessionKey, crate::nat::NatDecision)],
 ) -> Vec<(SessionKey, crate::nat::NatDecision)> {
     if established_keys.is_empty() {
@@ -621,7 +695,14 @@ pub(in crate::afxdp) fn restamp_shared_forward_wire_established(
         } else if let Some(canonical) = canonicals.get(&wire_key) {
             let mut aliased = canonical.clone();
             aliased.tcp_handshake_state = established;
+            let map_key = wire_key.clone();
             wire_sessions.insert(wire_key, aliased);
+            update_stage_counts_entry_key_index(
+                &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                &map_key,
+                None,
+                wire_sessions.get(&map_key),
+            );
             transitioned.push((forward_key.clone(), *nat));
         }
     }

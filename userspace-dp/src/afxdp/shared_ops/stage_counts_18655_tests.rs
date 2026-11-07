@@ -26,6 +26,8 @@ use crate::session::{SessionOrigin, TcpHandshakeState};
 use std::net::{IpAddr, Ipv4Addr};
 
 type Map = Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>;
+const EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662: usize = 128;
+
 
 /// The pre-#18655 per-key helper, verbatim apart from taking the guarded
 /// maps directly. It is the reference the batch must reproduce exactly.
@@ -192,7 +194,7 @@ impl Lcg {
 /// cannot reach. Returns the maps and the `(key, nat)` queries to compare
 /// (each flow under its own NAT, some under a foreign NAT, absent keys,
 /// duplicates).
-fn mixed_state() -> (Map, Map, Vec<(SessionKey, crate::nat::NatDecision)>) {
+fn mixed_state() -> (Map, Map, SharedSessionOwnerRgIndexes, Vec<(SessionKey, crate::nat::NatDecision)>) {
     let (shared, nat_map, wire_map, indexes) = maps();
     let mut rng = Lcg(18655);
     let stages = [
@@ -241,9 +243,27 @@ fn mixed_state() -> (Map, Map, Vec<(SessionKey, crate::nat::NatDecision)>) {
     );
     {
         let wire_key = crate::session::forward_wire_key(&restamped, snat(Some(45001)));
-        lock_shared_recover(&wire_map).remove(&wire_key);
+        let mut wires = lock_shared_recover(&wire_map);
+        let removed = wires.remove(&wire_key).expect("published alias present");
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &wire_key,
+            Some(&removed),
+            None,
+        );
     }
-    restamp_shared_forward_wire_established(&shared, &wire_map, &[(restamped.clone(), snat(Some(45999)))]);
+    restamp_shared_forward_wire_established(&shared, &wire_map, &indexes, &[(restamped.clone(), snat(Some(45999)))]);
+    {
+        let wire_index = lock_shared_recover(&indexes.stage_counts_forward_wire_sessions);
+        let aliases = wire_index
+            .get(&restamped)
+            .expect("#18662: restamp keeps a reserved entry-key bucket");
+        assert_eq!(aliases.len(), 1);
+        assert!(
+            !aliases.spilled(),
+            "#18662: restoring one wire alias stays in the two-slot inline bucket"
+        );
+    }
     queries.push((restamped.clone(), snat(Some(45001))));
     queries.push((restamped.clone(), snat(Some(45999))));
     // A republish of the SAME canonical key under a changed NAT. publish
@@ -309,13 +329,13 @@ fn mixed_state() -> (Map, Map, Vec<(SessionKey, crate::nat::NatDecision)>) {
     queries.push((key(v4(192, 0, 2, 1), 1, v4(192, 0, 2, 2), 2, crate::ip_proto::PROTO_UDP), no_nat()));
     let dup = queries[1].clone();
     queries.push(dup);
-    (shared, wire_map, queries)
+    (shared, wire_map, indexes, queries)
 }
 
 #[test]
 fn batched_stage_counts_equal_the_per_key_scan_18655() {
-    let (shared, wire_map, queries) = mixed_state();
-    let batched = shared_rows_stage_and_counts(&shared, &wire_map, &queries);
+    let (shared, wire_map, indexes, queries) = mixed_state();
+    let batched = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, &queries);
     assert_eq!(batched.len(), queries.len());
     let holders = lock_shared_recover(&shared);
     let wires = lock_shared_recover(&wire_map);
@@ -341,7 +361,7 @@ fn batched_stage_counts_equal_the_per_key_scan_18655() {
     drop(wires);
     drop(holders);
     for (index, query) in queries.iter().enumerate() {
-        let single = shared_rows_stage_and_counts(&shared, &wire_map, std::slice::from_ref(query));
+        let single = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, std::slice::from_ref(query));
         assert_eq!(single[0], batched[index], "#18655: single-key batch differs for {query:?}");
     }
 }
@@ -352,7 +372,7 @@ fn batched_stage_counts_equal_the_per_key_scan_18655() {
 /// the equivalence cell above has lost its discriminating rows.
 #[test]
 fn fixture_holds_wire_rows_keyed_get_cannot_reach_18655() {
-    let (shared, wire_map, queries) = mixed_state();
+    let (shared, wire_map, _indexes, queries) = mixed_state();
     let _ = shared;
     let wires = lock_shared_recover(&wire_map);
     let mut unreachable = 0usize;
@@ -371,8 +391,8 @@ fn fixture_holds_wire_rows_keyed_get_cannot_reach_18655() {
 }
 
 #[test]
-fn one_pass_visits_each_shared_row_once_per_batch_18655() {
-    let (shared, wire_map, queries) = mixed_state();
+fn indexed_stage_counts_bound_each_hold_small_18662() {
+    let (shared, wire_map, indexes, queries) = mixed_state();
     let rows = {
         let h = lock_shared_recover(&shared);
         let w = lock_shared_recover(&wire_map);
@@ -380,31 +400,107 @@ fn one_pass_visits_each_shared_row_once_per_batch_18655() {
     };
     for batch in [&queries[..1], &queries[..8], &queries[..]] {
         let before = STAGE_COUNTS_WORK_18655.with(|w| w.get());
-        let _ = shared_rows_stage_and_counts(&shared, &wire_map, batch);
+        let _ = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, batch);
         let after = STAGE_COUNTS_WORK_18655.with(|w| w.get());
-        assert_eq!(after.0 - before.0, 1, "#18655: one pass per batch");
-        assert_eq!(
-            after.1 - before.1,
-            rows,
-            "#18655: a batch of {} keys must visit each of the {rows} shared rows exactly once \
-             (a per-key scan visits keys × rows)",
-            batch.len()
+        assert_eq!(after.0 - before.0, 1, "#18662: one indexed batch call");
+        assert!(
+            after.1 - before.1 <= rows.saturating_mul(4),
+            "#18662: indexed reads stay proportional to the table, not per-key scans"
+        );
+        assert!(
+            after.2 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+            "#18662: max rows fetched in one dual-map lock hold is {}, bound is {}",
+            after.2,
+            EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662
+        );
+        assert!(
+            after.3 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+            "#18662: max lookup candidates in one hold is {}, bound is {}",
+            after.3,
+            EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662
         );
     }
-    // The pure pass reports the same count.
-    let holders = lock_shared_recover(&shared);
-    let wires = lock_shared_recover(&wire_map);
-    let mut out = vec![(0, 0, 0); 1];
-    let mut wanted = FastMap::default();
-    wanted.insert(queries[0].0.clone(), vec![(0usize, false)]);
-    assert_eq!(super::restamp::stage_and_counts_pass(&holders, &wires, &wanted, &mut out) as u64, rows);
+}
+
+#[test]
+fn indexed_stage_counts_bound_each_hold_at_64k_18662() {
+    const ROWS: usize = 65_536;
+    let shared: Map = Arc::new(Mutex::new(FastMap::default()));
+    let wire_map: Map = Arc::new(Mutex::new(FastMap::default()));
+    let indexes = SharedSessionOwnerRgIndexes::default();
+    let server = v4(172, 16, 80, 200);
+    let nat = |i: usize| snat(Some(30_000u16.wrapping_add(i as u16)));
+    let mut queries = Vec::with_capacity(ROWS);
+    {
+        let mut holders = lock_shared_recover(&shared);
+        let mut wires = lock_shared_recover(&wire_map);
+        for i in 0..ROWS {
+            let forward = key(
+                v4(10, 0, (i >> 8) as u8, i as u8),
+                20_000 + (i % 40_000) as u16,
+                server,
+                5201,
+                crate::ip_proto::PROTO_TCP,
+            );
+            let decision = nat(i);
+            let entry = row(
+                &forward,
+                decision,
+                TcpHandshakeState::Established.to_wire(),
+                i as u64,
+                1,
+                false,
+                i as u64 + 1,
+            );
+            let wire_key = crate::session::forward_wire_key(&forward, decision);
+            holders.insert(forward.clone(), entry.clone());
+            wires.insert(wire_key.clone(), entry.clone());
+            update_stage_counts_entry_key_index(
+                &indexes.stage_counts_forward_wire_sessions,
+                &wire_key,
+                None,
+                Some(&entry),
+            );
+            queries.push((forward, decision));
+        }
+    }
+    let before = STAGE_COUNTS_WORK_18655.with(|w| w.get());
+    let out = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, &queries);
+    let after = STAGE_COUNTS_WORK_18655.with(|w| w.get());
+    assert_eq!(out.len(), ROWS);
+    for (i, actual) in out.iter().enumerate() {
+        assert_eq!(
+            *actual,
+            (TcpHandshakeState::Established.to_wire(), i as u64, 1),
+            "#18662: exact stage/count result for row {i}"
+        );
+    }
+    assert_eq!(after.0 - before.0, 1, "#18662: 64k rows use one indexed call");
+    assert_eq!(
+        after.4 - before.4,
+        ROWS as u64,
+        "#18662: 64k input keys are processed exactly once"
+    );
+    let total_rows = (ROWS * 2) as u64;
+    assert!(
+        after.1 - before.1 <= total_rows * 2,
+        "#18662: 64k indexed reads stay linear instead of rescanning per query"
+    );
+    assert!(
+        after.2 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+        "#18662: 64k population caps rows fetched per dual-map lock hold"
+    );
+    assert!(
+        after.3 <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662 as u64,
+        "#18662: 64k population caps visited lookup candidates per hold"
+    );
 }
 
 #[test]
 fn empty_batch_takes_no_lock_and_no_pass_18655() {
-    let (shared, wire_map, _) = mixed_state();
+    let (shared, wire_map, indexes, _) = mixed_state();
     let before = STAGE_COUNTS_WORK_18655.with(|w| w.get());
-    let out = shared_rows_stage_and_counts(&shared, &wire_map, &[]);
+    let out = shared_rows_stage_and_counts(&shared, &wire_map, &indexes, &[]);
     assert!(out.is_empty());
     assert_eq!(STAGE_COUNTS_WORK_18655.with(|w| w.get()), before);
 }
@@ -420,8 +516,8 @@ fn snapshot(map: &Map) -> Vec<(SessionKey, u64, u64)> {
 
 #[test]
 fn batched_count_restamp_equals_per_pair_restamp_18655() {
-    let (shared_a, wire_a, queries) = mixed_state();
-    let (shared_b, wire_b, _) = mixed_state();
+    let (shared_a, wire_a, _indexes_a, queries) = mixed_state();
+    let (shared_b, wire_b, _indexes_b, _) = mixed_state();
     let mut rng = Lcg(55018);
     let pairs: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> = queries
         .iter()
@@ -460,8 +556,16 @@ fn wire_alias_restamp_keeps_first_canonical_on_collision_18655() {
     let pending = TcpHandshakeState::HandshakePending.to_wire();
     publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &row(&first, nat, pending, 1, 1, false, 5001));
     publish_shared_session(&shared, &nat_map, &wire_map, &indexes, &row(&second, nat, pending, 2, 2, false, 5002));
-    lock_shared_recover(&wire_map).remove(&wire_key);
-    restamp_shared_forward_wire_established(&shared, &wire_map, &[(first.clone(), nat), (second.clone(), nat)]);
+    let mut wires = lock_shared_recover(&wire_map);
+    let removed = wires.remove(&wire_key).expect("published alias present");
+    update_stage_counts_entry_key_index(
+        &indexes.stage_counts_forward_wire_sessions,
+        &wire_key,
+        Some(&removed),
+        None,
+    );
+    drop(wires);
+    restamp_shared_forward_wire_established(&shared, &wire_map, &indexes, &[(first.clone(), nat), (second.clone(), nat)]);
     let alias = lock_shared_recover(&wire_map).get(&wire_key).cloned().expect("alias reinserted");
     assert_eq!(alias.key, first, "#18655: the alias must clone the FIRST completed key's canonical row");
     assert_eq!(alias.session_id, 5001);

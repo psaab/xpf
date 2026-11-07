@@ -604,7 +604,13 @@ pub(in crate::afxdp) fn publish_shared_session(
             let wire_displaced = displaced
                 .as_ref()
                 .is_some_and(|existing| existing.key != entry.key);
-            let previous_owner_rg = displaced.map(|existing| existing.metadata.owner_rg_id);
+            let previous_owner_rg = displaced.as_ref().map(|existing| existing.metadata.owner_rg_id);
+            super::update_stage_counts_entry_key_index(
+                &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                &wire_key,
+                displaced.as_ref(),
+                Some(entry),
+            );
             update_owner_rg_index(
                 &shared_owner_rg_indexes.forward_wire_sessions,
                 &wire_key,
@@ -958,9 +964,16 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                             // scanning its values.
                             match sessions.get(&survivor_key).cloned() {
                                 Some(survivor) => {
-                                    let previous_owner_rg = forward_wire_sessions
-                                        .insert(wire_key.clone(), survivor.clone())
-                                        .map(|existing| existing.metadata.owner_rg_id);
+                                    let previous = forward_wire_sessions
+                                        .insert(wire_key.clone(), survivor.clone());
+                                    let previous_owner_rg =
+                                        previous.as_ref().map(|existing| existing.metadata.owner_rg_id);
+                                    super::update_stage_counts_entry_key_index(
+                                        &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                                        &wire_key,
+                                        previous.as_ref(),
+                                        Some(&survivor),
+                                    );
                                     update_owner_rg_index(
                                         &shared_owner_rg_indexes.forward_wire_sessions,
                                         &wire_key,
@@ -982,6 +995,12 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                                         &wire_key,
                                         &entry.key,
                                     ) {
+                                        super::update_stage_counts_entry_key_index(
+                                            &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                                            &wire_key,
+                                            Some(&removed),
+                                            None,
+                                        );
                                         remove_owner_rg_index_entry(
                                             &shared_owner_rg_indexes.forward_wire_sessions,
                                             removed.metadata.owner_rg_id,
@@ -1001,6 +1020,12 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                                 &wire_key,
                                 &entry.key,
                             ) {
+                                super::update_stage_counts_entry_key_index(
+                                    &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                                    &wire_key,
+                                    Some(&removed),
+                                    None,
+                                );
                                 remove_owner_rg_index_entry(
                                     &shared_owner_rg_indexes.forward_wire_sessions,
                                     removed.metadata.owner_rg_id,
@@ -1014,6 +1039,12 @@ pub(in crate::afxdp) fn remove_shared_session_if(
                     }
                 }
             }
+        }
+        if !sessions.contains_key(&entry.key) {
+            super::prune_empty_stage_counts_entry_key_index(
+                &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                &entry.key,
+            );
         }
     }
     // Keep `shared_sessions` held through the prewarm un-file. If this lock is
@@ -1184,6 +1215,7 @@ mod handshake_monotonic_16223_tests {
         crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             &shared,
             &wire_map,
+            &indexes,
             &[(forward.clone(), nat)],
         );
         assert_eq!(wire(&shared, &forward), established, "canonical advanced");
@@ -1325,6 +1357,7 @@ mod handshake_monotonic_16223_tests {
                 crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
                     &shared,
                     &wire_map,
+                    &indexes,
                     &[(f.clone(), nat)],
                 );
             }
@@ -1435,6 +1468,7 @@ mod handshake_monotonic_16223_tests {
         crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             &shared,
             &wire_map,
+            &indexes,
             &[(forward.clone(), nat_decision())],
         );
         assert_eq!(wire(&shared, &forward), established, "canonical stage must advance");
@@ -1517,6 +1551,7 @@ mod handshake_monotonic_16223_tests {
         crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             &shared,
             &wire_map,
+            &indexes,
             &[(forward.clone(), nat)],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts(

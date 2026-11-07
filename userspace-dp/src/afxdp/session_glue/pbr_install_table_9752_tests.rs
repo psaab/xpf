@@ -2416,7 +2416,9 @@ fn purge_close_reinstall_scoped_survivor_skips_flush_10512() {
         "removing one scope must collapse the bucket to the surviving exact scope"
     );
 
-    shared.owner_rg_indexes.clear(&shared.sessions);
+    shared
+        .owner_rg_indexes
+        .clear(&shared.sessions, &shared.forward_wire_sessions);
     assert!(
         !super::super::session_delta::close_delta_is_stale_incarnation(
             &deltas[0],

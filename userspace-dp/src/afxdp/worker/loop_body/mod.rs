@@ -1622,6 +1622,7 @@ pub(crate) fn worker_loop(
             worker_id,
             &shared_sessions,
             &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
             &mut established_shared_cursor,
         );
         // #16217 (FZDiag28, part b): timer-driven pending-neighbor retry

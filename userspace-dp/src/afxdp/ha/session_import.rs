@@ -1188,9 +1188,10 @@ impl crate::afxdp::ha::SessionDomain {
                 return Err("clear-no-progress");
             }
         }
-        self.sessions.owner_rg_indexes.clear(&self.sessions.synced);
         lock_shared_recover(&self.sessions.nat).clear();
-        lock_shared_recover(&self.sessions.forward_wire).clear();
+        self.sessions
+            .owner_rg_indexes
+            .clear(&self.sessions.synced, &self.sessions.forward_wire);
         drop(fence);
         Ok(counts)
     }
