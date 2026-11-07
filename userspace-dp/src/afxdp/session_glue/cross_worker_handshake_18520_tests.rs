@@ -628,12 +628,10 @@ fn imported_opening_session_served_mid_stream_survives_opening_window_18520() {
             "premise: imported Opening"
         );
     }
-    let reverse_alias_index = std::cell::OnceCell::new();
     let node_served = |key: &SessionKey| {
         crate::afxdp::shared_ops::shared_node_served_evidence(
             &shared_sessions,
-            &shared_nat_sessions,
-            &reverse_alias_index,
+            &shared_owner_rg_indexes,
             key,
         )
     };
@@ -729,16 +727,13 @@ fn imported_opening_session_held_on_standby_survives_takeover_service_18520() {
     import(&mut b, t0);
     let shared_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
         Arc::new(Mutex::new(FastMap::default()));
-    let shared_nat_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
-        Arc::new(Mutex::new(FastMap::default()));
-    let reverse_alias_index = std::cell::OnceCell::new();
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
     let forwarding_here = std::cell::Cell::new(false);
     let rg_epoch = std::cell::Cell::new(0u32);
     let node_served = |key: &SessionKey| {
         crate::afxdp::shared_ops::shared_node_served_evidence(
             &shared_sessions,
-            &shared_nat_sessions,
-            &reverse_alias_index,
+            &shared_owner_rg_indexes,
             key,
         )
     };

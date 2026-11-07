@@ -65,77 +65,30 @@ pub(in crate::afxdp) fn shared_completion_evidence(
     }
     ev
 }
-/// #18663: reverse-row NAT aliases are not present in `shared_nat_sessions`,
-/// which indexes forward rows only. The pass-local index maps an exact
-/// translated reverse key to its unique shared reverse-row key. `None`
-/// represents an alias collision, which fails closed.
-pub(in crate::afxdp) struct SharedNodeServedReverseAliasIndex {
-    aliases: FastMap<SessionKey, Option<SessionKey>>,
-}
 
-/// Build the reverse-row portion of #18663's evidence index. The shared-map
-/// lock is held only while snapshotting compact key/NAT tuples in one pass;
-/// alias derivation, hashing, and index allocation happen after it is dropped.
-pub(in crate::afxdp) fn build_shared_node_served_reverse_alias_index(
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-) -> SharedNodeServedReverseAliasIndex {
-    let established = crate::session::TcpHandshakeState::Established.to_wire();
-    #[cfg(test)]
-    let mut rows_visited = 0u64;
-    let reverse_rows = {
-        let sessions = lock_shared_recover(shared_sessions);
-        let mut rows = Vec::with_capacity(sessions.len());
-        for (map_key, entry) in sessions.iter() {
-            #[cfg(test)]
-            {
-                rows_visited += 1;
-            }
-            if entry.metadata.is_reverse && entry.tcp_handshake_state == established {
-                rows.push((map_key.clone(), entry.key.clone(), entry.decision.nat));
-            }
-        }
-        rows
-    };
-    #[cfg(test)]
-    NODE_SERVED_INDEX_WORK_18663.with(|stats| {
-        let (builds, rows) = stats.get();
-        stats.set((builds + 1, rows + rows_visited));
-    });
-
-    let mut aliases: FastMap<SessionKey, Option<SessionKey>> = FastMap::default();
-    for (map_key, entry_key, nat) in reverse_rows {
-        let reverse_nat = crate::session::reverse_session_key(&entry_key, nat);
-        if let Some(existing) = aliases.get_mut(&reverse_nat) {
-            if existing.as_ref() != Some(&map_key) {
-                *existing = None;
-            }
-        } else {
-            aliases.insert(reverse_nat, Some(map_key));
-        }
+/// Whether a live primary row still derives the exact alias being probed.
+fn shared_node_served_entry_claims_alias(
+    entry: &SyncedSessionEntry,
+    key: &SessionKey,
+) -> bool {
+    if entry.metadata.is_reverse {
+        crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
+    } else {
+        crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
+            || crate::session::reverse_canonical_key(&entry.key, entry.decision.nat) == *key
     }
-    SharedNodeServedReverseAliasIndex { aliases }
 }
 
-/// #16223: node-level served-handshake evidence for `key` (either
-/// half of the pair): the shared synced entry whose handshake wire is
-/// Established. The completion counter half (`rev_packets`) is not
-/// read from the shared entry; production merges this wire with the
-/// serving worker's admitted-counter stamp (`SessionTable` node-served
-/// stamps, surfaced through the expiry context). Either half's key
-/// may name the entry, and the exact reverse/SNAT-translated companion
-/// is matched without borrowing evidence from another flow.
-/// #18722/#18742: the matched canonical forward row's ct-slice-restamped
-/// counts and stable `(session_id, generation)` identity ride out as
-/// `shared_served` / `shared_incarnation`, the expiry pass's per-contributor
-/// recency proof.
-/// #18663: direct and no-NAT reverse rows are probed by their primary
-/// keys; forward-row NAT aliases use `shared_nat_sessions`. A NAT-reverse
-/// alias stored only on a reverse row is resolved from `reverse_alias_index`,
-/// built lazily once per expiry pass.
+/// #16223: node-level served-handshake evidence for `key` (either half of
+/// the pair), with #18722/#18742's counts, incarnation and recency proof.
+/// #18663: every branch is a keyed primary or alias lookup. Direct and plain
+/// reverse keys retain precedence; translated aliases resolve through the
+/// live alias-owner index maintained with `shared_sessions` under the same
+/// lock. Alias collisions fail closed, and the resolved primary is checked
+/// again while that lock remains held.
 pub(in crate::afxdp) fn shared_node_served_evidence(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    reverse_alias_index: &std::cell::OnceCell<SharedNodeServedReverseAliasIndex>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
 ) -> crate::session::NodeServedEvidence {
     let established = crate::session::TcpHandshakeState::Established.to_wire();
@@ -170,7 +123,10 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
         true
     };
 
-    // The direct keyed row retains precedence over every companion.
+    // Keep the primary-map lock for the complete lookup. Publishers and
+    // removers update `served_aliases` under this same lock, so a query cannot
+    // observe an alias before its primary row, a replacement without its new
+    // alias, or a removed primary through a stale alias owner.
     let sessions = lock_shared_recover(shared_sessions);
     #[cfg(test)]
     {
@@ -181,8 +137,6 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
         found = record(&sessions, entry);
     }
     if !found {
-        // The plain reverse orientation is derivable without knowing NAT.
-        // `reverse_session_key` is involutive for the no-NAT decision.
         let reverse =
             crate::session::reverse_session_key(key, crate::nat::NatDecision::default());
         #[cfg(test)]
@@ -193,66 +147,21 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
             found = record(&sessions, entry);
         }
     }
-    drop(sessions);
-
     if !found {
-        // The NAT reverse tuple is not derivable from `key`: the original
-        // decision belongs to the forward row. `publish_shared_session`
-        // already indexes that exact tuple (plus the reverse-canonical
-        // alias) in `shared_nat_sessions`. Use it only to recover the
-        // canonical key, then read the live row from `shared_sessions`;
-        // the alias's copy may have stale restamped counters.
         #[cfg(test)]
         {
             work.set(work.get() + 1);
         }
-        let canonical_key = lock_shared_recover(shared_nat_sessions)
-            .get(key)
-            .map(|entry| entry.key.clone());
-        if let Some(canonical_key) = canonical_key {
-            let sessions = lock_shared_recover(shared_sessions);
+        let owner = lock_shared_recover(&shared_owner_rg_indexes.served_aliases)
+            .unique_owner(key)
+            .cloned();
+        if let Some(owner) = owner {
             #[cfg(test)]
             {
                 work.set(work.get() + 1);
             }
-            if let Some(entry) = sessions.get(&canonical_key) {
-                // The reverse-NAT map can retain an alias after a flow's
-                // NAT decision changes. Recheck the current primary row's
-                // relation to the probe so a stale alias cannot vouch for
-                // a new incarnation with an unrelated tuple.
-                let reverse_default = crate::session::reverse_session_key(
-                    &entry.key,
-                    crate::nat::NatDecision::default(),
-                );
-                let reverse_nat =
-                    crate::session::reverse_session_key(&entry.key, entry.decision.nat);
-                if entry.key == *key || reverse_default == *key || reverse_nat == *key {
-                    found = record(&sessions, entry);
-                }
-            }
-        }
-    }
-    if !found {
-        // A reverse row's NAT-derived opposite key is not available from the
-        // probe and is not stored in `shared_nat_sessions`. Build this narrow
-        // reverse-row alias index once, on the first such fallback in the
-        // expiry pass, then re-read its current primary row.
-        let index = reverse_alias_index
-            .get_or_init(|| build_shared_node_served_reverse_alias_index(shared_sessions));
-        #[cfg(test)]
-        {
-            work.set(work.get() + 1);
-        }
-        if let Some(Some(reverse_row_key)) = index.aliases.get(key) {
-            let sessions = lock_shared_recover(shared_sessions);
-            #[cfg(test)]
-            {
-                work.set(work.get() + 1);
-            }
-            if let Some(entry) = sessions.get(reverse_row_key)
-                && entry.metadata.is_reverse
-                && entry.tcp_handshake_state == established
-                && crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
+            if let Some(entry) = sessions.get(&owner)
+                && shared_node_served_entry_claims_alias(entry, key)
             {
                 let _ = record(&sessions, entry);
             }
@@ -266,17 +175,10 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
     evidence
 }
 
-// #18663: each query performs a constant number of keyed gets. The one
-// reverse-row snapshot/index is lazy and shared by all candidates in the
-// expiry pass.
+// #18663: the proof counter measures actual keyed lookup work, not table rows.
 #[cfg(test)]
 thread_local! {
     pub(in crate::afxdp) static NODE_SERVED_WORK_18663: std::cell::Cell<(u64, u64)> =
-        const { std::cell::Cell::new((0, 0)) };
-}
-#[cfg(test)]
-thread_local! {
-    pub(in crate::afxdp) static NODE_SERVED_INDEX_WORK_18663: std::cell::Cell<(u64, u64)> =
         const { std::cell::Cell::new((0, 0)) };
 }
 /// #16223: restamp the shared synced entries for `forward_key` (and

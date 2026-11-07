@@ -47,7 +47,7 @@ mod session_index;
 #[cfg(test)]
 pub(super) use session_index::WIRE_KEY_CAP_OVERRIDE;
 pub(super) use session_index::{
-    FastMap, FastSet, OwnerRgSessionIndex, SharedNatAmbiguityIndex,
+    FastMap, FastSet, OwnerRgSessionIndex, SharedNatAmbiguityIndex, SharedServedAliasIndex,
     SharedSessionOwnerRgIndexes,
 };
 

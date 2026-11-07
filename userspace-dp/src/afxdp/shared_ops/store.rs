@@ -14,6 +14,13 @@ pub(crate) static SHARED_SESSION_PUBLISHES: AtomicU64 = AtomicU64::new(0);
 std::thread_local! {
     static NAT_AMBIGUITY_LOCK_ACQUISITIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
+// #18663: pauses a publisher between primary insertion and alias filing so
+// the evidence lookup's primary-lock serialization is deterministic in tests.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static SHARED_ALIAS_PRIMARY_LOCK_HOOK_18663:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
 
 #[cfg(test)]
 pub(crate) struct NatAmbiguityLockStats {
@@ -54,6 +61,40 @@ fn lock_wire_ambiguities_for_publish(
     indexes: &SharedSessionOwnerRgIndexes,
 ) -> MutexGuard<'_, SharedNatAmbiguityIndex> {
     lock_shared_recover(&indexes.wire_ambiguities)
+}
+
+/// Visit every reverse identity that can vouch for a primary row. Forward
+/// rows publish the same wire and canonical aliases as `shared_nat_sessions`;
+/// reverse rows contribute their NAT-derived opposite tuple.
+fn visit_shared_served_aliases(
+    entry: &SyncedSessionEntry,
+    mut visit: impl FnMut(&SessionKey),
+) {
+    if entry.metadata.is_reverse {
+        let reverse = reverse_session_key(&entry.key, entry.decision.nat);
+        visit(&reverse);
+        return;
+    }
+    let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);
+    let reverse_canonical = reverse_canonical_key(&entry.key, entry.decision.nat);
+    visit(&reverse_wire);
+    if reverse_canonical != reverse_wire {
+        visit(&reverse_canonical);
+    }
+}
+
+fn update_shared_served_aliases(
+    aliases: &mut SharedServedAliasIndex,
+    entry: &SyncedSessionEntry,
+    insert: bool,
+) {
+    visit_shared_served_aliases(entry, |alias| {
+        if insert {
+            aliases.insert(alias, &entry.key);
+        } else {
+            aliases.remove(alias, &entry.key);
+        }
+    });
 }
 
 /// #8486: the largest `owner_rg_id` this helper will FILE into the owner-RG
@@ -392,9 +433,27 @@ pub(in crate::afxdp) fn publish_shared_session(
         } else {
             entry
         };
-        let previous_owner_rg = sessions
-            .insert(entry.key.clone(), entry.clone())
+        let previous = sessions.insert(entry.key.clone(), entry.clone());
+        let previous_owner_rg = previous
+            .as_ref()
             .map(|existing| existing.metadata.owner_rg_id);
+        {
+        #[cfg(test)]
+        SHARED_ALIAS_PRIMARY_LOCK_HOOK_18663.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().take() {
+                hook();
+            }
+        });
+            // Lock order is shared primary -> served aliases. Evidence readers
+            // use the same order and keep the primary lock while resolving an
+            // alias, making replacement/displacement visible atomically.
+            let mut served_aliases =
+                lock_shared_recover(&shared_owner_rg_indexes.served_aliases);
+            if let Some(previous) = previous.as_ref() {
+                update_shared_served_aliases(&mut served_aliases, previous, false);
+            }
+            update_shared_served_aliases(&mut served_aliases, entry, true);
+        }
         lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions).insert(&entry.key);
         update_owner_rg_index(
             &shared_owner_rg_indexes.sessions,
@@ -740,6 +799,11 @@ pub(in crate::afxdp) fn remove_shared_session_if(
     }
     let removed_entry = sessions.remove(key);
     if let Some(entry) = removed_entry.as_ref() {
+        {
+            let mut served_aliases =
+                lock_shared_recover(&shared_owner_rg_indexes.served_aliases);
+            update_shared_served_aliases(&mut served_aliases, entry, false);
+        }
         lock_shared_recover(&shared_owner_rg_indexes.bare_tuple_sessions).remove(&entry.key);
         remove_owner_rg_index_entry(
             &shared_owner_rg_indexes.sessions,

@@ -602,6 +602,45 @@ impl SharedSessionBareTupleIndex {
     }
 }
 
+/// Primary owners that claim a shared node-served alias. The key is the
+/// domain-neutral reverse-match tuple so cross-domain collisions fail closed
+/// just like the shared NAT lookup. Owner sets keep publish/remove updates
+/// exact; lookups accept only a single live owner.
+#[derive(Default)]
+pub(in crate::afxdp) struct SharedServedAliasIndex {
+    owners: FastMap<SessionKey, FastSet<SessionKey>>,
+}
+
+impl SharedServedAliasIndex {
+    pub(in crate::afxdp) fn insert(&mut self, alias: &SessionKey, owner: &SessionKey) {
+        self.owners
+            .entry(crate::session::reverse_match_key(alias))
+            .or_default()
+            .insert(owner.clone());
+    }
+
+    pub(in crate::afxdp) fn remove(&mut self, alias: &SessionKey, owner: &SessionKey) {
+        let key = crate::session::reverse_match_key(alias);
+        let mut empty = false;
+        if let Some(owners) = self.owners.get_mut(&key) {
+            owners.remove(owner);
+            empty = owners.is_empty();
+        }
+        if empty {
+            self.owners.remove(&key);
+        }
+    }
+
+    pub(in crate::afxdp) fn unique_owner(&self, alias: &SessionKey) -> Option<&SessionKey> {
+        let owners = self.owners.get(&crate::session::reverse_match_key(alias))?;
+        (owners.len() == 1).then(|| owners.iter().next()).flatten()
+    }
+
+    pub(in crate::afxdp) fn clear(&mut self) {
+        self.owners.clear();
+    }
+}
+
 #[derive(Clone)]
 pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     pub(in crate::afxdp) sessions: Arc<Mutex<OwnerRgSessionIndex>>,
@@ -614,6 +653,10 @@ pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     // can fail closed instead of resolving to the last-published session.
     pub(in crate::afxdp) wire_ambiguities: Arc<Mutex<SharedNatAmbiguityIndex>>,
     pub(in crate::afxdp) bare_tuple_sessions: Arc<Mutex<SharedSessionBareTupleIndex>>,
+    /// #18663: aliases -> every live primary owner claiming that alias. Kept
+    /// under the shared-primary lock during publish/remove so evidence lookup
+    /// cannot observe a primary/alias publication gap.
+    pub(in crate::afxdp) served_aliases: Arc<Mutex<SharedServedAliasIndex>>,
     /// #18562: the node's ONE punt-seed directory, handed to every worker's
     /// `SessionTable` in `worker_loop` (`set_punt_seed_directory`). It
     /// mirrors live worker TABLES, not the shared maps, so `clear` below
@@ -631,6 +674,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             nat_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
             wire_ambiguities: Arc::new(Mutex::new(SharedNatAmbiguityIndex::default())),
             bare_tuple_sessions: Arc::new(Mutex::new(SharedSessionBareTupleIndex::default())),
+            served_aliases: Arc::new(Mutex::new(SharedServedAliasIndex::default())),
             punt_seeds: Arc::new(crate::session::PuntSeedDirectory::new()),
         }
     }
@@ -651,10 +695,13 @@ impl SharedSessionOwnerRgIndexes {
         let mut sessions = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
         let mut bare_tuple_sessions =
             crate::afxdp::shared_ops::lock_shared_recover(&self.bare_tuple_sessions);
+        let mut served_aliases =
+            crate::afxdp::shared_ops::lock_shared_recover(&self.served_aliases);
         sessions.clear();
         bare_tuple_sessions.clear();
         drop(bare_tuple_sessions);
-        drop(sessions);
+        served_aliases.clear();
+        drop(served_aliases);
 
         crate::afxdp::shared_ops::lock_shared_recover(&self.sessions).clear();
         crate::afxdp::shared_ops::lock_shared_recover(&self.nat_sessions).clear();
