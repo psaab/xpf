@@ -1368,6 +1368,15 @@ pub(crate) struct ProcessStatus {
     pub event_stream_sent: u64,
     #[serde(rename = "event_stream_dropped", default)]
     pub event_stream_dropped: u64,
+    /// Per-kind count of non-bulk HA session deltas lost on the lossless event
+    /// stream enqueue path. CommandExport is suppressed and bulk-resync loss
+    /// does not arm the loss-of-sync latch, so neither is included.
+    #[serde(rename = "event_stream_session_delta_lost_open", default)]
+    pub event_stream_session_delta_lost_open: u64,
+    #[serde(rename = "event_stream_session_delta_lost_close", default)]
+    pub event_stream_session_delta_lost_close: u64,
+    #[serde(rename = "event_stream_session_delta_lost_update", default)]
+    pub event_stream_session_delta_lost_update: u64,
     /// I/O cycles in which the event-stream socket-write backlog hit its cap
     /// and the helper stopped draining the channel (stalled daemon reader,
     /// #2381). Growing → telemetry shed at the bounded channel; dataplane

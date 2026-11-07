@@ -243,8 +243,12 @@ those reads. N is `SESSION_SYNC_IDLE_STABLE_SAMPLES` (3).
 
 - "Pending" covers both the target's helper delta queue
   (`Session delta pending`) and the source's helper delta buffer.
-- The source must also have dropped no delta since the wait began.
-
+- The source's `Session delta dropped` fallback count and
+  `Event stream HA session delta lost` total must both remain unchanged
+  since the wait began. The latter sums only non-bulk, non-CommandExport HA
+  session-delta Open/Close/Update failures from the helper's lossless event-stream enqueue;
+  it is distinct from `Event stream producer: dropped=`, which also counts
+  shed RT_FLOW log events.
 A sample reads D = the source's `Session create` Sent minus the target's
 `Session create` Received (`show chassis cluster data-plane statistics`).
 The floor is the lowest D the wait has seen. "Outstanding beyond the floor" is
@@ -253,9 +257,9 @@ D minus the floor.
 The N samples need not be consecutive:
 - A sample above the floor, or with something pending, neither counts nor
   resets the count.
-- A new floor or a counter rewind restarts it. A source drop does not: that
-  sample is not idle, and because the drop baseline is kept, no later sample
-  can count either, so the wait FAILs.
+- A new floor or a counter rewind restarts it. A source loss on either path
+  does not restart the wait: it makes the sample not idle, and the original
+  loss baselines stay in place so later samples cannot absorb that loss.
 - The wait PASSes only on a sample at the floor.
 
 Each counted sample is an exact reading: nothing was outstanding beyond the
@@ -328,9 +332,12 @@ How the predicate gets there:
 - **Source-side deltas.** A session delta the source's helper still holds, or
   has dropped, never becomes a "sent" create. So neither D nor the target's
   pending count can see it. The predicate therefore also reads the source's
-  `Session delta pending` (must be 0 at an idle sample) and
-  `Session delta dropped` (any increase since the wait's first sample keeps
-  every later sample not idle, so the wait FAILs).
+  `Session delta pending` (must be 0 at an idle sample) and both source loss
+  counters: `Session delta dropped` for the per-binding RPC-fallback path, and
+  `Event stream HA session delta lost` for non-bulk event-stream Open/Close/
+  Update deltas whose lossless enqueue failed. The latter is a separate total;
+  it does not use the mixed `Event stream producer: dropped=` count, which
+  includes rate-limited log events.
 - **Unknown verdicts.** An unknown helper verdict VOIDs the wait in both
   loops.
 
@@ -356,16 +363,10 @@ or sequence number, not counts.
   attempts. The PASS sample is still an exact reading, so this is not a lost
   create.
 - **A rewind wipes a drop.** A counter rewind (a daemon or helper restart)
-  re-baselines everything, including the source's dropped count, so a drop
+  re-baselines everything, including both source loss counters, so a loss
   seen before it is forgotten.
 - **After the last sample.** A create sent after the last idle sample is not
   covered.
-- **The event-stream delta path.** The source checks read the helper's
-  per-binding RPC-fallback delta buffer. In event-stream mode, session deltas
-  reach the daemon over the event stream instead. A loss there latches an
-  owner-RG resync. The CLI's `Event stream producer: dropped=` counter mixes
-  rate-limited log events with HA deltas, so it cannot be gated without false
-  FAILs. #18635 tracks exposing an HA-delta loss counter.
 
 `test/incus/ha-assurance-selftest.sh` covers this with fixed counter pairs and
 with timeline cells. In a timeline cell the counters depend on when each

@@ -432,7 +432,7 @@ wait_for_session_sync_idle() {
 	source_node="$(node_name "$SOURCE_NODE")"
 	target_node="$(node_name "$TARGET_NODE")"
 	local prev_source_sent="" prev_target_recv="" prev_target_pending="" prev_target_drained=""
-	local baseline_sent="" baseline_received="" baseline_dropped=""
+	local baseline_sent="" baseline_received="" baseline_dropped="" baseline_event_stream_lost=""
 	while (( tries > 0 )); do
 		# #18632: TARGET first, then source (see ha_session_sync_idle_sample):
 		# sent - received then reads high, not low; only a source stall
@@ -444,7 +444,7 @@ wait_for_session_sync_idle() {
 		source_path="$(sync_snapshot_path "${label}-source" "$SOURCE_VM")"
 		target_path="$(sync_snapshot_path "${label}-target" "$TARGET_VM")"
 		local sample_status sample_diagnostic
-		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" 2>&1)"; then
+		if sample_diagnostic="$(ha_session_sync_idle_sample "$source_node" "$target_node" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" "$baseline_event_stream_lost" 2>&1)"; then
 			sample_status=0
 		else
 			sample_status=$?
@@ -461,9 +461,10 @@ wait_for_session_sync_idle() {
 		# The helper verdicts above are fail-closed on blind evidence, so
 		# these re-reads cannot fail on the paths that use their values
 		# (0/1/3/4 all imply the helper parsed every field).
-		local source_sent target_recv target_pending target_drained source_dropped
+		local source_sent target_recv target_pending target_drained source_dropped source_event_stream_lost
 		source_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)"
 		source_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")"
+		source_event_stream_lost="$(ha_status_summary_value "$source_path" "Event stream HA session delta lost")"
 		target_recv="$(ha_sync_stats_value "$target_path" "Session create" received)"
 		target_pending="$(ha_status_summary_value "$target_path" "Session delta pending")"
 		target_drained="$(ha_status_summary_value "$target_path" "Session delta drained")"
@@ -484,17 +485,19 @@ wait_for_session_sync_idle() {
 			baseline_sent="$source_sent"
 			baseline_received="$target_recv"
 			baseline_dropped="$source_dropped"
+			baseline_event_stream_lost="$source_event_stream_lost"
 		else
 			# Ordinary not-idle: above the floor, or something pending.
 			# It neither counts nor resets the count (#18632: see
 			# ha_session_sync_idle_sample). Establish the baseline only
 			# when none exists yet (first sample); otherwise keep it —
-			# an outstanding unreceived delta, or a source drop, must
-			# persist, never be absorbed into a new baseline.
+			# an outstanding unreceived delta or either source-side loss
+			# counter must persist, never be absorbed into a new baseline.
 			if [[ -z "$baseline_sent" ]]; then
 				baseline_sent="$source_sent"
 				baseline_received="$target_recv"
 				baseline_dropped="$source_dropped"
+				baseline_event_stream_lost="$source_event_stream_lost"
 			fi
 		fi
 		prev_source_sent="$source_sent"

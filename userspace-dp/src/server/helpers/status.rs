@@ -728,6 +728,9 @@ pub(crate) fn project_status(state: &mut ServerState) {
         state.status.event_stream_acked = es_stats.acked_seq;
         state.status.event_stream_sent = es_stats.sent;
         state.status.event_stream_dropped = es_stats.dropped;
+        state.status.event_stream_session_delta_lost_open = es_stats.session_delta_lost_open;
+        state.status.event_stream_session_delta_lost_close = es_stats.session_delta_lost_close;
+        state.status.event_stream_session_delta_lost_update = es_stats.session_delta_lost_update;
         state.status.event_stream_write_stalls = es_stats.write_stalls;
         state.status.event_stream_replay_evictions = es_stats.replay_evictions;
         state.status.event_stream_invalid_acks = es_stats.invalid_acks;

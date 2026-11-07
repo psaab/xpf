@@ -155,6 +155,45 @@ fn test_close_delta(kind: crate::session::SessionDeltaKind) -> crate::session::S
         source_nat_static: None,
     }
 }
+/// #18635: session-sync loss totals remain split by the HA delta kind, and
+/// excluded bulk/control exports cannot contaminate the total.
+#[test]
+fn session_delta_loss_counts_are_per_kind_18635() {
+    use crate::session::{ExportProvenance, SessionDeltaKind};
+
+    let (sender, _rx) = EventStreamSender::test_sender(false, 1);
+    let handle = sender.worker_handle();
+    let zones = rustc_hash::FxHashMap::default();
+    for kind in [
+        SessionDeltaKind::Open,
+        SessionDeltaKind::Close,
+        SessionDeltaKind::Update,
+    ] {
+        let delta = test_close_delta(kind);
+        assert!(
+            handle.push_delta_lossless(&delta, &zones).is_err(),
+            "disconnected event stream must reject {kind:?}"
+        );
+    }
+    assert_eq!(handle.session_delta_lost_counts(), (1, 1, 1));
+
+    let mut bulk = test_close_delta(SessionDeltaKind::Open);
+    bulk.bulk_resync = true;
+    assert!(handle.push_delta_lossless(&bulk, &zones).is_err());
+    let mut command_export = test_close_delta(SessionDeltaKind::Close);
+    command_export.provenance = ExportProvenance::CommandExport(7);
+    assert!(handle.push_delta_lossless(&command_export, &zones).is_err());
+    assert_eq!(handle.session_delta_lost_counts(), (1, 1, 1));
+    let stats = sender.stats();
+    assert_eq!(
+        (
+            stats.session_delta_lost_open,
+            stats.session_delta_lost_close,
+            stats.session_delta_lost_update,
+        ),
+        (1, 1, 1)
+    );
+}
 
 mod backpressure;
 mod control_frames;

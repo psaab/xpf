@@ -386,8 +386,8 @@ ha_sync_idle_timeout_verdict() {
 ha_wait_for_session_sync_idle() {
 	local label="$1" source_id="$2" source_node="$3" target_id="$4" target_node="$5"
 	local attempt stable=0 source_path target_path rc wait_started="$SECONDS"
-	local baseline_sent="" baseline_received="" baseline_dropped=""
-	local baseline_next_sent baseline_next_received baseline_next_dropped
+	local baseline_sent="" baseline_received="" baseline_dropped="" baseline_event_stream_lost=""
+	local baseline_next_sent baseline_next_received baseline_next_dropped baseline_next_event_stream_lost
 	for ((attempt = 1; attempt <= SESSION_SYNC_IDLE_TIMEOUT; attempt++)); do
 		# #18632: TARGET first, then source. A create the target counted
 		# as received is counted as sent right after its enqueue, so this
@@ -410,11 +410,12 @@ ha_wait_for_session_sync_idle() {
 		# exactly as before (the helper returns 2 on blind evidence).
 		if ! baseline_next_sent="$(ha_sync_stats_value "$source_path" "Session create" sent)" ||
 			! baseline_next_received="$(ha_sync_stats_value "$target_path" "Session create" received)" ||
-			! baseline_next_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")"; then
+			! baseline_next_dropped="$(ha_status_summary_value "$source_path" "Session delta dropped")" ||
+			! baseline_next_event_stream_lost="$(ha_status_summary_value "$source_path" "Event stream HA session delta lost")"; then
 			void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 			return 2
 		fi
-		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped"; then
+		if ha_session_sync_idle_sample "$source_id" "$target_id" "$source_path" "$target_path" "$baseline_sent" "$baseline_received" "$baseline_dropped" "$baseline_event_stream_lost"; then
 			stable=$((stable + 1))
 			if (( stable >= SESSION_SYNC_IDLE_STABLE_SAMPLES )); then
 				pass "${label}: session sync idle (${source_id}->${target_id}, ${stable} samples at the floor)"
@@ -424,49 +425,29 @@ ha_wait_for_session_sync_idle() {
 			rc=$?
 			case "$rc" in
 			1)
-				# Ordinary not-idle: above the floor, or something
-				# pending. It neither counts nor resets the count
-				# (#18632: under a steady mirror sweep a create lands
-				# between the reads every few samples, so requiring
-				# CONSECUTIVE floor samples false-FAILed on loss). Each
-				# counted sample is still an exact reading at the
-				# floor. Establish the baseline only when none exists
-				# yet (first sample); otherwise keep it — an
-				# outstanding unreceived delta, or a source drop, must
-				# persist, never be absorbed into a new baseline.
+				# Ordinary not-idle samples do not reset the floor or
+				# stable count. Establish all loss baselines only once.
 				if [[ -z "$baseline_sent" ]]; then
 					baseline_sent="$baseline_next_sent"
 					baseline_received="$baseline_next_received"
 					baseline_dropped="$baseline_next_dropped"
+					baseline_event_stream_lost="$baseline_next_event_stream_lost"
 				fi
 				;;
-			4)
-				# #18632: new floor. Moving the baseline DOWN shrinks
-				# what it can absorb (creates in flight at it) and never
-				# grows it; a create lost after the wait has seen the
-				# true floor is never absorbed. The streak restarts: a
-				# backlog still draining never reads idle.
+			4|3)
+				# New floor or a counter rewind restarts the streak and
+				# re-baselines all source loss counters together.
 				stable=0
 				baseline_sent="$baseline_next_sent"
 				baseline_received="$baseline_next_received"
 				baseline_dropped="$baseline_next_dropped"
-				;;
-			3)
-				# #16289: counter rewind (daemon or helper restart).
-				# With a new floor (4) these are the ONLY re-baseline
-				# triggers.
-				stable=0
-				baseline_sent="$baseline_next_sent"
-				baseline_received="$baseline_next_received"
-				baseline_dropped="$baseline_next_dropped"
+				baseline_event_stream_lost="$baseline_next_event_stream_lost"
 				;;
 			2)
 				void "${label}: session sync statistics malformed (${source_id}->${target_id})"
 				return 2
 				;;
 			*)
-				# An unknown verdict is VOID, as in the userspace
-				# validator (#18632).
 				void "${label}: session sync sample verdict ${rc} unknown (${source_id}->${target_id})"
 				return 2
 				;;

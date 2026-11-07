@@ -538,6 +538,15 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 	fmt.Fprintf(b, "  Session delta pending:     %d\n", agg.sessionDeltaPending)
 	fmt.Fprintf(b, "  Session delta generated:   %d\n", agg.sessionDeltaGenerated)
 	fmt.Fprintf(b, "  Session delta dropped:     %d\n", agg.sessionDeltaDropped)
+	// #18635: expose HA event-stream loss beside the session-delta status
+	// counters unconditionally, even when the optional EventStream block is
+	// absent. The sync-idle precondition needs a parseable zero as well.
+	sessionDeltaLost := status.EventStreamSessionDeltaLostOpen +
+		status.EventStreamSessionDeltaLostClose +
+		status.EventStreamSessionDeltaLostUpdate
+	fmt.Fprintf(b, "  Event stream HA session delta lost: %d (open=%d close=%d update=%d)\n",
+		sessionDeltaLost, status.EventStreamSessionDeltaLostOpen,
+		status.EventStreamSessionDeltaLostClose, status.EventStreamSessionDeltaLostUpdate)
 	fmt.Fprintf(b, "  Session delta drained:     %d\n", agg.sessionDeltaDrained)
 }
 

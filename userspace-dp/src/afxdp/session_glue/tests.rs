@@ -13998,7 +13998,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         1,
         crate::event_stream::DataplaneEventRateLimitConfig::default(),
     );
-    let event_stream = Some(handle);
+    let event_stream = Some(handle.clone());
 
     let open = SessionDelta {
         provenance: crate::session::ExportProvenance::Incremental,
@@ -14068,6 +14068,11 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
             .iter()
             .any(|info| info.event == "open"),
         "open delta must still reach the recent-deltas buffer"
+    );
+    assert_eq!(
+        handle.session_delta_lost_counts(),
+        (1, 0, 0),
+        "the failed non-bulk OPEN enqueue must increment only its per-kind HA loss count"
     );
 }
 /// #13654 (D6-02): tuple-gate contention on a Close whose suffix is
@@ -18775,8 +18780,12 @@ fn delta_8593(key: &SessionKey, bulk_resync: bool) -> SessionDelta {
 
 /// Drive `flush_session_deltas` once against a SATURATED fallback buffer and
 /// report whether the per-binding loss latch came out ARMED.
-fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
+fn flush_one_and_report_armed_8593(bulk_resync: bool) -> (bool, (u64, u64, u64)) {
     let live = saturated_live_8593();
+    let (event_stream, _rx) = crate::event_stream::test_worker_handle(
+        1,
+        crate::event_stream::DataplaneEventRateLimitConfig::default(),
+    );
     let ident = BindingIdentity {
         slot: 0,
         queue_id: 0,
@@ -18810,7 +18819,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
         &recent_session_deltas,
         &peer_worker_commands,
         crate::afxdp::empty_worker_commands_by_id(),
-        &None,
+        &Some(event_stream.clone()),
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
@@ -18824,7 +18833,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
          (bulk_resync={bulk_resync}) — if it fit, the latch result says nothing \
          about the routing"
     );
-    live.take_delta_loss()
+    (live.take_delta_loss(), event_stream.session_delta_lost_counts())
 }
 
 /// THE WIRING (#8593). The non-arming push exists; this proves
@@ -18841,16 +18850,24 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> bool {
 /// `flush_session_deltas` and the first assertion reds.
 #[test]
 fn flush_session_deltas_routes_a_bulk_export_drop_to_the_non_arming_push_8593() {
+    let (bulk_armed, bulk_lost) = flush_one_and_report_armed_8593(true);
     assert!(
-        !flush_one_and_report_armed_8593(true),
+        !bulk_armed,
         "a BULK-EXPORT delta the fallback buffer refused must not arm the \
          loss-of-sync latch — arming it makes the resync re-trigger itself"
     );
+    assert_eq!(
+        bulk_lost,
+        (0, 0, 0),
+        "a bulk-resync loss is generic producer loss, not a new non-bulk HA loss"
+    );
+    let (incremental_armed, incremental_lost) = flush_one_and_report_armed_8593(false);
     assert!(
-        flush_one_and_report_armed_8593(false),
+        incremental_armed,
         "an INCREMENTAL delta the buffer refused must still arm it (#5290); a \
          fix that never arms deletes the recovery instead of bounding it"
     );
+    assert_eq!(incremental_lost, (0, 1, 0), "incremental purge delta is a CLOSE");
 }
 
 // ---------------------------------------------------------------------------

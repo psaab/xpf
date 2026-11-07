@@ -141,6 +141,16 @@ pub(crate) struct EventStreamStats {
     pub(crate) acked_seq: u64,
     pub(crate) sent: u64,
     pub(crate) dropped: u64,
+    /// #18635: session-sync (HA) deltas that could not be queued through the
+    /// LOSSLESS producer, split by delta kind. Incremented on a failed
+    /// lossless session-delta enqueue for non-bulk, non-CommandExport deltas.
+    /// Bulk-resync failures (counted in generic `dropped`) and CommandExport
+    /// deltas (suppressed from the stream) do not move these counters, so a
+    /// policy-deny log burst on the lossy telemetry path cannot masquerade as
+    /// HA session-delta loss.
+    pub(crate) session_delta_lost_open: u64,
+    pub(crate) session_delta_lost_close: u64,
+    pub(crate) session_delta_lost_update: u64,
     /// Count of I/O cycles in which the pending socket-write backlog reached
     /// `WRITE_BACKLOG_MAX_BYTES` and the I/O thread therefore stopped pulling
     /// frames from the channel (a wedged/stalled daemon reader, #2381). A
@@ -275,6 +285,10 @@ struct EventStreamShared {
     /// Counters.
     frames_sent: AtomicU64,
     frames_dropped: AtomicU64,
+    /// #18635: per-kind lossless session-delta loss (see `EventStreamStats`).
+    session_delta_lost_open: AtomicU64,
+    session_delta_lost_close: AtomicU64,
+    session_delta_lost_update: AtomicU64,
     /// I/O cycles in which `write_buf` hit `WRITE_BACKLOG_MAX_BYTES` and the
     /// channel drain was halted (stalled consumer signal, #2381).
     frames_write_stalled: AtomicU64,
@@ -321,6 +335,9 @@ impl EventStreamShared {
             connected: AtomicBool::new(false),
             frames_sent: AtomicU64::new(0),
             frames_dropped: AtomicU64::new(0),
+            session_delta_lost_open: AtomicU64::new(0),
+            session_delta_lost_close: AtomicU64::new(0),
+            session_delta_lost_update: AtomicU64::new(0),
             frames_write_stalled: AtomicU64::new(0),
             frames_replay_evicted: AtomicU64::new(0),
             frames_invalid_acks: AtomicU64::new(0),
@@ -417,6 +434,15 @@ impl EventStreamSender {
             acked_seq: self.shared.acked_seq.load(Ordering::Relaxed),
             sent: self.shared.frames_sent.load(Ordering::Relaxed),
             dropped: self.shared.frames_dropped.load(Ordering::Relaxed),
+            session_delta_lost_open: self.shared.session_delta_lost_open.load(Ordering::Relaxed),
+            session_delta_lost_close: self
+                .shared
+                .session_delta_lost_close
+                .load(Ordering::Relaxed),
+            session_delta_lost_update: self
+                .shared
+                .session_delta_lost_update
+                .load(Ordering::Relaxed),
             write_stalls: self.shared.frames_write_stalled.load(Ordering::Relaxed),
             replay_evictions: self.shared.frames_replay_evicted.load(Ordering::Relaxed),
             invalid_acks: self.shared.frames_invalid_acks.load(Ordering::Relaxed),
@@ -537,6 +563,40 @@ impl EventStreamWorkerHandle {
     /// lossy `try_send` path uses, instead of being silently swallowed.
     pub(crate) fn record_dropped_frames(&self, n: u64) {
         self.shared.frames_dropped.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// #18635: record a lost session-sync delta at the lossless producer
+    /// boundary. Bulk-resync and CommandExport deltas are outside this
+    /// counter's contract; all non-bulk session-delta lossless sends use this
+    /// method so direct producers (as well as `flush_session_deltas`) cannot
+    /// silently bypass the per-kind accounting.
+    pub(crate) fn record_session_delta_lost(&self, delta: &SessionDelta) {
+        if delta.bulk_resync
+            || matches!(
+                delta.provenance,
+                crate::session::ExportProvenance::CommandExport(_)
+            )
+        {
+            return;
+        }
+        use crate::session::SessionDeltaKind;
+        let counter = match delta.kind {
+            SessionDeltaKind::Open => &self.shared.session_delta_lost_open,
+            SessionDeltaKind::Close => &self.shared.session_delta_lost_close,
+            SessionDeltaKind::Update => &self.shared.session_delta_lost_update,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// #18635 test seam: per-kind lossless session-delta loss counts
+    /// (open, close, update) as published in `EventStreamStats`.
+    #[cfg(test)]
+    pub(crate) fn session_delta_lost_counts(&self) -> (u64, u64, u64) {
+        (
+            self.shared.session_delta_lost_open.load(Ordering::Relaxed),
+            self.shared.session_delta_lost_close.load(Ordering::Relaxed),
+            self.shared.session_delta_lost_update.load(Ordering::Relaxed),
+        )
     }
     fn try_send_frame(&self, frame: EventFrame) -> Result<(), EventStreamSendError> {
         match self.tx.try_send(frame) {
@@ -824,13 +884,17 @@ impl EventStreamWorkerHandle {
         zone_name_to_id: &FxHashMap<String, u32>,
         budget: Duration,
     ) -> Result<u64, String> {
-        self.send_lossless_encoded(budget, || {
+        let result = self.send_lossless_encoded(budget, || {
             let seq = self.next_seq();
             (
                 Self::encode_delta_frame(seq, delta, zone_name_to_id),
                 Some(seq),
             )
-        })
+        });
+        if result.is_err() {
+            self.record_session_delta_lost(delta);
+        }
+        result
     }
 }
 

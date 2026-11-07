@@ -89,3 +89,20 @@ func TestEventStreamProducerCountersWire10979(t *testing.T) {
 		}
 	}
 }
+
+// #18635: per-kind HA event-stream loss survives the helper JSON boundary.
+func TestEventStreamSessionDeltaLossWire18635(t *testing.T) {
+	const payload = `{"event_stream_session_delta_lost_open":11,"event_stream_session_delta_lost_close":22,"event_stream_session_delta_lost_update":33}`
+	var status ProcessStatus
+	if err := json.Unmarshal([]byte(payload), &status); err != nil {
+		t.Fatalf("decode HA session-delta loss counters: %v", err)
+	}
+	if status.EventStreamSessionDeltaLostOpen != 11 ||
+		status.EventStreamSessionDeltaLostClose != 22 ||
+		status.EventStreamSessionDeltaLostUpdate != 33 {
+		t.Fatalf("HA session-delta loss counters = open=%d close=%d update=%d, want 11/22/33",
+			status.EventStreamSessionDeltaLostOpen,
+			status.EventStreamSessionDeltaLostClose,
+			status.EventStreamSessionDeltaLostUpdate)
+	}
+}

@@ -4175,6 +4175,9 @@ fn process_status_event_stream_fields_wire_keys_1642() {
         event_stream_seq: 4242,
         event_stream_acked: 4200,
         event_stream_write_stalls: 17,
+        event_stream_session_delta_lost_open: 18,
+        event_stream_session_delta_lost_close: 19,
+        event_stream_session_delta_lost_update: 20,
         ..Default::default()
     };
     let value: serde_json::Value = serde_json::to_value(&status).expect("serialize ProcessStatus");
@@ -4184,6 +4187,11 @@ fn process_status_event_stream_fields_wire_keys_1642() {
     // #2381: stalled-consumer backlog counter must survive the wire under its
     // exact key so the Go status adapter can surface it.
     assert_eq!(value["event_stream_write_stalls"], 17u64);
+    // #18635: all HA session-delta loss kinds have stable wire keys for the
+    // Go status adapter; generic producer drops are deliberately separate.
+    assert_eq!(value["event_stream_session_delta_lost_open"], 18u64);
+    assert_eq!(value["event_stream_session_delta_lost_close"], 19u64);
+    assert_eq!(value["event_stream_session_delta_lost_update"], 20u64);
 }
 
 #[test]
