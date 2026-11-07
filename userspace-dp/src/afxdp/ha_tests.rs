@@ -1829,6 +1829,43 @@ fn purge_remapped_tunnel_sessions_records_drop_on_lossless_failure() {
 }
 
 #[test]
+fn purge_remapped_tunnel_sessions_counts_abandoned_close_suffix_18635() {
+    let (mut coordinator, first_key) = coordinator_with_tunnel_session(7);
+    let mut second = coordinator
+        .sessions
+        .synced
+        .lock()
+        .expect("synced")
+        .get(&first_key)
+        .expect("first tunnel session")
+        .clone();
+    let mut second_key = first_key;
+    second_key.src_port = second_key.src_port.wrapping_add(1);
+    second.key = second_key;
+    publish_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &second,
+    );
+
+    let (sender, _rx) = crate::event_stream::EventStreamSender::test_sender(false, 16);
+    coordinator.event_stream = Some(sender);
+    assert_eq!(
+        coordinator.purge_remapped_tunnel_sessions(&[7], &ForwardingState::default()),
+        2
+    );
+
+    let stats = coordinator.event_stream.as_ref().expect("event stream").stats();
+    assert_eq!(stats.dropped, 2);
+    assert_eq!(
+        stats.session_delta_lost_close, 2,
+        "the failed Close and every abandoned suffix Close are lost HA deltas"
+    );
+}
+
+#[test]
 fn purge_remapped_tunnel_sessions_no_drop_on_lossless_success() {
     let (mut coordinator, key) = coordinator_with_tunnel_session(7);
 

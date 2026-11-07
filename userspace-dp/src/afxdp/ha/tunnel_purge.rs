@@ -269,6 +269,14 @@ impl crate::afxdp::Coordinator {
         for (delivered, delta) in deltas.iter().enumerate() {
             if let Err(err) = handle.push_delta_lossless(delta, zone_name_to_id) {
                 let dropped = deltas.len() - delivered;
+                // The failed delta was counted at the lossless enqueue
+                // boundary. The purge abandons later Close deltas rather
+                // than spending another timeout on each, so account for that
+                // unsent suffix separately (without double-counting the
+                // failed delta).
+                for abandoned in deltas.iter().skip(delivered + 1) {
+                    handle.record_session_delta_lost(abandoned);
+                }
                 handle.record_dropped_frames(dropped as u64);
                 eprintln!(
                     "xpf-userspace-dp: tunnel-remap purge could not queue {dropped}/{} close delta(s) losslessly ({err}); recorded as dropped frames — surviving peer/Go-shadow entries are harmless (encap ifindex guard) and self-heal via the standby snapshot-apply purge + idle GC (#2880)",
