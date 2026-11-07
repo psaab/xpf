@@ -358,7 +358,10 @@ func TestCopyRenameClearsBracketProvenance_9881(t *testing.T) {
 	build := func() *ConfigTree {
 		// A singleton AS set is valid Junos syntax, and remains valid when a
 		// copied/re-keyed node loses its bracket provenance and reads as AS 65000.
-		return buildFlat9881(t, `set policy-options as-path AP1 [65000]`)
+		// Hier shape: only it carries BracketedClosed=true (parent probe:
+		// flat parses closed=false, hier closed=true), so only it can pin
+		// the close-bit clearing in #17263.
+		return parseHierText(t, `policy-options { as-path AP1 [65000]; }`)
 	}
 	t.Run("copy", func(t *testing.T) {
 		tree := build()

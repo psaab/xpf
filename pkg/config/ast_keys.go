@@ -7,9 +7,10 @@ import "fmt"
 // is supplied, BracketedClosed is true only for a closed span with at least
 // one bracketed key.
 func (n *Node) setKeysBracketed(bracketed []bool, closed ...bool) {
+	aligned := len(bracketed) == len(n.Keys)
 	if len(closed) > 0 {
 		n.BracketedClosed = false
-		if closed[0] {
+		if closed[0] && aligned {
 			for _, b := range bracketed {
 				if b {
 					n.BracketedClosed = true
@@ -18,7 +19,7 @@ func (n *Node) setKeysBracketed(bracketed []bool, closed ...bool) {
 			}
 		}
 	}
-	if len(bracketed) != len(n.Keys) {
+	if !aligned {
 		n.KeysBracketed = nil
 		return
 	}
