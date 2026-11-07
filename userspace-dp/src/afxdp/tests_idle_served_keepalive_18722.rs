@@ -780,3 +780,167 @@ fn shared_node_served_clear_unfiles_alias_index_18663() {
         "clear must retire primary rows and their served aliases, got {evidence:?}"
     );
 }
+
+#[test]
+fn shared_node_served_nat_no_nat_collision_blocks_plain_reverse_in_both_orders_18663() {
+    let nat_forward = unique_served_key(80_001);
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some("203.0.113.21".parse().expect("SNAT address")),
+        rewrite_src_port: Some(41_001),
+        ..crate::nat::NatDecision::default()
+    };
+    let alias = crate::session::reverse_session_key(&nat_forward, nat);
+    let plain_forward =
+        crate::session::reverse_session_key(&alias, crate::nat::NatDecision::default());
+    assert_eq!(
+        crate::session::reverse_session_key(
+            &plain_forward,
+            crate::nat::NatDecision::default()
+        ),
+        alias,
+        "premise: no-NAT primary's reverse alias collides with the NAT wire alias"
+    );
+    assert_ne!(nat_forward, plain_forward);
+
+    for nat_publishes_last in [false, true] {
+        let mut nat_row = serving_row(&nat_forward);
+        nat_row.decision.nat = nat;
+        nat_row.fwd_packets = 101;
+        let mut plain_row = serving_row(&plain_forward);
+        plain_row.fwd_packets = 202;
+        let store = SharedServedStore::new();
+        if nat_publishes_last {
+            store.publish(&plain_row);
+            store.publish(&nat_row);
+        } else {
+            store.publish(&nat_row);
+            store.publish(&plain_row);
+        }
+
+        assert!(
+            !store.sessions.lock().expect("shared sessions").contains_key(&alias),
+            "premise: the probe is not itself a primary key"
+        );
+        let ambiguous = store.evidence(&alias);
+        assert!(
+            !ambiguous.shared_established && ambiguous.shared_served.is_none(),
+            "plain-reverse lookup must reject the NAT/no-NAT owner collision, \
+             NAT publishes last={nat_publishes_last}: {ambiguous:?}"
+        );
+
+        // An actual primary at the probed key remains authoritative even when
+        // other rows also claim it as an alias.
+        let mut direct = serving_row(&alias);
+        direct.fwd_packets = 303;
+        store.publish(&direct);
+        let direct_hit = store.evidence(&alias);
+        assert!(direct_hit.shared_established);
+        assert_eq!(direct_hit.shared_served, Some(303));
+    }
+}
+
+#[test]
+fn shared_node_served_canonical_alias_respects_routing_domain_18663() {
+    let probe = unique_served_key(81_001);
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some("203.0.113.22".parse().expect("SNAT address")),
+        rewrite_src_port: Some(41_002),
+        ..crate::nat::NatDecision::default()
+    };
+
+    for (owner_domain, should_vouch) in [(100, false), (0, true)] {
+        let mut forward =
+            crate::session::reverse_session_key(&probe, crate::nat::NatDecision::default());
+        forward.routing_domain = owner_domain;
+        assert_eq!(
+            crate::session::reverse_canonical_key(&forward, nat),
+            probe,
+            "premise: canonical alias is domain-zero"
+        );
+
+        let mut opening = serving_row(&probe);
+        opening.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
+        let mut established = serving_row(&forward);
+        established.decision.nat = nat;
+        established.fwd_packets = 77;
+        let store = SharedServedStore::new();
+        store.publish(&opening);
+        store.publish(&established);
+
+        let evidence = store.evidence(&probe);
+        assert_eq!(
+            evidence.shared_established, should_vouch,
+            "only a same-domain owner may vouch; owner domain {owner_domain}: {evidence:?}"
+        );
+        if should_vouch {
+            assert_eq!(evidence.shared_served, Some(77));
+        } else {
+            assert!(
+                evidence.shared_served.is_none(),
+                "foreign-domain activity must not supply served counts: {evidence:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn shared_node_served_singleton_lookup_stays_bounded_after_collision_growth_18663() {
+    const COLLIDERS: u32 = 512;
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some("203.0.113.23".parse().expect("shared SNAT address")),
+        rewrite_src_port: Some(41_003),
+        ..crate::nat::NatDecision::default()
+    };
+    let store = SharedServedStore::new();
+    let mut owners = Vec::with_capacity(COLLIDERS as usize);
+    for index in 0..COLLIDERS {
+        let forward = unique_served_key(90_000 + index);
+        let mut row = serving_row(&forward);
+        row.decision.nat = nat;
+        row.fwd_packets = u64::from(index + 1);
+        if index != 0 {
+            row.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
+        }
+        store.publish(&row);
+        owners.push(row);
+    }
+    let alias = crate::session::reverse_session_key(&owners[0].key, nat);
+    let grown_capacity = store
+        .owner_indexes
+        .served_aliases
+        .lock()
+        .expect("served alias index")
+        .owner_capacity(&alias);
+    assert!(
+        grown_capacity >= COLLIDERS as usize,
+        "premise: the alias-owner bucket grew to {COLLIDERS}, got capacity {grown_capacity}"
+    );
+
+    for row in owners.iter().skip(1) {
+        assert!(matches!(
+            store.remove(&row.key),
+            crate::afxdp::shared_ops::SharedRemoval::Removed(_)
+        ));
+    }
+    let retained_capacity = store
+        .owner_indexes
+        .served_aliases
+        .lock()
+        .expect("served alias index")
+        .owner_capacity(&alias);
+    assert!(
+        retained_capacity >= grown_capacity,
+        "premise: removal retains bucket allocation, capacity {retained_capacity} < {grown_capacity}"
+    );
+
+    let before = crate::afxdp::shared_ops::NODE_SERVED_WORK_18663.with(|stats| stats.get());
+    let evidence = store.evidence(&alias);
+    let (calls, work) = served_work_since(before);
+    assert_eq!(calls, 1);
+    assert_eq!(
+        work, 4,
+        "alias-owner map probe and singleton read are one keyed work unit"
+    );
+    assert!(evidence.shared_established);
+    assert_eq!(evidence.shared_served, Some(1));
+}

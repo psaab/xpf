@@ -311,13 +311,17 @@ mod flow_cache_invalidation_tests {
         );
         let mirror_row = || crate::afxdp::bpf_map::conntrack_row_for_test(&key).is_some();
         assert!(mirror_row(), "premise: the mirror row exists");
-        let shared = std::sync::Arc::new(std::sync::Mutex::new({
-            let mut map = FastMap::default();
-            map.insert(key.clone(), serving_shared_entry(&key, 0x4_8722));
-            map
-        }));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let nat_aliases = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
         let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
         let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        crate::afxdp::shared_ops::publish_shared_session(
+            &shared,
+            &nat_aliases,
+            &wires,
+            &shared_owner_rg_indexes,
+            &serving_shared_entry(&key, 0x4_8722),
+        );
         let node_served = |k: &SessionKey| {
             crate::afxdp::shared_ops::shared_node_served_evidence(
                 &shared,
@@ -498,13 +502,17 @@ mod flow_cache_invalidation_tests {
             "premise: B serves the reverse direction too"
         );
         table_b.account_packet(&reverse, 64, crate::tcp_flags::TCP_ACK, 0);
-        let shared = std::sync::Arc::new(std::sync::Mutex::new({
-            let mut map = FastMap::default();
-            map.insert(key.clone(), serving_shared_entry(&key, session_id));
-            map
-        }));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let nat_aliases = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
         let wires = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
         let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        crate::afxdp::shared_ops::publish_shared_session(
+            &shared,
+            &nat_aliases,
+            &wires,
+            &shared_owner_rg_indexes,
+            &serving_shared_entry(&key, session_id),
+        );
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
             &shared,
             &wires,

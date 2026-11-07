@@ -602,38 +602,47 @@ impl SharedSessionBareTupleIndex {
     }
 }
 
-/// Primary owners that claim a shared node-served alias. The key is the
-/// domain-neutral reverse-match tuple so cross-domain collisions fail closed
-/// just like the shared NAT lookup. Owner sets keep publish/remove updates
-/// exact; lookups accept only a single live owner.
+/// Primary owners that claim a shared node-served alias. Alias keys retain
+/// the owner's routing domain, including the scoped form of canonical aliases,
+/// so activity from another domain cannot vouch for this domain's row.
+/// SmallVec keeps singleton retrieval O(1) even after a collision bucket grows
+/// and later shrinks while retaining its allocation.
 #[derive(Default)]
 pub(in crate::afxdp) struct SharedServedAliasIndex {
-    owners: FastMap<SessionKey, FastSet<SessionKey>>,
+    owners: FastMap<SessionKey, smallvec::SmallVec<[SessionKey; 1]>>,
 }
 
 impl SharedServedAliasIndex {
     pub(in crate::afxdp) fn insert(&mut self, alias: &SessionKey, owner: &SessionKey) {
-        self.owners
-            .entry(crate::session::reverse_match_key(alias))
-            .or_default()
-            .insert(owner.clone());
+        let owners = self.owners.entry(alias.clone()).or_default();
+        if !owners.contains(owner) {
+            owners.push(owner.clone());
+        }
     }
 
     pub(in crate::afxdp) fn remove(&mut self, alias: &SessionKey, owner: &SessionKey) {
-        let key = crate::session::reverse_match_key(alias);
         let mut empty = false;
-        if let Some(owners) = self.owners.get_mut(&key) {
-            owners.remove(owner);
+        if let Some(owners) = self.owners.get_mut(alias) {
+            if let Some(index) = owners.iter().position(|candidate| candidate == owner) {
+                owners.swap_remove(index);
+            }
             empty = owners.is_empty();
         }
         if empty {
-            self.owners.remove(&key);
+            self.owners.remove(alias);
         }
     }
 
+    /// Returns the sole owner without walking retained capacity. One lookup
+    /// unit covers this map probe and the O(1) SmallVec length/first access.
     pub(in crate::afxdp) fn unique_owner(&self, alias: &SessionKey) -> Option<&SessionKey> {
-        let owners = self.owners.get(&crate::session::reverse_match_key(alias))?;
-        (owners.len() == 1).then(|| owners.iter().next()).flatten()
+        let owners = self.owners.get(alias)?;
+        (owners.len() == 1).then(|| &owners[0])
+    }
+
+    #[cfg(test)]
+    pub(in crate::afxdp) fn owner_capacity(&self, alias: &SessionKey) -> usize {
+        self.owners.get(alias).map_or(0, |owners| owners.capacity())
     }
 
     pub(in crate::afxdp) fn clear(&mut self) {

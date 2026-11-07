@@ -66,16 +66,24 @@ pub(in crate::afxdp) fn shared_completion_evidence(
     ev
 }
 
-/// Whether a live primary row still derives the exact alias being probed.
+/// Whether a live primary row still derives the exact, routing-scoped alias
+/// being probed. Canonical reverse keys normally zero the domain for shared
+/// reverse-match admission; evidence must restore the owner's scope.
 fn shared_node_served_entry_claims_alias(
     entry: &SyncedSessionEntry,
     key: &SessionKey,
 ) -> bool {
+    if entry.key.routing_domain != key.routing_domain {
+        return false;
+    }
     if entry.metadata.is_reverse {
         crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
     } else {
+        let mut canonical =
+            crate::session::reverse_canonical_key(&entry.key, entry.decision.nat);
+        canonical.routing_domain = entry.key.routing_domain;
         crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
-            || crate::session::reverse_canonical_key(&entry.key, entry.decision.nat) == *key
+            || canonical == *key
     }
 }
 
@@ -134,6 +142,8 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
     }
     let mut found = false;
     if let Some(entry) = sessions.get(key) {
+        // A direct primary hit is authoritative for the probed key and
+        // deliberately does not consult alias ambiguity.
         found = record(&sessions, entry);
     }
     if !found {
@@ -144,7 +154,21 @@ pub(in crate::afxdp) fn shared_node_served_evidence(
             work.set(work.get() + 1);
         }
         if let Some(entry) = sessions.get(&reverse) {
-            found = record(&sessions, entry);
+            // A plain-reverse primary hit is still an alias route: its tuple
+            // may also be claimed by a translated owner. Require the same
+            // unique-owner proof used by the indexed alias path.
+            #[cfg(test)]
+            {
+                work.set(work.get() + 1);
+            }
+            let owner = lock_shared_recover(&shared_owner_rg_indexes.served_aliases)
+                .unique_owner(key)
+                .cloned();
+            if owner.as_ref() == Some(&entry.key)
+                && shared_node_served_entry_claims_alias(entry, key)
+            {
+                found = record(&sessions, entry);
+            }
         }
     }
     if !found {
