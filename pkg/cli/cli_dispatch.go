@@ -33,6 +33,26 @@ func (c *CLI) configModeEntryAllowed() bool {
 	return c.configOwnedNow() || c.UserClass() == ""
 }
 
+// operationalShowConfigurationCompare identifies the compare handler pipe
+// that belongs to operational `show configuration`, not config-mode `show`.
+// A foreign/global config lock does not change this console's prompt; routing
+// this command through dispatchConfig would compare the dirty candidate.
+func operationalShowConfigurationCompare(line string) bool {
+	parts := strings.Fields(line)
+	if len(parts) < 3 || parts[0] != "show" || parts[1] != "configuration" {
+		return false
+	}
+	for i := 2; i < len(parts); i++ {
+		if parts[i] == "|" {
+			return i+1 < len(parts) && parts[i+1] == "compare"
+		}
+		if parts[i] == "|compare" {
+			return true
+		}
+	}
+	return false
+}
+
 // checkConfigModePerm enforces the coarse PermConfig price of entering
 // and mutating inside config mode. dispatchConfig previously carried
 // only the *-configuration regex gate, which a built-in class with no
@@ -95,7 +115,12 @@ func (c *CLI) dispatch(line string) error {
 			if foreign {
 				if f := strings.Fields(line); len(f) > 0 {
 					switch f[0] {
-					case "show", "?", "help":
+					case "show":
+						if operationalShowConfigurationCompare(line) {
+							return c.dispatchOperational(line)
+						}
+						return c.dispatchConfig(line)
+					case "?", "help":
 						return c.dispatchConfig(line)
 					}
 				}
@@ -104,6 +129,9 @@ func (c *CLI) dispatch(line string) error {
 			// Non-foreign, not owned: a PermConfig class may use config
 			// verbs; a view class may still use config-mode `show`.
 			if f := strings.Fields(line); len(f) > 0 && (f[0] == "show" || f[0] == "?" || f[0] == "help") {
+				if f[0] == "show" && operationalShowConfigurationCompare(line) {
+					return c.dispatchOperational(line)
+				}
 				return c.dispatchConfig(line)
 			}
 			// Own-class PermConfig holder whose entry predates the

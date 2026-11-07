@@ -27,6 +27,7 @@ func showCompareStore18669(t *testing.T) *configstore.Store {
 		"set system login class rollback-deny deny-configuration \"interfaces ge-0/0/0 description old-interface-18669\"",
 		"set system login class compare-deny permissions [ view ]",
 		"set system login class compare-deny deny-commands \"compare$\"",
+		"set system login class compare-view-18669 permissions [ view ]",
 	}
 	if _, err := store.LoadSet(strings.Join(base, "\n")); err != nil {
 		t.Fatalf("LoadSet(base): %v", err)
@@ -158,5 +159,156 @@ func TestCLIShowConfigurationComparePricesRollbackTree18669(t *testing.T) {
 				t.Errorf("denied rollback-only compare printed output: %q", out)
 			}
 		})
+	}
+}
+
+func foreignShowCompareStore18669(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := newConfigStore(t, filepath.Join(t.TempDir(), "xpf-foreign-18669.conf"))
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure(base): %v", err)
+	}
+	base := []string{
+		"set system host-name compare-18669-base",
+		"set interfaces ge-0/0/0 description old-interface-18669",
+		"set system login class rollback-deny permissions [ view ]",
+		"set system login class rollback-deny deny-configuration \"interfaces ge-0/0/0 description old-interface-18669\"",
+		"set system login class compare-deny permissions [ view ]",
+		"set system login class compare-deny deny-commands \"compare$\"",
+		"set system login class compare-view-18669 permissions [ view ]",
+	}
+	if _, err := store.LoadSet(strings.Join(base, "\n")); err != nil {
+		t.Fatalf("LoadSet(base): %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit(base): %v", err)
+	}
+	store.ExitConfigure()
+
+	if err := store.EnterConfigure(); err != nil {
+		t.Fatalf("EnterConfigure(active): %v", err)
+	}
+	active := []string{
+		"set system domain-name " + activeDomain18669,
+		"set interfaces ge-0/0/0 description " + activeInterface18669,
+	}
+	if _, err := store.LoadSet(strings.Join(active, "\n")); err != nil {
+		t.Fatalf("LoadSet(active): %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit(active): %v", err)
+	}
+	store.ExitConfigure()
+
+	if err := store.EnterConfigureExclusive("foreign-compare-18669"); err != nil {
+		t.Fatalf("EnterConfigureExclusive(foreign): %v", err)
+	}
+	staged := []string{
+		"set system domain-name candidate-18669.invalid",
+		"set system host-name " + candidateCanary18669,
+	}
+	if _, err := store.LoadSet(strings.Join(staged, "\n")); err != nil {
+		t.Fatalf("LoadSet(candidate): %v", err)
+	}
+	return store
+}
+
+func TestCLIShowConfigurationCompareDispatchAcrossConfigHolders18669(t *testing.T) {
+	fixtures := []struct {
+		name  string
+		store func(*testing.T) *configstore.Store
+	}{
+		{"foreign-holder", foreignShowCompareStore18669},
+		{"unowned-shared-lock", showCompareStore18669},
+	}
+	for _, fixture := range fixtures {
+		for _, tc := range []struct {
+			line    string
+			wantIn  []string
+			wantOut []string
+		}{
+			{
+				line:    "show configuration | compare rollback 1",
+				wantIn:  []string{activeDomain18669, activeInterface18669},
+				wantOut: []string{candidateCanary18669, "candidate-18669.invalid"},
+			},
+			{
+				line:    "show configuration system | compare rollback 1",
+				wantIn:  []string{activeDomain18669},
+				wantOut: []string{activeInterface18669, candidateCanary18669, "candidate-18669.invalid"},
+			},
+		} {
+			t.Run(fixture.name+"/"+tc.line, func(t *testing.T) {
+				store := fixture.store(t)
+				c := &CLI{store: store, userClass: "compare-view-18669"}
+				if got, want := c.promptForCurrentMode(), c.operationalPrompt(); got != want {
+					t.Fatalf("promptForCurrentMode() = %q, want operational prompt %q", got, want)
+				}
+				if !store.IsDirty() {
+					t.Fatal("fixture candidate is not dirty")
+				}
+				var err error
+				out := captureStdout(t, func() { err = c.dispatch(tc.line) })
+				if err != nil {
+					t.Fatalf("dispatch(%q): %v", tc.line, err)
+				}
+				for _, value := range tc.wantIn {
+					if !strings.Contains(out, value) {
+						t.Errorf("dispatch(%q) output missing active-baseline value %q:\n%s", tc.line, value, out)
+					}
+				}
+				for _, value := range tc.wantOut {
+					if strings.Contains(out, value) {
+						t.Errorf("dispatch(%q) output contains candidate value %q:\n%s", tc.line, value, out)
+					}
+				}
+			})
+		}
+	}
+
+	for _, line := range []string{
+		"show configuration | compare",
+		"show configuration |compare",
+	} {
+		t.Run("foreign-holder/bare/"+line, func(t *testing.T) {
+			c := &CLI{store: foreignShowCompareStore18669(t), userClass: "compare-view-18669"}
+			var err error
+			out := captureStdout(t, func() { err = c.dispatch(line) })
+			if err == nil {
+				t.Fatalf("dispatch(%q) returned nil, output %q; want a non-nil operational compare refusal", line, out)
+			}
+			if line == "show configuration | compare" &&
+				err.Error() != "syntax error: | compare on operational show configuration requires rollback <N>" {
+				t.Fatalf("bare compare error = %q; want explicit rollback requirement", err)
+			}
+		})
+	}
+}
+
+func TestCLIShowConfigurationForeignCompareRoutingKeepsLockGuards18669(t *testing.T) {
+	store := foreignShowCompareStore18669(t)
+	c := &CLI{store: store, userClass: "super-user"}
+	for _, line := range []string{
+		"set system host-name blocked-foreign-18669",
+		"delete system host-name",
+		"commit",
+		"configure",
+		"run show route",
+	} {
+		if err := c.dispatch(line); err == nil || !strings.Contains(err.Error(), "configuration is locked by another session") {
+			t.Errorf("dispatch(%q) = %v; want foreign-lock refusal", line, err)
+		}
+		if got := store.ShowCandidateSet(); !strings.Contains(got, candidateCanary18669) {
+			t.Fatalf("dispatch(%q) changed the foreign candidate:\n%s", line, got)
+		}
+	}
+	if holder, locked := store.ConfigHolder(); !locked || holder != "foreign-compare-18669" {
+		t.Fatalf("foreign lock after refusals = %q/%v; want foreign-compare-18669/true", holder, locked)
+	}
+
+	var err error
+	out := captureStdout(t, func() { err = c.dispatch("show system") })
+	if err != nil || !strings.Contains(out, candidateCanary18669) {
+		t.Fatalf("plain config-mode show system = (%q, %v); want candidate rendering through existing branch", out, err)
 	}
 }
