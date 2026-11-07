@@ -1291,6 +1291,32 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(c.owner[2], 1)
         self.assertEqual(c.commands, [])
 
+    def test_unreadable_final_owner_does_not_trigger_restore_18631(self):
+        class UnreadableOnce(FakeCluster):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.status_reads = {0: 0, 1: 0}
+
+            def status(self, node):
+                self.status_reads[node] += 1
+                if node == 1 and self.status_reads[node] == 3:
+                    return ""
+                return super().status(node)
+
+        clock = FakeClock()
+        c = UnreadableOnce(clock, {2: 1}, stale_iperf_ports={5211: 88}, iperf_reset_fail=True)
+        rc, result, logs = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertIn("iperf socket preflight", result["void"])
+        self.assertEqual(c.owner[2], 1)
+        self.assertEqual(c.commands, [])
+        self.assertNotIn("restore", result["preflight"])
+        self.assertIn("owner unreadable", "\n".join(logs))
+        self.assertEqual(c.status_reads, {0: 3, 1: 3})
+        v0, v1 = soak.parse_status(c.status(0)), soak.parse_status(c.status(1))
+        self.assertEqual(soak.rg_ownership(2, v0, v1).owner, 1)
+
+
     def test_preflight_timeout_voids_without_moving_rg_18631(self):
         clock = FakeClock()
         c = FakeCluster(clock, {2: 1}, stale_iperf_ports={5211: 88}, iperf_reset_timeout=True)

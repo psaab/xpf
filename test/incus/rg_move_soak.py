@@ -1315,7 +1315,12 @@ class Soak:
                 owner_changed = False
                 try:
                     current_owners = self._refresh_owners(rgs)
-                    owner_changed = any(current_owners.get(rg) != initial_owners.get(rg) for rg in rgs)
+                    unknown_rgs = [rg for rg in rgs if current_owners.get(rg) is None]
+                    if unknown_rgs:
+                        self.log(f"WARNING: current owner unreadable for RG(s) {unknown_rgs}; "
+                                 "unknown is not treated as an ownership change")
+                    owner_changed = any(current_owners.get(rg) is not None
+                                        and current_owners[rg] != initial_owners.get(rg) for rg in rgs)
                 except Exception as e:
                     self.log(f"WARNING: could not read current RG owners before restore decision: {e}")
                 if self.move_commands_issued or owner_changed:
