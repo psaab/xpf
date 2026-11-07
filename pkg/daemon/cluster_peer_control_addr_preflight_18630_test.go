@@ -121,7 +121,7 @@ func TestPeerControlAddressRenumberRefusedAtCommit_18630(t *testing.T) {
 	if err != nil {
 		t.Fatalf("precondition: compile candidate for peer node: %v", err)
 	}
-	if got := controlLinkStaticAddrs18606(peerView, "em0"); len(got) != 1 || got[0] != peerControlAddrNew18630 {
+	if got := controlLinkState18606(peerView, "em0").addrs; len(got) != 1 || got[0] != peerControlAddrNew18630 {
 		t.Fatalf("precondition: peer view renders em0 addresses %v, want [%s]", got, peerControlAddrNew18630)
 	}
 
@@ -168,7 +168,7 @@ func TestPeerControlAddressUnchangedCommitPasses_18630(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compile committed peer view: %v", err)
 	}
-	if got := controlLinkStaticAddrs18606(peerView, "em0"); len(got) != 1 || got[0] != peerControlAddrOld18630 {
+	if got := controlLinkState18606(peerView, "em0").addrs; len(got) != 1 || got[0] != peerControlAddrOld18630 {
 		t.Fatalf("committed peer view renders em0 addresses %v, want unchanged [%s]", got, peerControlAddrOld18630)
 	}
 }
@@ -195,7 +195,7 @@ func TestPeerControlAddressDHCPAndForeignBindingsPassBothCommitPaths18630(t *tes
 				if err != nil {
 					t.Fatalf("compile running peer view: %v", err)
 				}
-				runningAddrs := controlLinkStaticAddrs18606(activePeerView, "em0")
+				runningAddrs := controlLinkState18606(activePeerView, "em0").addrs
 				peerIP := net.ParseIP(tc.peerAddr)
 				if cidrListHasIP18606(runningAddrs, peerIP) {
 					t.Fatalf("precondition: running peer address %s unexpectedly appears in static control addresses %v",
@@ -205,7 +205,7 @@ func TestPeerControlAddressDHCPAndForeignBindingsPassBothCommitPaths18630(t *tes
 				if err != nil {
 					t.Fatalf("compile candidate peer view: %v", err)
 				}
-				candidateAddrs := controlLinkStaticAddrs18606(candidatePeerView, "em0")
+				candidateAddrs := controlLinkState18606(candidatePeerView, "em0").addrs
 				if cidrListHasIP18606(candidateAddrs, peerIP) {
 					t.Fatalf("precondition: candidate unexpectedly renders running peer address %s in %v",
 						tc.peerAddr, candidateAddrs)

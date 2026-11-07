@@ -611,7 +611,7 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 		return nil
 	}
 	runningControlInterface := runningPeerView.Chassis.Cluster.ControlInterface
-	runningStaticAddrs := controlLinkStaticAddrs18606(runningPeerView, runningControlInterface)
+	runningStaticAddrs := controlLinkState18606(runningPeerView, runningControlInterface).addrs
 	if !cidrListHasIP18606(runningStaticAddrs, net.ParseIP(peerAddr)) {
 		// DHCP-derived and foreign heartbeat addresses are not being removed by
 		// this config candidate, so unrelated commits must remain admissible.
@@ -631,7 +631,7 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 		controlInterface = peerView.Chassis.Cluster.ControlInterface
 	}
 	return peerControlAddressDecision18630(peerAddr, runningStaticAddrs,
-		controlLinkStaticAddrs18606(peerView, controlInterface))
+		controlLinkState18606(peerView, controlInterface).addrs)
 }
 
 // peerControlAddressDecision18630 refuses only when the running heartbeat peer
