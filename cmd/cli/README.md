@@ -74,20 +74,15 @@ the pipe. The rules:
   handler and named: `syntax error: unknown pipe command "frobnicate"`,
   `unknown display format "yaml"`, `syntax error: missing pipe
   modifier`.
-- `| compare [rollback <N>]` is not supported on operational
-  `show configuration` (Junos supports it). The handler says so and
-  points at the command that answers the question
-  (`opShowConfigurationCompareErr`):
-  - Unscoped `| compare rollback <N>` points at `show system rollback
-    <N> | compare`. That command diffs rollback N against the ACTIVE
-    configuration (`ShowCompare{ActiveBaseline}`), which is the Junos
-    operational meaning, and needs no configuration mode, which a
-    view-only class cannot enter.
-  - Bare `| compare` and any scoped path (`show configuration interfaces
-    | compare [rollback <N>]`) point at configuration-mode `show
-    [<path>] | compare [rollback <N>]`, because the rollback compare has
-    no subtree selector here. Configuration mode compares the CANDIDATE,
-    and the message says so.
+- Operational `show configuration [<path>] | compare rollback <N>` is
+  supported on both the remote and local consoles. It diffs rollback N
+  against the ACTIVE configuration (`ShowCompare{ActiveBaseline,
+  Path}`), with an optional subtree path before the pipe; it never reads
+  the candidate. Bare `| compare` is refused with
+  `syntax error: | compare on operational show configuration requires
+  rollback <N>` rather than guessing rollback 1. Malformed compare forms
+  return non-nil usage errors. Configuration-mode `show | compare`
+  remains a distinct candidate-baseline command.
 - A `|` glued to a word (`|display`, `configuration|display`) is not
   the pipe operator on any operational surface. The shared gate's scan,
   `cliterm.SplitPipe` and the handlers all recognize only a bare `|` token.

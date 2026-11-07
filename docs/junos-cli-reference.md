@@ -3199,18 +3199,17 @@ configuration mode, `run show configuration | display set` does the same.
   `syntax error: "request chassis cluster" does not accept the output modifier "| display set"`;
   `show chassis | display set` ->
   `syntax error: "show chassis" does not accept the output modifier "| display set"`.
-- Operational `show configuration [<path>] | compare [rollback <N>]` is a
-  Junos command that xpf does not support. The remote `cli` refuses it and
-  names the command to use instead:
-  - `show configuration | compare rollback <N>` -> use
-    `show system rollback <N> | compare` (or `show system rollback compare
-    <N>`). Both diff rollback N against the ACTIVE configuration, which is
-    what the Junos command shows, without entering configuration mode.
-  - Bare `show configuration | compare`, or any scoped form such as
-    `show configuration interfaces | compare rollback 1` -> use
-    configuration mode: `configure`, then `show [<path>] | compare
-    [rollback <N>]`. That compares the CANDIDATE configuration, and it can
-    scope to a subtree, which the rollback compare cannot.
+- Operational `show configuration [<path>] | compare rollback <N>` is
+  supported on both the remote and local xpf consoles. It compares rollback
+  N against the ACTIVE configuration, not the candidate; a path before the
+  pipe scopes the diff (for example,
+  `show configuration system | compare rollback 1`).
+- Bare `show configuration | compare` is refused with
+  `syntax error: | compare on operational show configuration requires
+  rollback <N>`; xpf does not invent rollback 1. Malformed compare forms
+  likewise return syntax errors.
+- Configuration-mode `show | compare [rollback <N>]` remains a separate
+  candidate-baseline operation and may be subtree-scoped.
 
 ---
 

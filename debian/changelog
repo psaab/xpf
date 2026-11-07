@@ -1,4 +1,8 @@
 xpf (0.0.0) unstable; urgency=medium
+  * CLI: implement operational `show configuration [<path>] | compare
+    rollback <N>` against the ACTIVE configuration on both consoles.
+    Bare `| compare` requires an explicit rollback index, and malformed
+    forms fail with non-nil errors (#18669).
   * CLI: share the operational keyword-only and output-pipe gate between the
     local console and remote `cli` (#18668). Previously only the remote CLI
     refused keyword-only pipes; the local handlers could print help and exit

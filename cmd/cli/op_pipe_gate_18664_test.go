@@ -34,22 +34,8 @@ import (
 
 const cfgOut18664 = "set system host-name fw0\nset interfaces ge-0/0/0 unit 0\n"
 
-// Junos supports operational `show configuration | compare [rollback <N>]`;
-// xpf does not, so the refusal must say that rather than call `compare` an
-// unknown pipe command, and must point at the command that answers the
-// question. Bare and scoped compares point at configuration mode (candidate
-// diff)...
-const opCompareConfigMode18664 = "syntax error: `| compare` is not supported on " +
-	"operational `show configuration`; use configuration mode (`configure`, then " +
-	"`show [<path>] | compare [rollback <N>]`), which compares the candidate configuration"
-
-// ...and the unscoped rollback compare points at its operational equivalent,
-// `show system rollback <N> | compare` (ActiveBaseline: active vs rollback N).
-func opCompareSystemRollback18664(n string) string {
-	return "syntax error: `| compare rollback " + n + "` is not supported on " +
-		"operational `show configuration`; use `show system rollback " + n + " | compare`, " +
-		"which diffs rollback " + n + " against the active configuration"
-}
+// Operational compare acceptance and refusal shapes are pinned in the #18669
+// cells below.
 
 // rec18664 records the RPCs a dispatched line issues. Any RPC it does not
 // override nil-panics, which fails the cell: a refusal must happen before the
@@ -237,16 +223,11 @@ func TestOpPipeKeepsKeywordOnlyRefusal18664(t *testing.T) {
 	}
 }
 
-// An invalid pipe after `show configuration` reaches the handler and fails
-// there, naming what is wrong, never as `unknown show configuration command`.
+// An invalid non-compare pipe after `show configuration` reaches the handler
+// and fails there, naming what is wrong, never as `unknown show configuration command`.
 func TestOpShowConfigurationBadPipe18664(t *testing.T) {
 	for _, tc := range []struct{ line, want string }{
 		{"show configuration | frobnicate", `syntax error: unknown pipe command "frobnicate"`},
-		{"show configuration | compare", opCompareConfigMode18664},
-		{"show configuration | compare rollback 1", opCompareSystemRollback18664("1")},
-		{"show configuration | compare rollback", opCompareSystemRollback18664("<N>")},
-		{"show configuration interfaces | compare", opCompareConfigMode18664},
-		{"show configuration interfaces | compare rollback 1", opCompareConfigMode18664},
 		{"show configuration | display yaml", `unknown display format "yaml"`},
 		{"show configuration | display set bogus", "usage: | display <supported-format>"},
 		{"show configuration |", "syntax error: missing pipe modifier"},
@@ -328,5 +309,57 @@ func TestOperationalPipeConsumers18664(t *testing.T) {
 		if !gotSet || strings.TrimSpace(path) == "" {
 			t.Fatalf("consumer %q: no RPC carried the SET format (config=%v rollback=%v)", path, f.config, f.rollback)
 		}
+	}
+}
+
+// #18669: operational compare rollback requests are active-baseline compares
+// on both whole-tree and path-scoped `show configuration`.
+func TestOpShowConfigurationCompareRollback18669(t *testing.T) {
+	for _, tc := range []struct {
+		line string
+		n    int32
+		path []string
+	}{
+		{"show configuration | compare rollback 2", 2, nil},
+		{"show configuration system | compare rollback 3", 3, []string{"system"}},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			f, out, err := dispatch18664(t, tc.line, false)
+			if err != nil || len(f.compare) != 1 || f.calls() != 1 {
+				t.Fatalf("dispatch(%q) = %v, compare=%d total=%d; want one ShowCompare", tc.line, err, len(f.compare), f.calls())
+			}
+			req := f.compare[0]
+			if !req.GetActiveBaseline() || req.GetRollbackN() != tc.n || !reflect.DeepEqual(req.GetPath(), tc.path) {
+				t.Fatalf("dispatch(%q) ShowCompare active=%v n=%d path=%v; want ActiveBaseline/%d/%v",
+					tc.line, req.GetActiveBaseline(), req.GetRollbackN(), req.GetPath(), tc.n, tc.path)
+			}
+			if out != "diff\n" {
+				t.Fatalf("dispatch(%q) output %q; want diff", tc.line, out)
+			}
+		})
+	}
+}
+
+// Bare compare intentionally refuses rather than guessing rollback 1. Bad
+// rollback syntax must also fail before the RPC.
+func TestOpShowConfigurationCompareRefusals18669(t *testing.T) {
+	for _, tc := range []struct{ line, want string }{
+		{"show configuration | compare", "syntax error: | compare on operational show configuration requires rollback <N>"},
+		{"show configuration | compare rollback", "usage: show configuration [<path>] | compare rollback <N>"},
+		{"show configuration | compare rollback nope", "usage: show configuration [<path>] | compare rollback <N>"},
+		{"show configuration | compare rollback -1", "usage: show configuration [<path>] | compare rollback <N>"},
+		{"show configuration | compare rollback 2147483648", "usage: show configuration [<path>] | compare rollback <N>"},
+		{"show configuration | compare rollback 1 extra", "usage: show configuration [<path>] | compare rollback <N>"},
+		{"show configuration | compare extra", "usage: show configuration [<path>] | compare rollback <N>"},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			f, _, err := dispatch18664(t, tc.line, false)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("dispatch(%q) = %v; want %q", tc.line, err, tc.want)
+			}
+			if f.calls() != 0 {
+				t.Fatalf("dispatch(%q) issued %d RPCs; want refusal before the wire", tc.line, f.calls())
+			}
+		})
 	}
 }
