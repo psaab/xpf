@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -322,5 +323,143 @@ func TestRedactedClonePreservesFormatQualifier(t *testing.T) {
 	}
 	if strings.Contains(out, "SUPERSECRET") {
 		t.Errorf("pre-shared-key material leaked:\n%s", out)
+	}
+}
+
+// TestRedactionSiteConsumersPinned17270 exercises every redacted surface and
+// each embedded payload shape against both secret and URL credential sites.
+// It keeps cleartext positives beside the redacted assertions so empty or
+// over-restrictive output cannot satisfy the pins.
+func TestRedactionSiteConsumersPinned17270(t *testing.T) {
+	type siteCase struct {
+		name    string
+		tree    *ConfigTree
+		path    []string
+		canary  string
+		marker  string
+		wantErr error
+	}
+	tests := []siteCase{
+		{
+			name:    "direct secret leaf",
+			tree:    buildRedactTree(t, []string{"set security ike policy p1 pre-shared-key ascii-text SITE-17270-PSK"}),
+			path:    []string{"security", "ike", "policy", "p1"},
+			canary:  "SITE-17270-PSK",
+			marker:  SecretDataPlaceholder,
+			wantErr: errRedactionPlaceholderIngest,
+		},
+		{
+			name:    "direct URL credential",
+			tree:    buildRedactTree(t, []string{`set system services dynamic-dns provider p1 url "https://user:SITE-17270-URL@dyn.example.com/upd"`}),
+			path:    []string{"system", "services", "dynamic-dns", "provider", "p1"},
+			canary:  "SITE-17270-URL",
+			marker:  "redacted",
+			wantErr: errRedactedURLIngest,
+		},
+	}
+	for _, shape := range []string{"quoted", "joined-tail", "block"} {
+		for _, kind := range []string{"secret", "url"} {
+			name := strings.ToUpper(strings.ReplaceAll(shape, "-", "_")) + "-" + kind
+			canary := "SITE-17270-" + name
+			command := "set security ike policy p1 pre-shared-key ascii-text " + canary
+			marker := SecretDataPlaceholder
+			wantErr := errRedactionPlaceholderIngest
+			if kind == "url" {
+				command = "set system services dynamic-dns provider dy url https://user:" + canary + "@dyn.example.com/upd"
+				marker = "redacted"
+				wantErr = errRedactedURLIngest
+			}
+			var tree *ConfigTree
+			switch shape {
+			case "quoted":
+				tree = embeddedIngest15209FlatTree(t,
+					`set event-options policy p1 events ping_test_failed`,
+					`set event-options policy p1 then change-configuration commands `+strconv.Quote(command))
+			case "joined-tail":
+				if kind == "url" {
+					// The inner lexer sees the URL-bearing tail as an
+					// unjudgeable payload and fails closed on the whole
+					// command, rather than emitting a URL-only sentinel.
+					marker = SecretDataPlaceholder
+					wantErr = errRedactionPlaceholderIngest
+					tree = &ConfigTree{Children: []*Node{{
+						Keys: []string{"event-options"},
+						Children: []*Node{{
+							Keys: []string{"policy", "p1", "then",
+								"change-configuration", "commands", "set", "system", "services",
+								"dynamic-dns", "provider", "dy", "url",
+								"https://user:" + canary + "@dyn.example.com/upd"},
+							IsLeaf: true,
+						}},
+					}}}
+				} else {
+					tree = embeddedIngest15209FlatTree(t,
+						`set event-options policy p1 events ping_test_failed`,
+						`set event-options policy p1 then change-configuration commands `+command)
+				}
+			case "block":
+				tree = parseHierText(t, `event-options {
+    policy p1 {
+        events ping_test_failed;
+        then {
+            change-configuration {
+                commands { `+strconv.Quote(command)+`; }
+            }
+        }
+    }
+}`)
+			}
+			tests = append(tests, siteCase{
+				name: "embedded " + name, tree: tree,
+				path: []string{"event-options", "policy", "p1"},
+				canary: canary, marker: marker, wantErr: wantErr,
+			})
+		}
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cleartext := tc.tree
+			if !strings.Contains(cleartext.FormatSet(), tc.canary) ||
+				!strings.Contains(FormatCompare(&ConfigTree{}, cleartext), tc.canary) {
+				t.Fatalf("cleartext positive control lost %q", tc.canary)
+			}
+			if err := checkRedactionPlaceholder(cleartext); err != nil {
+				t.Fatalf("ingest guard rejected cleartext source: %v", err)
+			}
+
+			redacted := cleartext.RedactedClone()
+			inheritance, err := cleartext.FormatPathInheritanceRedactedForNode(tc.path, -1)
+			if err != nil {
+				t.Fatalf("FormatPathInheritanceRedactedForNode: %v", err)
+			}
+			for surface, rendered := range map[string]string{
+				"clone hierarchical": redacted.Format(),
+				"clone set":          redacted.FormatSet(),
+				"clone JSON":         redacted.FormatJSON(),
+				"clone XML":          redacted.FormatXML(),
+				"path hierarchical":  cleartext.FormatPathRedacted(tc.path),
+				"path set":           cleartext.FormatPathSetRedacted(tc.path),
+				"path JSON":          cleartext.FormatPathJSONRedacted(tc.path),
+				"path XML":           cleartext.FormatPathXMLRedacted(tc.path),
+				"path inheritance":   inheritance,
+				"whole compare":      FormatCompareRedacted(&ConfigTree{}, cleartext),
+				"scoped compare":     FormatCompareRedactedAtPath(&ConfigTree{}, cleartext, tc.path),
+			} {
+				if strings.Contains(rendered, tc.canary) {
+					t.Errorf("%s leaked %q:\n%s", surface, tc.canary, rendered)
+				}
+				if !strings.Contains(rendered, tc.marker) {
+					t.Errorf("%s omitted redaction marker %q:\n%s", surface, tc.marker, rendered)
+				}
+			}
+			if err := checkRedactionPlaceholder(redacted); err == nil {
+				t.Fatal("ingest guard accepted redacted output")
+			} else if !errors.Is(err, tc.wantErr) {
+				t.Errorf("ingest guard error = %v, want %v", err, tc.wantErr)
+			} else if strings.Contains(err.Error(), tc.canary) {
+				t.Errorf("ingest guard error echoed %q: %v", tc.canary, err)
+			}
+		})
 	}
 }

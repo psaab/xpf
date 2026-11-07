@@ -164,8 +164,8 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect, lenient bool) ([]
 	// compileTreeLenient preserves this placeholder-specific error while other
 	// legacy typed-leaf violations continue to follow the tolerant policy.
 	// Fold 3 (F2): this return (and the QNH one above) previously bypassed
-	// the exit scrub; findRedactionPlaceholder embeds the raw flattened
-	// path, which can carry a PRECEDING secret operand on the same leaf.
+	// the exit scrub; the guard's raw flattened location could carry a
+	// PRECEDING secret operand on the same leaf.
 	// scrubSchemaErrorSecrets re-wraps the %w sentinel, preserving
 	// IsRedactionPlaceholderIngestError / IsRedactedURLIngestError.
 	if err := checkRedactionPlaceholder(tree); err != nil {

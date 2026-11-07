@@ -253,12 +253,11 @@ func TestSecretLeafEscapedExtraTokenNeverEchoed16066(t *testing.T) {
 	}
 }
 
-// #16066 fold 3 (F2): the pre-walk redaction-placeholder guard. A
-// secret leaf carrying an ordinary canary operand BEFORE the
-// ##SECRET-DATA## placeholder made findRedactionPlaceholder embed
-// the canary in its returned path, and checkRedactionPlaceholder
-// quoted it — returned before the exit scrub. The error must still
-// classify as IsRedactionPlaceholderIngestError but omit the canary.
+// #16066 fold 3 (F2): the old placeholder guard returned a raw flattened
+// path when a secret leaf carried an ordinary canary operand BEFORE the
+// ##SECRET-DATA## placeholder. The schema gate's exit scrub must still
+// classify the error as IsRedactionPlaceholderIngestError while omitting
+// that canary.
 func TestPlaceholderGuardNeverEchoesPrecedingSecret16066(t *testing.T) {
 	const canary = "CANARYPRE16066"
 	text := "system { services { dynamic-dns { provider p { password \"" + canary + "\" \"##SECRET-DATA##\"; } } } }"

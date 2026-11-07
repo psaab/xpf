@@ -279,15 +279,11 @@ func (t *ConfigTree) FormatPathInheritanceRedactedForNode(path []string, nodeID 
 	}
 	clones := cloneNodes(matches)
 	// Mask with the true ancestor prefix the matches sit under, exactly
-	// as redactedScopedMatches does: context-gated predicates
-	// (snmp>community, authentication/md5>key, archive-sites>password,
-	// gated URL leaves) test ancestors at/above the matched node, so a
-	// nil base silently unmasked them (#15979). Tokens beyond the
-	// consumed width live in the clones' Keys, not in base, and
-	// redactMatches15942 only masks idx >= len(base), so the caller's
-	// navigation spelling is preserved.
+	// as redactedScopedMatches does: context-gated predicates test the path
+	// ancestors above the matched node. The shared walker leaves the
+	// caller's navigation tokens untouched.
 	parentPrefix := append([]string(nil), path[:len(path)-width]...)
-	redactMatches15942(clones, parentPrefix)
+	redactNodes(clones, parentPrefix)
 	var b strings.Builder
 	for _, n := range clones {
 		if n.Annotation != "" {
@@ -343,22 +339,10 @@ func (t *ConfigTree) redactedScopedMatches(path []string) ([]*Node, int) {
 	}
 	clones := cloneNodes(matches)
 	parentPrefix := append([]string(nil), path[:len(path)-width]...)
-	redactMatches15942(clones, parentPrefix)
+	redactNodes(clones, parentPrefix)
 	return clones, width
 }
 
-// redactMatches15942 masks secret/URL tokens inside matched nodes with
-// SecretDataPlaceholder, mirroring redactNodes but rooted at base (the
-// parent prefix the matches sit under) instead of the tree root.
-// Tokens at or above base (idx < len(base)) belong to ancestor nodes
-// outside the match and keep their authored spelling — that is what
-// leaves the caller's navigation path intact on the clone.
-// maskSecretPathComponents15942 returns path with every token that is
-// a secret identity at its position replaced by SecretDataPlaceholder.
-// The judgement reuses secretIndices/urlLeafIndices on the path itself,
-// so this masks exactly the tokens the tree redactor would mask at
-// that flattened position (`public` in `snmp community public …`, a
-// credential-bearing archive-sites URL) and nothing else.
 func maskSecretPathComponents15942(path []string) []string {
 	if len(path) == 0 {
 		return path
@@ -377,26 +361,6 @@ func maskSecretPathComponents15942(path []string) []string {
 	return out
 }
 
-func redactMatches15942(matches []*Node, base []string) {
-	for _, n := range matches {
-		full := append(append([]string(nil), base...), n.Keys...)
-		for _, idx := range secretIndices(full) {
-			if idx >= len(base) && idx < len(full) {
-				n.Keys[idx-len(base)] = SecretDataPlaceholder
-			}
-		}
-		for _, idx := range urlLeafIndices(full) {
-			if idx >= len(base) && idx < len(full) {
-				n.Keys[idx-len(base)] = RedactURL(n.Keys[idx-len(base)])
-			}
-		}
-		redactEmbeddedCommands14413(n, full, base)
-		if !n.IsLeaf {
-			redactMatches15942(n.Children, full)
-		}
-	}
-}
-
 func fingerprintRedactedClone(t *ConfigTree) *ConfigTree {
 	if t == nil {
 		return nil
@@ -407,46 +371,11 @@ func fingerprintRedactedClone(t *ConfigTree) *ConfigTree {
 }
 
 func fingerprintCompareNodes(nodes []*Node, base []string) {
-	for _, n := range nodes {
-		full := append(append([]string(nil), base...), n.Keys...)
-		// Dedupe by path index, never value bytes: quoted strings may contain NUL.
-		secretIdxs := secretIndices(full)
-		urlIdxs := urlLeafIndices(full)
-		var seen map[int]struct{}
-		if len(secretIdxs)+len(urlIdxs) > 0 {
-			seen = make(map[int]struct{}, len(secretIdxs)+len(urlIdxs))
-		}
-		for _, idx := range secretIdxs {
-			if idx < len(base) || idx >= len(full) {
-				continue
-			}
-			if _, ok := seen[idx]; ok {
-				continue
-			}
-			seen[idx] = struct{}{}
-			valueIndex := idx - len(base)
-			n.Keys[valueIndex] = SecretDataPlaceholder + compareFingerprintSuffix(n.Keys[valueIndex])
-		}
-		for _, idx := range urlIdxs {
-			if idx < len(base) || idx >= len(full) {
-				continue
-			}
-			if _, ok := seen[idx]; ok {
-				continue
-			}
-			seen[idx] = struct{}{}
-			valueIndex := idx - len(base)
-			value := n.Keys[valueIndex]
-			redacted := RedactURL(value)
-			if redacted != value {
-				n.Keys[valueIndex] = redacted + compareURLFingerprintSuffix(value)
-			}
-		}
-		fingerprintEmbeddedCommands14413(n, full, base)
-		if !n.IsLeaf {
-			fingerprintCompareNodes(n.Children, full)
-		}
-	}
+	walkSecretSites(nodes, base, func(sites redactionSiteList) bool {
+		fingerprintSecretSites(sites)
+		redactEmbeddedPayloads(sites.embedded, true)
+		return true
+	})
 }
 
 // RedactEmbeddedChangeConfigCommand masks credential values inside one
@@ -706,133 +635,56 @@ func isValuedKeyCredentialFallback18435(k string) bool {
 	}
 }
 
-// redactEmbeddedCommands14413 applies embedded-command redaction to the
-// `commands` payload carried by node n (full = base + n.Keys) on a redaction
-// CLONE. Shapes (compiler_services.go eventChangeConfigCommands):
-//   - `commands "<one command>"` / `commands [ "a" "b" ]`: every Keys token
-//     after `commands` is one command (quoted) — rewrite each in place.
-//   - `commands set … <bare words>`: one unquoted command — judged as the
-//     joined tail, then re-split only if a secret was masked (a no-secret
-//     tail is left byte-identical so ordinary commands never churn).
-//   - `commands { "a"; set …; }`: each child carries one command in its Keys
-//     (eventMultiWordLeafValues grouping) — recurse with full as base.
-//
-// KeysQuoted provenance, when present, decides quoted-vs-joined exactly as
-// the compiler reader does; without it the token text decides (a token
-// containing a space must have been quoted).
-func redactEmbeddedCommands14413(n *Node, full, base []string) {
-	ci := -1
-	for i := 0; i+1 < len(full); i++ {
-		if full[i] == "change-configuration" && full[i+1] == "commands" {
-			ci = i
-			break
-		}
-	}
-	if ci < 0 {
-		return
-	}
-	// The `commands` keyword must belong to THIS node, not an ancestor: an
-	// ancestor-owned payload is handled when that ancestor is visited.
-	if ci+1 < len(base) {
-		return
-	}
-	local := ci + 1 - len(base) // index of "commands" within n.Keys
-	if local < 0 || local >= len(n.Keys) {
-		return
-	}
-	tailStart := local + 1
-	if len(n.Children) > 0 {
-		for _, child := range n.Children {
-			redactEmbeddedChild14413(child)
-		}
-		return
-	}
-	if tailStart >= len(n.Keys) {
-		return
-	}
-	tail := n.Keys[tailStart:]
-	hasProv := n.KeysHaveQuoteProvenance()
-	quoted := func(j int) bool {
-		if hasProv {
-			return n.KeyQuoted(tailStart + j)
-		}
-		return tail[j] == "" || strings.Contains(tail[j], " ")
-	}
-	if quoted(0) {
-		for j := range tail {
-			if redacted, changed := redactEmbeddedCommand(tail[j], false); changed {
-				n.Keys[tailStart+j] = redacted
-			}
-		}
-		return
-	}
-	redactJoinedTail14413(n, tailStart)
+// embeddedPayloadSite identifies one command stored in the AST. Quoted
+// commands occupy a single key; an unquoted command is the joined tail from
+// start onward. The location is the name-only outer path used by ingest errors.
+type embeddedPayloadSite struct {
+	node     *Node
+	start    int
+	joined   bool
+	location string
 }
 
-// redactEmbeddedChild14413 handles one child of a `commands { … }` block (or
-// a flat-set bracket child): quoted first token means each Keys token is a
-// separate command; otherwise the Keys join into one command.
-func redactEmbeddedChild14413(child *Node) {
-	if len(child.Keys) == 0 {
-		return
+func (site embeddedPayloadSite) command() string {
+	if site.joined {
+		return strings.Join(site.node.Keys[site.start:], " ")
 	}
-	hasProv := child.KeysHaveQuoteProvenance()
-	quotedFirst := (hasProv && child.KeyQuoted(0)) || (!hasProv &&
-		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
-	if quotedFirst {
-		for j := range child.Keys {
-			if redacted, changed := redactEmbeddedCommand(child.Keys[j], false); changed {
-				child.Keys[j] = redacted
-			}
-		}
-		return
-	}
-	joined := strings.Join(child.Keys, " ")
-	if redacted, changed := redactEmbeddedCommand(joined, false); changed {
-		applyRedactedJoin14413(child, redacted)
-	}
+	return site.node.Keys[site.start]
 }
 
-// redactJoinedTail14413 judges the joined unquoted tail of `commands set …`
-// and, only when a secret is masked, rewrites the node's tail to the
-// redacted tokenization. A clean tail is untouched.
-func redactJoinedTail14413(n *Node, tailStart int) {
-	joined := strings.Join(n.Keys[tailStart:], " ")
-	redacted, changed := redactEmbeddedCommand(joined, false)
-	if !changed {
+func (site embeddedPayloadSite) replace(command string) {
+	if !site.joined {
+		site.node.Keys[site.start] = command
 		return
 	}
-	tokens, _ := lexConfigMutationLine9938(redacted)
+	tokens, _ := lexConfigMutationLine9938(command)
 	if len(tokens) == 0 {
-		// Whole-payload masks begin with `#`, so the config lexer treats the
-		// placeholder itself as a comment. Preserve it as one AST key rather
-		// than dropping the replacement with the empty token list.
-		n.replaceKeys(append(n.Keys[:tailStart], redacted), nil, nil, false)
+		// Whole-payload masks begin with `#`; preserve the placeholder as one
+		// AST key instead of letting the config lexer discard it as a comment.
+		site.node.replaceKeys(append(site.node.Keys[:site.start], command), nil, nil, false)
 		return
 	}
-	keys := make([]string, 0, tailStart+len(tokens))
-	keys = append(keys, n.Keys[:tailStart]...)
+	keys := make([]string, 0, site.start+len(tokens))
+	keys = append(keys, site.node.Keys[:site.start]...)
 	keys = append(keys, tokens...)
-	n.replaceKeys(keys, nil, nil, false)
+	// Joined tails are re-tokenized; clear quote provenance rather than
+	// carrying positional bits over from the old key span.
+	site.node.replaceKeys(keys, nil, nil, false)
 }
 
-// applyRedactedJoin14413 rewrites a block child's Keys to the redacted
-// tokenization of its joined command.
-func applyRedactedJoin14413(child *Node, redacted string) {
-	tokens, _ := lexConfigMutationLine9938(redacted)
-	if len(tokens) == 0 {
-		child.replaceKeys([]string{redacted}, nil, nil, false)
-		return
+func redactEmbeddedPayloads(sites []embeddedPayloadSite, fingerprint bool) {
+	for _, site := range sites {
+		if redacted, changed := redactEmbeddedCommand(site.command(), fingerprint); changed {
+			site.replace(redacted)
+		}
 	}
-	child.replaceKeys(tokens, nil, nil, false)
 }
 
-// fingerprintEmbeddedCommands14413 is redactEmbeddedCommands14413 with
-// compare fingerprints: masked secret/URL tokens carry the \x00xpf-sha256=
-// suffix maskCompareFingerprints already strips into a metadata line, so a
-// changed embedded credential still diffs as changed (and an unchanged one
-// as unchanged) without the value ever rendering.
-func fingerprintEmbeddedCommands14413(n *Node, full, base []string) {
+// forEachEmbeddedPayload is the single locator for
+// `change-configuration commands` in every AST shape. The commands keyword
+// must belong to n, not an ancestor; block/bracket children are grouped by the
+// same quote-provenance rule as flat tails.
+func forEachEmbeddedPayload(n *Node, full, base []string, visit func(embeddedPayloadSite)) {
 	ci := -1
 	for i := 0; i+1 < len(full); i++ {
 		if full[i] == "change-configuration" && full[i+1] == "commands" {
@@ -850,60 +702,36 @@ func fingerprintEmbeddedCommands14413(n *Node, full, base []string) {
 	tailStart := local + 1
 	if len(n.Children) > 0 {
 		for _, child := range n.Children {
-			fingerprintEmbeddedChild14413(child)
-		}
-		return
-	}
-	if tailStart >= len(n.Keys) {
-		return
-	}
-	tail := n.Keys[tailStart:]
-	hasProv := n.KeysHaveQuoteProvenance()
-	quotedFirst := (hasProv && n.KeyQuoted(tailStart)) || (!hasProv &&
-		(tail[0] == "" || strings.Contains(tail[0], " ")))
-	if quotedFirst {
-		for j := range tail {
-			if redacted, changed := redactEmbeddedCommand(tail[j], true); changed {
-				n.Keys[tailStart+j] = redacted
+			if len(child.Keys) == 0 {
+				continue
 			}
+			childFull := append(append([]string(nil), full...), child.Keys...)
+			location := redactedLocName(childFull, len(full)-1)
+			appendEmbeddedPayloadSites(child, 0, location, visit)
 		}
 		return
 	}
-	joined := strings.Join(tail, " ")
-	if redacted, changed := redactEmbeddedCommand(joined, true); changed {
-		tokens, _ := lexConfigMutationLine9938(redacted)
-		if len(tokens) == 0 {
-			// See redactJoinedTail14413: whole-payload masks lex as comments,
-			// but still need to replace the stored joined tail.
-			n.replaceKeys(append(n.Keys[:tailStart], redacted), nil, nil, false)
-			return
-		}
-		keys := make([]string, 0, tailStart+len(tokens))
-		keys = append(keys, n.Keys[:tailStart]...)
-		keys = append(keys, tokens...)
-		n.replaceKeys(keys, nil, nil, false)
+	if tailStart < len(n.Keys) {
+		location := redactedLocName(full, len(base)+tailStart-1)
+		appendEmbeddedPayloadSites(n, tailStart, location, visit)
 	}
 }
 
-func fingerprintEmbeddedChild14413(child *Node) {
-	if len(child.Keys) == 0 {
-		return
-	}
-	hasProv := child.KeysHaveQuoteProvenance()
-	quotedFirst := (hasProv && child.KeyQuoted(0)) || (!hasProv &&
-		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
-	if quotedFirst {
-		for j := range child.Keys {
-			if redacted, changed := redactEmbeddedCommand(child.Keys[j], true); changed {
-				child.Keys[j] = redacted
-			}
+func appendEmbeddedPayloadSites(n *Node, start int, location string, visit func(embeddedPayloadSite)) {
+	if embeddedKeyIsQuoted(n, start) {
+		for i := start; i < len(n.Keys); i++ {
+			visit(embeddedPayloadSite{node: n, start: i, location: location})
 		}
 		return
 	}
-	joined := strings.Join(child.Keys, " ")
-	if redacted, changed := redactEmbeddedCommand(joined, true); changed {
-		applyRedactedJoin14413(child, redacted)
+	visit(embeddedPayloadSite{node: n, start: start, joined: true, location: location})
+}
+
+func embeddedKeyIsQuoted(n *Node, index int) bool {
+	if n.KeysHaveQuoteProvenance() {
+		return n.KeyQuoted(index)
 	}
+	return n.Keys[index] == "" || strings.Contains(n.Keys[index], " ")
 }
 
 const compareFingerprintMarker = "\x00xpf-sha256="
@@ -987,34 +815,100 @@ func maskCompareFingerprints(diff string) string {
 	return out.String()
 }
 
-// redactNodes walks nodes maintaining the flattened key path of all ancestors
-// (base). A secret token is identified on the FULL flattened path so it is
-// matched identically whether the parser produced a hierarchical tree (secret
-// split across nested block nodes) or a flat SetPath collapsed the whole
-// branch onto one leaf's Keys (the dual AST shape, CLAUDE.md). Each secret
-// index is masked in whichever node's own Keys slice owns it (idx >= len(base))
-// — so a container-identity secret (an SNMP community name) is masked once, on
-// the node that introduces it, and its descendants skip it.
-func redactNodes(nodes []*Node, base []string) {
+// redactionSiteList is the single per-node inventory consumed by display
+// masking, compare fingerprinting, and the ingest guard. It contains only
+// sites owned by node; indices naming ancestors are retained for classification
+// but consumers transform or inspect only indices at or beyond baseLen.
+type redactionSiteList struct {
+	node          *Node
+	full          []string
+	baseLen       int
+	secrets       []int
+	urls          []int
+	embedded      []embeddedPayloadSite
+}
+
+// walkSecretSites is the only recursive AST redaction walk. It classifies each
+// flattened path once, locates any embedded command payload once, then gives
+// that complete site list to the operation-specific visitor before descending.
+// The visitor returns false to stop the traversal (the ingest guard stops once
+// it finds the higher-priority secret-placeholder error).
+func walkSecretSites(nodes []*Node, base []string, visit func(redactionSiteList) bool) bool {
 	for _, n := range nodes {
 		full := append(append([]string(nil), base...), n.Keys...)
-		for _, idx := range secretIndices(full) {
-			if idx >= len(base) && idx < len(full) {
-				n.Keys[idx-len(base)] = SecretDataPlaceholder
-			}
+		site := redactionSiteList{
+			node:    n,
+			full:    full,
+			baseLen: len(base),
+			secrets: secretIndices(full),
+			urls:    urlLeafIndices(full),
 		}
-		// #6703: URL-bearing leaves are TRANSFORMED, not masked — see
-		// urlLeafIndices. RedactURL strips userinfo/query/fragment (and an
-		// implausible authority, #6609) while keeping scheme/host/path, so a
-		// credential-free URL renders unchanged.
-		for _, idx := range urlLeafIndices(full) {
-			if idx >= len(base) && idx < len(full) {
-				n.Keys[idx-len(base)] = RedactURL(n.Keys[idx-len(base)])
-			}
+		forEachEmbeddedPayload(n, full, base, func(payload embeddedPayloadSite) {
+			site.embedded = append(site.embedded, payload)
+		})
+		if !visit(site) {
+			return false
 		}
-		redactEmbeddedCommands14413(n, full, base)
-		if !n.IsLeaf {
-			redactNodes(n.Children, full)
+		if !n.IsLeaf && !walkSecretSites(n.Children, full, visit) {
+			return false
+		}
+	}
+	return true
+}
+
+func redactNodes(nodes []*Node, base []string) {
+	walkSecretSites(nodes, base, func(site redactionSiteList) bool {
+		maskRedactionSites(site)
+		redactEmbeddedPayloads(site.embedded, false)
+		return true
+	})
+}
+
+func maskRedactionSites(site redactionSiteList) {
+	for _, idx := range site.secrets {
+		if idx >= site.baseLen && idx < len(site.full) {
+			site.node.Keys[idx-site.baseLen] = SecretDataPlaceholder
+		}
+	}
+	// URL-bearing leaves are transformed, not masked: RedactURL strips
+	// userinfo/query/fragment while preserving the URL context.
+	for _, idx := range site.urls {
+		if idx >= site.baseLen && idx < len(site.full) {
+			site.node.Keys[idx-site.baseLen] = RedactURL(site.node.Keys[idx-site.baseLen])
+		}
+	}
+}
+
+func fingerprintSecretSites(site redactionSiteList) {
+	// Dedupe by path index, never value bytes: quoted strings may contain NUL.
+	var seen map[int]struct{}
+	if len(site.secrets)+len(site.urls) > 0 {
+		seen = make(map[int]struct{}, len(site.secrets)+len(site.urls))
+	}
+	for _, idx := range site.secrets {
+		if idx < site.baseLen || idx >= len(site.full) {
+			continue
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		valueIndex := idx - site.baseLen
+		site.node.Keys[valueIndex] = SecretDataPlaceholder + compareFingerprintSuffix(site.node.Keys[valueIndex])
+	}
+	for _, idx := range site.urls {
+		if idx < site.baseLen || idx >= len(site.full) {
+			continue
+		}
+		if _, ok := seen[idx]; ok {
+			continue
+		}
+		seen[idx] = struct{}{}
+		valueIndex := idx - site.baseLen
+		value := site.node.Keys[valueIndex]
+		redacted := RedactURL(value)
+		if redacted != value {
+			site.node.Keys[valueIndex] = redacted + compareURLFingerprintSuffix(value)
 		}
 	}
 }
@@ -1681,30 +1575,51 @@ var errRedactedURLIngest = errors.New(
 // rejecting it would be an over-reach. The returned error names the offending
 // config path for the operator.
 //
-// #15209 (A20-03): the scope includes credentials embedded in an
-// `event-options … then change-configuration commands` payload. #14413 taught
-// RedactedClone to mask those (via lexConfigMutationLine9938 +
-// secretIndices/urlLeafIndices on the inner command), so a redacted export
-// carries the placeholder / a "<redacted>" URL inside the quoted command
-// string — invisible to the direct leaf checks below, which only see the
-// whole command as one token. findRedactionPlaceholder/findRedactedURL
-// therefore also lex each embedded command (see
-// embeddedRedactionHit15209) and judge its inner tokens with the same sets.
+// #15209: the shared site walker also locates embedded
+// `event-options … then change-configuration commands` payloads. The guard
+// judges their inner tokens with the same secret/URL classifiers as display
+// redaction; it does not mistake a cleartext credential for an already
+// redacted export.
 func checkRedactionPlaceholder(t *ConfigTree) error {
 	if t == nil {
 		return nil
 	}
-	// Fold 5 (#16090): the "(at %q)" location names the stanza/leaf
-	// NAME path only — never the rendered flattened path. The old form
-	// embedded candidate VALUES (a preceding secret operand on the
-	// same leaf, or the whole quoted change-configuration payload),
-	// and every string-scrub layer kept losing to deeper escaping.
-	// Names are schema vocabulary, not operator data.
-	if loc := findRedactionPlaceholder(t.Children, nil); loc != "" {
-		return fmt.Errorf("%w (at %s)", errRedactionPlaceholderIngest, loc)
+	// Fold 5 (#16090): "(at %q)" names the stanza/leaf NAME path only, never
+	// the rendered flattened path, which may contain operator-supplied values.
+	var secretLoc, urlLoc string
+	walkSecretSites(t.Children, nil, func(site redactionSiteList) bool {
+		for _, idx := range site.secrets {
+			if idx >= site.baseLen && idx < len(site.full) &&
+				site.node.Keys[idx-site.baseLen] == SecretDataPlaceholder {
+				secretLoc = redactedLocName(site.full, secretLeafKeywordIndex(site.full, idx))
+				return false
+			}
+		}
+		for _, idx := range site.urls {
+			if urlLoc == "" && idx >= site.baseLen && idx < len(site.full) &&
+				strings.Contains(site.node.Keys[idx-site.baseLen], SecretRedacted) {
+				urlLoc = redactedLocName(site.full, urlLeafKeywordIndex(site.full, idx))
+				break
+			}
+		}
+		for _, payload := range site.embedded {
+			if urlLoc == "" {
+				urlLoc = embeddedCommandURLHit15209(payload.command(), payload.location)
+			}
+			if secretLoc == "" {
+				secretLoc = embeddedCommandSecretHit15209(payload.command(), payload.location)
+			}
+			if secretLoc != "" {
+				return false
+			}
+		}
+		return true
+	})
+	if secretLoc != "" {
+		return fmt.Errorf("%w (at %s)", errRedactionPlaceholderIngest, secretLoc)
 	}
-	if loc := findRedactedURL(t.Children, nil); loc != "" {
-		return fmt.Errorf("%w (at %s)", errRedactedURLIngest, loc)
+	if urlLoc != "" {
+		return fmt.Errorf("%w (at %s)", errRedactedURLIngest, urlLoc)
 	}
 	return nil
 }
@@ -1773,181 +1688,6 @@ func urlLeafKeywordIndex(full []string, idx int) int {
 	return keep
 }
 
-// findRedactedURL is the URL-leaf mirror of findRedactionPlaceholder (#6703).
-// Its scope is exactly what redactNodes TRANSFORMS — the same urlLeafIndices
-// set is used to detect the sentinel that produced it — so detection stays
-// symmetric with masking under either AST shape.
-//
-// It tests CONTAINS rather than equals: RedactURL embeds the sentinel inside an
-// otherwise-intact URL ("https://host/upd?<redacted>"), so an equality test
-// would miss every real case. A non-URL leaf carrying that literal is not
-// inspected at all, mirroring the placeholder guard's deliberate narrowness.
-func findRedactedURL(nodes []*Node, base []string) string {
-	for _, n := range nodes {
-		full := append(append([]string(nil), base...), n.Keys...)
-		for _, idx := range urlLeafIndices(full) {
-			if idx >= len(base) && idx < len(full) && strings.Contains(n.Keys[idx-len(base)], SecretRedacted) {
-				return redactedLocName(full, urlLeafKeywordIndex(full, idx))
-			}
-		}
-		if hit, _ := embeddedRedactionHit15209(n, full, base); hit != "" {
-			return hit
-		}
-		if !n.IsLeaf {
-			if hit := findRedactedURL(n.Children, full); hit != "" {
-				return hit
-			}
-		}
-	}
-	return ""
-}
-
-// findRedactionPlaceholder walks nodes maintaining the flattened key path of all
-// ancestors (base), mirroring redactNodes. It returns the flattened path (up to
-// and including the offending value token) of the FIRST secret leaf whose value
-// equals SecretDataPlaceholder, or "" if none. A secret index is only inspected
-// in whichever node's own Keys slice owns it (idx >= len(base)) — matching how
-// redactNodes masks the token — so the detection is exactly symmetric with the
-// masking regardless of the dual (hierarchical vs flat-set) AST shape.
-//
-// #15209: embedded `change-configuration commands` payloads are inspected via
-// embeddedRedactionHit15209, mirroring redactEmbeddedCommands14413.
-func findRedactionPlaceholder(nodes []*Node, base []string) string {
-	for _, n := range nodes {
-		full := append(append([]string(nil), base...), n.Keys...)
-		for _, idx := range secretIndices(full) {
-			if idx >= len(base) && idx < len(full) && n.Keys[idx-len(base)] == SecretDataPlaceholder {
-				return redactedLocName(full, secretLeafKeywordIndex(full, idx))
-			}
-		}
-		if _, hit := embeddedRedactionHit15209(n, full, base); hit != "" {
-			return hit
-		}
-		if !n.IsLeaf {
-			if hit := findRedactionPlaceholder(n.Children, full); hit != "" {
-				return hit
-			}
-		}
-	}
-	return ""
-}
-
-// embeddedRedactionHit15209 is the ingest-guard mirror of
-// redactEmbeddedCommands14413 (#15209). It locates the
-// `change-configuration commands` payload carried by node n (full = base +
-// n.Keys), extracts every embedded command with the SAME shapes the display
-// redactor handles (quoted tokens, unquoted joined tail, `commands { … }`
-// block/bracket children), lexes each with lexConfigMutationLine9938, and
-// judges the inner tokens with the SAME secretIndices/urlLeafIndices sets.
-// It returns (urlHit, secretHit): urlHit is the flattened outer path when an
-// inner URL token contains SecretRedacted, secretHit when an inner secret
-// token equals SecretDataPlaceholder. There is no verb gate (#16726),
-// mirroring redactEmbeddedTokens: any verb's credential placeholder is a
-// hit. A non-secret inner leaf carrying the placeholder, or the placeholder
-// glued inside a larger token, is NOT a hit — RedactedClone replaces whole
-// tokens (or, for an unlexable command, the whole payload), so neither
-// glued spelling is one it produces. The reported path is the outer
-// flattened path up to and including the payload token (quoted command) or
-// the whole node (unquoted joined tail / block child), naming the offending
-// config path.
-func embeddedRedactionHit15209(n *Node, full, base []string) (string, string) {
-	ci := -1
-	for i := 0; i+1 < len(full); i++ {
-		if full[i] == "change-configuration" && full[i+1] == "commands" {
-			ci = i
-			break
-		}
-	}
-	if ci < 0 {
-		return "", ""
-	}
-	// The `commands` keyword must belong to THIS node, not an ancestor: an
-	// ancestor-owned payload is judged when that ancestor is visited.
-	if ci+1 < len(base) {
-		return "", ""
-	}
-	local := ci + 1 - len(base) // index of "commands" within n.Keys
-	if local < 0 || local >= len(n.Keys) {
-		return "", ""
-	}
-	tailStart := local + 1
-	if len(n.Children) > 0 {
-		for _, child := range n.Children {
-			if urlHit, secretHit := embeddedChildRedactionHit15209(child, full); urlHit != "" || secretHit != "" {
-				return urlHit, secretHit
-			}
-		}
-		return "", ""
-	}
-	if tailStart >= len(n.Keys) {
-		return "", ""
-	}
-	tail := n.Keys[tailStart:]
-	hasProv := n.KeysHaveQuoteProvenance()
-	quoted := func(j int) bool {
-		if hasProv {
-			return n.KeyQuoted(tailStart + j)
-		}
-		return tail[j] == "" || strings.Contains(tail[j], " ")
-	}
-	if quoted(0) {
-		for j := range tail {
-			cmdPath := redactedLocName(full, len(base)+tailStart-1)
-			if hit := embeddedCommandURLHit15209(tail[j], cmdPath); hit != "" {
-				return hit, ""
-			}
-			if hit := embeddedCommandSecretHit15209(tail[j], cmdPath); hit != "" {
-				return "", hit
-			}
-		}
-		return "", ""
-	}
-	joined := strings.Join(tail, " ")
-	nodePath := redactedLocName(full, len(base)+tailStart-1)
-	if hit := embeddedCommandURLHit15209(joined, nodePath); hit != "" {
-		return hit, ""
-	}
-	if hit := embeddedCommandSecretHit15209(joined, nodePath); hit != "" {
-		return "", hit
-	}
-	return "", ""
-}
-
-// embeddedChildRedactionHit15209 handles one child of a `commands { … }`
-// block (or a flat-set bracket child), mirroring redactEmbeddedChild14413:
-// quoted first token means each Keys token is a separate command; otherwise
-// the Keys join into one command. parentFull is the flattened path of the
-// owning `commands` node, used to name the offending path.
-func embeddedChildRedactionHit15209(child *Node, parentFull []string) (string, string) {
-	if len(child.Keys) == 0 {
-		return "", ""
-	}
-	childFull := append(append([]string(nil), parentFull...), child.Keys...)
-	hasProv := child.KeysHaveQuoteProvenance()
-	quotedFirst := (hasProv && child.KeyQuoted(0)) || (!hasProv &&
-		(child.Keys[0] == "" || strings.Contains(child.Keys[0], " ")))
-	if quotedFirst {
-		for j := range child.Keys {
-			cmdPath := redactedLocName(childFull, len(parentFull)-1)
-			if hit := embeddedCommandURLHit15209(child.Keys[j], cmdPath); hit != "" {
-				return hit, ""
-			}
-			if hit := embeddedCommandSecretHit15209(child.Keys[j], cmdPath); hit != "" {
-				return "", hit
-			}
-		}
-		return "", ""
-	}
-	joined := strings.Join(child.Keys, " ")
-	nodePath := redactedLocName(childFull, len(parentFull)-1)
-	if hit := embeddedCommandURLHit15209(joined, nodePath); hit != "" {
-		return hit, ""
-	}
-	if hit := embeddedCommandSecretHit15209(joined, nodePath); hit != "" {
-		return "", hit
-	}
-	return "", ""
-}
 
 // embeddedCommandSecretHit15209 reports path when an embedded command
 // ALREADY carries SecretDataPlaceholder in a secret VALUE position

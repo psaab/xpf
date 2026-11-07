@@ -6,15 +6,13 @@ import (
 	"testing"
 )
 
-// #15209 (A20-03): the #4060 placeholder ingest guard
-// (checkRedactionPlaceholder / findRedactionPlaceholder / findRedactedURL)
-// inspected only direct secret/URL leaf tokens. It never lexed embedded
-// `event-options … then change-configuration commands` payloads, even though
-// #14413 taught RedactedClone to mask credentials inside those commands.
-// A redacted export therefore re-committed cleanly: the event policy carried
-// `set … pre-shared-key ascii-text "##SECRET-DATA##"` (or a redacted URL)
-// verbatim, and the embedded change failed only when the event fired.
-//
+// #15209 (A20-03): the original placeholder ingest guard inspected only
+// direct secret/URL leaf tokens. It missed `event-options … then
+// change-configuration commands` payloads even though #14413 taught
+// RedactedClone to mask credentials there, so a redacted export could be
+// re-committed with an embedded placeholder. The shared walk now covers both
+// direct leaves and embedded payloads; these cells pin its ingest behavior.
+
 // The decisive v9 re-ingest cells below build the redacted render exactly as
 // an operator would re-apply it (RedactedClone -> FormatSet -> ParseSetCommand
 // + SetPath, plus the hierarchical and block shapes), and require the guard —

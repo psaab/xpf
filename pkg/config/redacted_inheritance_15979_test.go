@@ -6,13 +6,12 @@ import (
 )
 
 // #15979 (H-6, regression from #15973): FormatPathInheritanceRedactedForNode
-// passed a nil ancestor base to redactMatches15942, so every context-gated
-// predicate (snmp>community, authentication/md5>key, archive-sites>password,
-// gated URL leaves) saw a truncated flattened path and never fired. The
-// sibling scoped renderers pass path[:len(path)-width]; this renderer now
-// mirrors them. These fixtures assert on the rendered output: each scope
-// names the container, and the secret VALUE inside the matched node must
-// render as SecretDataPlaceholder (or RedactURL'd), never cleartext.
+// passed a nil ancestor base to the scoped redaction walk, so every
+// context-gated predicate (snmp>community, authentication/md5>key,
+// archive-sites>password, gated URL leaves) saw a truncated flattened path
+// and never fired. The sibling scoped renderers pass path[:len(path)-width];
+// this renderer now mirrors them. Each fixture asserts that the secret value
+// inside the matched node is masked.
 
 const (
 	leakSNMP15979    = "LEAK-SNMP-COMMUNITY-15979"

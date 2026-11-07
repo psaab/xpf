@@ -157,9 +157,9 @@ func TestRPMTargetNonCredentialAndNonRPMControls14379(t *testing.T) {
 }
 
 // TestRPMTargetRedactedIngestRefused14379 pins the symmetric ingest guard:
-// findRedactedURL shares urlLeafIndices, so a re-committed redacted RPM
-// target (bare or address spelling) is refused, while a cleartext one
-// ingests cleanly.
+// the shared site walk uses urlLeafIndices to find the URL sentinel, so a
+// re-committed redacted RPM target (bare or address spelling) is refused,
+// while a cleartext one ingests cleanly.
 func TestRPMTargetRedactedIngestRefused14379(t *testing.T) {
 	for _, line := range []string{
 		`set services rpm probe P test t target "https://<redacted>@host.example.com/base"`,

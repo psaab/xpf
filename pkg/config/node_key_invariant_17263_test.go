@@ -191,7 +191,7 @@ func TestRedactJoinedTailDropsStaleMasks17263(t *testing.T) {
 
 	// A non-empty comment-only tail is masked as one payload key, changing
 	// the key count and making both old per-key masks stale.
-	redactJoinedTail14413(n, 1)
+	redactEmbeddedPayloads([]embeddedPayloadSite{{node: n, start: 1, joined: true}}, false)
 	if len(n.Keys) != 2 || n.Keys[0] != "commands" {
 		t.Fatalf("redacted tail keys = %v, want a two-key replacement", n.Keys)
 	}
