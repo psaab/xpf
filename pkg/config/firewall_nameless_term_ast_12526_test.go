@@ -230,3 +230,24 @@ func TestCompileConfigLenientNamelessDiscardKeepsAuthoredPosition17257(t *testin
 		t.Fatalf("second term = %+v, want named allow accept after the nameless discard", term)
 	}
 }
+
+func TestCompileConfigLenientPackedTermBeforeTypedNamelessMarkerKeepsBoth17257(t *testing.T) {
+	src := `firewall { filter { F term { then discard; term { then reject; } term allow { then accept; } } } }`
+	cfg, err := CompileConfigLenient(hierTree(t, src))
+	if err != nil {
+		t.Fatalf("tolerant compile: %v", err)
+	}
+	filter := cfg.Firewall.FiltersInet["F"]
+	if filter == nil || len(filter.Terms) != 3 {
+		t.Fatalf("filter = %+v, want packed discard, typed nameless marker, and named allow", filter)
+	}
+	if term := filter.Terms[0]; term == nil || !term.nameless || term.Action != FilterActionDiscard {
+		t.Fatalf("first term = %+v, want packed discard at authored ordinal zero", term)
+	}
+	if term := filter.Terms[1]; term == nil || !term.nameless || term.Name != "then" || term.Action != "" {
+		t.Fatalf("second term = %+v, want the separate typed-visible nameless marker preserved", term)
+	}
+	if term := filter.Terms[2]; term == nil || term.Name != "allow" || term.Action != FilterActionAccept {
+		t.Fatalf("third term = %+v, want named allow accept after both nameless terms", term)
+	}
+}

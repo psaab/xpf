@@ -9,10 +9,11 @@ import (
 const namelessFirewallSyntheticPrefix17257 = "nameless-term-17257-"
 
 // neutralizePackedNamelessTerms17257 restores terms lost by section lowering
-// at the AST-authored ordinal. Existing nameless terms are replaced in place;
-// missing terms are inserted before any later named term. A placeholder has
-// no match constraints and terminates with discard, so the tolerant recovery is
-// fail-closed rather than an accidental accept or a precedence inversion.
+// at their AST-authored ordinals. Packed sites are absent from the section
+// compiler's output, so restoration inserts them without consuming a later
+// typed-visible nameless marker. Firewall placeholders discard without match
+// constraints, making tolerant recovery fail-closed rather than accidental
+// accept or a precedence inversion.
 func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNamelessSite17257, policySites []policyNamelessSite17257) {
 	if cfg == nil {
 		return
@@ -62,10 +63,6 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 				Action:   FilterActionDiscard,
 				nameless: true,
 			}
-			if index < len(filter.Terms) && filter.Terms[index] != nil && filter.Terms[index].nameless {
-				filter.Terms[index] = placeholder
-				continue
-			}
 			if index > len(filter.Terms) {
 				index = len(filter.Terms)
 			}
@@ -82,10 +79,6 @@ func neutralizePackedNamelessTerms17257(cfg *Config, firewallSites []firewallNam
 		}
 		index := site.ordinal
 		placeholder := &PolicyTerm{Name: site.first, nameless: true}
-		if index < len(statement.Terms) && statement.Terms[index] != nil && statement.Terms[index].nameless {
-			statement.Terms[index] = placeholder
-			continue
-		}
 		if index > len(statement.Terms) {
 			index = len(statement.Terms)
 		}
