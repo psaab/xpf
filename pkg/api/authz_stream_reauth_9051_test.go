@@ -333,9 +333,16 @@ func TestRESTReadWatcherStopJoinsTick18994(t *testing.T) {
 				t.Error("REST stop returned while its authorization tick was still blocked")
 			case <-time.After(25 * time.Millisecond):
 			}
+			releaseStart := time.Now()
 			release()
 			select {
 			case <-stopped:
+				// Sol MINOR: prove return was CAUSED by watcher exit, not
+				// the 2s timeout fallback — a missing-exit-signal mutant
+				// would hold stop for the full bound.
+				if elapsed := time.Since(releaseStart); elapsed > readWatcherExitBound18994/2 {
+					t.Errorf("stop returned after %v, want exit-caused return well under the %v bound", elapsed, readWatcherExitBound18994)
+				}
 			case <-time.After(3 * time.Second):
 				t.Fatal("REST stop did not return after the authorization tick was released")
 			}
