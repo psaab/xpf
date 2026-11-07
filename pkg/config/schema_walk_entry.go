@@ -273,7 +273,8 @@ func schemaValidateImpl(tree, defsSource *ConfigTree, collect, lenient bool) ([]
 // is scrubbed from the returned error text — all occurrences — so no
 // credential operand reaches tolerant-ingress logs or compiled warnings
 // regardless of which helper built the error. Cost is rejection-path only:
-// the tree is walked once per failed validation.
+// collectSecretValues and collectURLValues each walk the tree once per
+// failed validation.
 func scrubSchemaErrorSecrets(tree *ConfigTree, err error) error {
 	if err == nil || tree == nil {
 		return err

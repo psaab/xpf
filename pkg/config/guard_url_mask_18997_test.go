@@ -150,11 +150,13 @@ func TestPlaceholderGuardURLVariantMatrix18997(t *testing.T) {
 		`set system archival configuration archive-sites "scp://u1:p1@h1/d" password "##SECRET-DATA##"`,
 		`set system archival configuration archive-sites "scp://u2:p2@h2/d" password "s3cr3t"`,
 	})
-	if err := SchemaValidate(multi); err != nil {
-		if strings.Contains(err.Error(), "p1@") || strings.Contains(err.Error(), "p2@") ||
-			strings.Contains(err.Error(), "u1:p1") || strings.Contains(err.Error(), "u2:p2") {
-			t.Errorf("multi-site credential leaked: %v", err)
-		}
+	err := SchemaValidate(multi)
+	if err == nil {
+		t.Fatal("premise: multi-site placeholder fixture must be rejected")
+	}
+	if strings.Contains(err.Error(), "p1@") || strings.Contains(err.Error(), "p2@") ||
+		strings.Contains(err.Error(), "u1:p1") || strings.Contains(err.Error(), "u2:p2") {
+		t.Errorf("multi-site credential leaked: %v", err)
 	}
 	// Credential-free URL: RedactURL is a no-op, so collectURLValues must
 	// not return it, and a foreign error naming it stays intact.
