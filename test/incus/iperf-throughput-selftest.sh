@@ -768,8 +768,12 @@ for name, metrics in (
     assert "2 zero interval(s) after demonstrated throughput" in metrics["collapse_reason"], (name, metrics)
     assert "2 stalled interval(s) after demonstrated throughput" in metrics["collapse_reason"], (name, metrics)
     assert metrics["stalled_intervals_after_activity"] == 2, (name, metrics)
-assert late_recovery["stream_zero_intervals_resume_excused_total"] == 16, late_recovery
-assert late_recovery["stream_zero_intervals_outside_events_total"] == 0, late_recovery
+# #18708 ends resume excusal at the first post-event data interval. The later
+# zeros charge the per-stream outside counters while aggregate collapse fires.
+assert late_recovery["stream_zero_intervals_resume_excused_total"] == 0, late_recovery
+assert late_recovery["stream_zero_intervals_outside_events_total"] == 16, late_recovery
+assert late_recovery["zero_streams_outside_events_total"] == 8, late_recovery
+assert late_recovery["collapse_detected"], late_recovery
 assert all_excluded["peak_gbps"] == 32, all_excluded
 assert all_excluded["peak_interval_index"] == 1, all_excluded
 assert all_excluded["tail_gbps"] == [], all_excluded
