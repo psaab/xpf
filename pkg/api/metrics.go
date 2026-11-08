@@ -138,6 +138,8 @@ type xpfCollector struct {
 	statusPollDecodeErrorsTotal *prometheus.Desc
 	// #18685: helper liveness, per runtime Manager (metrics_helper_liveness_18685.go).
 	helperAnswerAgeSeconds                 *prometheus.Desc
+	helperStatusAgeSeconds                 *prometheus.Desc
+	helperStatusStale                      *prometheus.Desc
 	helperElectionNotReady                 *prometheus.Desc
 	helperWedgeKillsTotal                  *prometheus.Desc
 	learnedRouteCapHitsTotal               *prometheus.Desc

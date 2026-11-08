@@ -188,6 +188,13 @@ type ProcessStatus struct {
 	// is cache bookkeeping only and cannot prove a fresh helper measurement;
 	// HA idle freshness uses HelperStatusMeasurementSequence instead.
 	HelperStatusObservationSequence uint64 `json:"helper_status_observation_sequence,omitempty"`
+
+	// #18689: manager-computed age of the last answered status poll. These
+	// fields are attached to Status()/CachedStatus() copies only; they are
+	// not helper protocol fields and never serialized.
+	HelperStatusAge      time.Duration `json:"-"`
+	HelperStatusAgeKnown bool          `json:"-"`
+	HelperStatusStale    bool          `json:"-"`
 	// #1642: the Rust helper serializes these three flat event-stream
 	// fields on ProcessStatus (protocol/control.rs) alongside _sent /
 	// _dropped, but the Go side only declared _sent / _dropped, so

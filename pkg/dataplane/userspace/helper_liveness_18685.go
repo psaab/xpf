@@ -85,6 +85,10 @@ type helperLivenessTracker struct {
 	retired bool
 
 	lastAnswer     time.Time
+	// lastAnsweredStatusAt is separate from lastAnswer: any control request
+	// refreshes the latter, but only an answered status poll refreshes this.
+	// Guarded by mu; zero until the first answered status of this generation.
+	lastAnsweredStatusAt time.Time
 	silentSince    time.Time
 	silentTrips    int
 	lastRGActivate time.Time
@@ -176,6 +180,7 @@ func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheri
 	t.gen = gen
 	t.retired = false
 	t.lastAnswer = now
+	t.lastAnsweredStatusAt = time.Time{}
 	t.silentSince = time.Time{}
 	t.silentTrips = 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak, t.lastStatusAt = 0, -1, 0, time.Time{}
@@ -225,6 +230,7 @@ func (t *helperLivenessTracker) retireGeneration(keepInherited bool) bool {
 	preserveInherited := keepInherited && t.inherited && !t.forwardingReadySeen
 	t.retired = true
 	t.lastAnswer = time.Time{} // no live generation: the answer age is undefined, not growing
+	t.lastAnsweredStatusAt = time.Time{}
 	t.silentSince, t.silentTrips = time.Time{}, 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
 	if !preserveInherited {
@@ -329,6 +335,16 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 		t.healthySince, t.healthyTrips = time.Time{}, 0
 	}
 	t.evaluateLocked(now)
+}
+
+// noteAnsweredStatus records the status-specific answer clock. It is called
+// by statusLoop only for successful and answered-but-undecodable replies.
+func (t *helperLivenessTracker) noteAnsweredStatus(gen uint64, at time.Time) {
+	t.mu.Lock()
+	if gen == t.gen && !t.retired {
+		t.lastAnsweredStatusAt = at
+	}
+	t.mu.Unlock()
 }
 
 // noteAppliedForwardingReady records that an armed status has passed all
@@ -475,6 +491,17 @@ func (t *helperLivenessTracker) answerAge(now time.Time) time.Duration {
 		return -1
 	}
 	return now.Sub(t.lastAnswer)
+}
+
+// statusAnswerAge is the age of the last status poll answered by this
+// generation, independent of other answered control requests.
+func (t *helperLivenessTracker) statusAnswerAge(now time.Time) time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.lastAnsweredStatusAt.IsZero() || t.retired {
+		return -1
+	}
+	return now.Sub(t.lastAnsweredStatusAt)
 }
 
 // classifyControlRoundTrip maps a requestDetailedAtSocket outcome onto the

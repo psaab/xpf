@@ -101,6 +101,22 @@ func (c *xpfCollector) initGlobalDescriptors() {
 			"cached helper status the other userspace families report.",
 		nil, nil,
 	)
+	c.helperStatusAgeSeconds = prometheus.NewDesc(
+		"xpf_userspace_helper_status_age_seconds",
+		"Seconds since the userspace helper last answered a status poll. The "+
+			"clock is status-specific (not any control request) and refreshes "+
+			"on decoded or answered-but-undecodable replies (#18689). NaN until "+
+			"the live generation answers a status, and when no generation is live.",
+		nil, nil,
+	)
+	c.helperStatusStale = prometheus.NewDesc(
+		"xpf_userspace_helper_status_stale",
+		"1 when the last answered userspace helper status poll is at least "+
+			"30 seconds old (the #18685 helperWedgeMinSpan); otherwise 0, "+
+			"including before a status answer or when no generation is live "+
+			"(#18689).",
+		nil, nil,
+	)
 	c.helperElectionNotReady = prometheus.NewDesc(
 		"xpf_userspace_helper_election_not_ready",
 		"1 while this node's helper must not hold the RGs at full weight: it "+

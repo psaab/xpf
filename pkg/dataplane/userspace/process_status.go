@@ -695,6 +695,13 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 			// for publication, but does not undo the fact that the helper
 			// answered (or failed to answer).
 			pollResultTime := time.Now()
+			// #18689: use the reply-return time, before any lock wait. This
+			// status-specific clock differs from heartbeat age for ANY control
+			// request; success and answered-but-undecodable replies refresh it
+			// before the publication fence, while silence and other failures do not.
+			if pollErr == nil || errors.Is(pollErr, errStatusDecode) {
+				m.liveTrack.noteAnsweredStatus(pollProcGen, pollReturnedAt)
+			}
 			if pollErr == nil {
 				m.noteStatusPollResultLocked(nil, pollResultTime)
 				// #18685: worker heartbeats and the arm state feed the

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
@@ -49,6 +50,10 @@ func (m *Manager) recordHelperStatusLocked(status *ProcessStatus) {
 	// repeated CLI reads of this cache therefore carry the same value.
 	m.helperStatusObservationSequence++
 	status.HelperStatusObservationSequence = m.helperStatusObservationSequence
+	// #18689: callers that immediately format this returned status need the
+	// same age/stale view as Status()/CachedStatus(), without advancing the
+	// status-poll clock for unrelated control-request replies.
+	*status = m.stampHelperStatusLiveness(*status)
 	m.setLastStatusLocked(*status)
 }
 
@@ -155,12 +160,35 @@ func (m *Manager) clearLastStatusLocked() {
 	m.publishHAWatchdogSnapshotLocked()
 }
 
+func helperStatusStale(age time.Duration) bool {
+	return age >= helperWedgeMinSpan
+}
+
+// HelperStatusAgeAndStale reports the age of the most recent answered status
+// poll and whether it has crossed the #18685 silence bound. Unlike
+// HelperAnswerAge, unrelated control requests do not refresh this clock.
+// Before any answered status (or after generation retirement), age is -1 and
+// stale is false.
+func (m *Manager) HelperStatusAgeAndStale() (time.Duration, bool) {
+	if m == nil {
+		return -1, false
+	}
+	age := m.liveTrack.statusAnswerAge(time.Now())
+	return age, helperStatusStale(age)
+}
+
+func (m *Manager) stampHelperStatusLiveness(status ProcessStatus) ProcessStatus {
+	status.HelperStatusAge, status.HelperStatusStale = m.HelperStatusAgeAndStale()
+	status.HelperStatusAgeKnown = status.HelperStatusAge >= 0
+	return status
+}
+
 func (m *Manager) Status() (ProcessStatus, error) {
 	view := m.helperStatusView.Load()
 	if view == nil || view.PID == 0 {
 		return ProcessStatus{}, errors.New("userspace dataplane helper not running or has not reported status")
 	}
-	return *view, nil
+	return m.stampHelperStatusLiveness(*view), nil
 }
 
 // CachedStatus returns the most recent status published by the status poll.
@@ -171,7 +199,7 @@ func (m *Manager) CachedStatus() (ProcessStatus, bool) {
 	if view == nil || view.PID == 0 {
 		return ProcessStatus{}, false
 	}
-	return *view, true
+	return m.stampHelperStatusLiveness(*view), true
 }
 
 // errLinkCycleInFlight refuses an operator worker-affecting verb while a RETH

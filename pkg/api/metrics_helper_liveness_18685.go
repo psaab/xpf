@@ -13,6 +13,7 @@ import (
 // Every method is lock-free with respect to the Manager's m.mu.
 type helperLivenessProvider interface {
 	HelperAnswerAge() time.Duration
+	HelperStatusAgeAndStale() (time.Duration, bool)
 	HelperElectionNotReady() bool
 	HelperWedgeKills() uint64
 }
@@ -39,6 +40,16 @@ func (c *xpfCollector) collectHelperLiveness(ch chan<- prometheus.Metric, dp api
 		age = d.Seconds()
 	}
 	c.emitConstMetric(ch, c.helperAnswerAgeSeconds, prometheus.GaugeValue, age)
+	statusAge, statusStale := p.HelperStatusAgeAndStale()
+	statusAgeSeconds, statusStaleGauge := math.NaN(), 0.0
+	if statusAge >= 0 {
+		statusAgeSeconds = statusAge.Seconds()
+		if statusStale {
+			statusStaleGauge = 1
+		}
+	}
+	c.emitConstMetric(ch, c.helperStatusAgeSeconds, prometheus.GaugeValue, statusAgeSeconds)
+	c.emitConstMetric(ch, c.helperStatusStale, prometheus.GaugeValue, statusStaleGauge)
 	c.emitConstMetric(ch, c.helperElectionNotReady, prometheus.GaugeValue, notReady)
 	c.emitConstMetric(ch, c.helperWedgeKillsTotal, prometheus.CounterValue, float64(p.HelperWedgeKills()))
 }

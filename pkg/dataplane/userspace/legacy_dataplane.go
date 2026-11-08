@@ -245,6 +245,15 @@ func (a *LegacyDataPlaneAdapter) HelperAnswerAge() time.Duration {
 	return m.HelperAnswerAge()
 }
 
+// HelperStatusAgeAndStale forwards the per-status staleness clock for /metrics.
+func (a *LegacyDataPlaneAdapter) HelperStatusAgeAndStale() (time.Duration, bool) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return -1, false
+	}
+	return m.HelperStatusAgeAndStale()
+}
+
 // HelperWedgeKills forwards the #18685 wedge-kill count for /metrics.
 func (a *LegacyDataPlaneAdapter) HelperWedgeKills() uint64 {
 	m, err := a.managerOrErr()

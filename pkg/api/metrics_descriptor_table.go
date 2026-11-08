@@ -134,6 +134,8 @@ var collectorDescGlobal = []int{
 	xpfCollectorDescFieldIndex("bindingWedgeGiveupsTotal"),
 	xpfCollectorDescFieldIndex("statusPollDecodeErrorsTotal"),
 	xpfCollectorDescFieldIndex("helperAnswerAgeSeconds"),
+	xpfCollectorDescFieldIndex("helperStatusAgeSeconds"),
+	xpfCollectorDescFieldIndex("helperStatusStale"),
 	xpfCollectorDescFieldIndex("helperElectionNotReady"),
 	xpfCollectorDescFieldIndex("helperWedgeKillsTotal"),
 	xpfCollectorDescFieldIndex("learnedRouteCapHitsTotal"),

@@ -153,6 +153,9 @@ func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
 			if kills != 0 {
 				t.Fatalf("kills = %d, want 0", kills)
 			}
+			if age, stale := m.HelperStatusAgeAndStale(); age < 0 || stale {
+				t.Fatalf("real errStatusDecode poll left status age/stale = %s/%v, want a fresh status answer", age, stale)
+			}
 			return
 		}
 		if time.Now().After(deadline) {
