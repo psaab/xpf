@@ -673,7 +673,8 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 		if (!isCall && !isValue) || rustFnDeclName19013(src, start) {
 			continue
 		}
-		if rustMacroTokenTree19013(src, start) {
+		if rustMacroDefinitionContains19013(src, start) ||
+			rustMacroTokenTree19013(src, start) {
 			continue
 		}
 		currentPath := rustModulePath19013(rel, src, start)
@@ -697,6 +698,56 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 		return true
 	}
 	return false
+}
+
+// Macro definitions are opaque too: matcher and transcriber tokens are not
+// Rust call sites.
+func rustMacroDefinitionContains19013(src string, pos int) bool {
+	for i := 0; i <= pos && i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if rustWordAt19013(src, i, "macro_rules") {
+			if end, ok := rustMacroDefinitionEnd19013(src, i); ok {
+				if pos <= end {
+					return true
+				}
+				i = end + 1
+				continue
+			}
+		}
+		i++
+	}
+	return false
+}
+
+func rustMacroDefinitionEnd19013(src string, start int) (int, bool) {
+	i := skipRustTrivia19013(src, start+len("macro_rules"))
+	if i >= len(src) || src[i] != '!' {
+		return -1, false
+	}
+	i = skipRustTrivia19013(src, i+1)
+	if i+1 < len(src) && src[i] == 'r' && src[i+1] == '#' {
+		i += 2
+	}
+	if i >= len(src) || !rustIdentStart19013(src[i]) {
+		return -1, false
+	}
+	i++
+	for i < len(src) && rustIdentByte19013(src[i]) {
+		i++
+	}
+	i = skipRustTrivia19013(src, i)
+	// Accept the ident! spelling as well as the standard macro_rules! ident.
+	if i < len(src) && src[i] == '!' {
+		i = skipRustTrivia19013(src, i+1)
+	}
+	if i >= len(src) || (src[i] != '(' && src[i] != '[' && src[i] != '{') {
+		return -1, false
+	}
+	end := rustMatchingDelimiter19013(src, i)
+	return end, end >= 0
 }
 
 // Macro invocations are opaque regardless of expansion semantics. The in-tree
@@ -2048,6 +2099,12 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			name: "stringify token-tree delimiters do not reference an unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn ok() { let _ = stringify!(lost()); let _ = stringify![lost()]; let _ = stringify!{lost()}; assert!(true); }\n",
+			want: 1,
+		},
+		{
+			name: "macro rule matcher does not reference an unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\nmacro_rules! ignore_lost { (lost()) => {}; }\n#[test]\nfn ok() { assert!(true); }\n",
 			want: 1,
 		},
 		{
