@@ -4555,16 +4555,22 @@ The helper-facing overlay lives in the userspace manager
 (`pkg/dataplane/userspace/manager_ha_preactivate.go`, see
 `pkg/dataplane/README.md`). It never touches the daemon's rg_active state
 machine, so no activation-keyed side effect (VIPs, GARP, RETH services) runs
-early. Cells: `pkg/cluster/transfer_preactivate_18559_test.go`,
+early. Cells:
+`pkg/cluster/transfer_preactivate_18559_test.go`,
 `pkg/daemon/transfer_preactivate_18559_test.go`,
-`pkg/dataplane/userspace/manager_ha_preactivate_18559_test.go`.
+`pkg/dataplane/userspace/manager_ha_preactivate_18559_test.go`, and
+`userspace-dp/src/afxdp/coordinator/idle_lease_sync_8121_tests.rs`
+(`aborted_requester_lease_promotion_matches_old_owner_18569`).
 
 Two consequences of opening forwarding early:
 
-- **The request waits for `applySem`.** The pre-activation's connected-route
-  republish takes `applySem`, so a failover issued during a long commit
-  starts only after that commit finishes. The promotion path already waited
-  on the same lock; it now waits before the request is sent.
+- **The request's pre-activation wait for `applySem` is bounded.** It waits at
+  most 500 ms; if the semaphore is busy, the pre-activation is skipped with a
+  warning and the transfer proceeds break-before-make. The overlay TTL starts
+  after the semaphore is acquired. Cells
+  `TestBeginTransferPreActivationBoundsApplySemWait18569` and
+  `TestTransferPreActivationTTLStartsAfterLock18569` pin the timeout/fallback
+  and TTL order.
 - **Helper side effects happen on the requester.** Pre-activation runs the
   helper's ordinary activation for the RG. That includes `RefreshOwnerRGS`
   and, when it leaves no group inactive, the node-wide
@@ -4572,8 +4578,8 @@ Two consequences of opening forwarding early:
   ordinary demotion (`DemoteOwnerRGS` and its purge walk). Lease promotion has
   no reverse step, so a requester whose transfer aborts keeps promoted
   leases. That is the same state an old owner is left in after an ordinary
-  failover, which also has no reverse step. No cell yet observes the helper
-  through an aborted pre-activation; it is owed (#18559).
+  failover, which also has no reverse step. The helper-level abort cell above
+  confirms the requester remains in that same post-demotion lease state (#18569).
 
 The untargeted `request chassis cluster failover redundancy-group N` (run on
 the owner, no target node) still demotes locally and leaves the peer to
