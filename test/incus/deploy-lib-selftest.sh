@@ -4300,6 +4300,59 @@ test_prepare_deb_explicit_version_builds() {
 	teardown_make_fixture
 }
 
+# #19017: an actual `make deb` under the with-cluster testguard PATH must
+# refuse before dpkg-buildpackage; on a clean PATH the same guard must stay
+# silent and let the build reach the controlled dpkg-buildpackage stub.
+test_make_deb_host_shim_guard_19017() {
+	local shim="$SCRIPT_DIR/../support/host-bin-shims" make_bin tmp out rc
+	tmp=$(mktemp -d)
+	make_bin=$(command -v make)
+	mkdir -p "$tmp/stub-bin"
+	cat >"$tmp/stub-bin/dpkg-buildpackage" <<'EOF'
+#!/bin/sh
+: >"$DPKG_BUILDPACKAGE_MARKER"
+exit 77
+EOF
+	chmod +x "$tmp/stub-bin/dpkg-buildpackage"
+
+	out=$(cd "$SCRIPT_DIR/../.." && \
+		PATH="$shim:$tmp/stub-bin:/usr/bin:/bin" \
+		DPKG_BUILDPACKAGE_MARKER="$tmp/dpkg-buildpackage-called" \
+		"$make_bin" --no-print-directory deb DEB_OUT="$tmp/deb-out" 2>&1)
+	rc=$?
+	if [[ $rc -ne 0 && "$out" == *"build outside the lock cell"* &&
+		"$out" == *"#19017"* && ! -e "$tmp/dpkg-buildpackage-called" ]]; then
+		ok "make deb: shimmed PATH refuses with #19017 before dpkg-buildpackage"
+	else
+		bad "make deb shim refusal: rc=$rc out='$out' called=$(test -e "$tmp/dpkg-buildpackage-called" && echo yes || echo no)"
+	fi
+
+	out=$(cd "$SCRIPT_DIR/../.." && \
+		PATH="$tmp/stub-bin:/usr/bin:/bin" \
+		DPKG_BUILDPACKAGE_MARKER="$tmp/dpkg-buildpackage-called-clean" \
+		"$make_bin" --no-print-directory deb DEB_OUT="$tmp/deb-out" 2>&1)
+	rc=$?
+	if [[ $rc -ne 0 && "$out" != *"build outside the lock cell"* &&
+		-e "$tmp/dpkg-buildpackage-called-clean" ]]; then
+		ok "make deb: clean PATH reaches dpkg-buildpackage without shim refusal"
+	else
+		bad "make deb clean PATH guard: rc=$rc out='$out' called=$(test -e "$tmp/dpkg-buildpackage-called-clean" && echo yes || echo no)"
+	fi
+
+	out=$(cd "$SCRIPT_DIR/../.." && \
+		PATH="$shim:$tmp/stub-bin:/usr/bin:/bin" \
+		DPKG_BUILDPACKAGE_MARKER="$tmp/prepare-dpkg-buildpackage-called" \
+		"$make_bin" --no-print-directory prepare-deb DEB_OUT="$tmp/deb-out" 2>&1)
+	rc=$?
+	if [[ $rc -ne 0 && "$out" == *"build outside the lock cell"* &&
+		"$out" == *"#19017"* && ! -e "$tmp/prepare-dpkg-buildpackage-called" ]]; then
+		ok "prepare-deb: rebuild path inherits #19017 shim refusal"
+	else
+		bad "prepare-deb shim refusal: rc=$rc out='$out' called=$(test -e "$tmp/prepare-dpkg-buildpackage-called" && echo yes || echo no)"
+	fi
+	rm -rf "$tmp"
+}
+
 test_prepare_deb_fast_never_builds_deb() {
 	setup_make_fixture
 	local out rc
@@ -4447,6 +4500,7 @@ test_prepare_deb_reuses_prebuilt_99
 test_prepare_deb_fresh_tree_builds_stock
 test_prepare_deb_explicit_version_builds
 test_prepare_deb_older_only_rebuilds
+test_make_deb_host_shim_guard_19017
 test_rolling_upgrade_candidate_is_pinned_to_built_deb
 test_rolling_upgrade_requires_pin_env
 test_prepare_deb_fast_never_builds_deb
