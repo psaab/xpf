@@ -84,14 +84,14 @@ type helperLivenessTracker struct {
 	// while set, no evidence is recorded and no verdict is raised.
 	retired bool
 
-	lastAnswer     time.Time
+	lastAnswer time.Time
 	// lastAnsweredStatusAt is separate from lastAnswer: any control request
 	// refreshes the latter, but only an answered status poll refreshes this.
 	// Guarded by mu; zero until the first answered status of this generation.
 	lastAnsweredStatusAt time.Time
-	silentSince    time.Time
-	silentTrips    int
-	lastRGActivate time.Time
+	silentSince          time.Time
+	silentTrips          int
+	lastRGActivate       time.Time
 
 	// heartbeat freeze, from answered statuses. A worker is judged by the
 	// AGE of its heartbeat at the moment a status was answered (status time

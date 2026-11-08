@@ -30,7 +30,7 @@ func (f fakeLiveness18685) HelperStatusAgeAndStale() (time.Duration, bool) {
 	return f.statusAge, f.statusStale
 }
 func (f fakeLiveness18685) HelperElectionNotReady() bool { return f.notReady }
-func (f fakeLiveness18685) HelperWedgeKills() uint64    { return f.kills }
+func (f fakeLiveness18685) HelperWedgeKills() uint64     { return f.kills }
 
 // TestHelperLivenessFamiliesEmitted18685: the five helper liveness families
 // are emitted from the provider, including while the helper is not answering.

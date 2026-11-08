@@ -173,4 +173,3 @@ func TestFailedStatusPollDoesNotClearStaleness18689(t *testing.T) {
 		t.Fatalf("status summary view stale=%v err=%v, want stale after failed poll", status.HelperStatusStale, err)
 	}
 }
-
