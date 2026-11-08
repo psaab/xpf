@@ -168,23 +168,33 @@ func (c *CLI) requestPeerSystemAction(ctx context.Context, action string) (strin
 // (x-peer-persistent-nat-*) into the request body, where the #4107 fabric
 // token's request-digest MAC binds them.
 func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Context, action string, origin string, generation uint64) (string, error) {
+	msg, err, _ := c.requestPeerSystemActionSent(ctx, action, origin, generation)
+	return msg, err
+}
+
+// requestPeerSystemActionSent is requestPeerSystemActionWithPersistentNatGeneration
+// that also reports whether the request may have reached the peer. sent is
+// false only when it provably did not: dialPeer found no fabric address that
+// accepts a TCP connection, before any RPC. Once the RPC is issued every error
+// counts as sent (#18559 keys its local-resign fallback on this).
+func (c *CLI) requestPeerSystemActionSent(ctx context.Context, action string, origin string, generation uint64) (string, error, bool) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "x-peer-forwarded", "1")
 	req := &pb.SystemActionRequest{Action: action, PersistentNatOrigin: origin, PersistentNatGeneration: generation}
 	if c.peerSystemActionFn != nil {
 		msg, err := c.peerSystemActionFn(ctx, req)
 		if err != nil {
 			if message, outcome := c.failoverProxyTimeoutMessage(action, err); outcome == peerclient.OutcomeCommitted {
-				return message, nil
+				return message, nil, true
 			} else if outcome == peerclient.OutcomeUnknown {
-				return "", status.Error(codes.Unknown, message)
+				return "", status.Error(codes.Unknown, message), true
 			}
-			return "", err
+			return "", err, true
 		}
-		return msg, nil
+		return msg, nil, true
 	}
 	conn := c.dialPeer()
 	if conn == nil {
-		return "", fmt.Errorf("cluster peer not reachable")
+		return "", fmt.Errorf("cluster peer not reachable"), false
 	}
 	defer conn.Close()
 
@@ -198,14 +208,14 @@ func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Con
 			// verify text) verbatim instead of re-reconciling
 			// against this node's view, which would downgrade it
 			// to a success message.
-			return "", err
+			return "", err, true
 		}
 		if message, outcome := c.failoverProxyTimeoutMessage(action, err); outcome == peerclient.OutcomeCommitted {
-			return message, nil
+			return message, nil, true
 		} else if outcome == peerclient.OutcomeUnknown {
-			return "", status.Error(codes.Unknown, message)
+			return "", status.Error(codes.Unknown, message), true
 		}
-		return "", err
+		return "", err, true
 	}
-	return resp.Message, nil
+	return resp.Message, nil, true
 }

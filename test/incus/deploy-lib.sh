@@ -1160,7 +1160,9 @@ deploy_rg_local_forwarding() {
 # records exactly four verdicts and never aborts under `set -euo pipefail`.
 #
 # Ownership is read from BOTH nodes' own views, the ha_rg_owner_verdict rule
-# (#18503). The untargeted yield parks the old owner in `secondary-hold`, so
+# (#18503). A local untargeted resign parks the old owner in
+# `secondary-hold` (on a data RG's owner with a live peer the untargeted form
+# runs the transfer instead, #18559, and the old owner ends `secondary`), so
 # a non-owner is `secondary` or `secondary-hold`. fw0's view alone would
 # score a dual-primary RG as healthy.
 #

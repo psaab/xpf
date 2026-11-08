@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	dpformat "github.com/psaab/xpf/pkg/dataplane/userspace/format"
 	"github.com/psaab/xpf/pkg/osident"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func (c *CLI) handleRequestChassis(args []string) error {
@@ -150,6 +153,16 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 		return nil
 
 	case clusterfailover.KindRGFailover:
+		// #18559: on the owner of a data RG with a live peer, run the
+		// make-before-break transfer to the peer instead of the local
+		// resign. Same rule as the gRPC handler (untargetedPeerTransfer).
+		if message, err, done := c.untargetedPeerTransfer(op); done {
+			if err != nil {
+				return err
+			}
+			fmt.Println(message)
+			return nil
+		}
 		outcome, err := c.cluster.ManualFailover(op.RG)
 		if err != nil {
 			return err
@@ -165,6 +178,50 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 
 	// ParseCommand only returns the five kinds above; this is unreachable.
 	return fmt.Errorf("%s", clusterfailover.CommandUsage)
+}
+
+// untargetedPeerTransfer is the in-process CLI twin of the gRPC handler's
+// (#18559): an untargeted RG failover on the RG's owner runs as the
+// node-targeted transfer to the peer. done=false means "run the local
+// resign": the form did not qualify, or the request provably never reached
+// the peer (the #18585 clock refusal, or no fabric address answered the
+// dial). Every failure that reached the peer is returned; nothing resigns on
+// top of it. The rule is documented with clusterfailover.UntargetedPeerTransfer.
+func (c *CLI) untargetedPeerTransfer(op clusterfailover.Op) (message string, err error, done bool) {
+	target, ok := clusterfailover.UntargetedPeerTransfer(op, c.cluster.NodeID(),
+		c.cluster.IsLocalPrimary(op.RG), c.cluster.PeerAlive())
+	if !ok {
+		return "", nil, false
+	}
+	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
+		"rg", op.RG, "target_node", target.Node)
+	sent := false
+	if err = c.cluster.CrossNodeFabricClockError(target.Node); err == nil { // #18585
+		message, err, sent = c.requestPeerSystemActionSent(context.Background(), target.Action(), "", 0)
+		if err == nil {
+			return message, nil, true
+		}
+	}
+	if !sent {
+		slog.Info("cluster failover: the transfer request never reached the peer; falling back to the local resign (the peer claims the group on its next heartbeat)",
+			"rg", op.RG, "target_node", target.Node, "reason", err)
+		return "", nil, false
+	}
+	slog.Warn("cluster failover: the transfer to the peer did not complete; not resigning locally",
+		"rg", op.RG, "target_node", target.Node, "err", err)
+	return "", untargetedTransferError18559(op.RG, target.Node, err), true
+}
+
+// untargetedTransferError18559 names the transfer in a failure the peer
+// returned and keeps its gRPC code; see the gRPC handler's twin.
+func untargetedTransferError18559(rg, targetNode int, err error) error {
+	st := status.Convert(err)
+	if st.Code() == codes.Unknown {
+		return st.Err()
+	}
+	return status.Errorf(st.Code(),
+		"untargeted failover of redundancy group %d ran as a make-before-break transfer to node %d, which returned: %s; no local resign was run",
+		rg, targetNode, st.Message())
 }
 
 func (c *CLI) handleRequestChassisClusterDataPlane(args []string) error {

@@ -52,6 +52,22 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 	origin string,
 	generation uint64,
 ) (*pb.SystemActionResponse, error) {
+	resp, err, _ := s.proxyPeerSystemActionSent(ctx, req, origin, generation)
+	return resp, err
+}
+
+// proxyPeerSystemActionSent is proxyPeerSystemActionWithPersistentNatGeneration
+// that also reports whether the request may have reached the peer. sent is
+// false only when it provably did not: the peer could not be dialed (dialPeer
+// probes every fabric address before any RPC). Once the RPC is issued, any
+// error — a transport error included — may have been delivered, so it counts
+// as sent (#18559 keys its local-resign fallback on this).
+func (s *Server) proxyPeerSystemActionSent(
+	ctx context.Context,
+	req *pb.SystemActionRequest,
+	origin string,
+	generation uint64,
+) (resp *pb.SystemActionResponse, err error, sent bool) {
 	peerCtx, cancel := context.WithTimeout(ctx, proxyPeerTimeout(req))
 	defer cancel()
 	// #14580: origin/generation ride inside the signed request body (see
@@ -59,14 +75,16 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 	forwardedReq := persistentNatClearRequestWithGeneration(req, origin, generation)
 	peerCtx = metadata.AppendToOutgoingContext(peerCtx, "x-peer-forwarded", "1")
 	if s.peerSystemActionFn != nil {
-		return s.peerSystemActionFn(peerCtx, forwardedReq)
+		resp, err = s.peerSystemActionFn(peerCtx, forwardedReq)
+		return resp, err, true
 	}
 	conn, err := s.dialPeer(peerCtx)
 	if err != nil {
-		return nil, err
+		return nil, err, false
 	}
 	defer conn.Close()
-	return pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, forwardedReq)
+	resp, err = pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, forwardedReq)
+	return resp, err, true
 }
 
 // failoverProxyTimeoutOutcome reconciles a forwarded node-targeted
@@ -112,26 +130,82 @@ func (s *Server) failoverProxyTimeoutOutcome(op clusterfailover.Op, err error) (
 // codes.Unknown with the verify text (#16432), so a status-checking
 // client can distinguish the two without parsing the message.
 func (s *Server) proxyClusterFailover(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error) {
+	resp, err, _ := s.proxyClusterFailoverSent(ctx, req, op)
+	return resp, err
+}
+
+// proxyClusterFailoverSent is proxyClusterFailover that also reports whether
+// the request may have reached the peer: false for the #18585 clock refusal
+// and for a peer that could not be dialed (proxyPeerSystemActionSent).
+func (s *Server) proxyClusterFailoverSent(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error, bool) {
 	// #18585: refuse up front, with the measured skew and the remedy, when
 	// the peer's clock is past the point where the fabric token can ever
 	// verify. Below that bound (or with no fresh measurement) the request is
 	// proxied exactly as before.
 	if s.cluster != nil {
 		if err := s.cluster.CrossNodeFabricClockError(op.Node); err != nil {
-			return nil, status.Error(codes.FailedPrecondition, err.Error())
+			return nil, status.Error(codes.FailedPrecondition, err.Error()), false
 		}
 	}
-	resp, err := s.proxyPeerSystemAction(ctx, req)
+	resp, err, sent := s.proxyPeerSystemActionSent(ctx, req, "", 0)
 	if err != nil {
 		if outcome, oerr, ok := s.failoverProxyTimeoutOutcome(op, err); ok {
-			return outcome, oerr
+			return outcome, oerr, sent
 		}
 		if st, ok := status.FromError(err); ok {
-			return nil, st.Err()
+			return nil, st.Err(), sent
 		}
-		return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err)
+		return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err), sent
 	}
-	return resp, nil
+	return resp, nil, sent
+}
+
+// untargetedPeerTransfer runs an untargeted RG failover issued on the RG's
+// owner as the node-targeted transfer to the peer (#18559; the decision and
+// the failure rule are documented with clusterfailover.UntargetedPeerTransfer).
+// done reports whether the caller must return resp/err as the result. It is
+// false when the form does not qualify, and when the request provably never
+// reached the peer (no dial, or the #18585 clock refusal): the caller then
+// runs the pre-#18559 local resign. Every failure that reached the peer is
+// returned and nothing resigns on top of it; a peer that is not
+// takeover-ready refuses with its readiness reasons and this node keeps the
+// RG.
+func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.Op) (resp *pb.SystemActionResponse, err error, done bool) {
+	target, ok := clusterfailover.UntargetedPeerTransfer(op, s.cluster.NodeID(),
+		s.cluster.IsLocalPrimary(op.RG), s.cluster.PeerAlive())
+	if !ok {
+		return nil, nil, false
+	}
+	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
+		"rg", op.RG, "target_node", target.Node)
+	resp, err, sent := s.proxyClusterFailoverSent(ctx, &pb.SystemActionRequest{Action: target.Action()}, target)
+	if err == nil {
+		return resp, nil, true
+	}
+	if !sent {
+		slog.Info("cluster failover: the transfer request never reached the peer; falling back to the local resign (the peer claims the group on its next heartbeat)",
+			"rg", op.RG, "target_node", target.Node, "reason", err)
+		return nil, nil, false
+	}
+	slog.Warn("cluster failover: the transfer to the peer did not complete; not resigning locally",
+		"rg", op.RG, "target_node", target.Node, "err", err)
+	return nil, untargetedTransferError18559(op.RG, target.Node, err), true
+}
+
+// untargetedTransferError18559 names the transfer in a failure the peer
+// returned and keeps its gRPC code. codes.Unknown is passed through as is: it
+// is the #16432 verify-before-retry outcome and its text already says so.
+// Anything else (for a peer that is not takeover-ready, FailedPrecondition
+// with its readiness reasons) gains the context that the untargeted form ran
+// as a transfer and that no local resign was run.
+func untargetedTransferError18559(rg, targetNode int, err error) error {
+	st := status.Convert(err)
+	if st.Code() == codes.Unknown {
+		return st.Err()
+	}
+	return status.Errorf(st.Code(),
+		"untargeted failover of redundancy group %d ran as a make-before-break transfer to node %d, which returned: %s; no local resign was run",
+		rg, targetNode, st.Message())
 }
 
 // logSystemAction records a destructive maintenance action to the configstore
@@ -938,6 +1012,16 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 		}, nil
 
 	case clusterfailover.KindRGFailover:
+		// #18559: on the owner of a data RG with a live peer, the untargeted
+		// form runs the make-before-break transfer to the peer (the peer
+		// pre-activates before this node demotes) instead of the local
+		// resign, which the peer only noticed on its next heartbeat. A
+		// request the peer forwarded to us is never re-proxied.
+		if !peerForwardedFromContext(ctx) {
+			if resp, err, done := s.untargetedPeerTransfer(ctx, op); done {
+				return resp, err
+			}
+		}
 		outcome, err := s.cluster.ManualFailover(op.RG)
 		if err != nil {
 			return nil, status.Errorf(codes.NotFound, "%v", err)

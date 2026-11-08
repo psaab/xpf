@@ -852,6 +852,10 @@ The grammar is closed. Exactly four forms are accepted:
 | Reset | `reset redundancy-group <rg>` | `cluster-failover-reset:<rg>` |
 
 `<rg>` is a non-negative decimal group ID; `<0|1>` is a supported chassis node.
+The plain form is a local resign (`ManualFailover`) except on the owner of a
+data RG with a live peer. There, since #18559, it runs as the targeted form to
+the peer (`clusterfailover.UntargetedPeerTransfer`), so the move is
+make-before-break.
 Unknown, missing, misspelled, duplicate, signed, whitespace-laden, or trailing
 tokens — and an empty `:node` suffix — are rejected with usage/`InvalidArgument`
 BEFORE any cluster method or peer dial. This closes the class where a truncated
@@ -1464,10 +1468,27 @@ queued in the RX rings. Mechanism, ownership rules and counters:
 `docs/afxdp-packet-processing.md` ("Generation stamp: who writes it").
 Loss-cluster numbers are in `docs/log/18560-ctrl-stamp.md`.
 
-The untargeted form (`request chassis cluster failover redundancy-group N`
-on the owner) still demotes locally and lets the peer promote on the next
-heartbeat. Prefer the node-targeted form, and the `data node <peer>` batch
-when moving every data RG: the batch has no split window between RGs.
+Since #18559 the untargeted form (`request chassis cluster failover
+redundancy-group N`), when run on the owner of a data RG with a live peer, runs
+the node-targeted transfer to the peer, so it is make-before-break too. Before
+that it demoted locally and let the peer promote on its next heartbeat: on
+loss, a 71-336 ms gap with every flow dropped, and the H1 #19019 stalls.
+
+What the operator now sees:
+
+- The command blocks about 1-1.8 s for the commit.
+- It prints `... (transfer committed)`.
+- The old owner ends `secondary` with `Manual: no`, not in the Manual hold.
+- A peer that is not takeover-ready refuses with its readiness reasons, and
+  the owner keeps the group instead of resigning into an ownerless RG.
+
+Only a request that never reached the peer falls back to the old local
+resign: the #18585 clock refusal, or no fabric address answering. RG0 keeps
+its local resign.
+
+The rules are in `pkg/cluster/README.md` ("The untargeted form on the owner
+runs the transfer"). The `data node <peer>` batch is still the better way to
+move every data RG: it has no split window between RGs.
 
 ### Watchdog heartbeat: map write every tick vs IPC on change/backstop (#2549)
 

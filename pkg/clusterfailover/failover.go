@@ -47,8 +47,10 @@ const (
 	// KindInvalid is the zero value; a parsed Op never carries it.
 	KindInvalid Kind = iota
 	// KindRGFailover is the plain, untargeted redundancy-group failover:
-	// `redundancy-group <rg>` / `cluster-failover:<rg>`. It maps to
-	// Manager.ManualFailover(rg) — it does not name a target node.
+	// `redundancy-group <rg>` / `cluster-failover:<rg>`. It does not name a
+	// target node. It maps to Manager.ManualFailover(rg), except on the
+	// owner of a data RG with a live peer, where the frontends run it as the
+	// targeted transfer to the peer (UntargetedPeerTransfer, #18559).
 	KindRGFailover
 	// KindRGFailoverNode is the targeted redundancy-group failover:
 	// `redundancy-group <rg> node <n>` / `cluster-failover:<rg>:node<n>`.

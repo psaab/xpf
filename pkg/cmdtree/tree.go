@@ -1215,7 +1215,7 @@ var OperationalTree = map[string]*Node{
 							return []string{"0", "1"}
 						}},
 					}},
-					"redundancy-group": {Desc: "Failover a specific redundancy group", DynamicFn: func(cfg *config.Config) []string {
+					"redundancy-group": {Desc: "Fail over a redundancy group (no node: on its owner, a make-before-break transfer to the peer that waits for the commit)", DynamicFn: func(cfg *config.Config) []string {
 						return redundancyGroupIDs(cfg) // #4866: nil-skip tolerated RG entries
 					}, Children: map[string]*Node{
 						"node": {Desc: "Target node ID (local or peer)", DynamicFn: func(cfg *config.Config) []string {
