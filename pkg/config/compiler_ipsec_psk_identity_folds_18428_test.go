@@ -5,15 +5,15 @@ import (
 	"testing"
 )
 
-// #18428 review folds. A PSK owner collision is a presented identity that can
-// select both secrets. strongSwan selects through has_owner() (mem_cred.c),
-// lookup->matches(owner), and every matches_* is type-strict except that an
-// ID_ANY owner matches anything (round 3, verified in identification.c and
-// with the libstrongswan 6.1.0-2 oracle). So a DN and a KEY_ID with the same
-// DER bytes never collide, whichever gateway sorts first, while two selectors
-// that strongSwan parses as the SAME type and compares equal always do.
-// ID_ANY spellings, diagnostics, the case-insensitive type prefix and the
-// empty-last-RDN quirk are oracle-checked too (docs/log/18428.md).
+// #18428 review folds plus #18682's match-set expansion. A PSK owner collision
+// is a presented identity that can select both secrets. strongSwan selects
+// through has_owner() (mem_cred.c), lookup->matches(owner): string, DN and
+// binary matches remain type-strict, while matches_range crosses address,
+// subnet and range types within one family. ID_ANY owners match anything.
+// Thus DN and KEY_ID values with the same DER remain distinct, while wildcard,
+// overlapping address-range and DN length-octet owner sets can intersect.
+// Local identities are directed lookups, not owner sets. Oracle coverage and
+// regression cells are recorded in docs/log/18682.md.
 
 func TestPSKIdentityCollisionTypeStrict18428(t *testing.T) {
 	crossType := []struct{ name, aType, a, bType, b string }{

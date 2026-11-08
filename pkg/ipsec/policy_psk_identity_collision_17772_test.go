@@ -304,9 +304,9 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
-	// #18428 round 3: DN/raw-encoding pairs never select each other's
-	// secret (matches() is type-strict), so both connections render in both
-	// gateway orders.
+	// #18428 round 3: DN matching remains type-strict across identity types,
+	// so DN/raw-encoding pairs never select each other's secret and both
+	// connections render in both gateway orders.
 	t.Run("cross-type DN versus raw-encoding owners render both in both gateway orders", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"DN left compares exact FQDN type DER bytes", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "{2}:#300f310d300b0603550403130470656572"},
@@ -359,7 +359,6 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"unknown DN attribute case", "distinguished-name", "broken=peer", "distinguished-name", "BROKEN=PEER"},
 			{"double separator differs from plain hex", "key-id", "7a::7a", "key-id", "7a7a"},
 			{"URI and numeric ID 12 are distinct", "inet", "uri:Peer", "inet", "{12}:Peer"},
-			{"subnet differs from host IP", "inet", "198.51.100.0/24", "inet", "198.51.100.0"},
 			{"UTF8 DN differs from uppercase bytes", "distinguished-name", "CN=Peer", "inet", "asn1dn:#300f310d300b06035504030c0450454552"},
 			{"backslash DN is not raw KEY_ID", "distinguished-name", "CN=peer\\", "key-id", "434e3d706565725c"},
 			{"non-Printable DN keeps case", "distinguished-name", "CN=peer\\", "distinguished-name", "CN=PEER\\"},
@@ -412,8 +411,6 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			{"zero-length value with extra TLV remains malformed", "inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"},
 			{"mismatched declared total length remains distinct", "inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"},
 			{"trailing bytes remain outside DN total length", "inet", "asn1dn:#300f310d300b060355040313047065657200", "inet", "asn1dn:#300f310d300b060355040313045045455200"},
-			{"nonminimal outer length differs from canonical under total-length gate", "inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"},
-			{"padded two-octet outer length differs from canonical under total-length gate", "inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"},
 			{"nine-octet outer length remains malformed", "inet", "asn1dn:#308900000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#308900000000000000000f310d300b0603550403130450454552"},
 			{"embedded NUL prevents type-2 comparison", "inet", "{2}:#410062", "inet", "{2}:#410062"},
 			{"embedded NUL prevents type-3 comparison", "inet", "{3}:#410062", "inet", "{3}:#410062"},
@@ -452,8 +449,9 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			})
 		}
 	})
-	// #18428 round 3: matches() is type-strict, so a DN never selects a
-	// KEY_ID owner (or the reverse); both connections render.
+	// #18428 round 3: DN matching remains type-strict across identity types,
+	// so a DN never selects a KEY_ID owner (or the reverse); both connections
+	// render.
 	t.Run("type-9 peer identity does not match another gateway KEY_ID local identity", func(t *testing.T) {
 		cfg := build(map[string]*config.IPsecGateway{
 			"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: "distinguished-name", RemoteIDValue: "CN=peer"},
@@ -602,6 +600,64 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		text, rendered, err := manager.renderConfig(cfg)
 		if err != nil || !rendered["gw-a"] || !rendered["gw-b"] {
 			t.Fatalf("DN and FQDN are distinct identity namespaces: rendered=%v err=%v\n%s", rendered, err, text)
+		}
+	})
+
+	t.Run("wildcard address containment and DN match-set collisions skip secrets", func(t *testing.T) {
+		pairs := []struct{ name, aType, a, bType, b string }{
+			{"FQDN wildcard", "hostname", "*.example.com", "hostname", "peer.example.com"},
+			{"RFC822 wildcard", "email", "*@example.com", "email", "peer@example.com"},
+			{"IPv4 address in subnet", "inet", "198.51.100.7", "inet", "198.51.100.0/24"},
+			{"IPv4 subnet and range", "inet", "198.51.100.0/24", "inet", "198.51.100.0-198.51.100.255"},
+			{"DN wildcard", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=x"},
+			{"DN length octets", "distinguished-name", "CN=peer", "inet", "asn1dn:#30810f310d300b0603550403130470656572"},
+		}
+		for _, pair := range pairs {
+			pair := pair
+			t.Run(pair.name, func(t *testing.T) {
+				cfg := build(map[string]*config.IPsecGateway{
+					"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: pair.aType, RemoteIDValue: pair.a},
+					"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: pair.bType, RemoteIDValue: pair.b},
+					"gw-c": {Name: "gw-c", Address: "203.0.113.3"},
+				}, map[string]*config.IPsecVPN{
+					"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+					"c": {Gateway: "gw-c", PSK: config.NewSecret("secret-c")},
+				})
+				text, rendered := assertSkipped(t, cfg, "gw-a", "gw-b")
+				if !rendered["gw-c"] {
+					t.Fatalf("unrelated VPN must render while match-set conflicts are skipped:\n%s", text)
+				}
+			})
+		}
+	})
+
+	t.Run("disjoint wildcard and subnet owners render uniquely", func(t *testing.T) {
+		for _, pair := range []struct{ name, aType, a, bType, b string }{
+			{"disjoint wildcards", "hostname", "*.a.example", "hostname", "*.b.example"},
+			{"disjoint subnets", "inet", "192.0.2.0/24", "inet", "192.0.3.0/24"},
+		} {
+			pair := pair
+			t.Run(pair.name, func(t *testing.T) {
+				cfg := build(map[string]*config.IPsecGateway{
+					"gw-a": {Name: "gw-a", Address: "203.0.113.1", RemoteIDType: pair.aType, RemoteIDValue: pair.a},
+					"gw-b": {Name: "gw-b", Address: "203.0.113.2", RemoteIDType: pair.bType, RemoteIDValue: pair.b},
+				}, map[string]*config.IPsecVPN{
+					"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+					"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+				})
+				text, rendered, err := manager.renderConfig(cfg)
+				if err != nil || !rendered["gw-a"] || !rendered["gw-b"] {
+					t.Fatalf("disjoint owner sets must both render: rendered=%v err=%v\n%s", rendered, err, text)
+				}
+				blocks := parseSecretBlocks(t, text)
+				if _, ok := blocks["ike-gw-a"]; !ok {
+					t.Fatalf("unique gateway A secret missing: %s", text)
+				}
+				if _, ok := blocks["ike-gw-b"]; !ok {
+					t.Fatalf("unique gateway B secret missing: %s", text)
+				}
+			})
 		}
 	})
 

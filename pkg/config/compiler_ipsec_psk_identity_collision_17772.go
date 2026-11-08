@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/asn1"
 	"encoding/hex"
 	"errors"
@@ -177,17 +178,14 @@ func IPsecPSKIdentityConflicts(ipsec *IPsecConfig) []IPsecPSKIdentityConflict {
 			if a.key == b.key || ipsecPSKSetsEqual(a.psks, b.psks) {
 				continue
 			}
-			// #18428: strongSwan selects a secret through has_owner()
-			// (mem_cred.c), lookup->matches(owner). The modelled rule is
-			// type-strict plus "an ID_ANY owner matches anything"; the
-			// classes matches() also covers are listed on
-			// ipsecIdentitiesCollide (#18682).
-			// Peer selectors are owners: two collide when one presented
-			// identity can select both (ipsecIdentitiesCollide). An effective
-			// local identity is the `me` lookup of its own exchange: it
-			// exposes another connection's secret when it selects that
-			// connection's owner (ipsecLookupSelectsOwner). equals() is not
-			// on the lookup path.
+			// #18428/#18682: strongSwan selects a secret through has_owner()
+			// (mem_cred.c), lookup->matches(owner). Peer selectors are
+			// owners: ipsecIdentitiesCollide checks that their match sets
+			// intersect. An effective local identity is the `me` lookup of
+			// its own exchange, so ipsecLookupSelectsOwner applies the
+			// directed lookup->matches(owner) relation to it. Both functions
+			// share the parsed address/wildcard/DN match primitives below;
+			// equals() alone is not the lookup path.
 			conflict := IPsecPSKIdentityConflict{}
 			for _, peer := range a.peerSelectors {
 				for _, other := range b.peerSelectors {
@@ -581,25 +579,36 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 
 // ipsecIdentitiesCollide reports whether one presented identity could select
 // the secrets of both a and b, and names the rule that made them one owner
-// (#18428). strongSwan selects a PSK through has_owner() in mem_cred.c:
-// lookup->matches(owner) for each configured owner, and an ID_ANY owner
-// returns ID_MATCH_ANY for any lookup.
+// (#18428, #18682). strongSwan selects a PSK through has_owner() in
+// mem_cred.c: lookup->matches(owner) for each configured owner, and an
+// ID_ANY owner returns ID_MATCH_ANY for any lookup.
 //
-// The MODELLED rule: two owners collide when their strongSwan types (parsed
-// from the RENDERED selectors, which the key already carries) are equal and
-// they compare equal, or when either is ID_ANY. That is exact for
-// matches_binary, matches_string and matches_dn_internal, which return
-// ID_MATCH_NONE unless both identities have the same type, so a DN whose DER
-// equals a KEY_ID's bytes is NOT a collision (oracle-confirmed). equals() is
-// directional only for a type-9 left operand against another type, which the
-// type gate excludes, so the same-type test is symmetric.
+// The MODELLED rule is match-set intersection: two owners collide when
+// some presented identity P has P.matches(a) and P.matches(b) both above
+// ID_MATCH_NONE. That covers same-type equals(): for types 2/3/9 the
+// equals() comparison is exactly the strength-20 case of matches(), and
+// equals() is directional only for a type-9 left operand against another
+// type, which the per-class type gates exclude, so the test is symmetric.
+// A DN whose DER equals a KEY_ID's bytes is therefore NOT a collision
+// (matches_binary/matches_string/matches_dn stay type-strict; oracle-
+// confirmed). matches_range is the exception: it is NOT type-strict and
+// crosses IPV4_ADDR, IPV4_ADDR_SUBNET, IPV4_ADDR_RANGE (and the IPv6
+// trio) within one address family (#18682).
 //
-// NOT modelled (matches() can select both secrets; #18682): wildcard owners
-// (`*` in an FQDN, an RFC822 address or a DN value); address/subnet/range
-// containment, because matches_range is NOT type-strict and crosses those
-// types within one address family; and DN encodings that differ only in
-// their length octets, which matches() compares without equals()'s
-// total-length check.
+// Beyond equals() the model intersects, per class (#18682):
+//   - wildcard strings (types 2 and 3): a leading-'*' owner matches its
+//     suffix-exact strings, so two match sets meet exactly when one
+//     suffix ends with the other (case-insensitively); a wildcard also
+//     meets an exact string it suffix-matches;
+//   - address identities (types 1/4/5/6/7/8): hosts and ranges denote
+//     singleton/closed-interval sets; subnet membership follows the
+//     matcher's netmask rules, and the resulting sets intersect within
+//     one address family;
+//   - DNs (type 9): matches() compares RDN-by-RDN through compare_dn
+//     with a wildcard counter and WITHOUT equals()'s total-length
+//     check, so encodings that differ only in BER length octets still
+//     collide, and an RDN value '*' on either side matches any value of
+//     the other side's RDN at that position.
 func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
 	if a.typeID == 0 || b.typeID == 0 {
 		return "ID_ANY owner matches every identity", true
@@ -607,17 +616,468 @@ func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
 	if a.typeID == b.typeID && a.equals(b) {
 		return ipsecIdentityEqualityRule(a, b), true
 	}
+	if rule, ok := ipsecAddressIdentitiesIntersect(a, b); ok {
+		return rule, true
+	}
+	if (a.typeID == 2 || a.typeID == 3) && a.typeID == b.typeID {
+		if rule, ok := ipsecWildcardStringsIntersect(a.encoding, b.encoding); ok {
+			return rule, true
+		}
+	}
+	if a.typeID == 9 && b.typeID == 9 {
+		if rule, ok := ipsecDNMatchSetsIntersect(a, b); ok {
+			return rule, true
+		}
+	}
+	return "", false
+}
+
+// ipsecAddressBounds holds both the interval conversion used by
+// matches_range and the host-membership mask used by matches_subnets.
+// strongSwan's subnet-to-range conversion uses netmask_to_cidr, while
+// host-to-subnet matching checks the effective mask bytes, so retaining
+// both forms is necessary for explicit subnet encodings too.
+type ipsecAddressBounds struct {
+	family       uint8
+	length       uint8
+	first        [16]byte
+	last         [16]byte
+	subnet       bool
+	subnetBits   uint8
+	subnetNet    [16]byte
+	subnetMask   [16]byte
+}
+
+// ipsecSubnetMaskBits mirrors netmask_to_cidr in identification.c,
+// including its handling of non-contiguous explicit masks.
+func ipsecSubnetMaskBits(mask string) int {
+	bits := 0
+	for i := 0; i < len(mask); i++ {
+		maskByte := mask[i]
+		if maskByte == 0 {
+			break
+		}
+		if maskByte == 0xff {
+			bits += 8
+			continue
+		}
+		for maskByte&0x80 != 0 {
+			bits++
+			maskByte <<= 1
+		}
+	}
+	return bits
+}
+
+// ipsecAddressInterval decodes an address identity (types 1/4/5/6/7/8)
+// into its family and closed interval for range comparisons. For subnets,
+// first/last mirror subnet_to_range, while subnetNet/subnetMask retain the
+// bytes used by address-to-subnet match checks.
+func ipsecAddressInterval(identity ipsecIKEIdentity) (ipsecAddressBounds, bool) {
+	var bounds ipsecAddressBounds
+	switch identity.typeID {
+	case 1, 5: // IPV4_ADDR, IPV6_ADDR
+		length := 4
+		if identity.typeID == 5 {
+			length = 16
+			bounds.family = 6
+		} else {
+			bounds.family = 4
+		}
+		if len(identity.encoding) != length {
+			return ipsecAddressBounds{}, false
+		}
+		bounds.length = uint8(length)
+		copy(bounds.first[:], identity.encoding)
+		bounds.last = bounds.first
+		return bounds, true
+	case 4, 6: // IPV4_ADDR_SUBNET, IPV6_ADDR_SUBNET: addr || mask
+		half := 4
+		bounds.family = 4
+		if identity.typeID == 6 {
+			half = 16
+			bounds.family = 6
+		}
+		if len(identity.encoding) != 2*half {
+			return ipsecAddressBounds{}, false
+		}
+		bounds.length = uint8(half)
+		bounds.subnet = true
+		copy(bounds.subnetNet[:], identity.encoding[:half])
+		mask := identity.encoding[half:]
+		bits := ipsecSubnetMaskBits(mask)
+		bounds.subnetBits = uint8(bits)
+		maskLength := (bits + 7) / 8
+		copy(bounds.subnetMask[:maskLength], mask[:maskLength])
+
+		copy(bounds.first[:], bounds.subnetNet[:half])
+		copy(bounds.last[:], bounds.subnetNet[:half])
+		i := bits / 8
+		if i < half {
+			prefixMask := byte(0xff << (8 - bits%8))
+			bounds.first[i] &= prefixMask
+			bounds.last[i] |= ^prefixMask
+			for j := i + 1; j < half; j++ {
+				bounds.first[j] = 0
+				bounds.last[j] = 0xff
+			}
+		}
+		return bounds, true
+	case 7, 8: // IPV4_ADDR_RANGE, IPV6_ADDR_RANGE: from || to
+		half := 4
+		bounds.family = 4
+		if identity.typeID == 8 {
+			half = 16
+			bounds.family = 6
+		}
+		if len(identity.encoding) != 2*half {
+			return ipsecAddressBounds{}, false
+		}
+		bounds.length = uint8(half)
+		copy(bounds.first[:], identity.encoding[:half])
+		copy(bounds.last[:], identity.encoding[half:])
+		if bytes.Compare(bounds.first[:half], bounds.last[:half]) > 0 {
+			return ipsecAddressBounds{}, false
+		}
+		return bounds, true
+	}
+	return ipsecAddressBounds{}, false
+}
+
+func ipsecSubnetMasksIntersect(a, b ipsecAddressBounds) bool {
+	for i := 0; i < int(a.length); i++ {
+		if (a.subnetNet[i]^b.subnetNet[i])&a.subnetMask[i]&b.subnetMask[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func ipsecFillMinimalSubnetAddress(candidate *[16]byte, subnet ipsecAddressBounds, fromBit, totalBits int) {
+	for bit := fromBit; bit < totalBits; bit++ {
+		index := bit / 8
+		mask := byte(1 << uint(7-bit%8))
+		candidate[index] &^= mask
+		if subnet.subnetMask[index]&mask != 0 && subnet.subnetNet[index]&mask != 0 {
+			candidate[index] |= mask
+		}
+	}
+}
+
+// ipsecAddressRangeIntersectsSubnet reports whether a closed interval
+// contains an address satisfying the subnet's effective matcher mask.
+func ipsecAddressRangeIntersectsSubnet(addressRange, subnet ipsecAddressBounds) bool {
+	if !subnet.subnet || addressRange.family != subnet.family {
+		return false
+	}
+	length := int(addressRange.length)
+	if bytes.Compare(addressRange.first[:length], addressRange.last[:length]) > 0 {
+		return false
+	}
+
+	candidate := addressRange.first
+	pivot := -1
+	totalBits := length * 8
+	for bit := 0; bit < totalBits; bit++ {
+		index := bit / 8
+		mask := byte(1 << uint(7-bit%8))
+		lowerSet := addressRange.first[index]&mask != 0
+		if subnet.subnetMask[index]&mask == 0 {
+			if !lowerSet {
+				pivot = bit
+			}
+			continue
+		}
+
+		fixedSet := subnet.subnetNet[index]&mask != 0
+		if fixedSet == lowerSet {
+			continue
+		}
+		if fixedSet {
+			candidate[index] |= mask
+			ipsecFillMinimalSubnetAddress(&candidate, subnet, bit+1, totalBits)
+			return bytes.Compare(candidate[:length], addressRange.last[:length]) <= 0
+		}
+		if pivot < 0 {
+			return false
+		}
+		candidate[pivot/8] |= byte(1 << uint(7-pivot%8))
+		ipsecFillMinimalSubnetAddress(&candidate, subnet, pivot+1, totalBits)
+		return bytes.Compare(candidate[:length], addressRange.last[:length]) <= 0
+	}
+	return true
+}
+
+// ipsecAddressIdentitiesIntersect reports whether two address identities
+// can share a lookup (#18682). It includes both host lookups that satisfy
+// subnet masks and range lookups contained by subnet_to_range intervals.
+func ipsecAddressIdentitiesIntersect(a, b ipsecIKEIdentity) (string, bool) {
+	aBounds, aOK := ipsecAddressInterval(a)
+	bBounds, bOK := ipsecAddressInterval(b)
+	if !aOK || !bOK || aBounds.family != bBounds.family {
+		return "", false
+	}
+
+	aLast := aBounds.last[:aBounds.length]
+	bFirst := bBounds.first[:bBounds.length]
+	bLast := bBounds.last[:bBounds.length]
+	aFirst := aBounds.first[:aBounds.length]
+	intervalOverlap := bytes.Compare(aLast, bFirst) >= 0 && bytes.Compare(bLast, aFirst) >= 0
+	overlap := intervalOverlap
+	switch {
+	case aBounds.subnet && bBounds.subnet:
+		overlap = overlap || ipsecSubnetMasksIntersect(aBounds, bBounds)
+	case aBounds.subnet:
+		overlap = overlap || ipsecAddressRangeIntersectsSubnet(bBounds, aBounds)
+	case bBounds.subnet:
+		overlap = overlap || ipsecAddressRangeIntersectsSubnet(aBounds, bBounds)
+	}
+	if !overlap {
+		return "", false
+	}
+
+	aName, bName := ipsecIdentityTypeName(a.typeID), ipsecIdentityTypeName(b.typeID)
+	switch {
+	case a.typeID == b.typeID:
+		return aName + " match sets overlap", true
+	case a.typeID == 1 || a.typeID == 5:
+		return "address contained in " + bName, true
+	case b.typeID == 1 || b.typeID == 5:
+		return "address contained in " + aName, true
+	default:
+		return aName + " and " + bName + " match sets overlap", true
+	}
+}
+
+func ipsecAddressMatchesSubnet(address, subnet ipsecAddressBounds) bool {
+	if !subnet.subnet || address.subnet || address.length != subnet.length {
+		return false
+	}
+	for i := 0; i < int(address.length); i++ {
+		if (address.first[i]^subnet.subnetNet[i])&subnet.subnetMask[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func ipsecSubnetLookupSelectsOwner(lookup, owner ipsecAddressBounds) bool {
+	if !lookup.subnet || !owner.subnet {
+		return false
+	}
+	lookupBits, ownerBits := int(lookup.subnetBits), int(owner.subnetBits)
+	if ownerBits == 0 {
+		return true
+	}
+	length := int(lookup.length)
+	if lookupBits == ownerBits {
+		return bytes.Equal(lookup.subnetNet[:length], owner.subnetNet[:length])
+	}
+	if lookupBits < ownerBits {
+		return false
+	}
+	for i := 0; i < (ownerBits+7)/8; i++ {
+		if (lookup.subnetNet[i]^owner.subnetNet[i])&owner.subnetMask[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// ipsecAddressLookupSelectsOwner models the directed matches_range check:
+// a subnet lookup follows matches_subnets' specificity rules, host lookups
+// match subnet masks, and other range comparisons require containment.
+func ipsecAddressLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
+	lookupBounds, lookupOK := ipsecAddressInterval(lookup)
+	if !lookupOK {
+		return "", false
+	}
+	ownerBounds, ownerOK := ipsecAddressInterval(owner)
+	if !ownerOK || lookupBounds.family != ownerBounds.family {
+		return "", false
+	}
+
+	matches := false
+	switch {
+	case ownerBounds.subnet && (lookup.typeID == 1 || lookup.typeID == 5):
+		matches = ipsecAddressMatchesSubnet(lookupBounds, ownerBounds)
+	case lookupBounds.subnet && ownerBounds.subnet:
+		matches = ipsecSubnetLookupSelectsOwner(lookupBounds, ownerBounds)
+	case lookupBounds.subnet && (owner.typeID == 1 || owner.typeID == 5):
+		matches = int(lookupBounds.subnetBits) == int(lookupBounds.length)*8 &&
+			bytes.Equal(lookupBounds.subnetNet[:lookupBounds.length], ownerBounds.first[:ownerBounds.length])
+	default:
+		lookupFirst := lookupBounds.first[:lookupBounds.length]
+		lookupLast := lookupBounds.last[:lookupBounds.length]
+		ownerFirst := ownerBounds.first[:ownerBounds.length]
+		ownerLast := ownerBounds.last[:ownerBounds.length]
+		matches = bytes.Compare(lookupFirst, ownerFirst) >= 0 &&
+			bytes.Compare(lookupLast, ownerLast) <= 0
+	}
+	if !matches {
+		return "", false
+	}
+	if lookup.typeID == owner.typeID {
+		return ipsecIdentityTypeName(owner.typeID) + " owner contains lookup interval", true
+	}
+	return ipsecIdentityTypeName(owner.typeID) + " owner contains " + ipsecIdentityTypeName(lookup.typeID), true
+}
+
+// ipsecWildcardSuffix reports whether a string identity value is a
+// wildcard owner (leading '*') and returns its fixed suffix. matches_string
+// honours only the single leading '*' (#18682, oracle: "*com" is a
+// wildcard with suffix "com"); any other '*' is a literal byte.
+func ipsecWildcardSuffix(value string) (string, bool) {
+	if strings.HasPrefix(value, "*") {
+		return value[1:], true
+	}
+	return "", false
+}
+
+// ipsecWildcardStringsIntersect intersects two type-2/3 string owners.
+// A wildcard owner's match set is every string ending in its suffix; an
+// exact owner's set is its own singleton under ASCII case folding
+// (equals() refuses embedded NULs, and matches_string stops at the same
+// NUL, so NUL-carrying values here have an empty set on the exact side).
+func ipsecWildcardStringsIntersect(a, b string) (string, bool) {
+	if strings.IndexByte(a, 0) >= 0 || strings.IndexByte(b, 0) >= 0 {
+		return "", false
+	}
+	aSuffix, aWild := ipsecWildcardSuffix(a)
+	bSuffix, bWild := ipsecWildcardSuffix(b)
+	switch {
+	case aWild && bWild:
+		// Two suffix sets meet iff one suffix ends with the other: the
+		// longer suffix itself is then in both sets.
+		if ipsecASCIIHasSuffixFold(aSuffix, bSuffix) || ipsecASCIIHasSuffixFold(bSuffix, aSuffix) {
+			return "wildcard suffixes overlap", true
+		}
+	case aWild:
+		if ipsecASCIIHasSuffixFold(b, aSuffix) {
+			return "wildcard matches peer identity", true
+		}
+	case bWild:
+		if ipsecASCIIHasSuffixFold(a, bSuffix) {
+			return "wildcard matches peer identity", true
+		}
+	}
+	return "", false
+}
+
+// ipsecASCIIHasSuffixFold reports whether value ends with suffix under
+// ASCII case folding (matches_string compares with strcaseeq semantics).
+func ipsecASCIIHasSuffixFold(value, suffix string) bool {
+	if len(value) < len(suffix) {
+		return false
+	}
+	return ipsecASCIIEqualFold(value[len(value)-len(suffix):], suffix)
+}
+
+// ipsecDNMatchSetsIntersect intersects two type-9 owners beyond equals():
+// matches_dn passes a wildcard counter to compare_dn, so an RDN whose
+// value is exactly "*" matches any value at that position, and it never
+// applies equals_dn's total-length check, so two encodings whose BER
+// length octets differ (nonminimal long form at any nesting level) still
+// meet on the canonically-encoded presented DN. Both encodings must
+// parse as DNs; an unparseable encoding has matches_dn's empty set
+// unless equals() already byte-matched it. RDN comparison otherwise
+// follows equals()'s per-attribute rule (PrintableString and the
+// emailAddress OID fold case through NUL; other tags compare exactly),
+// with the empty-last-RDN-value quirk of compare_dn preserved: such a
+// DN's structural set is empty, exactly as in ipsecDNIdentityEqual.
+func ipsecDNMatchSetsIntersect(a, b ipsecIKEIdentity) (string, bool) {
+	if !a.dnValid || !b.dnValid || len(a.rdns) == 0 || len(a.rdns) != len(b.rdns) {
+		return "", false
+	}
+	if len(a.rdns[len(a.rdns)-1].value) == 0 || len(b.rdns[len(b.rdns)-1].value) == 0 {
+		return "", false
+	}
+	wildcard := false
+	for i := range a.rdns {
+		x, y := a.rdns[i], b.rdns[i]
+		if x.oid != y.oid {
+			return "", false
+		}
+		if x.value == "*" || y.value == "*" {
+			if x.value == "*" && y.value == "*" {
+				// Both wildcards still need a presented value: any
+				// value works, so this position never blocks.
+			}
+			wildcard = true
+			continue
+		}
+		if !ipsecDNValuesMatchForMatches(x, y) {
+			return "", false
+		}
+	}
+	if wildcard {
+		return "DN wildcard RDN matches peer DN", true
+	}
+	if a.encoding != b.encoding {
+		return "DN equality ignoring BER length octets", true
+	}
+	return "", false
+}
+
+// ipsecDNValuesMatchForMatches is equals()'s per-RDN value rule, shared
+// by the length-octet and wildcard DN intersection: PrintableString
+// values (tag 0x13) and emailAddress values (tag 0x16 with the
+// emailAddress OID) fold ASCII case through the first NUL when the tags
+// agree; everything else compares byte-exact across tags.
+func ipsecDNValuesMatchForMatches(x, y ipsecDNRDN) bool {
+	const emailAddressOID = "\x2a\x86\x48\x86\xf7\x0d\x01\x09\x01"
+	if x.tag == y.tag && (x.tag == 0x13 || (x.tag == 0x16 && x.oid == emailAddressOID)) {
+		return len(x.value) == len(y.value) && ipsecASCIIEqualFoldUntilNUL(x.value, y.value)
+	}
+	return x.value == y.value
+}
+
+// ipsecDNLookupSelectsOwner applies matches_dn in its actual direction:
+// wildcard RDNs are special only on the owner (right) side. It shares the
+// parsed DN and per-RDN comparison primitives with match-set intersection,
+// but an exact owner cannot be selected by a wildcard lookup.
+func ipsecDNLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
+	if !lookup.dnValid || !owner.dnValid || len(lookup.rdns) == 0 ||
+		len(lookup.rdns) != len(owner.rdns) {
+		return "", false
+	}
+	if len(lookup.rdns[len(lookup.rdns)-1].value) == 0 ||
+		len(owner.rdns[len(owner.rdns)-1].value) == 0 {
+		return "", false
+	}
+	wildcard := false
+	for i := range lookup.rdns {
+		left, right := lookup.rdns[i], owner.rdns[i]
+		if left.oid != right.oid {
+			return "", false
+		}
+		if right.value == "*" {
+			wildcard = true
+			continue
+		}
+		if left.value == "*" || !ipsecDNValuesMatchForMatches(left, right) {
+			return "", false
+		}
+	}
+	if wildcard {
+		return "DN wildcard owner matches lookup", true
+	}
+	if lookup.encoding != owner.encoding {
+		return "DN equality ignoring BER length octets", true
+	}
 	return "", false
 }
 
 // ipsecLookupSelectsOwner reports whether lookup, used as the `me` identity of
-// has_owner(), selects a secret owned by owner: lookup->matches(owner). It is
-// ipsecIdentitiesCollide's rule with the operand roles fixed. An ID_ANY owner
-// matches every lookup, but matches_any() makes an ID_ANY LOOKUP match only an
-// ID_ANY owner. An effective local identity is ID_ANY when it is spelled as a
-// wildcard or comes from an unspecified local address (`local-address
-// 0.0.0.0` / `::`); charon then presents its real source address, which
-// commit cannot know, so such a local identity selects no peer selector.
+// has_owner(), selects a secret owned by owner: lookup->matches(owner). It
+// preserves that directed lookup relation: an ID_ANY owner matches every
+// lookup, but an ID_ANY lookup matches only an ID_ANY owner. An effective
+// local identity is ID_ANY when it is spelled as a wildcard or comes from an
+// unspecified local address (`local-address 0.0.0.0` / `::`); charon then
+// presents its real source address, which commit cannot know, so such a local
+// identity selects no peer selector. Address containment, wildcard matching,
+// and DN comparison reuse ipsecIdentitiesCollide's match-set primitives
+// without turning an intersection into a directed lookup match.
 func ipsecLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
 	if owner.typeID == 0 {
 		return "ID_ANY owner matches every identity", true
@@ -625,7 +1085,21 @@ func ipsecLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
 	if lookup.typeID == 0 {
 		return "", false
 	}
-	return ipsecIdentitiesCollide(lookup, owner)
+	if lookup.typeID == owner.typeID && lookup.equals(owner) {
+		return ipsecIdentityEqualityRule(lookup, owner), true
+	}
+	if rule, matches := ipsecAddressLookupSelectsOwner(lookup, owner); matches {
+		return rule, true
+	}
+	if lookup.typeID == owner.typeID && (lookup.typeID == 2 || lookup.typeID == 3) {
+		if _, ownerWildcard := ipsecWildcardSuffix(owner.encoding); ownerWildcard {
+			return ipsecWildcardStringsIntersect(lookup.encoding, owner.encoding)
+		}
+	}
+	if lookup.typeID == 9 && owner.typeID == 9 {
+		return ipsecDNLookupSelectsOwner(lookup, owner)
+	}
+	return "", false
 }
 
 // ipsecIdentityEqualityRule describes why left.equals(right) holds for two

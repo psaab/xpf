@@ -11717,38 +11717,48 @@ reserved for whole-dataplane selection where a rewrite shim
     ASCII case. Other values compare bytes, even across differing tags, so DN
     equality is pairwise and not reducible to a transitive canonical key.
     A collision is a presented identity that can select two secrets.
-    strongSwan selects through `has_owner()`: `lookup->matches(owner)`, which
-    is type-strict for strings, DNs and binary identities (not for the
-    address/subnet/range family), while an ID_ANY owner matches everything
-    (#18428 round 3). So two peer selectors collide
-    when their parsed strongSwan types are equal and they compare equal, or
-    when either is ID_ANY; a DN and a KEY_ID/FQDN raw encoding of the same DER
-    never collide, in either gateway order. An effective local identity is a
-    lookup: an ID_ANY local identity or an unspecified `local-address` selects
-    no concrete owner. DN matching assumes charon's default
+    strongSwan selects through `has_owner()`: `lookup->matches(owner)`.
+    `matches_binary`, `matches_string` and `matches_dn_internal` remain
+    type-strict, while `matches_range` crosses host, subnet and range types
+    within one address family; an ID_ANY owner matches every lookup.
+    `ipsecIdentitiesCollide` checks match-set intersection for peer owners:
+    it retains same-type `equals()` and also covers leading-`*` FQDN/RFC822
+    suffix wildcards, address/subnet/range match sets using strongSwan's range
+    conversion and subnet-mask rules, DN wildcard RDN values, and DN encodings
+    differing only in BER length octets (because `matches_dn` skips
+    `equals()`'s total-length check). A DN and a KEY_ID/FQDN raw encoding of
+    the same DER remain type-distinct and do not collide, in either gateway order.
+    An effective local identity is a directed lookup:
+    `ipsecLookupSelectsOwner(local, peer)` tests `local->matches(peer)`.
+    Consequently local address/subnet/range identities follow strongSwan's
+    directed matcher, including its subnet-mask rules; wildcard matches are
+    applied on the owner side; an ID_ANY local identity or unspecified
+    `local-address` selects no concrete owner. DN matching assumes charon's default
     `rdn_matching = strict` (xpf does not set it); `reordered` or `relaxed`
-    would make RDN-order swaps collide unrefused. Not modelled (#18682): wildcard
-    owners (`*` in an FQDN/RFC822 or a DN value), address/subnet/range
-    containment, and DN encodings differing only in length octets.
-    The exact-byte shortcut still matches identical malformed DN/KEY_ID bytes;
-    structural folding requires nonempty comparable DN structures with equal
-    total encoded lengths, and a DN whose LAST attribute value is empty matches
-    only byte-identically (`CN=Peer, O=` and `CN=peer, O=` are distinct).
-    `atodn()` parses at most 20 RDNs; a longer textual DN is a literal KEY_ID of
-    its text. `""`, `%any`, `%any6`, `0.0.0.0`, `*`, `::` and `0::0` are ID_ANY
-    under every declared type that renders its value unprefixed, and such a
+    would make RDN-order swaps collide unrefused.
+    Exact-byte matches still include identical malformed DN/KEY_ID bytes;
+    structural DN equality requires comparable nonempty DNs of equal total
+    encoded length, whereas `matches_dn` can match valid length-octet variants.
+    A DN whose LAST attribute value is empty matches only byte-identically
+    (`CN=Peer, O=` and `CN=peer, O=` are distinct). `atodn()` parses at most
+    20 RDNs; a longer textual DN is a literal KEY_ID of its text. `""`,
+    `%any`, `%any6`, `0.0.0.0`, `*`, `::` and `0::0` are ID_ANY under every
+    declared type that renders its value unprefixed, and such a
     `remote-identity` is a wildcard, not a peer selector (#16845). Type
-    prefixes (`fqdn:`, `FQDN:` …) match case-insensitively. Refusals name both
-    rendered selectors and the equality rule.
-    **Upgrade note (#18428):** measured examples, not exhaustive. Newly
-    refused: RFC822 case variants (local part included), a DN versus a
-    `user-at-hostname`/`inet` value of the same text, an explicit type prefix
-    versus the matching hostname, `key-id 7a:7a` versus `7a7a`, an untyped
-    range versus its `ipv4range:#` form, a `/24junk` suffix versus `/24`, and
-    ID_ANY spellings under non-inet types (refused by #16845 without a
-    discriminating gateway address; otherwise the secret is re-scoped to that
-    address). Newly accepted: RDN-order swaps (strict `rdn_matching`) and case
-    variants with an empty last RDN value. On upgrade a colliding config loads
+    prefixes (`fqdn:`, `FQDN:` …) match case-insensitively. Refusals name
+    both rendered selectors and the rule.
+    **Upgrade note (#18428/#18682):** measured examples, not exhaustive.
+    Newly refused by #18428: RFC822 case variants (local part included), a
+    DN versus a `user-at-hostname`/`inet` value of the same text, an explicit
+    type prefix versus its matching hostname, `key-id 7a:7a` versus `7a7a`,
+    and ID_ANY spellings under non-inet types. Newly refused by #18682:
+    overlapping FQDN/RFC822 wildcard owners, address/subnet/range match sets,
+    and DN owners whose match sets intersect through a wildcard RDN or
+    length-octet-only BER difference. ID_ANY
+    spellings are refused by #16845 without a discriminating gateway address;
+    otherwise an IP-addressed gateway's secret is re-scoped to that address.
+    Newly accepted: RDN-order swaps (strict `rdn_matching`) and case variants
+    with an empty last RDN value. On upgrade a colliding config loads
     leniently with the colliding VPNs skipped (warning) and every later commit
     is refused until fixed; run `commit check` on the new build first.
     DN parsing requires constructed SEQUENCE, SET, and attribute-SEQUENCE

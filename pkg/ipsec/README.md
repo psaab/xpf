@@ -1049,55 +1049,54 @@ all files stay in `package ipsec`, so the public API is unchanged.
   DN length parsing accepts bounded long-form lengths (up to eight length
   octets), including redundant leading zeros; containing TLVs must match their
   declared total lengths.
-  **What counts as a collision (#18428 round 3).** strongSwan selects a
+  **What counts as a collision (#18428/#18682).** strongSwan selects a
   PSK through `has_owner()` (`mem_cred.c`): `lookup->matches(owner)` over
-  each secret's configured owners. `equals()` is not on that path.
-  `matches_binary`, `matches_string` and `matches_dn_internal` return no
-  match unless both identities have the same type (`matches_range` does not;
-  see "Not modelled" below); an ID_ANY owner matches every lookup. So two peer selectors collide when their strongSwan types
-  (parsed from the RENDERED selectors) are equal and they compare equal, or
-  when either is ID_ANY (`ipsecIdentitiesCollide`); same-type `equals()` is
-  symmetric, so gateway order no longer matters. A DN and a KEY_ID (or FQDN
-  raw bytes) with the same DER never select each other's secret and commit
-  in both orders; `equals()`'s directional type-9-left comparison against
-  other types is not a lookup. An effective local identity is the `me`
-  LOOKUP of its own exchange (`ipsecLookupSelectsOwner`): it exposes another
-  connection's secret when it selects that connection's owner, and
-  `matches_any()` makes an ID_ANY lookup match only an ID_ANY owner, so a
-  wildcard `local-identity` or an unspecified `local-address 0.0.0.0` / `::`
-  (charon then presents its real source address) is not a collision.
+  each secret's configured owners. `equals()` is not the lookup path.
+  `matches_binary`, `matches_string` and `matches_dn_internal` are type-strict;
+  `matches_range` is not, and crosses address, subnet and range types within
+  one IP family. An ID_ANY owner matches every lookup.
+  `ipsecIdentitiesCollide` checks whether two peer-owner match sets share a
+  presented identity. It retains the same-type `equals()` rule and also
+  intersects leading-`*` FQDN/RFC822 suffix patterns, address/subnet/range
+  match sets using strongSwan's range conversion and subnet-mask matching,
+  and DN RDN patterns. DN matching can match encodings that differ only in BER
+  length octets because `matches_dn` skips `equals()`'s total-length check;
+  a `*` DN value matches any value at that RDN. A DN and a KEY_ID (or FQDN
+  raw bytes) with the same DER remain type-distinct and do not select each
+  other's secret.
+  An effective local identity is the `me` LOOKUP of its own exchange
+  (`ipsecLookupSelectsOwner`), so that check remains directed:
+  `lookup->matches(owner)`. A local wildcard does not select an exact owner;
+  an exact local identity can select a wildcard owner. Local address, subnet
+  or range lookups follow strongSwan's directed matching, including its
+  subnet-mask rules. `matches_any()` makes an ID_ANY lookup match only an ID_ANY
+  owner, so an unspecified `local-address 0.0.0.0` / `::` is not a collision
+  (charon presents its real source address there).
   Exact identical bytes still match even for malformed DN encodings;
-  structural folding requires comparable nonempty DNs of the same encoded
-  length. strongSwan declares a structural match only when both RDN
-  enumerators end at the DN end, and an EMPTY last attribute value unwraps to
-  a NULL chunk, so a DN whose last value is empty matches only
-  byte-identically: `CN=Peer, O=` and `CN=peer, O=` are distinct
-  (oracle-confirmed; an empty value that is not last still folds). `atodn()`
-  parses at most 20 RDNs (`appendRDN`); a longer textual DN is not a DN to
-  strongSwan but a literal KEY_ID of its text, compared byte for byte (no case
-  folding). The ID_ANY spellings `""`, `%any`, `%any6`, `0.0.0.0`, `*`, `::`
-  and `0::0` are ID_ANY whenever they reach strongSwan unprefixed and without
-  `@`, whatever the declared xpf type (`distinguished-name 0.0.0.0` and
-  `user-at-hostname ::` included); near spellings (`::0`, ` 0.0.0.0`,
-  `@0.0.0.0`) are not. Named type prefixes (`fqdn:`, `FQDN:`, `DnS:` …) match
-  case-insensitively.
+  structural DN equality requires comparable nonempty DNs of the same
+  encoded length, while `matches_dn` accepts length-octet variants.
+  strongSwan declares a structural DN match only when both RDN enumerators
+  end at the DN end, and an EMPTY last attribute value unwraps to a NULL
+  chunk, so a DN whose last value is empty matches only byte-identically:
+  `CN=Peer, O=` and `CN=peer, O=` are distinct (oracle-confirmed; an empty
+  value that is not last still folds). `atodn()` parses at most 20 RDNs; a
+  longer textual DN is a literal KEY_ID of its text, compared byte for byte
+  (no case folding). The ID_ANY spellings `""`, `%any`, `%any6`, `0.0.0.0`,
+  `*`, `::` and `0::0` are ID_ANY whenever they reach strongSwan unprefixed
+  and without `@`, whatever the declared xpf type (`distinguished-name
+  0.0.0.0` and `user-at-hostname ::` included); near spellings (`::0`,
+  ` 0.0.0.0`, `@0.0.0.0`) are not. Named type prefixes (`fqdn:`, `FQDN:`,
+  `DnS:` …) match case-insensitively.
   DN matching follows charon's `rdn_matching` setting, which defaults to
   `strict` (`/etc/strongswan.d/charon.conf`) and which xpf does not set:
   RDN order is significant and the collision check assumes it. An operator
   who sets `rdn_matching = reordered` or `relaxed` makes RDN-order swaps match
-  in strongSwan, and xpf will NOT refuse those collisions.
-  Not modelled (strongSwan matches them, this check does not; #18682): wildcard
-  owners (an FQDN/RFC822 with `*`, a DN RDN value `*`; a bare `*` is already
-  ID_ANY), address/subnet/range containment within one IP family
-  (`matches_range` matches an address against a covering subnet or range, and
-  a subnet against an overlapping range), and DN encodings that differ only in
-  their length octets (`matches()` skips `equals()`'s total-length check).
-  The refusal and the render-belt warning name BOTH rendered selectors and the
-  rule that made them one owner (for example "identical DN encoding",
-  "DN equality (same RDNs; PrintableString/emailAddress case-insensitive)",
-  "FQDN case-insensitive", "RFC822 case-insensitive (whole address, including
-  the local part)").
-  **Upgrade note (#18428).** Collision classes changed relative to the
+  in strongSwan, and xpf will NOT refuse those collisions. The refusal and
+  render-belt warning name BOTH rendered selectors and the rule that made
+  them one owner (for example "DN equality ignoring BER length octets",
+  "DN wildcard RDN matches peer DN", "address contained in IPV4_ADDR_SUBNET",
+  "FQDN wildcard matches peer identity").
+  **Upgrade note (#18428/#18682).** Collision classes changed relative to the
   declared-type key. Measured examples (one `CompileConfig` cell run on
   master and on this build; not an exhaustive list): newly REFUSED at commit
   are RFC822 addresses that differ only in case, local part included
@@ -1109,9 +1108,11 @@ all files stay in `package ipsec`, so the public API is unchanged.
   a `/24junk` subnet suffix against `/24`; and ID_ANY spellings under non-inet
   types, which are now wildcards (#16845 refuses them on a gateway with no
   discriminating address, and an IP-addressed gateway's secret is re-scoped to
-  the address instead of the wildcard owner). Newly ACCEPTED: DNs that differ
-  only in RDN order (under the default strict `rdn_matching`), and case
-  variants whose last RDN value is empty. A config that commits on the old
+  the address instead of the wildcard owner). #18682 also newly REFUSES
+  overlapping wildcard owner sets, overlapping address/subnet/range match
+  sets, and DN owner pairs whose match sets intersect through a wildcard RDN or BER
+  (under the default strict `rdn_matching`), and case variants whose last RDN
+  value is empty. A config that commits on the old
   build but collides now loads leniently with the colliding VPNs SKIPPED
   (warning naming both selectors) and every later commit is refused until the
   identities are made distinct. Run `commit check` on the new build before

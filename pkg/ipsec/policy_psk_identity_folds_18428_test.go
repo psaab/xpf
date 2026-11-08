@@ -7,12 +7,11 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #18428 review folds, render belt side. config.IPsecPSKIdentityConflicts is
-// shared with commit validation; these cells pin the renderer's use of it:
-// cross-type DN/raw-encoding owners render (strongSwan's matches() is
-// type-strict, so neither selects the other's secret) whatever the gateway
-// order, an ID_ANY remote-identity under any unprefixed type never becomes a
-// PSK owner, and the conflict carries both selectors and the equality rule.
+// #18428/#18682 review folds, render belt side. config.IPsecPSKIdentityConflicts
+// is shared with commit validation; these cells pin the renderer's use of it:
+// cross-type DN/raw-encoding owners render (matches_dn remains type-strict
+// across types), ID_ANY remote identities are not PSK owners, and the conflict
+// carries both selectors and the matching rule.
 func TestPSKIdentityFoldsRender18428(t *testing.T) {
 	manager := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	pair := func(aType, a, bType, b, addrA, addrB string) *config.IPsecConfig {

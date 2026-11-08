@@ -77,6 +77,27 @@ func identityPair17772(aType, aValue, bType, bValue string, gatewayBExtras ...st
 	return twoVPN17772(gwA, gwB, "secret-a", "secret-b")
 }
 
+func localIdentityPair17772(peerType, peerValue, localType, localValue string, localOnGatewayA bool) []string {
+	gwA := []string{
+		"set security ike gateway gw-a ike-policy ike-pol",
+		"set security ike gateway gw-a address 203.0.113.1",
+		"set security ike gateway gw-a remote-identity hostname unused-a.invalid",
+	}
+	gwB := []string{
+		"set security ike gateway gw-b ike-policy ike-pol",
+		"set security ike gateway gw-b address 203.0.113.2",
+		"set security ike gateway gw-b remote-identity hostname unused-b.invalid",
+	}
+	if localOnGatewayA {
+		gwA = append(gwA, fmt.Sprintf("set security ike gateway gw-a local-identity %s %q", localType, localValue))
+		gwB[2] = fmt.Sprintf("set security ike gateway gw-b remote-identity %s %q", peerType, peerValue)
+	} else {
+		gwA[2] = fmt.Sprintf("set security ike gateway gw-a remote-identity %s %q", peerType, peerValue)
+		gwB = append(gwB, fmt.Sprintf("set security ike gateway gw-b local-identity %s %q", localType, localValue))
+	}
+	return twoVPN17772(gwA, gwB, "secret-a", "secret-b")
+}
+
 func requireCollision17772(t *testing.T, commands []string) {
 	t.Helper()
 	_, err := CompileConfig(buildTree17772(t, commands))
@@ -166,9 +187,8 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			t.Fatalf("error must never leak PSK material: %v", err)
 		}
 	})
-	// #18428 round 3: strongSwan selects a PSK through has_owner(),
-	// lookup->matches(owner), and matches_* is type-strict, so a DN and a
-	// KEY_ID with the same DER bytes can never select each other's secret.
+	// #18428 round 3: string/DN/binary matches stay type-strict, so a DN
+	// and a KEY_ID with the same DER bytes cannot select each other's secret.
 	t.Run("type-9 remote identity does not match another gateway KEY_ID local identity", func(t *testing.T) {
 		cmds := identityPair17772("distinguished-name", "CN=peer", "hostname", "gw-b.example.com",
 			"set security ike gateway gw-b local-identity key-id 300f310d300b0603550403130450454552")
@@ -511,10 +531,10 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		}
 	})
 
-	// #18428 round 3: these DN/raw-encoding pairs compare equal under
-	// strongSwan's directional equals(), but the PSK lookup uses the
-	// type-strict matches(), so neither can select the other's secret. They
-	// commit in BOTH gateway orders.
+	// #18428 round 3: string/DN/binary matches are type-strict across types,
+	// so DN and raw-encoding owners never select each other's secrets.
+	// Address-family matches_range and wildcard match sets are covered in the
+	// #18682 cells below.
 	t.Run("cross-type DN versus raw-encoding owners commit in both gateway orders", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"DN left compares FQDN type raw DER", "inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "{2}:#300f310d300b0603550403130450454552"},
@@ -546,7 +566,7 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("hostname", "zz", "key-id", "zz"))
 		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer.example.com", "inet", "peer.example.com"))
 		requireNoCollision17772(t, identityPair17772("inet", "uri:Peer", "inet", "{12}:Peer"))
-		requireNoCollision17772(t, identityPair17772("inet", "198.51.100.0/24", "inet", "198.51.100.0"))
+		requireCollision17772(t, identityPair17772("inet", "198.51.100.0/24", "inet", "198.51.100.0"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3000", "inet", "asn1dn:#3001"))
 		requireNoCollision17772(t, identityPair17772("inet", "{08}:peer", "inet", "fqdn:peer"))
 		requireNoCollision17772(t, identityPair17772("inet", "{18446744073709551617}:peer", "inet", "18446744073709551617"))
@@ -583,11 +603,11 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#30113100310d300b0603550403130470656572", "inet", "asn1dn:#3011310d300b06035504031304706565723100"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0682000003550403130470656572", "inet", "asn1dn:#3011310f300d0682000003550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3011310f300d0603550403138200000470656572", "inet", "asn1dn:#3011310f300d0603550403138200000450454552"))
-		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"))
+		requireCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3010310d300b0603550403130470656572", "inet", "asn1dn:#3010310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b060355040313047065657200", "inet", "asn1dn:#300f310d300b060355040313045045455200"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#308900000000000000000f310d300b0603550403130470656572", "inet", "asn1dn:#308900000000000000000f310d300b0603550403130450454552"))
-		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
+		requireCollision17772(t, identityPair17772("inet", "asn1dn:#30810f310d300b0603550403130470656572", "inet", "asn1dn:#300f310d300b0603550403130470656572"))
 		requireNoCollision17772(t, identityPair17772("inet", "keyid:#300f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130450454552"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#300f310d300b0603550403130470656572", "inet", "keyid:#3082000f310d300b0603550403130470656572"))
 		requireNoCollision17772(t, identityPair17772("inet", "asn1dn:#3082000f310d300b0603550403130470656572", "inet", "keyid:#300f310d300b0603550403130470656572"))
@@ -641,6 +661,125 @@ func TestIPsecPSKOwnerCollision17772(t *testing.T) {
 			"set security ipsec vpn site pre-shared-key ascii-text site-secret")
 		if _, err := CompileConfig(buildTree17772(t, cmds)); err != nil {
 			t.Fatalf("a single connection whose remote identity equals its own local identity must commit: %v", err)
+		}
+	})
+}
+
+// #18682: collision means two owners share at least one presented identity,
+// while a local identity is a directed lookup against the other owner's
+// match set. Both paths must cover wildcard, address-containment and DN
+// length-octet matching without treating an intersection as a directed hit.
+func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
+	collisions := []struct {
+		name, aType, a, bType, b string
+	}{
+		{"FQDN wildcard and exact", "hostname", "*.example.com", "hostname", "a.example.com"},
+		{"overlapping FQDN wildcards", "hostname", "*.example.com", "hostname", "*.com"},
+		{"RFC822 wildcard and exact", "email", "*@example.com", "email", "peer@example.com"},
+		{"IPv4 address inside subnet", "inet", "198.51.100.7", "inet", "198.51.100.0/24"},
+		{"overlapping IPv4 subnets", "inet", "198.51.100.0/24", "inet", "198.51.0.0/16"},
+		{"IPv4 subnet and range", "inet", "198.51.100.0/24", "inet", "198.51.100.0-198.51.100.255"},
+		{"overlapping IPv4 ranges", "inet", "198.51.100.1-198.51.100.9", "inet", "198.51.100.9-198.51.100.20"},
+		{"IPv6 address inside subnet", "inet", "2001:db8:1::7", "inet", "2001:db8::/32"},
+		{"overlapping explicit subnet masks", "inet", "ipv4net:#00000000a0ffffff", "inet", "ipv4net:#4000000040ffffff"},
+		{"DN wildcard and exact", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=x"},
+		{"DN wildcard values intersect", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=*"},
+		{"DN wildcard on all RDNs", "distinguished-name", "CN=*, O=*", "distinguished-name", "CN=a, O=x"},
+	}
+	for _, pair := range collisions {
+		pair := pair
+		t.Run("owners/"+pair.name, func(t *testing.T) {
+			requireCollision17772(t, identityPair17772(pair.aType, pair.a, pair.bType, pair.b))
+			requireCollision17772(t, identityPair17772(pair.bType, pair.b, pair.aType, pair.a))
+		})
+	}
+
+	// DN matches ignore the total-encoding-length gate in equals() at each
+	// BER nesting level. The parent lengths here are valid and adjusted when
+	// an inner length field grows.
+	dnLengthOctetPairs := []struct {
+		name, alternate string
+	}{
+		{"outer long form", "asn1dn:#30810f310d300b0603550403130470656572"},
+		{"outer padded long form", "asn1dn:#3082000f310d300b0603550403130470656572"},
+		{"RDN SET long form", "asn1dn:#301031810d300b0603550403130470656572"},
+		{"attribute SEQUENCE long form", "asn1dn:#3010310e30810b0603550403130470656572"},
+		{"OID long form", "asn1dn:#3010310e300c068103550403130470656572"},
+		{"value long form", "asn1dn:#3010310e300c060355040313810470656572"},
+	}
+	for _, pair := range dnLengthOctetPairs {
+		pair := pair
+		t.Run("DN "+pair.name, func(t *testing.T) {
+			requireCollision17772(t, identityPair17772("distinguished-name", "CN=peer", "inet", pair.alternate))
+			requireCollision17772(t, identityPair17772("inet", pair.alternate, "distinguished-name", "CN=peer"))
+		})
+	}
+
+	// These local identities are LOOKUPS, not peer-owner sets. The narrow
+	// local lookup selects the broader peer owner; swapping roles must not
+	// turn an intersecting-but-not-contained address or a wildcard lookup
+	// into a collision.
+	localLookupCollisions := []struct {
+		name, ownerType, owner, lookupType, lookup string
+	}{
+		{"FQDN wildcard owner", "hostname", "*.example.com", "hostname", "a.example.com"},
+		{"IPv4 subnet contains local address", "inet", "198.51.100.0/24", "inet", "198.51.100.7"},
+		{"IPv4 subnet contains local subnet", "inet", "198.51.0.0/16", "inet", "198.51.100.0/24"},
+		{"IPv6 subnet contains local address", "inet", "2001:db8::/32", "inet", "2001:db8:1::7"},
+		{"DN wildcard owner", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=x"},
+		{"DN length-octet owner", "distinguished-name", "CN=peer", "inet", "asn1dn:#30810f310d300b0603550403130470656572"},
+	}
+	for _, pair := range localLookupCollisions {
+		pair := pair
+		t.Run("local lookup/"+pair.name, func(t *testing.T) {
+			requireCollision17772(t, localIdentityPair17772(pair.ownerType, pair.owner, pair.lookupType, pair.lookup, false))
+			requireCollision17772(t, localIdentityPair17772(pair.ownerType, pair.owner, pair.lookupType, pair.lookup, true))
+		})
+	}
+
+	t.Run("direct local lookup remains directional", func(t *testing.T) {
+		for _, pair := range []struct {
+			name, ownerType, owner, lookupType, lookup string
+		}{
+			{"wildcard owner", "hostname", "*.example.com", "hostname", "a.example.com"},
+			{"address subnet owner", "inet", "198.51.0.0/16", "inet", "198.51.100.0/24"},
+			{"DN wildcard owner", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=x"},
+		} {
+			owner, _ := ipsecIKEIdentityKey(pair.ownerType, pair.owner)
+			lookup, _ := ipsecIKEIdentityKey(pair.lookupType, pair.lookup)
+			if _, ok := ipsecLookupSelectsOwner(lookup, owner); !ok {
+				t.Errorf("%s: narrow lookup should select broad owner", pair.name)
+			}
+			if _, ok := ipsecLookupSelectsOwner(owner, lookup); ok {
+				t.Errorf("%s: broad lookup must not select narrow owner", pair.name)
+			}
+			if _, ok := ipsecIdentitiesCollide(lookup, owner); !ok {
+				t.Errorf("%s: owner match sets still intersect symmetrically", pair.name)
+			}
+		}
+	})
+
+	t.Run("disjoint wildcard and subnet controls still commit", func(t *testing.T) {
+		requireNoCollision17772(t, identityPair17772("hostname", "*.a.example", "hostname", "*.b.example"))
+		requireNoCollision17772(t, identityPair17772("inet", "192.0.2.0/24", "inet", "192.0.3.0/24"))
+		requireNoCollision17772(t, identityPair17772("distinguished-name", "CN=peer", "inet",
+			"asn1dn:#3010310e300c060355040313056f74686572"))
+	})
+
+	t.Run("explicit subnet mask disjoint controls still commit", func(t *testing.T) {
+		requireNoCollision17772(t, identityPair17772("inet", "ipv4net:#00000000a0ffffff",
+			"inet", "ipv4net:#20000000a0ffffff"))
+		requireNoCollision17772(t, identityPair17772("inet", "ipv4net:#00000000a0ffffff",
+			"inet", "ipv4range:#200000003fffffff"))
+	})
+
+	t.Run("wildcard lookup does not select an exact owner", func(t *testing.T) {
+		commands := localIdentityPair17772("hostname", "a.example.com", "hostname", "*.example.com", false)
+		requireNoCollision17772(t, commands)
+		lookup, _ := ipsecIKEIdentityKey("hostname", "*.example.com")
+		owner, _ := ipsecIKEIdentityKey("hostname", "a.example.com")
+		if _, ok := ipsecLookupSelectsOwner(lookup, owner); ok {
+			t.Fatal("a wildcard local lookup must not select an exact FQDN owner")
 		}
 	})
 }
