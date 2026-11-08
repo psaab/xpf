@@ -1093,6 +1093,14 @@ On `BulkEnd` the receiver:
 3. sends `BulkAck(epoch)`
 4. fires `OnBulkSyncReceived`
 
+The mastership part of that frozen view carries a generation per captured RG,
+so BulkEnd detects a flip-away/flip-back even when the endpoint primary answer
+matches. Stale deletion revalidates all captured generations under the manager
+read lock for each bounded delete batch and holds the lock through exact-value
+deletion; a final generation check also voids an otherwise-empty sweep if
+mastership changed during enumeration. This keeps election unblocked between
+batches while preventing a newly local row from being deleted by the old view.
+
 When the receiver withholds steps 3 and 4 — the ack certifies a reconciled
 table — it now asks for the replacement itself (#18521). Every withholding
 outcome of a completed window qualifies: the reconcile was skipped (the
@@ -1149,11 +1157,15 @@ private DNS-refresh clone; its install uses its recorded base's digest when
 that base is the store's compiled active config (DNS answers are not read by
 the fold). A genuine change, an unknown digest (a config the store cannot
 identify, such as a candidate or a DNS clone of a non-active config), or a
-legacy setter still advances it and still voids the reconcile. RG mastership
-is not part of the generation: BulkEnd separately re-reads the snapshot's RG
-primary set and voids/rerequests if any answer changed since BulkStart
-(#18548). If mastership is unchanged, the snapshot's primary answers judge
-the rows.
+legacy setter still advances it and still voids the reconcile. Local RG
+mastership has a separate per-RG generation, advanced on RG creation and every
+transition into or out of primary. BulkStart captures coherent primary answers
+and generations (including the RG 0 fallback); BulkEnd compares both, so a
+secondary→primary→secondary cycle cannot hide behind equal endpoints. After
+enumerating candidate stale rows, the receiver validates the same generation
+snapshot under the manager read lock before each bounded delete batch and holds
+that lock through deletion, excluding election transitions at the destructive
+point. A changed generation voids the remaining sweep and withholds `BulkAck`.
 
 ### Config-Epoch Guard (#5274)
 

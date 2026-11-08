@@ -107,7 +107,7 @@ func (m *Manager) SetKernelUpgradeHold(reason string) {
 	for _, id := range ids {
 		rg := m.groups[id]
 		if rg.State == StatePrimary {
-			rg.State = StateSecondary
+			m.setLocalRGStateLocked(rg, StateSecondary)
 			rg.FailoverCount++
 			rg.transferCommitRolePinned = false
 			m.sendEvent(rg.GroupID, StatePrimary, StateSecondary, "kernel-upgrade hold armed")

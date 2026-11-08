@@ -904,9 +904,9 @@ func (m *Manager) runElection() {
 
 		switch result {
 		case electLocalPrimary:
-			rg.State = StatePrimary
+			m.setLocalRGStateLocked(rg, StatePrimary)
 		case electLocalSecondary:
-			rg.State = StateSecondary
+			m.setLocalRGStateLocked(rg, StateSecondary)
 		case electNoChange:
 			// Dual-active winner: state unchanged but emit ownership
 			// reaffirm event so daemon can send GARPs to refresh
@@ -1072,9 +1072,9 @@ func (m *Manager) electSingleNode() {
 		}
 		oldState := rg.State
 		if rg.Weight > 0 {
-			rg.State = StatePrimary
+			m.setLocalRGStateLocked(rg, StatePrimary)
 		} else {
-			rg.State = StateSecondary
+			m.setLocalRGStateLocked(rg, StateSecondary)
 		}
 		if oldState != rg.State {
 			reason := "Only node present"

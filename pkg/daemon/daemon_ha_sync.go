@@ -2007,6 +2007,18 @@ func (d *Daemon) startClusterComms(ctx context.Context) {
 					ss.IsPrimaryForRGFn = func(rgID int) bool {
 						return d.cluster != nil && d.cluster.IsLocalPrimary(rgID)
 					}
+					ss.RGMastershipSnapshotFn = func(rgID int) (bool, uint64) {
+						if d.cluster == nil {
+							return false, 0
+						}
+						return d.cluster.LocalMastershipSnapshot(rgID)
+					}
+					ss.WithRGMastershipSnapshotFn = func(snapshot map[int]uint64, apply func() error) (bool, error) {
+						if d.cluster == nil {
+							return false, nil
+						}
+						return d.cluster.WithLocalMastershipSnapshot(snapshot, apply)
+					}
 					// #7762: the peer boot epoch reaches the connection
 					// classifier through this callback, NOT through
 					// clusterRuntime. clusterRuntime is the dataplane-backend

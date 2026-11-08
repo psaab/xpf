@@ -1418,7 +1418,12 @@ type SessionSync struct {
 	OnPeerDisconnected func()
 	IsPrimaryFn        func() bool
 	// IsPrimaryForRGFn reports whether the local node is primary for a given RG.
-	IsPrimaryForRGFn func(rgID int) bool
+	IsPrimaryForRGFn           func(rgID int) bool
+	// RGMastershipSnapshotFn returns a coherent local-primary answer and role
+	// generation for one RG. WithRGMastershipSnapshotFn validates generations
+	// and runs each stale-delete batch while role transitions are excluded.
+	RGMastershipSnapshotFn    func(rgID int) (primary bool, generation uint64)
+	WithRGMastershipSnapshotFn func(snapshot map[int]uint64, apply func() error) (bool, error)
 	// PeerBootEpochFn reports the peer's across-reboot boot-epoch floor and
 	// whether the peer has PROVED it emits boot epochs (#7762).
 	//
@@ -2813,15 +2818,20 @@ func (s *SessionSync) WaitForIdle(timeout time.Duration, stableSamples int, samp
 // judges by, taken when the bulk STARTS (#9655).
 type zoneOwnershipSnapshot struct {
 	// zones stores ShouldSyncZone's answer for each named zone.
-	zones map[uint16]bool
+	zones           map[uint16]bool
 	// fallbackPrimary is the captured RG 0 answer for absent zones.
 	fallbackPrimary bool
-	useRG  bool
-	foldRG map[uint32]int
-	foldFn func(uint32, uint16) uint32
+	useRG           bool
+	foldRG          map[uint32]int
+	foldFn          func(uint32, uint16) uint32
 	// primary holds the per-RG answers captured at BulkStart. BulkEnd
 	// revalidates this exact set before per-session ownership is judged (#18548).
 	primary map[int]bool
+	// primaryGenerations detects role changes that return to the original answer
+	// before BulkEnd, and gates each bounded delete batch.
+	primaryGenerations       map[int]uint64
+	mastershipSnapshotFn     func(rgID int) (primary bool, generation uint64)
+	withMastershipSnapshotFn func(snapshot map[int]uint64, apply func() error) (bool, error)
 	// zoneRGsByZone is the bulk-start RG set per zone (#14357), so
 	// shouldSyncV4/V6 can tell a multi-RG zone from a single-RG one without
 	// re-reading the live map.
@@ -2853,6 +2863,8 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	foldRG := s.foldRGMap
 	foldFn := s.ingressFoldFn
 	isPrimaryForRG := s.IsPrimaryForRGFn
+	mastershipSnapshotFn := s.RGMastershipSnapshotFn
+	withMastershipSnapshotFn := s.WithRGMastershipSnapshotFn
 	mapGen := s.zoneRGMapGen
 	s.zoneRGMu.RUnlock()
 	// #9655/#10227: nil is unwired; empty is an authoritative all-unmapped
@@ -2868,29 +2880,53 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 	for fold, rg := range foldRG {
 		foldRGCapture[fold] = rg
 	}
-	fallbackPrimary := s.IsPrimaryFn != nil && s.IsPrimaryFn()
-	snap := &zoneOwnershipSnapshot{
-		zones:           make(map[uint16]bool, len(zoneRG)),
-		fallbackPrimary: fallbackPrimary,
-		useRG:           isPrimaryForRG != nil,
-		foldRG:          foldRGCapture,
-		foldFn:          foldFn,
-		primary:         make(map[int]bool),
-		zoneRGsByZone:   zoneRG,
-		mapGen:          mapGen,
+	fallbackPrimary := false
+	if mastershipSnapshotFn == nil && s.IsPrimaryFn != nil {
+		fallbackPrimary = s.IsPrimaryFn()
 	}
-	if isPrimaryForRG != nil {
+	var primaryGenerations map[int]uint64
+	if mastershipSnapshotFn != nil {
+		primaryGenerations = make(map[int]uint64, len(zoneRG)+len(foldRGCapture)+1)
+	}
+	snap := &zoneOwnershipSnapshot{
+		zones:                    make(map[uint16]bool, len(zoneRG)),
+		fallbackPrimary:          fallbackPrimary,
+		useRG:                    isPrimaryForRG != nil || mastershipSnapshotFn != nil,
+		foldRG:                   foldRGCapture,
+		foldFn:                   foldFn,
+		primary:                  make(map[int]bool, len(zoneRG)+len(foldRGCapture)+1),
+		primaryGenerations:       primaryGenerations,
+		mastershipSnapshotFn:     mastershipSnapshotFn,
+		withMastershipSnapshotFn: withMastershipSnapshotFn,
+		zoneRGsByZone:            zoneRG,
+		mapGen:                   mapGen,
+	}
+	capturePrimary := func(rg int) {
+		if _, ok := snap.primary[rg]; ok {
+			return
+		}
+		if mastershipSnapshotFn != nil {
+			primary, generation := mastershipSnapshotFn(rg)
+			snap.primary[rg] = primary
+			snap.primaryGenerations[rg] = generation
+			return
+		}
+		if isPrimaryForRG != nil {
+			snap.primary[rg] = isPrimaryForRG(rg)
+		}
+	}
+	if mastershipSnapshotFn != nil {
+		capturePrimary(0)
+		snap.fallbackPrimary = snap.primary[0]
+	}
+	if isPrimaryForRG != nil || mastershipSnapshotFn != nil {
 		for _, rgs := range zoneRG {
 			for _, rg := range rgs {
-				if _, ok := snap.primary[rg]; !ok {
-					snap.primary[rg] = isPrimaryForRG(rg)
-				}
+				capturePrimary(rg)
 			}
 		}
 		for _, rg := range foldRGCapture {
-			if _, ok := snap.primary[rg]; !ok {
-				snap.primary[rg] = isPrimaryForRG(rg)
-			}
+			capturePrimary(rg)
 		}
 	}
 	for zoneID, rgs := range zoneRG {
@@ -2898,8 +2934,8 @@ func (s *SessionSync) snapshotZoneOwnership() *zoneOwnershipSnapshot {
 		// RGs are all peer-owned must remain distinguishable from an unmapped
 		// zone during stale-session reconciliation.
 		snap.zones[zoneID] = false
-		if isPrimaryForRG == nil {
-			snap.zones[zoneID] = fallbackPrimary
+		if isPrimaryForRG == nil && mastershipSnapshotFn == nil {
+			snap.zones[zoneID] = snap.fallbackPrimary
 			continue
 		}
 		for _, rg := range rgs {
@@ -2966,35 +3002,54 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, u
 	// different contents installed during the bulk can move a zone to this node,
 	// and judging by the old answers would delete a session this node now owns.
 	// Keep everything; the next bulk reconciles.
-	// #18548: zoneRGMapGen tracks ownership MAP content only; an RG mastership
-	// transition installs no map, so a failover onto this node between BulkStart
-	// and BulkEnd moves no generation while the snapshot's primary answers go
-	// stale. Re-read the live primary set for the RGs the snapshot judged and
-	// void the reconcile on any change: rows created locally after the
-	// takeover are absent from the peer's bulk and would otherwise be judged
-	// stale on BulkStart answers.
+	// #18548: zoneRGMapGen tracks ownership MAP content only; mastership has a
+	// separate per-RG generation. BulkEnd compares coherent answer/generation
+	// pairs, detecting a flip away and back even when the endpoint answers match.
+	// Because elections can also occur after that check while the rows are being
+	// enumerated, every bounded stale-delete batch validates the captured
+	// generations under the manager read lock and holds that lock through the
+	// exact-value delete. A promotion at any point before deletion therefore
+	// voids the remaining sweep rather than judging a new local row as stale.
 	var changedRG int
 	var primaryAtBulkStart, primaryAtBulkEnd bool
+	var generationAtBulkStart, generationAtBulkEnd uint64
 	mastershipChanged := false
 	if zoneSnap.useRG {
 		s.zoneRGMu.RLock()
 		isPrimaryForRG := s.IsPrimaryForRGFn
 		s.zoneRGMu.RUnlock()
-		if isPrimaryForRG == nil {
+		switch {
+		case zoneSnap.mastershipSnapshotFn != nil:
+			for rg, wasPrimary := range zoneSnap.primary {
+				primaryNow, generationNow := zoneSnap.mastershipSnapshotFn(rg)
+				generationStart := zoneSnap.primaryGenerations[rg]
+				if generationNow != generationStart || primaryNow != wasPrimary {
+					mastershipChanged = true
+					changedRG = rg
+					primaryAtBulkStart, primaryAtBulkEnd = wasPrimary, primaryNow
+					generationAtBulkStart, generationAtBulkEnd = generationStart, generationNow
+					break
+				}
+			}
+		case isPrimaryForRG != nil:
+			for rg, wasPrimary := range zoneSnap.primary {
+				if primaryNow := isPrimaryForRG(rg); primaryNow != wasPrimary {
+					mastershipChanged = true
+					changedRG = rg
+					primaryAtBulkStart, primaryAtBulkEnd = wasPrimary, primaryNow
+					break
+				}
+			}
+		default:
 			slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership unavailable at BulkEnd)")
 			return false, inventoryGeneration, inventoryRequestToken, inventoryRequested
-		}
-		for rg, wasPrimary := range zoneSnap.primary {
-			if isPrimaryForRG(rg) != wasPrimary {
-				mastershipChanged = true
-				changedRG, primaryAtBulkStart, primaryAtBulkEnd = rg, wasPrimary, !wasPrimary
-				break
-			}
 		}
 	}
 	if mastershipChanged {
 		slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership changed during the bulk)",
-			"rg", changedRG, "primary_at_bulk_start", primaryAtBulkStart, "primary_at_bulk_end", primaryAtBulkEnd)
+			"rg", changedRG, "primary_at_bulk_start", primaryAtBulkStart, "primary_at_bulk_end", primaryAtBulkEnd,
+			"mastership_generation_at_bulk_start", generationAtBulkStart,
+			"mastership_generation_at_bulk_end", generationAtBulkEnd)
 		return false, inventoryGeneration, inventoryRequestToken, inventoryRequested
 	}
 	s.zoneRGMu.RLock()
@@ -3011,19 +3066,57 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, u
 	// does not name uses the captured RG 0 fallback.
 	// #10227: when that absent-zone answer is false, the dataplane origin bit
 	// preserves local rows while allowing stale peer-synced rows to be deleted.
+	if zoneSnap.mastershipSnapshotFn != nil && zoneSnap.withMastershipSnapshotFn == nil {
+		slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership delete guard unavailable)")
+		return false, inventoryGeneration, inventoryRequestToken, inventoryRequested
+	}
 	shouldSyncAtBulkStart := zoneSnap.shouldSync
 	isZoneMappedAtBulkStart := zoneSnap.isMapped
+	var withMastershipSnapshot func(func() error) (bool, error)
+	if zoneSnap.mastershipSnapshotFn != nil {
+		withMastershipSnapshot = func(apply func() error) (bool, error) {
+			return zoneSnap.withMastershipSnapshotFn(zoneSnap.primaryGenerations, apply)
+		}
+	}
 	var deleted int
 	result, err := s.sessions.ReconcileClusterBulk(dataplane.ClusterBulkReconcileInput{
-		ReceivedV4:     recvV4,
-		ReceivedV6:     recvV6,
-		ShouldSyncZone: shouldSyncAtBulkStart,
-		ShouldSyncV4:   zoneSnap.shouldSyncV4,
-		ShouldSyncV6:   zoneSnap.shouldSyncV6,
-		IsZoneMapped:   isZoneMappedAtBulkStart,
-		DeleteReason:   dataplane.DeleteReasonClusterStale,
+		ReceivedV4:              recvV4,
+		ReceivedV6:              recvV6,
+		ShouldSyncZone:          shouldSyncAtBulkStart,
+		ShouldSyncV4:            zoneSnap.shouldSyncV4,
+		ShouldSyncV6:            zoneSnap.shouldSyncV6,
+		IsZoneMapped:            isZoneMappedAtBulkStart,
+		DeleteReason:            dataplane.DeleteReasonClusterStale,
+		WithMastershipSnapshot:  withMastershipSnapshot,
 	})
 	deleted = result.DeletedV4 + result.DeletedV6
+	if result.MastershipChanged {
+		logged := false
+		if zoneSnap.mastershipSnapshotFn != nil {
+			for rg, primaryAtStart := range zoneSnap.primary {
+				primaryNow, generationNow := zoneSnap.mastershipSnapshotFn(rg)
+				generationStart := zoneSnap.primaryGenerations[rg]
+				if primaryNow != primaryAtStart || generationNow != generationStart {
+					slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership changed before stale delete)",
+						"rg", rg, "primary_at_bulk_start", primaryAtStart, "primary_at_delete", primaryNow,
+						"mastership_generation_at_bulk_start", generationStart,
+						"mastership_generation_at_delete", generationNow,
+						"deleted_v4", result.DeletedV4, "deleted_v6", result.DeletedV6)
+					logged = true
+					break
+				}
+			}
+		}
+		if !logged {
+			slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership changed before stale delete)",
+				"deleted_v4", result.DeletedV4, "deleted_v6", result.DeletedV6)
+		}
+		if err != nil {
+			slog.Warn("cluster sync: stale reconcile partially failed before mastership change", "err", err)
+			s.stats.Errors.Add(1)
+		}
+		return false, inventoryGeneration, inventoryRequestToken, inventoryRequested
+	}
 	if err != nil {
 		slog.Warn("cluster sync: reconcile stale sessions failed", "err", err)
 		s.stats.Errors.Add(1)

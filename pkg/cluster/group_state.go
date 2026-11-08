@@ -63,13 +63,15 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 				initialWeight = rgWeightFromDebt(DataplaneArmMonitorCost)
 				initialMonitorFails = []string{DataplaneArmMonitorIface}
 			}
+			m.mastershipGen++
 			existing = &RedundancyGroupState{
-				GroupID:       rg.ID,
-				LocalPriority: pri,
-				Weight:        initialWeight,
-				State:         StateSecondary,
-				Preempt:       rg.Preempt,
-				MonitorFails:  initialMonitorFails,
+				GroupID:               rg.ID,
+				LocalPriority:         pri,
+				Weight:                initialWeight,
+				State:                 StateSecondary,
+				mastershipGen:         m.mastershipGen,
+				Preempt:               rg.Preempt,
+				MonitorFails:          initialMonitorFails,
 			}
 			m.groups[rg.ID] = existing
 			if cfg.ControlInterface != "" {
@@ -516,6 +518,61 @@ func (m *Manager) GroupState(rgID int) *RedundancyGroupState {
 	return &cp
 }
 
+// setLocalRGStateLocked publishes a local RG state transition. Caller holds
+// m.mu. The generation changes only when local primary ownership changes;
+// secondary-to-secondary transitions do not invalidate a bulk ownership view.
+func (m *Manager) setLocalRGStateLocked(rg *RedundancyGroupState, state NodeState) {
+	oldState := rg.State
+	if oldState == state {
+		return
+	}
+	rg.State = state
+	if (oldState == StatePrimary) != (state == StatePrimary) {
+		m.mastershipGen++
+		rg.mastershipGen = m.mastershipGen
+	}
+}
+
+// LocalMastershipSnapshot returns a coherent local-primary answer and its
+// generation for one RG. It is intended for bulk ownership snapshots, not
+// per-session paths.
+func (m *Manager) LocalMastershipSnapshot(rgID int) (primary bool, generation uint64) {
+	if m == nil {
+		return false, 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if rg, ok := m.groups[rgID]; ok {
+		return rg.State == StatePrimary, rg.mastershipGen
+	}
+	return false, 0
+}
+
+// WithLocalMastershipSnapshot runs apply while local RG ownership cannot
+// change, but only if every captured RG generation is still current. Bulk
+// stale cleanup calls this once per bounded delete batch so elections are
+// never held off across a whole table sweep.
+func (m *Manager) WithLocalMastershipSnapshot(snapshot map[int]uint64, apply func() error) (bool, error) {
+	if m == nil || apply == nil {
+		return false, nil
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for rgID, generation := range snapshot {
+		rg, ok := m.groups[rgID]
+		if !ok {
+			if generation != 0 {
+				return false, nil
+			}
+			continue
+		}
+		if rg.mastershipGen != generation {
+			return false, nil
+		}
+	}
+	return true, apply()
+}
+
 // SetGroupStateForTesting forces an RG's local state without running an
 // election. Test-only, mirroring SetPeerDHCPLeasesForTesting; not for
 // production callers.
@@ -529,7 +586,7 @@ func (m *Manager) SetGroupStateForTesting(rgID int, st NodeState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if rg, ok := m.groups[rgID]; ok {
-		rg.State = st
+		m.setLocalRGStateLocked(rg, st)
 	}
 }
 

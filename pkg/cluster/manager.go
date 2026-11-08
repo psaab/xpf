@@ -42,13 +42,14 @@ func (s NodeState) String() string {
 
 // RedundancyGroupState holds the runtime state of a single redundancy group.
 type RedundancyGroupState struct {
-	GroupID          int
-	LocalPriority    int
-	PeerPriority     int
-	State            NodeState
-	Preempt          bool
-	ManualFailover   bool      // true if manually forced
-	ManualFailoverAt time.Time // when ManualFailover was set (for deadlock detection)
+	GroupID           int
+	LocalPriority     int
+	PeerPriority      int
+	State             NodeState
+	mastershipGen     uint64
+	Preempt           bool
+	ManualFailover    bool      // true if manually forced
+	ManualFailoverAt  time.Time // when ManualFailover was set (for deadlock detection)
 	// forcedSecondary is the ISSU drain pin (#16743): ForceSecondary sets it
 	// alongside ManualFailover, and it pins Weight to 0 as a state fact. While
 	// set, recalcWeight / debtDerivedWeightLocked / reconcile keep Weight=0
@@ -206,13 +207,15 @@ type Manager struct {
 	unkeyedAlarmHook func(rung string, raised bool, expiry time.Time)
 	unkeyedAuditHook func(action, operator string, rgID, nodeID int, at time.Time, reason string)
 
-	nodeID         int
-	clusterID      int
-	groups         map[int]*RedundancyGroupState
-	monitorWeights map[monitorKey]int // per-RG per-interface monitor weights
-	mu             sync.RWMutex
-	eventCh        chan ClusterEvent
-	monitor        *Monitor
+	nodeID          int
+	clusterID       int
+	groups          map[int]*RedundancyGroupState
+	monitorWeights  map[monitorKey]int // per-RG per-interface monitor weights
+	// Advances on local RG creation and every primary-role transition; guarded by mu.
+	mastershipGen   uint64
+	mu              sync.RWMutex
+	eventCh         chan ClusterEvent
+	monitor         *Monitor
 	// monStartMu serializes Start's stop-previous + swap + start-new monitor
 	// sequence. It is a SEPARATE lock from m.mu because Start must NOT hold
 	// m.mu across the old monitor's Stop(): Stop() joins the poll goroutine

@@ -40,6 +40,44 @@ func TestNewManager(t *testing.T) {
 	}
 }
 
+func TestLocalMastershipGenerationTracksPrimaryTransitions18548(t *testing.T) {
+	m := NewManager(0, 1)
+	m.UpdateConfig(makeConfig(makeRG(5, false, map[int]int{0: 200})))
+	m.SetGroupStateForTesting(5, StateSecondary)
+
+	primary, initialGeneration := m.LocalMastershipSnapshot(5)
+	if primary || initialGeneration == 0 {
+		t.Fatalf("new secondary RG snapshot = (%v, %d), want (false, nonzero)", primary, initialGeneration)
+	}
+	applied := false
+	stable, err := m.WithLocalMastershipSnapshot(map[int]uint64{5: initialGeneration}, func() error {
+		if m.mu.TryLock() {
+			m.mu.Unlock()
+			return errors.New("snapshot guard did not retain the manager read lock through apply")
+		}
+		applied = true
+		return nil
+	})
+	if err != nil || !stable || !applied {
+		t.Fatalf("unchanged snapshot guard = (%v, %v, applied=%v), want (true, nil, true)", stable, err, applied)
+	}
+
+	m.SetGroupStateForTesting(5, StatePrimary)
+	m.SetGroupStateForTesting(5, StateSecondary)
+	primary, currentGeneration := m.LocalMastershipSnapshot(5)
+	if primary || currentGeneration == initialGeneration {
+		t.Fatalf("flip-back snapshot = (%v, %d), want secondary with a new generation after %d", primary, currentGeneration, initialGeneration)
+	}
+	applied = false
+	stable, err = m.WithLocalMastershipSnapshot(map[int]uint64{5: initialGeneration}, func() error {
+		applied = true
+		return nil
+	})
+	if err != nil || stable || applied {
+		t.Fatalf("stale snapshot guard = (%v, %v, applied=%v), want (false, nil, false)", stable, err, applied)
+	}
+}
+
 func TestPeerGroupPrimaryRequiresLiveHeartbeat17784(t *testing.T) {
 	m := NewManager(0, 1)
 	m.SetPeerGroupStateForTesting(0, StatePrimary)

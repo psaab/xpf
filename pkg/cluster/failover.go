@@ -405,7 +405,7 @@ func (m *Manager) manualFailoverWith(rgID int, admit func(rg *RedundancyGroupSta
 	rg.transferCommitRolePinned = false
 	rg.ManualFailover = true
 	rg.ManualFailoverAt = time.Now()
-	rg.State = StateSecondaryHold
+	m.setLocalRGStateLocked(rg, StateSecondaryHold)
 	rg.FailoverCount++
 	if oldState != rg.State {
 		m.sendEvent(rg.GroupID, oldState, rg.State, "Manual failover")
@@ -495,7 +495,7 @@ func (m *Manager) ForceSecondary() error {
 		rg.forcedSecondary = true
 		rg.ManualFailover = true
 		rg.ManualFailoverAt = time.Now()
-		rg.State = StateSecondary
+		m.setLocalRGStateLocked(rg, StateSecondary)
 		if oldState != rg.State {
 			rg.FailoverCount++
 			m.sendEvent(rg.GroupID, oldState, rg.State, "Forced secondary (ISSU)")
@@ -555,7 +555,7 @@ func (m *Manager) ForcePrimaryRecovery(rgID int, operator string) error {
 	reason := "peer has not produced a fresh authenticated heartbeat proof"
 	oldState := rg.State
 	rg.forcedPrimary = true
-	rg.State = StatePrimary
+	m.setLocalRGStateLocked(rg, StatePrimary)
 	if oldState != StatePrimary {
 		rg.FailoverCount++
 		m.sendEvent(rgID, oldState, StatePrimary, "Force-primary recovery (#16016)")
@@ -818,7 +818,7 @@ func (m *Manager) restoreOperatorHoldLocked(rgID int, snapshot operatorHoldSnaps
 		rg.Weight = snapshot.weight
 	}
 	rg.ManualFailoverAt = snapshot.at
-	rg.State = snapshot.state
+	m.setLocalRGStateLocked(rg, snapshot.state)
 	if oldState != rg.State {
 		m.sendEvent(rg.GroupID, oldState, rg.State, eventReason)
 	}
@@ -1434,7 +1434,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 		rg.forcedSecondary = true
 		rg.ManualFailoverAt = prior.at
 		rg.Weight = prior.weight
-		rg.State = prior.state
+		m.setLocalRGStateLocked(rg, prior.state)
 		// No commit-role pin: the drain hold itself keeps this node
 		// secondary, and the pin would arm the #15734 rescue that clears
 		// the hold once the peer is stably primary.
@@ -1443,7 +1443,7 @@ func (m *Manager) FinalizePeerTransferOut(rgID int) error {
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
-		rg.State = StateSecondary
+		m.setLocalRGStateLocked(rg, StateSecondary)
 		rg.transferCommitRolePinned = true
 		rg.transferCommitRole = StateSecondary
 	}
@@ -1616,7 +1616,7 @@ func (m *Manager) ManualFailoverBatch(rgIDs []int) (BatchFailoverResult, error) 
 		res.Applied = append(res.Applied, rgID)
 		rg.ManualFailover = true
 		rg.ManualFailoverAt = now
-		rg.State = StateSecondaryHold
+		m.setLocalRGStateLocked(rg, StateSecondaryHold)
 		rg.FailoverCount++
 		if oldState != rg.State {
 			m.sendEvent(rg.GroupID, oldState, rg.State, "Manual failover batch")
@@ -1911,7 +1911,7 @@ func (m *Manager) FinalizePeerTransferOutBatch(rgIDs []int) error {
 		rg.ManualFailover = false
 		rg.forcedSecondary = false
 		rg.ManualFailoverAt = time.Time{}
-		rg.State = StateSecondary
+		m.setLocalRGStateLocked(rg, StateSecondary)
 		rg.transferCommitRolePinned = true
 		rg.transferCommitRole = StateSecondary
 		// Clear stale inbound-transfer markers from the previous direction

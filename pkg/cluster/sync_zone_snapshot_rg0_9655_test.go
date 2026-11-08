@@ -215,42 +215,59 @@ func TestZoneMapChangeDuringBulkWithholdsCompletion9655(t *testing.T) {
 	}
 }
 
-// #18548: mastership can move without changing zoneRGMapGen. If this node
-// becomes primary after BulkStart, a new local row is absent from the peer's
-// table and must not be judged by the stale secondary answer.
-func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
-	const zone uint16 = 18
-	const rg = 5
-	local := dataplane.SessionKey{
-		SrcIP: [4]byte{10, 0, 18, 1}, DstIP: [4]byte{172, 16, 80, 200},
-		Protocol: 6, SrcPort: 41850, DstPort: 5201,
+// #18548: endpoint equality alone is insufficient. Mastership can flip away
+// and back before BulkEnd, and can move after BulkEnd's ownership read. The
+// promotion subtest binds deletion to the generation lock; the empty-sweep
+// subtest ensures an ownership change during enumeration still withholds ACK.
+// FAIL-ON-REVERT: removing those guards makes their corresponding cell fail.
+type mastershipState18548 struct {
+	primary    bool
+	generation uint64
+}
+
+func (state *mastershipState18548) snapshot(rgID int) (bool, uint64) {
+	if rgID != 5 {
+		return false, 0
 	}
-	dp := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+	return state.primary, state.generation
+}
+
+func (state *mastershipState18548) withSnapshot(snapshot map[int]uint64, apply func() error) (bool, error) {
+	for rgID, generation := range snapshot {
+		current := uint64(0)
+		if rgID == 5 {
+			current = state.generation
+		}
+		if generation != current {
+			return false, nil
+		}
+	}
+	return true, apply()
+}
+
+func mastershipReceiver18548(t *testing.T, dp *mockSweepDP, state *mastershipState18548) *SessionSync {
+	t.Helper()
 	rx := NewSessionSync(":0", "10.0.0.3:4785", dp)
-	primary := false
-	rx.IsPrimaryForRGFn = func(rgID int) bool { return rgID == rg && primary }
-	rx.SetZoneRGMap(map[uint16]int{zone: rg})
+	rx.RGMastershipSnapshotFn = state.snapshot
+	rx.WithRGMastershipSnapshotFn = state.withSnapshot
+	rx.SetZoneRGMap(map[uint16]int{18: 5})
 	rx.stats.Connected.Store(true)
 	rx.testZoneMapSettle = 10 * time.Millisecond
 	rx.testBulkRerequestBackoff = 20 * time.Millisecond
+	return rx
+}
 
-	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
-	primary = true
-	if err := dp.SetSessionV4(local, establishedIn(zone)); err != nil {
-		t.Fatalf("create local row after promotion: %v", err)
-	}
-	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
-
+func assertMastershipVoid18548(t *testing.T, rx *SessionSync, dp *mockSweepDP, local dataplane.SessionKey) {
+	t.Helper()
 	if _, ok := dp.v4sessions[local]; !ok {
-		t.Fatal("#18548: local row created after promotion was judged using BulkStart mastership and deleted")
+		t.Fatal("#18548: stale BulkStart ownership deleted an RG-mapped local row")
 	}
 	if rx.BulkEverCompleted() {
-		t.Fatal("#18548: a bulk whose reconcile was voided by mastership change was marked complete")
+		t.Fatal("#18548: a bulk with an invalid mastership judgment was marked complete")
 	}
 	if got := rx.stats.BulkSyncEndTime.Load(); got != 0 {
 		t.Fatalf("#18548: a nonauthoritative bulk recorded end time %d", got)
 	}
-
 	if !waitFor18521(t, 5*time.Second, func() bool { return !rx.bulkRerequestInFlight.Load() }) {
 		t.Fatal("#18548: voided reconcile did not complete its bulk re-request")
 	}
@@ -258,4 +275,139 @@ func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
 	if got := rx.Stats().BulkRerequestsSent; got != 1 {
 		t.Fatalf("#18548: queued bulk re-requests = %d, want 1", got)
 	}
+}
+
+func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
+	const zone uint16 = 18
+	const rg = 5
+	local := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 18, 1}, DstIP: [4]byte{172, 16, 80, 200},
+		Protocol: 6, SrcPort: 41850, DstPort: 5201,
+	}
+
+	t.Run("flip back before BulkEnd", func(t *testing.T) {
+		state := &mastershipState18548{generation: 1}
+		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
+			local: establishedIn(zone),
+		}}
+		dp.beforeBatchV4 = func() { t.Fatal("#18548: flip-back reached stale-row enumeration instead of failing the BulkEnd generation check") }
+		rx := mastershipReceiver18548(t, dp, state)
+		rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+
+		state.primary, state.generation = true, state.generation+1
+		state.primary, state.generation = false, state.generation+1
+		rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+		assertMastershipVoid18548(t, rx, dp, local)
+	})
+
+	t.Run("promote after BulkEnd read before V4 sweep", func(t *testing.T) {
+		state := &mastershipState18548{generation: 1}
+		dp := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+		var enumeratedLocal bool
+		dp.beforeBatchV4 = func() { _, enumeratedLocal = dp.v4sessions[local] }
+		rx := mastershipReceiver18548(t, dp, state)
+		guardedDeletes := 0
+		rx.WithRGMastershipSnapshotFn = func(snapshot map[int]uint64, apply func() error) (bool, error) {
+			guardedDeletes++
+			return state.withSnapshot(snapshot, apply)
+		}
+		var rgReads int
+		rx.RGMastershipSnapshotFn = func(rgID int) (bool, uint64) {
+			primary, generation := state.snapshot(rgID)
+			if rgID == rg {
+				rgReads++
+				if rgReads == 2 {
+					// BulkEnd has observed the old secondary answer. Model
+					// election promotion and a local flow before ForEachV4.
+					state.primary = true
+					state.generation++
+					if err := dp.SetSessionV4(local, establishedIn(zone)); err != nil {
+						t.Fatalf("create local row after promotion: %v", err)
+					}
+				}
+			}
+			return primary, generation
+		}
+		rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+		rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+		if !enumeratedLocal {
+			t.Fatal("#18548: newly local row did not enter the stale sweep after the BulkEnd predicate read")
+		}
+		if guardedDeletes != 1 {
+			t.Fatalf("#18548: guarded stale-delete batches = %d, want 1", guardedDeletes)
+		}
+
+		assertMastershipVoid18548(t, rx, dp, local)
+	})
+	t.Run("promotion after BulkEnd read during empty sweep", func(t *testing.T) {
+		state := &mastershipState18548{generation: 1}
+		dp := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+		rx := mastershipReceiver18548(t, dp, state)
+		guardedChecks := 0
+		rx.WithRGMastershipSnapshotFn = func(snapshot map[int]uint64, apply func() error) (bool, error) {
+			guardedChecks++
+			return state.withSnapshot(snapshot, apply)
+		}
+		var rgReads int
+		rx.RGMastershipSnapshotFn = func(rgID int) (bool, uint64) {
+			primary, generation := state.snapshot(rgID)
+			if rgID == rg {
+				rgReads++
+				if rgReads == 2 {
+					state.primary = true
+					state.generation++
+				}
+			}
+			return primary, generation
+		}
+		rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+		rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+		if guardedChecks != 1 {
+			t.Fatalf("#18548: empty sweep mastership validations = %d, want 1 final check", guardedChecks)
+		}
+		if rx.BulkEverCompleted() || rx.stats.BulkSyncEndTime.Load() != 0 {
+			t.Fatal("#18548: an empty sweep acknowledged a bulk after mastership changed")
+		}
+		if !waitFor18521(t, 5*time.Second, func() bool { return !rx.bulkRerequestInFlight.Load() }) {
+			t.Fatal("#18548: empty-sweep mastership change did not complete its bulk re-request")
+		}
+		rx.wg.Wait()
+		if got := rx.Stats().BulkRerequestsSent; got != 1 {
+			t.Fatalf("#18548: queued empty-sweep bulk re-requests = %d, want 1", got)
+		}
+	})
+}
+
+func TestSettledMastershipReplacementBulkCompletes18548(t *testing.T) {
+	state := &mastershipState18548{generation: 1}
+	dp := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+	rx := mastershipReceiver18548(t, dp, state)
+	gate := make(chan struct{})
+	rx.testBulkRerequestGate = gate
+
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	state.primary = true
+	state.generation++
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+	if rx.BulkEverCompleted() || rx.stats.BulkSyncEndTime.Load() != 0 {
+		t.Fatal("#18548: first bulk was acknowledged after a mastership change")
+	}
+
+	// The ownership has settled. A replacement starts from that role and may
+	// complete normally instead of being trapped in a void/re-request loop.
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(2, nil))
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(2, nil))
+	if !rx.BulkEverCompleted() {
+		t.Fatal("#18548: settled replacement bulk did not complete")
+	}
+	if got := rx.stats.BulkSyncEndTime.Load(); got == 0 {
+		t.Fatal("#18548: settled replacement did not record completion")
+	}
+	close(gate)
+	if !waitFor18521(t, 5*time.Second, func() bool { return !rx.bulkRerequestInFlight.Load() }) {
+		t.Fatal("#18548: superseded re-request did not drain")
+	}
+	rx.wg.Wait()
 }
