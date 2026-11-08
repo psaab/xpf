@@ -446,12 +446,12 @@ pub(in crate::afxdp) fn publish_shared_session(
             .as_ref()
             .map(|existing| existing.metadata.owner_rg_id);
         {
-        #[cfg(test)]
-        SHARED_ALIAS_PRIMARY_LOCK_HOOK_18663.with(|hook| {
-            if let Some(hook) = hook.borrow_mut().take() {
-                hook();
-            }
-        });
+            #[cfg(test)]
+            SHARED_ALIAS_PRIMARY_LOCK_HOOK_18663.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().take() {
+                    hook();
+                }
+            });
             // Lock order is shared primary -> served aliases. Evidence readers
             // use the same order and keep the primary lock while resolving an
             // alias, making replacement/displacement visible atomically.

@@ -880,7 +880,9 @@ fn shared_node_served_clear_unfiles_alias_index_18663() {
     store.publish(&row);
     assert!(store.evidence(&alias).shared_established);
 
-    store.owner_indexes.clear(&store.sessions);
+    store
+        .owner_indexes
+        .clear(&store.sessions, &store.forward_wire_aliases);
     let evidence = store.evidence(&alias);
     assert!(
         !evidence.shared_established && evidence.shared_served.is_none(),
