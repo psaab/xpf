@@ -668,6 +668,9 @@ write_fixture("excluded-window-peak-outside-zero.json", rates=[8, 32, 0, 0, 0, 1
 write_fixture("excluded-window-peak-control.json", rates=[8, 32, 0, 0, 16, 16, 16])
 write_fixture("late-recovery-outage.json", rates=[8, 32, 8, 8, 0, 0, 64, 64])
 write_fixture("all-excluded.json", rates=[8, 32, 8])
+write_fixture("late-recovery-halfpeak.json", rates=[8, 16, 8, 8, 0, 0, 64, 64])
+write_fixture("late-recovery-nearpeak.json", rates=[8, 31.999, 8, 8, 0, 0, 64, 64])
+write_fixture("slow-start.json", rates=[0, 0, 4, 8, 16, 16])
 PY
 collapse_metrics() { # <fixture> [metrics producer args...]
 	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$aggregate_window_dir/$1" "${@:2}"
@@ -680,17 +683,36 @@ excluded_peak_outside_metrics=$(collapse_metrics "excluded-window-peak-outside-z
 excluded_peak_control_metrics=$(collapse_metrics "excluded-window-peak-control.json" --event-sec 1)
 late_recovery_metrics=$(collapse_metrics late-recovery-outage.json --event-sec 1 --resume-event-sec 1)
 all_excluded_metrics=$(collapse_metrics all-excluded.json --event-sec 0)
+late_recovery_halfpeak_metrics=$(collapse_metrics late-recovery-halfpeak.json --event-sec 1)
+late_recovery_nearpeak_metrics=$(collapse_metrics late-recovery-nearpeak.json --event-sec 1)
+slow_start_metrics=$(collapse_metrics slow-start.json --event-sec 5)
+legacy_no_event_metrics=$(collapse_metrics late-recovery-outage.json)
 python3 - "$crash_window_metrics" "$planned_window_metrics" \
 	"$outside_crash_metrics" "$outside_planned_metrics" \
 	"$excluded_peak_outside_metrics" "$excluded_peak_control_metrics" \
-	"$late_recovery_metrics" "$all_excluded_metrics" <<'PY' \
-	|| bad "#19021: collapse baseline must survive later recovery and all-excluded windows must retain raw peak"
+	"$late_recovery_metrics" "$all_excluded_metrics" \
+	"$late_recovery_halfpeak_metrics" "$late_recovery_nearpeak_metrics" \
+	"$slow_start_metrics" "$legacy_no_event_metrics" \
+	"$aggregate_window_dir/late-recovery-outage.json" <<'PY' \
+	|| bad "#19021: transition collapse policy must preserve demonstrated outages and no-window output"
 import json
 import sys
 
-crash, planned, outside_crash, outside_planned, peak_outside, peak_control, late_recovery, all_excluded = (
-    json.loads(value) for value in sys.argv[1:]
-)
+metrics = [json.loads(value) for value in sys.argv[1:12]]
+(
+    crash,
+    planned,
+    outside_crash,
+    outside_planned,
+    peak_outside,
+    peak_control,
+    late_recovery,
+    all_excluded,
+    late_recovery_halfpeak,
+    late_recovery_nearpeak,
+    slow_start,
+) = metrics
+legacy_no_event, legacy_path = sys.argv[12:]
 for name, metrics in (("crash", crash), ("planned move", planned)):
     assert metrics["peak_interval_index"] == 2, (name, metrics)
     assert metrics["zero_intervals_after_peak"] == 0, (name, metrics)
@@ -702,35 +724,76 @@ for name, metrics in (("crash", outside_crash), ("planned move", outside_planned
     assert metrics["peak_interval_index"] == 2, (name, metrics)
     assert metrics["zero_intervals_after_peak"] == 1, (name, metrics)
     assert metrics["collapse_detected"], (name, metrics)
-    assert metrics["collapse_reason"] == "1 zero interval(s) after sustained-rate baseline", metrics
-assert outside_crash["stream_zero_intervals_outside_events_total"] == 8, outside_crash
-assert outside_planned["planned_moves"][0]["verdict"] == "PASS", outside_planned
+    assert metrics["collapse_reason"] == "1 zero interval(s) after demonstrated throughput", metrics
 assert peak_outside["peak_gbps"] == 32, peak_outside
 assert peak_outside["peak_interval_index"] == 1, peak_outside
 assert peak_outside["zero_intervals_after_peak"] == 1, peak_outside
 assert peak_outside["collapse_detected"], peak_outside
-assert peak_outside["collapse_reason"] == "1 zero interval(s) after sustained-rate baseline", peak_outside
+assert peak_outside["collapse_reason"] == "1 zero interval(s) after demonstrated throughput", peak_outside
 assert peak_outside["tail_gbps"] == [16.0, 16.0], peak_outside
 assert peak_control["peak_gbps"] == 32, peak_control
 assert peak_control["peak_interval_index"] == 1, peak_control
 assert peak_control["zero_intervals_after_peak"] == 0, peak_control
 assert not peak_control["collapse_detected"], peak_control
-assert late_recovery["peak_gbps"] == 64, late_recovery
-assert late_recovery["peak_interval_index"] == 6, late_recovery
-assert late_recovery["zero_intervals_after_peak"] == 2, late_recovery
-assert late_recovery["collapse_detected"], late_recovery
-assert late_recovery["collapse_reason"] == (
-    "2 zero interval(s) after sustained-rate baseline; "
-    "2 stalled interval(s) after sustained-rate baseline"
-), late_recovery
+for name, metrics in (
+    ("32 Gbit/s prior peak", late_recovery),
+    ("16 Gbit/s prior peak", late_recovery_halfpeak),
+    ("31.999 Gbit/s prior peak", late_recovery_nearpeak),
+):
+    assert metrics["peak_gbps"] == 64, (name, metrics)
+    assert metrics["peak_interval_index"] == 6, (name, metrics)
+    assert metrics["zero_intervals_after_peak"] == 2, (name, metrics)
+    assert metrics["collapse_detected"], (name, metrics)
+    assert "2 zero interval(s) after demonstrated throughput" in metrics["collapse_reason"], (name, metrics)
+    assert "2 stalled interval(s) after demonstrated throughput" in metrics["collapse_reason"], (name, metrics)
 assert late_recovery["stream_zero_intervals_resume_excused_total"] == 16, late_recovery
 assert late_recovery["stream_zero_intervals_outside_events_total"] == 0, late_recovery
 assert all_excluded["peak_gbps"] == 32, all_excluded
 assert all_excluded["peak_interval_index"] == 1, all_excluded
 assert all_excluded["tail_gbps"] == [], all_excluded
 assert not all_excluded["collapse_detected"], all_excluded
+assert not slow_start["collapse_detected"], slow_start
+assert slow_start["zero_intervals_after_peak"] == 0, slow_start
+legacy_expected = {
+    "path": legacy_path,
+    "ok": True,
+    "error": "",
+    "format": "json",
+    "protocol": "",
+    "completed": True,
+    "observed_end_sec": 8.0,
+    "avg_gbps": 8.0,
+    "avg_source": "end",
+    "retransmits": 0,
+    "udp_loss_percent": 0.0,
+    "udp_jitter_ms": 0.0,
+    "interval_gbps": [8.0, 32.0, 8.0, 8.0, 0.0, 0.0, 64.0, 64.0],
+    "peak_gbps": 64.0,
+    "peak_interval_index": 6,
+    "tail_gbps": [64.0, 64.0],
+    "tail_median_gbps": 64.0,
+    "tail_min_gbps": 64.0,
+    "tail_peak_ratio": 1.0,
+    "zero_intervals_total": 18,
+    "stream_zero_intervals_total": 16,
+    "stream_zero_intervals_outside_events_total": 16,
+    "stream_zero_intervals_resume_excused_total": 0,
+    "zero_streams_outside_events_total": 8,
+    "zero_streams_total": 8,
+    "planned_moves": [],
+    "planned_move_cost_total": 0,
+    "planned_move_fail_total": 0,
+    "planned_move_zero_intervals_total": 0,
+    "zero_intervals_after_peak": 0,
+    "stalled_intervals_after_peak": 0,
+    "collapse_detected": False,
+    "collapse_reason": "",
+    "client_error": "",
+    "post_duration_intervals_excluded": 0,
+}
+assert legacy_no_event == json.dumps(legacy_expected, sort_keys=True), legacy_no_event
 PY
-ok "#19021: window exclusions retain raw peaks and detect outages before later recovery"
+ok "#19021: demonstrated-throughput outage predicate, no-event output, and peak reporting are covered"
 
 # #18692/#18708: a stream carried in the five seconds before T is judged by
 # the crash cell, so its T+3..T+5 zeros can be excused when it resumes at T+5.

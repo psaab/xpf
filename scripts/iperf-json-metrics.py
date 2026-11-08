@@ -76,6 +76,13 @@ def stream_client_error(payload):
 # interrupt's closing report (the time the client spent hung before the
 # signal), not a measured reporting interval.
 POST_DURATION_SLACK_SEC = 1.0
+TRANSITION_COLLAPSE_POLICY = (
+    "With transition windows configured, a zero-triggered aggregate collapse is any full "
+    "interval outside those windows at or below --zero-gbps that follows an earlier full "
+    "interval outside those windows above --stall-gbps; zeros before that throughput "
+    "evidence do not count. Without transition windows, collapse metrics and verdicts "
+    "retain their original behavior."
+)
 
 
 def end_throughput_summary(end):
@@ -491,6 +498,52 @@ def summarize(path, args):
         summary["ok"] = True
         return summary
 
+    # Preserve the original aggregate metrics and verdict byte-for-byte when no
+    # crash or planned-move windows are configured.
+    if not exclude_windows and not planned:
+        peak_gbps = max(full_intervals)
+        peak_index = full_intervals.index(peak_gbps)
+        tail = (
+            full_intervals[-args.tail_window:]
+            if len(full_intervals) >= args.tail_window
+            else list(full_intervals)
+        )
+        tail_median = statistics.median(tail)
+        tail_min = min(tail)
+        after_peak = full_intervals[peak_index + 1 :]
+        zero_after_peak = sum(1 for value in after_peak if value <= args.zero_gbps)
+        stalled_after_peak = sum(1 for value in after_peak if value <= args.stall_gbps)
+        tail_peak_ratio = tail_median / peak_gbps if peak_gbps > 0 else 0.0
+
+        summary.update(
+            {
+                "ok": True,
+                "peak_gbps": peak_gbps,
+                "peak_interval_index": peak_index,
+                "tail_gbps": tail,
+                "tail_median_gbps": tail_median,
+                "tail_min_gbps": tail_min,
+                "tail_peak_ratio": tail_peak_ratio,
+                "zero_intervals_after_peak": zero_after_peak,
+                "stalled_intervals_after_peak": stalled_after_peak,
+            }
+        )
+
+        if peak_gbps >= args.min_peak_gbps:
+            reasons = []
+            if zero_after_peak > 0:
+                reasons.append(f"{zero_after_peak} zero interval(s) after peak")
+            if len(after_peak) >= 2 and stalled_after_peak >= 2:
+                reasons.append(f"{stalled_after_peak} stalled interval(s) after peak")
+            if tail_peak_ratio < args.min_tail_ratio:
+                reasons.append(
+                    f"tail/peak ratio {tail_peak_ratio:.3f} below {args.min_tail_ratio:.3f}"
+                )
+            if reasons:
+                summary["collapse_detected"] = True
+                summary["collapse_reason"] = "; ".join(reasons)
+        return summary
+
     peak_gbps = max(full_intervals)
     peak_index = full_intervals.index(peak_gbps)
     summary.update(
@@ -506,7 +559,6 @@ def summarize(path, args):
         if not excluded
     ]
     if not tail_intervals:
-        summary["ok"] = True
         return summary
     tail = (
         tail_intervals[-args.tail_window:]
@@ -515,66 +567,65 @@ def summarize(path, args):
     )
     tail_median = statistics.median(tail)
     tail_min = min(tail)
-    # A later recovery peak must not erase an earlier capacity-relative
-    # outage. Start the collapse scan after the first interval reaching half
-    # the raw run peak; transition exclusions apply to scanned intervals, not
-    # to this baseline or to the raw peak reported above.
-    baseline_threshold = peak_gbps * 0.5
-    baseline_index = next(
-        index for index, value in enumerate(full_intervals) if value >= baseline_threshold
-    )
-    after_baseline = full_intervals[baseline_index + 1 :]
-    after_baseline_excluded = full_interval_excluded[baseline_index + 1 :]
-    after_baseline_outside = [
-        value
-        for value, excluded in zip(after_baseline, after_baseline_excluded)
-        if not excluded
-    ]
-    zero_after_baseline = sum(
-        1 for value in after_baseline_outside if value <= args.zero_gbps
-    )
-    stalled_after_baseline = sum(
-        1 for value in after_baseline_outside if value <= args.stall_gbps
-    )
+
+    demonstrated = False
+    post_activity_intervals = 0
+    zero_after_activity = 0
+    stalled_after_activity = 0
+    for value, excluded in zip(full_intervals, full_interval_excluded):
+        if excluded:
+            continue
+        if value > args.stall_gbps:
+            if demonstrated:
+                post_activity_intervals += 1
+            else:
+                demonstrated = True
+            continue
+        if demonstrated:
+            post_activity_intervals += 1
+            if value <= args.zero_gbps:
+                zero_after_activity += 1
+            if value <= args.stall_gbps:
+                stalled_after_activity += 1
     tail_peak_ratio = tail_median / peak_gbps if peak_gbps > 0 else 0.0
 
     summary.update(
         {
-            "ok": True,
             "tail_gbps": tail,
             "tail_median_gbps": tail_median,
             "tail_min_gbps": tail_min,
             "tail_peak_ratio": tail_peak_ratio,
-            # Keep the established metric keys; collapse scanning begins at
-            # the first interval reaching 50% of the raw peak.
-            "zero_intervals_after_peak": zero_after_baseline,
-            "stalled_intervals_after_peak": stalled_after_baseline,
+            "zero_intervals_after_peak": zero_after_activity,
+            "stalled_intervals_after_peak": stalled_after_activity,
         }
     )
 
+    reasons = []
+    if zero_after_activity > 0:
+        reasons.append(
+            f"{zero_after_activity} zero interval(s) after demonstrated throughput"
+        )
     if peak_gbps >= args.min_peak_gbps:
-        reasons = []
-        if zero_after_baseline > 0:
+        if post_activity_intervals >= 2 and stalled_after_activity >= 2:
             reasons.append(
-                f"{zero_after_baseline} zero interval(s) after sustained-rate baseline"
-            )
-        if len(after_baseline_outside) >= 2 and stalled_after_baseline >= 2:
-            reasons.append(
-                f"{stalled_after_baseline} stalled interval(s) after sustained-rate baseline"
+                f"{stalled_after_activity} stalled interval(s) after demonstrated throughput"
             )
         if tail_peak_ratio < args.min_tail_ratio:
             reasons.append(
                 f"tail/peak ratio {tail_peak_ratio:.3f} below {args.min_tail_ratio:.3f}"
             )
-        if reasons:
-            summary["collapse_detected"] = True
-            summary["collapse_reason"] = "; ".join(reasons)
+    if reasons:
+        summary["collapse_detected"] = True
+        summary["collapse_reason"] = "; ".join(reasons)
 
     return summary
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Summarize and flag iperf3 JSON interval collapse.")
+    parser = argparse.ArgumentParser(
+        description="Summarize and flag iperf3 JSON interval collapse.",
+        epilog=TRANSITION_COLLAPSE_POLICY,
+    )
     parser.add_argument("json_path", help="Path to an iperf3 -J output file")
     parser.add_argument("--tail-window", type=int, default=2)
     parser.add_argument("--min-full-interval-sec", type=float, default=0.95)
