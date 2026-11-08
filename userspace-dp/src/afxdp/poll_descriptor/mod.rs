@@ -2552,6 +2552,8 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         non_host_unicast_ip,
                         validation,
                         sessions,
+                        conntrack_v4_fd,
+                        conntrack_v6_fd,
                         now_ns,
                         now_secs,
                         worker_ctx,

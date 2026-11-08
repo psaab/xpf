@@ -1381,6 +1381,8 @@ fn run_stage_seeded(
             false,
             ValidationState::default(),
             &mut sessions,
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
             seed.now_ns,
             1,
             &fixture.worker_ctx(),
@@ -9089,6 +9091,86 @@ fn crossed_resurrection_derives_tcp_seq_ack_once_17268() {
     let derivations = crate::afxdp::frame::tcp_seq_ack_window_derivations_for_test() - before;
     assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: crossed hit resurrected and served");
     assert_eq!(derivations, 1, "two progress-arm resolves share one ACK derivation");
+}
+
+/// #18530: the forward conntrack mirror timeout tracks handshake completion.
+///
+/// The install publish seeds the row with the TCP opening timeout. A
+/// completing cache hit must update only the row's timeout at the Established
+/// transition, rather than waiting for the ct-slice or overwriting the rest
+/// of the live conntrack row with a fresh publish.
+///
+/// RED on revert: removing the transition-time timeout RMW leaves the fake
+/// row's `SessionValue.Timeout` at the opening residue.
+#[test]
+fn conntrack_mirror_timeout_tracks_handshake_completion_18530() {
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let entry = cached_entry();
+    let forward = test_key();
+    let opening_secs = (crate::session::SessionTimeouts::default().tcp_opening_ns
+        / 1_000_000_000) as u32;
+    let established_secs = (crate::session::SessionTimeouts::default().tcp_established_ns
+        / 1_000_000_000) as u32;
+    assert_ne!(opening_secs, established_secs, "fixture: windows must differ");
+
+    // Seed the mirror row as the install path does, with a stale opening
+    // window and its complete session metadata intact.
+    let _publish_guard = crate::afxdp::bpf_map::take_conntrack_publish_guard();
+    crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
+    assert_eq!(
+        crate::afxdp::bpf_map::publish_bpf_conntrack_entry(
+            crate::afxdp::bpf_map::CONNTRACK_TEST_MAP_FD,
+            -1,
+            &forward,
+            entry.decision.clone(),
+            &entry.metadata,
+            &fixture.forwarding.zone_name_to_id,
+            0,
+            0,
+            18656,
+            opening_secs,
+            crate::session::SessionOrigin::ForwardFlow,
+        ),
+        crate::afxdp::bpf_map::ConntrackPublishResult::Written,
+        "premise: install publish writes the forward mirror row"
+    );
+    let opening_row = crate::afxdp::bpf_map::conntrack_row_for_test(&forward)
+        .expect("premise: forward mirror row exists");
+    assert_eq!(opening_row.timeout_secs, opening_secs);
+    let publishes_before = crate::afxdp::bpf_map::conntrack_publishes().len();
+
+    let run = run_stage_seeded(
+        &fixture,
+        &frame,
+        test_meta(&frame),
+        entry,
+        0,
+        StageSeed {
+            install_handshake_pending: true,
+            ..StageSeed::default()
+        },
+    );
+    assert!(matches!(run.outcome, FlowCacheOutcome::Consumed), "premise: served");
+    assert_eq!(
+        run.sessions.timeout_secs_for(&forward),
+        established_secs,
+        "premise: the worker table moved to the established window"
+    );
+
+    let refreshed_row = crate::afxdp::bpf_map::conntrack_row_for_test(&forward)
+        .expect("forward mirror row remains present");
+    let mut expected_row = opening_row;
+    expected_row.timeout_secs = established_secs;
+    assert_eq!(
+        refreshed_row, expected_row,
+        "#18530: only the forward row's timeout changes to the established value"
+    );
+    assert_eq!(
+        crate::afxdp::bpf_map::conntrack_publishes().len(),
+        publishes_before,
+        "#18530: transition refresh must not republish and clobber live row fields"
+    );
 }
 #[path = "../alloc_free_spine_tests.rs"]
 mod alloc_free_spine_tests;

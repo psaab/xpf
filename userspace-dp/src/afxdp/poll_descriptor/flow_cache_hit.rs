@@ -163,6 +163,8 @@ pub(super) fn stage_flow_cache_hit(
     l2_group_unicast_ip: bool,
     validation: ValidationState,
     sessions: &mut SessionTable,
+    conntrack_v4_fd: libc::c_int,
+    conntrack_v6_fd: libc::c_int,
     now_ns: u64,
     now_secs: u64,
     worker_ctx: &WorkerContext,
@@ -997,6 +999,17 @@ pub(super) fn stage_flow_cache_hit(
                 worker_ctx.shared_sessions,
                 worker_ctx.shared_forward_wire_sessions,
                 &[(stage_forward_key.clone(), stage_forward_nat)],
+            );
+            // #18530: refresh the forward conntrack timeout only at this
+            // one-shot Established transition. The row RMW preserves live
+            // counters/NAT/timestamps; the ct-slice remains the fallback if
+            // the row is missing or tuple-gated.
+            let timeout_secs = sessions.timeout_secs_for(&stage_forward_key);
+            crate::afxdp::bpf_map::restamp_bpf_conntrack_timeout(
+                conntrack_v4_fd,
+                conntrack_v6_fd,
+                &stage_forward_key,
+                timeout_secs,
             );
         }
         // #3778/#11430/#11679: BA queue and LP inputs are packet-dependent,

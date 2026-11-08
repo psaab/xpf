@@ -866,6 +866,8 @@ pub(crate) struct ConntrackPublishRecord {
     pub(super) app_id: u16,
     pub(super) session_id: u64,
     pub(super) cluster_synced: bool,
+    /// #18530: timeout value visible in the conntrack row.
+    pub(super) timeout_secs: u32,
     pub(super) result: Option<ConntrackPublishResult>,
 }
 
@@ -1076,6 +1078,7 @@ fn publish_bpf_conntrack_entry_raw(
                 app_id,
                 session_id,
                 cluster_synced: origin.is_cluster_synced_origin(),
+                timeout_secs,
                 result: None,
             });
         });
@@ -1566,6 +1569,83 @@ fn restamp_bpf_conntrack_policy_raw(
     false
 }
 
+
+/// Restamp only the inactivity timeout on an existing conntrack row. The
+/// read/modify/write preserves counters, timestamps, NAT state, and session id.
+pub(super) fn restamp_bpf_conntrack_timeout(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    timeout_secs: u32,
+) -> bool {
+    // Match publish semantics: 0 means the session has no live entry, so leave
+    // the existing mirror timeout untouched rather than making it expire now.
+    if timeout_secs == 0 {
+        return true;
+    }
+    with_conntrack_rmw(key, false, || {
+        restamp_bpf_conntrack_timeout_raw(
+            conntrack_v4_fd,
+            conntrack_v6_fd,
+            key,
+            timeout_secs,
+        )
+    })
+}
+
+fn restamp_bpf_conntrack_timeout_raw(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    timeout_secs: u32,
+) -> bool {
+    let target = conntrack_target(conntrack_v4_fd, conntrack_v6_fd, key);
+    if target.v4_fd().is_some() {
+        if !matches!((&key.src_ip, &key.dst_ip), (IpAddr::V4(_), IpAddr::V4(_))) {
+            return false;
+        }
+        if target.is_no_map() {
+            return true;
+        }
+        let mut value: BpfSessionValueV4 = unsafe { std::mem::zeroed() };
+        if conntrack_lookup(target, key, ConntrackValueMutRef::V4(&mut value)) != Some(0) {
+            return false;
+        }
+        if value.timeout == timeout_secs {
+            return true;
+        }
+        value.timeout = timeout_secs;
+        return conntrack_update(
+            target,
+            key,
+            ConntrackValueRef::V4(&value),
+            libbpf_sys::BPF_EXIST as u64,
+        ) == Some(0);
+    }
+    if target.v6_fd().is_some() {
+        if !matches!((&key.src_ip, &key.dst_ip), (IpAddr::V6(_), IpAddr::V6(_))) {
+            return false;
+        }
+        if target.is_no_map() {
+            return true;
+        }
+        let mut value: BpfSessionValueV6 = unsafe { std::mem::zeroed() };
+        if conntrack_lookup(target, key, ConntrackValueMutRef::V6(&mut value)) != Some(0) {
+            return false;
+        }
+        if value.timeout == timeout_secs {
+            return true;
+        }
+        value.timeout = timeout_secs;
+        return conntrack_update(
+            target,
+            key,
+            ConntrackValueRef::V6(&value),
+            libbpf_sys::BPF_EXIST as u64,
+        ) == Some(0);
+    }
+    false
+}
 
 /// Update only the AppID label in an existing conntrack row. Read/modify/write
 /// preserves the live row's counters, timestamps, NAT state, and session id.

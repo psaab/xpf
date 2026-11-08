@@ -724,6 +724,7 @@ fn delete_test_row(key: &SessionKey) -> bool {
 /// caller's zeroed value is untouched, exactly as the pre-boundary seams did.
 #[cfg(test)]
 fn project_test_row_v4(value: &mut BpfSessionValueV4, row: &ConntrackPublishRecord) {
+    value.timeout = row.timeout_secs;
     value.session_id = row.session_id;
     value.app_id = row.app_id;
     value.flags = cluster_synced_flags(value.flags, row.cluster_synced);
@@ -737,6 +738,7 @@ fn project_test_row_v4(value: &mut BpfSessionValueV4, row: &ConntrackPublishReco
 /// V6 counterpart to [`project_test_row_v4`].
 #[cfg(test)]
 fn project_test_row_v6(value: &mut BpfSessionValueV6, row: &ConntrackPublishRecord) {
+    value.timeout = row.timeout_secs;
     value.session_id = row.session_id;
     value.app_id = row.app_id;
     value.flags = cluster_synced_flags(value.flags, row.cluster_synced);
@@ -762,6 +764,7 @@ fn update_test_row(key: &SessionKey, value: ConntrackValueRef<'_>, flags: u64) -
             ConntrackValueRef::V4(value) => {
                 let app_changed = row.app_id != value.app_id;
                 row.app_id = value.app_id;
+                row.timeout_secs = value.timeout;
                 row.cluster_synced = value.flags & SESS_FLAG_CLUSTER_SYNCED != 0;
                 row.ingress_zone = u32::from(value.ingress_zone);
                 row.egress_zone = u32::from(value.egress_zone);
@@ -775,6 +778,7 @@ fn update_test_row(key: &SessionKey, value: ConntrackValueRef<'_>, flags: u64) -
                 row.app_id = value.app_id;
                 row.cluster_synced = value.flags & SESS_FLAG_CLUSTER_SYNCED != 0;
                 row.ingress_zone = u32::from(value.ingress_zone);
+                row.timeout_secs = value.timeout;
                 row.egress_zone = u32::from(value.egress_zone);
                 if app_changed {
                     CONNTRACK_TEST_APP_ID_RESTAMP_WRITES
