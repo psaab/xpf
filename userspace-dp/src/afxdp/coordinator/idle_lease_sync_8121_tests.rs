@@ -1327,3 +1327,145 @@ fn explicit_source_record_missing_pool_never_routes_nat64_17099() {
     let counts = coord.import_idle_persistent_leases(&[rec], 10_000);
     assert_eq!((counts.installed, counts.skipped_unknown_pool), (0, 1), "kind-1 missing source must be unknown-pool, not NAT64: {counts:?}");
 }
+/// #18569 item 2: helper-level abort cell for transfer pre-activation
+/// (#18559/#18563). Go's effective inventory marks pre-active RGs Active=true,
+/// so pre-activation reaches this coordinator as an ordinary all-active
+/// inventory; EndTransferPreActivation then republishes the cluster truth
+/// (inactive) and the helper demotes. The issue's claim is that this
+/// promotion is equivalent to an old owner after an ordinary failover:
+/// `promote_imported_persistent_leases` is one-way (no demote-side unpromote),
+/// so an aborted requester ends with locally-owned imported persistent-NAT
+/// leases exactly like the old owner does.
+///
+/// The two arms compare equivalent ownership after different paths:
+/// (a) requester: a peer-imported standby lease -> pre-activation-equivalent
+///     all-active `update_ha_state` (fires the #16876
+///     `handle_activated_rgs` all-groups-forwarding-active gate) -> abort/
+///     deactivate via configured-inactive `update_ha_state`; a further
+///     post-abort import must stay peer-owned, because the configured
+///     inventory no longer says all-active (the late-import gate uses the
+///     same predicate);
+/// (b) old owner: its pre-existing local lease survives ordinary failover
+///     demotion.
+/// Both must MATCH: the same lease is locally owned and re-exportable in both
+/// arms after the abort/demote, and display still holds it. There is no Rust
+/// signal distinguishing "aborted requester" from "old owner" — `update_ha_state`
+/// receives only `active` bools — so if this equivalence holds the hazard is
+/// documented-equivalent, not a silent act; if arm (a) diverges the cell is RED
+/// and names the divergence.
+#[test]
+fn aborted_requester_lease_promotion_matches_old_owner_18569() {
+    fn requester_and_old_owner() -> (Coordinator, Coordinator) {
+        let mut old_owner = Coordinator::new();
+        old_owner.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1", "203.0.113.2"])]);
+        old_owner
+            .update_ha_state(&configured_ha_inventory(&[1, 2]))
+            .expect("fixture: old owner already committed all-active ownership");
+        let advertised = mint_local_idle_lease(&old_owner, "P");
+
+        let mut requester = Coordinator::new();
+        requester.forwarding.source_nat_rules =
+            parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1", "203.0.113.2"])]);
+        requester
+            .update_ha_state(&configured_ha_inventory(&[]))
+            .expect("fixture: requester starts with configured inactive RGs");
+        assert_eq!(
+            requester
+                .import_idle_persistent_leases(&[advertised], 10_000)
+                .installed,
+            1,
+            "fixture: peer lease must import on the standby"
+        );
+        assert!(
+            requester.export_idle_persistent_leases(11_000).is_empty(),
+            "fixture: standby must not echo an imported lease before activation"
+        );
+        (requester, old_owner)
+    }
+    fn lease_identity(coord: &Coordinator) -> (Vec<PoolIdleLease>, Vec<PoolDisplayLease>) {
+        (
+            coord.export_idle_persistent_leases(14_000),
+            coord.export_display_persistent_leases(14_000),
+        )
+    }
+
+    // Arm A — aborted requester. The pre-activation-equivalent publish IS
+    // configured_ha_inventory(&[1, 2]) (all active, as Go's effective view
+    // sends it); the abort IS configured_ha_inventory(&[]) (cluster truth
+    // republished by EndTransferPreActivation). Demote must not unpromote.
+    let (requester, old_owner) = requester_and_old_owner();
+    requester
+        .update_ha_state(&configured_ha_inventory(&[1, 2]))
+        .expect("pre-activation-equivalent activation");
+    requester
+        .update_ha_state(&configured_ha_inventory(&[]))
+        .expect("abort deactivation");
+    let (req_export, req_display) = lease_identity(&requester);
+
+    // Arm B — ordinary old owner: its pre-existing locally owned lease stays
+    // local after the same failover demotion. This compares two different
+    // origins (requester-imported vs old-owner-local) with the same wire lease.
+    old_owner
+        .update_ha_state(&configured_ha_inventory(&[]))
+        .expect("ordinary failover demotion");
+    let (owner_export, owner_display) = lease_identity(&old_owner);
+
+    assert_eq!(
+        req_export.len(),
+        1,
+        "#18569: aborted requester must keep the promoted lease locally owned (re-exportable), as the old owner does"
+    );
+    assert_eq!(
+        owner_export.len(),
+        1,
+        "#16876 control: old owner must keep the promoted lease locally owned after demotion"
+    );
+    assert_eq!(
+        req_export[0].pool_name, owner_export[0].pool_name,
+        "arms must agree on pool"
+    );
+    assert_eq!(
+        req_export[0].lease.translated_ip, owner_export[0].lease.translated_ip,
+        "arms must agree on translated ip"
+    );
+    assert_eq!(
+        req_export[0].lease.translated_port, owner_export[0].lease.translated_port,
+        "arms must agree on translated port"
+    );
+    assert_eq!(
+        req_display.len(),
+        owner_display.len(),
+        "arms must agree on display holdings"
+    );
+    assert_eq!(req_display.len(), 1, "display must still hold the lease");
+    assert_eq!(
+        req_display[0].lease.translated_ip, owner_display[0].lease.translated_ip,
+        "display arms must agree"
+    );
+
+    // Post-abort: the configured inventory no longer says all-active, so a
+    // FURTHER import must stay peer-owned (not exported) — promotion must not
+    // keep firing after the abort. Uses a second source lease so the check is
+    // about the gate, not the already-promoted key.
+    let alternate_translation = if req_export[0].lease.translated_ip
+        == "203.0.113.1".parse::<std::net::IpAddr>().unwrap()
+    {
+        "203.0.113.2"
+    } else {
+        "203.0.113.1"
+    };
+    let late = record("P", "10.9.8.7", alternate_translation, 40_001);
+    assert_eq!(
+        requester
+            .import_idle_persistent_leases(&[late], 20_000)
+            .installed,
+        1,
+        "fixture: second lease must import after the abort"
+    );
+    assert_eq!(
+        requester.export_idle_persistent_leases(21_000).len(),
+        1,
+        "post-abort import must stay peer-owned (not exported); only the pre-abort promoted lease is local"
+    );
+}
