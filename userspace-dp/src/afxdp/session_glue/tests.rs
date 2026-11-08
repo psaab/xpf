@@ -13445,8 +13445,15 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
     // cohort drains over consecutive continuation calls. The ring is NOT
     // drained between them, so it still overflows into the returned suffix.
     let mut expired = sessions.expire_stale_entries(EXPIRE_NS);
+    let mut calls = 1usize;
     while sessions.expiry_backlog() {
         expired.extend(sessions.expire_stale_entries(EXPIRE_NS));
+        calls += 1;
+        // A drain that stops making progress must fail, not hang.
+        assert!(
+            calls <= N.div_ceil(crate::session::EXPIRY_PASS_MAX_REAPS) + 1,
+            "#18780: the expiry backlog did not drain within ceil(N / cap) calls"
+        );
     }
     assert_eq!(expired.len(), N);
     let ring_deltas = sessions.drain_deltas(usize::MAX);

@@ -1668,6 +1668,7 @@ fn wheel_sustained_overload_drains_all_buckets() {
     while table.expiry_backlog() {
         expired.extend(table.expire_stale_entries(advance));
         calls += 1;
+        assert!(calls <= N.div_ceil(EXPIRY_PASS_MAX_REAPS) + 1, "#18780: drain must progress");
     }
     assert_eq!(expired.len(), N, "all sessions must drain");
     assert_eq!(
@@ -7439,9 +7440,14 @@ fn run_expire_ha(
     // holding the whole pass so the HA cells keep asserting per-pass counts.
     let mut expired = table.expire_stale_entries_ha(now_ns, Some(&ctx));
     let mut pass = table.last_pop_stats;
+    let mut continuations = 0u32;
     while table.expiry_backlog {
         expired.extend(table.expire_stale_entries_ha(now_ns, Some(&ctx)));
         pass.accumulate(table.last_pop_stats);
+        continuations += 1;
+        // Generous (a 30-day simulated jump needs a handful); a drain that
+        // stops making progress must fail, not hang.
+        assert!(continuations <= 10_000, "#18780: the expiry backlog never drained");
     }
     table.last_pop_stats = pass;
     expired
