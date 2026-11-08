@@ -912,6 +912,7 @@ pub(crate) fn worker_loop(
             validation = live_validation;
         }
         if let Some(new_forwarding) = new_forwarding_opt {
+            // Compare BEFORE assignment — needs both old and new.
             let cos_changed =
                 cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
             // #18560: the binding's CoS queues are rebuilt for the new

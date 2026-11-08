@@ -13811,6 +13811,13 @@ fn worker_sites_publish_the_syn_cookie_key_ring_9173() {
             "{site} must not publish the key without the ring"
         );
     }
+    let loop_body = code(include_str!("../worker/loop_body/mod.rs"));
+    assert!(
+        loop_body.contains(
+            "ifletSome(new_forwarding)=new_forwarding_opt{letcos_changed=cos_runtime_config_changed(forwarding.as_ref(),new_forwarding.as_ref());prev_views.on_forwarding_swap(cos_changed);ifadopt_rotated_forwarding(new_forwarding,cos_changed,"
+        ),
+        "worker_loop must route its forwarding-rotation branch into reconciliation"
+    );
 }
 
 // #9821 cell 13 — the CONSUMER half of the Go→Rust snapshot contract. The

@@ -1,11 +1,11 @@
 // #13075 (D4-12) — session expiry / GC teardown helpers, extracted from
 // loop_body/mod.rs (pure code motion; see that file's header).
 //
-// These run on the worker's ~1s GC sweep and on control-plane delete
-// dispatch — never per packet. Contents: missing-neighbor seed retirement
-// (#10419), the expired-session reap (SNAT/NAT64 release + BPF teardown +
-// flow-cache eviction, #3776/#4381/#6211), the #10591 production test
-// seams, the DeleteSynced flow-cache invalidation (#6457), the
+// These run on the worker's ~1s GC sweep, on control-plane delete dispatch,
+// and once on worker exit — never per packet. Contents: missing-neighbor
+// seed retirement (#10419), the expired-session reap (SNAT/NAT64 release +
+// BPF teardown + flow-cache eviction, #3776/#4381/#6211), the #10591 production
+// test seams, the DeleteSynced flow-cache invalidation (#6457), the
 // create-counted expiry counter (#2428), and #18693 worker-exit cleanup.
 // The seams keep their `pub(in crate::afxdp)` visibility via the re-export
 // in mod.rs, so `worker/mod.rs` and the #10591 window tests are unchanged.
