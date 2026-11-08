@@ -360,10 +360,6 @@ def summarize(path, args):
     # Excusal uses only streams carrying data in the five full seconds before
     # the event, exactly the set the crash cell judges (#18708).
     resume_event_secs = [float(event_sec) for event_sec in args.resume_event_sec]
-    resume_windows = merge_windows(
-        (event_sec, event_sec + args.resume_window_sec)
-        for event_sec in resume_event_secs
-    )
     # Match the crash cell's judged set: only streams carrying data in a full
     # interval whose start is in [event-5, event) are eligible for resume-zero
     # excusal. A stream already stalled before that window is not judged by the
@@ -383,16 +379,17 @@ def summarize(path, args):
                 for event_sec in resume_event_secs:
                     if event_sec - 5 <= stream_start < event_sec:
                         resume_pre_streams[event_sec].add(stream_id)
-    resume_window_streams = []
-    for lo, hi in resume_windows:
-        event_secs = (
-            event_sec for event_sec in resume_event_secs
-            if event_sec <= hi + 1e-9 and event_sec + args.resume_window_sec >= lo - 1e-9
+    # Keep each window paired with its own crash-cell stream set. Merging
+    # windows first would let a stream carried before event B excuse zeros
+    # inside event A's window even if A's cell does not judge that stream.
+    resume_window_streams = [
+        (
+            event_sec,
+            event_sec + args.resume_window_sec,
+            resume_pre_streams[event_sec],
         )
-        eligible_streams = set()
-        for event_sec in event_secs:
-            eligible_streams.update(resume_pre_streams[event_sec])
-        resume_window_streams.append((lo, hi, eligible_streams))
+        for event_sec in resume_event_secs
+    ]
 
     def resume_excused(stream_id, start, end_s):
         return last_data_start.get(stream_id, -1.0) >= end_s - 1e-9 and any(

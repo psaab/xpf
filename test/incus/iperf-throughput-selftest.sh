@@ -616,20 +616,26 @@ ok "producer exclusion is decided by the full-length interval bounds, not a shor
 straggler_fixture="${fixture_dir}/straggler.jsonl"
 dead_fixture="${fixture_dir}/straggler-dead.jsonl"
 stalled_fixture="${fixture_dir}/stalled-into-window.jsonl"
-python3 - "$straggler_fixture" "$dead_fixture" "$stalled_fixture" <<'PY'
+overlap_fixture="${fixture_dir}/overlap-events.jsonl"
+python3 - "$straggler_fixture" "$dead_fixture" "$stalled_fixture" "$overlap_fixture" <<'PY'
 import json
 import pathlib
 import sys
 
-def write(path, resume_at, stall_at=10):
+def write(path, resume_at, stall_at=10, zero_seconds=()):
     events = []
     for second in range(30):
         streams = []
         total = 0
         for sid in range(1, 5):
             bps = 0 if (
-                sid == 4 and second >= stall_at
-                and (resume_at is None or second < resume_at)
+                sid == 4 and (
+                    second in zero_seconds
+                    or (
+                        second >= stall_at
+                        and (resume_at is None or second < resume_at)
+                    )
+                )
             ) else 6_000_000_000
             total += bps
             streams.append({"socket": sid, "start": second, "end": second + 1, "bits_per_second": bps})
@@ -640,14 +646,18 @@ def write(path, resume_at, stall_at=10):
 write(sys.argv[1], 15)
 write(sys.argv[2], None)
 write(sys.argv[3], 15, stall_at=5)
+# s4 is not a T1=10 carrier, but it is a T2=20 carrier. The T1+5 zero
+# lies in overlapping resume windows and must not inherit T2's eligibility.
+write(sys.argv[4], 30, stall_at=30, zero_seconds={5, 6, 7, 8, 9, 15})
 PY
 straggler_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10 --resume-event-sec 10)
 straggler_twin=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10)
 dead_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$dead_fixture" --event-sec 10 --resume-event-sec 10)
 stalled_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$stalled_fixture" --event-sec 10 --resume-event-sec 10)
-python3 - "$straggler_out" "$straggler_twin" "$dead_out" "$stalled_out" <<'PY' || bad "#18708: resume-zero excusal must match the pre-crash streams the crash cell judges"
+overlap_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$overlap_fixture" --event-sec 10 --resume-event-sec 10 --resume-event-sec 20 --resume-window-sec 15)
+python3 - "$straggler_out" "$straggler_twin" "$dead_out" "$stalled_out" "$overlap_out" <<'PY' || bad "#18708: resume-zero excusal must match each event's pre-crash stream set"
 import json, sys
-straggler, twin, dead, stalled = (json.loads(arg) for arg in sys.argv[1:])
+straggler, twin, dead, stalled, overlap = (json.loads(arg) for arg in sys.argv[1:])
 assert straggler["stream_zero_intervals_total"] == 5, straggler
 assert straggler["stream_zero_intervals_outside_events_total"] == 0, straggler
 assert straggler["stream_zero_intervals_resume_excused_total"] == 2, straggler
@@ -658,8 +668,11 @@ assert dead["stream_zero_intervals_resume_excused_total"] == 0, dead
 assert stalled["stream_zero_intervals_total"] == 10, stalled
 assert stalled["stream_zero_intervals_outside_events_total"] == 7, stalled
 assert stalled["stream_zero_intervals_resume_excused_total"] == 0, stalled
+assert overlap["stream_zero_intervals_total"] == 6, overlap
+assert overlap["stream_zero_intervals_outside_events_total"] == 6, overlap
+assert overlap["stream_zero_intervals_resume_excused_total"] == 0, overlap
 PY
-ok "#18708: only a pre-crash carrier's resumed zeros are excused; a stream stalled before the crash set is still charged"
+ok "#18708: resumed zeros are excused only for the stream set judged by that exact event window"
 python3 - "$SCRIPT_DIR/../../scripts/iperf-json-metrics.py" "$stalled_fixture" "$stalled_out" <<'PY' || bad "#18708: ungated resume excusal must be killed by the stalled-into-window fixture"
 import contextlib
 import io
