@@ -189,6 +189,7 @@ func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheri
 	t.statusClock.Store(&helperStatusClock{gen: gen, startedAt: now})
 	t.lastAnswer = now
 	t.silentTrips = 0
+	t.silentSince = time.Time{}
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak, t.lastStatusAt = 0, -1, 0, time.Time{}
 	t.inherited = inheritNotReady
 	t.forwardingReadySeen = false
@@ -237,6 +238,7 @@ func (t *helperLivenessTracker) retireGeneration(keepInherited bool) bool {
 	t.retired = true
 	t.statusClock.Store(nil)
 	t.lastAnswer = time.Time{} // no live generation: the answer age is undefined, not growing
+	t.silentSince, t.silentTrips = time.Time{}, 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
 	if !preserveInherited {
 		t.suspected, t.inherited = false, false

@@ -87,6 +87,56 @@ func TestDemoteBeforeKill18685(t *testing.T) {
 	}
 }
 
+func TestSilenceEvidenceDoesNotCrossGeneration18685(t *testing.T) {
+	t.Run("intentional_stop_clears_election_debt", func(t *testing.T) {
+		now := time.Now()
+		oldStart := now.Add(-10 * time.Second)
+		m := New()
+		m.liveTrack.reset(1, oldStart, false)
+		m.liveTrack.noteSilent(1, oldStart, oldStart.Add(time.Second))
+		m.liveTrack.noteSilent(1, oldStart.Add(time.Second), oldStart.Add(2*time.Second))
+
+		m.liveTrack.retire()
+		if m.liveTrack.wedgeSuspected(now) || m.HelperElectionNotReady() {
+			t.Fatal("intentional stop retained silence-triggered election debt")
+		}
+		if due, span := m.liveTrack.killDue(now); due {
+			t.Fatalf("intentional stop retained kill-due silence span %s", span)
+		}
+
+		freshStart := now
+		m.liveTrack.reset(2, freshStart, false)
+		m.liveTrack.noteSilent(2, freshStart, freshStart.Add(time.Second))
+		m.liveTrack.noteSilent(2, freshStart.Add(time.Second), freshStart.Add(2*time.Second))
+		if due, span := m.liveTrack.killDue(freshStart.Add(3 * time.Second)); due {
+			t.Fatalf("two fresh short failures reached kill span %s", span)
+		}
+	})
+
+	t.Run("reset_clears_anchor_and_fresh_silence_kills_at_bound", func(t *testing.T) {
+		now := time.Now()
+		oldStart := now.Add(-45 * time.Second)
+		m := New()
+		m.liveTrack.reset(1, oldStart, false)
+		m.liveTrack.noteSilent(1, oldStart, oldStart.Add(time.Second))
+		m.liveTrack.noteSilent(1, oldStart.Add(time.Second), oldStart.Add(2*time.Second))
+
+		freshStart := now
+		m.liveTrack.reset(2, freshStart, false)
+		m.liveTrack.noteSilent(2, freshStart, freshStart.Add(time.Second))
+		m.liveTrack.noteSilent(2, freshStart.Add(time.Second), freshStart.Add(2*time.Second))
+		if due, span := m.liveTrack.killDue(freshStart.Add(3 * time.Second)); due {
+			t.Fatalf("two fresh short failures inherited old kill span %s", span)
+		}
+		if due, _ := m.liveTrack.killDue(freshStart.Add(helperWedgeMinSpan - time.Nanosecond)); due {
+			t.Fatal("fresh silence became kill-due before helperWedgeMinSpan")
+		}
+		if due, span := m.liveTrack.killDue(freshStart.Add(helperWedgeMinSpan)); !due {
+			t.Fatalf("fresh generation did not become kill-due at its own bound (span %s)", span)
+		}
+	})
+}
+
 // TestSlowButAnsweringNeverDemotes18685: answers that each take up to just
 // under the deadline, and a lone timeout followed by an answer, never raise
 // the verdict.
