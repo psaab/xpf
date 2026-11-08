@@ -178,6 +178,33 @@ func TestLocalKeywordOnlyUnknownRefused18668(t *testing.T) {
 // pipes after value slots and `AcceptsArgs` tails remain with their handlers;
 // and the two pre-existing refusal controls keep refusing exactly as before
 // #18668.
+// #19015: the local CLI admits exactly the two HA loss probes on the
+// data-plane statistics leaf (gate-level; the probe provider is unset in
+// this fixture, so an admitted probe reaches the provider check, not the
+// gate refusal).
+func TestLocalDataPlaneStatisticsLossProbes19015(t *testing.T) {
+	c := committedStore18668(t)
+	for _, line := range []string{
+		"show chassis cluster data-plane statistics loss-baseline",
+		"show chassis cluster data-plane statistics loss-since opaque-token",
+	} {
+		err := c.dispatch(line)
+		if err != nil && strings.Contains(err.Error(), "unknown show chassis cluster data-plane statistics command") {
+			t.Errorf("dispatch(%q) gate-refused: %v", line, err)
+		}
+	}
+	for _, line := range []string{
+		"show chassis cluster data-plane statistics loss-baseline extra",
+		"show chassis cluster data-plane statistics loss-since",
+		"show chassis cluster data-plane statistics loss-since a b",
+	} {
+		err := c.dispatch(line)
+		if err == nil || !strings.Contains(err.Error(), "unknown show chassis cluster data-plane statistics command") {
+			t.Errorf("dispatch(%q) = %v; want gate refusal", line, err)
+		}
+	}
+}
+
 func TestLocalKeywordOnlyControls18668(t *testing.T) {
 	// Bare keyword nodes: help + nil.
 	for _, line := range []string{

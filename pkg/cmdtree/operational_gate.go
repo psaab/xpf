@@ -92,7 +92,7 @@ func ValidateOperationalGate(words []string) error {
 	// so locate a pure keyword leaf anywhere in the line and reject any
 	// unconsumed suffix, including a bare or glued pipe. Filters do not reach
 	// this gate: dispatch strips implemented filter stages first.
-	if path, consumed, optionalSelector, leaf := canonicalKeywordLeafPrefix(words); leaf && consumed < len(words) {
+	if path, consumed, optionalSelector, lossProbe, leaf := canonicalKeywordLeafPrefix(words); leaf && consumed < len(words) {
 		if OperationalPipeConsumers[path] {
 			return nil
 		}
@@ -112,6 +112,15 @@ func ValidateOperationalGate(words []string) error {
 			}
 		}
 		tail := words[consumed:]
+		if !optionsReentry && lossProbe {
+			// #19015: the data-plane statistics handler serves the two
+			// private HA probes (#18635). Admit exactly those tails; every
+			// other suffix keeps the #18666 refusal below.
+			if (len(tail) == 1 && tail[0] == "loss-baseline") ||
+				(len(tail) == 2 && tail[0] == "loss-since") {
+				return nil
+			}
+		}
 		if !optionsReentry && optionalSelector && tail[0] != "|" &&
 			(!strings.Contains(tail[0], "|") || isQuotedOperationalWord(tail[0])) {
 			// A small number of terminal handlers consume exactly one
@@ -141,9 +150,9 @@ func ValidateOperationalGate(words []string) error {
 // words, including when unconsumed words follow it. A value or free-form
 // argument ending is not a pure keyword leaf even if its accepting node has no
 // keyword children.
-func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, optionalSelector bool, ok bool) {
+func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, optionalSelector bool, lossProbe bool, ok bool) {
 	if len(words) == 0 {
-		return "", 0, false, false
+		return "", 0, false, false, false
 	}
 	current := OperationalTree
 	var node *Node
@@ -153,11 +162,11 @@ func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, opti
 			(node.RequiresValue && node.HasDynamic())) {
 			// A pending value slot cannot be skipped by resolving a child
 			// keyword; Canonicalize rejects that shape.
-			return "", 0, false, false
+			return "", 0, false, false, false
 		}
 		name, next, _, resolved := resolveTreeWord(current, word)
 		if !resolved {
-			return "", 0, false, false
+			return "", 0, false, false, false
 		}
 		canonicalLen += len(name) + 1
 		node = next
@@ -166,7 +175,7 @@ func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, opti
 			continue
 		}
 		if node.HasDynamic() || node.IsTypedLeaf() {
-			return "", 0, false, false
+			return "", 0, false, false, false
 		}
 		// A childless AcceptsArgs node has no keyword children either, but
 		// accepts a free-form tail. Probe one impossible trailing token
@@ -176,7 +185,7 @@ func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, opti
 		copy(probe, words[:i+1])
 		probe[i+1] = "\x00"
 		if _, res := Canonicalize(OperationalTree, probe); res == CanonicalOK {
-			return "", 0, false, false
+			return "", 0, false, false, false
 		}
 		var canonical strings.Builder
 		canonical.Grow(canonicalLen - 1)
@@ -184,7 +193,7 @@ func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, opti
 		for j, part := range words[:i+1] {
 			name, next, _, resolved := resolveTreeWord(current, part)
 			if !resolved {
-				return "", 0, false, false
+				return "", 0, false, false, false
 			}
 			if j > 0 {
 				canonical.WriteByte(' ')
@@ -192,9 +201,9 @@ func canonicalKeywordLeafPrefix(words []string) (path string, consumed int, opti
 			canonical.WriteString(name)
 			current = next.Children
 		}
-		return canonical.String(), i + 1, node.OptionalSelector, true
+		return canonical.String(), i + 1, node.OptionalSelector, node.LossProbe, true
 	}
-	return "", 0, false, false
+	return "", 0, false, false, false
 }
 
 // ClassifyComparePipe reports whether words contain an operational compare

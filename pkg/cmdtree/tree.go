@@ -145,6 +145,11 @@ type Node struct {
 	// than AcceptsArgs: arbitrary tails and output pipes are not admitted.
 	// ValidateOperationalGate uses it only for that selector position.
 	OptionalSelector bool
+	// LossProbe marks the data-plane statistics leaf, whose handler also
+	// serves the two private HA probes `loss-baseline` and
+	// `loss-since <token>` (#18635). The gate admits exactly those tails and
+	// refuses every other suffix. ValidateOperationalGate is the only reader.
+	LossProbe bool
 
 	// Options marks a node whose dispatcher parses its children as combinable
 	// OPTIONS, in any order (#9505): `show security flow session zone trust
@@ -424,7 +429,7 @@ var OperationalTree = map[string]*Node{
 					"statistics": {Desc: "Show control-plane statistics"},
 				}},
 				"data-plane": {Desc: "Show data-plane information", Children: map[string]*Node{
-					"statistics": {Desc: "Show data-plane statistics"},
+					"statistics": {Desc: "Show data-plane statistics", LossProbe: true},
 					"interfaces": {Desc: "Show data-plane interfaces"},
 					"fairness":   {Desc: "Show userspace fairness RSS structure"},
 					"flows": {Desc: "Show userspace flow-to-worker diagnostics", Children: map[string]*Node{

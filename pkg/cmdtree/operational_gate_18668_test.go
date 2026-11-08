@@ -41,6 +41,26 @@ func TestOperationalGate18668(t *testing.T) {
 			want:  `syntax error: "show system license" does not accept the output modifier "| display json"`,
 		},
 		{
+			name:  "loss-baseline with extra word",
+			words: []string{"show", "chassis", "cluster", "data-plane", "statistics", "loss-baseline", "extra"},
+			want:  `unknown show chassis cluster data-plane statistics command: loss-baseline`,
+		},
+		{
+			name:  "loss-since missing token",
+			words: []string{"show", "chassis", "cluster", "data-plane", "statistics", "loss-since"},
+			want:  `unknown show chassis cluster data-plane statistics command: loss-since`,
+		},
+		{
+			name:  "loss-since two tokens",
+			words: []string{"show", "chassis", "cluster", "data-plane", "statistics", "loss-since", "a", "b"},
+			want:  `unknown show chassis cluster data-plane statistics command: loss-since`,
+		},
+		{
+			name:  "statistics junk suffix",
+			words: []string{"show", "chassis", "cluster", "data-plane", "statistics", "junk"},
+			want:  `unknown show chassis cluster data-plane statistics command: junk`,
+		},
+		{
 			name:  "leaf trailing bare pipe",
 			words: []string{"show", "version", "|"},
 			want:  `syntax error: "show version" does not accept the output modifier "|"`,
@@ -143,10 +163,15 @@ func TestOperationalGateControls18668(t *testing.T) {
 		{"show", "security", "flow", "session", "summary", "zone", "trust"},
 		{"show", "class-of-service", "interface", "reth0.80"},
 		{"show", "class-of-service", "interface", "'|'"},
+		{"show", "chassis", "cluster", "data-plane", "statistics", "loss-baseline"},
+		{"show", "chassis", "cluster", "data-plane", "statistics", "loss-since", "opaque-token"},
 	} {
 		if err := ValidateOperationalGate(words); err != nil {
 			t.Errorf("ValidateOperationalGate(%q) = %v; want nil", words, err)
 		}
+	}
+	if !OperationalTree["show"].Children["chassis"].Children["cluster"].Children["data-plane"].Children["statistics"].LossProbe {
+		t.Fatal("show chassis cluster data-plane statistics must declare its loss probes")
 	}
 	if !OperationalTree["show"].Children["class-of-service"].Children["interface"].OptionalSelector {
 		t.Fatal("show class-of-service interface must declare its one optional selector")

@@ -64,7 +64,7 @@ func (f *rec18664) ShowRollback(_ context.Context, in *pb.ShowRollbackRequest, _
 }
 
 func (f *rec18664) ShowText(_ context.Context, in *pb.ShowTextRequest, _ ...grpc.CallOption) (*pb.ShowTextResponse, error) {
-	f.text = append(f.text, in.GetTopic())
+	f.text = append(f.text, in.GetTopic()+"filter="+in.GetFilter())
 	if in.GetTopic() == "class-of-service:reth0.80" {
 		return &pb.ShowTextResponse{Output: "Interface: reth0.80\n"}, nil
 	}
@@ -132,6 +132,41 @@ func TestOpShowConfigurationDisplayPipe18664(t *testing.T) {
 // fail on revert. They pin that the pipe-aware gate does not break them. The
 // keyword-only `| display json` rows are revert-sensitive by message: still
 // refused, but naming the modifier instead of `unknown ... command: |`.
+// #19015: the data-plane statistics leaf serves the private HA probes
+// through the text proxy; the gate admits exactly those tails.
+func TestOpDataPlaneStatisticsLossProbes19015(t *testing.T) {
+	for _, tc := range []struct{ line, filter string }{
+		{"show chassis cluster data-plane statistics loss-baseline", "loss-baseline"},
+		{"show chassis cluster data-plane statistics loss-since opaque-token", "loss-since opaque-token"},
+	} {
+		t.Run(tc.line, func(t *testing.T) {
+			f, _, err := dispatch18664(t, tc.line, false)
+			if err != nil {
+				t.Fatalf("dispatch(%q) = %v; want ShowText with filter %q", tc.line, err, tc.filter)
+			}
+			if len(f.text) != 1 || f.text[0] != "chassis-cluster-data-plane-statisticsfilter="+tc.filter {
+				t.Fatalf("dispatch(%q) text=%v; want one data-plane statistics ShowText filter=%q", tc.line, f.text, tc.filter)
+			}
+		})
+	}
+	for _, line := range []string{
+		"show chassis cluster data-plane statistics loss-baseline extra",
+		"show chassis cluster data-plane statistics loss-since",
+		"show chassis cluster data-plane statistics loss-since a b",
+		"show chassis cluster data-plane statistics junk",
+	} {
+		t.Run(line, func(t *testing.T) {
+			f, out, err := dispatch18664(t, line, false)
+			if err == nil {
+				t.Fatalf("dispatch(%q) succeeded (out %q); want gate refusal", line, out)
+			}
+			if f.calls() != 0 {
+				t.Fatalf("dispatch(%q) issued %d RPCs; want refusal before the wire", line, f.calls())
+			}
+		})
+	}
+}
+
 func TestOpPipeOnOtherCommands18664(t *testing.T) {
 	t.Run("show chassis cluster status | match node", func(t *testing.T) {
 		f, out, err := dispatch18664(t, "show chassis cluster status | match node", false)
