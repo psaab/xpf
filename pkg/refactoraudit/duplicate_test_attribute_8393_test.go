@@ -690,7 +690,8 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 			if scope, ok := rustFunctionScope19013(src, start); ok &&
 				(rustParamShadows19013(scope.args, name) ||
 					rustLetShadows19013(src, name, scope.start, start) ||
-					rustClosureParamShadows19013(src, name, scope.start, start)) {
+					rustClosureParamShadows19013(src, name, scope.start, start) ||
+					rustForBindingShadows19013(src, name, scope.start, start)) {
 				continue
 			}
 		}
@@ -1103,7 +1104,7 @@ func rustClosureStart19013(src string, at, scopeStart int) bool {
 		return true
 	}
 	switch src[prev-1] {
-	case '=', '(', '[', '{', ',', ';', ':':
+	case '=', '(', '[', '{', ',', ';', ':', '&':
 		return true
 	}
 	end := prev
@@ -1111,7 +1112,7 @@ func rustClosureStart19013(src string, at, scopeStart int) bool {
 		prev--
 	}
 	switch src[prev:end] {
-	case "move", "async", "return":
+	case "move", "async", "return", "mut":
 		return true
 	default:
 		return false
@@ -1194,6 +1195,111 @@ func rustClosureBodyEnd19013(src string, start int) int {
 		i++
 	}
 	return len(src)
+}
+
+func rustForBindingShadows19013(src, name string, start, pos int) bool {
+	for i := start; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if !rustWordAt19013(src, i, "for") {
+			i++
+			continue
+		}
+		patternStart := skipRustTrivia19013(src, i+len("for"))
+		in := rustForIn19013(src, patternStart, pos)
+		if in < 0 {
+			i += len("for")
+			continue
+		}
+		if rustPatternBinds19013(src[patternStart:in], name) {
+			body := rustForBodyOpen19013(src, in+len("in"), pos)
+			if body >= 0 && pos < rustMatchingBrace19013(src, body) {
+				return true
+			}
+		}
+		i = in + len("in")
+	}
+	return false
+}
+
+func rustForIn19013(src string, start, limit int) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 && rustWordAt19013(src, i, "in") {
+			return i
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		}
+		i++
+	}
+	return -1
+}
+
+func rustPatternBinds19013(pattern, name string) bool {
+	for i := 0; i < len(pattern); {
+		if next, skip := skipRustNonCodeFnItem19013(pattern, i); skip {
+			i = next
+			continue
+		}
+		if strings.HasPrefix(pattern[i:], name) {
+			end := i + len(name)
+			if (i == 0 || (!rustIdentByte19013(pattern[i-1]) && pattern[i-1] != ':')) &&
+				(end == len(pattern) || (!rustIdentByte19013(pattern[end]) && pattern[end] != ':')) {
+				return true
+			}
+			i = end
+			continue
+		}
+		i++
+	}
+	return false
+}
+
+func rustForBodyOpen19013(src string, start, limit int) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if src[i] == '{' && paren == 0 && bracket == 0 && brace == 0 {
+			return i
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		}
+		i++
+	}
+	return -1
 }
 
 func rustLetShadows19013(src, name string, start, pos int) bool {
@@ -1506,10 +1612,11 @@ func TestNoUnregisteredAssertingTestFn15255(t *testing.T) {
 // "found nothing in the repo" proves nothing.
 func TestUnregisteredTestFnDetector15255(t *testing.T) {
 	cases := []struct {
-		name string
-		rel  string
-		src  string
-		want int
+		name        string
+		rel         string
+		src         string
+		want        int
+		wantFinding string
 	}{
 		{
 			name: "displaced test with no attribute and no caller",
@@ -1578,6 +1685,24 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			want: 1,
 		},
 		{
+			name: "borrowed closure parameter does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let f = &|lost: fn()| lost(); f(); }\n",
+			want: 1,
+		},
+		{
+			name: "twice-borrowed closure parameter does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let f = &&|lost: fn()| lost(); f(); }\n",
+			want: 1,
+		},
+		{
+			name: "for-loop binding does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { for lost in [|| {}] { lost(); } }\n",
+			want: 1,
+		},
+		{
 			name: "unrelated qualified item does not reference the unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { runner(Other::lost); }\n",
@@ -1588,14 +1713,16 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			rel:  "tests_x.rs",
 			src: "fn lost() { assert!(true); }\nimpl Owner {\n    fn lost() { assert!(true); }\n}\n" +
 				"#[test]\nfn uses() { lost(); }\n",
-			want: 1,
+			want:        1,
+			wantFinding: ":3 — fn lost()",
 		},
 		{
 			name: "owner-qualified method call does not resolve same-named free fn",
 			rel:  "tests_x.rs",
 			src: "fn lost() { assert!(true); }\nimpl Owner {\n    fn lost() { assert!(true); }\n}\n" +
 				"#[test]\nfn uses() { Owner::lost(); }\n",
-			want: 1,
+			want:        1,
+			wantFinding: ":1 — fn lost()",
 		},
 		{
 			name: "comment call mention does not reference an unregistered fn",
@@ -1722,6 +1849,9 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 		if len(got) != tc.want {
 			t.Errorf("%s: got %d findings, want %d\n  findings: %v\n  src:\n%s",
 				tc.name, len(got), tc.want, got, tc.src)
+		}
+		if tc.wantFinding != "" && (len(got) != 1 || !strings.Contains(got[0], tc.wantFinding)) {
+			t.Errorf("%s: findings %v, want declaration containing %q", tc.name, got, tc.wantFinding)
 		}
 	}
 	// The gated-#[path] half of the region model: the declaring file
