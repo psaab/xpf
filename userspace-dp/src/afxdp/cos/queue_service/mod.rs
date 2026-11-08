@@ -38,7 +38,7 @@ use super::{
     CoSQueueLeaseAcquireTelemetry, COS_MIN_BURST_BYTES,
 };
 // #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
-use super::exact_demand::{exact_demand_rate_bytes_for_mask, serviceable_exact_demand_mask};
+use super::exact_demand::{exact_demand_rate_bytes_for_mask, local_exact_demand_mask};
 use super::fairness::account_flow_bucket_tx;
 use super::flow_hash::cos_flow_bucket_index;
 
@@ -404,8 +404,7 @@ fn build_nonexact_cos_batch(
                 // work-conserving, but while exact queues are backlogged it may
                 // consume only the residual root rate after backlogged exact
                 // guarantee rates are reserved.
-                let exact_demand_mask =
-                    serviceable_exact_demand_mask(root) | peer_exact_demand_mask;
+                let exact_demand_mask = local_exact_demand_mask(root) | peer_exact_demand_mask;
                 let exact_demand_rate = exact_demand_rate_bytes_for_mask(root, exact_demand_mask);
                 let nonexact_budget = nonexact_surplus_budget_under_exact_demand(
                     root,

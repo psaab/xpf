@@ -369,32 +369,35 @@ pub(in crate::afxdp) fn cos_item_len(item: &CoSPendingTxItem) -> u64 {
     }
 }
 
-/// #hb166 T-6(b): a guaranteed exact queue counts as REAL (serviceable)
-/// demand for the surplus-reservation masks only when it can actually ship
-/// its head packet right now — runnable, non-empty, and both the root and
-/// per-queue token buckets cover the head length. A v8-starved /
-/// token-parked exact class that ships zero bytes is NOT serviceable, so it
-/// must release its reserved rate to best-effort (work conservation)
-/// instead of zeroing the BE residual while the link idles.
+/// Whether a guaranteed exact queue DEMANDS its reserved rate: it is
+/// backlogged and its OWN token bucket covers the head packet, so the only
+/// thing that can hold it back is the shared root. Callers still apply the
+/// `exact && guarantee_enabled` config gate separately.
 ///
-/// This is exactly the per-queue predicate the shared_exact backlog already
-/// publishes as `serviceable_exact_backlog_bytes`; gating the demand MASKS
-/// on it makes the reservation consistent with the published serviceability
-/// signal. Callers still apply the `exact && guarantee_enabled` config
-/// gate separately.
+/// #hb166 T-6(b) introduced the release rule this keeps: an exact class
+/// that is backlogged but ships zero bytes because it is limited by ITSELF
+/// (its own rate is spent and it parked on queue tokens, or its v8 lease is
+/// not granting) must not reserve its rate, or best-effort is held to the
+/// residual while the link idles. Every such state has `tokens < head`.
+///
+/// #18748 narrowed what counts as "limited by itself". T-6(b) required the
+/// queue to be serviceable right now: runnable and holding ROOT tokens for
+/// its head as well. Every exact selector checks the root before the queue
+/// tokens and parks a root-short queue on `RootTokenStarvation`, so a queue
+/// that lost the root race dropped out of the local and the published demand
+/// masks. Peers' non-exact surplus then ran unconstrained, the greedy root
+/// lease gave its worker about 1/N of the root, and the exact queue spent
+/// that share ahead of the colocated non-exact queue: the exact class was
+/// capped near one worker's share and the colocated non-exact instance got
+/// about nothing, a loop that sustained itself. The root is the resource
+/// the reservation protects, so a queue short only of root keeps its demand;
+/// reserving makes peers yield the root and the reserved rate is spent, not
+/// idled. `runnable` is not consulted: a root-parked queue is not runnable,
+/// and a queue-token-parked queue is parked only from a `tokens < head`
+/// branch and is not topped up until it wakes, so this test releases it.
 #[inline]
-pub(in crate::afxdp) fn cos_exact_queue_serviceable(
-    root_tokens: u64,
-    queue: &CoSQueueRuntime,
-) -> bool {
-    if !queue.hot.runnable {
-        return false;
-    }
-    let Some(head) = cos_queue_front(queue) else {
-        return false;
-    };
-    let head_len = cos_item_len(head);
-    root_tokens >= head_len && queue.hot.tokens >= head_len
+pub(in crate::afxdp) fn cos_exact_queue_demands_reservation(queue: &CoSQueueRuntime) -> bool {
+    cos_queue_front(queue).is_some_and(|head| queue.hot.tokens >= cos_item_len(head))
 }
 
 #[cfg(test)]

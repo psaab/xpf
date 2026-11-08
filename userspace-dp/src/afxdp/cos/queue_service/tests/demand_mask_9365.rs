@@ -13,7 +13,7 @@
 // queues, so the `builders.rs` >64-exact-queue warning never fires.
 
 use super::*;
-use crate::afxdp::cos::queue_ops::cos_exact_queue_serviceable;
+use crate::afxdp::cos::queue_ops::cos_exact_queue_demands_reservation;
 
 const SHAPING_BYTES: u64 = 1_000_000_000 / 8;
 const EXACT_63_BYTES: u64 = 100_000_000 / 8;
@@ -48,8 +48,9 @@ fn sixty_five_queue_root() -> CoSInterfaceRuntime {
     root
 }
 
-/// Runnable, non-empty, and holding tokens for its head: what
-/// `cos_exact_queue_serviceable` requires.
+/// Runnable, non-empty, and holding tokens for its head: serviceable, so
+/// it demands its rate under both the #hb166 T-6(b) predicate and the
+/// #18748 one (`cos_exact_queue_demands_reservation`).
 fn make_serviceable(root: &mut CoSInterfaceRuntime, queue_idx: usize) {
     let queue = &mut root.queues[queue_idx];
     queue.hot.runnable = true;
@@ -66,7 +67,7 @@ fn local_demand_mask_names_each_exact_queue_past_index_63() {
         let mut root = sixty_five_queue_root();
         make_serviceable(&mut root, serviceable);
 
-        let mask = serviceable_exact_demand_mask(&root);
+        let mask = local_exact_demand_mask(&root);
         assert!(
             mask.counts(serviceable),
             "serviceable exact queue {serviceable} must count as demand"
@@ -95,12 +96,11 @@ fn published_peer_demand_mask_names_each_exact_queue_past_index_63() {
         let mut peer_root = sixty_five_queue_root();
         make_serviceable(&mut peer_root, serviceable);
         let backlog = SharedCoSExactBacklog::new(1);
-        backlog.publish_with_serviceable(1, 1500, 1500, serviceable_exact_demand_mask(&peer_root));
+        backlog.publish_with_serviceable(1, 1500, 1500, local_exact_demand_mask(&peer_root));
 
         // The local worker has no exact backlog of its own; all demand is the peer's.
         let local_root = sixty_five_queue_root();
-        let mask =
-            serviceable_exact_demand_mask(&local_root) | backlog.peer_exact_demand_queue_mask(0);
+        let mask = local_exact_demand_mask(&local_root) | backlog.peer_exact_demand_queue_mask(0);
         let rate = exact_demand_rate_bytes_for_mask(&local_root, mask);
         assert_eq!(
             rate, want_rate,
@@ -213,17 +213,17 @@ fn shared_backlog_carries_every_mask_word() {
     );
 }
 
-/// The pre-#9365 producer and consumer, apart from names, as the reference for
-/// every interface a `u64` could represent.
+/// The pre-#9365 producer and consumer, apart from names and the per-queue
+/// demand predicate (#18748 swapped it in both producers), as the reference
+/// for every interface a `u64` could represent.
 fn reference_u64_mask(root: &CoSInterfaceRuntime) -> u64 {
-    let root_tokens = root.tokens;
     root.queues
         .iter()
         .enumerate()
         .filter(|(_, queue)| {
             queue.config.exact
                 && queue.config.guarantee_enabled
-                && cos_exact_queue_serviceable(root_tokens, queue)
+                && cos_exact_queue_demands_reservation(queue)
         })
         .fold(0u64, |acc, (queue_idx, _)| {
             if queue_idx < u64::BITS as usize {
@@ -291,18 +291,15 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
             });
 
         let want_local = reference_u64_rate(&root, reference_u64_mask(&root));
-        let got_local =
-            exact_demand_rate_bytes_for_mask(&root, serviceable_exact_demand_mask(&root));
+        let got_local = exact_demand_rate_bytes_for_mask(&root, local_exact_demand_mask(&root));
         assert_eq!(
             got_local, want_local,
             "local reservation changed for a {queue_count}-queue interface"
         );
 
         let want = reference_u64_rate(&root, reference_u64_mask(&root) | peer_bits);
-        let got = exact_demand_rate_bytes_for_mask(
-            &root,
-            serviceable_exact_demand_mask(&root) | peer_mask,
-        );
+        let got =
+            exact_demand_rate_bytes_for_mask(&root, local_exact_demand_mask(&root) | peer_mask);
         assert_eq!(
             got, want,
             "local+peer reservation changed for a {queue_count}-queue interface"

@@ -2095,6 +2095,32 @@ Each carries a RED-on-revert unit test.
   (`types/shared_cos_lease/backlog.rs`), one bit per u8 queue id, so every
   committed interface is tracked exactly; the published peer slot carries all
   four words.
+  **#18748 — a root-starved exact queue keeps its reservation.** The T-6(b)
+  predicate (runnable ∧ root tokens ∧ queue tokens cover the head) also
+  released a queue that was short only of ROOT tokens. Every exact selector
+  checks the root before the queue tokens and parks on
+  `RootTokenStarvation`, so a queue that lost the root race left both masks;
+  peers' non-exact surplus ran unconstrained, the greedy root lease gave each
+  worker about 1/N of the root, and on a worker carrying an exact flow the
+  exact queue (guarantee before surplus) spent the whole share. Live (tcp,
+  25 Gb/s root, `iperf-24g` exact + `iperf-uncapped`): the exact class ran at
+  about one worker's share (2.2–3.5 Gb/s per flow against 24 Gb/s) and the
+  colocated non-exact flow at 0.026 Gbit/s with a 4.1 s head age; Gate 1
+  failed in the failover-free repro, and #18683's crash-takeover stall was
+  attributed to it.
+  The predicate is now `cos_exact_queue_demands_reservation`: backlogged ∧
+  OWN tokens cover the head. The T-6(b) release still holds for every state
+  where the class is limited by itself (empty, parked on its own tokens, v8
+  lease not granting: all have `tokens < head`); only the root-short state
+  flips to "keep", because the root is the resource the reservation protects
+  — reserving makes peers yield it and the rate is spent, not idled. Cells:
+  `cos/queue_service/tests/exact_starvation_18748.rs` (a multi-worker
+  `drain_shaped_tx` simulation; the release end of the rule is pinned by
+  `exact_class_short_of_its_own_tokens_reserves_nothing_18748`). The amount
+  reserved is unchanged (configured rate), which over-reserves when an exact
+  class is held below it by its worker's TX capacity (#19023); a non-exact
+  instance colocated with a self-limited exact class still gets a small
+  share (#19025).
 
 - **T-6(e) — V_min publish on the CoSBatch settle path.** The CoSBatch
   submit path (`submit_local`/`submit_prepared`) was the 5th of 5 V_min

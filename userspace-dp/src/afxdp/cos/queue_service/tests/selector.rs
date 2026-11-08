@@ -109,7 +109,7 @@ fn exact_demand_mask_excludes_starved_exact_queue() {
     root.queues[1].hot.items.push_back(test_cos_item(1500));
     root.queues[1].hot.queued_bytes = 1500;
 
-    let mask = serviceable_exact_demand_mask(&root);
+    let mask = local_exact_demand_mask(&root);
     assert!(mask.counts(0), "serviceable exact queue counts as demand");
     assert!(
         !mask.counts(1),

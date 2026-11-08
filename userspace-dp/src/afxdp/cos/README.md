@@ -267,6 +267,22 @@ mod.rs for further file-level breakdown.
   per-root residual bucket. Exact queues that explicitly enable
   `surplus-sharing` remain eligible for surplus service outside the
   non-exact residual budget.
+- **What counts as exact demand (#hb166 T-6(b), #18748).** An exact
+  guarantee queue is in the demand mask (`exact_demand.rs`
+  `local_exact_demand_mask`, published by `publish_cos_exact_backlog`) while
+  it is backlogged and its OWN token bucket covers the head
+  (`queue_ops::cos_exact_queue_demands_reservation`). A queue limited by
+  itself (empty, parked on its own queue tokens, v8 lease not granting)
+  releases its reservation so best-effort does not idle the link behind a
+  class that ships nothing. A queue short only of ROOT tokens, including one
+  parked on `RootTokenStarvation`, keeps it: every exact selector checks the
+  root before the queue tokens, so under the old "serviceable right now"
+  predicate a root-parked queue dropped out of both masks, peers' surplus
+  ran unconstrained, the greedy root lease gave its worker about 1/N of the
+  root, and the exact class (capped near one worker's share) starved the
+  non-exact queue on its own worker (#18748). The reserved AMOUNT is still
+  the configured rate; an exact class held below it by its worker's TX
+  capacity over-reserves (#19023).
 - **Shared queue-lease conservation for non-exact lease-metered queues
   (#4265 / #5156).** A non-exact GUARANTEED queue whose configured rate
   trips `COS_SHARED_EXACT_MIN_RATE_BYTES` runs the sharded `shared_exact`
