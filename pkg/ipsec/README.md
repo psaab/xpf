@@ -1057,13 +1057,16 @@ all files stay in `package ipsec`, so the public API is unchanged.
   one IP family. An ID_ANY owner matches every lookup.
   `ipsecIdentitiesCollide` checks whether two peer-owner match sets share a
   presented identity. It retains the same-type `equals()` rule and also
-  intersects leading-`*` FQDN/RFC822 suffix patterns, address/subnet/range
-  match sets using strongSwan's range conversion and subnet-mask matching,
-  and DN RDN patterns. DN matching can match encodings that differ only in BER
-  length octets because `matches_dn` skips `equals()`'s total-length check;
-  a `*` DN value matches any value at that RDN. A DN and a KEY_ID (or FQDN
-  raw bytes) with the same DER remain type-distinct and do not select each
-  other's secret.
+  intersects leading-`*` FQDN/RFC822 suffix patterns, anchored strongSwan
+  regex owners (`fqdn:`/`dns:`, `rfc822:`/`email:`/`userfqdn:` and `asn1dn:`),
+  address/subnet/range match sets using strongSwan's range conversion and
+  subnet-mask matching, and DN RDN patterns.
+  Regex exact and prefix forms are intersected directly;
+  undecidable regex languages fail closed as possible collisions. DN matching
+  can match encodings that differ only in BER length octets because
+  `matches_dn` skips `equals()`'s total-length check; a `*` DN value matches
+  any value at that RDN. A DN and a KEY_ID (or FQDN raw bytes) with the same
+  DER remain type-distinct and do not select each other's secret.
   An effective local identity is the `me` LOOKUP of its own exchange
   (`ipsecLookupSelectsOwner`), so that check remains directed:
   `lookup->matches(owner)`. Wildcards apply on the owner side. The lookup's full

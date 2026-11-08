@@ -303,7 +303,7 @@ func ipsecForEachPSKPeerIdentity(endpointList string, gw *IPsecGateway, visit fu
 		if idValue == "" || IsAnyIPsecRemoteIdentity(idType, idValue) {
 			return
 		}
-		identity, selector := ipsecIKEIdentityKey(idType, idValue)
+		identity, selector := ipsecIKEIdentityOwnerKey(idType, idValue)
 		add(identity, selector)
 	}
 	if gw != nil && hasDiscriminatingRemoteIdentity(gw) {
@@ -351,6 +351,10 @@ type ipsecIKEIdentity struct {
 	encoding string
 	rdns     []ipsecDNRDN
 	dnValid  bool
+	// isRegex marks a regex-anchored peer owner parsed with strongSwan's
+	// identification_create_from_string_with_regex (#19020). Lookups remain
+	// ordinary identities; only an owner can carry this flag.
+	isRegex bool
 }
 
 func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
@@ -406,6 +410,33 @@ func ipsecIKEIdentityKey(idType, idValue string) (ipsecIKEIdentity, string) {
 	}
 	return ipsecTypedIdentityString(2, selector), selector
 }
+
+// ipsecIKEIdentityOwnerKey parses a selector as a strongSwan PSK owner.
+// Unlike identity lookups, swanctl's credential-owner parser accepts anchored
+// regex spellings for fqdn, rfc822 and DN identities.
+func ipsecIKEIdentityOwnerKey(idType, idValue string) (ipsecIKEIdentity, string) {
+	identity, selector := ipsecIKEIdentityKey(idType, idValue)
+	if ipsecStrongSwanRegexSelector(selector) {
+		identity.isRegex = true
+	}
+	return identity, selector
+}
+
+// ipsecStrongSwanRegexSelector mirrors is_regex_identity()'s accepted prefixes
+// and anchor requirement. It deliberately recognizes only the strongSwan
+// regex-enabled prefixes; `@^...$` remains an ordinary FQDN.
+func ipsecStrongSwanRegexSelector(selector string) bool {
+	for _, prefix := range [...]string{
+		"rfc822:", "email:", "userfqdn:", "fqdn:", "dns:", "asn1dn:",
+	} {
+		if ipsecASCIIHasPrefix(selector, prefix) {
+			pattern := selector[len(prefix):]
+			return len(pattern) >= 2 && pattern[0] == '^' && pattern[len(pattern)-1] == '$'
+		}
+	}
+	return false
+}
+
 
 // ipsecStrongSwanAnySelector reports whether identification_create_from_string
 // maps the rendered selector to ID_ANY (#18428). strongSwan tests these exact
@@ -579,7 +610,7 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 
 // ipsecIdentitiesCollide reports whether one presented identity could select
 // the secrets of both a and b, and names the rule that made them one owner
-// (#18428, #18682). strongSwan selects a PSK through has_owner() in
+// (#18428, #18682, #19020). strongSwan selects a PSK through has_owner() in
 // mem_cred.c: lookup->matches(owner) for each configured owner, and an
 // ID_ANY owner returns ID_MATCH_ANY for any lookup.
 //
@@ -595,12 +626,11 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 // crosses IPV4_ADDR, IPV4_ADDR_SUBNET, IPV4_ADDR_RANGE (and the IPv6
 // trio) within one address family (#18682).
 //
-// Beyond equals() the model intersects, per class (#18682):
-//   - wildcard strings (types 2 and 3): intersect end-aligned suffix
-//     constraints case-insensitively through NUL, requiring NULs to align
-//     where both constraints apply; a presented lookup must be at least as
-//     long as each wildcard owner's full encoding. Exact owners contribute
-//     a singleton only when equals_strcasecmp can match (no embedded NUL);
+// Beyond equals() the model intersects, per class (#18682, #19020):
+//   - anchored regex owners (types 2/3): exact and literal-prefix patterns
+//     are intersected directly; unknown regex languages fail closed as
+//     possible collisions. Regex matching is case-insensitive, and an empty
+//     presented encoding cannot match because matches_regex rejects it;
 //   - address identities (types 1/4/5/6/7/8): hosts and ranges denote
 //     singleton/closed-interval sets; subnet membership follows the
 //     matcher's netmask rules, and the resulting sets intersect within
@@ -613,6 +643,9 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
 	if a.typeID == 0 || b.typeID == 0 {
 		return "ID_ANY owner matches every identity", true
+	}
+	if a.isRegex || b.isRegex {
+		return ipsecRegexIdentityOwnersIntersect(a, b)
 	}
 	if a.typeID == b.typeID && a.equals(b) {
 		return ipsecIdentityEqualityRule(a, b), true
@@ -631,6 +664,199 @@ func ipsecIdentitiesCollide(a, b ipsecIKEIdentity) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+type ipsecRegexOwnerPatternKind uint8
+
+const (
+	ipsecRegexOwnerUndecidable ipsecRegexOwnerPatternKind = iota
+	ipsecRegexOwnerEmpty
+	ipsecRegexOwnerMatchAll
+	ipsecRegexOwnerExact
+	ipsecRegexOwnerPrefix
+)
+
+type ipsecRegexOwnerPattern struct {
+	kind    ipsecRegexOwnerPatternKind
+	literal string
+}
+
+// ipsecClassifyRegexOwner models the supported anchored regex subset without
+// compiling or executing a second regex dialect. Anything outside the subset
+// is Undecidable and callers must fail closed.
+func ipsecClassifyRegexOwner(identity ipsecIKEIdentity) ipsecRegexOwnerPattern {
+	if identity.typeID != 2 && identity.typeID != 3 {
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
+	}
+	pattern := identity.encoding
+	if len(pattern) < 2 || pattern[0] != '^' || pattern[len(pattern)-1] != '$' {
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
+	}
+	body := pattern[1 : len(pattern)-1]
+	if body == "" {
+		// strongSwan's matches_regex refuses an empty presented identity.
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerEmpty}
+	}
+	if body == ".*" {
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerMatchAll}
+	}
+	if strings.HasSuffix(body, ".*") {
+		prefix := body[:len(body)-2]
+		if literal, ok := ipsecRegexLiteral(prefix); ok {
+			if literal == "" {
+				return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerMatchAll}
+			}
+			return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerPrefix, literal: literal}
+		}
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
+	}
+	if literal, ok := ipsecRegexLiteral(body); ok {
+		if literal == "" {
+			return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerEmpty}
+		}
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerExact, literal: literal}
+	}
+	return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
+}
+
+// ipsecRegexLiteral converts a literal ERE body, accepting only explicit
+// escapes for ERE metacharacters. The common unescaped path is zero-copy.
+func ipsecRegexLiteral(pattern string) (string, bool) {
+	escaped := false
+	for i := 0; i < len(pattern); i++ {
+		char := pattern[i]
+		if char == 0 || char >= 0x80 {
+			return "", false
+		}
+		if char == '\\' {
+			if i+1 >= len(pattern) || !strings.ContainsRune(`.\^$*+?{}[]()|`, rune(pattern[i+1])) {
+				return "", false
+			}
+			escaped = true
+			i++
+			continue
+		}
+		if strings.ContainsRune(`.^$*+?{}[]()|`, rune(char)) {
+			return "", false
+		}
+	}
+	if !escaped {
+		return pattern, true
+	}
+	var literal strings.Builder
+	literal.Grow(len(pattern))
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] == '\\' {
+			i++
+		}
+		literal.WriteByte(pattern[i])
+	}
+	return literal.String(), true
+}
+func ipsecRegexStringASCII(value string) bool {
+	for i := 0; i < len(value); i++ {
+		if value[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
+func ipsecRegexPatternMatches(pattern ipsecRegexOwnerPattern, value string) bool {
+	// REG_ICASE behavior outside ASCII depends on the charon's locale; never
+	// use the ASCII model to prove a non-ASCII candidate disjoint.
+	if !ipsecRegexStringASCII(value) {
+		return true
+	}
+	switch pattern.kind {
+	case ipsecRegexOwnerMatchAll:
+		return !strings.Contains(value, "\n")
+	case ipsecRegexOwnerExact:
+		return ipsecASCIIEqualFold(pattern.literal, value)
+	case ipsecRegexOwnerPrefix:
+		return ipsecASCIIHasPrefix(value, pattern.literal) &&
+			!strings.Contains(value[len(pattern.literal):], "\n")
+	default:
+		return false
+	}
+}
+
+func ipsecRegexIdentityOwnersIntersect(a, b ipsecIKEIdentity) (string, bool) {
+	if a.typeID != b.typeID {
+		return "", false
+	}
+	aRegex, bRegex := a.isRegex, b.isRegex
+	if !aRegex && !bRegex {
+		return "", false
+	}
+	regex := a
+	other := b
+	if !aRegex {
+		regex, other = b, a
+	}
+	pattern := ipsecClassifyRegexOwner(regex)
+	if pattern.kind == ipsecRegexOwnerEmpty {
+		return "", false
+	}
+	if !aRegex || !bRegex {
+		if other.encoding == "" {
+			return "", false
+		}
+		if strings.IndexByte(other.encoding, 0) >= 0 ||
+			!ipsecRegexStringASCII(other.encoding) {
+			return "undecidable regex owner intersection", true
+		}
+		if strings.HasPrefix(other.encoding, "*") {
+			if pattern.kind == ipsecRegexOwnerExact {
+				if _, ok := ipsecWildcardLookupSelectsOwner(pattern.literal, other.encoding); !ok {
+					return "", false
+				}
+			}
+			// The two constraints may intersect; retain the conservative
+			// verdict for patterns or raw suffixes not modelled here.
+			return "regex owner may match wildcard owner", true
+		}
+		if pattern.kind == ipsecRegexOwnerUndecidable {
+			return "undecidable regex owner intersection", true
+		}
+		if ipsecRegexPatternMatches(pattern, other.encoding) {
+			return "regex owner matches peer identity", true
+		}
+		return "", false
+	}
+
+	otherPattern := ipsecClassifyRegexOwner(other)
+	if otherPattern.kind == ipsecRegexOwnerEmpty {
+		return "", false
+	}
+	if pattern.kind == ipsecRegexOwnerUndecidable ||
+		otherPattern.kind == ipsecRegexOwnerUndecidable {
+		return "undecidable regex owner intersection", true
+	}
+	switch {
+	case pattern.kind == ipsecRegexOwnerMatchAll ||
+		otherPattern.kind == ipsecRegexOwnerMatchAll:
+		return "regex owner languages overlap", true
+	case pattern.kind == ipsecRegexOwnerExact &&
+		otherPattern.kind == ipsecRegexOwnerExact &&
+		ipsecASCIIEqualFold(pattern.literal, otherPattern.literal):
+		return "regex owner languages overlap", true
+	case pattern.kind == ipsecRegexOwnerExact &&
+		otherPattern.kind == ipsecRegexOwnerPrefix &&
+		ipsecASCIIHasPrefix(pattern.literal, otherPattern.literal):
+		return "regex owner languages overlap", true
+	case pattern.kind == ipsecRegexOwnerPrefix &&
+		otherPattern.kind == ipsecRegexOwnerExact &&
+		ipsecASCIIHasPrefix(otherPattern.literal, pattern.literal):
+		return "regex owner languages overlap", true
+	case pattern.kind == ipsecRegexOwnerPrefix &&
+		otherPattern.kind == ipsecRegexOwnerPrefix &&
+		(ipsecASCIIHasPrefix(pattern.literal, otherPattern.literal) ||
+			ipsecASCIIHasPrefix(otherPattern.literal, pattern.literal)):
+		return "regex owner languages overlap", true
+	default:
+		return "", false
+	}
 }
 
 // ipsecAddressBounds holds both the interval conversion used by
@@ -1109,14 +1335,33 @@ func ipsecDNLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
 // local identity is ID_ANY when it is spelled as a wildcard or comes from an
 // unspecified local address (`local-address 0.0.0.0` / `::`); charon then
 // presents its real source address, which commit cannot know, so such a local
-// identity selects no peer selector. Address containment, wildcard matching,
-// and DN comparison reuse ipsecIdentitiesCollide's match-set primitives
-// without turning an intersection into a directed lookup match.
+// identity selects no peer selector. Regex matching applies only when the
+// right-side PSK owner was parsed by strongSwan's regex-enabled credential
+// parser. Address containment, wildcard matching, and DN comparison reuse
+// ipsecIdentitiesCollide's match-set primitives without turning an intersection
+// into a directed lookup match.
 func ipsecLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
 	if owner.typeID == 0 {
 		return "ID_ANY owner matches every identity", true
 	}
 	if lookup.typeID == 0 {
+		return "", false
+	}
+	if owner.isRegex {
+		if lookup.typeID != owner.typeID || lookup.encoding == "" {
+			return "", false
+		}
+		pattern := ipsecClassifyRegexOwner(owner)
+		if pattern.kind == ipsecRegexOwnerEmpty {
+			return "", false
+		}
+		if pattern.kind == ipsecRegexOwnerUndecidable ||
+			strings.IndexByte(lookup.encoding, 0) >= 0 {
+			return "undecidable regex owner lookup", true
+		}
+		if ipsecRegexPatternMatches(pattern, lookup.encoding) {
+			return "regex owner matches lookup", true
+		}
 		return "", false
 	}
 	if lookup.typeID == owner.typeID && lookup.equals(owner) {

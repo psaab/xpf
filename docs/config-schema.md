@@ -11722,12 +11722,16 @@ reserved for whole-dataplane selection where a rewrite shim
     type-strict, while `matches_range` crosses host, subnet and range types
     within one address family; an ID_ANY owner matches every lookup.
     `ipsecIdentitiesCollide` checks match-set intersection for peer owners:
-    it retains same-type `equals()` and also covers leading-`*` FQDN/RFC822
-    suffix wildcards, address/subnet/range match sets using strongSwan's range
+    it retains same-type `equals()` and covers leading-`*` FQDN/RFC822 suffix
+    wildcards, anchored strongSwan regex owners (`fqdn:`/`dns:`,
+    `rfc822:`/`email:`/`userfqdn:` and `asn1dn:`), address/subnet/range match
     conversion and subnet-mask rules, DN wildcard RDN values, and DN encodings
     differing only in BER length octets (because `matches_dn` skips
-    `equals()`'s total-length check). A DN and a KEY_ID/FQDN raw encoding of
-    the same DER remain type-distinct and do not collide, in either gateway order.
+    `equals()`'s total-length check). Regex exact and prefix forms are
+    intersected directly; if a regex language cannot be decided, it is treated
+    as colliding rather than left fail-open. A DN and a KEY_ID/FQDN raw
+    encoding of the same DER remain type-distinct and do not collide, in either
+    gateway order.
     An effective local identity is a directed lookup:
     `ipsecLookupSelectsOwner(local, peer)` tests `local->matches(peer)`.
     Consequently local address/subnet/range identities follow strongSwan's

@@ -688,3 +688,41 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 	})
 
 }
+
+func TestPSKIdentityRegexOwnerCollisionRender19020(t *testing.T) {
+	manager := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
+	cfg := &config.IPsecConfig{
+		Gateways: map[string]*config.IPsecGateway{
+			"gw-regex": {Name: "gw-regex", Address: "203.0.113.1", RemoteIDType: "inet", RemoteIDValue: "fqdn:^.*$"},
+			"gw-exact": {Name: "gw-exact", Address: "203.0.113.2", RemoteIDType: "hostname", RemoteIDValue: "vpn.example"},
+			"gw-unique": {Name: "gw-unique", Address: "203.0.113.3", RemoteIDType: "inet", RemoteIDValue: "198.51.100.8"},
+		},
+		VPNs: map[string]*config.IPsecVPN{
+			"regex":  {Gateway: "gw-regex", PSK: config.NewSecret("regex-secret")},
+			"exact":  {Gateway: "gw-exact", PSK: config.NewSecret("exact-secret")},
+			"unique": {Gateway: "gw-unique", PSK: config.NewSecret("unique-secret")},
+		},
+		Proposals: map[string]*config.IPsecProposal{},
+	}
+	text, rendered, err := manager.renderConfig(cfg)
+	if err != nil {
+		t.Fatalf("renderConfig: %v", err)
+	}
+	for _, gateway := range []string{"gw-regex", "gw-exact"} {
+		if rendered[gateway] {
+			t.Errorf("regex-colliding connection %q must not render:\n%s", gateway, text)
+		}
+	}
+	if !rendered["gw-unique"] {
+		t.Fatalf("unrelated connection must still render:\n%s", text)
+	}
+	blocks := parseSecretBlocks(t, text)
+	for _, gateway := range []string{"gw-regex", "gw-exact"} {
+		if _, ok := blocks["ike-"+gateway]; ok {
+			t.Errorf("regex-colliding connection %q emitted a PSK secret:\n%s", gateway, text)
+		}
+	}
+	if _, ok := blocks["ike-gw-unique"]; !ok {
+		t.Fatalf("unrelated connection secret missing:\n%s", text)
+	}
+}
