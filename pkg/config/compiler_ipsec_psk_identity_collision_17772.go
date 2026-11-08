@@ -596,10 +596,11 @@ func (identity ipsecIKEIdentity) equals(other ipsecIKEIdentity) bool {
 // trio) within one address family (#18682).
 //
 // Beyond equals() the model intersects, per class (#18682):
-//   - wildcard strings (types 2 and 3): a leading-'*' owner matches its
-//     suffix-exact strings, so two match sets meet exactly when one
-//     suffix ends with the other (case-insensitively); a wildcard also
-//     meets an exact string it suffix-matches;
+//   - wildcard strings (types 2 and 3): intersect end-aligned suffix
+//     constraints case-insensitively through NUL, requiring NULs to align
+//     where both constraints apply; a presented lookup must be at least as
+//     long as each wildcard owner's full encoding. Exact owners contribute
+//     a singleton only when equals_strcasecmp can match (no embedded NUL);
 //   - address identities (types 1/4/5/6/7/8): hosts and ranges denote
 //     singleton/closed-interval sets; subnet membership follows the
 //     matcher's netmask rules, and the resulting sets intersect within
