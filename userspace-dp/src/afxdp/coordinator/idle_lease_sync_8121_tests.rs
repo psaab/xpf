@@ -1372,8 +1372,29 @@ fn aborted_requester_lease_promotion_matches_old_owner_18569() {
         let mut old_owner = Coordinator::new();
         old_owner.forwarding.source_nat_rules =
             parse_source_nat_rules(&[pool_rule("r1", "P", &["203.0.113.1", "203.0.113.2"])]);
+        // Keep RG0/RG2 complementary to the requester's baseline; only RG1
+        // overlaps during the intended make-before-break pre-activation.
         old_owner
-            .update_ha_state(&transfer_helper_inventory_18569(rg0_active, true))
+            .update_ha_state(&[
+                crate::HAGroupStatus {
+                    rg_id: 0,
+                    active: !rg0_active,
+                    watchdog_timestamp: 0,
+                    ..crate::HAGroupStatus::default()
+                },
+                crate::HAGroupStatus {
+                    rg_id: 1,
+                    active: true,
+                    watchdog_timestamp: 0,
+                    ..crate::HAGroupStatus::default()
+                },
+                crate::HAGroupStatus {
+                    rg_id: 2,
+                    active: false,
+                    watchdog_timestamp: 0,
+                    ..crate::HAGroupStatus::default()
+                },
+            ])
             .expect("fixture: old owner holds its configured forwarding inventory");
         let advertised = mint_local_idle_lease(&old_owner, "P");
 
