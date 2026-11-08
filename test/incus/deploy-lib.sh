@@ -782,10 +782,14 @@ deploy_gate_wave() {
 # .deb (the exact bits deploy_install_deb pushes), or nothing (rc 1) when
 # the member is absent or unreadable. Never substitutes a worktree hash.
 deploy_manifest_sha_from_deb() {
-	local deb="$1" bin="$2" sha=""
+	local deb="$1" bin="$2" sha="" dpkg_deb_bin
 	[[ -f "$deb" ]] || return 1
+	dpkg_deb_bin=$(deploy_host_dpkg_deb) || {
+		printf 'deploy_manifest_sha_from_deb: cannot resolve the host dpkg-deb (it resolved to the #18038 testguard shim or is missing) for %s (#19014)\n' "$deb" >&2
+		return 1
+	}
 	if ! sha=$(set -o pipefail
-		"$(deploy_host_dpkg_deb)" --fsys-tarfile "$deb" 2>/dev/null |
+		"$dpkg_deb_bin" --fsys-tarfile "$deb" 2>/dev/null |
 			tar -xO "./usr/local/share/xpf/staged/$bin" 2>/dev/null |
 			sha256sum 2>/dev/null | awk '{print $1}'); then
 		return 1
@@ -1848,19 +1852,16 @@ deploy_running_deb_version() {
 # deploy preflight. with-cluster.sh:38 prepends test/support/host-bin-shims
 # to PATH (the #18038 testguard shims, which exit 125 on the workstation);
 # a shimmed `dpkg` would make every comparison below fail. Resolve the real
-# binary once, shim-dir-free: XPF_DEPLOY_HOST_DPKG (tests), then
-# $XPF_HOST_DPKG captured before the shim prepend, then a PATH search that
-# skips directories holding a refuse-host-tool marker. Results: 0 = true,
-# 1 = false, 2 = comparison could not be performed (tool missing/error) —
-# never collapse 2 into false, which would read as "not newer" (#19014).
+# binary, shim-dir-free: XPF_DEPLOY_HOST_DPKG (explicit override, used by
+# tests) first, then a PATH search that skips directories holding a
+# refuse-host-tool marker. Results: 0 = true, 1 = false, 2 = comparison
+# could not be performed (tool missing/error) — never collapse 2 into
+# false, which would read as "not newer" (#19014).
 deploy_host_dpkg() {
-	local override="${XPF_DEPLOY_HOST_DPKG:-${XPF_HOST_DPKG:-}}" cand dir
+	local override="${XPF_DEPLOY_HOST_DPKG:-}" cand dir
 	if [[ -n "$override" ]]; then
 		[[ -x "$override" ]] && { printf '%s\n' "$override"; return 0; }
 		return 1
-	fi
-	if [[ -n "${_XPF_DEPLOY_HOST_DPKG_RESOLVED:-}" ]]; then
-		printf '%s\n' "$_XPF_DEPLOY_HOST_DPKG_RESOLVED"; return 0
 	fi
 	local IFS=:
 	for dir in $PATH; do
