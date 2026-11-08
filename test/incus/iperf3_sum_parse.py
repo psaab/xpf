@@ -336,6 +336,9 @@ _STOP_UNCERTAINTY = 0.05
 # runs from the sysrq dispatch to the exec's return (seconds), so without the
 # aggregate's stop inside it the cell falls back to the integer verdict.
 _MAX_CLOCK_UNCERTAINTY = 0.25
+# Cap the per-stream stop search: a wide command window can contain unrelated
+# pauses after the fast takeover it brackets (#18708).
+_STREAMS_STOP_SEARCH_SEC = 2.0
 
 
 class EventAnchor:
@@ -475,6 +478,13 @@ def _streams_stop_anchor(rows, lo: float, hi: float) -> Optional[EventAnchor]:
     crash lies inside ``k`` and ``k+1`` is wholly after it, whatever the
     fraction's error: the anchor cannot make a pre-crash byte count as a
     resume.
+
+    The search is capped at ``lo + _STREAMS_STOP_SEARCH_SEC``: the crash that
+    the window brackets is near its open, so its first qualifying interval
+    must start within two seconds. Otherwise a fast takeover with fewer than
+    the threshold streams down for a full interval lets a later unrelated
+    group pause in a wide window anchor the crash late, under-reading resume
+    latency and possibly changing PASS/COST.
     """
     streams = _stream_intervals(rows)
     if not streams:
@@ -482,7 +492,11 @@ def _streams_stop_anchor(rows, lo: float, hi: float) -> Optional[EventAnchor]:
     need = max(3, (len(streams) + 3) // 4)
     starts = sorted({start for intervals in streams.values() for start, _, _ in intervals})
     for k_start in starts:
-        if k_start > hi or k_start < lo - 1.5:
+        if (
+            k_start > hi
+            or k_start < lo - 1.5
+            or k_start > lo + _STREAMS_STOP_SEARCH_SEC
+        ):
             continue
         fractions = []
         for intervals in streams.values():

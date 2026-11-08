@@ -885,6 +885,43 @@ class PreciseCrashAnchorTests(unittest.TestCase):
     def cell(module, text, anchor):
         return module.precise_stream_cell(text, anchor, 8, json_stream=True)
 
+    @staticmethod
+    def fast_takeover_with_late_group_pause(text):
+        """Keep only two streams stopped after the fast crash takeover, then
+        inject an unrelated three-stream pause well later in the wide window.
+        """
+        resumed_fast = {5, 9, 11}
+        pre_crash_rates = {}
+        events = []
+        for line in text.splitlines():
+            event = json.loads(line)
+            if event.get("event") == "interval":
+                data = event["data"]
+                second = int(float(data["sum"]["start"]) + 0.05)
+                for stream in data["streams"]:
+                    stream_id = stream["socket"]
+                    if second == 53:
+                        pre_crash_rates[stream_id] = stream["bits_per_second"]
+                    elif second == 54 and stream_id in resumed_fast:
+                        stream["bits_per_second"] = pre_crash_rates[stream_id]
+                    elif second == 61 and stream_id in resumed_fast:
+                        stream["bits_per_second"] = 0
+                    if second == 54 and stream_id in resumed_fast:
+                        stream["bytes"] = int(
+                            stream["bits_per_second"] * (stream["end"] - stream["start"]) / 8
+                        )
+                    elif second == 61 and stream_id in resumed_fast:
+                        stream["bytes"] = 0
+                data["sum"]["bits_per_second"] = sum(
+                    stream["bits_per_second"] for stream in data["streams"]
+                )
+                if "bytes" in data["sum"]:
+                    data["sum"]["bytes"] = sum(
+                        stream.get("bytes", 0) for stream in data["streams"]
+                    )
+            events.append(json.dumps(event, separators=(",", ":")))
+        return "\n".join(events) + "\n"
+
     def setUp(self):
         import iperf3_sum_parse as module
 
@@ -926,6 +963,26 @@ class PreciseCrashAnchorTests(unittest.TestCase):
         status, reason = self.cell(self.module, self.fast, anchor)
         self.assertEqual(status, "PASS", reason)
         self.assertIn("data max 2.39s", reason)
+
+
+    def test_fast_takeover_does_not_anchor_on_a_later_group_pause(self):
+        # The three streams that would otherwise make the first post-crash
+        # interval qualify resume immediately; only two remain stopped. A
+        # separate pause of those three streams begins seven seconds later.
+        text = self.fast_takeover_with_late_group_pause(self.fast)
+        judge = lambda module: (
+            "anchor" if module.data_stop_anchor(text, 53.0, 65.0) else "none",
+            "",
+        )
+        self.assertEqual(judge(self.module)[0], "none")
+        # Removing the two-second search cap makes the unrelated later pause
+        # the first qualifying group and must fail this fixture.
+        self.assert_flips(
+            "            or k_start > lo + _STREAMS_STOP_SEARCH_SEC\n",
+            "",
+            judge,
+            "none",
+        )
 
     def test_no_stop_in_a_wide_window_is_no_precise_anchor(self):
         # The window opens after the stop: no stop, and seconds wide.

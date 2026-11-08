@@ -608,24 +608,29 @@ assert m["stream_zero_intervals_outside_events_total"] == 0, m
 PY
 ok "producer exclusion is decided by the full-length interval bounds, not a shortened stream row"
 
-# #18692: a straggler that resumes at T+5 is the crash stream cell's COST, so
-# its zero seconds past [T, T+3] must not red the "outside" cell when the crash
-# is a --resume-event-sec; a stream that never resumes keeps them, and without
-# the flag the same bytes still count (the twin).
+# #18692/#18708: a stream carried in the five seconds before T is judged by
+# the crash cell, so its T+3..T+5 zeros can be excused when it resumes at T+5.
+# A stream stalled before that five-second set is not judged, so its zeros
+# after the event window stay outside even when it resumes inside the window.
+# The dead stream and the flagless twin retain their existing counter checks.
 straggler_fixture="${fixture_dir}/straggler.jsonl"
 dead_fixture="${fixture_dir}/straggler-dead.jsonl"
-python3 - "$straggler_fixture" "$dead_fixture" <<'PY'
+stalled_fixture="${fixture_dir}/stalled-into-window.jsonl"
+python3 - "$straggler_fixture" "$dead_fixture" "$stalled_fixture" <<'PY'
 import json
 import pathlib
 import sys
 
-def write(path, resume_at):
+def write(path, resume_at, stall_at=10):
     events = []
     for second in range(30):
         streams = []
         total = 0
         for sid in range(1, 5):
-            bps = 0 if (sid == 4 and second >= 10 and (resume_at is None or second < resume_at)) else 6_000_000_000
+            bps = 0 if (
+                sid == 4 and second >= stall_at
+                and (resume_at is None or second < resume_at)
+            ) else 6_000_000_000
             total += bps
             streams.append({"socket": sid, "start": second, "end": second + 1, "bits_per_second": bps})
         events.append({"event": "interval", "data": {"sum": {"start": second, "end": second + 1, "bits_per_second": total}, "streams": streams}})
@@ -634,13 +639,15 @@ def write(path, resume_at):
 
 write(sys.argv[1], 15)
 write(sys.argv[2], None)
+write(sys.argv[3], 15, stall_at=5)
 PY
 straggler_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10 --resume-event-sec 10)
 straggler_twin=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10)
 dead_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$dead_fixture" --event-sec 10 --resume-event-sec 10)
-python3 - "$straggler_out" "$straggler_twin" "$dead_out" <<'PY' || bad "#18692: a straggler resuming at T+5 must not red the outside cell; a dead stream and the flagless twin must"
+stalled_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$stalled_fixture" --event-sec 10 --resume-event-sec 10)
+python3 - "$straggler_out" "$straggler_twin" "$dead_out" "$stalled_out" <<'PY' || bad "#18708: resume-zero excusal must match the pre-crash streams the crash cell judges"
 import json, sys
-straggler, twin, dead = (json.loads(arg) for arg in sys.argv[1:])
+straggler, twin, dead, stalled = (json.loads(arg) for arg in sys.argv[1:])
 assert straggler["stream_zero_intervals_total"] == 5, straggler
 assert straggler["stream_zero_intervals_outside_events_total"] == 0, straggler
 assert straggler["stream_zero_intervals_resume_excused_total"] == 2, straggler
@@ -648,8 +655,47 @@ assert twin["stream_zero_intervals_outside_events_total"] == 2, twin
 assert twin["stream_zero_intervals_resume_excused_total"] == 0, twin
 assert dead["stream_zero_intervals_outside_events_total"] == 17, dead
 assert dead["stream_zero_intervals_resume_excused_total"] == 0, dead
+assert stalled["stream_zero_intervals_total"] == 10, stalled
+assert stalled["stream_zero_intervals_outside_events_total"] == 7, stalled
+assert stalled["stream_zero_intervals_resume_excused_total"] == 0, stalled
 PY
-ok "#18692: a straggler resuming at T+5 is excused to the 10 s line; a dead stream and the flagless twin are not"
+ok "#18708: only a pre-crash carrier's resumed zeros are excused; a stream stalled before the crash set is still charged"
+python3 - "$SCRIPT_DIR/../../scripts/iperf-json-metrics.py" "$stalled_fixture" "$stalled_out" <<'PY' || bad "#18708: ungated resume excusal must be killed by the stalled-into-window fixture"
+import contextlib
+import io
+import json
+import pathlib
+import sys
+
+script = pathlib.Path(sys.argv[1])
+fixture = pathlib.Path(sys.argv[2])
+expected_json = sys.argv[3]
+source = script.read_text(encoding="utf-8")
+anchor = "            stream_id in eligible_streams and inside(((lo, hi),), start, end_s)\n"
+assert source.count(anchor) == 1, "ungated-excusal mutant anchor is not unique"
+mutant_source = source.replace(anchor, "            inside(((lo, hi),), start, end_s)\n")
+expected = json.loads(expected_json)
+
+def run(source_text):
+    namespace = {"__name__": "metrics_fixture", "__file__": str(script)}
+    exec(compile(source_text, str(script), "exec"), namespace)
+    output = io.StringIO()
+    saved_argv = sys.argv
+    try:
+        sys.argv = [str(script), str(fixture), "--event-sec", "10", "--resume-event-sec", "10"]
+        with contextlib.redirect_stdout(output):
+            namespace["main"]()
+    finally:
+        sys.argv = saved_argv
+    return json.loads(output.getvalue())
+
+assert run(source) == expected, "no-op source control disagrees with the harness result"
+mutant = run(mutant_source)
+assert mutant["stream_zero_intervals_resume_excused_total"] == 2, mutant
+assert mutant["stream_zero_intervals_resume_excused_total"] != expected["stream_zero_intervals_resume_excused_total"], mutant
+assert mutant["stream_zero_intervals_outside_events_total"] == 5, mutant
+PY
+ok "#18708: ungated resume-excusal mutant is killed by the stalled-into-window fixture"
 
 # Completion requires an end event or evidence that the expected duration ran.
 incomplete_fixture="${fixture_dir}/incomplete.jsonl"

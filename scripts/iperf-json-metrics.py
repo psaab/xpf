@@ -355,25 +355,50 @@ def summarize(path, args):
             inside(move["windows"], start, end_s) for move in planned
         )
 
-    # #18692 RESUME windows (--resume-event-sec): the crash's stream cell FAILs
-    # a stream only when it has not resumed within the window, and scores a
-    # later resume as a COST. A resuming straggler's zero seconds inside the
-    # window are that COST, not an "outside" outage; a stream that never
-    # carries data again keeps them (its own cells FAIL it as well).
+    # #18692 RESUME windows (--resume-event-sec): the crash stream cell scores
+    # a later resume as a COST; those zeros are not an "outside" outage.
+    # Excusal uses only streams carrying data in the five full seconds before
+    # the event, exactly the set the crash cell judges (#18708).
+    resume_event_secs = [float(event_sec) for event_sec in args.resume_event_sec]
     resume_windows = merge_windows(
-        (float(event_sec), float(event_sec) + args.resume_window_sec)
-        for event_sec in args.resume_event_sec
+        (event_sec, event_sec + args.resume_window_sec)
+        for event_sec in resume_event_secs
     )
+    # Match the crash cell's judged set: only streams carrying data in a full
+    # interval whose start is in [event-5, event) are eligible for resume-zero
+    # excusal. A stream already stalled before that window is not judged by the
+    # crash cell, even if it resumes later (#18708).
+    resume_pre_streams = {event_sec: set() for event_sec in resume_event_secs}
     last_data_start = {}
     for interval in normalized_intervals:
-        _, interval_start, _ = interval_bps(interval)
+        _, interval_start, interval_end = interval_bps(interval)
         for stream in interval.get("streams", []):
             stream_id = str(stream.get("socket") or stream.get("id") or "?")
-            if float(stream.get("bits_per_second") or 0.0) > args.zero_gbps * 1e9:
+            stream_start = float(stream.get("start") or interval_start)
+            stream_end = float(stream.get("end") or interval_end)
+            bps = float(stream.get("bits_per_second") or 0.0)
+            if bps > args.zero_gbps * 1e9:
                 last_data_start[stream_id] = max(last_data_start.get(stream_id, interval_start), interval_start)
+            if bps > 0 and 0.5 <= stream_end - stream_start <= 1.5:
+                for event_sec in resume_event_secs:
+                    if event_sec - 5 <= stream_start < event_sec:
+                        resume_pre_streams[event_sec].add(stream_id)
+    resume_window_streams = []
+    for lo, hi in resume_windows:
+        event_secs = (
+            event_sec for event_sec in resume_event_secs
+            if event_sec <= hi + 1e-9 and event_sec + args.resume_window_sec >= lo - 1e-9
+        )
+        eligible_streams = set()
+        for event_sec in event_secs:
+            eligible_streams.update(resume_pre_streams[event_sec])
+        resume_window_streams.append((lo, hi, eligible_streams))
 
     def resume_excused(stream_id, start, end_s):
-        return inside(resume_windows, start, end_s) and last_data_start.get(stream_id, -1.0) >= end_s - 1e-9
+        return last_data_start.get(stream_id, -1.0) >= end_s - 1e-9 and any(
+            stream_id in eligible_streams and inside(((lo, hi),), start, end_s)
+            for lo, hi, eligible_streams in resume_window_streams
+        )
 
     stream_zero_resume_excused = 0
 
@@ -547,10 +572,10 @@ def main():
         action="append",
         default=[],
         help="#18692: a crash instant whose per-stream cell scores a late resume as "
-        "a COST; may repeat. A stream's full zero intervals wholly inside "
-        "[T, T+--resume-window-sec] are excluded from "
-        "stream_zero_intervals_outside_events_total when that stream carries data "
-        "again later; a stream that never does keeps them.",
+        "a COST; may repeat. Full zero intervals in [T, T+--resume-window-sec] "
+        "are excluded from stream_zero_intervals_outside_events_total only for "
+        "streams that carried data in a full interval starting in [T-5, T) and "
+        "carry data again later.",
     )
     parser.add_argument(
         "--resume-window-sec",
