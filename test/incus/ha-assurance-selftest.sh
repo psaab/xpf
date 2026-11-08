@@ -1792,17 +1792,50 @@ assert_eq "$(claim_cell_run 0)" PASS 'test-connectivity claim cell: unique addre
 assert_eq "$(claim_cell_run 1)" FAIL 'test-connectivity claim cell: a non-xpf claimant FAILs'
 assert_eq "$(claim_cell_run 3)" FAIL 'test-connectivity claim cell: another xpf cluster FAILs'
 assert_eq "$(claim_cell_run 2)" VOID 'test-connectivity claim cell: an unmeasured probe is VOID'
-# #18580: reachability, not text. Run the extracted test_cluster with every
-# helper it calls as a successful empty no-op and incus returning success with
-# empty output. That keeps this reachability probe runnable under set -eu while
-# counting real invocations of the cell. Run it with the LAN host running and
-# stopped: the cell must be reached once in each, so a call moved into either
-# branch of the LAN-host check, into a dead branch or after an early return is
-# caught.
+# #18580: reachability, not text. Keep the original failure-rich run: all
+# helpers fail as an unknown command would, but its permissive shell still
+# reaches the cell. A separate strict run below uses successful no-op helpers
+# so set -eu specifically catches an early abort before the call.
 reach_count() { # <wiring-file> <cell> <lan-running|lan-stopped>
 	(
+		set +eu
+		CALLS="${TMP_DIR}/reach-calls-permissive-${2}-${3}"
+		: >"$CALLS"
+		# shellcheck disable=SC1090
+		source "$1"
+		command_not_found_handle() { return 127; }
+		incus() { return 1; }
+		xpf_assert_cluster_lock_idle() { return 127; }
+		service_check() { return 127; }
+		failover_clock_ntp_cell() { return 127; }
+		ping_test() { return 127; }
+		ping6_test() { return 127; }
+		mtr_test() { return 127; }
+		internet_test() { return 127; }
+		target_neighbor_identity_cell() { return 127; }
+		LAN_STATE="$3"
+		instance_running() {
+			[[ "$1" == "$FW0" || "$1" == "$FW1" ]] && return 0
+			[[ "$1" == "$CLUSTER_LAN_HOST" && "$LAN_STATE" == lan-running ]]
+		}
+		wan_claim_cell() { printf 'wan_claim_cell\n' >>"$CALLS"; }
+		iperf_target_claim_cell() { printf 'iperf_target_claim_cell\n' >>"$CALLS"; }
+		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF="${ROOT}/docs/ha-cluster.conf" PROJECT_ROOT="$ROOT"
+		SCRIPT_DIR="${ROOT}/test/incus"
+		WAN_GW4=10.0.0.1 LAN_HOST_IP=172.16.80.10 LAN_VIP4=172.16.80.1
+		LAN_VIP6=2001:559:8585:80::1 IPERF_TARGET4=172.16.80.211
+		IPERF_TARGET6=2001:559:8585:80::211 WAN_GW80_4=172.16.80.10
+		test_cluster >/dev/null 2>&1
+		grep -cxF "$2" "$CALLS"
+	)
+}
+# This companion preserves the same real-cell count while making the call run
+# under strict mode. Its no-op helpers prevent intentional fixture failures
+# from masking the specific errexit/nounset guard this cell is for.
+reach_count_strict() { # <wiring-file> <cell> <lan-running|lan-stopped>
+	(
 		set -eu
-		CALLS="${TMP_DIR}/reach-calls-${2}-${3}"
+		CALLS="${TMP_DIR}/reach-calls-strict-${2}-${3}"
 		: >"$CALLS"
 		# shellcheck disable=SC1090
 		source "$1"
@@ -1840,7 +1873,9 @@ reach_count() { # <wiring-file> <cell> <lan-running|lan-stopped>
 }
 for lan_state in lan-running lan-stopped; do
 	assert_eq "$(reach_count "${CLAIM_WIRING}.test_cluster" wan_claim_cell "$lan_state")" 1 \
-		"test-connectivity test_cluster reaches wan_claim_cell exactly once (${lan_state})"
+		"test-connectivity test_cluster reaches wan_claim_cell with failing helpers (${lan_state})"
+	assert_eq "$(reach_count_strict "${CLAIM_WIRING}.test_cluster" wan_claim_cell "$lan_state")" 1 \
+		"test-connectivity test_cluster reaches wan_claim_cell under set -eu (${lan_state})"
 done
 RECENT_JSON="${TMP_DIR}/recent-metrics.jsonl"
 cat >"$RECENT_JSON" <<'JSON'
