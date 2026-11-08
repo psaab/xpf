@@ -38,6 +38,57 @@ var _ legacyPolicySchedulerSeeder = (*LegacyDataPlaneAdapter)(nil)
 var _ legacyNeighborProvider = (*LegacyDataPlaneAdapter)(nil)
 var _ legacyUserspaceControl = (*LegacyDataPlaneAdapter)(nil)
 
+func TestLegacyDataPlaneAdapterStopHelperForReset18700(t *testing.T) {
+	var nilAdapter *LegacyDataPlaneAdapter
+	nilAdapter.StopHelperForReset()
+
+	m, cmd, restarts := spawnSupervisedChild(t)
+	adapter := NewLegacyDataPlaneAdapter(m)
+	pid := cmd.Process.Pid
+
+	if running, crashLooping := adapter.HelperSupervisorState(); !running || crashLooping {
+		t.Fatalf("initial supervisor state = (running=%v, crashLooping=%v), want (true,false)",
+			running, crashLooping)
+	}
+
+	m.mu.Lock()
+	exited := m.procSup.exited
+	m.mu.Unlock()
+	adapter.StopHelperForReset()
+	awaitSupervisor(t, m, exited)
+
+	if running, crashLooping := adapter.HelperSupervisorState(); running || crashLooping {
+		t.Fatalf("supervisor state after reset stop = (running=%v, crashLooping=%v), want (false,false)",
+			running, crashLooping)
+	}
+	m.mu.Lock()
+	proc := m.proc
+	m.mu.Unlock()
+	if proc != nil {
+		t.Fatal("manager still owns a helper after adapter reset stop")
+	}
+	if cmd.ProcessState == nil {
+		t.Fatal("supervised child was not waited after adapter reset stop")
+	}
+	if state := procState(pid); state != "" {
+		t.Fatalf("child pid %d remains in process state %q after adapter reset stop", pid, state)
+	}
+	if got := restarts.snapshot(); len(got) != 0 {
+		t.Fatalf("intentional reset stop scheduled restart delays %v", got)
+	}
+
+	// Manager.StopHelperForReset is idempotent and has no error result; the
+	// adapter must preserve that behavior for a repeated reset stop.
+	adapter.StopHelperForReset()
+	if running, crashLooping := adapter.HelperSupervisorState(); running || crashLooping {
+		t.Fatalf("supervisor state after repeated reset stop = (running=%v, crashLooping=%v), want (false,false)",
+			running, crashLooping)
+	}
+	if got := restarts.snapshot(); len(got) != 0 {
+		t.Fatalf("repeated intentional reset stop scheduled restart delays %v", got)
+	}
+}
+
 func TestLegacyDataPlaneAdapterForwardsOptionalInterfaces(t *testing.T) {
 	m := New()
 	adapter := NewLegacyDataPlaneAdapter(m)

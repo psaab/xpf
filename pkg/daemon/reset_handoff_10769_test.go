@@ -467,6 +467,10 @@ func (d *resetHelperDP) StopHelperForReset() {
 // fails the build here instead of skipping the helper stop.
 var _ helperResetStopper = (*dpuserspace.Manager)(nil)
 
+// #18700: production hands the reset path the adapter, not the Manager, so
+// the adapter must satisfy the same interface or the stop silently no-ops.
+var _ helperResetStopper = (*dpuserspace.LegacyDataPlaneAdapter)(nil)
+
 func TestFactoryResetStopsSweepsAndDisarmsHelper10769(t *testing.T) {
 	isolateFactoryResetOwnershipPaths(t)
 	isolateFactoryResetIdentityPaths(t)

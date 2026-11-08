@@ -194,6 +194,16 @@ func (a *LegacyDataPlaneAdapter) HelperSupervisorState() (bool, bool) {
 	return m.HelperSupervisorState()
 }
 
+// StopHelperForReset forwards the factory-reset stop to the supervised helper.
+// A missing adapter manager is already a no-op for this void lifecycle method.
+func (a *LegacyDataPlaneAdapter) StopHelperForReset() {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return
+	}
+	m.StopHelperForReset()
+}
+
 // HelperElectionNotReady forwards the #18697/#18685 readiness verdict. The
 // daemon's transit gate asserts this method on the RUNTIME dataplane, which is
 // this adapter, not the Manager, so it must be forwarded here or the gate never
