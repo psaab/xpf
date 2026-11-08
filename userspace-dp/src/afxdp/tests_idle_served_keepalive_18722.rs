@@ -608,6 +608,113 @@ fn shared_node_served_evidence_finds_reverse_only_established_nat_alias_18663() 
 }
 
 #[test]
+fn shared_node_served_promoted_opening_wire_alias_vouches_via_established_reverse_18663() {
+    let forward_key = unique_served_key(30_101);
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some("203.0.113.25".parse().expect("SNAT address")),
+        rewrite_src_port: Some(41_005),
+        ..crate::nat::NatDecision::default()
+    };
+    let reverse_key = crate::session::reverse_session_key(&forward_key, nat);
+    let reverse_nat = nat.reverse(
+        forward_key.src_ip,
+        forward_key.dst_ip,
+        forward_key.src_port,
+        forward_key.dst_port,
+    );
+    let wire_key = crate::session::reverse_session_key(
+        &reverse_key,
+        crate::nat::NatDecision::default(),
+    );
+    assert_eq!(
+        wire_key,
+        crate::session::forward_wire_key(&forward_key, nat),
+        "premise: R's plain-reverse key is the promoted forward-wire alias W"
+    );
+    assert_eq!(
+        crate::session::reverse_session_key(&reverse_key, reverse_nat),
+        forward_key,
+        "premise: R's NAT-derived canonical key is F"
+    );
+
+    let mut forward = serving_row(&forward_key);
+    forward.decision.nat = nat;
+    forward.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
+    forward.fwd_packets = 17;
+    forward.rev_packets = 23;
+    forward.session_id = 0x18_663;
+    forward.generation = 7;
+    let mut reverse = serving_row(&reverse_key);
+    reverse.metadata.is_reverse = true;
+    reverse.decision.nat = reverse_nat;
+    reverse.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
+    reverse.fwd_packets = 3;
+    reverse.rev_packets = 5;
+    reverse.session_id = 0x28_663;
+    reverse.generation = 11;
+    let mut promoted = super::tests_support::imported_forward_wire_alias(&forward);
+    promoted.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
+
+    let store = SharedServedStore::new();
+    store.publish(&promoted);
+    store.publish(&forward);
+    store.publish(&reverse);
+    assert!(
+        promoted.metadata.forward_wire_alias_origin,
+        "premise: W is the production-imported promoted forward-wire alias"
+    );
+    assert_eq!(
+        store
+            .owner_indexes
+            .served_aliases
+            .lock()
+            .expect("served alias index")
+            .unique_owner(&wire_key),
+        Some(&reverse_key),
+        "R must file W in addition to canonical F"
+    );
+    let opening_evidence = store.evidence(&wire_key);
+    assert!(
+        !opening_evidence.shared_established && opening_evidence.shared_served.is_none(),
+        "Opening W and Opening F/R do not vouch yet: {opening_evidence:?}"
+    );
+
+    // The sibling restamp advances only the canonical pair. W remains Opening
+    // while its plain-reverse primary R supplies the established vouch.
+    forward.tcp_handshake_state = TcpHandshakeState::Established.to_wire();
+    reverse.tcp_handshake_state = TcpHandshakeState::Established.to_wire();
+    store.publish(&forward);
+    store.publish(&reverse);
+    assert_eq!(
+        store
+            .sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&wire_key)
+            .map(|entry| entry.tcp_handshake_state),
+        Some(TcpHandshakeState::Opening.to_wire()),
+        "premise: restamp advanced F/R but left W Opening"
+    );
+
+    let before_work =
+        crate::afxdp::shared_ops::NODE_SERVED_WORK_18663.with(|stats| stats.get());
+    let evidence = store.evidence(&wire_key);
+    let (calls, work) = served_work_since(before_work);
+    assert_eq!(calls, 1);
+    assert!(
+        work <= 5,
+        "promoted W lookup must remain keyed and bounded, got {work} units"
+    );
+    assert!(evidence.shared_established, "R must vouch for W: {evidence:?}");
+    assert_eq!(evidence.shared_served, Some(40), "counts come from canonical F");
+    assert_eq!(
+        evidence.shared_incarnation,
+        Some((0x18_663, 7)),
+        "evidence identity comes from canonical F"
+    );
+}
+
+#[test]
 fn shared_node_served_forward_nat_alias_collisions_fail_closed_in_both_publish_orders_18663() {
     let flow_a = unique_served_key(40_001);
     let mut flow_b = flow_a.clone();
@@ -841,22 +948,37 @@ fn shared_node_served_nat_no_nat_collision_blocks_plain_reverse_in_both_orders_1
 
 #[test]
 fn shared_node_served_canonical_alias_respects_routing_domain_18663() {
-    let probe = unique_served_key(81_001);
+    let base_probe = unique_served_key(81_001);
     let nat = crate::nat::NatDecision {
         rewrite_src: Some("203.0.113.22".parse().expect("SNAT address")),
         rewrite_src_port: Some(41_002),
         ..crate::nat::NatDecision::default()
     };
 
-    for (owner_domain, should_vouch) in [(100, false), (0, true)] {
+    // A domain-zero probe must not be vouched by another domain. The
+    // nonzero-domain control proves canonical alias scope is restored through
+    // the whole lookup, not merely accepted when the owner is domain zero.
+    for (owner_domain, probe_domain, should_vouch) in [(100, 0, false), (100, 100, true)] {
+        let mut probe = base_probe.clone();
+        probe.routing_domain = probe_domain;
         let mut forward =
             crate::session::reverse_session_key(&probe, crate::nat::NatDecision::default());
         forward.routing_domain = owner_domain;
-        assert_eq!(
-            crate::session::reverse_canonical_key(&forward, nat),
-            probe,
-            "premise: canonical alias is domain-zero"
-        );
+        let canonical = crate::session::reverse_canonical_key(&forward, nat);
+        assert_eq!(canonical.routing_domain, 0, "premise: helper is domain-neutral");
+        let mut scoped_canonical = canonical;
+        scoped_canonical.routing_domain = owner_domain;
+        if should_vouch {
+            assert_eq!(
+                scoped_canonical, probe,
+                "premise: canonical tuple matches when scoped to same-domain owner"
+            );
+        } else {
+            assert_ne!(
+                scoped_canonical, probe,
+                "premise: foreign-domain canonical alias stays separate"
+            );
+        }
 
         let mut opening = serving_row(&probe);
         opening.tcp_handshake_state = TcpHandshakeState::Opening.to_wire();
@@ -870,7 +992,8 @@ fn shared_node_served_canonical_alias_respects_routing_domain_18663() {
         let evidence = store.evidence(&probe);
         assert_eq!(
             evidence.shared_established, should_vouch,
-            "only a same-domain owner may vouch; owner domain {owner_domain}: {evidence:?}"
+            "only a same-domain owner may vouch; owner domain {owner_domain}, \
+             probe domain {probe_domain}: {evidence:?}"
         );
         if should_vouch {
             assert_eq!(evidence.shared_served, Some(77));

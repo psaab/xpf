@@ -65,16 +65,21 @@ fn lock_wire_ambiguities_for_publish(
 
 /// Visit every reverse identity that can vouch for a primary row. Forward
 /// rows publish their wire alias and a canonical alias scoped back to the
-/// owner's routing domain; reverse rows contribute their NAT-derived opposite
-/// tuple. The canonical key helper itself is intentionally domain-neutral for
-/// reverse-match admission, so this evidence index restores owner scope here.
+/// owner's routing domain; reverse rows contribute both their NAT-derived
+/// canonical tuple and their plain-reverse wire tuple. The canonical key
+/// helper itself is intentionally domain-neutral for reverse-match admission,
+/// so this evidence index restores owner scope here.
 fn visit_shared_served_aliases(
     entry: &SyncedSessionEntry,
     mut visit: impl FnMut(&SessionKey),
 ) {
     if entry.metadata.is_reverse {
-        let reverse = reverse_session_key(&entry.key, entry.decision.nat);
-        visit(&reverse);
+        let canonical = reverse_session_key(&entry.key, entry.decision.nat);
+        let plain_reverse = reverse_session_key(&entry.key, NatDecision::default());
+        visit(&canonical);
+        if plain_reverse != canonical {
+            visit(&plain_reverse);
+        }
         return;
     }
     let reverse_wire = reverse_session_key(&entry.key, entry.decision.nat);

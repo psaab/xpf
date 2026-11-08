@@ -77,7 +77,13 @@ fn shared_node_served_entry_claims_alias(
         return false;
     }
     if entry.metadata.is_reverse {
+        // A reverse NAT row derives both the canonical forward tuple and
+        // its plain-reverse wire alias (used by an Opening promoted row).
         crate::session::reverse_session_key(&entry.key, entry.decision.nat) == *key
+            || crate::session::reverse_session_key(
+                &entry.key,
+                crate::nat::NatDecision::default(),
+            ) == *key
     } else {
         let mut canonical =
             crate::session::reverse_canonical_key(&entry.key, entry.decision.nat);
