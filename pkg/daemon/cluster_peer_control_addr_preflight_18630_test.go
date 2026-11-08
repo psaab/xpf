@@ -372,6 +372,30 @@ func TestPeerControlAddressSelectionUsesPeerResolverFamily18630(t *testing.T) {
 	}
 }
 
+// Like the local pass cell, an IPv6 append changes the rendered input without
+// changing the peer's IPv4 fresh-bind pick. The live endpoint is a different
+// configured address, so this specifically pins the want == oldWant allow arm.
+func TestPeerControlAddressUnchangedPickPassesWithIPv6Append18630(t *testing.T) {
+	running := controlLinkAddrs18606{addrs: []string{
+		"10.99.14.2/24", "10.99.14.5/24",
+	}}
+	candidate := controlLinkAddrs18606{addrs: []string{
+		"10.99.14.2/24", "10.99.14.5/24", "2001:db8:14::1/64",
+	}}
+	const runningPeerAddr = "10.99.14.5"
+	const resolverPeerAddress = "10.99.14.6"
+	oldWant := freshBindSelection18606(running, resolverPeerAddress)
+	want := freshBindSelection18606(candidate, resolverPeerAddress)
+	if oldWant != "10.99.14.2" || want != oldWant || want == runningPeerAddr {
+		t.Fatalf("peer old/new/live picks = %q/%q/%q; want same IPv4 pick distinct from live endpoint",
+			oldWant, want, runningPeerAddr)
+	}
+	if err := peerControlAddressDecision18630(runningPeerAddr, running, candidate,
+		resolverPeerAddress, resolverPeerAddress); err != nil {
+		t.Fatalf("IPv6 append with unchanged peer IPv4 pick must pass: %v", err)
+	}
+}
+
 func TestPeerControlAddressUnchangedCommitPasses_18630(t *testing.T) {
 	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
 	d := runningPeerControlDaemon18630(store)
