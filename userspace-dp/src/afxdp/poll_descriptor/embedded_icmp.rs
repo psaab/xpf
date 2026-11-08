@@ -31,13 +31,13 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
     /// matches are reverse-translated; untranslated matches preserve the wire
     /// tuple. The original descriptor is now owned by that
     /// `PendingForwardRequest`; the caller MUST then pop + recycle on deny and
-    /// MUST stop processing this descriptor. `related_admit` is the RELATED
-    /// admission: true for the type-scoped, zone-validated same-family
-    /// path-error contract, translated or untranslated (#10286/#10684,
-    /// #18174; a NAT'd reply-quote error and a NAT64 error only for PMTUD,
-    /// #10666), whose arrival the match arm validated against the quoted
-    /// session's direction; anything else keeps it false and the caller
-    /// adjudicates the queued prebuilt against zone policy.
+    /// MUST stop processing this descriptor.
+    /// `related_admit` is true for the type-scoped, zone-validated same-family
+    /// path-error contract (#10286/#10684/#18174), or for a NAT64 path error
+    /// of any supported type after its arm validates arrival against the
+    /// quoted session's direction (#18557). A NAT'd same-family reply-quote
+    /// error retains the PMTUD-only admission (#10666). Anything else keeps it
+    /// false and the caller adjudicates the queued prebuilt against zone policy.
     Queued {
         related_admit: bool,
         /// #13649/#14123: builders rewrite the outer source before the
@@ -197,10 +197,10 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
         meta,
         effective_ingress_zone_override,
     );
-    // #10666/#18174: a path error quoting a live session rides the RELATED
-    // bypass iff it arrives from the side the quoted packet travels toward
-    // (inbound, a forward quote) or from (outbound, a reply quote) — the
-    // #7169 arrival rule applied as an admission check, not a match
+    // #10666/#18174/#18557: a path error quoting a live session rides the
+    // RELATED bypass iff it arrives from the side the quoted packet travels
+    // toward (inbound, a forward quote) or from (outbound, a reply quote) —
+    // the #7169 arrival rule applied as an admission check, not a match
     // constraint. The match stays Unconstrained on purpose: an intermediate
     // router's error still ingresses on the egress link, so the zone check
     // keeps PMTUD and traceroute working while a wrong-zone forgery falls to
@@ -231,6 +231,9 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     // peer (#13772, where `outbound_snat` is deliberately false) both stay a
     // `lan -> wan` policy decision on the internal sender (#13649), exactly
     // as before.
+    // #18557: the separate NAT64 cross-family arm uses the same path-error
+    // types in both directions, but only in the quoted session's expected
+    // arrival zone.
     let expected_arrival_zone = icmp_match.related_expected_zone;
     let untranslated = icmp_match.nat.rewrite_src.is_none()
         && icmp_match.nat.rewrite_dst.is_none()
@@ -556,9 +559,10 @@ pub(in crate::afxdp) fn enforce_queued_embedded_icmp_policy(
     }
     // A supported same-family path error quoting a live session, translated
     // or not, is admitted by the type- and zone-scoped RELATED contract
-    // (#10286/#10684/#18174); a NAT'd reply-quote error or a NAT64 error
-    // rides the same bypass only as PMTUD (#10666), always with its arrival
-    // validated against the quoted session's direction.
+    // (#10286/#10684/#18174); a NAT'd reply-quote error rides the same bypass
+    // only as PMTUD (#10666), and a NAT64 error rides it for every path
+    // error (#18557), always with its arrival validated against the quoted
+    // session's direction.
     // Keep the reverse flowless zone pair scoped to ForwardCandidate; a
     // non-forward disposition is not a policy verdict.
     if related_admit && resolution.disposition == ForwardingDisposition::ForwardCandidate {
@@ -693,13 +697,14 @@ pub(super) fn restamp_embedded_fabric_redirect(
     .unwrap_or(resolution)
 }
 
-/// #10684/#18174: the same-family RELATED passthrough (untranslated, and a
-/// translated FORWARD quote) keeps only ICMPv4 errors with usable path-error
-/// semantics (Destination Unreachable, Time Exceeded, Parameter Problem) and
-/// the supported quoted-packet ICMPv6 errors (Destination Unreachable,
-/// Packet Too Big, Time Exceeded, Parameter Problem). Deprecated Source
-/// Quench and link-scoped Redirect remain policy-gated.
-fn outer_is_related_path_error(
+/// #10684/#18174/#18557: the same-family RELATED path-error branch (untranslated
+/// and translated FORWARD quotes) and the NAT64 cross-family arms keep only
+/// ICMPv4 errors with usable path-error semantics (Destination Unreachable,
+/// Time Exceeded, Parameter Problem) and the supported quoted-packet ICMPv6
+/// errors (Destination Unreachable, Packet Too Big, Time Exceeded, Parameter
+/// Problem). Deprecated Source Quench and link-scoped Redirect remain
+/// policy-gated.
+pub(super) fn outer_is_related_path_error(
     packet_frame: &[u8],
     meta: UserspaceDpMeta,
 ) -> bool {
@@ -713,10 +718,10 @@ fn outer_is_related_path_error(
 
 /// #10666: whether the OUTER error is the PMTUD signal — v4
 /// Fragmentation-Needed (type 3 / code 4, RFC 1191) or v6 Packet-Too-Big
-/// (type 2 / code 0, RFC 4443). Since #18174 this scopes the NAT64
-/// (cross-family) RELATED bypass in `nat64_icmp_error.rs` and a same-family
+/// (type 2 / code 0, RFC 4443). Since #18174 this scopes a same-family
 /// NAT'd REPLY-quote error (#6474/#13649/#13772); every other same-family
-/// match admits each path error through `outer_is_related_path_error`.
+/// match and both NAT64 arms (#18557) admit each path error through
+/// `outer_is_related_path_error`.
 pub(super) fn outer_is_pmtud_error(packet_frame: &[u8], meta: UserspaceDpMeta) -> bool {
     let l4 = meta.l4_offset as usize;
     match (

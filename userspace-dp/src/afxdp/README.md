@@ -1057,11 +1057,24 @@ sync.
     (node1 holds the row only as an HA import through
     `synthesized_synced_reverse_entry` + `WorkerCommand::UpsertSynced`), and
     `split_rg_hop_one_time_exceeded_is_answered_by_lan_owner_18174`. NAT64
-    (cross-family) RELATED admission is unchanged — still PMTUD only.
+    (cross-family) RELATED admission was unchanged by #18174 and is widened
+    under #18557 below.
     Cells: `tests_mtr_icmp_errors_18174.rs` (real ICMP-echo and UDP probes
     through the poll path, v4+v6, SNAT and non-NAT, single node and the
     split-RG fabric chain across both nodes) and
     `poll_descriptor_snat_time_exceeded_admitted_as_related_18174`.
+  - **#18557 — NAT64 Time Exceeded / Destination Unreachable are RELATED
+    from the expected zone:** the cross-family v4→v6 and v6→v4 arms now use
+    `outer_is_related_path_error` (v4 types 3/11/12; v6 types 1–4) after
+    validating arrival against the quoted session's direction-derived
+    forward egress/ingress zone. Thus translator-side hop errors are delivered
+    under default deny in both directions; a wrong-zone arrival still reaches
+    queued zone policy and is denied under default deny (#9948). The
+    #14123/#14316 policy-source and original-type cells are retargeted to
+    wrong-zone arrivals, so they continue exercising the queued policy gate
+    and retain mutation kills. Focused poll cells are
+    `poll_descriptor_nat64_icmp_error_*_related_18557` in
+    `tests_embedded_poll_filter.rs`.
   - **#9528 — both ICMP-error arms run AFTER the interface input filter and
     the PBR verdict:** each arm `continue`s with the descriptor consumed, and
     each used to run ahead of a gate below it. The #6472 arm ran before the

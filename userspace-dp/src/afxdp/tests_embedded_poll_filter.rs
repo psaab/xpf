@@ -3219,6 +3219,7 @@ fn n6472_patch_ptb(frame: &mut [u8], l4_offset: usize) {
     let csum = checksum16(&frame[l4_offset..]);
     frame[l4_offset + 2..l4_offset + 4].copy_from_slice(&csum.to_be_bytes());
 }
+
 /// Convert the shared ICMPv6 Time Exceeded fixture into Packet-Too-Big.
 fn n6472_patch_ptb_v6(frame: &mut [u8]) {
     let l4 = 54;
@@ -3230,6 +3231,25 @@ fn n6472_patch_ptb_v6(frame: &mut [u8]) {
     let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[38..54]).expect("outer IPv6 dst"));
     let csum = checksum16_ipv6(src, dst, PROTO_ICMPV6, &frame[l4..]);
     frame[l4 + 2..l4 + 4].copy_from_slice(&csum.to_be_bytes());
+}
+
+fn n6472_patch_dest_unreachable_v4(frame: &mut [u8], l4_offset: usize) {
+    frame[l4_offset] = 3;
+    frame[l4_offset + 1] = 1;
+    frame[l4_offset + 2..l4_offset + 4].fill(0);
+    let checksum = checksum16(&frame[l4_offset..]);
+    frame[l4_offset + 2..l4_offset + 4].copy_from_slice(&checksum.to_be_bytes());
+}
+
+fn n6472_patch_dest_unreachable_v6(frame: &mut [u8]) {
+    let l4 = 54;
+    frame[l4] = 1;
+    frame[l4 + 1] = 0;
+    frame[l4 + 2..l4 + 4].fill(0);
+    let src = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[22..38]).expect("outer IPv6 src"));
+    let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&frame[38..54]).expect("outer IPv6 dst"));
+    let checksum = checksum16_ipv6(src, dst, PROTO_ICMPV6, &frame[l4..]);
+    frame[l4 + 2..l4 + 4].copy_from_slice(&checksum.to_be_bytes());
 }
 
 /// #6472 FAIL-ON-REVERT (v4→v6, RFC 7915 §4.2): an ICMPv4 PTB from a v4 hop
@@ -3256,6 +3276,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     expect_denied: bool,
     expect_fabric_redirect: bool,
     outer_pmtud: bool,
+    outer_dest_unreachable: bool,
     arrival_ifindex: u32,
     expect_related_admit: bool,
 ) {
@@ -3274,8 +3295,9 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     }
     if outer_pmtud {
         n6472_patch_ptb(&mut frame, 34);
+    } else if outer_dest_unreachable {
+        n6472_patch_dest_unreachable_v4(&mut frame, 34);
     }
-
     // allow_embedded_icmp deliberately NOT set: the NAT64 arm is ungated.
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
     if expect_fabric_redirect {
@@ -3438,7 +3460,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     if expect_denied || (!allow_reverse_policy && !expect_related_admit) {
         assert!(
             binding.scratch.scratch_forwards.is_empty(),
-            "a NAT64 translated ICMP error must not queue under WAN->LAN default deny"
+            "a NAT64 translated ICMP error must not queue under zone-policy default deny"
         );
         assert_eq!(binding.scratch.scratch_recycle.len(), 1);
         if ha_state.values().any(|group| !group.active) {
@@ -3518,12 +3540,25 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
     );
     assert_eq!(out[14 + 6], PROTO_ICMPV6, "next header ICMPv6");
     assert_eq!(out[14 + 7], 63, "hop limit decremented once");
-    // ICMPv6 PTB: type 2, code 0, MTU = 1400 + 20 = 1420.
+    // The outer message is translated per RFC 7915; PMTUD additionally
+    // adjusts the advertised MTU by the IPv4/IPv6 header delta.
     let icmp6 = &out[14 + 40..];
-    assert_eq!(icmp6[0], 2, "ICMPv6 Packet Too Big type");
-    assert_eq!(icmp6[1], 0, "PTB code 0");
-    let mtu = u32::from_be_bytes([icmp6[4], icmp6[5], icmp6[6], icmp6[7]]);
-    assert_eq!(mtu, 1420, "PTB MTU = v4 next-hop MTU + NAT64 header delta");
+    assert_eq!(
+        icmp6[0],
+        if outer_pmtud {
+            2
+        } else if outer_dest_unreachable {
+            1
+        } else {
+            3
+        },
+        "ICMPv6 error type"
+    );
+    assert_eq!(icmp6[1], 0, "ICMPv6 error code");
+    if outer_pmtud {
+        let mtu = u32::from_be_bytes([icmp6[4], icmp6[5], icmp6[6], icmp6[7]]);
+        assert_eq!(mtu, 1420, "PTB MTU = v4 next-hop MTU + NAT64 header delta");
+    }
     // ICMPv6 checksum oracle over the translated message.
     let s6 = Ipv6Addr::from(<[u8; 16]>::try_from(&out[14 + 8..14 + 24]).unwrap());
     let d6 = Ipv6Addr::from(<[u8; 16]>::try_from(&out[14 + 24..14 + 40]).unwrap());
@@ -3570,6 +3605,7 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_im
         "a queued prebuilt forward owns the descriptor; no recycle"
     );
 }
+
 #[test]
 fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() {
     poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
@@ -3578,13 +3614,14 @@ fn poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472() 
         false,
         false,
         true,
+        false,
         12,
         false,
     );
 }
 
-/// #9948 fail-on-revert: a translated non-PMTUD error remains subject to the
-/// actual WAN-to-LAN zone policy even though a matched PMTUD error is RELATED.
+/// #9948 fail-on-revert: a translated non-PMTUD error arriving from the
+/// wrong zone remains subject to the actual zone policy under default deny.
 #[test]
 fn poll_descriptor_nat64_icmp_error_zone_policy_denies_9948() {
     poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
@@ -3593,8 +3630,41 @@ fn poll_descriptor_nat64_icmp_error_zone_policy_denies_9948() {
         true,
         false,
         false,
-        12,
         false,
+        32,
+        false,
+    );
+}
+
+/// #18557: a Time Exceeded from the expected arrival zone is RELATED under
+/// default deny.
+#[test]
+fn poll_descriptor_nat64_icmp_error_v4_to_v6_time_exceeded_related_18557() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        false,
+        false,
+        12,
+        true,
+    );
+}
+
+/// #18557: a Destination Unreachable from the expected arrival zone is
+/// RELATED under default deny.
+#[test]
+fn poll_descriptor_nat64_icmp_error_v4_to_v6_dest_unreachable_related_18557() {
+    poll_descriptor_nat64_icmp_error_v4_to_v6_translated_on_flowless_path_6472_impl(
+        false,
+        txn_ha_state(),
+        false,
+        false,
+        false,
+        true,
+        12,
+        true,
     );
 }
 
@@ -3608,6 +3678,7 @@ fn poll_descriptor_nat64_icmp_error_ha_inactive_denies_9948() {
         true,
         false,
         true,
+        false,
         12,
         false,
     );
@@ -3623,6 +3694,7 @@ fn poll_descriptor_nat64_icmp_error_fabric_redirect_passthrough_9948() {
         false,
         true,
         true,
+        false,
         12,
         false,
     );
@@ -3638,6 +3710,7 @@ fn poll_descriptor_nat64_pmtud_admitted_as_related_10666() {
         false,
         false,
         true,
+        false,
         12,
         true,
     );
@@ -3653,6 +3726,7 @@ fn poll_descriptor_nat64_pmtud_from_wrong_zone_denied_10666() {
         true,
         false,
         true,
+        false,
         32,
         false,
     );
@@ -3675,6 +3749,7 @@ fn poll_descriptor_nat64_pmtud_from_wrong_zone_denied_10666() {
 /// assertion below goes RED.
 fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
     outer_pmtud: bool,
+    outer_dest_unreachable: bool,
     allow_reverse_policy: bool,
     arrival_ifindex: u32,
     expect_denied: bool,
@@ -3694,6 +3769,8 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
     }
     if outer_pmtud {
         n6472_patch_ptb_v6(&mut frame);
+    } else if outer_dest_unreachable {
+        n6472_patch_dest_unreachable_v6(&mut frame);
     }
 
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
@@ -3808,18 +3885,24 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
         0,
         "outer IPv4 header checksum verifies"
     );
-    // ICMPv4 Time-Exceeded: type 11, code 0.
+    // ICMPv4 error mapping: v6 PTB -> v4 Fragmentation Needed, v6
+    // Destination Unreachable -> v4 Destination Unreachable, and Time
+    // Exceeded maps 1:1.
     let icmp = &ip[20..];
-    assert_eq!(
-        icmp[0],
-        if outer_pmtud { 3 } else { 11 },
-        "ICMPv4 error type"
-    );
-    assert_eq!(
-        icmp[1],
-        if outer_pmtud { 4 } else { 0 },
-        "ICMPv4 error code"
-    );
+    let expected_type = if outer_pmtud || outer_dest_unreachable {
+        3
+    } else {
+        11
+    };
+    let expected_code = if outer_pmtud {
+        4
+    } else if outer_dest_unreachable {
+        1
+    } else {
+        0
+    };
+    assert_eq!(icmp[0], expected_type, "ICMPv4 error type");
+    assert_eq!(icmp[1], expected_code, "ICMPv4 error code");
     // Embedded quote: the v4 reply the server sent — 8.8.8.8:443 ->
     // pool:40000. The quote's DESTINATION port is RESTORED to the translated
     // value (the server never saw the client's original 12345).
@@ -3857,10 +3940,11 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_im
     assert_eq!(sessions.len(), sessions_before, "no new session minted");
     assert!(binding.scratch.scratch_recycle.is_empty());
 }
+
 #[test]
 fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() {
     poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
-        false, true, 24, false,
+        false, false, true, 24, false,
     );
 }
 
@@ -3870,23 +3954,39 @@ fn poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472() 
 
 fn poll_descriptor_nat64_v6_to_v4_pmtud_admitted_as_related_10666() {
     poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
-        true, false, 24, false,
+        true, false, false, 24, false,
     );
 }
 
 #[test]
 fn poll_descriptor_nat64_v6_to_v4_pmtud_from_wrong_zone_denied_10666() {
     poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
-        true, false, 32, true,
+        true, false, false, 32, true,
     );
 }
-/// #14123 helper: one V6ToV4 NAT64 error (Time-Exceeded, not PMTUD, so the
-/// queued prebuilt faces the zone-policy gate) from `router` quoting the
-/// translated reply, driven on the real flowless poll path under
-/// `lan -> wan` policies `deny_src` then `permit_src`, in that order.
-/// Returns whether the translated error queued.
+
+/// #18557: expected-zone Time Exceeded is RELATED under default deny.
+#[test]
+fn poll_descriptor_nat64_icmp_error_v6_to_v4_time_exceeded_related_18557() {
+    poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
+        false, false, false, 24, false,
+    );
+}
+
+/// #18557: expected-zone Destination Unreachable is RELATED under default deny.
+#[test]
+fn poll_descriptor_nat64_icmp_error_v6_to_v4_dest_unreachable_related_18557() {
+    poll_descriptor_nat64_icmp_error_v6_to_v4_translated_on_flowless_path_6472_impl(
+        false, true, false, 24, false,
+    );
+}
+
+/// #14123 helper: one V6ToV4 NAT64 Time-Exceeded arriving from the wrong
+/// zone, so the queued prebuilt faces the zone-policy gate. The frame quotes
+/// the translated reply and is driven under `untrust -> wan` policies
+/// `deny_src` then `permit_src`, in that order. Returns whether it queued.
 fn n14123_run_v6_to_v4(router: Ipv6Addr, deny_src: IpAddr, permit_src: IpAddr) -> bool {
-    let frame = build_icmpv6_te_frame_with_mac(
+    let mut frame = build_icmpv6_te_frame_with_mac(
         router,
         n6472_pref64_server(),
         n6472_client_v6(),
@@ -3895,8 +3995,10 @@ fn n14123_run_v6_to_v4(router: Ipv6Addr, deny_src: IpAddr, permit_src: IpAddr) -
         PROTO_TCP,
         TEST_LAN_MAC,
     );
+    frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
     snapshot.default_policy = "deny".to_string();
+    add_untrusted_icmp_ingress(&mut snapshot);
     let addr = |ip: IpAddr| match ip {
         IpAddr::V6(v6) => format!("{v6}/128"),
         IpAddr::V4(v4) => format!("{v4}/32"),
@@ -3904,7 +4006,7 @@ fn n14123_run_v6_to_v4(router: Ipv6Addr, deny_src: IpAddr, permit_src: IpAddr) -
     snapshot.policies = vec![
         PolicyRuleSnapshot {
             name: "deny-error-src-14123".to_string(),
-            from_zone: "lan".to_string(),
+            from_zone: "untrust".to_string(),
             to_zone: "wan".to_string(),
             source_addresses: vec![addr(deny_src)],
             destination_addresses: vec!["any".to_string()],
@@ -3915,7 +4017,7 @@ fn n14123_run_v6_to_v4(router: Ipv6Addr, deny_src: IpAddr, permit_src: IpAddr) -
         },
         PolicyRuleSnapshot {
             name: "permit-error-src-14123".to_string(),
-            from_zone: "lan".to_string(),
+            from_zone: "untrust".to_string(),
             to_zone: "wan".to_string(),
             source_addresses: vec![addr(permit_src)],
             destination_addresses: vec!["any".to_string()],
@@ -3927,15 +4029,15 @@ fn n14123_run_v6_to_v4(router: Ipv6Addr, deny_src: IpAddr, permit_src: IpAddr) -
     ];
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
-    binding.interface = Arc::<str>::from("reth1.0");
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 32, 0);
+    binding.interface = Arc::<str>::from("reth2.0");
     let mut sessions = SessionTable::new();
     n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
-        ingress_ifindex: 24,
+        ingress_ifindex: 32,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,
@@ -3977,7 +4079,7 @@ fn poll_descriptor_nat64_v6_to_v4_policy_judges_original_sender_14123() {
     let other: Ipv6Addr = "2001:db8::99".parse().expect("other v6 sender");
     assert!(
         !n14123_run_v6_to_v4(router, IpAddr::V6(router), IpAddr::V6(other)),
-        "#14123: a lan->wan deny on the original IPv6 error sender must refuse the translated error (RED on master: gate judged the pool source)"
+        "#14123: an untrust->wan deny on the original IPv6 error sender must refuse the translated error (RED on master: gate judged the pool source)"
     );
     assert!(
         n14123_run_v6_to_v4(router, IpAddr::V6(other), IpAddr::V6(router)),
@@ -3997,15 +4099,13 @@ fn n14316_icmp_term(protocol: &str, icmp_type: u8) -> Vec<crate::PolicyApplicati
     }]
 }
 
-/// #14316 helper (V4ToV6): one ICMPv4 Time-Exceeded (type 11) from
-/// `198.51.100.254` quoting the NAT64 reverse session, driven on the real
-/// flowless poll path under `wan -> lan` policies deny(icmp type 11 from
+/// #14316 helper (V4ToV6): one ICMPv4 Time-Exceeded from
+/// `198.51.100.254` arriving on the wrong zone and quoting the NAT64 reverse
+/// session, driven under `untrust -> lan` policies deny(icmp type 11 from the
 /// sender) then permit(any). Returns whether the translated error queued.
-/// `wan -> lan` is the arrival(wan)->egress(lan) direction the queued
-/// gate adjudicates; the quoted session's forward direction is lan->wan.
 fn n14316_run_v4_to_v6() -> bool {
     let sender = Ipv4Addr::new(198, 51, 100, 254);
-    let frame = build_icmp_te_frame_v4_with_mac(
+    let mut frame = build_icmp_te_frame_v4_with_mac(
         sender,
         n6472_pool_v4(),
         n6472_server_v4(),
@@ -4014,12 +4114,14 @@ fn n14316_run_v4_to_v6() -> bool {
         PROTO_TCP,
         TEST_WAN_MAC,
     );
+    frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
     snapshot.default_policy = "deny".to_string();
+    add_untrusted_icmp_ingress(&mut snapshot);
     snapshot.policies = vec![
         PolicyRuleSnapshot {
             name: "deny-error-src-14316".to_string(),
-            from_zone: "wan".to_string(),
+            from_zone: "untrust".to_string(),
             to_zone: "lan".to_string(),
             source_addresses: vec!["198.51.100.254/32".to_string()],
             destination_addresses: vec!["any".to_string()],
@@ -4030,7 +4132,7 @@ fn n14316_run_v4_to_v6() -> bool {
         },
         PolicyRuleSnapshot {
             name: "permit-rest-14316".to_string(),
-            from_zone: "wan".to_string(),
+            from_zone: "untrust".to_string(),
             to_zone: "lan".to_string(),
             source_addresses: vec!["any".to_string()],
             destination_addresses: vec!["any".to_string()],
@@ -4042,17 +4144,15 @@ fn n14316_run_v4_to_v6() -> bool {
     ];
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
-    binding.interface = Arc::<str>::from("reth0.80");
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 32, 0);
+    binding.interface = Arc::<str>::from("reth2.0");
     let mut sessions = SessionTable::new();
     n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
-        ingress_ifindex: 12,
-        ingress_vlan_id: EMBEDDED_POLL_TEST_WAN_VLAN_ID,
-        ingress_vlan_present: 1,
+        ingress_ifindex: 32,
         l3_offset: 14,
         l4_offset: 34,
         payload_offset: 42,
@@ -4063,7 +4163,6 @@ fn n14316_run_v4_to_v6() -> bool {
         fib_generation: 9,
         ..UserspaceDpMeta::default()
     };
-    let (frame, meta) = embedded_poll_test_tag_wan_ingress(&frame, meta);
     let (_batch, _dbg) = txn_run_descriptor_checked(
         &mut binding,
         &mut sessions,
@@ -4087,15 +4186,15 @@ fn n14316_run_v4_to_v6() -> bool {
 fn pol14316_v4tov6_icmp_type_deny_refuses() {
     assert!(
         !n14316_run_v4_to_v6(),
-        "#14316: wan->lan deny on 198.51.100.254/32 protocol icmp icmp-type 11 must refuse the V4ToV6 translated Time-Exceeded (RED on master: policy_src_ip None left the PROTO_ICMP arm dead)"
+        "#14316: untrust->lan deny on 198.51.100.254/32 protocol icmp icmp-type 11 must refuse the V4ToV6 translated Time-Exceeded (RED on master: policy_src_ip None left the PROTO_ICMP arm dead)"
     );
 }
 
-/// #14316 helper (V6ToV4): one ICMPv6 error of `icmpv6_type`/code 0 from the
-/// LAN router quoting the translated reply, driven on the real flowless
-/// poll path under `lan -> wan` policies deny(icmpv6 icmp-type
-/// `deny_type`) then permit(icmpv6 icmp-type `permit_type`), both from the
-/// router /128. Returns whether the translated error queued.
+/// #14316 helper (V6ToV4): one ICMPv6 error from the LAN router arriving on
+/// the wrong zone and quoting the translated reply, driven under `untrust ->
+/// wan` policies deny(icmpv6 icmp-type `deny_type`) then permit(icmpv6
+/// icmp-type `permit_type`), both from the router /128. Returns whether it
+/// queued.
 fn n14316_run_v6_to_v4(icmpv6_type: u8, deny_type: u8, permit_type: u8) -> bool {
     let router: Ipv6Addr = "2001:559:8585:ef00::fe".parse().expect("lan v6 router");
     let mut frame = build_icmpv6_te_frame_with_mac(
@@ -4107,6 +4206,7 @@ fn n14316_run_v6_to_v4(icmpv6_type: u8, deny_type: u8, permit_type: u8) -> bool 
         PROTO_TCP,
         TEST_LAN_MAC,
     );
+    frame[..6].copy_from_slice(&[0x02, 0xbf, 0x72, 0x01, 0x00, 0x01]);
     if icmpv6_type != 3 {
         // Patch the outer ICMPv6 type (builder emits type 3) and fix the
         // ICMPv6 checksum over the pseudo-header.
@@ -4120,10 +4220,11 @@ fn n14316_run_v6_to_v4(icmpv6_type: u8, deny_type: u8, permit_type: u8) -> bool 
     }
     let mut snapshot = nat64_snapshot(lan_to_wan_permit("8.8.8.8/32", "permit-nat64-v4"));
     snapshot.default_policy = "deny".to_string();
+    add_untrusted_icmp_ingress(&mut snapshot);
     snapshot.policies = vec![
         PolicyRuleSnapshot {
             name: "deny-icmpv6-type-14316".to_string(),
-            from_zone: "lan".to_string(),
+            from_zone: "untrust".to_string(),
             to_zone: "wan".to_string(),
             source_addresses: vec![format!("{router}/128")],
             destination_addresses: vec!["any".to_string()],
@@ -4134,7 +4235,7 @@ fn n14316_run_v6_to_v4(icmpv6_type: u8, deny_type: u8, permit_type: u8) -> bool 
         },
         PolicyRuleSnapshot {
             name: "permit-icmpv6-type-14316".to_string(),
-            from_zone: "lan".to_string(),
+            from_zone: "untrust".to_string(),
             to_zone: "wan".to_string(),
             source_addresses: vec![format!("{router}/128")],
             destination_addresses: vec!["any".to_string()],
@@ -4146,15 +4247,15 @@ fn n14316_run_v6_to_v4(icmpv6_type: u8, deny_type: u8, permit_type: u8) -> bool 
     ];
     let forwarding = build_forwarding_state(&snapshot);
     let ha_state = txn_ha_state();
-    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
-    binding.interface = Arc::<str>::from("reth1.0");
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 32, 0);
+    binding.interface = Arc::<str>::from("reth2.0");
     let mut sessions = SessionTable::new();
     n6472_install_sessions(&mut sessions, 123_000_000_000 - 1);
     let meta = UserspaceDpMeta {
         magic: USERSPACE_META_MAGIC,
         version: USERSPACE_META_VERSION,
         length: std::mem::size_of::<UserspaceDpMeta>() as u16,
-        ingress_ifindex: 24,
+        ingress_ifindex: 32,
         l3_offset: 14,
         l4_offset: 54,
         payload_offset: 62,

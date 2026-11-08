@@ -1,6 +1,7 @@
 // #6472: NAT64 (cross-family) ICMP error translation on the FLOWLESS poll
 // arm — the path every non-query ICMP error takes (#3290). RFC 7915
-// §4.2/§5.2 PMTUD/traceroute across the NAT64 boundary.
+// §4.2/§5.2 PMTUD, traceroute, and destination-unreachable signaling across
+// the NAT64 boundary.
 //
 // Reachability bug this fixes: the RFC 7915 translators in `nat64.rs` were
 // previously callable only via `build_nat64_forwarded_frame`, which runs on
@@ -23,8 +24,9 @@
 // then normal flowless enforcement, both unchanged.
 
 use super::embedded_icmp::{
-    actual_embedded_icmp_ingress_zone, outer_is_pmtud_error, queued_embedded_icmp_identity,
-    related_forward_zones, EmbeddedIcmpReversal, queue_prebuilt_embedded_icmp_error,
+    actual_embedded_icmp_ingress_zone, outer_is_related_path_error,
+    queued_embedded_icmp_identity, related_forward_zones, EmbeddedIcmpReversal,
+    queue_prebuilt_embedded_icmp_error,
 };
 use super::*;
 
@@ -197,18 +199,19 @@ pub(super) fn try_translate_nat64_icmp_error(
                 #[cfg(feature = "debug-log")]
                 false,
             );
-            // #10666: the v4 error arrives on the translator's v4 (egress)
-            // side — RELATED iff it is PMTUD from the session's forward
-            // egress zone. Anything else keeps `related_admit` false and
-            // the caller adjudicates the queued prebuilt against zone
-            // policy; a wrong-zone forgery still drops under default-deny.
+            // #10666/#18557: the v4 error arrives on the translator's v4
+            // (egress) side — a supported path error is RELATED iff it
+            // arrives from the session's forward egress zone. Anything else
+            // keeps `related_admit` false and the caller adjudicates the
+            // queued prebuilt against zone policy; a wrong-zone forgery still
+            // drops under default-deny.
             let (_, fwd_egress_zone) = related_forward_zones(&metadata);
             match queued {
                 EmbeddedIcmpReversal::Queued { budget_key, .. } => {
                     EmbeddedIcmpReversal::Queued {
                         related_admit: fwd_egress_zone != 0
                             && arrival_zone == fwd_egress_zone
-                            && outer_is_pmtud_error(packet_frame, meta),
+                            && outer_is_related_path_error(packet_frame, meta),
                         policy_src_ip: Some(IpAddr::V4(router_v4)),
                         policy_icmp: Some(policy_icmp),
                         budget_key,
@@ -318,16 +321,17 @@ pub(super) fn try_translate_nat64_icmp_error(
                 #[cfg(feature = "debug-log")]
                 false,
             );
-            // #10666: the v6 error arrives on the translator's v6 (ingress)
-            // side — RELATED iff it is PMTUD from the session's forward
-            // ingress zone (the mirror of the v4 arm above).
+            // #10666/#18557: the v6 error arrives on the translator's v6
+            // (ingress) side — a supported path error is RELATED iff it
+            // arrives from the session's forward ingress zone (the mirror of
+            // the v4 arm above).
             let (fwd_ingress_zone, _) = related_forward_zones(&metadata);
             match queued {
                 EmbeddedIcmpReversal::Queued { budget_key, .. } => {
                     EmbeddedIcmpReversal::Queued {
                         related_admit: fwd_ingress_zone != 0
                             && arrival_zone == fwd_ingress_zone
-                            && outer_is_pmtud_error(packet_frame, meta),
+                            && outer_is_related_path_error(packet_frame, meta),
                         policy_src_ip: Some(original_src),
                         policy_icmp: Some(policy_icmp),
                         budget_key,
