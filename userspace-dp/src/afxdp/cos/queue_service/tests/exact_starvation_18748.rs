@@ -717,3 +717,51 @@ fn published_backlog_carries_a_root_parked_exact_queue_18748() {
         "the published demand bytes must agree with the published mask"
     );
 }
+
+/// The local half of the reservation: while this worker's own exact queue
+/// waits on root (parked, own tokens covering its head), its own non-exact
+/// surplus is metered by the residual budget like every peer's, so it cannot
+/// take the root that the parked exact queue is waiting for. The fresh shared
+/// residual holds nothing yet, so no surplus batch is built. Under the
+/// #hb166 T-6(b) predicate the parked queue was not demand and the worker's
+/// own non-exact queue drained unconstrained.
+#[test]
+fn own_root_parked_exact_queue_meters_this_workers_surplus_18748() {
+    let mut root = lab_runtime(24 * GBIT);
+    root.tokens = 100_000;
+    {
+        let exact = &mut root.queues[EXACT_IDX];
+        exact.hot.tokens = 10_000;
+        exact.hot.items.push_back(test_cos_item(FRAME));
+        exact.hot.queued_bytes = FRAME as u64;
+    }
+    park(&mut root);
+    {
+        let nonexact = &mut root.queues[NONEXACT_IDX];
+        nonexact.hot.runnable = true;
+        nonexact.hot.items.push_back(test_cos_item(FRAME));
+        nonexact.hot.queued_bytes = FRAME as u64;
+    }
+    root.nonempty_queues = 2;
+    root.runnable_queues = 1;
+    let backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut fast = test_cos_fast_interfaces(
+        IFX,
+        IFX,
+        NONEXACT_QUEUE,
+        vec![
+            (EXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
+            (NONEXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
+        ],
+        None,
+        None,
+    );
+    fast.get_mut(&IFX).expect("fast path").shared_exact_backlog = Some(backlog);
+    let fast_path = fast.get(&IFX).expect("fast path").clone();
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFX, root, fast_path);
+
+    assert!(
+        build_nonexact_cos_batch(&mut binding, IFX, 2_000_000_000).is_none(),
+        "this worker's non-exact surplus took root while its own exact queue was parked on root"
+    );
+}
