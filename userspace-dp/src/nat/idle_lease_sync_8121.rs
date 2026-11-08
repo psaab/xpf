@@ -270,6 +270,26 @@ impl PortAllocator {
         }
     }
 
+    /// Test-only readback for asserting lease ownership and normalized expiry
+    /// without inferring them solely from export counts.
+    #[cfg(test)]
+    pub(crate) fn debug_idle_lease_state(
+        &self,
+        record: &IdleLeaseRecord,
+    ) -> Option<(bool, u64, u64)> {
+        let key = PersistentSourceKey {
+            protocol: record.protocol,
+            src_ip: record.src_ip,
+            src_port: record.src_port,
+            routing_scope: record.routing_scope,
+            remote: None,
+        };
+        self.lock_live()
+            .persistent_by_source
+            .get(&key)
+            .map(|lease| (lease.imported, lease.expires_at_ns, lease.timeout_ns))
+    }
+
     /// #8615: every persistent lease this node would HONOUR, for DISPLAY only.
     ///
     /// The filter is `reuse_existing_lease_locked`'s own admission predicate —

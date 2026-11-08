@@ -4573,13 +4573,20 @@ Two consequences of opening forwarding early:
   and TTL order.
 - **Helper side effects happen on the requester.** Pre-activation runs the
   helper's ordinary activation for the RG. That includes `RefreshOwnerRGS`
-  and, when it leaves no group inactive, the node-wide
-  `promote_imported_persistent_nat_leases`. A failed transfer then runs the
-  ordinary demotion (`DemoteOwnerRGS` and its purge walk). Lease promotion has
-  no reverse step, so a requester whose transfer aborts keeps promoted
-  leases. That is the same state an old owner is left in after an ordinary
-  failover, which also has no reverse step. The helper-level abort cell above
-  confirms the requester remains in that same post-demotion lease state (#18569).
+  and the node-wide `promote_imported_persistent_nat_leases` when the full
+  configured helper inventory is all-active. The inventory includes RG0 even
+  when the transfer targets only RG1: the Go cell
+  `TestPreActivationPublishesFullInventoryAndAbort18569` pins RG0/RG1/RG2 as
+  active or inactive through the real overlay and abort path. With inactive
+  RG0, RG1's overlay cannot promote while RG0 remains inactive; if RG0 and the
+  other configured groups are already active, pre-activation makes the whole
+  inventory all-active and promotes the import. A failed transfer then runs
+  ordinary demotion (`DemoteOwnerRGS` and its purge walk), but promotion has no
+  reverse step. In that genuinely all-active case, the aborted requester
+  exports the same lease state as an old owner after ordinary failover. The
+  Rust cell `aborted_requester_lease_promotion_matches_old_owner_18569` proves
+  that equivalence for the helper-facing wire inventory; the wire status has
+  no pre-activation provenance field.
 
 The untargeted `request chassis cluster failover redundancy-group N` (run on
 the owner, no target node) still demotes locally and leaves the peer to

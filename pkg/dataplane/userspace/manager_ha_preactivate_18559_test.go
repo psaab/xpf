@@ -33,6 +33,16 @@ func (r *haSendRecorder18559) last(t *testing.T) map[int]bool {
 	return out
 }
 
+func (r *haSendRecorder18559) lastGroups(t *testing.T) []HAGroupStatus {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.sends) == 0 {
+		t.Fatal("no update_ha_state reached the helper")
+	}
+	return append([]HAGroupStatus(nil), r.sends[len(r.sends)-1]...)
+}
+
 func (r *haSendRecorder18559) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -81,6 +91,67 @@ func TestPreActivationOpensHelperForwarding18559(t *testing.T) {
 	if m.haGroups[1].Active {
 		t.Fatal("haGroups[1] was rewritten active: the overlay must not touch the cluster truth")
 	}
+}
+
+// #18569: drive the real Go overlay and pin the entire helper-facing inventory
+// across begin and abort. RG0 is present even when it owns no forwarding; its
+// active state can gate the node-wide lease-promotion predicate.
+func TestPreActivationPublishesFullInventoryAndAbort18569(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		rg0Active bool
+	}{
+		{name: "configured-inactive-RG0-blocks-promotion", rg0Active: false},
+		{name: "all-active-including-RG0", rg0Active: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, rec := newPreActivateManager18559(t)
+			if tc.rg0Active {
+				m.mu.Lock()
+				group := m.haGroups[0]
+				group.Active = true
+				m.haGroups[0] = group
+				m.mu.Unlock()
+			}
+			m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
+			if err := m.PublishTransferPreActivation(); err != nil && err.Error() != "userspace_ctrl map not loaded" {
+				t.Fatalf("PublishTransferPreActivation: %v", err)
+			}
+			wantDuring := []HAGroupStatus{
+				{RGID: 0, Active: tc.rg0Active, WatchdogTimestamp: 0},
+				{RGID: 1, Active: true, WatchdogTimestamp: 0},
+				{RGID: 2, Active: true, WatchdogTimestamp: 0},
+			}
+			if got := rec.lastGroups(t); !equalHAGroupInventories18569(got, wantDuring) {
+				t.Fatalf("helper pre-activation inventory = %+v, want %+v", got, wantDuring)
+			}
+
+			reverted, err := m.EndTransferPreActivation([]int{1})
+			if !reverted || (err != nil && err.Error() != "userspace_ctrl map not loaded") {
+				t.Fatalf("EndTransferPreActivation = (%v, %v), want a successful release (plus only the known map-free status error)", reverted, err)
+			}
+			wantAfterAbort := []HAGroupStatus{
+				{RGID: 0, Active: tc.rg0Active, WatchdogTimestamp: 0},
+				{RGID: 1, Active: false, WatchdogTimestamp: 0},
+				{RGID: 2, Active: true, WatchdogTimestamp: 0},
+			}
+			if got := rec.lastGroups(t); !equalHAGroupInventories18569(got, wantAfterAbort) {
+				t.Fatalf("helper post-abort inventory = %+v, want %+v", got, wantAfterAbort)
+			}
+		})
+	}
+}
+
+func equalHAGroupInventories18569(got, want []HAGroupStatus) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // The daemon's reconcile keeps writing rg_active=false for an RG that is
