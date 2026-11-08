@@ -666,6 +666,8 @@ write_fixture("crash-window-zero.json", 62)
 write_fixture("outside-window-zero.json", 66)
 write_fixture("excluded-window-peak-outside-zero.json", rates=[8, 32, 0, 0, 0, 16, 16])
 write_fixture("excluded-window-peak-control.json", rates=[8, 32, 0, 0, 16, 16, 16])
+write_fixture("late-recovery-outage.json", rates=[8, 32, 8, 8, 0, 0, 64, 64])
+write_fixture("all-excluded.json", rates=[8, 32, 8])
 PY
 collapse_metrics() { # <fixture> [metrics producer args...]
 	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$aggregate_window_dir/$1" "${@:2}"
@@ -676,14 +678,17 @@ outside_crash_metrics=$(collapse_metrics outside-window-zero.json --event-sec 61
 outside_planned_metrics=$(collapse_metrics outside-window-zero.json --planned-move move=61.442)
 excluded_peak_outside_metrics=$(collapse_metrics "excluded-window-peak-outside-zero.json" --event-sec 1)
 excluded_peak_control_metrics=$(collapse_metrics "excluded-window-peak-control.json" --event-sec 1)
+late_recovery_metrics=$(collapse_metrics late-recovery-outage.json --event-sec 1 --resume-event-sec 1)
+all_excluded_metrics=$(collapse_metrics all-excluded.json --event-sec 0)
 python3 - "$crash_window_metrics" "$planned_window_metrics" \
 	"$outside_crash_metrics" "$outside_planned_metrics" \
-	"$excluded_peak_outside_metrics" "$excluded_peak_control_metrics" <<'PY' \
-	|| bad "#19021: aggregate collapse must exclude only window intervals without shifting its peak"
+	"$excluded_peak_outside_metrics" "$excluded_peak_control_metrics" \
+	"$late_recovery_metrics" "$all_excluded_metrics" <<'PY' \
+	|| bad "#19021: collapse baseline must survive later recovery and all-excluded windows must retain raw peak"
 import json
 import sys
 
-crash, planned, outside_crash, outside_planned, peak_outside, peak_control = (
+crash, planned, outside_crash, outside_planned, peak_outside, peak_control, late_recovery, all_excluded = (
     json.loads(value) for value in sys.argv[1:]
 )
 for name, metrics in (("crash", crash), ("planned move", planned)):
@@ -697,21 +702,35 @@ for name, metrics in (("crash", outside_crash), ("planned move", outside_planned
     assert metrics["peak_interval_index"] == 2, (name, metrics)
     assert metrics["zero_intervals_after_peak"] == 1, (name, metrics)
     assert metrics["collapse_detected"], (name, metrics)
-    assert metrics["collapse_reason"] == "1 zero interval(s) after peak", metrics
+    assert metrics["collapse_reason"] == "1 zero interval(s) after sustained-rate baseline", metrics
 assert outside_crash["stream_zero_intervals_outside_events_total"] == 8, outside_crash
 assert outside_planned["planned_moves"][0]["verdict"] == "PASS", outside_planned
 assert peak_outside["peak_gbps"] == 32, peak_outside
 assert peak_outside["peak_interval_index"] == 1, peak_outside
 assert peak_outside["zero_intervals_after_peak"] == 1, peak_outside
 assert peak_outside["collapse_detected"], peak_outside
-assert peak_outside["collapse_reason"] == "1 zero interval(s) after peak", peak_outside
+assert peak_outside["collapse_reason"] == "1 zero interval(s) after sustained-rate baseline", peak_outside
 assert peak_outside["tail_gbps"] == [16.0, 16.0], peak_outside
 assert peak_control["peak_gbps"] == 32, peak_control
 assert peak_control["peak_interval_index"] == 1, peak_control
 assert peak_control["zero_intervals_after_peak"] == 0, peak_control
 assert not peak_control["collapse_detected"], peak_control
+assert late_recovery["peak_gbps"] == 64, late_recovery
+assert late_recovery["peak_interval_index"] == 6, late_recovery
+assert late_recovery["zero_intervals_after_peak"] == 2, late_recovery
+assert late_recovery["collapse_detected"], late_recovery
+assert late_recovery["collapse_reason"] == (
+    "2 zero interval(s) after sustained-rate baseline; "
+    "2 stalled interval(s) after sustained-rate baseline"
+), late_recovery
+assert late_recovery["stream_zero_intervals_resume_excused_total"] == 16, late_recovery
+assert late_recovery["stream_zero_intervals_outside_events_total"] == 0, late_recovery
+assert all_excluded["peak_gbps"] == 32, all_excluded
+assert all_excluded["peak_interval_index"] == 1, all_excluded
+assert all_excluded["tail_gbps"] == [], all_excluded
+assert not all_excluded["collapse_detected"], all_excluded
 PY
-ok "#19021: window zeros are excluded, raw peaks stay fixed, and outside collapse still fails"
+ok "#19021: window exclusions retain raw peaks and detect outages before later recovery"
 
 # #18692/#18708: a stream carried in the five seconds before T is judged by
 # the crash cell, so its T+3..T+5 zeros can be excused when it resumes at T+5.

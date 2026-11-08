@@ -493,6 +493,13 @@ def summarize(path, args):
 
     peak_gbps = max(full_intervals)
     peak_index = full_intervals.index(peak_gbps)
+    summary.update(
+        {
+            "ok": True,
+            "peak_gbps": peak_gbps,
+            "peak_interval_index": peak_index,
+        }
+    )
     tail_intervals = [
         value
         for value, excluded in zip(full_intervals, full_interval_excluded)
@@ -508,37 +515,53 @@ def summarize(path, args):
     )
     tail_median = statistics.median(tail)
     tail_min = min(tail)
-    after_peak = full_intervals[peak_index + 1 :]
-    after_peak_excluded = full_interval_excluded[peak_index + 1 :]
-    after_peak_outside = [
+    # A later recovery peak must not erase an earlier capacity-relative
+    # outage. Start the collapse scan after the first interval reaching half
+    # the raw run peak; transition exclusions apply to scanned intervals, not
+    # to this baseline or to the raw peak reported above.
+    baseline_threshold = peak_gbps * 0.5
+    baseline_index = next(
+        index for index, value in enumerate(full_intervals) if value >= baseline_threshold
+    )
+    after_baseline = full_intervals[baseline_index + 1 :]
+    after_baseline_excluded = full_interval_excluded[baseline_index + 1 :]
+    after_baseline_outside = [
         value
-        for value, excluded in zip(after_peak, after_peak_excluded)
+        for value, excluded in zip(after_baseline, after_baseline_excluded)
         if not excluded
     ]
-    zero_after_peak = sum(1 for value in after_peak_outside if value <= args.zero_gbps)
-    stalled_after_peak = sum(1 for value in after_peak_outside if value <= args.stall_gbps)
+    zero_after_baseline = sum(
+        1 for value in after_baseline_outside if value <= args.zero_gbps
+    )
+    stalled_after_baseline = sum(
+        1 for value in after_baseline_outside if value <= args.stall_gbps
+    )
     tail_peak_ratio = tail_median / peak_gbps if peak_gbps > 0 else 0.0
 
     summary.update(
         {
             "ok": True,
-            "peak_gbps": peak_gbps,
-            "peak_interval_index": peak_index,
             "tail_gbps": tail,
             "tail_median_gbps": tail_median,
             "tail_min_gbps": tail_min,
             "tail_peak_ratio": tail_peak_ratio,
-            "zero_intervals_after_peak": zero_after_peak,
-            "stalled_intervals_after_peak": stalled_after_peak,
+            # Keep the established metric keys; collapse scanning begins at
+            # the first interval reaching 50% of the raw peak.
+            "zero_intervals_after_peak": zero_after_baseline,
+            "stalled_intervals_after_peak": stalled_after_baseline,
         }
     )
 
     if peak_gbps >= args.min_peak_gbps:
         reasons = []
-        if zero_after_peak > 0:
-            reasons.append(f"{zero_after_peak} zero interval(s) after peak")
-        if len(after_peak_outside) >= 2 and stalled_after_peak >= 2:
-            reasons.append(f"{stalled_after_peak} stalled interval(s) after peak")
+        if zero_after_baseline > 0:
+            reasons.append(
+                f"{zero_after_baseline} zero interval(s) after sustained-rate baseline"
+            )
+        if len(after_baseline_outside) >= 2 and stalled_after_baseline >= 2:
+            reasons.append(
+                f"{stalled_after_baseline} stalled interval(s) after sustained-rate baseline"
+            )
         if tail_peak_ratio < args.min_tail_ratio:
             reasons.append(
                 f"tail/peak ratio {tail_peak_ratio:.3f} below {args.min_tail_ratio:.3f}"
