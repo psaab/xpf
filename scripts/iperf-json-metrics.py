@@ -77,11 +77,14 @@ def stream_client_error(payload):
 # signal), not a measured reporting interval.
 POST_DURATION_SLACK_SEC = 1.0
 TRANSITION_COLLAPSE_POLICY = (
-    "With transition windows configured, a zero-triggered aggregate collapse is any full "
-    "interval outside those windows at or below --zero-gbps that follows an earlier full "
-    "interval outside those windows above --stall-gbps; zeros before that throughput "
-    "evidence do not count. Without transition windows, collapse metrics and verdicts "
-    "retain their original behavior."
+    "With transition windows configured, the transition-window policy is selected whenever "
+    "--event-sec or --planned-move is supplied, even if no full interval is excluded. A "
+    "zero-triggered aggregate collapse is any full interval outside those windows at or "
+    "below --zero-gbps that follows an earlier full interval outside those windows above "
+    "--stall-gbps; zeros before that throughput evidence do not count. In transition mode, "
+    "tail/peak ratio uses the eligible peak as its denominator while reported peak fields "
+    "stay raw, and post-activity counters use *_after_activity. Without transition windows, "
+    "collapse metrics and verdicts retain their original behavior."
 )
 
 
@@ -460,10 +463,9 @@ def summarize(path, args):
         duration = end_s - start
         if duration >= args.min_full_interval_sec:
             full_intervals.append(bps / 1e9)
-            # #19021: share the per-stream outside logic's full-window
-            # decision for aggregate tail and post-peak scans. The peak stays
-            # on the raw series, as before, so a later recovery cannot move it
-            # past an outside-window zero.
+            # #19021: reuse the per-stream full-window exclusion for
+            # transition-mode aggregate tail and post-activity scans.
+            # Reported peak fields remain raw for diagnostics.
             full_interval_excluded.append(fully_excluded(start, end_s))
     if client_error or not end:
         # An interrupted client's stub has zero sum_received and a sum_sent
@@ -546,6 +548,10 @@ def summarize(path, args):
 
     peak_gbps = max(full_intervals)
     peak_index = full_intervals.index(peak_gbps)
+    summary.pop("zero_intervals_after_peak")
+    summary.pop("stalled_intervals_after_peak")
+    summary["zero_intervals_after_activity"] = 0
+    summary["stalled_intervals_after_activity"] = 0
     summary.update(
         {
             "ok": True,
@@ -560,6 +566,7 @@ def summarize(path, args):
     ]
     if not tail_intervals:
         return summary
+    eligible_peak_gbps = max(tail_intervals)
     tail = (
         tail_intervals[-args.tail_window:]
         if len(tail_intervals) >= args.tail_window
@@ -587,7 +594,7 @@ def summarize(path, args):
                 zero_after_activity += 1
             if value <= args.stall_gbps:
                 stalled_after_activity += 1
-    tail_peak_ratio = tail_median / peak_gbps if peak_gbps > 0 else 0.0
+    tail_peak_ratio = tail_median / eligible_peak_gbps if eligible_peak_gbps > 0 else 0.0
 
     summary.update(
         {
@@ -595,8 +602,8 @@ def summarize(path, args):
             "tail_median_gbps": tail_median,
             "tail_min_gbps": tail_min,
             "tail_peak_ratio": tail_peak_ratio,
-            "zero_intervals_after_peak": zero_after_activity,
-            "stalled_intervals_after_peak": stalled_after_activity,
+            "zero_intervals_after_activity": zero_after_activity,
+            "stalled_intervals_after_activity": stalled_after_activity,
         }
     )
 
@@ -605,7 +612,7 @@ def summarize(path, args):
         reasons.append(
             f"{zero_after_activity} zero interval(s) after demonstrated throughput"
         )
-    if peak_gbps >= args.min_peak_gbps:
+    if eligible_peak_gbps >= args.min_peak_gbps:
         if post_activity_intervals >= 2 and stalled_after_activity >= 2:
             reasons.append(
                 f"{stalled_after_activity} stalled interval(s) after demonstrated throughput"
@@ -640,8 +647,8 @@ def main():
         default=[],
         help="transition instant (seconds from iperf start); may repeat. "
         "Full intervals wholly inside [T, T+--event-window-sec] are excluded "
-        "from stream_zero_intervals_outside_events_total and aggregate collapse "
-        "tail/post-peak scans; the peak remains on the raw series.",
+        "from stream_zero_intervals_outside_events_total and aggregate tail/post-activity "
+        "scans; event-mode counters use *_after_activity while peak fields stay raw.",
     )
     parser.add_argument(
         "--planned-move",
@@ -651,7 +658,8 @@ def main():
         help="a move the harness itself makes, anchored at each instant given "
         "(the request and the observed landing); may repeat. Its zero intervals "
         "are scored PASS/COST/FAIL in planned_moves, not excused from that score; "
-        "the windows are excluded from aggregate tail/post-peak scans, not peak selection.",
+        "the windows are excluded from aggregate tail/post-activity scans, not peak selection; "
+        "event-mode counters use *_after_activity while peak fields stay raw.",
     )
     parser.add_argument(
         "--planned-stall-gbps",

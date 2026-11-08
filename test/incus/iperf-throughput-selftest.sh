@@ -671,6 +671,10 @@ write_fixture("all-excluded.json", rates=[8, 32, 8])
 write_fixture("late-recovery-halfpeak.json", rates=[8, 16, 8, 8, 0, 0, 64, 64])
 write_fixture("late-recovery-nearpeak.json", rates=[8, 31.999, 8, 8, 0, 0, 64, 64])
 write_fixture("slow-start.json", rates=[0, 0, 4, 8, 16, 16])
+write_fixture("window-flat.json", rates=[8, 32, 8, 8, 8, 8, 8])
+write_fixture("window-decline.json", rates=[8, 32, 8, 8, 4, 4, 4])
+write_fixture("window-decline-default.json", rates=[8, 32, 8, 8, 2, 2, 2])
+write_fixture("threshold-boundary.json", rates=[0.25, 0, 8, 8, 8])
 PY
 collapse_metrics() { # <fixture> [metrics producer args...]
 	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$aggregate_window_dir/$1" "${@:2}"
@@ -687,18 +691,26 @@ late_recovery_halfpeak_metrics=$(collapse_metrics late-recovery-halfpeak.json --
 late_recovery_nearpeak_metrics=$(collapse_metrics late-recovery-nearpeak.json --event-sec 1)
 slow_start_metrics=$(collapse_metrics slow-start.json --event-sec 5)
 legacy_no_event_metrics=$(collapse_metrics late-recovery-outage.json)
+window_flat_metrics=$(collapse_metrics window-flat.json --event-sec 1)
+window_decline_metrics=$(collapse_metrics window-decline.json --event-sec 1 --min-tail-ratio 0.55)
+window_decline_default_metrics=$(collapse_metrics window-decline-default.json --event-sec 1)
+ineffective_event_metrics=$(collapse_metrics late-recovery-outage.json --event-sec 100)
+zero_width_event_metrics=$(collapse_metrics late-recovery-outage.json --event-sec 1 --event-window-sec 0)
+threshold_boundary_metrics=$(collapse_metrics threshold-boundary.json --event-sec 100 --stall-gbps 0.25)
 python3 - "$crash_window_metrics" "$planned_window_metrics" \
 	"$outside_crash_metrics" "$outside_planned_metrics" \
 	"$excluded_peak_outside_metrics" "$excluded_peak_control_metrics" \
 	"$late_recovery_metrics" "$all_excluded_metrics" \
 	"$late_recovery_halfpeak_metrics" "$late_recovery_nearpeak_metrics" \
-	"$slow_start_metrics" "$legacy_no_event_metrics" \
+	"$slow_start_metrics" "$window_flat_metrics" "$window_decline_metrics" \
+	"$window_decline_default_metrics" "$ineffective_event_metrics" \
+	"$zero_width_event_metrics" "$threshold_boundary_metrics" "$legacy_no_event_metrics" \
 	"$aggregate_window_dir/late-recovery-outage.json" <<'PY' \
 	|| bad "#19021: transition collapse policy must preserve demonstrated outages and no-window output"
 import json
 import sys
 
-metrics = [json.loads(value) for value in sys.argv[1:12]]
+metrics = [json.loads(value) for value in sys.argv[1:18]]
 (
     crash,
     planned,
@@ -711,29 +723,35 @@ metrics = [json.loads(value) for value in sys.argv[1:12]]
     late_recovery_halfpeak,
     late_recovery_nearpeak,
     slow_start,
+    window_flat,
+    window_decline,
+    window_decline_default,
+    ineffective_event,
+    zero_width_event,
+    threshold_boundary,
 ) = metrics
-legacy_no_event, legacy_path = sys.argv[12:]
+legacy_no_event, legacy_path = sys.argv[18:]
 for name, metrics in (("crash", crash), ("planned move", planned)):
     assert metrics["peak_interval_index"] == 2, (name, metrics)
-    assert metrics["zero_intervals_after_peak"] == 0, (name, metrics)
+    assert metrics["zero_intervals_after_activity"] == 0, (name, metrics)
     assert not metrics["collapse_detected"], (name, metrics["collapse_reason"])
 assert crash["stream_zero_intervals_outside_events_total"] == 0, crash
 assert planned["planned_move_fail_total"] == 1, planned
 assert planned["planned_move_zero_intervals_total"] == 8, planned
 for name, metrics in (("crash", outside_crash), ("planned move", outside_planned)):
     assert metrics["peak_interval_index"] == 2, (name, metrics)
-    assert metrics["zero_intervals_after_peak"] == 1, (name, metrics)
+    assert metrics["zero_intervals_after_activity"] == 1, (name, metrics)
     assert metrics["collapse_detected"], (name, metrics)
     assert metrics["collapse_reason"] == "1 zero interval(s) after demonstrated throughput", metrics
 assert peak_outside["peak_gbps"] == 32, peak_outside
 assert peak_outside["peak_interval_index"] == 1, peak_outside
-assert peak_outside["zero_intervals_after_peak"] == 1, peak_outside
+assert peak_outside["zero_intervals_after_activity"] == 1, peak_outside
 assert peak_outside["collapse_detected"], peak_outside
 assert peak_outside["collapse_reason"] == "1 zero interval(s) after demonstrated throughput", peak_outside
 assert peak_outside["tail_gbps"] == [16.0, 16.0], peak_outside
 assert peak_control["peak_gbps"] == 32, peak_control
 assert peak_control["peak_interval_index"] == 1, peak_control
-assert peak_control["zero_intervals_after_peak"] == 0, peak_control
+assert peak_control["zero_intervals_after_activity"] == 0, peak_control
 assert not peak_control["collapse_detected"], peak_control
 for name, metrics in (
     ("32 Gbit/s prior peak", late_recovery),
@@ -742,10 +760,11 @@ for name, metrics in (
 ):
     assert metrics["peak_gbps"] == 64, (name, metrics)
     assert metrics["peak_interval_index"] == 6, (name, metrics)
-    assert metrics["zero_intervals_after_peak"] == 2, (name, metrics)
+    assert metrics["zero_intervals_after_activity"] == 2, (name, metrics)
     assert metrics["collapse_detected"], (name, metrics)
     assert "2 zero interval(s) after demonstrated throughput" in metrics["collapse_reason"], (name, metrics)
     assert "2 stalled interval(s) after demonstrated throughput" in metrics["collapse_reason"], (name, metrics)
+    assert metrics["stalled_intervals_after_activity"] == 2, (name, metrics)
 assert late_recovery["stream_zero_intervals_resume_excused_total"] == 16, late_recovery
 assert late_recovery["stream_zero_intervals_outside_events_total"] == 0, late_recovery
 assert all_excluded["peak_gbps"] == 32, all_excluded
@@ -753,7 +772,34 @@ assert all_excluded["peak_interval_index"] == 1, all_excluded
 assert all_excluded["tail_gbps"] == [], all_excluded
 assert not all_excluded["collapse_detected"], all_excluded
 assert not slow_start["collapse_detected"], slow_start
-assert slow_start["zero_intervals_after_peak"] == 0, slow_start
+assert slow_start["zero_intervals_after_activity"] == 0, slow_start
+for name, metrics in (
+    ("outside-run event", ineffective_event),
+    ("zero-width event", zero_width_event),
+):
+    assert "zero_intervals_after_activity" in metrics, (name, metrics)
+    assert "zero_intervals_after_peak" not in metrics, (name, metrics)
+    assert metrics["stream_zero_intervals_outside_events_total"] == 16, (name, metrics)
+    assert metrics["zero_intervals_after_activity"] == 2, (name, metrics)
+    assert metrics["collapse_detected"], (name, metrics)
+assert window_flat["peak_gbps"] == 32, window_flat
+assert window_flat["peak_interval_index"] == 1, window_flat
+assert window_flat["tail_gbps"] == [8.0, 8.0], window_flat
+assert window_flat["tail_peak_ratio"] == 1.0, window_flat
+assert not window_flat["collapse_detected"], window_flat
+assert window_decline["peak_gbps"] == 32, window_decline
+assert window_decline["peak_interval_index"] == 1, window_decline
+assert window_decline["tail_gbps"] == [4.0, 4.0], window_decline
+assert window_decline["tail_peak_ratio"] == 0.5, window_decline
+assert window_decline["collapse_reason"] == "tail/peak ratio 0.500 below 0.550", window_decline
+assert window_decline_default["tail_peak_ratio"] == 0.25, window_decline_default
+assert "tail/peak ratio 0.250 below 0.350" in window_decline_default["collapse_reason"], window_decline_default
+assert threshold_boundary["interval_gbps"][:2] == [0.25, 0.0], threshold_boundary
+assert threshold_boundary["peak_gbps"] == 8.0, threshold_boundary
+assert threshold_boundary["peak_interval_index"] == 2, threshold_boundary
+assert threshold_boundary["zero_intervals_after_activity"] == 0, threshold_boundary
+assert threshold_boundary["stalled_intervals_after_activity"] == 0, threshold_boundary
+assert not threshold_boundary["collapse_detected"], threshold_boundary
 legacy_expected = {
     "path": legacy_path,
     "ok": True,
