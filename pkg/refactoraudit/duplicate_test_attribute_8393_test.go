@@ -489,6 +489,42 @@ func lineInRanges15255(ranges [][2]int, i int) bool {
 	return false
 }
 
+// fnItemRef19013 reports whether src references name as a fn-item value
+// outside its own declaration: a bare identifier or the last segment of a
+// `::`-qualified path, followed by `,`, `)`, or `;` (an argument, a
+// binding, or a returned value — never an invocation, which ends in
+// `(`). The `fn name(` declaration itself is excluded: its next byte is
+// `(` so it can never match, and identifier boundaries keep longer
+// names that merely contain name (name_extra) from counting (#19013).
+func fnItemRef19013(src, name string) bool {
+	for idx := 0; ; {
+		at := strings.Index(src[idx:], name)
+		if at < 0 {
+			return false
+		}
+		start := idx + at
+		idx = start + len(name)
+		if start > 0 {
+			if prev := src[start-1]; prev == '_' ||
+				('0' <= prev && prev <= '9') ||
+				('a' <= prev && prev <= 'z') ||
+				('A' <= prev && prev <= 'Z') {
+				continue
+			}
+		}
+		end := start + len(name)
+		for end < len(src) && (src[end] == ' ' || src[end] == '\t' ||
+			src[end] == '\n' || src[end] == '\r') {
+			end++
+		}
+		if end < len(src) {
+			if next := src[end]; next == ',' || next == ')' || next == ';' {
+				return true
+			}
+		}
+	}
+}
+
 // fnNameAndArgs15255 parses a fn declaration line, returning the name
 // and the raw argument list. ok=false for non-declarations. Generic
 // parameter lists before the parens are skipped.
@@ -627,7 +663,7 @@ func unregisteredInRanges15255(rel, src string, ranges [][2]int, whole bool) []s
 					strings.Contains(body, "assert_ne!(")
 				if asserting {
 					refs := strings.Count(src, name+"(")
-					if refs <= 1 {
+					if refs <= 1 && !fnItemRef19013(src, name) {
 						out = append(out, rel+":"+itoa8393(i+1)+" — fn "+name+
 							"() asserts but carries no #[test] and is never called")
 					}
@@ -751,6 +787,18 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			name: "unregistered zero-arg helper that is called",
 			rel:  "tests_x.rs",
 			src:  "fn setup() { assert!(true); }\n#[test]\nfn uses() { setup(); assert!(true); }\n",
+			want: 0,
+		},
+		{
+			name: "unregistered zero-arg helper passed as a bare fn item",
+			rel:  "tests_x.rs",
+			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(callback); }\n",
+			want: 0,
+		},
+		{
+			name: "unregistered zero-arg helper passed as a qualified fn item",
+			rel:  "tests_x.rs",
+			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(crate::tests::callback); }\n",
 			want: 0,
 		},
 		{
