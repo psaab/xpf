@@ -1642,8 +1642,12 @@ fn wheel_duplicate_count_per_session_bounded() {
     );
 }
 
-/// 50K sessions all expiring at the same tick: a single GC call
-/// drains all of them from the popped bucket. No per-tick cap.
+/// 50K sessions all expiring at the same tick: the popped bucket drains
+/// completely. #965 drained it in ONE call with no per-tick cap; #18780
+/// replaced that with a per-call budget (`EXPIRY_PASS_MAX_REAPS`) and
+/// continuation calls, so the contract is now "every session drains within
+/// ceil(N / EXPIRY_PASS_MAX_REAPS) consecutive calls" — the cap the old
+/// comment ruled out is exactly what stopped one call freezing a worker.
 #[test]
 fn wheel_sustained_overload_drains_all_buckets() {
     let mut table = SessionTable::new();
@@ -1659,8 +1663,18 @@ fn wheel_sustained_overload_drains_all_buckets() {
     }
     let advance = install_ns + 65 * WHEEL_TICK_NS;
     table.last_gc_ns = advance - SESSION_GC_INTERVAL_NS;
-    let expired = table.expire_stale_entries(advance);
-    assert_eq!(expired.len(), N, "all sessions must drain in one call");
+    let mut expired = table.expire_stale_entries(advance);
+    let mut calls = 1usize;
+    while table.expiry_backlog() {
+        expired.extend(table.expire_stale_entries(advance));
+        calls += 1;
+    }
+    assert_eq!(expired.len(), N, "all sessions must drain");
+    assert_eq!(
+        calls,
+        N.div_ceil(EXPIRY_PASS_MAX_REAPS),
+        "#18780: the cohort drains in exactly ceil(N / cap) consecutive calls"
+    );
     assert_eq!(table.len(), 0);
 }
 
@@ -7418,7 +7432,19 @@ fn run_expire_ha(
         ceiling_abs_ns: TEST_CEIL_ABS_NS,
     node_served: &|_| NodeServedEvidence::default(),
     };
-    table.expire_stale_entries_ha(now_ns, Some(&ctx))
+    // #18780: one GC pass at `now_ns` is the fresh call plus the
+    // continuation calls the worker loop makes on its next iterations when a
+    // pass hits its per-call budget (a long simulated time jump re-rotates
+    // far-future hints every wheel revolution). `last_pop_stats` is left
+    // holding the whole pass so the HA cells keep asserting per-pass counts.
+    let mut expired = table.expire_stale_entries_ha(now_ns, Some(&ctx));
+    let mut pass = table.last_pop_stats;
+    while table.expiry_backlog {
+        expired.extend(table.expire_stale_entries_ha(now_ns, Some(&ctx)));
+        pass.accumulate(table.last_pop_stats);
+    }
+    table.last_pop_stats = pass;
+    expired
 }
 
 fn install_synced_tcp(table: &mut SessionTable, key: &SessionKey, rg: i32, now_ns: u64) {
@@ -12399,11 +12425,30 @@ fn tombstone_harvest_cap_transfers_drop_to_export_9856() {
 //
 // The fix retains ring-overflow Closes on the corresponding returned
 // `ExpiredSession`; the worker flushes those returned records in fixed-size
-// chunks immediately after the pass, in the same iteration — all-in-one-call
-// expiry is preserved and no Close is ever silently dropped. These cells pin
-// that contract. FAIL-ON-REVERT: pushing every Close through the bare ring
+// chunks immediately after the pass, in the same iteration — no Close is ever
+// silently dropped. These cells pin that contract. #18780: the walk itself is
+// now bounded per call (`EXPIRY_PASS_MAX_REAPS`) and resumes on the next call;
+// the cells drive the cohort across those calls without draining the ring in
+// between, so the overflow suffix is still reached. FAIL-ON-REVERT: pushing every Close through the bare ring
 // again reds both on `delta_drops` and on the Close count.
 //
+
+/// #18780: one expiry call is bounded (`EXPIRY_PASS_MAX_REAPS`); a cohort
+/// due in one tick drains over consecutive continuation calls, which the
+/// worker loop makes once per iteration. This drives those calls WITHOUT
+/// draining the delta ring between them (the worker drains it every call),
+/// so the #10309 ring-overflow suffix is still exercised: the ring fills
+/// across calls exactly as it filled within the old single call.
+fn expire_cohort_until_drained_18780(table: &mut SessionTable, now_ns: u64) -> Vec<ExpiredSession> {
+    let mut all = table.expire_stale_entries(now_ns);
+    let mut calls = 1usize;
+    while table.expiry_backlog() {
+        all.extend(table.expire_stale_entries(now_ns));
+        calls += 1;
+        assert!(calls <= 1 + all.len() / EXPIRY_PASS_MAX_REAPS + 1, "#18780: drain must progress");
+    }
+    all
+}
 
 /// Install `n` forward UDP sessions sharing one expiration tick, draining
 /// install-time Opens along the way so the ring starts the tick empty.
@@ -12421,6 +12466,9 @@ fn install_forward_udp_burst_10309(table: &mut SessionTable, n: usize, install_n
 
 /// Cell A: one over-capacity GC tick from an empty ring loses no Close.
 /// (RED probe: ring-only Close count; GREEN adds the overflow take.)
+/// #10309 contract, #18780 shape change: the cohort is now reaped across
+/// bounded continuation calls (`expire_cohort_until_drained_18780`) instead
+/// of one call; every Close/overflow assertion below is byte-identical.
 #[test]
 fn expiry_over_capacity_tick_loses_no_close_10309() {
     let mut table = SessionTable::new();
@@ -12429,11 +12477,11 @@ fn expiry_over_capacity_tick_loses_no_close_10309() {
     install_forward_udp_burst_10309(&mut table, N, install_ns);
     let drops_before = table.delta_drops();
 
-    let expired = table.expire_stale_entries(install_ns + 65 * WHEEL_TICK_NS);
+    let expired = expire_cohort_until_drained_18780(&mut table, install_ns + 65 * WHEEL_TICK_NS);
     assert_eq!(
         expired.len(),
         N,
-        "all-in-one-call expiry must reap every due session"
+        "the bounded drain (#18780) must reap every due session"
     );
     assert_eq!(table.len(), 0, "reaped sessions must leave the table");
     assert_eq!(
@@ -12468,6 +12516,8 @@ fn expiry_over_capacity_tick_loses_no_close_10309() {
 
 /// Cell B: a tick that STARTS with a full ring still loses no Close.
 /// (RED probe: ring-only Close count; GREEN flushes returned overflow.)
+/// #10309 contract, #18780 shape change: reaped across bounded continuation
+/// calls; every Close/overflow assertion below is byte-identical.
 #[test]
 fn expiry_over_capacity_tick_with_full_ring_loses_no_close_10309() {
     let mut table = SessionTable::new();
@@ -12483,11 +12533,11 @@ fn expiry_over_capacity_tick_with_full_ring_loses_no_close_10309() {
     let _ = table.take_delta_loss();
     let drops_before = table.delta_drops();
 
-    let expired = table.expire_stale_entries(install_ns + 65 * WHEEL_TICK_NS);
+    let expired = expire_cohort_until_drained_18780(&mut table, install_ns + 65 * WHEEL_TICK_NS);
     assert_eq!(
         expired.len(),
         N,
-        "all-in-one-call expiry must reap every due session"
+        "the bounded drain (#18780) must reap every due session"
     );
     assert_eq!(table.len(), 0, "reaped sessions must leave the table");
     assert_eq!(

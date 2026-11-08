@@ -13403,7 +13403,10 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
 /// #10309: an expiry tick larger than the 4096-slot delta ring must still
 /// deliver every Close to each binding-independent consumer. The returned
 /// `ExpiredSession::overflow_close` suffix is drained in 256-delta chunks,
-/// mirroring the worker loop's same-iteration flush. Reverting the expiry
+/// mirroring the worker loop's same-iteration flush. #10309 contract, #18780
+/// shape change: the cohort is expired across bounded continuation calls with
+/// no ring drain between them; every Close/consumer assertion is
+/// byte-identical. Reverting the expiry
 /// overflow handoff or any Close side effect makes one of the counts below
 /// red: shared-map teardown, sibling `DeleteSynced`, HA event frames, or
 /// SESSION_CLOSE RT_FLOW frames.
@@ -13438,7 +13441,13 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
         }
     }
     let _ = sessions.drain_deltas(RING_CAP);
-    let expired = sessions.expire_stale_entries(EXPIRE_NS);
+    // #18780: one expiry call is bounded (`EXPIRY_PASS_MAX_REAPS`); the
+    // cohort drains over consecutive continuation calls. The ring is NOT
+    // drained between them, so it still overflows into the returned suffix.
+    let mut expired = sessions.expire_stale_entries(EXPIRE_NS);
+    while sessions.expiry_backlog() {
+        expired.extend(sessions.expire_stale_entries(EXPIRE_NS));
+    }
     assert_eq!(expired.len(), N);
     let ring_deltas = sessions.drain_deltas(usize::MAX);
     let overflow_deltas: Vec<_> = expired

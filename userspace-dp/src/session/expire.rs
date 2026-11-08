@@ -32,6 +32,15 @@ impl SessionTable {
         self.cumulative_pop_stats
     }
 
+    /// #18780: the last expiry call stopped at its per-call budget with due
+    /// work left; the next call resumes the cursor without waiting for the
+    /// `SESSION_GC_INTERVAL_NS` gate. (Production needs no accessor: the
+    /// worker loop calls the pass every iteration and the table resumes.)
+    #[cfg(test)]
+    pub(crate) fn expiry_backlog(&self) -> bool {
+        self.expiry_backlog
+    }
+
     /// #965: lazily initialize the wheel cursor to the first observed
     /// `now_ns`. SessionTable::new() does not have a `now_ns`, so we
     /// must initialize on the first call to any method that takes one.
@@ -177,6 +186,18 @@ impl SessionTable {
     ///
     /// When `ha` is `None` (standalone / tests), behavior is identical to
     /// the pre-#2120 unconditional wheel: every idle-crossed entry ages.
+    ///
+    /// #18780: one call is BOUNDED — it reaps at most
+    /// `EXPIRY_PASS_MAX_REAPS` rows and examines at most
+    /// `EXPIRY_PASS_MAX_POPS` wheel hints. When it stops with due work left it
+    /// sets `expiry_backlog`, and the next call skips the 1 s interval gate and
+    /// resumes at the same cursor/bucket position, so the worker loop (which
+    /// calls this once per iteration) drains a cohort of C rows due in one
+    /// tick in `ceil(C / EXPIRY_PASS_MAX_REAPS)` consecutive iterations
+    /// instead of one iteration that freezes the heartbeat. The interval gate,
+    /// `last_gc_ns` and the PPTP association sweep advance only on a fresh
+    /// (non-continuation) pass, so the 1 s cadence is unchanged when there is
+    /// no backlog.
     pub fn expire_stale_entries_ha(
         &mut self,
         now_ns: u64,
@@ -186,37 +207,66 @@ impl SessionTable {
         // gated no-op call returns zeroed stats rather than leftovers
         // from a prior call (Codex impl-review round-2 non-blocking note).
         self.last_pop_stats = WheelPopStats::default();
-        if self.last_gc_ns != 0 && now_ns.saturating_sub(self.last_gc_ns) < SESSION_GC_INTERVAL_NS {
+        // #18780: a budget-cut pass left due work; resume it now rather than
+        // after the next interval (a continuation is not a fresh pass).
+        let continuation = self.expiry_backlog;
+        if !continuation
+            && self.last_gc_ns != 0
+            && now_ns.saturating_sub(self.last_gc_ns) < SESSION_GC_INTERVAL_NS
+        {
             return Vec::new();
         }
-        self.last_gc_ns = now_ns;
-
-        // #7699: age out PPTP call associations in the same sweep the sessions
-        // use, because the hazard they carry is on the same clock.
-        //
-        // The association must expire whether or not a Call-Disconnect-Notify
-        // ever arrives: a lost notify, a restarted peer or a control channel
-        // torn down mid-call otherwise leaves an association that re-pairs a
-        // REUSED 16-bit call id onto a dead handle. That is a MIS-ATTRIBUTION —
-        // call B's traffic resolving to call A's session — not a memory leak.
-        //
-        // PLACEMENT IS LOAD-BEARING and it was wrong when this landed: this sat
-        // ABOVE the gc-interval gate, so it ran on EVERY call rather than once
-        // per interval. `expire_stale_entries_ha` is called from the worker poll
-        // loop and the gate is what makes it periodic — above it, this scanned
-        // the whole association map at poll frequency, which is precisely the
-        // per-poll work this tree exists to avoid. Below the gate it runs once
-        // per `SESSION_GC_INTERVAL_NS` like the session expiry it rides on.
-        self.pptp
-            .expire_idle(now_ns, crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS);
-
+        self.expiry_backlog = false;
+        if !continuation {
+            self.last_gc_ns = now_ns;
+            // #7699: age out PPTP call associations in the same sweep the
+            // sessions use, because the hazard they carry is on the same clock.
+            //
+            // The association must expire whether or not a Call-Disconnect-Notify
+            // ever arrives: a lost notify, a restarted peer or a control channel
+            // torn down mid-call otherwise leaves an association that re-pairs a
+            // REUSED 16-bit call id onto a dead handle. That is a MIS-ATTRIBUTION —
+            // call B's traffic resolving to call A's session — not a memory leak.
+            //
+            // PLACEMENT IS LOAD-BEARING and it was wrong when this landed: this sat
+            // ABOVE the gc-interval gate, so it ran on EVERY call rather than once
+            // per interval. `expire_stale_entries_ha` is called from the worker poll
+            // loop and the gate is what makes it periodic — above it, this scanned
+            // the whole association map at poll frequency, which is precisely the
+            // per-poll work this tree exists to avoid. Below the gate it runs once
+            // per `SESSION_GC_INTERVAL_NS` like the session expiry it rides on.
+            // #18780: likewise only on a FRESH pass — a budget continuation
+            // bypasses the gate, and must not turn this into per-poll work.
+            self.pptp
+                .expire_idle(now_ns, crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS);
+        }
         self.wheel_observe(now_ns);
         let now_tick = now_ns / WHEEL_TICK_NS;
         let mut expired_entries = Vec::new();
-        while self.wheel.cursor_tick < now_tick {
+        let mut pops_left = EXPIRY_PASS_MAX_POPS;
+        'ticks: while self.wheel.cursor_tick < now_tick {
             let bucket_idx = bucket_for_tick(self.wheel.cursor_tick);
-            let due_count = self.wheel.buckets[bucket_idx].len();
-            for _ in 0..due_count {
+            // #18780: a continuation resumes the snapshot its cut pass took
+            // (`resume_due`), never the bucket's current length — that would
+            // re-count the future hints rotated/appended behind the snapshot.
+            let bucket_len = self.wheel.buckets[bucket_idx].len();
+            let mut due_count = self
+                .wheel
+                .resume_due
+                .take()
+                .map_or(bucket_len, |left| left.min(bucket_len));
+            while due_count > 0 {
+                // #18780: stop BEFORE popping once either cap is spent. The
+                // cursor stays on this tick and the unvisited snapshot hints
+                // stay at the front of its bucket, so the next call resumes
+                // exactly here.
+                if pops_left == 0 || expired_entries.len() >= EXPIRY_PASS_MAX_REAPS {
+                    self.wheel.resume_due = Some(due_count);
+                    self.expiry_backlog = true;
+                    break 'ticks;
+                }
+                pops_left -= 1;
+                due_count -= 1;
                 // The modulo bucket can be visited before a future absolute
                 // tick when this call catches up after a long GC pause. Keep
                 // that hint queued until the cursor reaches its scheduled tick.
@@ -488,32 +538,44 @@ impl SessionTable {
                     // whose node-level serving pair has promoted and
                     // served reverse traffic is retained even when its
                     // local flags are Opening / syn_ack_first.
-                    let node_evidence = {
-                        let mut ev = self.node_served_evidence(&key);
-                        if let Some(ha) = ha {
-                            let shared = shared_node_evidence
-                                .unwrap_or_else(|| (ha.node_served)(&key));
-                            if shared.handshake_wire
-                                == TcpHandshakeState::Established.to_wire()
-                            {
-                                ev.handshake_wire = shared.handshake_wire;
+                    //
+                    // #18780: computed only where that arm can keep the
+                    // row — companion-eligible, TCP, not closing — which is
+                    // exactly the precondition `opening_companion_keeps_alive`
+                    // checks first (it returns false for non-TCP or closing,
+                    // and is not called when !companion_eligible). The
+                    // production `node_served` closure locks the node-global
+                    // shared-session map, so before this every crossed UDP
+                    // row (and every deliberate reap) took that lock for
+                    // evidence nothing read.
+                    if companion_eligible && key.protocol == PROTO_TCP && !e_closing {
+                        let node_evidence = {
+                            let mut ev = self.node_served_evidence(&key);
+                            if let Some(ha) = ha {
+                                let shared = shared_node_evidence
+                                    .unwrap_or_else(|| (ha.node_served)(&key));
+                                if shared.handshake_wire
+                                    == TcpHandshakeState::Established.to_wire()
+                                {
+                                    ev.handshake_wire = shared.handshake_wire;
+                                }
+                                ev.shared_established |= shared.shared_established;
+                                ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
+                                // #18722/#18742: keep count, source identity,
+                                // sibling packet recency separate.
+                                ev.shared_served = shared.shared_served;
+                                ev.shared_incarnation = shared.shared_incarnation;
+                                ev.shared_sibling_last_seen_ns =
+                                    shared.shared_sibling_last_seen_ns;
+                                ev.shared_evidence_max_cadence_ns =
+                                    shared.shared_evidence_max_cadence_ns;
                             }
-                            ev.shared_established |= shared.shared_established;
-                            ev.rev_packets = ev.rev_packets.max(shared.rev_packets);
-                            // #18722/#18742: keep count, source identity,
-                            // sibling packet recency separate.
-                            ev.shared_served = shared.shared_served;
-                            ev.shared_incarnation = shared.shared_incarnation;
-                            ev.shared_sibling_last_seen_ns = shared.shared_sibling_last_seen_ns;
-                            ev.shared_evidence_max_cadence_ns = shared.shared_evidence_max_cadence_ns;
+                            ev
+                        };
+                        if self.opening_companion_keeps_alive(&key, e_nat, now_ns, node_evidence) {
+                            self.last_pop_stats.kept_alive_by_companion += 1;
+                            continue;
                         }
-                        ev
-                    };
-                    if companion_eligible
-                        && self.opening_companion_keeps_alive(&key, e_nat, now_ns, node_evidence)
-                    {
-                        self.last_pop_stats.kept_alive_by_companion += 1;
-                        continue;
                     }
                     if let Some(removed) = self.remove_entry(&key, RemovalKind::Terminal) {
                         self.last_pop_stats.expired += 1;
