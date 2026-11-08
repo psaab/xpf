@@ -30,7 +30,9 @@
 #                    `... node <issuer>`. Away-move replies are classed in
 #                    the summary's cli_classes: ok (transfer committed),
 #                    triggered (pre-#18559 local resign, accepted), fallback
-#                    (post-#18559 local resign with a note: VOID)
+#                    (post-#18559 local resign with a note, or the OK "no
+#                    longer primary on this node" reply: the transfer did
+#                    not run, VOID)
 #   SOAK_EXPECT_TRANSFER=1 the build runs the untargeted form as a transfer:
 #                    a plain `triggered` away-move FAILs (default 0)
 #   SOAK_CONVERGE_S  seconds after the CLI returns for the RG to land in both

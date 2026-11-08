@@ -150,6 +150,20 @@ class CLIClassify(unittest.TestCase):
         self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_FALLBACK)
         self.assertEqual(soak.classify_cli(0, text, 2)[0], soak.CLI_OTHER)
 
+    def test_no_longer_primary_reply_is_a_fallback_18559(self):
+        # clusterfailover.UntargetedNoLongerPrimaryMessage, verbatim for both
+        # owner shapes. An OK reply, but the group left by election, not by
+        # the transfer: VOID like the other fallbacks, never "unexpected CLI
+        # output" (docs/ha-rg-move-correctness.md troubleshooting row).
+        for text in ("Redundancy group 2 is no longer primary on this node (now secondary); node 1 reports it "
+                     "primary. Nothing to resign: the group already left this node during the request",
+                     "Redundancy group 2 is no longer primary on this node (now secondary); no node reports it "
+                     "primary yet (an election is in progress). Nothing to resign: the group already left this "
+                     "node during the request"):
+            self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_FALLBACK)
+            self.assertEqual(soak.classify_cli(0, text, 1, untargeted=True)[0], soak.CLI_OTHER)
+            self.assertEqual(soak.classify_cli(0, text, 2)[0], soak.CLI_OTHER)
+
     def test_dual_active_reply_is_a_fallback_18559(self):
         # clusterfailover.ResignNoteDualActive; the Go cell
         # TestSoakReplyNotesMatchGo18559 keeps the two texts in sync.
@@ -812,6 +826,14 @@ class FakeCluster:
             return self.cli_rc_on_error, USER_ERROR + "\n"
         if self.owner[rg] == target:
             return 0, f"Redundancy group {rg} is already primary on node {target}\n"
+        if untargeted and self.untargeted_reply == "no-longer-primary":
+            # The peer claimed the group while the request ran: an OK reply,
+            # and the group is the peer's by election, not by the transfer.
+            self.owner[rg] = target
+            self.landed_at[rg] = self.clock_.t
+            return 0, (f"Redundancy group {rg} is no longer primary on this node (now secondary); node {target} "
+                       f"reports it primary. Nothing to resign: the group already left this node during the "
+                       f"request\n")
         if untargeted and self.untargeted_reply in ("triggered", "fallback"):
             self.pending[rg] = (target, self.clock_.t + 0.5)
             note = (" (peer unreachable; resigned locally, break-before-make)"
@@ -1238,6 +1260,23 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(back["verdict"], "PASS")
         self.assertEqual(res["summary"]["cli_classes"], {soak.CLI_FALLBACK: 1, soak.CLI_OK: 1})
         self.assertEqual(rc, 2)
+
+    def test_no_longer_primary_away_move_is_void_not_fail_18559(self):
+        # The OK "no longer primary" reply (the group left by election while
+        # the request ran) scores like the fallback: VOID "did not run the
+        # transfer", never FAIL "unexpected CLI output", even when the build
+        # is expected to run the transfer.
+        for expect in (False, True):
+            clock = FakeClock()
+            c = FakeCluster(clock, {2: 0}, untargeted_reply="no-longer-primary")
+            rc, res, _ = run_fake(c, clock, moves=2, form=soak.FORM_UNTARGETED_AWAY, expect_transfer=expect)
+            away, back = res["moves"][0], res["moves"][1]
+            self.assertEqual(away["rgs"][0]["cli_class"], soak.CLI_FALLBACK)
+            self.assertEqual(away["verdict"], "VOID", away["reasons"])
+            self.assertTrue(any("did not run the transfer" in r for r in away["reasons"]), away["reasons"])
+            self.assertFalse(any("unexpected CLI output" in r for r in away["reasons"]), away["reasons"])
+            self.assertEqual(back["verdict"], "PASS")
+            self.assertEqual(rc, 2)
 
     def test_expect_transfer_fails_a_plain_local_resign_18559(self):
         clock = FakeClock()

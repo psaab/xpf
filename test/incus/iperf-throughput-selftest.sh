@@ -1595,12 +1595,16 @@ run_reply_notes() {
 		ha_planned_reply_note 1 "error: rpc error: code = FailedPrecondition desc = untargeted failover of redundancy group 1 ran as a make-before-break transfer to node 0, which answered: ..."
 		# The Aborted reply quotes the peer's "(transfer committed)": not a transfer.
 		ha_planned_reply_note 2 "error: rpc error: code = Aborted desc = ownership of redundancy group 2 changed during the request (a newer move or an automatic election): this node is primary again at a newer ownership epoch, so the group did not move and no local resign ran; node 1 had replied: Manual failover completed for redundancy group 2 (transfer committed). Check \`show chassis cluster status\` before retrying"
+		# clusterfailover.UntargetedNoLongerPrimaryMessage, both owner shapes:
+		# the transfer did not run, so it is a fallback (H1 VOIDs).
+		ha_planned_reply_note 2 "Redundancy group 2 is no longer primary on this node (now secondary); node 1 reports it primary. Nothing to resign: the group already left this node during the request"
+		ha_planned_reply_note 1 "Redundancy group 1 is no longer primary on this node (now secondary); no node reports it primary yet (an election is in progress). Nothing to resign: the group already left this node during the request"
 		echo "t=$PLANNED_REPLY_TRANSFER f=$PLANNED_REPLY_FALLBACK g=$PLANNED_REPLY_TRIGGERED o=$PLANNED_REPLY_OTHER"
 	)
 }
-[[ "$(run_reply_notes)" == "t=2 f=1 g=1 o=2" ]] \
-	|| bad "planned-move reply types must count transfer/fallback/triggered/other as 2/1/1/2 (an Aborted reply quoting \"(transfer committed)\" is not a transfer), got '$(run_reply_notes)'"
-ok "planned-move reply types (#18559): transfer, fallback, plain triggered and other are counted apart; an Aborted reply quoting the peer's transfer is an error"
+[[ "$(run_reply_notes)" == "t=2 f=3 g=1 o=2" ]] \
+	|| bad "planned-move reply types must count transfer/fallback/triggered/other as 2/3/1/2 (an Aborted reply quoting \"(transfer committed)\" is not a transfer; 'no longer primary' is a fallback), got '$(run_reply_notes)'"
+ok "planned-move reply types (#18559): transfer, fallback, plain triggered and other are counted apart; an Aborted reply quoting the peer's transfer is an error; 'no longer primary' is a fallback"
 reply_verdict_src="$(tf_fn ha_planned_reply_verdict)"
 [[ -n "$reply_verdict_src" ]] || bad "could not extract ha_planned_reply_verdict from test-failover.sh"
 run_reply_verdict() { # <fallback count> -> the void lines it emitted

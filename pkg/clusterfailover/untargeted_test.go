@@ -170,4 +170,25 @@ func TestSoakReplyNotesMatchGo18559(t *testing.T) {
 	if got := clusterfailover.LocalResignMessage(7, clusterfailover.ResignNoteDualActive); !strings.HasPrefix(got, "Manual failover triggered for redundancy group 7 (") {
 		t.Errorf("LocalResignMessage %q no longer has the prefix the soak and H1 key on", got)
 	}
+	// The OK "no longer primary" reply is a fallback too (the transfer did
+	// not run): the soak classes it CLI_FALLBACK and H1 counts it in
+	// planned_reply_fallback. Both key on these fixed fragments of the Go
+	// text, so a reword on either side fails here.
+	got := clusterfailover.UntargetedNoLongerPrimaryMessage(7, "secondary", 1)
+	if !strings.HasPrefix(got, "Redundancy group 7 is no longer primary on this node (now secondary); ") ||
+		!strings.Contains(got, "Nothing to resign") {
+		t.Errorf("UntargetedNoLongerPrimaryMessage %q no longer has the fragments the soak and H1 key on", got)
+	}
+	for _, frag := range []string{"is no longer primary on this node", "Nothing to resign"} {
+		if !strings.Contains(string(src), frag) {
+			t.Errorf("rg_move_soak.py's fallback pattern does not carry %q", frag)
+		}
+	}
+	h1, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "test-failover.sh"))
+	if err != nil {
+		t.Fatalf("read H1: %v", err)
+	}
+	if !strings.Contains(string(h1), `*"Redundancy group $rg is no longer primary on this node"*`) {
+		t.Error("test-failover.sh's ha_planned_reply_note does not count the no-longer-primary reply as a fallback")
+	}
 }

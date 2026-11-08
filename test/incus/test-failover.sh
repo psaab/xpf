@@ -1262,14 +1262,15 @@ PLANNED_REPLY_OTHER=0
 # ha_planned_reply_verdict <fallback count>: H1 SCORES the reply types
 # (#18559). A planned move whose reply carries a local-resign note ("fallback":
 # the transfer request never reached the peer, or the peer also claimed the
-# RG) can only come from a build that runs the transfer, and that move ran the
-# break-before-make resign instead, so the planned-move cells did not measure
-# what they claim: VOID. A plain "triggered" is a pre-#18559 build (or RG0) and
-# is not judged here.
+# RG), or the OK "no longer primary" reply (the group left by election while
+# the request ran), can only come from a build that runs the transfer, and
+# that move did not run it, so the planned-move cells did not measure what
+# they claim: VOID. A plain "triggered" is a pre-#18559 build (or RG0) and is
+# not judged here.
 ha_planned_reply_verdict() {
 	local fallback="$1"
 	if ((fallback > 0)); then
-		void "planned moves: ${fallback} untargeted move(s) replied with a local-resign note (peer unreachable, or the peer also primary) on a build that runs the make-before-break transfer; the planned-move cells did not measure the transfer"
+		void "planned moves: ${fallback} untargeted move(s) replied with a local-resign note (peer unreachable, or the peer also primary) or 'no longer primary' on a build that runs the make-before-break transfer; the planned-move cells did not measure the transfer"
 	fi
 }
 
@@ -1289,7 +1290,12 @@ ha_planned_reply_note() {
 		kind=transfer
 		PLANNED_REPLY_TRANSFER=$((PLANNED_REPLY_TRANSFER + 1))
 		;;
-	*"Manual failover triggered for redundancy group $rg ("*)
+	*"Manual failover triggered for redundancy group $rg ("* | \
+		*"Redundancy group $rg is no longer primary on this node"*)
+		# Both shapes did not run the transfer: a local-resign note, or the
+		# OK "no longer primary" reply (the group left by election while the
+		# request ran; docs/ha-rg-move-correctness.md). Counted as fallbacks,
+		# so ha_planned_reply_verdict VOIDs the run.
 		kind=fallback
 		PLANNED_REPLY_FALLBACK=$((PLANNED_REPLY_FALLBACK + 1))
 		;;

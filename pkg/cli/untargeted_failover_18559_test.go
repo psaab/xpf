@@ -388,3 +388,34 @@ func TestCLIUntargetedFailoverRealPathNoListenerFallsBack18559(t *testing.T) {
 		t.Fatalf("fallback did not run: primary=%v out=%q", mgr.IsLocalPrimary(1), out)
 	}
 }
+
+// The reconciled-deadline branch on the REAL transport (review N1, R2 final
+// A). The console CLI dials the peer for real, so the reconciled flag that
+// matters is the one set after the real SystemAction RPC, not the test seam's.
+// A real peer answers DeadlineExceeded while node0's cached heartbeat view
+// says the peer is primary (stale: it just lost a dual-active election) and
+// node0 still owns the group. The #15081 reconciliation reports "committed"
+// from that cached bit; it is printed as the targeted form prints it, and the
+// dual-active resign must NOT run.
+func TestCLIUntargetedFailoverRealPathReconciledDeadlineDoesNotResign18559(t *testing.T) {
+	peer := &realCLIPeer18559{err: status.Error(codes.DeadlineExceeded, "peer action response timed out")}
+	c, mgr := realPathCLI18559(t, peer)
+	mgr.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+	var callErr error
+	out := captureStdout(t, func() {
+		callErr = c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
+	})
+	if peer.calls.Load() != 1 {
+		t.Fatalf("peer SystemAction calls = %d, want 1 (the real RPC)", peer.calls.Load())
+	}
+	if g := mgr.GroupState(1); !mgr.IsLocalPrimary(1) || g.FailoverCount != 0 || g.ManualFailover {
+		t.Fatalf("a reconciled deadline on the real transport resigned the owner: primary=%v failovers=%d err=%v out=%q",
+			mgr.IsLocalPrimary(1), g.FailoverCount, callErr, out)
+	}
+	if strings.Contains(out, clusterfailover.ResignNoteDualActive) {
+		t.Fatalf("stdout %q carries the dual-active resign reply", out)
+	}
+	if callErr != nil || !strings.Contains(out, "proxy response timed out after the peer committed") {
+		t.Fatalf("want the reconciled outcome printed as the targeted form prints it: err=%v out=%q", callErr, out)
+	}
+}

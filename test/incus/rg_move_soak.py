@@ -212,9 +212,13 @@ CLI_OK, CLI_ALREADY, CLI_ERROR, CLI_OTHER = "ok", "already", "error", "other"
 #                  SOAK_EXPECT_TRANSFER=1 (a post-#18559 build) it FAILs.
 #   CLI_FALLBACK   a post-#18559 build that did NOT run the transfer: the
 #                  request never reached the peer ("peer unreachable; resigned
-#                  locally, break-before-make") or the peer also claimed the
-#                  RG. The move did not exercise the path the soak measures,
-#                  so it is VOID with that reason, never a silent PASS.
+#                  locally, break-before-make"), the peer also claimed the RG,
+#                  or a derived resign found the group had already left this
+#                  node ("Redundancy group N is no longer primary on this node
+#                  ...; Nothing to resign", an OK reply: it moved by election,
+#                  not make-before-break). The move did not exercise the path
+#                  the soak measures, so it is VOID with that reason, never a
+#                  silent PASS and never "unexpected CLI output".
 CLI_TRIGGERED = "triggered"
 CLI_FALLBACK = "fallback"
 CLI_CLASSES = (CLI_OK, CLI_TRIGGERED, CLI_FALLBACK, CLI_ALREADY, CLI_ERROR, CLI_OTHER)
@@ -225,6 +229,10 @@ _CLI_TRIGGERED_RE = re.compile(r"Manual failover triggered for redundancy group 
 _CLI_FALLBACK_RE = re.compile(r"Manual failover triggered for redundancy group (\d+) "
                               r"\((peer unreachable; resigned locally, break-before-make"
                               r"|the peer is also primary; resigned locally)\)$")
+# clusterfailover.UntargetedNoLongerPrimaryMessage (#18559 cycle 3). The Go
+# cell TestSoakReplyNotesMatchGo18559 keeps its fixed fragments in sync.
+_CLI_NO_LONGER_PRIMARY_RE = re.compile(r"^Redundancy group (\d+) is no longer primary on this node \(now [^)]*\); "
+                                       r".*Nothing to resign")
 
 # SOAK_FORM values. "targeted" (the default) issues every move as
 # `redundancy-group <rg> node <target>`. "untargeted-away" issues a move AWAY
@@ -263,6 +271,9 @@ def classify_cli(rc: int, out: str, rg: int, untargeted: bool = False) -> Tuple[
     if untargeted and m and int(m.group(1)) == rg:
         return CLI_TRIGGERED, first
     m = _CLI_FALLBACK_RE.search(first)
+    if untargeted and m and int(m.group(1)) == rg:
+        return CLI_FALLBACK, first
+    m = _CLI_NO_LONGER_PRIMARY_RE.search(first)
     if untargeted and m and int(m.group(1)) == rg:
         return CLI_FALLBACK, first
     return CLI_OTHER, first or "(no output)"
