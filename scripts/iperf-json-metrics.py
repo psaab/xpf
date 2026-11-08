@@ -223,6 +223,7 @@ def score_planned_move(move, rows, args, inside):
 
 
 def summarize(path, args):
+    transition_mode = bool(args.event_sec or args.planned_move)
     summary = {
         "path": str(path),
         "ok": False,
@@ -251,8 +252,8 @@ def summarize(path, args):
         "planned_move_cost_total": 0,
         "planned_move_fail_total": 0,
         "planned_move_zero_intervals_total": 0,
-        "zero_intervals_after_peak": 0,
-        "stalled_intervals_after_peak": 0,
+        ("zero_intervals_after_activity" if transition_mode else "zero_intervals_after_peak"): 0,
+        ("stalled_intervals_after_activity" if transition_mode else "stalled_intervals_after_peak"): 0,
         "collapse_detected": False,
         "collapse_reason": "",
     }
@@ -500,9 +501,9 @@ def summarize(path, args):
         summary["ok"] = True
         return summary
 
-    # Preserve the original aggregate metrics and verdict byte-for-byte when no
-    # crash or planned-move windows are configured.
-    if not exclude_windows and not planned:
+    # Preserve the original aggregate metrics and verdict byte-for-byte when
+    # neither --event-sec nor --planned-move is supplied.
+    if not transition_mode:
         peak_gbps = max(full_intervals)
         peak_index = full_intervals.index(peak_gbps)
         tail = (
@@ -548,10 +549,6 @@ def summarize(path, args):
 
     peak_gbps = max(full_intervals)
     peak_index = full_intervals.index(peak_gbps)
-    summary.pop("zero_intervals_after_peak")
-    summary.pop("stalled_intervals_after_peak")
-    summary["zero_intervals_after_activity"] = 0
-    summary["stalled_intervals_after_activity"] = 0
     summary.update(
         {
             "ok": True,
@@ -647,8 +644,7 @@ def main():
         default=[],
         help="transition instant (seconds from iperf start); may repeat. "
         "Full intervals wholly inside [T, T+--event-window-sec] are excluded "
-        "from stream_zero_intervals_outside_events_total and aggregate tail/post-activity "
-        "scans; event-mode counters use *_after_activity while peak fields stay raw.",
+        "from stream_zero_intervals_outside_events_total and aggregate collapse scans.",
     )
     parser.add_argument(
         "--planned-move",
@@ -658,8 +654,8 @@ def main():
         help="a move the harness itself makes, anchored at each instant given "
         "(the request and the observed landing); may repeat. Its zero intervals "
         "are scored PASS/COST/FAIL in planned_moves, not excused from that score; "
-        "the windows are excluded from aggregate tail/post-activity scans, not peak selection; "
-        "event-mode counters use *_after_activity while peak fields stay raw.",
+        "its windows are excluded from stream_zero_intervals_outside_events_total "
+        "and aggregate collapse scans.",
     )
     parser.add_argument(
         "--planned-stall-gbps",

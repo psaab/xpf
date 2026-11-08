@@ -675,6 +675,7 @@ write_fixture("window-flat.json", rates=[8, 32, 8, 8, 8, 8, 8])
 write_fixture("window-decline.json", rates=[8, 32, 8, 8, 4, 4, 4])
 write_fixture("window-decline-default.json", rates=[8, 32, 8, 8, 2, 2, 2])
 write_fixture("threshold-boundary.json", rates=[0.25, 0, 8, 8, 8])
+write_fixture("no-full-intervals.json", rates=[])
 PY
 collapse_metrics() { # <fixture> [metrics producer args...]
 	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$aggregate_window_dir/$1" "${@:2}"
@@ -697,6 +698,7 @@ window_decline_default_metrics=$(collapse_metrics window-decline-default.json --
 ineffective_event_metrics=$(collapse_metrics late-recovery-outage.json --event-sec 100)
 zero_width_event_metrics=$(collapse_metrics late-recovery-outage.json --event-sec 1 --event-window-sec 0)
 threshold_boundary_metrics=$(collapse_metrics threshold-boundary.json --event-sec 100 --stall-gbps 0.25)
+no_full_intervals_metrics=$(collapse_metrics no-full-intervals.json --event-sec 100)
 python3 - "$crash_window_metrics" "$planned_window_metrics" \
 	"$outside_crash_metrics" "$outside_planned_metrics" \
 	"$excluded_peak_outside_metrics" "$excluded_peak_control_metrics" \
@@ -704,13 +706,13 @@ python3 - "$crash_window_metrics" "$planned_window_metrics" \
 	"$late_recovery_halfpeak_metrics" "$late_recovery_nearpeak_metrics" \
 	"$slow_start_metrics" "$window_flat_metrics" "$window_decline_metrics" \
 	"$window_decline_default_metrics" "$ineffective_event_metrics" \
-	"$zero_width_event_metrics" "$threshold_boundary_metrics" "$legacy_no_event_metrics" \
+	"$zero_width_event_metrics" "$threshold_boundary_metrics" "$no_full_intervals_metrics" "$legacy_no_event_metrics" \
 	"$aggregate_window_dir/late-recovery-outage.json" <<'PY' \
 	|| bad "#19021: transition collapse policy must preserve demonstrated outages and no-window output"
 import json
 import sys
 
-metrics = [json.loads(value) for value in sys.argv[1:18]]
+metrics = [json.loads(value) for value in sys.argv[1:19]]
 (
     crash,
     planned,
@@ -729,8 +731,9 @@ metrics = [json.loads(value) for value in sys.argv[1:18]]
     ineffective_event,
     zero_width_event,
     threshold_boundary,
+    no_full_intervals,
 ) = metrics
-legacy_no_event, legacy_path = sys.argv[18:]
+legacy_no_event, legacy_path = sys.argv[19:]
 for name, metrics in (("crash", crash), ("planned move", planned)):
     assert metrics["peak_interval_index"] == 2, (name, metrics)
     assert metrics["zero_intervals_after_activity"] == 0, (name, metrics)
@@ -800,6 +803,11 @@ assert threshold_boundary["peak_interval_index"] == 2, threshold_boundary
 assert threshold_boundary["zero_intervals_after_activity"] == 0, threshold_boundary
 assert threshold_boundary["stalled_intervals_after_activity"] == 0, threshold_boundary
 assert not threshold_boundary["collapse_detected"], threshold_boundary
+assert no_full_intervals["ok"], no_full_intervals
+assert no_full_intervals["interval_gbps"] == [], no_full_intervals
+assert "zero_intervals_after_activity" in no_full_intervals, no_full_intervals
+assert "stalled_intervals_after_activity" in no_full_intervals, no_full_intervals
+assert "zero_intervals_after_peak" not in no_full_intervals, no_full_intervals
 legacy_expected = {
     "path": legacy_path,
     "ok": True,
