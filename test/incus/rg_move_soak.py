@@ -19,7 +19,9 @@ What this harness does, per move:
 
   * issues `request chassis cluster failover redundancy-group <rg> node <t>`
     on the SAME node every time (SOAK_FROM), alternating t, then waits SOAK_SLEEP
-    seconds after the CLI returns, exactly like the loop above;
+    seconds after the CLI returns, exactly like the loop above. With
+    SOAK_FORM=untargeted-away a move AWAY from that node is the untargeted
+    `redundancy-group <rg>` instead (#18559: H1's form);
   * scores the CLI text;
   * polls BOTH nodes' own `show chassis cluster status` until the target is
     primary and the other node secondary/secondary-hold in both views, and the
@@ -203,15 +205,39 @@ def rg_ownership(rg: int, view0: Dict[int, RGView], view1: Dict[int, RGView]) ->
 # ---------------------------------------------------------------------------
 
 CLI_OK, CLI_ALREADY, CLI_ERROR, CLI_OTHER = "ok", "already", "error", "other"
+# #18559: the untargeted form's local-resign text. Correct only for an
+# untargeted move (SOAK_FORM=untargeted-away) on a build that still resigns
+# locally (master before #18559, or the fallback when the transfer request
+# never reached the peer). It is a command that tells the truth but confirms
+# no commit, so the UDP probe checkpoints at the observed landing instead.
+CLI_TRIGGERED = "triggered"
 
 _CLI_OK_RE = re.compile(r"Manual failover completed for redundancy group (\d+) \(transfer committed\)")
+_CLI_TRIGGERED_RE = re.compile(r"Manual failover triggered for redundancy group (\d+)$")
+
+# SOAK_FORM values. "targeted" (the default) issues every move as
+# `redundancy-group <rg> node <target>`. "untargeted-away" issues a move AWAY
+# from the issuing node as the operator's untargeted form
+# `redundancy-group <rg>` (run on that node, which owns the RG), and a move
+# back TO it as `... node <issuer>`: the "fail over away from me, then bring
+# it back" loop. H1 (test-failover) issues its planned moves untargeted.
+FORM_TARGETED, FORM_UNTARGETED_AWAY = "targeted", "untargeted-away"
+FORMS = (FORM_TARGETED, FORM_UNTARGETED_AWAY)
 
 
-def classify_cli(rc: int, out: str, rg: int) -> Tuple[str, str]:
-    """Classify one `request chassis cluster failover ... node N` result.
+def move_command(rg: int, target: int, issuer: int, form: str) -> Tuple[str, bool]:
+    """The CLI command for one RG move, and whether it is the untargeted form."""
+    if form == FORM_UNTARGETED_AWAY and target != issuer:
+        return f"request chassis cluster failover redundancy-group {rg}", True
+    return f"request chassis cluster failover redundancy-group {rg} node {target}", False
+
+
+def classify_cli(rc: int, out: str, rg: int, untargeted: bool = False) -> Tuple[str, str]:
+    """Classify one `request chassis cluster failover ...` result.
 
     The CLI can print `error: ...` and still exit 0, so the TEXT decides, and
-    a nonzero rc is an error whatever the text says.
+    a nonzero rc is an error whatever the text says. `... triggered ...` is
+    accepted only for an untargeted move.
     """
     text = (out or "").strip()
     first = text.splitlines()[0] if text else ""
@@ -222,6 +248,9 @@ def classify_cli(rc: int, out: str, rg: int) -> Tuple[str, str]:
     m = _CLI_OK_RE.search(text)
     if m and int(m.group(1)) == rg:
         return CLI_OK, first
+    m = _CLI_TRIGGERED_RE.search(first)
+    if untargeted and m and int(m.group(1)) == rg:
+        return CLI_TRIGGERED, first
     return CLI_OTHER, first or "(no output)"
 
 
@@ -1001,6 +1030,7 @@ class Config:
     warmup_s: float = 3.0
     outdir: str = ""
     run_id: str = ""
+    form: str = FORM_TARGETED
 
 
 class Soak:
@@ -1250,17 +1280,22 @@ class Soak:
 
     def one_rg(self, rg: int, target: int, pre: Ownership,
                udp_probe_pre: Optional[Dict] = None) -> Tuple[RGMoveResult, float, Optional[Dict]]:
-        cmd = f"request chassis cluster failover redundancy-group {rg} node {target}"
+        cmd, untargeted = move_command(rg, target, self.cfg.issuer, self.cfg.form)
         t0 = self.now()
         self.move_commands_issued += 1
         rc, out = self.c.cli(self.cfg.issuer, cmd)
         t_ret = self.now()
-        cls, first = classify_cli(rc, out, rg)
+        cls, first = classify_cli(rc, out, rg, untargeted)
         udp_probe = None
         post_commit_snapshot = None
+        snapshot_at_landing = False
         if udp_probe_pre is not None:
             if udp_probe_pre.get("status") != "READY":
                 udp_probe = udp_probe_pre
+            elif cls == CLI_TRIGGERED:
+                # A local resign confirms no commit: checkpoint at the
+                # observed landing instead (below).
+                snapshot_at_landing = True
             elif cls != CLI_OK:
                 udp_probe = {"status": "VOID",
                              "detail": "UDP sequence checkpoint requires the directed CLI's transfer-committed confirmation",
@@ -1289,6 +1324,12 @@ class Soak:
             if self.now() >= deadline:
                 break
             self.sleep(self.cfg.poll_s)
+        if snapshot_at_landing and landed is not None:
+            post_commit_snapshot = self.c.udp_probe_snapshot(self.cfg.run_id)
+            if post_commit_snapshot is None:
+                udp_probe = {"status": "VOID",
+                             "detail": "UDP sequence probe landing checkpoint became unavailable",
+                             "metrics": {}}
         if udp_probe_pre is not None and udp_probe_pre.get("status") == "READY" and udp_probe is None:
             if landed is None:
                 udp_probe = {"status": "VOID",
@@ -1690,12 +1731,16 @@ def main(argv=None) -> int:
         iperf_streams=int(os.environ.get("SOAK_STREAMS", "8")),
         outdir=a.outdir,
         run_id=re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(a.outdir.rstrip("/"))),
+        form=os.environ.get("SOAK_FORM", FORM_TARGETED),
     )
     if cfg.issuer not in (0, 1):
         print("FATAL: SOAK_FROM must be 0 or 1", file=sys.stderr)
         return 2
+    if cfg.form not in FORMS:
+        print(f"FATAL: SOAK_FORM must be one of {', '.join(FORMS)}", file=sys.stderr)
+        return 2
     os.makedirs(cfg.outdir, exist_ok=True)
-    print(f"rg-move-soak: {cfg.moves} moves of RG {cfg.rgs} from node{cfg.issuer} every {cfg.sleep_s:g}s; "
+    print(f"rg-move-soak: {cfg.moves} moves of RG {cfg.rgs} from node{cfg.issuer} every {cfg.sleep_s:g}s, form {cfg.form}; "
           f"converge<= {budget.converge_s:g}s gap<= {budget.max_gap_ms:g}ms stall<= {budget.max_stall_ms:g}ms; "
           f"traffic={'on' if cfg.traffic else 'off'} v6={'on' if cfg.target6 else 'off'}; out={cfg.outdir}")
     soak = Soak(cfg, IncusCluster({0: a.fw0, 1: a.fw1}, a.lan, a.mouse_target))

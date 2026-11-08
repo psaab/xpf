@@ -51,7 +51,9 @@ A move of RG *g* to node *t* is correct when all of these hold:
 2. **Exactly one owner before and after, in both nodes' own views.**
    - node *t*'s `show chassis cluster status` shows itself `primary` for *g*;
    - the other node's own view shows itself `secondary` or `secondary-hold`
-     (the untargeted yield parks the old owner in `secondary-hold`).
+     (a local untargeted resign parks the old owner in `secondary-hold`; on
+     the owner of a data RG with a live peer the untargeted form runs the
+     targeted transfer since #18559, and the old owner ends `secondary`).
    - One node's view is not enough. node0's view alone scores a dual-primary
      split as healthy (the #18503 rule).
 3. **Forwarding follows ownership.** Each node prints its own
@@ -471,6 +473,7 @@ SOAK_MOVES=200 SOAK_SLEEP=2 make test-rg-move-soak
 
 # other shapes
 SOAK_FROM=1 make test-rg-move-soak           # issue every move on node1
+SOAK_FORM=untargeted-away make test-rg-move-soak  # moves away from the issuer untargeted (H1's form)
 SOAK_RG=1 make test-rg-move-soak             # RG1 (WAN)
 SOAK_RG=all make test-rg-move-soak           # every RG in status, each move
 
@@ -496,6 +499,7 @@ Knobs:
 | `SOAK_SLEEP` | 5 | seconds after each CLI return before the next move |
 | `SOAK_RG` | 2 | `2`, `1`, a list such as `1,2`, or `all` |
 | `SOAK_FROM` | 0 | the node that issues every move |
+| `SOAK_FORM` | `targeted` | `targeted`: every move is `redundancy-group <rg> node <t>`. `untargeted-away` (#18559): a move away from the issuing node is the operator's untargeted `redundancy-group <rg>`, run on that node (the owner); a move back is `... node <issuer>`. H1 issues its planned moves untargeted. A `Manual failover triggered ...` reply is accepted only for an untargeted move: a pre-#18559 build or the never-reached-the-peer fallback. Its UDP checkpoint is taken at the observed landing, because a local resign confirms no commit |
 | `SOAK_CONVERGE_S` | `SOAK_SLEEP` | seconds after the CLI returns for the RG to land |
 | `SOAK_MAX_GAP_MS` | 1000 | longest ping gap allowed in a move's window |
 | `SOAK_MAX_STALL_MS` | 2000 | worst iperf3 stream stall allowed in a move's window |
@@ -589,7 +593,7 @@ a late dual-active sample and a revert), are in
 |---|---|---|
 | `CLI error: ... fabric RPC authentication failed ... window Ns ahead/behind ours` `[fabric-auth clock skew ...]` | The node clocks are more than about 30 s apart. Every move to the peer is rejected | Check the preflight skew line and `chronyc tracking` on both nodes. Configure `system ntp server ... routing-instance mgmt` |
 | `CLI error: ... cross-node request not sent: nodeN's wall clock is ...` `[inter-node clock skew]` | #18585's fail-fast: a fresh heartbeat reading says the clocks are 60 s or more apart, so the fabric RPC cannot authenticate and was not sent | Fix NTP; or issue the move on the target node (a local pull) |
-| `unexpected CLI output: ...` | The CLI said something that is neither `transfer committed`, `already primary` nor an error, e.g. `Manual failover triggered` (the untargeted form) or a superseded request | Check the command the soak issued; a superseded request means a concurrent `reset` |
+| `unexpected CLI output: ...` | The CLI said something that is neither `transfer committed`, `already primary` nor an error, e.g. `Manual failover triggered` (the untargeted form; accepted only under `SOAK_FORM=untargeted-away`) or a superseded request | Check the command the soak issued; a superseded request means a concurrent `reset` |
 | `CLI error: ... cannot connect to peer on any fabric address` (without auth) | The fabric path to the peer is down | Check fab0 addressing and reachability, and `show chassis cluster status` monitor failures |
 | `CLI error: ... not transfer-ready` / `barrier` / `fenced` / `peer config stale` | The transfer was refused by readiness, the sync barrier or a fence (#18521 class) | Check session-sync health (row H7). A refusal that clears on retry is still a FAIL |
 | `CLI said already primary ... but the RG was on nodeX` | The issuing node's view disagrees with the joint view | Compare the two status outputs in `result.json`. This is a state bug |

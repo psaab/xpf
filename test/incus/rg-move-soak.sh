@@ -23,6 +23,11 @@
 #   SOAK_SLEEP       seconds after each CLI return         (default 5)
 #   SOAK_RG          2 | 1 | "1,2" | all                   (default 2)
 #   SOAK_FROM        node that issues every move (0|1)     (default 0)
+#   SOAK_FORM        targeted | untargeted-away             (default targeted)
+#                    untargeted-away (#18559): a move away from the issuing
+#                    node uses the operator's untargeted form
+#                    `redundancy-group <rg>` (H1's form); a move back uses
+#                    `... node <issuer>`
 #   SOAK_CONVERGE_S  seconds after the CLI returns for the RG to land in both
 #                    views                                  (default SOAK_SLEEP)
 #   SOAK_MAX_GAP_MS  longest ping gap allowed per move     (default 1000)
