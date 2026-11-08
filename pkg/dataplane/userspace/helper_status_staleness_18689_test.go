@@ -60,23 +60,33 @@ func TestPublishedStartupStatusUsesGenerationAgeBeforeFirstPoll18689(t *testing.
 	}
 }
 
-func TestHelperGoneCleanupRetiresStatusAge18689(t *testing.T) {
-	m := New()
-	m.liveTrack.reset(1, time.Now(), false)
-	m.liveTrack.noteAnsweredStatus(1, time.Now().Add(-time.Second))
+func TestUnexpectedExitRetiresStatusAge18689(t *testing.T) {
+	m, cmd, _ := spawnSupervisedChild(t)
+
 	m.mu.Lock()
-	m.setLastStatusLocked(ProcessStatus{PID: 4242})
-	m.resetAfterHelperGoneLocked()
+	gen := m.procGen
+	started := time.Now().Add(-2 * helperWedgeMinSpan)
+	m.liveTrack.reset(gen, started, false)
+	m.liveTrack.noteAnsweredStatus(gen, time.Now().Add(-helperWedgeMinSpan-time.Second))
+	exited := m.procSup.exited
 	m.mu.Unlock()
 
+	if age, stale := m.HelperStatusAgeAndStale(); age < helperWedgeMinSpan || !stale {
+		t.Fatalf("live helper status age/stale = %s/%v, want stale before exit", age, stale)
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	awaitSupervisor(t, m, exited)
 	if age, stale := m.HelperStatusAgeAndStale(); age >= 0 || stale {
 		t.Fatalf("departed helper status age/stale = %s/%v, want undefined/false", age, stale)
 	}
-	m.liveTrack.reset(2, time.Now(), false)
+
+	m.liveTrack.reset(gen+1, time.Now(), false)
 	if age, stale := m.HelperStatusAgeAndStale(); age >= 0 || stale {
 		t.Fatalf("restart before its first answer retained status age: %s/%v, want undefined/false", age, stale)
 	}
-	m.liveTrack.noteAnsweredStatus(2, time.Now())
+	m.liveTrack.noteAnsweredStatus(gen+1, time.Now())
 	if age, stale := m.HelperStatusAgeAndStale(); age < 0 || stale {
 		t.Fatalf("restart's first answered status age/stale = %s/%v, want fresh", age, stale)
 	}

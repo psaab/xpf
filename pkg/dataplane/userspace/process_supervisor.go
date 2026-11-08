@@ -422,6 +422,10 @@ func (m *Manager) handleUnexpectedHelperExitLocked(g *helperGeneration) {
 	// the truth.
 	m.proc = nil
 	m.procSup = nil
+	// Retire the crashed generation's liveness after preserving the lock-free
+	// unexpected-exit election debt above. Intentional stop/retry teardown has
+	// its own preservation-aware retirement in stopLocked.
+	m.liveTrack.retire()
 	m.resetAfterHelperGoneLocked()
 
 	exitCode, signal := g.exitCodeAndSignal()
