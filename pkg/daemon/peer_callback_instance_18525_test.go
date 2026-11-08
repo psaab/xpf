@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -201,5 +202,162 @@ func TestOnBulkSyncReceivedFromRetiredSyncDoesNotReleaseHolds18554(t *testing.T)
 	}
 	if !d.syncBulkPrimed.Load() || !d.cluster.IsSyncBulkPrimed() || !d.cluster.IsSyncReady() {
 		t.Fatal("the current SessionSync's bulk-received callback did not publish bulk priming and readiness")
+	}
+}
+
+// A bulk completion can pass the optimistic identity check, then be overtaken
+// by a successor publication before it mutates daemon-wide readiness. The
+// final check and mutation must therefore be serialized with publication.
+func TestBulkReceivedCallbackRechecksSessionAfterReplacement18554(t *testing.T) {
+	d := &Daemon{
+		cluster:          newClusterManager(false),
+		vrrpMgr:          vrrp.NewManager(),
+		syncReadyTimeout: time.Hour,
+	}
+	t.Cleanup(d.stopSyncReadyTimer)
+	t.Cleanup(d.vrrpMgr.ReleaseSyncHold)
+	d.cluster.SetSyncReady(true)
+	d.vrrpMgr.SetSyncHold(time.Hour)
+	d.armNoRethSyncHold(time.Hour)
+
+	old, successor := newWiringTestSessionSync(), newWiringTestSessionSync()
+	d.wireSessionSyncPeerCallbacks(old)
+	d.wireSessionSyncPeerCallbacks(successor)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = old
+	d.clusterCommsMu.Unlock()
+
+	checked, resume := make(chan struct{}), make(chan struct{})
+	var resumeOnce sync.Once
+	releaseCallback := func() { resumeOnce.Do(func() { close(resume) }) }
+	d.peerCallbackAfterSupersededForTest = func(which string) {
+		if which == "OnBulkSyncReceived" {
+			close(checked)
+			<-resume
+		}
+	}
+	callbackDone := make(chan struct{})
+	go func() {
+		defer close(callbackDone)
+		old.OnBulkSyncReceived()
+	}()
+	t.Cleanup(func() {
+		releaseCallback()
+		<-callbackDone
+	})
+	select {
+	case <-checked:
+	case <-time.After(time.Second):
+		t.Fatal("old bulk callback did not reach the post-check race seam")
+	}
+
+	d.clusterCommsMu.Lock()
+	d.sessionSync = successor
+	d.clusterCommsMu.Unlock()
+	successor.OnPeerConnected()
+	if d.cluster.IsSyncReady() {
+		t.Fatal("fixture: successor cold connect must clear sync readiness before the stale callback resumes")
+	}
+
+	releaseCallback()
+	<-callbackDone
+	if !d.vrrpMgr.InSyncHold() || !d.inNoRethSyncHold() {
+		t.Fatal("the superseded bulk callback released startup holds after successor publication")
+	}
+	if d.syncBulkPrimed.Load() || d.cluster.IsSyncBulkPrimed() {
+		t.Fatal("the superseded bulk callback marked the successor bulk-primed")
+	}
+	if d.cluster.IsSyncReady() {
+		t.Fatal("the superseded bulk callback restored readiness cleared by the successor cold connect")
+	}
+}
+
+// A stale bulk ACK must not set syncPeerBulkPrimed after the successor's cold
+// connect resets it; that flag is the stop condition for the prime-retry loop.
+func TestRetiredBulkAckDoesNotStopSuccessorPrimeRetry18554(t *testing.T) {
+	oldIntervals := syncPrimeRetryIntervalsForTest
+	syncPrimeRetryIntervalsForTest = []time.Duration{10 * time.Millisecond, 10 * time.Millisecond}
+	t.Cleanup(func() { syncPrimeRetryIntervalsForTest = oldIntervals })
+
+	d := &Daemon{
+		cluster:          newClusterManager(false),
+		store:            testStoreWithSetConfig(t, []string{"set system host-name bulk-ack-18554"}),
+		syncReadyTimeout: time.Hour,
+	}
+	d.setDataplane(&runtimeOnlyApplyTestDP{})
+	t.Cleanup(d.stopSyncReadyTimer)
+	t.Cleanup(func() { d.syncPrimeRetryGen.Add(1) })
+
+	old, successor := newWiringTestSessionSync(), newWiringTestSessionSync()
+	old.SetConnectedForTesting(true)
+	successor.SetConnectedForTesting(true)
+	d.wireSessionSyncPeerCallbacks(old)
+	d.wireSessionSyncPeerCallbacks(successor)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = old
+	d.clusterCommsMu.Unlock()
+
+	checked, resume := make(chan struct{}), make(chan struct{})
+	var resumeOnce sync.Once
+	releaseCallback := func() { resumeOnce.Do(func() { close(resume) }) }
+	d.peerCallbackAfterSupersededForTest = func(which string) {
+		if which == "OnBulkSyncAckReceived" {
+			close(checked)
+			<-resume
+		}
+	}
+	callbackDone := make(chan struct{})
+	go func() {
+		defer close(callbackDone)
+		old.OnBulkSyncAckReceived()
+	}()
+	t.Cleanup(func() {
+		releaseCallback()
+		<-callbackDone
+	})
+	select {
+	case <-checked:
+	case <-time.After(time.Second):
+		t.Fatal("old bulk-ack callback did not reach the post-check race seam")
+	}
+
+	d.clusterCommsMu.Lock()
+	d.sessionSync = successor
+	d.clusterCommsMu.Unlock()
+	retryFirst, retrySecond, retryRelease := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var retryReleaseOnce sync.Once
+	releaseRetry := func() { retryReleaseOnce.Do(func() { close(retryRelease) }) }
+	t.Cleanup(releaseRetry)
+	retryCount := 0
+	d.syncPrimeRetryBeforeSleepForTest = func() {
+		retryCount++
+		switch retryCount {
+		case 1:
+			close(retryFirst)
+			<-retryRelease
+		case 2:
+			close(retrySecond)
+		}
+	}
+	successor.OnPeerConnected()
+	select {
+	case <-retryFirst:
+	case <-time.After(time.Second):
+		t.Fatal("successor cold-connect did not start the bulk-prime retry loop")
+	}
+
+	releaseCallback()
+	<-callbackDone
+	if d.syncPeerBulkPrimed.Load() {
+		t.Fatal("a retired bulk ACK set syncPeerBulkPrimed after the successor cold-connect reset")
+	}
+	releaseRetry()
+	select {
+	case <-retrySecond:
+	case <-time.After(time.Second):
+		t.Fatal("the successor bulk-prime retry loop stopped after the retired ACK")
+	}
+	if d.syncPeerBulkPrimed.Load() {
+		t.Fatal("the retired ACK primed the successor during its retry loop")
 	}
 }

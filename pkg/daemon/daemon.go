@@ -894,6 +894,10 @@ type Daemon struct {
 	// syncPrimeRetryBeforeSleepForTest blocks the retry loop at the
 	// sleep boundary for the 10387 drain-window cell. Nil in production.
 	syncPrimeRetryBeforeSleepForTest func()
+	// peerCallbackAfterSupersededForTest pauses a callback after its optimistic
+	// identity check to exercise a concurrent SessionSync replacement. Nil in
+	// production.
+	peerCallbackAfterSupersededForTest func(string)
 
 	syncReadyTimerGen atomic.Uint64
 	syncReadyTimerMu  sync.Mutex

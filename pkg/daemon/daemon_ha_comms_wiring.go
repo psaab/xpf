@@ -417,6 +417,19 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 		if d.peerCallbackSuperseded(ss, "OnBulkSyncReceived", false) {
 			return
 		}
+		if hook := d.peerCallbackAfterSupersededForTest; hook != nil {
+			hook("OnBulkSyncReceived")
+		}
+		// Revalidate under the publication lock and retain it through the
+		// daemon-wide mutations; the optimistic check above can race replacement.
+		d.clusterCommsMu.Lock()
+		if d.sessionSync != ss {
+			d.clusterCommsMu.Unlock()
+			slog.Info("cluster: ignoring a peer callback from a replaced session-sync instance (#18521)",
+				"callback", "OnBulkSyncReceived")
+			return
+		}
+		defer d.clusterCommsMu.Unlock()
 		d.cluster.RecordEvent(cluster.EventColdSync, -1, "Bulk sync completed")
 		slog.Info("cluster: session sync complete, releasing VRRP hold")
 		d.onSessionSyncBulkReceived()
@@ -473,6 +486,22 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	}
 
 	ss.OnBulkSyncAckReceived = func() {
+		if d.peerCallbackSuperseded(ss, "OnBulkSyncAckReceived", false) {
+			return
+		}
+		if hook := d.peerCallbackAfterSupersededForTest; hook != nil {
+			hook("OnBulkSyncAckReceived")
+		}
+		// The ack controls the daemon-wide prime-retry loop; serialize its
+		// acceptance with publication just like the inbound bulk-complete edge.
+		d.clusterCommsMu.Lock()
+		if d.sessionSync != ss {
+			d.clusterCommsMu.Unlock()
+			slog.Info("cluster: ignoring a peer callback from a replaced session-sync instance (#18521)",
+				"callback", "OnBulkSyncAckReceived")
+			return
+		}
+		defer d.clusterCommsMu.Unlock()
 		d.cluster.RecordEvent(cluster.EventColdSync, -1, "Bulk sync acknowledged by peer")
 		d.onSessionSyncBulkAckReceived()
 	}
@@ -518,11 +547,12 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 // from a SessionSync that is no longer the published one (#18521 review
 // round 4). The callbacks are ordered per instance (dispatchPeerEvent), but
 // the state they write — peer connection and prime-retry state, sync-ready
-// state, bulk-primed state, and startup holds/election debt — is daemon-wide
-// and belongs to whichever instance is published. An old peer disconnect can
-// queue behind its own slow connect and run after the successor's connect,
-// marking the live successor disconnected; an old bulk completion could mark
-// it primed and release its startup holds before its own bulk arrives.
+// state, inbound/outbound bulk-primed state, and startup holds/election debt —
+// is daemon-wide and belongs to whichever instance is published. An old peer
+// disconnect can queue behind its own slow connect and run after the
+// successor's connect, marking the live successor disconnected; an old bulk
+// ack could stop the successor's retry loop, while an old bulk completion
+// could mark it primed and release its startup holds before its own bulk arrives.
 //
 // A CONNECT from any unpublished instance is dropped, including while nothing
 // is published (mid-teardown): the instance is being retired, and applied it
