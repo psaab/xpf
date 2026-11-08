@@ -576,12 +576,24 @@ test_cluster() {
 		ping6_test "$CLUSTER_LAN_HOST" "$internet_target6" \
 			"cluster: LAN host → internet IPv6 (${internet_target6})"
 
-		# IPv6 TCP: iperf3 from LAN host to WAN (proves SNAT v6 + return path)
+		# IPv6 TCP: iperf3 from LAN host to WAN (proves the v6 forward and
+		# return path). #19016: what carries the reply back depends on the
+		# cluster, so the FAIL hint names the right check. loss SNATs v6 to
+		# reth0.80 (rule snat6), so the target answers an on-link address.
+		# tcp/udp ROUTE the LAN v6 block, so the target needs
+		# LAN_ROUTED_PREFIX6 routed back via WAN_GW80_6
+		# (mouse-target-setup.sh up). On udp that route was missing for three
+		# days while this cell blamed SNAT, which that cluster does not do.
+		if [[ -n "${LAN_ROUTED_PREFIX6:-}" ]]; then
+			v6_return_hint="v6 is routed, not SNATed: check the target's return route ${LAN_ROUTED_PREFIX6} via ${WAN_GW80_6:-<WAN_GW80_6 unset>} (mouse-target-setup.sh status)"
+		else
+			v6_return_hint="v6 is SNATed: check the SNAT v6 rule and the target's return path to reth0.80"
+		fi
 		if incus exec "$CLUSTER_LAN_HOST" -- which iperf3 &>/dev/null 2>&1; then
 			if incus exec "$CLUSTER_LAN_HOST" -- timeout 8 iperf3 -6 -c "$IPERF_TARGET6" -t 3 &>/dev/null 2>&1; then
 				pass "cluster: LAN host → WAN iperf3 IPv6 TCP"
 			else
-				fail "cluster: LAN host → WAN iperf3 IPv6 TCP (SNAT v6 may be missing)"
+				fail "cluster: LAN host → WAN iperf3 IPv6 TCP (${v6_return_hint})"
 			fi
 		else
 			skip "cluster: IPv6 TCP test (iperf3 not installed on ${CLUSTER_LAN_HOST})"

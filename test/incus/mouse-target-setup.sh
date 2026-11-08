@@ -46,6 +46,16 @@
 # split is recorded, not papered over with a dead v6 (see
 # target-services.sh).
 #
+# THE LAN v6 RETURN ROUTE IS DECLARED HERE TOO (#19016). tcp and udp ROUTE
+# the LAN v6 block instead of SNATing it (docs/incus-tcp-udp-plan.md section
+# 2.4.2), so this host sees the LAN host's real source and must send replies
+# back via the firewall's VLAN-80 v6 address. The env names both
+# (LAN_ROUTED_PREFIX6 via WAN_GW80_6); loss SNATs v6 and leaves the prefix
+# empty. On udp the route was a hand `ip -6 route add`: the 2026-11-05 host
+# reboot dropped it, replies followed the RA default to the lab router, and
+# every v6 cell failed while the firewall was fine. `up` now writes it as
+# xpf-target-return-route.service, and removes that unit where v6 is SNATed.
+#
 # WHY A VF AND NOT A BRIDGE. The firewall's own WAN interface is an SR-IOV VF
 # on the same PF, UNTAGGED — the firewall does the VLAN 50/80 tagging itself
 # (`reth0.80`). A VF tagged 80 by the hypervisor lands on the same L2 as
@@ -85,6 +95,11 @@ MOUSE_TARGET_IMAGE="${MOUSE_TARGET_IMAGE:-images:debian/trixie}"
 # disables the alias everywhere, so the default uses `-`, not `:-`
 # (cluster-env.sh does the same, #18576).
 TARGET_ALIAS_V4="${TARGET_ALIAS_V4-172.16.80.202}"
+# #19016: the LAN v6 return route, from the env (cluster-env.sh). Empty or
+# unset LAN_ROUTED_PREFIX6 means the cluster SNATs v6: no route.
+LAN_ROUTED_PREFIX6="${LAN_ROUTED_PREFIX6:-}"
+WAN_GW80_6="${WAN_GW80_6:-}"
+RETURN_ROUTE_UNIT="xpf-target-return-route.service"
 
 IPERF_PORTS=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
 
@@ -102,6 +117,8 @@ ${0##*/} — provision the #8259 mouse-probe target container
 Environment: MOUSE_TARGET_NAME MOUSE_TARGET_V4 MOUSE_TARGET_V6
              MOUSE_TARGET_PF MOUSE_TARGET_VLAN MOUSE_TARGET_IMAGE INCUS_REMOTE
              TARGET_ALIAS_V4 (default 172.16.80.202; empty disables)
+             LAN_ROUTED_PREFIX6 WAN_GW80_6 (#19016: the LAN v6 return
+             route on clusters that route v6; empty prefix = none)
              MOUSE_TARGET_CLAIM_PROBE=skip (skip the #18576 claim probe;
              use only when no control address can answer, and say why;
              recorded in mouse-addr.service and shown by \`status\`)
@@ -166,6 +183,20 @@ claim_probe_new_v4() {
 
 instance_exists() { inc info "$ref" >/dev/null 2>&1; }
 
+# return_route6_spec: "<LAN_ROUTED_PREFIX6> via <WAN_GW80_6>" when this host
+# must carry the LAN v6 return route (#19016), else nothing. Only a VLAN-80
+# host takes it: WAN_GW80_6 is on-link there and nowhere else (the VLAN-50
+# DMZ prober reuses this script). A prefix with no next hop is refused rather
+# than silently skipped, since that is exactly the dead-v6 shape.
+return_route6_spec() {
+    [[ "$MOUSE_TARGET_VLAN" == 80 && -n "$LAN_ROUTED_PREFIX6" ]] || return 0
+    if [[ -z "$WAN_GW80_6" ]]; then
+        echo "REFUSE: LAN_ROUTED_PREFIX6=${LAN_ROUTED_PREFIX6} is set but WAN_GW80_6 (the firewall's VLAN-80 v6 next hop) is empty (#19016)" >&2
+        return 1
+    fi
+    printf '%s via %s\n' "$LAN_ROUTED_PREFIX6" "$WAN_GW80_6"
+}
+
 # claim_skip_markers: the "# claim-probe: SKIPPED ..." lines of the
 # installed mouse-addr.service, if any (#18576).
 claim_skip_markers() {
@@ -201,6 +232,9 @@ do_up() {
     inc exec "$ref" -- sh -c \
         'apt-get update -qq && apt-get install -y -qq iperf3 python3 tcpdump' || return 1
     inc exec "$ref" -- sh -c 'command -v tcpdump && command -v iperf3 && command -v python3' >/dev/null || return 1
+
+    local route6
+    route6="$(return_route6_spec)" || return 1
 
     echo "installing the address unit"
     # #16213: TARGET_ALIAS_V4 (the primary elephant target, 172.16.80.202
@@ -250,6 +284,32 @@ ExecStart=/sbin/ip link set eth0 up
 [Install]
 WantedBy=multi-user.target
 UNIT"
+
+    if [[ -n "$route6" ]]; then
+        echo "installing the LAN v6 return route unit (${route6})"
+        # After mouse-addr: the next hop is on-link only once eth0 is up and
+        # carries its VLAN-80 v6 address. `replace` is idempotent, so a
+        # netplan copy of the same route (the tcp target) is harmless.
+        inc exec "$ref" -- sh -c "cat > /etc/systemd/system/${RETURN_ROUTE_UNIT} <<'UNIT'
+[Unit]
+Description=#19016 route the cluster's LAN v6 block back via the firewall's VLAN-80 address
+After=mouse-addr.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/ip -6 route replace ${route6} dev eth0
+ExecStop=-/sbin/ip -6 route del ${route6} dev eth0
+
+[Install]
+WantedBy=multi-user.target
+UNIT" || return 1
+    else
+        # v6 is SNATed here (loss) or this is not a VLAN-80 host: no return
+        # route. Remove a unit a previous env left behind.
+        inc exec "$ref" -- sh -c "if [ -f /etc/systemd/system/${RETURN_ROUTE_UNIT} ]; then systemctl disable --now ${RETURN_ROUTE_UNIT}; rm -f /etc/systemd/system/${RETURN_ROUTE_UNIT}; fi" >/dev/null 2>&1 || true
+    fi
 
     echo_source_hash="$(sha256sum "${SCRIPT_DIR}/mouse-target-echo.py")" || return 1
     echo_source_hash="${echo_source_hash%% *}"
@@ -308,6 +368,14 @@ UNIT"
     # idempotent and never removes an address, so the restart is safe on a
     # live target.
     inc exec "$ref" -- systemctl restart mouse-addr.service >/dev/null 2>&1 || return 1
+    if [[ -n "$route6" ]]; then
+        # Restart, not `enable --now`: a RemainAfterExit oneshot that already
+        # ran would not re-run, so a changed prefix or next hop would wait for
+        # a reboot (the mouse-addr lesson above). `up` holds the cluster lock,
+        # so the stop/start gap meets no gate traffic.
+        inc exec "$ref" -- systemctl enable "$RETURN_ROUTE_UNIT" >/dev/null 2>&1 || return 1
+        inc exec "$ref" -- systemctl restart "$RETURN_ROUTE_UNIT" >/dev/null 2>&1 || return 1
+    fi
     for p in "${IPERF_PORTS[@]}"; do
         inc exec "$ref" -- systemctl enable --now "mouse-iperf3@${p}" >/dev/null 2>&1
     done
@@ -334,6 +402,15 @@ do_status() {
             echo "alias:    ${TARGET_ALIAS_V4} present (mouse-addr.service, #16213)"
         else
             echo "alias:    ${TARGET_ALIAS_V4} MISSING — run '${0##*/} up' to re-pin it (mouse-addr.service, #16213)"
+        fi
+    fi
+    # #19016: the LAN v6 return route must be PRESENT, not merely configured.
+    local route6
+    if route6="$(return_route6_spec 2>/dev/null)" && [[ -n "$route6" ]]; then
+        if inc exec "$ref" -- ip -6 route show "${route6%% *}" 2>/dev/null | grep -qF "via ${route6##* } "; then
+            echo "return6:  ${route6} present (${RETURN_ROUTE_UNIT}, #19016)"
+        else
+            echo "return6:  ${route6} MISSING — run '${0##*/} up' (${RETURN_ROUTE_UNIT}, #19016)"
         fi
     fi
     local active

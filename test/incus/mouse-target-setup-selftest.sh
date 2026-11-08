@@ -75,6 +75,10 @@ case "$1" in
       *"sha256sum /usr/local/bin/mouse-echo.py"*)
         echo "${STUB_ECHO_HASH:-missing}  /usr/local/bin/mouse-echo.py"
         exit 0 ;;
+      *"ip -6 route show"*)
+        # #19016: the target's installed LAN v6 return route, staged per case.
+        [[ -n "${STUB_ROUTE6:-}" ]] && echo "$STUB_ROUTE6"
+        exit 0 ;;
       *systemctl*is-active*) echo active; exit 0 ;;
       *list-units*) echo "mouse-iperf3@5200.service loaded active running"; exit 0 ;;
       *) exit 0 ;;
@@ -266,6 +270,128 @@ unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_FORE
     && pass "held addresses are not re-probed" \
     || fail "#18576: a held address was probed (or the loss shape refused):
 $(<"${TMP}/up.out")"
+
+# --- 7. the LAN v6 return route follows the cluster's v6 NAT mode (#19016) -
+# tcp and udp ROUTE the LAN v6 block (no v6 source-nat rule), so the VLAN-80
+# target sees the LAN host's real source and must send replies back via the
+# firewall's reth0.80 v6 address. loss SNATs v6 (rule snat6) and needs none.
+# On udp that route was a hand `ip -6 route add`; the 2026-11-05 host reboot
+# dropped it, the replies went to the lab router, and every v6 cell on udp
+# failed for three days while the firewall was fine.
+# The EXPECTATION is read from each env's CLUSTER_CONF (the firewall config
+# is the source of truth for "routed or SNATed" and for the next hop), never
+# from the env values the script itself uses: an env that disagrees with its
+# firewall config fails here as well.
+conf_v6_facts() { # <conf> -> "snat6=<0|1> snat4=<0|1> gw80=<addr> lan64=<addr>"
+    python3 -I - "$1" <<'PY'
+import re, sys
+s = open(sys.argv[1]).read()
+rule = r"match\s*\{\s*source-address\s+(%s)\s*;\s*\}\s*then\s*\{\s*source-nat\b"
+snat6 = re.findall(rule % r"[0-9A-Fa-f]*:[0-9A-Fa-f:]*/\d+", s)
+snat4 = re.findall(rule % r"\d+\.\d+\.\d+\.\d+/\d+", s)
+gw = re.search(r"\breth0\s*\{.*?\bunit 80\s*\{.*?family inet6\s*\{\s*address\s+([0-9A-Fa-f:]+)/64;", s, re.S)
+lan = re.search(r"\breth1\s*\{.*?\bunit 0\s*\{.*?family inet6\s*\{\s*address\s+([0-9A-Fa-f:]+)/64;", s, re.S)
+print("snat6=%d snat4=%d gw80=%s lan64=%s" % (bool(snat6), bool(snat4),
+      gw.group(1) if gw else "", lan.group(1) if lan else ""))
+PY
+}
+# route_matches_conf <unit-payload> <gw80> <lan64>: the unit's one route line
+# goes via the conf's reth0.80 v6 address and covers the conf's LAN /64.
+route_matches_conf() {
+    python3 -I - "$1" "$2" "$3" <<'PY'
+import ipaddress, re, sys
+unit, gw, lan = sys.argv[1:4]
+routes = re.findall(r"^ExecStart=/sbin/ip -6 route replace (\S+) via (\S+) dev eth0$", unit, re.M)
+if len(routes) != 1:
+    sys.exit("want exactly one ExecStart route line, got %d" % len(routes))
+pfx, via = routes[0]
+net = ipaddress.ip_network(pfx)
+if ipaddress.ip_address(via) != ipaddress.ip_address(gw):
+    sys.exit("next hop %s is not the conf's reth0.80 v6 address %s" % (via, gw))
+if ipaddress.ip_address(lan) not in net or net.prefixlen > 64:
+    sys.exit("prefix %s does not cover the conf's LAN %s/64" % (pfx, lan))
+PY
+}
+route_unit_of() { # the recorded return-route unit payload, if any
+    awk '/cat > \/etc\/systemd\/system\/xpf-target-return-route\.service/{f=1} f{print} f&&/^UNIT/{exit}' "${TMP}/exec.log"
+}
+for envf in loss tcp udp; do
+    env_path="test/incus/${envf}-userspace-cluster.env"
+    conf="$(env BPFRX_CLUSTER_ENV="$env_path" bash -c 'source "$1/cluster-env.sh" >/dev/null 2>&1; printf %s "$CLUSTER_CONF"' _ "$SCRIPT_DIR")"
+    facts="$(conf_v6_facts "$conf")"
+    # Positive control: the parser must see each conf's v4 SNAT rule, its
+    # reth0.80 v6 address and its LAN v6 /64, or "no v6 SNAT" proves nothing.
+    if [[ "$facts" != *"snat4=1"* || "$facts" == *"gw80= "* || "$facts" == *"lan64=" ]]; then
+        fail "#19016: ${envf}: conf parser blind on ${conf} (${facts})"
+        continue
+    fi
+    gw80="$(sed -n 's/.*gw80=\([^ ]*\).*/\1/p' <<<"$facts")"
+    lan64="$(sed -n 's/.*lan64=\([^ ]*\).*/\1/p' <<<"$facts")"
+    run_up BPFRX_CLUSTER_ENV="$env_path" > /dev/null
+    rc="$(<"${TMP}/rc")"
+    unit="$(route_unit_of)"
+    if [[ "$facts" == *"snat6=1"* ]]; then
+        # v6 SNATed: no return route anywhere, and a stale unit is removed.
+        if [[ "$rc" == 0 && -z "$unit" ]] && ! grep -q 'ip -6 route replace' "${TMP}/exec.log" \
+           && grep -q 'disable --now xpf-target-return-route.service' "${TMP}/exec.log"; then
+            pass "${envf} SNATs v6: no LAN v6 return route, and a stale unit is removed"
+        else
+            fail "#19016: ${envf} SNATs v6 (${conf##*/}) but up emitted a return route or kept a stale unit (rc=${rc}):
+${unit}
+$(grep -E 'route|xpf-target-return-route' "${TMP}/exec.log")"
+        fi
+    else
+        why="$(route_matches_conf "$unit" "$gw80" "$lan64" 2>&1)"
+        write_line="$(grep -n 'xpf-target-return-route.service <<' "${TMP}/exec.log" | head -1 | cut -d: -f1)"
+        enable_line="$(grep -n 'systemctl enable xpf-target-return-route.service' "${TMP}/exec.log" | head -1 | cut -d: -f1)"
+        restart_line="$(grep -n 'systemctl restart xpf-target-return-route.service' "${TMP}/exec.log" | head -1 | cut -d: -f1)"
+        addr_line="$(grep -n 'systemctl restart mouse-addr.service' "${TMP}/exec.log" | head -1 | cut -d: -f1)"
+        if [[ "$rc" == 0 && -n "$unit" && -z "$why" && "$unit" == *"After=mouse-addr.service"* \
+              && -n "$write_line" && -n "$enable_line" && -n "$restart_line" && -n "$addr_line" \
+              && "$enable_line" -gt "$write_line" && "$restart_line" -gt "$addr_line" ]]; then
+            pass "${envf} routes v6: up installs, enables and starts the LAN v6 return route via ${gw80}"
+        else
+            fail "#19016: ${envf} routes v6 (no v6 source-nat in ${conf##*/}) but up does not persist the LAN v6 return route via ${gw80} covering ${lan64}/64 (rc=${rc}; ${why:-route line ok}; write ${write_line:-none} enable ${enable_line:-none} restart ${restart_line:-none} after mouse-addr ${addr_line:-none}):
+${unit:-<no xpf-target-return-route.service written>}"
+        fi
+    fi
+done
+# A routed env with no next hop is refused before anything is written. No
+# env file here: each real env assigns WAN_GW80_6 unconditionally, which
+# would override the caller's empty value and never reach the refusal.
+run_up LAN_ROUTED_PREFIX6=2001:db8:aa00::/56 WAN_GW80_6= MOUSE_TARGET_VLAN=80 \
+    MOUSE_TARGET_V4=172.16.80.201 MOUSE_TARGET_V6=2001:559:8585:80::201 > /dev/null
+if [[ "$(<"${TMP}/rc")" != 0 ]] && grep -q 'REFUSE: LAN_ROUTED_PREFIX6' "${TMP}/up.out" \
+   && ! grep -q 'cat > /etc/systemd/system/' "${TMP}/exec.log"; then
+    pass "a routed env without WAN_GW80_6 is refused before any unit is written"
+else
+    fail "#19016: LAN_ROUTED_PREFIX6 without WAN_GW80_6 was not refused up front (rc=$(<"${TMP}/rc")):
+$(<"${TMP}/up.out")"
+fi
+# The VLAN-50 DMZ prober (same script) never takes the VLAN-80 return route.
+run_up BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env MOUSE_TARGET_VLAN=50 \
+    MOUSE_TARGET_NAME=xpf-zone-matrix-dmz MOUSE_TARGET_V4=172.16.50.212 \
+    MOUSE_TARGET_V6=2001:559:8585:50::212 > /dev/null
+[[ "$(<"${TMP}/rc")" == 0 && -z "$(route_unit_of)" ]] \
+    && pass "the VLAN-50 DMZ prober gets no VLAN-80 return route" \
+    || fail "#19016: the VLAN-50 prober was given the VLAN-80 return route (rc=$(<"${TMP}/rc")):
+$(route_unit_of)"
+# status reports the route as present or MISSING, so drift is named.
+st="$(run_status BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env \
+    STUB_ROUTE6="2001:559:8585:ba00::/56 via 2001:559:8585:80::b dev eth0 metric 1024 pref medium")"
+st_missing="$(run_status BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env)"
+[[ "$st" == *"return6:  2001:559:8585:ba00::/56 via 2001:559:8585:80::b present"* \
+   && "$st_missing" == *"return6:  2001:559:8585:ba00::/56 via 2001:559:8585:80::b MISSING"* ]] \
+    && pass "status reports the LAN v6 return route present / MISSING" \
+    || fail "#19016: status does not report the LAN v6 return route state:
+${st}
+---
+${st_missing}"
+st="$(run_status BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env)"
+[[ "$st" != *"return6:"* ]] \
+    && pass "status prints no return-route line where v6 is SNATed" \
+    || fail "#19016: status reports a return route on loss:
+${st}"
 
 if [[ $fails -eq 0 ]]; then
     echo "mouse-target-setup selftest: all checks passed"
