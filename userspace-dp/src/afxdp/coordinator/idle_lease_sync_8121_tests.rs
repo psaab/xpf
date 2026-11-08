@@ -1460,10 +1460,29 @@ fn aborted_requester_lease_promotion_matches_old_owner_18569() {
             "only a genuinely all-forwarding-active inventory promotes the lease; demotion does not undo it"
         );
 
-        // Ordinary old owner control: the original local lease remains local
-        // after the same RG1 demotion, independent of imported-lease promotion.
+        // Ordinary old-owner control: demote only RG1 and retain the original,
+        // complementary RG0/RG2 status rather than borrowing the requester's.
         old_owner
-            .update_ha_state(&transfer_helper_inventory_18569(rg0_active, false))
+            .update_ha_state(&[
+                crate::HAGroupStatus {
+                    rg_id: 0,
+                    active: !rg0_active,
+                    watchdog_timestamp: 0,
+                    ..crate::HAGroupStatus::default()
+                },
+                crate::HAGroupStatus {
+                    rg_id: 1,
+                    active: false,
+                    watchdog_timestamp: 0,
+                    ..crate::HAGroupStatus::default()
+                },
+                crate::HAGroupStatus {
+                    rg_id: 2,
+                    active: false,
+                    watchdog_timestamp: 0,
+                    ..crate::HAGroupStatus::default()
+                },
+            ])
             .expect("ordinary failover demotion");
         let (owner_imported, owner_expiry, owner_timeout) =
             allocator_state(&old_owner, &advertised);
