@@ -689,10 +689,10 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 			}
 			if scope, ok := rustFunctionScope19013(src, start); ok &&
 				(rustParamShadows19013(scope.args, name) ||
-					rustLetShadows19013(src, name, scope.start, start) ||
-					rustClosureParamShadows19013(src, name, scope.start, start) ||
-					rustForBindingShadows19013(src, name, scope.start, start) ||
-					rustMatchArmShadows19013(src, name, scope.start, start)) {
+					rustLetShadows19013(src, name, scope.start, scope.end) ||
+					rustClosureParamShadows19013(src, name, scope.start, scope.end) ||
+					rustForBindingShadows19013(src, name, scope.start, scope.end) ||
+					rustMatchArmShadows19013(src, name, scope.start, scope.end)) {
 				continue
 			}
 		}
@@ -985,6 +985,7 @@ func rustFnDeclName19013(src string, start int) bool {
 
 type rustFunctionInfo19013 struct {
 	start int
+	end   int
 	args  string
 }
 
@@ -999,14 +1000,17 @@ func rustFunctionScope19013(src string, pos int) (rustFunctionInfo19013, bool) {
 		trimmed := strings.TrimSpace(line)
 		if isFnDecl8393(trimmed) {
 			open := rustFunctionBodyOpen19013(src, offset)
-			if open >= 0 && open < pos {
+			if open >= 0 {
 				close := rustMatchingBrace19013(src, open)
-				if close > pos && open > best.start {
-					_, args, ok := fnNameAndArgs15255(trimmed)
+				inBody := open < pos && close > pos
+				inHeader := offset <= pos && pos < open && close > pos
+				if (inBody || inHeader) && open > best.start {
+					header := strings.TrimSpace(src[offset:])
+					_, args, ok := fnNameAndArgs15255(header)
 					if !ok {
 						args = ""
 					}
-					best = rustFunctionInfo19013{start: open + 1, args: args}
+					best = rustFunctionInfo19013{start: open + 1, end: close, args: args}
 				}
 			}
 		}
@@ -1016,16 +1020,33 @@ func rustFunctionScope19013(src string, pos int) (rustFunctionInfo19013, bool) {
 }
 
 func rustFunctionBodyOpen19013(src string, start int) int {
+	paren, bracket, brace := 0, 0, 0
 	for i := start; i < len(src); {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
 			i = next
 			continue
 		}
+		if paren == 0 && bracket == 0 && brace == 0 {
+			switch src[i] {
+			case ';':
+				return -1
+			case '{':
+				return i
+			}
+		}
 		switch src[i] {
-		case ';':
-			return -1
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
 		case '{':
-			return i
+			brace++
+		case '}':
+			brace--
 		}
 		i++
 	}
@@ -1054,24 +1075,65 @@ func rustMatchingBrace19013(src string, open int) int {
 }
 
 func rustParamShadows19013(args, name string) bool {
-	for _, arg := range strings.Split(args, ",") {
-		colon := strings.IndexByte(arg, ':')
-		if colon < 0 {
-			continue
+	return rustPatternListShadows19013(args, name)
+}
+
+func rustPatternListShadows19013(patterns, name string) bool {
+	for start := 0; start < len(patterns); {
+		end := rustTopLevelSeparator19013(patterns, start, len(patterns), ",")
+		if end < 0 {
+			end = len(patterns)
 		}
-		pattern := strings.TrimSpace(arg[:colon])
-		for _, prefix := range []string{"mut ", "ref ", "&mut ", "&"} {
-			pattern = strings.TrimPrefix(pattern, prefix)
+		patternEnd := rustTopLevelSeparator19013(patterns, start, end, ":")
+		if patternEnd < 0 {
+			patternEnd = end
 		}
-		if pattern == name {
+		if rustPatternBinds19013(patterns[start:patternEnd], name) {
 			return true
 		}
+		if end == len(patterns) {
+			return false
+		}
+		start = end + 1
 	}
 	return false
 }
 
-func rustClosureParamShadows19013(src, name string, start, pos int) bool {
-	for i := start; i < pos; {
+func rustTopLevelSeparator19013(src string, start, limit int, separators string) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 &&
+			strings.IndexByte(separators, src[i]) >= 0 {
+			if src[i] != ':' ||
+				((i == start || src[i-1] != ':') && (i+1 == limit || src[i+1] != ':')) {
+				return i
+			}
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		}
+		i++
+	}
+	return -1
+}
+
+func rustClosureParamShadows19013(src, name string, start, end int) bool {
+	for i := start; i < end; {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
 			i = next
 			continue
@@ -1080,16 +1142,13 @@ func rustClosureParamShadows19013(src, name string, start, pos int) bool {
 			i++
 			continue
 		}
-		close := rustClosureParamEnd19013(src, i+1, pos)
+		close := rustClosureParamEnd19013(src, i+1, end)
 		if close < 0 {
 			i++
 			continue
 		}
-		if rustClosureHasParam19013(src[i+1:close], name) {
-			bodyStart := skipRustTrivia19013(src, close+1)
-			if pos >= bodyStart && pos < rustClosureBodyEnd19013(src, bodyStart) {
-				return true
-			}
+		if rustPatternListShadows19013(src[i+1:close], name) {
+			return true
 		}
 		i = close + 1
 	}
@@ -1134,72 +1193,10 @@ func rustClosureParamEnd19013(src string, start, limit int) int {
 	return -1
 }
 
-func rustClosureHasParam19013(params, name string) bool {
-	for _, param := range strings.Split(params, ",") {
-		if colon := strings.IndexByte(param, ':'); colon >= 0 {
-			param = param[:colon]
-		}
-		for i := 0; i+len(name) <= len(param); {
-			at := strings.Index(param[i:], name)
-			if at < 0 {
-				break
-			}
-			at += i
-			end := at + len(name)
-			if (at == 0 || (!rustIdentByte19013(param[at-1]) && param[at-1] != ':')) &&
-				(end == len(param) || !rustIdentByte19013(param[end])) {
-				return true
-			}
-			i = end
-		}
-	}
-	return false
-}
 
-func rustClosureBodyEnd19013(src string, start int) int {
-	if start < len(src) && src[start] == '{' {
-		return rustMatchingBrace19013(src, start) + 1
-	}
-	paren, bracket, brace := 0, 0, 0
-	for i := start; i < len(src); {
-		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
-			i = next
-			continue
-		}
-		switch src[i] {
-		case '(':
-			paren++
-		case ')':
-			if paren == 0 {
-				return i
-			}
-			paren--
-		case '[':
-			bracket++
-		case ']':
-			if bracket == 0 {
-				return i
-			}
-			bracket--
-		case '{':
-			brace++
-		case '}':
-			if brace == 0 {
-				return i
-			}
-			brace--
-		case ',', ';':
-			if paren == 0 && bracket == 0 && brace == 0 {
-				return i
-			}
-		}
-		i++
-	}
-	return len(src)
-}
 
-func rustForBindingShadows19013(src, name string, start, pos int) bool {
-	for i := start; i < pos; {
+func rustForBindingShadows19013(src, name string, start, end int) bool {
+	for i := start; i < end; {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
 			i = next
 			continue
@@ -1209,16 +1206,13 @@ func rustForBindingShadows19013(src, name string, start, pos int) bool {
 			continue
 		}
 		patternStart := skipRustTrivia19013(src, i+len("for"))
-		in := rustForIn19013(src, patternStart, pos)
+		in := rustForIn19013(src, patternStart, end)
 		if in < 0 {
 			i += len("for")
 			continue
 		}
 		if rustPatternBinds19013(src[patternStart:in], name) {
-			body := rustForBodyOpen19013(src, in+len("in"), pos)
-			if body >= 0 && pos < rustMatchingBrace19013(src, body) {
-				return true
-			}
+			return true
 		}
 		i = in + len("in")
 	}
@@ -1254,6 +1248,8 @@ func rustForIn19013(src string, start, limit int) int {
 	return -1
 }
 
+// Candidate-name tokens anywhere in a delimited pattern region conservatively
+// count as bindings; the nested pattern shape is intentionally not parsed.
 func rustPatternBinds19013(pattern, name string) bool {
 	for i := 0; i < len(pattern); {
 		if next, skip := skipRustNonCodeFnItem19013(pattern, i); skip {
@@ -1274,57 +1270,9 @@ func rustPatternBinds19013(pattern, name string) bool {
 	return false
 }
 
-func rustForBodyOpen19013(src string, start, limit int) int {
-	paren, bracket, brace := 0, 0, 0
-	for i := start; i < limit; {
-		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
-			i = next
-			continue
-		}
-		if src[i] == '{' && paren == 0 && bracket == 0 && brace == 0 {
-			close := rustMatchingBrace19013(src, i)
-			if close >= limit {
-				return i
-			}
-			next := close + 1
-			for next < limit {
-				if src[next] == ' ' || src[next] == '\t' || src[next] == '\n' || src[next] == '\r' {
-					next++
-					continue
-				}
-				if after, skip := skipRustNonCodeFnItem19013(src, next); skip {
-					next = after
-					continue
-				}
-				break
-			}
-			if next < limit && src[next] == '{' {
-				i = close + 1
-				continue
-			}
-			return i
-		}
-		switch src[i] {
-		case '(':
-			paren++
-		case ')':
-			paren--
-		case '[':
-			bracket++
-		case ']':
-			bracket--
-		case '{':
-			brace++
-		case '}':
-			brace--
-		}
-		i++
-	}
-	return -1
-}
 
-func rustMatchArmShadows19013(src, name string, start, pos int) bool {
-	for i := start; i < pos; {
+func rustMatchArmShadows19013(src, name string, start, end int) bool {
+	for i := start; i < end; {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
 			i = next
 			continue
@@ -1333,10 +1281,10 @@ func rustMatchArmShadows19013(src, name string, start, pos int) bool {
 			i++
 			continue
 		}
-		open := rustMatchBodyOpen19013(src, i+len("match"), pos)
+		open := rustMatchBodyOpen19013(src, i+len("match"), end)
 		if open >= 0 {
 			close := rustMatchingBrace19013(src, open)
-			if close > pos && rustMatchArmBindingAt19013(src, name, open, close, pos) {
+			if rustMatchArmPatternShadows19013(src, name, open, close) {
 				return true
 			}
 		}
@@ -1411,7 +1359,7 @@ func rustMatchContainsArmArrow19013(src string, start, limit int) bool {
 	return false
 }
 
-func rustMatchArmBindingAt19013(src, name string, open, close, pos int) bool {
+func rustMatchArmPatternShadows19013(src, name string, open, close int) bool {
 	for armStart := open + 1; armStart < close; {
 		armStart = skipRustTrivia19013(src, armStart)
 		if armStart >= close {
@@ -1421,12 +1369,10 @@ func rustMatchArmBindingAt19013(src, name string, open, close, pos int) bool {
 		if arrow < 0 {
 			return false
 		}
-		bodyStart := skipRustTrivia19013(src, arrow+2)
-		bodyEnd, nextArm := rustMatchArmBodyEnd19013(src, bodyStart, close)
-		if rustPatternBinds19013(src[armStart:arrow], name) &&
-			((armStart <= pos && pos < arrow) || (bodyStart <= pos && pos < bodyEnd)) {
+		if rustPatternBinds19013(src[armStart:arrow], name) {
 			return true
 		}
+		_, nextArm := rustMatchArmBodyEnd19013(src, arrow+2, close)
 		if nextArm >= close {
 			return false
 		}
@@ -1505,75 +1451,21 @@ func rustMatchArmBodyEnd19013(src string, start, limit int) (int, int) {
 	return limit, limit
 }
 
-func rustLetShadows19013(src, name string, start, pos int) bool {
-	depth := 0
-	var shadowDepths []int
-	for i := start; i < pos; {
+func rustLetShadows19013(src, name string, start, end int) bool {
+	for i := start; i < end; {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
 			i = next
 			continue
-		}
-		switch src[i] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			for len(shadowDepths) > 0 && shadowDepths[len(shadowDepths)-1] > depth {
-				shadowDepths = shadowDepths[:len(shadowDepths)-1]
-			}
 		}
 		if rustWordAt19013(src, i, "let") {
-			binding := skipRustTrivia19013(src, i+len("let"))
-			for {
-				if rustWordAt19013(src, binding, "mut") ||
-					rustWordAt19013(src, binding, "ref") {
-					word := "mut"
-					if rustWordAt19013(src, binding, "ref") {
-						word = "ref"
-					}
-					binding = skipRustTrivia19013(src, binding+len(word))
-					continue
-				}
-				break
-			}
-			if rustWordAt19013(src, binding, name) &&
-				rustLetTerminatedBefore19013(src, binding+len(name), pos) {
-				shadowDepths = append(shadowDepths, depth)
-			}
-		}
-		i++
-	}
-	for _, shadowDepth := range shadowDepths {
-		if shadowDepth <= depth {
-			return true
-		}
-	}
-	return false
-}
-
-func rustLetTerminatedBefore19013(src string, start, pos int) bool {
-	paren, bracket, brace := 0, 0, 0
-	for i := start; i < pos; {
-		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
-			i = next
-			continue
-		}
-		switch src[i] {
-		case '(':
-			paren++
-		case ')':
-			paren--
-		case '[':
-			bracket++
-		case ']':
-			bracket--
-		case '{':
-			brace++
-		case '}':
-			brace--
-		case ';':
-			if paren == 0 && bracket == 0 && brace == 0 {
+			patternStart := skipRustTrivia19013(src, i+len("let"))
+			patternEnd := rustTopLevelSeparator19013(src, patternStart, end, "=;")
+			if patternEnd >= 0 && rustPatternBinds19013(src[patternStart:patternEnd], name) {
 				return true
+			}
+			if patternEnd >= 0 {
+				i = patternEnd + 1
+				continue
 			}
 		}
 		i++
@@ -1882,9 +1774,39 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			want: 1,
 		},
 		{
+			name: "tuple let binding does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let (lost,) = (|| {},); lost(); }\n",
+			want: 1,
+		},
+		{
+			name: "nested struct slice and reference let pattern binds identifiers",
+			rel:  "tests_x.rs",
+			src:  "struct Holder { field: [fn(); 1] }\nfn lost() { assert!(true); }\n#[test]\nfn uses() { let (Holder { field: [ref lost] },) = fixture; assert!(true); }\n",
+			want: 1,
+		},
+		{
+			name: "tuple function parameter does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() {\n    fn nested((lost,): (fn(),)) { lost(); }\n}\n",
+			want: 1,
+		},
+		{
+			name: "nested struct slice reference function parameter shadows",
+			rel:  "tests_x.rs",
+			src:  "struct Holder { field: [fn(); 1] }\nfn lost() { assert!(true); }\n#[test]\nfn uses() {\n    fn nested((Holder { field: [ref lost] },): (Holder,)) { drop(lost); }\n}\n",
+			want: 1,
+		},
+		{
 			name: "closure parameter does not reference the unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let f = |lost: fn()| lost(); f(); }\n",
+			want: 1,
+		},
+		{
+			name: "tuple closure parameter does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let f = |(lost,): (fn(),)| lost(); f((|| {},)); }\n",
 			want: 1,
 		},
 		{
@@ -1912,9 +1834,33 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			want: 1,
 		},
 		{
+			name: "for-loop binding survives a postfix block iterable",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { for lost in { [|| {}] }.into_iter() { lost(); } }\n",
+			want: 1,
+		},
+		{
+			name: "tuple for-loop pattern shadows through the body",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { for (lost,) in [(|| {},)] { lost(); } }\n",
+			want: 1,
+		},
+		{
 			name: "match-arm binding does not reference the unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { match Some(|| {}) { Some(lost) => lost(), None => {} } }\n",
+			want: 1,
+		},
+		{
+			name: "nested tuple match-arm binding does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { match Some((|| {},)) { Some((lost,)) => lost(), None => {} } }\n",
+			want: 1,
+		},
+		{
+			name: "struct slice reference match pattern binds the candidate",
+			rel:  "tests_x.rs",
+			src:  "struct Holder { field: [fn(); 1] }\nfn lost() { assert!(true); }\n#[test]\nfn uses() { match Some(Holder { field: [|| {}] }) { Some(Holder { field: [ref lost] }) => drop(lost), None => {} } }\n",
 			want: 1,
 		},
 		{
