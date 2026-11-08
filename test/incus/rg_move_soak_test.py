@@ -635,6 +635,7 @@ class FakeCluster:
         self.udp_probe_replied = set()
         self.udp_probe_boot_id = "0123456789abcdef0123456789abcdef"
         self.udp_probe_session_value = 71
+        self.udp_probe_recreate_at = None
         self.udp_probe_session_queries = []
         self.ping_seq = {}
         self.iv_index = {}
@@ -659,6 +660,7 @@ class FakeCluster:
         self.udp_probe_sent = set()
         self.udp_probe_replied = set()
         self.udp_probe_session_value = 71
+        self.udp_probe_recreate_at = None
         return None
 
     def _advance_udp_probe(self, t):
@@ -714,6 +716,9 @@ class FakeCluster:
                 del self.pending[rg]
                 if self.dual_after_land:
                     self.dual_pending = 2
+        if self.udp_probe_recreate_at is not None and t >= self.udp_probe_recreate_at:
+            self.udp_probe_session_value = 84
+            self.udp_probe_recreate_at = None
         if self.dual_after_s is not None:
             for rg, at in list(self.landed_at.items()):
                 if t - at >= self.dual_after_s and (rg, at) not in getattr(self, "_dual_done", set()):
@@ -742,8 +747,8 @@ class FakeCluster:
             self.events.append((lan_now + 0.3, lan_now + 3.8, "gap"))
         elif fault == "die":
             self.events.append((lan_now + 0.3, float("inf"), "stall"))
-        elif fault == "udp-recreated":
-            self.udp_probe_session_value = 84
+        elif fault == "udp-recreated-after-landing":
+            self.udp_probe_recreate_at = self.clock_.t + 0.9
         elif fault == "udp-lost":
             self._advance_udp_probe(self.clock_.t)
             self.udp_probe_lost_after_seq = self.udp_probe_next_seq
@@ -1130,7 +1135,7 @@ class Orchestration(unittest.TestCase):
 
     def test_udp_session_identity_recreation_fails_even_with_stable_nat_tuple(self):
         clock = FakeClock()
-        c = FakeCluster(clock, {2: 0}, faults={1: "udp-recreated"})
+        c = FakeCluster(clock, {2: 0}, faults={1: "udp-recreated-after-landing"})
         rc, res, _ = run_fake(c, clock, moves=2)
         self.assertEqual(rc, 1)
         first = res["moves"][0]

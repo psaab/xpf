@@ -335,22 +335,21 @@ ha_rg1_udp_after_cli() {
 	fi
 }
 
-ha_rg1_udp_after_move() {
-	if [[ "$RG1_UDP_STARTED" != true || "$RG1_UDP_READY" != true ]]; then return 2; fi
-	if ! RG1_UDP_SESSION_AFTER=$(ha_udp_probe_session_id "$FW0" "$RG1_UDP_AFTER_CLI" \
-		"${HA_CAPTURE_DIR}/rg1-udp-session-after.txt"); then
-		RG1_UDP_READY=false
-		RG1_UDP_REASON="post-move UDP Session ID query on primary/fw0 failed"
-		return 2
-	fi
-}
 
 ha_rg1_udp_finish() {
 	if [[ "$RG1_UDP_STARTED" != true ]]; then return 2; fi
 	local captured=true
 	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_AFTER"; then
 		captured=false
-		RG1_UDP_REASON="post-move UDP probe snapshot was unavailable"
+		RG1_UDP_REASON="post-window UDP probe snapshot was unavailable"
+	fi
+	if [[ "$captured" == true && "$RG1_UDP_READY" == true ]]; then
+		if ! RG1_UDP_SESSION_AFTER=$(ha_udp_probe_session_id "$FW0" "$RG1_UDP_AFTER" \
+			"${HA_CAPTURE_DIR}/rg1-udp-session-final.txt"); then
+			captured=false
+			RG1_UDP_READY=false
+			RG1_UDP_REASON="final post-window UDP Session ID query on primary/fw0 failed"
+		fi
 	fi
 	ha_udp_probe_stop "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR"
 	RG1_UDP_STARTED=false
@@ -1313,9 +1312,6 @@ ha_run_rg1_failback_slice() {
 		fi
 	fi
 	if [[ "$owner_moved" == true ]]; then
-		if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]] && ! ha_rg1_udp_after_move; then
-			info "RG1 Group 1c UDP probe unavailable after RG1 landed: ${RG1_UDP_REASON}"
-		fi
 		if ! main_iperf_running; then
 			load_ok=false
 			failure_reason="${failure_reason:+${failure_reason}; }main iperf process was not alive at phase-mid"

@@ -140,17 +140,11 @@ def classify_snapshots(before_text: str, checkpoint_text: str, after_text: str,
     except ValueError as exc:
         return "VOID", f"UDP probe evidence malformed: {exc}", {}
 
-    # Compare the firewall's flow-instance ID on the promoted node, read before
-    # the move on standby and after the move on primary. Wire tuple identity is
-    # only a secondary recreation signal.
+    # Establish that the probe is one continuous, usable client before using
+    # Session IDs to claim recreation. A changed boot/socket or empty baseline is
+    # VOID evidence, even if the flow IDs differ.
     if not before_session_id:
         return "VOID", "UDP probe had no matching firewall session in the synced pre-move baseline", {}
-    if after_session_id and before_session_id != after_session_id:
-        return "RECREATED", (f"UDP probe RECREATED: firewall Session ID changed "
-                             f"{before_session_id}->{after_session_id}"), {
-                                 "session_id_before": before_session_id,
-                                 "session_id_after": after_session_id,
-                             }
     if before.boot_ids != checkpoint.boot_ids or checkpoint.boot_ids != after.boot_ids:
         return "VOID", (f"UDP probe sender restarted (boot nonce "
                         f"{before.boot_ids!r}->{checkpoint.boot_ids!r}->{after.boot_ids!r}); "
@@ -171,6 +165,15 @@ def classify_snapshots(before_text: str, checkpoint_text: str, after_text: str,
     if not baseline_replies:
         return "VOID", "UDP probe has no pre-move reply baseline", {}
     baseline_identity = (baseline_replies[-1][1], baseline_replies[-1][2])
+
+    # A session-ID change is meaningful only with a validated, continuous
+    # client baseline; otherwise the sender may have created a new flow itself.
+    if after_session_id and before_session_id != after_session_id:
+        return "RECREATED", (f"UDP probe RECREATED: firewall Session ID changed "
+                             f"{before_session_id}->{after_session_id}"), {
+                                 "session_id_before": before_session_id,
+                                 "session_id_after": after_session_id,
+                             }
 
     # The checkpoint is captured immediately after CLI return. It may include
     # grace replies for packets sent during command latency; only sequences

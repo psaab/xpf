@@ -2275,6 +2275,20 @@ assert_helper_status 2 ha_udp_probe_survival_verdict \
 	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_RESET" 71 71
 assert_contains "$(<"${ERR}")" 'sender restarted (boot nonce' \
 	'a sender restart without firewall session change is VOID'
+assert_helper_status 2 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_RESET" 71 84
+assert_contains "$(<"${ERR}")" 'sender restarted (boot nonce' \
+	'changed Session ID cannot override a restarted sender'
+UDP_PROBE_EMPTY="${RG1_DIR}/udp-empty-baseline.log"
+cat >"$UDP_PROBE_EMPTY" <<'UDP'
+BOOT 0123456789abcdef0123456789abcdef
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
+SENT 100
+UDP
+assert_helper_status 2 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_EMPTY" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_RECREATED" 71 84
+assert_contains "$(<"${ERR}")" 'no pre-move sent-and-answered baseline' \
+	'changed Session ID cannot override a missing pre-move reply baseline'
 UDP_PROBE_SENDERR="${RG1_DIR}/udp-senderr.log"
 cat "$UDP_PROBE_CHECKPOINT" >"$UDP_PROBE_SENDERR"
 printf 'SENDERR 103\n' >>"$UDP_PROBE_SENDERR"
@@ -2636,7 +2650,15 @@ request = move_body.find('request_output=$(incus exec "$FW1"')
 post_cli = move_body.find("ha_rg1_udp_after_cli")
 owner_poll = move_body.find('ha_wait_rg1_owner node0')
 if ("ha_rg1_udp_before_move" not in move_body or min(request, post_cli, owner_poll) < 0
-        or not request < post_cli < owner_poll or "ha_rg1_udp_after_move" not in move_body):
+        or not request < post_cli < owner_poll):
+    raise SystemExit(1)
+finish = re.search(r"^ha_rg1_udp_finish\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not finish:
+    raise SystemExit(1)
+finish_body = finish.group(0)
+final_snapshot = finish_body.find('ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_AFTER"')
+final_session = finish_body.find('ha_udp_probe_session_id "$FW0" "$RG1_UDP_AFTER"')
+if min(final_snapshot, final_session) < 0 or not final_snapshot < final_session:
     raise SystemExit(1)
 checkpoint = re.search(r"^ha_rg1_udp_before_move\(\) \{\n.*?^\}\n", text, re.M | re.S)
 if not checkpoint or "ha_udp_probe_session_id" not in checkpoint.group(0):

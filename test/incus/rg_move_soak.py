@@ -1235,10 +1235,15 @@ class Soak:
         if current is None:
             return {"status": "VOID", "detail": "UDP sequence probe snapshot became unavailable",
                     "metrics": {}}
+        session_id_after, error = self.c.udp_probe_session_id(pending["target_node"], current)
+        self.udp_probe_baseline = current
+        if error:
+            return {"status": "VOID",
+                    "detail": f"UDP sequence probe final-window Session ID query failed: {error}",
+                    "metrics": {}}
         status, detail, metrics = udp_session_probe.classify_snapshots(
             pending["pre_move_snapshot"], pending["post_cli_snapshot"], current,
-            pending["session_id_before"], pending["session_id_after"])
-        self.udp_probe_baseline = current
+            pending["session_id_before"], session_id_after)
         return {"status": status, "detail": detail, "metrics": metrics}
 
     # -- one move -------------------------------------------------------
@@ -1282,20 +1287,17 @@ class Soak:
         if udp_probe_pre is not None and udp_probe_pre.get("status") == "READY" and udp_probe is None:
             if landed is None:
                 udp_probe = {"status": "VOID",
-                             "detail": f"UDP probe could not query node{target} after RG{rg} failed to land",
+                             "detail": f"UDP probe could not reach node{target} after RG{rg} failed to land",
                              "metrics": {}}
             else:
-                session_id_after, error = self.c.udp_probe_session_id(target, post_cli_snapshot)
-                if error:
-                    udp_probe = {"status": "VOID",
-                                 "detail": f"UDP sequence probe post-move Session ID query failed: {error}",
-                                 "metrics": {}}
-                else:
-                    udp_probe = {"status": "READY",
-                                 "pre_move_snapshot": udp_probe_pre["snapshot"],
-                                 "post_cli_snapshot": post_cli_snapshot,
-                                 "session_id_before": udp_probe_pre["session_id_before"],
-                                 "session_id_after": session_id_after}
+                # Keep the pre-move Session ID, but query the promoted-node
+                # identity at the end of the judged window, beside its final
+                # probe snapshot, so later recreation cannot escape detection.
+                udp_probe = {"status": "READY",
+                             "pre_move_snapshot": udp_probe_pre["snapshot"],
+                             "post_cli_snapshot": post_cli_snapshot,
+                             "session_id_before": udp_probe_pre["session_id_before"],
+                             "target_node": target}
         # self._owners (the next move's precondition) is refreshed by
         # watch_window at the END of the window, not here at landing.
         res = RGMoveResult(rg, target, pre.owner, pre.detail, cls, first, rc, round(t_ret - t0, 3),
