@@ -607,6 +607,91 @@ assert m["stream_zero_intervals_total"] == 1, m
 assert m["stream_zero_intervals_outside_events_total"] == 0, m
 PY
 ok "producer exclusion is decided by the full-length interval bounds, not a shortened stream row"
+# #19021: aggregate collapse uses the same full [T, T+3] window test as the
+# per-stream outside counter. The crash fixture mirrors wave-3: a 16 Gbit/s
+# peak at interval 2, then all 8 streams read zero at 62-63 inside the crash
+# window. A zero outside that window remains a collapse.
+aggregate_window_dir="${fixture_dir}/aggregate-window"
+mkdir -p "$aggregate_window_dir"
+python3 - "$aggregate_window_dir" <<'PY'
+import json
+import pathlib
+import sys
+
+out = pathlib.Path(sys.argv[1])
+
+def write_fixture(name, zero_interval):
+    intervals = []
+    for second in range(70):
+        total = 0 if second == zero_interval else (16e9 if second == 2 else 8e9)
+        rate = total / 8
+        streams = [
+            {
+                "socket": stream_id,
+                "start": second,
+                "end": second + 1,
+                "bits_per_second": rate,
+            }
+            for stream_id in range(1, 9)
+        ]
+        intervals.append(
+            {
+                "sum": {
+                    "start": second,
+                    "end": second + 1,
+                    "bits_per_second": total,
+                },
+                "streams": streams,
+            }
+        )
+    out.joinpath(name).write_text(
+        json.dumps(
+            {
+                "intervals": intervals,
+                "end": {
+                    "sum_sent": {"bits_per_second": 8e9, "end": 70, "retransmits": 0},
+                    "sum_received": {"bits_per_second": 8e9, "end": 70},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+write_fixture("crash-window-zero.json", 62)
+write_fixture("outside-window-zero.json", 66)
+PY
+collapse_metrics() { # <fixture> [metrics producer args...]
+	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$aggregate_window_dir/$1" "${@:2}"
+}
+crash_window_metrics=$(collapse_metrics crash-window-zero.json --event-sec 61.442)
+planned_window_metrics=$(collapse_metrics crash-window-zero.json --planned-move move=61.442)
+outside_crash_metrics=$(collapse_metrics outside-window-zero.json --event-sec 61.442)
+outside_planned_metrics=$(collapse_metrics outside-window-zero.json --planned-move move=61.442)
+python3 - "$crash_window_metrics" "$planned_window_metrics" \
+	"$outside_crash_metrics" "$outside_planned_metrics" <<'PY' \
+	|| bad "#19021: aggregate collapse must exclude crash/planned-move windows only"
+import json
+import sys
+
+crash, planned, outside_crash, outside_planned = (
+    json.loads(value) for value in sys.argv[1:]
+)
+for name, metrics in (("crash", crash), ("planned move", planned)):
+    assert metrics["peak_interval_index"] == 2, (name, metrics)
+    assert metrics["zero_intervals_after_peak"] == 0, (name, metrics)
+    assert not metrics["collapse_detected"], (name, metrics["collapse_reason"])
+assert crash["stream_zero_intervals_outside_events_total"] == 0, crash
+assert planned["planned_move_fail_total"] == 1, planned
+assert planned["planned_move_zero_intervals_total"] == 8, planned
+for name, metrics in (("crash", outside_crash), ("planned move", outside_planned)):
+    assert metrics["peak_interval_index"] == 2, (name, metrics)
+    assert metrics["zero_intervals_after_peak"] == 1, (name, metrics)
+    assert metrics["collapse_detected"], (name, metrics)
+    assert metrics["collapse_reason"] == "1 zero interval(s) after peak", metrics
+assert outside_crash["stream_zero_intervals_outside_events_total"] == 8, outside_crash
+assert outside_planned["planned_moves"][0]["verdict"] == "PASS", outside_planned
+PY
+ok "#19021: crash/planned-move-window zero does not collapse; post-window zero still does"
 
 # #18692/#18708: a stream carried in the five seconds before T is judged by
 # the crash cell, so its T+3..T+5 zeros can be excused when it resumes at T+5.

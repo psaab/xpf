@@ -1852,9 +1852,10 @@ perf-matrix:
 		env BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/iperf-matrix.sh \
 		$(PERF_MATRIX_OUT) $(PERF_MATRIX_DUR) $(PERF_MATRIX_REPS)
 
-# Hermetic: the stall verdict on fixture iperf3 JSON (a stalled aggregate, a
-# single dead stream, an error, an empty and an unparseable result all FAIL).
+# Hermetic metrics and stall verdict fixtures for perf-matrix. The metrics
+# selftest also covers the aggregate collapse and event-window producer.
 perf-matrix-lib:
+	bash ./test/incus/iperf-throughput-selftest.sh
 	./test/incus/iperf-matrix.sh --selftest
 
 # Hermetic unit fixtures for the IPv4 RETH MTR path checker.

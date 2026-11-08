@@ -447,11 +447,16 @@ def summarize(path, args):
     summary["planned_move_cost_total"] = sum(1 for m in moves_out if m["verdict"] == "COST")
     summary["planned_move_fail_total"] = sum(1 for m in moves_out if m["verdict"] == "FAIL")
     summary["planned_move_zero_intervals_total"] = sum(m["zero_stream_intervals"] for m in moves_out)
+    full_interval_excluded = []
     for bps, start, end_s in intervals:
         observed_end = max(observed_end, end_s)
         duration = end_s - start
         if duration >= args.min_full_interval_sec:
             full_intervals.append(bps / 1e9)
+            # #19021: share the per-stream outside logic's full-window
+            # decision. Transition intervals are absent from the aggregate
+            # collapse series, but remain in interval_gbps and zero totals.
+            full_interval_excluded.append(fully_excluded(start, end_s))
     if client_error or not end:
         # An interrupted client's stub has zero sum_received and a sum_sent
         # diluted by the hung time. A client killed outright (SIGKILL after the
@@ -485,12 +490,27 @@ def summarize(path, args):
         summary["ok"] = True
         return summary
 
-    peak_gbps = max(full_intervals)
-    peak_index = full_intervals.index(peak_gbps)
-    tail = full_intervals[-args.tail_window:] if len(full_intervals) >= args.tail_window else list(full_intervals)
+    collapse_intervals = [
+        (index, value)
+        for index, (value, excluded) in enumerate(zip(full_intervals, full_interval_excluded))
+        if not excluded
+    ]
+    if not collapse_intervals:
+        summary["ok"] = True
+        return summary
+
+    collapse_values = [value for _, value in collapse_intervals]
+    peak_gbps = max(collapse_values)
+    peak_position = collapse_values.index(peak_gbps)
+    peak_index = collapse_intervals[peak_position][0]
+    tail = (
+        collapse_values[-args.tail_window:]
+        if len(collapse_values) >= args.tail_window
+        else list(collapse_values)
+    )
     tail_median = statistics.median(tail)
     tail_min = min(tail)
-    after_peak = full_intervals[peak_index + 1 :]
+    after_peak = collapse_values[peak_position + 1 :]
     zero_after_peak = sum(1 for value in after_peak if value <= args.zero_gbps)
     stalled_after_peak = sum(1 for value in after_peak if value <= args.stall_gbps)
     tail_peak_ratio = tail_median / peak_gbps if peak_gbps > 0 else 0.0
@@ -541,8 +561,8 @@ def main():
         action="append",
         default=[],
         help="transition instant (seconds from iperf start); may repeat. "
-        "Full per-stream intervals wholly inside [T, T+--event-window-sec] "
-        "are excluded from stream_zero_intervals_outside_events_total.",
+        "Full intervals wholly inside [T, T+--event-window-sec] are excluded "
+        "from stream_zero_intervals_outside_events_total and aggregate collapse checks.",
     )
     parser.add_argument(
         "--planned-move",
@@ -551,7 +571,8 @@ def main():
         metavar="LABEL=T1[,T2...]",
         help="a move the harness itself makes, anchored at each instant given "
         "(the request and the observed landing); may repeat. Its zero intervals "
-        "are scored PASS/COST/FAIL in planned_moves, never excused.",
+        "are scored PASS/COST/FAIL in planned_moves, not excused from that score; "
+        "the windows are excluded from aggregate collapse checks.",
     )
     parser.add_argument(
         "--planned-stall-gbps",
