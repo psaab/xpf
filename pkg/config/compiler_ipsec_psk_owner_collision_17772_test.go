@@ -716,13 +716,13 @@ func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
 	}
 
 	// These local identities are LOOKUPS, not peer-owner sets. The narrow
-	// local lookup selects the broader peer owner; swapping roles must not
-	// turn an intersecting-but-not-contained address or a wildcard lookup
-	// into a collision.
+	// local lookup selects a peer owner only in strongSwan's directed order;
+	// symmetric peer-set intersection alone is not a local-identity hit.
 	localLookupCollisions := []struct {
 		name, ownerType, owner, lookupType, lookup string
 	}{
 		{"FQDN wildcard owner", "hostname", "*.example.com", "hostname", "a.example.com"},
+		{"nested FQDN wildcard owner", "hostname", "*.com", "hostname", "*.example.com"},
 		{"IPv4 subnet contains local address", "inet", "198.51.100.0/24", "inet", "198.51.100.7"},
 		{"IPv4 subnet contains local subnet", "inet", "198.51.0.0/16", "inet", "198.51.100.0/24"},
 		{"IPv6 subnet contains local address", "inet", "2001:db8::/32", "inet", "2001:db8:1::7"},
@@ -743,6 +743,7 @@ func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
 		}{
 			{"wildcard owner", "hostname", "*.example.com", "hostname", "a.example.com"},
 			{"address subnet owner", "inet", "198.51.0.0/16", "inet", "198.51.100.0/24"},
+			{"IPv4 address lookup", "inet", "198.51.100.0/24", "inet", "198.51.100.7"},
 			{"DN wildcard owner", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=x"},
 		} {
 			owner, _ := ipsecIKEIdentityKey(pair.ownerType, pair.owner)
@@ -757,6 +758,22 @@ func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
 				t.Errorf("%s: owner match sets still intersect symmetrically", pair.name)
 			}
 		}
+	})
+
+	t.Run("nested wildcard lookup follows owner suffix direction", func(t *testing.T) {
+		specificLookup, _ := ipsecIKEIdentityKey("hostname", "*.example.com")
+		broadOwner, _ := ipsecIKEIdentityKey("hostname", "*.com")
+		if _, ok := ipsecLookupSelectsOwner(specificLookup, broadOwner); !ok {
+			t.Fatal("a leading-wildcard lookup whose string ends in the owner suffix must select it")
+		}
+		if _, ok := ipsecLookupSelectsOwner(broadOwner, specificLookup); ok {
+			t.Fatal("a broader wildcard lookup must not select a narrower wildcard owner")
+		}
+		if _, ok := ipsecIdentitiesCollide(specificLookup, broadOwner); !ok {
+			t.Fatal("overlapping wildcard peer-owner sets must still collide symmetrically")
+		}
+		commands := localIdentityPair17772("hostname", "*.example.com", "hostname", "*.com", false)
+		requireNoCollision17772(t, commands)
 	})
 
 	t.Run("disjoint wildcard and subnet controls still commit", func(t *testing.T) {

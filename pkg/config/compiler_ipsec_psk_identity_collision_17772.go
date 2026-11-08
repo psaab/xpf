@@ -973,6 +973,20 @@ func ipsecASCIIHasSuffixFold(value, suffix string) bool {
 	return ipsecASCIIEqualFold(value[len(value)-len(suffix):], suffix)
 }
 
+// ipsecWildcardLookupSelectsOwner mirrors matches_string's directed use
+// of the right-side wildcard: the lookup value, including a leading '*',
+// must end with the owner's suffix.
+func ipsecWildcardLookupSelectsOwner(lookup, owner string) (string, bool) {
+	if strings.IndexByte(lookup, 0) >= 0 || strings.IndexByte(owner, 0) >= 0 {
+		return "", false
+	}
+	suffix, wildcard := ipsecWildcardSuffix(owner)
+	if !wildcard || !ipsecASCIIHasSuffixFold(lookup, suffix) {
+		return "", false
+	}
+	return "wildcard matches peer identity", true
+}
+
 // ipsecDNMatchSetsIntersect intersects two type-9 owners beyond equals():
 // matches_dn passes a wildcard counter to compare_dn, so an RDN whose
 // value is exactly "*" matches any value at that position, and it never
@@ -1092,9 +1106,7 @@ func ipsecLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
 		return rule, true
 	}
 	if lookup.typeID == owner.typeID && (lookup.typeID == 2 || lookup.typeID == 3) {
-		if _, ownerWildcard := ipsecWildcardSuffix(owner.encoding); ownerWildcard {
-			return ipsecWildcardStringsIntersect(lookup.encoding, owner.encoding)
-		}
+		return ipsecWildcardLookupSelectsOwner(lookup.encoding, owner.encoding)
 	}
 	if lookup.typeID == 9 && owner.typeID == 9 {
 		return ipsecDNLookupSelectsOwner(lookup, owner)

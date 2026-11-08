@@ -1066,9 +1066,10 @@ all files stay in `package ipsec`, so the public API is unchanged.
   other's secret.
   An effective local identity is the `me` LOOKUP of its own exchange
   (`ipsecLookupSelectsOwner`), so that check remains directed:
-  `lookup->matches(owner)`. A local wildcard does not select an exact owner;
-  an exact local identity can select a wildcard owner. Local address, subnet
-  or range lookups follow strongSwan's directed matching, including its
+  `lookup->matches(owner)`. Wildcards apply on the owner side: an exact lookup
+  can match a wildcard owner, and a wildcard-valued lookup may match a broader
+  suffix owner (`*.example.com` -> `*.com`), but not the reverse. Local address,
+  subnet or range lookups follow strongSwan's directed matcher, including its
   subnet-mask rules. `matches_any()` makes an ID_ANY lookup match only an ID_ANY
   owner, so an unspecified `local-address 0.0.0.0` / `::` is not a collision
   (charon presents its real source address there).
@@ -1110,9 +1111,10 @@ all files stay in `package ipsec`, so the public API is unchanged.
   discriminating address, and an IP-addressed gateway's secret is re-scoped to
   the address instead of the wildcard owner). #18682 also newly REFUSES
   overlapping wildcard owner sets, overlapping address/subnet/range match
-  sets, and DN owner pairs whose match sets intersect through a wildcard RDN or BER
-  (under the default strict `rdn_matching`), and case variants whose last RDN
-  value is empty. A config that commits on the old
+  sets, and DN owner pairs whose match sets intersect through a wildcard RDN
+  or BER length-octet variants. Newly ACCEPTED: DNs differing only in RDN order
+  (under default strict `rdn_matching`), and case variants whose last RDN value
+  is empty. A config that commits on the old
   build but collides now loads leniently with the colliding VPNs SKIPPED
   (warning naming both selectors) and every later commit is refused until the
   identities are made distinct. Run `commit check` on the new build before
