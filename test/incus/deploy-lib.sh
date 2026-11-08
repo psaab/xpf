@@ -1869,7 +1869,6 @@ deploy_host_dpkg() {
 		[[ -e "$dir/refuse-host-tool" ]] && continue
 		cand="$dir/dpkg"
 		if [[ -x "$cand" && ! -L "$cand" ]]; then
-			_XPF_DEPLOY_HOST_DPKG_RESOLVED="$cand"
 			printf '%s\n' "$cand"; return 0
 		fi
 	done
