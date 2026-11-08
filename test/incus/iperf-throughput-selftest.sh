@@ -617,7 +617,9 @@ straggler_fixture="${fixture_dir}/straggler.jsonl"
 dead_fixture="${fixture_dir}/straggler-dead.jsonl"
 stalled_fixture="${fixture_dir}/stalled-into-window.jsonl"
 overlap_fixture="${fixture_dir}/overlap-events.jsonl"
-python3 - "$straggler_fixture" "$dead_fixture" "$stalled_fixture" "$overlap_fixture" <<'PY'
+post_resume_fixture="${fixture_dir}/post-resume-stall.jsonl"
+inverse_fixture="${fixture_dir}/resume-gap-overlap.jsonl"
+python3 - "$straggler_fixture" "$dead_fixture" "$stalled_fixture" "$overlap_fixture" "$post_resume_fixture" "$inverse_fixture" <<'PY'
 import json
 import pathlib
 import sys
@@ -646,18 +648,26 @@ def write(path, resume_at, stall_at=10, zero_seconds=()):
 write(sys.argv[1], 15)
 write(sys.argv[2], None)
 write(sys.argv[3], 15, stall_at=5)
-# s4 is not a T1=10 carrier, but it is a T2=20 carrier. The T1+5 zero
-# lies in overlapping resume windows and must not inherit T2's eligibility.
+# The windows overlap at [20,25], but the zero at T1+5=15 is T1-only. s4
+# carries before T2, not T1, so merging the event sets would leak T2 eligibility.
 write(sys.argv[4], 30, stall_at=30, zero_seconds={5, 6, 7, 8, 9, 15})
+# Run-6 shape: s4 carries before T=10, resumes at 11, then has an unrelated
+# zero at 15. Only the pre-resume zero belongs to the resume gap.
+write(sys.argv[5], 11, stall_at=10, zero_seconds={15})
+# T1 resumes at 11, then stalls across the T1/T2 window intersection; T2's
+# pre-window is all zero, so only T1 initially considers s4 eligible.
+write(sys.argv[6], 25, stall_at=14)
 PY
 straggler_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10 --resume-event-sec 10)
 straggler_twin=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$straggler_fixture" --event-sec 10)
 dead_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$dead_fixture" --event-sec 10 --resume-event-sec 10)
 stalled_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$stalled_fixture" --event-sec 10 --resume-event-sec 10)
 overlap_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$overlap_fixture" --event-sec 10 --resume-event-sec 10 --resume-event-sec 20 --resume-window-sec 15)
-python3 - "$straggler_out" "$straggler_twin" "$dead_out" "$stalled_out" "$overlap_out" <<'PY' || bad "#18708: resume-zero excusal must match each event's pre-crash stream set"
+post_resume_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$post_resume_fixture" --resume-event-sec 10)
+inverse_out=$(python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$inverse_fixture" --resume-event-sec 10 --resume-event-sec 20 --resume-window-sec 15)
+python3 - "$straggler_out" "$straggler_twin" "$dead_out" "$stalled_out" "$overlap_out" "$post_resume_out" "$inverse_out" <<'PY' || bad "#18708: resume-zero excusal must match each event's pre-crash stream set and resume gap"
 import json, sys
-straggler, twin, dead, stalled, overlap = (json.loads(arg) for arg in sys.argv[1:])
+straggler, twin, dead, stalled, overlap, post_resume, inverse = (json.loads(arg) for arg in sys.argv[1:])
 assert straggler["stream_zero_intervals_total"] == 5, straggler
 assert straggler["stream_zero_intervals_outside_events_total"] == 0, straggler
 assert straggler["stream_zero_intervals_resume_excused_total"] == 2, straggler
@@ -671,9 +681,19 @@ assert stalled["stream_zero_intervals_resume_excused_total"] == 0, stalled
 assert overlap["stream_zero_intervals_total"] == 6, overlap
 assert overlap["stream_zero_intervals_outside_events_total"] == 6, overlap
 assert overlap["stream_zero_intervals_resume_excused_total"] == 0, overlap
+# A stream that resumes at 11 gets only the pre-resume zero at 10 excused;
+# the unrelated zero at 15 is a charged outside interval.
+assert post_resume["stream_zero_intervals_total"] == 2, post_resume
+assert post_resume["stream_zero_intervals_outside_events_total"] == 1, post_resume
+assert post_resume["stream_zero_intervals_resume_excused_total"] == 1, post_resume
+# The T1 carrier resumed before the intersection zero; T2 did not carry before
+# its event. Neither event can excuse the unrelated post-resume stall.
+assert inverse["stream_zero_intervals_total"] == 11, inverse
+assert inverse["stream_zero_intervals_outside_events_total"] == 11, inverse
+assert inverse["stream_zero_intervals_resume_excused_total"] == 0, inverse
 PY
-ok "#18708: resumed zeros are excused only for the stream set judged by that exact event window"
-python3 - "$SCRIPT_DIR/../../scripts/iperf-json-metrics.py" "$stalled_fixture" "$stalled_out" <<'PY' || bad "#18708: ungated resume excusal must be killed by the stalled-into-window fixture"
+ok "#18708: resume zeros are scoped to each crash carrier set and stream's first resume gap"
+python3 - "$SCRIPT_DIR/../../scripts/iperf-json-metrics.py" "$stalled_fixture" "$stalled_out" "$post_resume_fixture" "$post_resume_out" <<'PY' || bad "#18708: resume-excusal mutants must be killed by the ineligible-set and post-resume-stall fixtures"
 import contextlib
 import io
 import json
@@ -681,34 +701,48 @@ import pathlib
 import sys
 
 script = pathlib.Path(sys.argv[1])
-fixture = pathlib.Path(sys.argv[2])
-expected_json = sys.argv[3]
+stalled_fixture = pathlib.Path(sys.argv[2])
+expected_stalled = json.loads(sys.argv[3])
+post_resume_fixture = pathlib.Path(sys.argv[4])
+expected_post_resume = json.loads(sys.argv[5])
 source = script.read_text(encoding="utf-8")
-anchor = "            stream_id in eligible_streams and inside(((lo, hi),), start, end_s)\n"
-assert source.count(anchor) == 1, "ungated-excusal mutant anchor is not unique"
-mutant_source = source.replace(anchor, "            inside(((lo, hi),), start, end_s)\n")
-expected = json.loads(expected_json)
+set_anchor = "            stream_id in eligible_streams\n            and start < first_data_start.get(stream_id, float(\"inf\"))\n"
+assert source.count(set_anchor) == 1, "ungated-excusal mutant anchor is not unique"
+ungated_source = source.replace(
+    set_anchor,
+    "            start < first_data_start.get(stream_id, float(\"inf\"))\n",
+)
+gap_anchor = "            and start < first_data_start.get(stream_id, float(\"inf\"))\n"
+assert source.count(gap_anchor) == 1, "post-resume mutant anchor is not unique"
+post_resume_mutant_source = source.replace(gap_anchor, "")
 
-def run(source_text):
+def run(source_text, fixture, arguments):
     namespace = {"__name__": "metrics_fixture", "__file__": str(script)}
     exec(compile(source_text, str(script), "exec"), namespace)
     output = io.StringIO()
     saved_argv = sys.argv
     try:
-        sys.argv = [str(script), str(fixture), "--event-sec", "10", "--resume-event-sec", "10"]
+        sys.argv = [str(script), str(fixture), *arguments]
         with contextlib.redirect_stdout(output):
             namespace["main"]()
     finally:
         sys.argv = saved_argv
     return json.loads(output.getvalue())
 
-assert run(source) == expected, "no-op source control disagrees with the harness result"
-mutant = run(mutant_source)
-assert mutant["stream_zero_intervals_resume_excused_total"] == 2, mutant
-assert mutant["stream_zero_intervals_resume_excused_total"] != expected["stream_zero_intervals_resume_excused_total"], mutant
-assert mutant["stream_zero_intervals_outside_events_total"] == 5, mutant
+stalled_args = ["--event-sec", "10", "--resume-event-sec", "10"]
+assert run(source, stalled_fixture, stalled_args) == expected_stalled, "no-op source control disagrees with the harness result"
+ungated = run(ungated_source, stalled_fixture, stalled_args)
+assert ungated["stream_zero_intervals_resume_excused_total"] == 2, ungated
+assert ungated["stream_zero_intervals_resume_excused_total"] != expected_stalled["stream_zero_intervals_resume_excused_total"], ungated
+assert ungated["stream_zero_intervals_outside_events_total"] == 5, ungated
+
+post_resume_args = ["--resume-event-sec", "10"]
+assert run(source, post_resume_fixture, post_resume_args) == expected_post_resume, "no-op post-resume source control disagrees with the harness result"
+post_resume_mutant = run(post_resume_mutant_source, post_resume_fixture, post_resume_args)
+assert post_resume_mutant["stream_zero_intervals_resume_excused_total"] == 2, post_resume_mutant
+assert post_resume_mutant["stream_zero_intervals_outside_events_total"] == 0, post_resume_mutant
 PY
-ok "#18708: ungated resume-excusal mutant is killed by the stalled-into-window fixture"
+ok "#18708: ungated-set and post-resume-gap mutants are killed by their fixtures"
 
 # Completion requires an end event or evidence that the expected duration ran.
 incomplete_fixture="${fixture_dir}/incomplete.jsonl"

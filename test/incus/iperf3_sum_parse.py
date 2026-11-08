@@ -332,13 +332,14 @@ _STOP_EMPTY_FRACTION = 0.05
 # test-failover records the stop's distance from the crash command's epoch
 # (`crash_stop_after_epoch_s`) so live runs build the evidence.
 _STOP_UNCERTAINTY = 0.05
+# The stream-group fallback also requires a corresponding aggregate drop in
+# interval k+1, so a later partial group pause cannot impersonate the crash.
+_STREAMS_STOP_AGGREGATE_FRACTION = 0.5
+
 # A clock-only anchor wider than this is not precise: the crash's clock window
 # runs from the sysrq dispatch to the exec's return (seconds), so without the
 # aggregate's stop inside it the cell falls back to the integer verdict.
 _MAX_CLOCK_UNCERTAINTY = 0.25
-# Cap the per-stream stop search: a wide command window can contain unrelated
-# pauses after the fast takeover it brackets (#18708).
-_STREAMS_STOP_SEARCH_SEC = 2.0
 
 
 class EventAnchor:
@@ -479,23 +480,44 @@ def _streams_stop_anchor(rows, lo: float, hi: float) -> Optional[EventAnchor]:
     fraction's error: the anchor cannot make a pre-crash byte count as a
     resume.
 
-    The search is capped at ``lo + _STREAMS_STOP_SEARCH_SEC``: the crash that
-    the window brackets is near its open, so its first qualifying interval
-    must start within two seconds. Otherwise a fast takeover with fewer than
-    the threshold streams down for a full interval lets a later unrelated
-    group pause in a wide window anchor the crash late, under-reading resume
-    latency and possibly changing PASS/COST.
+    The aggregate's next interval must also be below half its pre-event rate.
+    That confirms a path-wide drop while permitting a fast takeover to retain
+    a small amount of aggregate throughput; a later pause affecting only a
+    stream group cannot anchor when the rest of the aggregate stays live.
+    Candidates are examined from earliest to latest, with no assumption about
+    how long the sysrq write takes to reach the kernel.
     """
     streams = _stream_intervals(rows)
-    if not streams:
+    aggregates = sorted(
+        (start, end, bps) for stream, start, end, bps in rows
+        if stream is None and 0.5 <= end - start <= 1.5
+    )
+    if not streams or not aggregates:
         return None
     need = max(3, (len(streams) + 3) // 4)
     starts = sorted({start for intervals in streams.values() for start, _, _ in intervals})
     for k_start in starts:
+        if k_start > hi or k_start < lo - 1.5:
+            continue
+        aggregate_index = next(
+            (i for i, row in enumerate(aggregates) if abs(row[0] - k_start) < 0.05),
+            None,
+        )
+        if aggregate_index is None or aggregate_index + 1 >= len(aggregates):
+            continue
+        _, aggregate_end, _ = aggregates[aggregate_index]
+        following_start, _, aggregate_following = aggregates[aggregate_index + 1]
+        if abs(following_start - aggregate_end) >= 0.05:
+            continue
+        aggregate_pre = [
+            bps for start, _, bps in aggregates if k_start - 5 <= start < k_start
+        ]
+        if len(aggregate_pre) < 3:
+            continue
+        aggregate_rate = statistics.mean(aggregate_pre)
         if (
-            k_start > hi
-            or k_start < lo - 1.5
-            or k_start > lo + _STREAMS_STOP_SEARCH_SEC
+            aggregate_rate <= 0
+            or aggregate_following >= _STREAMS_STOP_AGGREGATE_FRACTION * aggregate_rate
         ):
             continue
         fractions = []

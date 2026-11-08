@@ -2420,12 +2420,12 @@ ha_build_planned_move_args
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
 # M1 JSON capture/gate fixture begin
-# ha_crash_resume_at <log> -- the crash instant the per-stream crash cell
-# uses (#18692; the same clock window, then the aggregate's stop within +/-1 s
-# of the integer anchor), printed as seconds on iperf3's clock, else the
-# integer anchor. The producer excuses a RESUMING stream's zero seconds up to
-# the cell's 10 s FAIL line from there, so a straggler is one COST, not a COST
-# plus an "outside" zero-interval FAIL.
+# ha_crash_resume_at <log> -- #18692's crash anchor: seconds plus uncertainty
+# from the parser's aggregate-stop evidence, else the integer anchor. The
+# stream-resume cell rejects evidence before anchor.latest (seconds plus
+# uncertainty). This shell handoff keeps only seconds, so the producer's
+# --resume-event-sec windows use raw anchor.seconds; near-boundary counter
+# classification can therefore differ from the cell's conservative cutoff.
 ha_crash_resume_at() {
 	local anchor_args=() line
 	if [[ "${failover_client_clock:-}" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then

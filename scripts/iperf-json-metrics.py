@@ -365,13 +365,16 @@ def summarize(path, args):
     # excusal. A stream already stalled before that window is not judged by the
     # crash cell, even if it resumes later (#18708).
     resume_pre_streams = {event_sec: set() for event_sec in resume_event_secs}
+    resume_first_data_start = {event_sec: {} for event_sec in resume_event_secs}
     last_data_start = {}
     for interval in normalized_intervals:
         _, interval_start, interval_end = interval_bps(interval)
         for stream in interval.get("streams", []):
             stream_id = str(stream.get("socket") or stream.get("id") or "?")
-            stream_start = float(stream.get("start") or interval_start)
-            stream_end = float(stream.get("end") or interval_end)
+            raw_start = stream.get("start")
+            raw_end = stream.get("end")
+            stream_start = interval_start if raw_start is None else float(raw_start)
+            stream_end = interval_end if raw_end is None else float(raw_end)
             bps = float(stream.get("bits_per_second") or 0.0)
             if bps > args.zero_gbps * 1e9:
                 last_data_start[stream_id] = max(last_data_start.get(stream_id, interval_start), interval_start)
@@ -379,22 +382,30 @@ def summarize(path, args):
                 for event_sec in resume_event_secs:
                     if event_sec - 5 <= stream_start < event_sec:
                         resume_pre_streams[event_sec].add(stream_id)
-    # Keep each window paired with its own crash-cell stream set. Merging
-    # windows first would let a stream carried before event B excuse zeros
-    # inside event A's window even if A's cell does not judge that stream.
+                    elif stream_start >= event_sec:
+                        resume_first_data_start[event_sec].setdefault(stream_id, stream_start)
+    # --resume-event-sec carries only the parser's raw anchor.seconds. The
+    # stream cell uses anchor.latest to reject possibly pre-event resume data;
+    # this counter uses the raw T for its [T, T+window] interval bounds.
+    # Keep each window paired with its own pre-event set and first post-event
+    # data interval. Once a stream resumes, a later pause is not part of that
+    # event's resume gap and must remain charged (#18708).
     resume_window_streams = [
         (
             event_sec,
             event_sec + args.resume_window_sec,
             resume_pre_streams[event_sec],
+            resume_first_data_start[event_sec],
         )
         for event_sec in resume_event_secs
     ]
 
     def resume_excused(stream_id, start, end_s):
         return last_data_start.get(stream_id, -1.0) >= end_s - 1e-9 and any(
-            stream_id in eligible_streams and inside(((lo, hi),), start, end_s)
-            for lo, hi, eligible_streams in resume_window_streams
+            stream_id in eligible_streams
+            and start < first_data_start.get(stream_id, float("inf"))
+            and inside(((lo, hi),), start, end_s)
+            for lo, hi, eligible_streams, first_data_start in resume_window_streams
         )
 
     stream_zero_resume_excused = 0
@@ -571,8 +582,8 @@ def main():
         help="#18692: a crash instant whose per-stream cell scores a late resume as "
         "a COST; may repeat. Full zero intervals in [T, T+--resume-window-sec] "
         "are excluded from stream_zero_intervals_outside_events_total only for "
-        "streams that carried data in a full interval starting in [T-5, T) and "
-        "carry data again later.",
+        "a pre-event carrier whose zero precedes its first post-T data interval. "
+        "T is raw anchor.seconds; the crash cell uses anchor.latest.",
     )
     parser.add_argument(
         "--resume-window-sec",
