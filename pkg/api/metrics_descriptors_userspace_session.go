@@ -440,14 +440,13 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	c.userspaceSyncedImportCapDrops = prometheus.NewDesc(
 		"xpf_userspace_synced_import_cap_drops_total",
 		"Peer-synced session imports rejected by the coordinator's "+
-			"admission bound. Worker tables are full replicas, so the "+
-			"per-table max_sessions is the node's logical ceiling, not a "+
-			"worker-count multiple. Each admitted forward publishes a "+
-			"forward plus a synthesized reverse companion, giving the "+
-			"shared map 2x that ceiling for a full-peer meet. A rising "+
-			"value means a peer exceeded THIS receiver's bound; a larger "+
-			"asymmetric peer can legitimately trip a smaller receiver "+
-			"(#5674/#18687).",
+			"admission bound. Worker tables are full replicas; max_sessions is "+
+			"one per-table local-admission ceiling N, not a worker-count "+
+			"multiple. Local rows use N shared-map entries, and each peer "+
+			"forward adds up to two (forward + synthesized reverse), so the "+
+			"aggregate map bound is N + 2N = 3N. A rising value means projected "+
+			"shared-map growth exceeded this receiver's bound; a peer with a "+
+			"larger per-table population can be refused (#5674/#18687).",
 		nil, nil,
 	)
 	c.userspaceWorkerCommandQueuePoisonRecoveries = prometheus.NewDesc(

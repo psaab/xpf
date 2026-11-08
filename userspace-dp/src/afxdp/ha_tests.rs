@@ -822,7 +822,7 @@ fn refusal_counters_are_per_coordinator_not_process_global() {
          `import_cap_drops` is process-global again (#6819)"
     );
 
-    // Entry cap = 2 (logical override 1, doubled for the synthesized reverse).
+    // Entry cap = 3 (one local row plus the imported forward/reverse pair).
     busy.synced_import_cap_override
         .store(1, std::sync::atomic::Ordering::Relaxed);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
@@ -831,6 +831,8 @@ fn refusal_counters_are_per_coordinator_not_process_global() {
         WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
         None,
     );
+    seed_local_shared_rows(&busy, 1);
+
 
     let key = test_key();
     busy.upsert_synced_session(synced_entry_with_generation(2));
@@ -1016,28 +1018,18 @@ fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709()
 
 // ── #5674/#18687: synced-import replicated node admission bound ──────
 //
-// Peer-synced sessions were imported with NO cap and fanned out to EVERY
-// worker command queue+table, so a peer under session-table pressure — or a
-// malicious/compromised peer — could drive this node past its table ceiling
-// and multiply that state across all workers. Worker tables are full replicas;
-// `upsert_synced_session` now bounds the shared synced map at twice the one
-// per-table `REPLICATED_NODE_SESSION_CEILING`, independent of worker count.
-// The 2x is in ENTRY units: each imported forward publishes itself and a
-// synthesized reverse companion. A full peer table fits at the receiver's 2x
-// meet point, while a peer beyond the stated ceiling is drop-newest rejected.
+// Peer-synced imports and local session rows share `sessions.synced`. The
+// local admission ceiling is N entries; each imported forward contributes a
+// forward row and synthesized reverse, so the aggregate bound is N + 2N = 3N,
+// independent of how many worker replicas consume the imports.
 //
-// This test pins: (a) a full three-session peer table fits a three-worker
-// receiver and all three forwards admit with zero drops; (b) the next forward
-// beyond that table ceiling is rejected and never fanned out; (c) replacing an
-// admitted key still applies at the ceiling.
+// This test pins: (a) N pre-existing local rows plus a full peer population of
+// N forward imports fit; (b) the next forward is rejected and never fanned
+// out; (c) replacing an admitted key still applies at the aggregate ceiling.
 //
-// PARENT-RED recipe: neutralize the single reject in the
-// `upsert_synced_session` gate (`session_import.rs`, the
-// `if synced_cap != 0 && synced_len >= synced_cap { ...; return; }` — e.g.
-// delete the `return;` so the over-ceiling forward falls through and is
-// admitted). The over-ceiling key then lands in the shared map + worker queue,
-// so the `is_none()` / not-enqueued reject assertions below fail as clean
-// assertions. Target-count = 1 gate site.
+// PARENT-RED recipe: neutralize the projected-entry-cap rejection in
+// `upsert_synced_session`. The over-ceiling key then lands in the shared map +
+// worker queue, so the refusal assertions below fail. Target-count = 1 gate.
 fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
@@ -1063,13 +1055,22 @@ fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
     }
 }
 
+fn seed_local_shared_rows(coordinator: &Coordinator, count: u16) {
+    let mut sessions = coordinator.sessions.synced.lock().expect("shared sessions");
+    for offset in 0..count {
+        let mut entry = synced_entry_port(3000 + offset, 0);
+        entry.origin = SessionOrigin::ForwardFlow;
+        sessions.insert(entry.key.clone(), entry);
+    }
+}
+
+
 #[test]
 fn synced_import_cap_rejects_over_ceiling_import_and_does_not_fan_out_18687() {
     let mut coordinator = Coordinator::new();
-    // The override supplies a small per-table logical ceiling so the
-    // production 2x ENTRY conversion can be tested without inserting
-    // DEFAULT_MAX_SESSIONS (131072) sessions. This receiver has multiple
-    // replicated worker tables; worker count must not multiply the ceiling.
+    // The override supplies a small per-table ceiling so the production 3x
+    // aggregate ENTRY conversion is testable without inserting 131072 rows.
+    // Worker count must not multiply the replicated node ceiling.
     const LOGICAL_CEILING: u16 = 3;
     coordinator.synced_import_cap_override.store(
         LOGICAL_CEILING as usize,
@@ -1084,13 +1085,16 @@ fn synced_import_cap_rejects_over_ceiling_import_and_does_not_fan_out_18687() {
             None,
         );
     }
+    seed_local_shared_rows(&coordinator, LOGICAL_CEILING);
+
 
     let before = coordinator.synced_import_cap_drops_total();
 
-    // (a) A FULL peer table — LOGICAL_CEILING forward sessions, each
-    // publishing a forward + synthesized reverse = 2×LOGICAL_CEILING entries
-    // — must ALL admit with ZERO drops. If worker count were still multiplied
-    // into the cap, this cell's over-ceiling import below would be admitted.
+    // (a) N local shared rows plus a FULL peer table — LOGICAL_CEILING
+    // forward sessions, each publishing a forward + synthesized reverse =
+    // 2×LOGICAL_CEILING imported entries — must all admit. If worker count
+    // were still multiplied into the cap, the over-ceiling import below would
+    // be admitted.
     let mut admitted_keys = Vec::new();
     for i in 0..LOGICAL_CEILING {
         let entry = synced_entry_port(1000 + i, 0);
@@ -1098,22 +1102,25 @@ fn synced_import_cap_rejects_over_ceiling_import_and_does_not_fan_out_18687() {
         coordinator.upsert_synced_session(entry);
         assert!(
             synced_generation(&coordinator, &key).is_some(),
-            "forward logical session {i} within the ceiling must be admitted — \
-             a full symmetric-peer set of {LOGICAL_CEILING} logical sessions \
-             ({} entries) must all fit the 2× entry cap (#5674)",
-            2 * LOGICAL_CEILING
+            "forward session {i} within the ceiling must be admitted beside a \
+             full local table"
         );
         admitted_keys.push(key);
     }
     assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        3 * LOGICAL_CEILING as usize,
+        "N local rows plus 2N peer rows must exactly fill the 3N aggregate cap"
+    );
+    assert_eq!(
         coordinator.synced_import_cap_drops_total(),
         before,
-        "a full symmetric-peer logical set must import with NO cap drop — a \
-         nonzero count here is the #5674 >50% silent under-sync regression"
+        "a full local table plus a full symmetric-peer population must import \
+         with NO cap drop — a nonzero count is the #5674 under-sync regression"
     );
 
-    // (b) BEYOND the logical ceiling: the next NEW forward key (a peer
-    // exceeding its OWN logical ceiling) is drop-newest rejected.
+    // (b) BEYOND the peer table ceiling: with N local rows already present,
+    // the next new forward would exceed the aggregate 3N bound and is rejected.
     let rejected = synced_entry_port(2000, 0);
     let rejected_key = rejected.key.clone();
     coordinator.upsert_synced_session(rejected);
@@ -1202,16 +1209,17 @@ fn over_ceiling_import_rejected_on_poisoned_shared_mutex() {
         None,
     );
 
-    // Fill to the ENTRY cap (2×LOGICAL_CEILING): each admitted forward
-    // publishes a forward key AND a synthesized reverse companion.
+    // Fill the aggregate cap: N local rows plus N peer forwards, each of
+    // which publishes a forward key AND a synthesized reverse companion.
+    seed_local_shared_rows(&coordinator, LOGICAL_CEILING);
     for i in 0..LOGICAL_CEILING {
         let entry = synced_entry_port(1000 + i, 0);
         let key = entry.key.clone();
         coordinator.upsert_synced_session(entry);
         assert!(
             synced_generation_recovered(&coordinator, &key).is_some(),
-            "setup: forward logical session {i} within the ceiling must be \
-             admitted before the map is at its entry cap"
+            "setup: forward {i} within the ceiling must be admitted beside \
+             local rows before the map reaches its aggregate cap"
         );
     }
 
@@ -1252,13 +1260,13 @@ fn over_ceiling_import_rejected_on_poisoned_shared_mutex() {
 }
 
 // #6819 §7/#18687: the admission cells use a per-table override to make the
-// boundary reachable, but they still run the same 2x entry conversion. This
-// cell leaves the override at zero and pins the production node ceiling and
-// the worker-count independence of the formula with three registered workers.
-// Restoring the old `records.len() * DEFAULT_MAX_SESSIONS * 2` formula makes
-// this expected cap three times too large and lets the refusal cell over-admit.
+// boundary reachable, but they still run the same 3x aggregate entry
+// conversion. This cell leaves the override at zero and pins the production
+// node ceiling and worker-count independence with three registered workers.
+// Restoring `records.len() * DEFAULT_MAX_SESSIONS * 2` makes the old cap twice
+// the expected aggregate cap and lets the refusal cell over-admit.
 #[test]
-fn synced_import_cap_production_formula_is_twice_the_replicated_node_ceiling() {
+fn synced_import_cap_production_formula_is_three_times_replicated_node_ceiling() {
     let mut coordinator = Coordinator::new();
     assert_eq!(
         coordinator
@@ -1270,8 +1278,8 @@ fn synced_import_cap_production_formula_is_twice_the_replicated_node_ceiling() {
     let per_table_ceiling = crate::session::REPLICATED_NODE_SESSION_CEILING;
     assert!(
         per_table_ceiling > 0,
-        "the replicated node ceiling must be positive or its 2x entry cap \
-         assertion is vacuous"
+        "the replicated node ceiling must be positive or its 3x aggregate \
+         entry-cap assertion is vacuous"
     );
     assert_eq!(
         per_table_ceiling,
@@ -1302,9 +1310,9 @@ fn synced_import_cap_production_formula_is_twice_the_replicated_node_ceiling() {
     let entry_cap = coordinator.synced_import_cap_for(&coordinator.workers.records());
     assert_eq!(
         entry_cap,
-        per_table_ceiling.saturating_mul(2),
-        "the production ENTRY cap is twice the replicated per-table ceiling, \
-         independent of worker count"
+        per_table_ceiling.saturating_mul(3),
+        "the production ENTRY cap is three times the replicated per-table \
+         ceiling (local N plus peer 2N), independent of worker count"
     );
     assert_ne!(
         entry_cap,
@@ -1313,6 +1321,54 @@ fn synced_import_cap_production_formula_is_twice_the_replicated_node_ceiling() {
          reverse companion"
     );
 }
+
+// A new forward plus its reverse requires two slots. Checking only
+// `synced_len >= cap` admits one entry past the aggregate bound when the map is
+// at cap-1; this pins the projected-pair refusal at odd occupancy.
+#[test]
+fn synced_import_cap_refuses_pair_past_odd_boundary_18687() {
+    let mut coordinator = Coordinator::new();
+    const PER_TABLE_CEILING: u16 = 2;
+    coordinator.synced_import_cap_override.store(
+        PER_TABLE_CEILING as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands)),
+        None,
+    );
+    seed_local_shared_rows(&coordinator, 1);
+    for port in 1000..1002 {
+        coordinator.upsert_synced_session(synced_entry_port(port, 0));
+    }
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        5,
+        "one local row plus two imported pairs leaves odd occupancy at cap-1"
+    );
+
+    let before = coordinator.synced_import_cap_drops_total();
+    let rejected = synced_entry_port(2000, 0);
+    let rejected_key = rejected.key.clone();
+    coordinator.upsert_synced_session(rejected);
+    assert!(
+        synced_generation(&coordinator, &rejected_key).is_none(),
+        "a pair whose projected insertion crosses the cap must be refused"
+    );
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        5,
+        "refusing the pair must keep the shared map at cap-1"
+    );
+    assert_eq!(
+        coordinator.synced_import_cap_drops_total(),
+        before + 1,
+        "the projected over-cap pair refusal must be counted"
+    );
+}
+
 
 // An equal- or newer-generation upsert must apply (equality is NOT refusal).
 #[test]
@@ -6274,7 +6330,7 @@ fn upsert_synced_session_refuses_standalone_reverse_8015() {
             "a FORWARD-only import must leave TWO entries — the forward and the \
              companion the helper synthesizes for it. This is the fact the Go-side \
              deletion of the explicit reverse rests on, and it is also why the \
-             #5674 entry cap is sized at 2x the logical ceiling (#8015)"
+             #5674/#18687 cap is N local rows plus 2N imported entries (#8015)"
         );
         assert!(
             synced.contains_key(&forward_key),
@@ -6386,8 +6442,9 @@ fn cap_rejected_forward_leaves_no_orphan_reverse_8015() {
         None,
     );
 
-    // Fill the map to its 2N ENTRY cap with one admitted forward (which brings
-    // its companion, so 2 entries == the cap for LOGICAL_CEILING = 1).
+    // Fill the 3N aggregate cap with one local row plus one admitted forward
+    // (which brings its companion): 1 local + 2 imported entries.
+    seed_local_shared_rows(&coordinator, LOGICAL_CEILING);
     let seed = synced_entry_port(1000, 0);
     let seed_key = seed.key.clone();
     let seed_companion = reverse_session_key(&seed.key, seed.decision.nat);
@@ -6402,8 +6459,8 @@ fn cap_rejected_forward_leaves_no_orphan_reverse_8015() {
         .expect("shared sessions")
         .len();
     assert_eq!(
-        synced_len_before, 2,
-        "the seed forward must have filled the 2N entry cap with its companion"
+        synced_len_before, 3,
+        "the local row plus imported pair must fill the 3N aggregate cap"
     );
 
     // The orphaning sequence: a NEW forward is cap-rejected, then the companion

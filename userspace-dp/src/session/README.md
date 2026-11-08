@@ -2130,51 +2130,52 @@ record: `docs/research/1870-local-tunnel-pair/plan.md`.
 
 `upsert_synced_with_origin` stays uncapped (the infallibility contract
 above), but the sync family is no longer *unbounded*: the row-I11 cap
-arbitration is now enforced ONE level up, at the coordinator's peer-sync
-entry point (`Coordinator::upsert_synced_session`,
+arbitration is enforced ONE level up, at the coordinator's peer-sync entry
+point (`Coordinator::upsert_synced_session`,
 `afxdp/ha/session_import.rs`). Before #5674 a peer-synced session was
 published to the shared `synced` map and fanned out to EVERY worker
 command queue+table with no cap, so a peer under session-table pressure
-— or a malicious/compromised peer — could drive this node past its own
-session ceiling and multiply that state across every worker (an
-availability/DoS the per-table `install_with_protocol_with_origin` cap
-is meant to prevent). Worker tables are full replicas, not disjoint
-shards: each local session is replicated to every worker, and each table's
-install cap counts those replicas. Therefore the one-table
-`REPLICATED_NODE_SESSION_CEILING` is the node's session ceiling; worker
-count does not multiply it. `upsert_synced_session` bounds the shared
-`synced` map (the single fan-out choke point) at twice that per-table
-ceiling in ENTRY units and **drop-newest**-rejects a NEW over-ceiling
-FORWARD key: it bumps `SessionManager::import_cap_drops`
+— or a malicious/compromised peer — could drive this node past its
+session ceiling and multiply that state across every worker.
+
+Worker tables are full replicas, not disjoint shards: each local session
+is replicated to every worker, and each table's local install cap counts
+those rows. `REPLICATED_NODE_SESSION_CEILING` is therefore one per-table
+local-admission ceiling N, never `worker_count * N`. Local-origin rows
+also occupy the shared `synced` map. Each imported forward contributes a
+forward key and a synthesized reverse companion, so the aggregate map
+bound is N local rows + 2N imported rows = 3N entries. This permits a
+full local table and one full peer table to coexist without multiplying
+the ceiling by worker count.
+
+`upsert_synced_session` checks projected map growth before its shared
+publish and worker fan-out. When the map has N local rows, N peer
+forwards (2N entries) exactly fit; a new pair that would take aggregate
+occupancy beyond 3N is **drop-newest**-rejected and bumps
+`SessionManager::import_cap_drops`
 (`Coordinator::synced_import_cap_drops_total()`, Prometheus
-`xpf_userspace_synced_import_cap_drops_total`) and returns BEFORE the
-publish + fan-out, so a rejected import is never enqueued to any worker
-(the queue-multiplication is bounded too).
+`xpf_userspace_synced_import_cap_drops_total`). The bound is aggregate:
+pre-existing local or imported rows consume the same shared-map budget.
+The rejected key is never published or enqueued to any worker.
 
-The 2× is load-bearing, and this is the crux of the cap's correctness.
-Each admitted **forward** logical session publishes TWO keys into the
-`synced` map — the forward key and a **synthesized reverse companion**
-(`synthesized_synced_reverse_entry` returns `Some` for every non-reverse
-import; `upsert_synced_session` publishes both via
-`publish_shared_session`). So `K` admitted forwards occupy `2K` entries.
-With the entry cap at `2N` (`N` = the one-table logical ceiling), a new
-forward is rejected exactly when `2K >= 2N ⇔ K >= N`: a full
-symmetric-peer set (`N` logical sessions → `2N` entries) EXACTLY fits and
-only a peer EXCEEDING its OWN logical ceiling is rejected. Sizing the cap
-to the logical ceiling `N` while counting entries was the #5674 dual-entry
-bug; multiplying this bound by worker count was the #18687 replicated-table
-bug.
+Each admitted forward needs up to TWO new map entries — the forward key
+and synthesized reverse — so the gate counts its projected additions
+under the shared-map lock. At the full-local boundary, `K=N` peer
+forwards occupy `2N` imported entries and fit alongside N local rows.
+Sizing only for 2N total entries would under-sync when local rows already
+occupied slots; multiplying the corrected 3N bound by worker count would
+reintroduce the #18687 replicated-table bug.
 
-The gate keys only on FORWARD new keys (`!entry.metadata.is_reverse`): a
-synthesized reverse always rides with its forward (a rejected forward
-returns BEFORE publishing its reverse, so no half-sync), and a lone
-reverse import is never independently rejected at a boundary slot.
+The admission check accounts for the FORWARD and its synthesized reverse
+as one projected pair. A rejected forward returns before either key is
+published, so there is no half-sync; standalone reverse imports are
+refused before the capacity check.
 
 **The "+1 orphan" corner is closed (#8015).** Because the gate is
-forward-only, a lone `is_reverse=1` import used to skip it and publish as
-a bounded orphan with no matching forward whenever the map was AT the 2N
-cap and its own forward was cap-rejected. #6413 assessed that as
-self-inflicted, bounded by the local session rate and low-harm — which it
+forward-only, a lone `is_reverse=1` import used to skip the capacity gate and
+publish as a bounded orphan whenever the map was AT its cap and its own
+forward was cap-rejected. #6413 assessed that as self-inflicted, bounded by
+the local session rate and low-harm — which it
 was, since the orphan's tuple and decision were the FORWARD's own, so it
 admitted the reply direction of a flow this node had itself just
 adjudicated, not any unsolicited inbound flow. What made it worth
@@ -2199,27 +2200,25 @@ The peer path never produced one in the first place: Go's
 mirror, so only FORWARD peer imports transit the helper. Pinned by
 `upsert_synced_session_refuses_standalone_reverse_8015`
 (`afxdp/ha_tests.rs`), whose control leg re-measures the
-forward-only-leaves-two-entries fact the cap's 2x sizing depends on.
+forward-only-leaves-two-entries fact used by the pair-growth accounting.
 
 The refusal carries no counter of its own, deliberately: with the sender
 deleted and the peer path excluded, no shipped daemon can produce the
 condition, and a metric that can only read zero says nothing. The typed
 outcome already reaches the caller through the control response.
 
-A REPLACE of an existing
-synced key is always allowed (it does not grow the map) so an in-flight
-synced session keeps refreshing; an existing entry is never evicted to
-make room. One documented residual: on an ASYMMETRIC pair (peer has MORE
-workers than this node — unusual; xpf pairs are symmetric) the peer's
-aggregate ceiling can exceed this node's `2N`, so a legitimate
-over-ceiling import would be dropped. The uncapped
+A REPLACE whose forward and reverse rows are already present remains allowed
+at the ceiling (it has no projected growth); an existing entry is never evicted
+make room. One documented residual: a peer whose per-table ceiling is
+larger than this node's can exceed the receiver's 3N aggregate bound, so
+a legitimate over-cap import would be dropped. The uncapped
 `upsert_synced_with_origin` and the local `UpsertLocal` / shared-hit
 materialization paths are unchanged — they are locally bounded and do
 not carry the peer-DoS vector. Pinned by
 `upsert_synced_session_rejects_over_ceiling_import_and_does_not_fan_out`
-(`afxdp/ha_tests.rs`), which asserts a full symmetric-peer logical set
-all-admits with zero drops (the regression) and that the next
-over-logical-ceiling forward is rejected + not fanned out.
+(`afxdp/ha_tests.rs`), which preloads N local rows, admits N peer
+forwards beside them with zero drops, and rejects the next new forward
+without fan-out.
 
 ### HA install-generation guard on SyncedSessionEntry (#2170)
 

@@ -461,9 +461,9 @@ func (m *Manager) SetSessionV4(key dataplane.SessionKey, val dataplane.SessionVa
 // (`userspace-dp/src/afxdp/ha/session_import.rs`) calls
 // `synthesized_synced_reverse_entry` for EVERY non-reverse import — a total
 // function, `Some` on every forward — and publishes both halves through
-// `publish_shared_session`, which is why the #5674 aggregate ENTRY cap is sized
-// at 2x the logical session ceiling. So a single forward upsert already leaves
-// a complete pair, and it leaves a BETTER one: the helper resolves the
+// `publish_shared_session`, which is why the #5674 aggregate ENTRY cap reserves
+// N local rows plus 2N peer forward/reverse rows (3N total). A single forward
+// upsert already leaves a complete pair, and it leaves a BETTER one: the helper resolves the
 // companion's egress/FIB, fabric/tunnel and owner-RG against live node-local
 // state, where this side could only copy the forward's (#5698). Synthesis also
 // happens AT IMPORT, which is strictly earlier than this pre-install, so #310's

@@ -1353,7 +1353,7 @@ faults:
 
 |---|---|---|
 | `stale-generation` | the stored entry is NEWER than the incoming one | #2170 |
-| `capacity` | the shared-map entry ceiling (2x one replicated node table) is full | #5674/#18687 |
+| `capacity` | the shared-map aggregate bound (N local rows + 2N peer forward/reverse rows = 3N) is full | #5674/#18687 |
 | `reserve` | the translated NAT tuple could not be reserved for this import | #6600 |
 
 Before #6785 all three returned `ok = true`, so the daemon recorded a success

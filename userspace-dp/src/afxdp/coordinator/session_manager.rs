@@ -186,15 +186,14 @@ pub(in crate::afxdp) struct SessionManager {
     /// Surfaced via `Coordinator::synced_reverse_rederived_total()`.
     pub(in crate::afxdp) synced_reverse_rederived: AtomicU64,
     /// #5674/#18687: peer-synced session imports REJECTED by the coordinator's
-    /// admission bound (`upsert_synced_session`). Each worker table is a full
-    /// replica, so this node's logical ceiling is one per-table
-    /// `DEFAULT_MAX_SESSIONS`, not a worker-count multiple. `upsert_synced_session`
-    /// bounds the shared synced map (the single fan-out choke point) at twice
-    /// that ceiling in ENTRY units: each imported forward publishes a forward
-    /// and synthesized reverse companion. This leaves room for a full peer
-    /// table to meet this node's own population while rejecting a peer that
-    /// exceeds this receiver's ceiling. A REPLACE of an existing key and a
-    /// standalone reverse import do not grow the forward admission count.
+    /// admission bound (`upsert_synced_session`). Worker tables are full
+    /// replicas, so this node's local-admission ceiling is one per-table
+    /// `DEFAULT_MAX_SESSIONS`, not a worker-count multiple. Local-origin rows
+    /// use N shared-map entries; each peer forward adds up to two (forward
+    /// and synthesized reverse), for an aggregate N + 2N = 3N entry bound.
+    /// The gate refuses projected shared-map growth past that bound. A
+    /// replacement with both rows present has no growth; standalone reverse
+    /// imports are refused before admission.
     /// Surfaced via `Coordinator::synced_import_cap_drops_total()` and the
     /// Prometheus counter `xpf_userspace_synced_import_cap_drops_total`.
     pub(in crate::afxdp) import_cap_drops: AtomicU64,

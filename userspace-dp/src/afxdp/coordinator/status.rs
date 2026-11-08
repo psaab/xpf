@@ -522,12 +522,11 @@ impl super::Coordinator {
 
     /// #5674/#18687: peer-synced session imports rejected by the coordinator's
     /// admission bound (`upsert_synced_session`). Worker tables are full
-    /// replicas, so the per-table `DEFAULT_MAX_SESSIONS` is the node's logical
-    /// ceiling, not a worker-count multiple. The shared map admits two entries
-    /// per imported forward (the forward and synthesized reverse), providing
-    /// 2x that ceiling for a full peer-table meet. A rising value means a peer
-    /// exceeded this receiver's ceiling; firing semantics are unchanged by
-    /// this wording. Surfaced as
+    /// replicas, and the per-table `DEFAULT_MAX_SESSIONS` is the local-admission
+    /// ceiling N, not a worker-count multiple. Local-origin rows occupy N
+    /// shared-map entries; each peer forward adds up to two (forward and
+    /// synthesized reverse), for an aggregate N + 2N = 3N entry bound. The
+    /// gate refuses projected shared-map growth past that bound. Surfaced as
     /// `xpf_userspace_synced_import_cap_drops_total`.
     pub fn synced_import_cap_drops_total(&self) -> u64 {
         self.sessions.import_cap_drops.load(Ordering::Relaxed)

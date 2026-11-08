@@ -1986,11 +1986,11 @@ mod session_domain_tests_7209 {
         let empty = std::collections::BTreeMap::new();
         assert_eq!(
             coordinator.session_domain().synced_import_cap_for(&empty),
-            6,
-            "the override is a per-table logical ceiling and the cap is in \
-             ENTRIES (a forward plus its synthesized reverse), so 3 must \
-             arrive as 6. A different result means the handle failed to observe \
-             the shared override and used the production ceiling instead."
+            9,
+            "the override is a per-table local-admission ceiling and the cap \
+             includes N local rows plus 2N imported forward/reverse rows, so \
+             3 must arrive as 9. A different result means the handle failed to \
+             observe the shared override and used the production ceiling."
         );
     }
 

@@ -510,13 +510,12 @@ type ProcessStatus struct {
 	EventStreamProducerSeqLockContendedTotal    uint64 `json:"event_stream_producer_seq_lock_contended_total,omitempty"`
 	// SyncedImportCapDropsTotal counts peer-synced session imports rejected by
 	// the coordinator's admission bound (#5674/#18687). Worker tables are full
-	// replicas, so the node's per-table logical ceiling is max_sessions, not a
-	// worker-count multiple. The shared map admits two entries per imported
-	// forward (the forward and synthesized reverse), giving it 2x that ceiling
-	// for the receiver's full-table meet point. A rising value means a peer
-	// exceeded THIS receiver's bound; a larger asymmetric peer can legitimately
-	// trip a smaller receiver's cap. A symmetric-pair failover exactly fits.
-	// Omitempty for wire compat with older helpers.
+	// replicas, and max_sessions is one per-table local-admission ceiling N,
+	// not a worker-count multiple. Local rows use N shared-map entries; each
+	// imported forward adds up to two (forward + synthesized reverse), giving
+	// the aggregate bound N + 2N = 3N. The gate refuses projected shared-map
+	// growth past this bound; a larger peer population can exceed it. Omitempty
+	// for wire compat with older helpers.
 	SyncedImportCapDropsTotal uint64 `json:"synced_import_cap_drops_total,omitempty"`
 	// #1760 W3': shared-map NAT reverse-key displacement events — a
 	// publish_shared_session insert into shared_nat_sessions displaced a

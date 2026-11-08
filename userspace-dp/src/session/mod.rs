@@ -317,18 +317,15 @@ pub(crate) const WHEEL_TICK_NS_FOR_TEST: u64 = wheel::WHEEL_TICK_NS;
 #[cfg(test)]
 pub(crate) const WHEEL_BUCKETS_FOR_TEST: usize = wheel::WHEEL_BUCKETS;
 pub(crate) const DEFAULT_MAX_SESSIONS: usize = 131072;
-/// #18687: THE replicated node session ceiling, in per-table ENTRIES.
+/// #18687: the replicated node's per-table LOCAL admission ceiling, in entries.
 ///
-/// Worker session tables are FULL replicas, not disjoint shards: every
-/// locally created session is replicated into every worker's table
-/// (`replicate_session_upsert`), and the per-table install cap
-/// (`install_with_protocol_with_origin_and_source_nat_inner`) counts those
-/// replicas in `len()`. One worker table — and therefore the node — holds
-/// at most `DEFAULT_MAX_SESSIONS` entries, never
-/// `worker_count * DEFAULT_MAX_SESSIONS`. A correct peer exports at most one
-/// table's worth; when both nodes' populations meet on one receiver, the
-/// shared synced map can hold twice this per-table ceiling. The import cap
-/// derives its explicit 2x headroom from this single constant.
+/// Worker session tables are full replicas: locally-created sessions fan out
+/// to every worker, and each table's local install cap counts those rows.
+/// Therefore the node has one `DEFAULT_MAX_SESSIONS` local-admission ceiling,
+/// never `worker_count * DEFAULT_MAX_SESSIONS`. This is not a hard cap on total
+/// table occupancy because the sync-family `upsert_synced_with_origin` path is
+/// intentionally uncapped. The coordinator's shared-map bound separately
+/// allows N local rows plus 2N peer forward/reverse rows (3N total).
 pub(crate) const REPLICATED_NODE_SESSION_CEILING: usize = DEFAULT_MAX_SESSIONS;
 
 /// Default per-worker concurrent sessions per source IP and ingress zone.

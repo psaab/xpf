@@ -280,7 +280,7 @@ pub enum SyncedImportOutcome {
     /// #10612: the entry names a zone absent from the current validated
     /// forwarding snapshot and is refused before shared publication.
     RejectedStaleZone,
-    /// #5674/#18687: the twice-per-table synced-import entry ceiling is full.
+    /// #5674/#18687: the aggregate N-local + 2N-imported entry ceiling is full.
     RejectedCapacity,
     /// #6600: the translated NAT tuple could not be reserved for this import.
     RejectedReserve,
@@ -558,16 +558,15 @@ impl crate::afxdp::ha::SessionDomain {
 
     /// #5674/#18687: cap the shared synced-session map in ENTRY units. Worker
     /// tables are full replicas, so their count does not multiply the node
-    /// ceiling. `REPLICATED_NODE_SESSION_CEILING` is the one per-table logical
-    /// ceiling. Each imported forward publishes itself and its synthesized
-    /// reverse into the shared map, so the import ceiling is twice that
-    /// per-table value: enough for a full peer table at the receiver's 2x
-    /// meet point, but not a worker-count multiple of it.
+    /// ceiling. `REPLICATED_NODE_SESSION_CEILING` is the per-table local
+    /// admission ceiling N. Local rows already occupy the shared map; a full
+    /// local table plus one full peer's forward imports and synthesized reverse
+    /// companions needs N + 2N entries, so the aggregate map cap is 3N.
     ///
     /// A zero-worker snapshot disables the bound during early boot/teardown,
     /// avoiding rejection while no worker can consume imports. The test seam
-    /// substitutes a small per-table ceiling but follows the production 2x
-    /// entry conversion.
+    /// substitutes a small per-table ceiling but follows the production 3x
+    /// aggregate entry conversion.
     ///
     /// #7209: calculate against the EXPLICIT records snapshot used for the
     /// reservation gate and fan-out. Independent `records()` loads inside one
@@ -600,7 +599,7 @@ impl crate::afxdp::ha::SessionDomain {
         if records.is_empty() {
             return 0;
         }
-        per_table_ceiling.saturating_mul(2)
+        per_table_ceiling.saturating_mul(3)
     }
 
     /// #6600: take this node's reservation on a peer-synced forward entry's
@@ -1418,13 +1417,11 @@ impl crate::afxdp::ha::SessionDomain {
         // #5674/#18687: synced-import admission bound. Every worker table is a
         // full replica and locally-created sessions are capped at
         // `REPLICATED_NODE_SESSION_CEILING`; worker count does not multiply
-        // that node ceiling. Bound the SHARED synced map (the single fan-out
-        // choke point) at twice this per-table value in ENTRY units. Each
-        // admitted forward publishes TWO keys into `sessions.synced` — the
-        // forward key and synthesized reverse companion — so K imported
-        // forwards occupy 2K entries. The 2N entry cap (N = the one-table
-        // ceiling) admits a full peer table at the receiver's 2x meet point,
-        // and rejects a NEW forward once that stated ceiling is exceeded.
+        // that node ceiling. Local shared rows can already occupy N entries.
+        // A full peer table may contribute N forward keys, each with a
+        // synthesized reverse, so the aggregate shared-map cap is N local
+        // entries + 2N imported entries = 3N. This admits both full
+        // populations without multiplying by worker count.
         //
         // #8015 CLOSED THE "+1 ORPHAN" CORNER THIS GATE USED TO DOCUMENT. The
         // gate keys on `!entry.metadata.is_reverse`, so a lone `is_reverse=1`
@@ -1491,9 +1488,15 @@ impl crate::afxdp::ha::SessionDomain {
         // Re-read all authoritative shared state while the lease excludes
         // tuple writers; generation, capacity, ownership, and merge decisions
         // below must use this current incarnation.
-        let (previous_entry, synced_len) = {
+        let (previous_entry, synced_len, reverse_present) = {
             let sessions = lock_shared_recover(&self.sessions.synced);
-            (sessions.get(&entry.key).cloned(), sessions.len())
+            (
+                sessions.get(&entry.key).cloned(),
+                sessions.len(),
+                reverse_entry
+                    .as_ref()
+                    .is_some_and(|reverse| sessions.contains_key(&reverse.key)),
+            )
         };
         if previous_entry.as_ref().is_some_and(|previous| {
             previous.generation != 0
@@ -1520,9 +1523,18 @@ impl crate::afxdp::ha::SessionDomain {
             (!previous.metadata.is_reverse && old_key != new_key)
                 .then(|| (old_key, previous.clone()))
         });
-        if previous_entry.is_none() && !entry.metadata.is_reverse {
+        if !entry.metadata.is_reverse {
+            let mut additional_entries = 0usize;
+            if previous_entry.is_none() {
+                additional_entries += 1;
+            }
+            if reverse_entry.is_some() && !reverse_present {
+                additional_entries += 1;
+            }
             let synced_cap = self.synced_import_cap_for(&worker_records);
-            if synced_cap != 0 && synced_len >= synced_cap {
+            if synced_cap != 0
+                && synced_len.saturating_add(additional_entries) > synced_cap
+            {
                 self.sessions
                     .import_cap_drops
                     .fetch_add(1, Ordering::Relaxed);
