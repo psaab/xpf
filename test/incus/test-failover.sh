@@ -1246,6 +1246,43 @@ ha_rg1_evaluate() {
 		"${RG1_STATS[phase-pre:node1]}" "${node1_stats[@]}"
 }
 
+# #18559: the reply type of each of H1's planned moves, counted and emitted
+# as HARNESS_METRIC lines, so a run on a post-#18559 build that silently fell
+# back to the local resign is visible instead of reading like master:
+#   transfer   "... (transfer committed)": the make-before-break transfer ran
+#   fallback   "Manual failover triggered for redundancy group N (<note>)": a
+#              post-#18559 local resign (the request never reached the peer,
+#              or the peer also claimed the RG)
+#   triggered  the plain local-resign text: a pre-#18559 build, or RG0
+#   other      anything else (an error, a refusal)
+PLANNED_REPLY_TRANSFER=0
+PLANNED_REPLY_FALLBACK=0
+PLANNED_REPLY_TRIGGERED=0
+PLANNED_REPLY_OTHER=0
+# ha_planned_reply_note <rg> <reply text>
+ha_planned_reply_note() {
+	local rg="$1" text="$2" kind
+	case "$text" in
+	*"(transfer committed"*)
+		kind=transfer
+		PLANNED_REPLY_TRANSFER=$((PLANNED_REPLY_TRANSFER + 1))
+		;;
+	*"Manual failover triggered for redundancy group $rg ("*)
+		kind=fallback
+		PLANNED_REPLY_FALLBACK=$((PLANNED_REPLY_FALLBACK + 1))
+		;;
+	*"Manual failover triggered for redundancy group $rg"*)
+		kind=triggered
+		PLANNED_REPLY_TRIGGERED=$((PLANNED_REPLY_TRIGGERED + 1))
+		;;
+	*)
+		kind=other
+		PLANNED_REPLY_OTHER=$((PLANNED_REPLY_OTHER + 1))
+		;;
+	esac
+	info "RG$rg planned-move reply type: $kind"
+}
+
 ha_run_rg1_failback_slice() {
 	RG1_FAILBACK_SETTLED=false
 	local sync_ok=true pre_ok=true pre_capture_ok=true owner_moved=false mid_capture_ok=true
@@ -1295,6 +1332,7 @@ ha_run_rg1_failback_slice() {
 		request_rc=$?
 	fi
 	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
+	ha_planned_reply_note 1 "$request_output"
 	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
 		owner_moved=true
 		if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]] \
@@ -2136,7 +2174,7 @@ fi
 # BEFORE it is sent) and failback_landed_at_seconds (each poll-observed
 # landing), both "a b" lists against the iperf start clock.
 ha_run_rg02_failback() {
-	local rg fo_start fo_elapsed moved
+	local rg fo_start fo_elapsed moved reply
 	failback_at_seconds=0
 	failback_epoch=""
 	failback_request_at_seconds=""
@@ -2147,8 +2185,9 @@ ha_run_rg02_failback() {
 		# stderr is CAPTURED, not discarded. `2>/dev/null` here hid every refusal
 		# this command can return, so a run that printed "Manual failover triggered"
 		# and a run that printed nothing at all were the same transcript (#9452).
-		incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 |
-			sed 's/^/    /' || true
+		reply=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1) || true
+		[[ -z "$reply" ]] || sed 's/^/    /' <<<"$reply"
+		ha_planned_reply_note "$rg" "$reply"
 	done
 
 	# Verify fw0 is now primary for RG0 and RG2. RG1 was checked from both node
@@ -2286,6 +2325,10 @@ if $all_primary; then
 	pass "fw0 became primary for all RGs after manual failback (slowest ${slowest}s of ${MANUAL_FAILOVER_DEADLINE}s budget)"
 fi
 info "Recorded planned failback at ${failback_request_at_seconds:-none} s (requests) and ${failback_landed_at_seconds:-none} s (landed) after iperf start; last RG moved at ${failback_at_seconds}s"
+echo "HARNESS_METRIC: planned_reply_transfer=${PLANNED_REPLY_TRANSFER}"
+echo "HARNESS_METRIC: planned_reply_fallback=${PLANNED_REPLY_FALLBACK}"
+echo "HARNESS_METRIC: planned_reply_triggered=${PLANNED_REPLY_TRIGGERED}"
+echo "HARNESS_METRIC: planned_reply_other=${PLANNED_REPLY_OTHER}"
 
 # Verify iperf3 survived manual failover
 if main_iperf_running; then

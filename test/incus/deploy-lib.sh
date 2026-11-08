@@ -1252,11 +1252,34 @@ deploy_restore_healthy() {
 	((refusals == 0 && took <= budget))
 }
 
+# deploy_restore_reply_kind <reply>: how deploy_restore_fw0_primary counts
+# one reply to `request chassis cluster failover redundancy-group N` on fw1.
+#   wait     fw0 is not takeover-ready / transfer-ready yet. Since #18559 the
+#            untargeted form on fw1 (the owner) runs the make-before-break
+#            transfer to fw0, so a rejoining fw0 that is still in its startup
+#            hold or bulk refuses it with its readiness reasons where the old
+#            local resign printed "triggered". That is fw0 settling, not the
+#            #18521 class; the restore retries and the budget still bounds it.
+#   refusal  any other error/refusal (the #18521 class).
+#   ok       anything else.
+deploy_restore_reply_kind() {
+	local out="$1"
+	if grep -qiE "not ready for explicit failover|not transfer-ready" <<<"$out"; then
+		echo wait
+	elif grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+		echo refusal
+	else
+		echo ok
+	fi
+}
+
 # deploy_restore_fw0_primary <label> moves RG0-2 back to fw0 one RG at a
 # time, polls, and re-requests the yield from fw1 until RESTORE_FW0_WAIT
 # (default 60s) runs out. A single fixed sleep after three blind requests was
 # shorter than one admission window plus a post-restart bulk (~50
-# sessions/s), and swallowed the refusal that said why.
+# sessions/s), and swallowed the refusal that said why. A readiness refusal
+# from fw0 (#18559, deploy_restore_reply_kind) is counted as a wait, not a
+# refusal.
 #
 # Verdicts (exactly one per call):
 #   PASS  fw0 already owned every RG, or the restore completed with no
@@ -1267,7 +1290,7 @@ deploy_restore_healthy() {
 #   FAIL  "could not restore": RESTORE_FW0_WAIT ran out. Returns 1.
 # Both FAILs name the last refusal.
 deploy_restore_fw0_primary() {
-	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0
+	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0 waits=0
 	local wait_s="${RESTORE_FW0_WAIT:-60}" budget="${RESTORE_FW0_BUDGET:-30}" took
 	if deploy_restore_fw0_owns_all; then
 		pass "$label: fw0 already primary"
@@ -1295,10 +1318,13 @@ deploy_restore_fw0_primary() {
 			if deploy_restore_rg_on_fw1 "$rg"; then
 				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
 				requests=$((requests + 1))
-				if grep -qiE "error|refus|not connected|failed" <<<"$out"; then
+				case "$(deploy_restore_reply_kind "$out")" in
+				wait) waits=$((waits + 1)) ;;
+				refusal)
 					refusals=$((refusals + 1))
 					last_err="RG$rg: $(head -1 <<<"$out")"
-				fi
+					;;
+				esac
 			fi
 			for _ in 1 2 3 4 5; do
 				deploy_restore_rg_on_fw0 "$rg" && break
@@ -1312,10 +1338,10 @@ deploy_restore_fw0_primary() {
 	fi
 	took=$((SECONDS - started))
 	if ! deploy_restore_healthy "$took" "$budget" "$refusals"; then
-		fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused${last_err:+; last refusal: $last_err})"
+		fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused, ${waits} waited for fw0 readiness${last_err:+; last refusal: $last_err})"
 		return 0
 	fi
-	pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused)"
+	pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused, ${waits} waited for fw0 readiness)"
 	return 0
 }
 

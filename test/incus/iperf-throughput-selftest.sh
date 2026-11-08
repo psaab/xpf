@@ -1498,6 +1498,7 @@ run_slice() { # <owner-wait rc> -> "req=<request instant> land=<landing instant>
 		ha_capture_rg1_sample_pair() { return 0; }
 		ha_recent_dead_streams_cell() { :; }
 		ha_rg1_evaluate() { :; }
+		ha_planned_reply_note() { :; }
 		sleep() { :; }
 		# The request takes 1.2 s of real time; the landing is observed 3 s after.
 		incus() { command sleep 1.2; echo "Manual failover triggered"; }
@@ -1541,7 +1542,7 @@ ok "call site (behavioural): instants cleared before the slice and kept after it
 run_rg02() { # -> "req=<list> land=<list> last=<s> all=<bool>"
 	(
 		set +eu
-		info() { :; }; fail() { :; }; rg_ownership_diagnosis() { :; }
+		info() { :; }; fail() { :; }; rg_ownership_diagnosis() { :; }; ha_planned_reply_note() { :; }
 		sleep() { SECONDS=$((SECONDS + 1)); }
 		polls="${fixture_dir}/rg02-polls"
 		: >"$polls"
@@ -1576,6 +1577,28 @@ rg02="$(run_rg02)"
 (( BASH_REMATCH[2] >= BASH_REMATCH[1] && BASH_REMATCH[3] >= BASH_REMATCH[2] && BASH_REMATCH[4] == BASH_REMATCH[3] )) \
 	|| bad "RG0/RG2 landings must follow the requests and the last one is the stream oracle's failback instant, got '$rg02'"
 ok "RG0/RG2 failback (behavioural): both requests and both poll-observed landings recorded, last landing kept for the oracle"
+# #18559: H1 counts each planned move's reply type, so a post-#18559 build
+# that fell back to the local resign is not read as a transfer, and an RG0
+# "triggered" is not read as a fallback.
+reply_note_src="$(tf_fn ha_planned_reply_note)"
+[[ -n "$reply_note_src" ]] || bad "could not extract ha_planned_reply_note from test-failover.sh"
+run_reply_notes() {
+	(
+		set +eu
+		info() { :; }
+		PLANNED_REPLY_TRANSFER=0 PLANNED_REPLY_FALLBACK=0 PLANNED_REPLY_TRIGGERED=0 PLANNED_REPLY_OTHER=0
+		eval "$reply_note_src"
+		ha_planned_reply_note 1 "Manual failover completed for redundancy group 1 (transfer committed)"
+		ha_planned_reply_note 2 "Manual failover completed for redundancy group 2 (transfer committed on node 0; proxy response timed out after the peer committed)"
+		ha_planned_reply_note 2 "Manual failover triggered for redundancy group 2 (peer unreachable; resigned locally, break-before-make)"
+		ha_planned_reply_note 0 "Manual failover triggered for redundancy group 0"
+		ha_planned_reply_note 1 "error: rpc error: code = FailedPrecondition desc = untargeted failover of redundancy group 1 ran as a make-before-break transfer to node 0, which answered: ..."
+		echo "t=$PLANNED_REPLY_TRANSFER f=$PLANNED_REPLY_FALLBACK g=$PLANNED_REPLY_TRIGGERED o=$PLANNED_REPLY_OTHER"
+	)
+}
+[[ "$(run_reply_notes)" == "t=2 f=1 g=1 o=1" ]] \
+	|| bad "planned-move reply types must count transfer/fallback/triggered/other as 2/1/1/1, got '$(run_reply_notes)'"
+ok "planned-move reply types (#18559): transfer, fallback, plain triggered and other are counted apart"
 # shellcheck disable=SC2154 # set by the eval'd ha_build_planned_move_args
 run_builder() { # <rg1 req> <rg1 land> <failback reqs> <failback lands>
 	(

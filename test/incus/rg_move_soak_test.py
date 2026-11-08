@@ -145,6 +145,11 @@ class CLIClassify(unittest.TestCase):
     def test_unknown_text_is_other(self):
         self.assertEqual(soak.classify_cli(0, "Manual failover triggered for redundancy group 2", 2)[0], soak.CLI_OTHER)
 
+    def test_fallback_reply_is_its_own_class_18559(self):
+        text = "Manual failover triggered for redundancy group 2 (peer unreachable; resigned locally, break-before-make)"
+        self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_FALLBACK)
+        self.assertEqual(soak.classify_cli(0, text, 2)[0], soak.CLI_OTHER)
+
     def test_triggered_is_accepted_only_for_an_untargeted_move_18559(self):
         text = "Manual failover triggered for redundancy group 2"
         self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_TRIGGERED)
@@ -620,13 +625,14 @@ class FakeCluster:
     def __init__(self, clock, owner, skew_s=0.0, cli_rc_on_error=0, lag_polls=0, lan_off=3.0,
                  stuck_traffic=False, revert_after_s=None, dual_after_land=False, helper_lie=False,
                  busy_iperf=False, faults=None, dual_after_s=None, stale_iperf_ports=None,
-                 iperf_reset_fail=False, iperf_reset_timeout=False, untargeted_resign=False):
+                 iperf_reset_fail=False, iperf_reset_timeout=False, untargeted_reply="transfer"):
         self.clock_ = clock
         # #18559: how the fake answers the UNTARGETED form issued on the owner.
-        # False: the fix (a make-before-break transfer, "transfer committed").
-        # True: master's local resign ("triggered"), landing one poll later
-        # when the peer's heartbeat claims the RG.
-        self.untargeted_resign = untargeted_resign
+        # "transfer": the fix (a make-before-break transfer, "transfer
+        # committed"). "triggered": the pre-#18559 local resign, landing 0.5 s
+        # later when the peer's heartbeat claims the RG. "fallback": a
+        # post-#18559 build whose transfer never reached the peer.
+        self.untargeted_reply = untargeted_reply
         self.owner = dict(owner)
         self.initial = dict(owner)
         self.skew_s = skew_s
@@ -744,6 +750,13 @@ class FakeCluster:
                 self.owner[rg] = target
                 self.landed_at[rg] = t
                 del self.pending[rg]
+                if self.faults.get(self.moves_seen) == "udp-lost-at-landing":
+                    # The probe answers right up to the landing and never
+                    # after it: only a checkpoint taken AT the landing sees
+                    # the loss (one taken at the CLI return counts the
+                    # replies in between).
+                    self._advance_udp_probe(t)
+                    self.udp_probe_lost_after_seq = self.udp_probe_next_seq
                 if self.dual_after_land:
                     self.dual_pending = 2
         if self.udp_probe_recreate_at is not None and t >= self.udp_probe_recreate_at:
@@ -792,9 +805,11 @@ class FakeCluster:
             return self.cli_rc_on_error, USER_ERROR + "\n"
         if self.owner[rg] == target:
             return 0, f"Redundancy group {rg} is already primary on node {target}\n"
-        if untargeted and self.untargeted_resign:
+        if untargeted and self.untargeted_reply in ("triggered", "fallback"):
             self.pending[rg] = (target, self.clock_.t + 0.5)
-            return 0, f"Manual failover triggered for redundancy group {rg}\n"
+            note = (" (peer unreachable; resigned locally, break-before-make)"
+                    if self.untargeted_reply == "fallback" else "")
+            return 0, f"Manual failover triggered for redundancy group {rg}{note}\n"
         if self.lag_polls:
             self.pending[rg] = (target, self.clock_.t + self.lag_polls * 0.5)
         else:
@@ -904,13 +919,14 @@ class FakeCluster:
 
 
 def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
-             v6=False, restore=True, files=None, strict_cost=False, managed_v6=None, form=soak.FORM_TARGETED):
+             v6=False, restore=True, files=None, strict_cost=False, managed_v6=None, form=soak.FORM_TARGETED,
+             expect_transfer=False):
     with tempfile.TemporaryDirectory() as d:
         cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=traffic, form=form,
                           helper_check=helper_check, restore=restore, strict_cost=strict_cost,
                           iperf4_on_mouse_target=True,
                           iperf6_on_mouse_target=v6 if managed_v6 is None else managed_v6,
-                          budget=soak.Budget(converge_s=sleep_s), outdir=d, run_id="t",
+                          budget=soak.Budget(converge_s=sleep_s, expect_transfer=expect_transfer), outdir=d, run_id="t",
                           target4="172.16.80.200", target6="2001:db8::200" if v6 else "",
                           lan_vip4="10.0.61.1")
         logs = []
@@ -1184,12 +1200,45 @@ class Orchestration(unittest.TestCase):
 
     def test_untargeted_local_resign_is_judged_and_udp_checkpoints_at_landing_18559(self):
         clock = FakeClock()
-        c = FakeCluster(clock, {2: 0}, untargeted_resign=True)
+        c = FakeCluster(clock, {2: 0}, untargeted_reply="triggered")
         rc, res, _ = run_fake(c, clock, moves=4, form=soak.FORM_UNTARGETED_AWAY)
         self.assertEqual(rc, 0, res["summary"])
         away = [m for m in res["moves"] if m["target"] == 1]
         self.assertEqual([m["rgs"][0]["cli_class"] for m in away], [soak.CLI_TRIGGERED] * 2)
         self.assertTrue(all(m["udp_probe"]["status"] == "SURVIVED" for m in res["moves"]))
+        self.assertEqual(res["summary"]["cli_classes"], {soak.CLI_TRIGGERED: 2, soak.CLI_OK: 2})
+
+    def test_udp_checkpoint_is_taken_at_the_landing_not_the_cli_return_18559(self):
+        # The probe is answered until the landing and never after. A
+        # checkpoint at the landing sees the loss; one at the CLI return
+        # would count the replies between return and landing as survival.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, untargeted_reply="triggered", faults={1: "udp-lost-at-landing"})
+        rc, res, _ = run_fake(c, clock, moves=1, form=soak.FORM_UNTARGETED_AWAY)
+        first = res["moves"][0]
+        self.assertEqual(first["udp_probe"]["status"], "LOST", first["udp_probe"])
+        self.assertEqual(first["verdict"], "FAIL")
+        self.assertEqual(rc, 1)
+
+    def test_fallback_away_move_is_void_not_pass_18559(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, untargeted_reply="fallback")
+        rc, res, _ = run_fake(c, clock, moves=2, form=soak.FORM_UNTARGETED_AWAY)
+        away, back = res["moves"][0], res["moves"][1]
+        self.assertEqual(away["rgs"][0]["cli_class"], soak.CLI_FALLBACK)
+        self.assertEqual(away["verdict"], "VOID")
+        self.assertTrue(any("did not run the transfer" in r for r in away["reasons"]), away["reasons"])
+        self.assertEqual(back["verdict"], "PASS")
+        self.assertEqual(res["summary"]["cli_classes"], {soak.CLI_FALLBACK: 1, soak.CLI_OK: 1})
+        self.assertEqual(rc, 2)
+
+    def test_expect_transfer_fails_a_plain_local_resign_18559(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, untargeted_reply="triggered")
+        rc, res, _ = run_fake(c, clock, moves=2, form=soak.FORM_UNTARGETED_AWAY, expect_transfer=True)
+        self.assertEqual(res["moves"][0]["verdict"], "FAIL")
+        self.assertTrue(any("SOAK_EXPECT_TRANSFER" in r for r in res["moves"][0]["reasons"]))
+        self.assertEqual(rc, 1)
 
     def test_udp_session_identity_recreation_fails_even_with_stable_nat_tuple(self):
         clock = FakeClock()

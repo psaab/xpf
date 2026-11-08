@@ -3953,13 +3953,13 @@ rm_row() {
 # "not restored", never an abort.
 test_restore_fw0_verdict_18523() {
 	rm_row "already restored" "rc=0 pass=1 fail=0 yields=0" "t: fw0 already primary" 0 0 0 normal
-	rm_row "prompt, no refusal" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused)" 1 0 0 normal
+	rm_row "prompt, no refusal" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused, 0 waited for fw0 readiness)" 1 0 0 normal
 	rm_row "one refusal" "rc=0 pass=0 fail=1 yields=4" \
-		"4 request(s), 1 refused; last refusal: RG0: $RM_REFUSAL)" 1 1 0 normal
+		"4 request(s), 1 refused, 0 waited for fw0 readiness; last refusal: RG0: $RM_REFUSAL)" 1 1 0 normal
 	rm_row "three refusals" "rc=0 pass=0 fail=1 yields=6" "6 request(s), 3 refused" 1 3 0 normal
-	rm_row "over budget, no refusal" "rc=0 pass=0 fail=1 yields=3" "(budget 30s; 3 request(s), 0 refused)" \
+	rm_row "over budget, no refusal" "rc=0 pass=0 fail=1 yields=3" "(budget 30s; 3 request(s), 0 refused, 0 waited for fw0 readiness)" \
 		1 0 12 normal
-	rm_row "same restore, RESTORE_FW0_BUDGET=45" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused)" \
+	rm_row "same restore, RESTORE_FW0_BUDGET=45" "rc=0 pass=1 fail=0 yields=3" "(3 request(s), 0 refused, 0 waited for fw0 readiness)" \
 		1 0 12 normal RESTORE_FW0_BUDGET=45
 	rm_row "RESTORE_FW0_BUDGET=abc falls back to 30" "rc=0 pass=0 fail=1" "budget 30s" \
 		1 0 12 normal RESTORE_FW0_BUDGET=abc
@@ -3971,6 +3971,29 @@ test_restore_fw0_verdict_18523() {
 		0 0 0 dual
 	rm_row "fw1 unreadable is not restored" "rc=1 pass=0 fail=1 yields=0" "could not restore fw0 as primary" \
 		0 0 0 unreadable
+}
+
+# #18559: the untargeted form on fw1 now runs the transfer to fw0, so a
+# rejoining fw0 that is not takeover-ready yet refuses it with its readiness
+# reasons where the old local resign printed "triggered". The restore counts
+# that as a wait (fw0 settling), not a #18521-class refusal: a restore that
+# waited once and then completed within the budget PASSes; a real refusal
+# still FAILs; and the classifier tells the three reply kinds apart.
+test_restore_readiness_wait_18559() {
+	local notready='error: rpc error: code = FailedPrecondition desc = untargeted failover of redundancy group 0 ran as a make-before-break transfer to node 0, which answered: the peer'"'"'s redundancy group 0 not ready for explicit failover ready=false reasons=[startup promotion hold]; this command ran no local resign'
+	if [[ "$(deploy_restore_reply_kind "$notready")" == wait &&
+		"$(deploy_restore_reply_kind "$RM_REFUSAL")" == refusal &&
+		"$(deploy_restore_reply_kind "Manual failover completed for redundancy group 2 (transfer committed)")" == ok &&
+		"$(deploy_restore_reply_kind "Manual failover triggered for redundancy group 0")" == ok ]]; then
+		ok "restore reply kind: readiness wait, refusal and ok told apart (#18559)"
+	else
+		bad "restore reply kind (#18559): readiness wait / refusal / ok misclassified"
+	fi
+	local saved="$RM_REFUSAL"
+	RM_REFUSAL="$notready"
+	rm_row "fw0 not ready yet, then restored (#18559)" "rc=0 pass=1 fail=0 yields=4" \
+		"(4 request(s), 0 refused, 1 waited for fw0 readiness)" 1 1 0 normal
+	RM_REFUSAL="$saved"
 }
 
 # #18523: the healthy predicate at its edges: equal to the budget passes,
@@ -4128,6 +4151,7 @@ test_rg_role_reader_skips_local_sublines_18523
 test_rg_local_forwarding_reader_18523
 test_active_active_split_verdict_18523
 test_restore_fw0_verdict_18523
+test_restore_readiness_wait_18559
 test_restore_healthy_boundaries_18523
 test_ha_smoke_site_pins_18523
 test_dual_active_committed_rows

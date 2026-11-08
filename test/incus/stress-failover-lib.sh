@@ -19,9 +19,11 @@ STRESS_OWNER_INTERVAL="${STRESS_OWNER_INTERVAL:-2}"
 # stress_rg1_owner_verdict <node0|node1> <fw0-status> <fw1-status>
 #
 # Pure: both node queries must independently show the expected RG1 owner as
-# `primary` and the peer as non-owning (`secondary` or `secondary-hold` — an
-# untargeted manual failover parks the old owner in secondary-hold with
-# Manual yes until reset; it has moved, not stuck). Prints a reason on
+# `primary` and the peer as non-owning (`secondary` or `secondary-hold` — a
+# local untargeted resign parks the old owner in secondary-hold with Manual
+# yes until reset; on a data RG's owner with a live peer the untargeted form
+# runs the transfer since #18559 and the old owner ends `secondary`; either
+# way it has moved, not stuck). Prints a reason on
 # stdout and returns 1 unless settled; returns 0 with no output when settled.
 #
 # Parse contract (pinned by status_layout_contract_8206_test.go): the header

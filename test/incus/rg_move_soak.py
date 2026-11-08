@@ -205,15 +205,26 @@ def rg_ownership(rg: int, view0: Dict[int, RGView], view1: Dict[int, RGView]) ->
 # ---------------------------------------------------------------------------
 
 CLI_OK, CLI_ALREADY, CLI_ERROR, CLI_OTHER = "ok", "already", "error", "other"
-# #18559: the untargeted form's local-resign text. Correct only for an
-# untargeted move (SOAK_FORM=untargeted-away) on a build that still resigns
-# locally (master before #18559, or the fallback when the transfer request
-# never reached the peer). It is a command that tells the truth but confirms
-# no commit, so the UDP probe checkpoints at the observed landing instead.
+# #18559: the untargeted form's local-resign replies. Accepted only for an
+# untargeted move (SOAK_FORM=untargeted-away). Such a command tells the truth
+# but confirms no commit, so the UDP probe checkpoints at the observed landing.
+#   CLI_TRIGGERED  the plain pre-#18559 text: a pre-#18559 build. With
+#                  SOAK_EXPECT_TRANSFER=1 (a post-#18559 build) it FAILs.
+#   CLI_FALLBACK   a post-#18559 build that did NOT run the transfer: the
+#                  request never reached the peer ("peer unreachable; resigned
+#                  locally, break-before-make") or the peer also claimed the
+#                  RG. The move did not exercise the path the soak measures,
+#                  so it is VOID with that reason, never a silent PASS.
 CLI_TRIGGERED = "triggered"
+CLI_FALLBACK = "fallback"
+CLI_CLASSES = (CLI_OK, CLI_TRIGGERED, CLI_FALLBACK, CLI_ALREADY, CLI_ERROR, CLI_OTHER)
 
 _CLI_OK_RE = re.compile(r"Manual failover completed for redundancy group (\d+) \(transfer committed\)")
 _CLI_TRIGGERED_RE = re.compile(r"Manual failover triggered for redundancy group (\d+)$")
+# The two notes are clusterfailover.ResignNoteUnreachable / ResignNoteDualActive.
+_CLI_FALLBACK_RE = re.compile(r"Manual failover triggered for redundancy group (\d+) "
+                              r"\((peer unreachable; resigned locally, break-before-make"
+                              r"|the peer is also primary; resigned locally)\)$")
 
 # SOAK_FORM values. "targeted" (the default) issues every move as
 # `redundancy-group <rg> node <target>`. "untargeted-away" issues a move AWAY
@@ -251,6 +262,9 @@ def classify_cli(rc: int, out: str, rg: int, untargeted: bool = False) -> Tuple[
     m = _CLI_TRIGGERED_RE.search(first)
     if untargeted and m and int(m.group(1)) == rg:
         return CLI_TRIGGERED, first
+    m = _CLI_FALLBACK_RE.search(first)
+    if untargeted and m and int(m.group(1)) == rg:
+        return CLI_FALLBACK, first
     return CLI_OTHER, first or "(no output)"
 
 
@@ -449,6 +463,10 @@ class Budget:
     # A recovered single-stream stall is COST only up to this; beyond it the
     # move FAILs however it recovered (seat AF: COST needs an upper bound).
     max_cost_stall_ms: float = 10000.0
+    # SOAK_EXPECT_TRANSFER=1 (#18559): the build under test runs the
+    # untargeted form on the owner as a transfer, so a plain "triggered"
+    # local-resign reply on an away-move is a FAIL.
+    expect_transfer: bool = False
 
 
 @dataclass
@@ -584,6 +602,14 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
         elif probe_status != "SURVIVED":
             return VOID, [f"unknown UDP probe status {probe_status!r}: {probe_detail}"]
     costs: List[str] = []
+    fallback_void: List[str] = []
+    for r in rec.rgs:
+        if r.cli_class == CLI_FALLBACK:
+            fallback_void.append(f"RG{r.rg} untargeted move did not run the transfer ('{r.cli_first}'); "
+                                 "the make-before-break path was not exercised")
+        elif r.cli_class == CLI_TRIGGERED and budget.expect_transfer:
+            reasons.append(f"RG{r.rg} untargeted move resigned locally ('{r.cli_first}') on a build expected to "
+                           "run the transfer (SOAK_EXPECT_TRANSFER=1)")
     for r in rec.rgs:
         other = 1 - r.target
         if r.cli_class == CLI_ERROR:
@@ -638,9 +664,10 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
     if reasons:
         if udp_void_reason:
             reasons.append(f"UDP probe evidence VOID: {udp_void_reason}")
+        reasons.extend(f"VOID evidence: {f}" for f in fallback_void)
         return FAIL, reasons + costs
-    if udp_void_reason:
-        return VOID, [udp_void_reason]
+    if udp_void_reason or fallback_void:
+        return VOID, fallback_void + ([udp_void_reason] if udp_void_reason else [])
     if costs:
         return COST, costs
     return PASS, []
@@ -654,7 +681,15 @@ def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str
     for m in moves:
         d = by_dir.setdefault(f"to node{m.target}", {PASS: 0, COST: 0, FAIL: 0, VOID: 0})
         d[m.verdict] += 1
-    out: Dict = {"moves": len(moves), "counts": counts, "by_direction": by_dir, "disabled_checks": disabled}
+    cli_classes: Dict[str, int] = {}
+    for m in moves:
+        for r in m.rgs:
+            cli_classes[r.cli_class] = cli_classes.get(r.cli_class, 0) + 1
+    out: Dict = {"moves": len(moves), "counts": counts, "by_direction": by_dir, "disabled_checks": disabled,
+                 # #18559: reply types (ok = transfer committed, triggered =
+                 # pre-#18559 local resign, fallback = post-#18559 local
+                 # resign that did not run the transfer).
+                 "cli_classes": cli_classes}
     scored = [m for m in moves if m.verdict != VOID]
     landed = [r.landed_s for m in scored for r in m.rgs if r.landed_s is not None]
     clis = [r.cli_seconds for m in scored for r in m.rgs]
@@ -1700,6 +1735,7 @@ def main(argv=None) -> int:
         tail_s=_env_float("SOAK_TAIL_S", 1.0),
         follow_min_pkts=int(_env_float("SOAK_FOLLOW_MIN_PKTS", 500)),
         max_cost_stall_ms=_env_float("SOAK_MAX_COST_STALL_MS", 10000.0),
+        expect_transfer=os.environ.get("SOAK_EXPECT_TRANSFER", "0") == "1",
     )
     v6 = os.environ.get("SOAK_IPV6", "1") != "0"
     target6 = a.target6 if v6 else ""

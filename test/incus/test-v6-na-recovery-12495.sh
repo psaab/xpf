@@ -21,7 +21,10 @@
 #              capture is NOT subject to the firewalls' AF_XDP blindness
 #              (#6934's instrument table).
 #   3. FAILOVER `request chassis cluster failover redundancy-group $RG` on
-#              the current primary. t0 = command completion.
+#              the current primary. t0 = command ISSUE: since #18559 the
+#              command runs the make-before-break transfer and returns only
+#              after the peer has promoted (and sent its NA/GARP burst), so
+#              an anchor at completion would miss the burst.
 #   4. SAMPLE   `ip -6 neigh` for both addresses every $V6_NA_POLL_MS for
 #              $V6_NA_WINDOW_MS, then 5 pings to the WAN-side v6 target
 #              (IPERF_TARGET6, the same 3-of-5 oracle check_v6_transit uses).
@@ -221,8 +224,10 @@ cell "capture armed: $(incus exec "$CLUSTER_LAN_HOST" -- grep '^tcpdump: listeni
 REQUEST_NODE="$FW0"
 [[ "$PRIMARY_BEFORE" == node1 ]] && REQUEST_NODE="$FW1"
 info "requesting RG${V6_NA_RG} failover on ${REQUEST_NODE} (${PRIMARY_BEFORE} is primary)"
-incus exec "$REQUEST_NODE" -- cli -c "request chassis cluster failover redundancy-group ${V6_NA_RG}" >/dev/null 2>&1 || true
+# t0 is taken BEFORE the request (#18559): the request now blocks through the
+# peer's promotion, whose NA/GARP burst must fall inside [t0, t0+window].
 T0="$(date +%s%3N)"
+incus exec "$REQUEST_NODE" -- cli -c "request chassis cluster failover redundancy-group ${V6_NA_RG}" >/dev/null 2>&1 || true
 
 # ── 4. Sample the neighbor timeline through the window ──────────────────
 POLL_N=$(( V6_NA_WINDOW_MS / V6_NA_POLL_MS ))
@@ -250,16 +255,19 @@ python3 "${_CELL_DIR}/v6-na-parse-12495.py" "$T/cap.pcap" >"$T/events.txt" ||
 
 # ── 6. Fail back — restore the shared cluster's placement ────────────────
 # #15959: the failback MUST follow the operator sequence, not a plain
-# failover request on the current primary. A plain
-# `request chassis cluster failover redundancy-group $RG` is a LOCAL yield
-# (ManualFailover): it parks the current primary in secondary-hold and
-# clears its transfer-commit pin, but under Preempt=no it does not move
-# the RG to the peer — the old primary is left in secondary-hold with
-# Manual=yes and the committed primary is re-elected, so waiting for the
-# peer to become primary strands the RG past any deadline (recorded
+# failover request on the current primary. Before #18559 a plain
+# `request chassis cluster failover redundancy-group $RG` was a LOCAL yield
+# (ManualFailover): it parked the current primary in secondary-hold and
+# cleared its transfer-commit pin, but under Preempt=no it did not move
+# the RG to the peer — the old primary was left in secondary-hold with
+# Manual=yes and the committed primary was re-elected, so waiting for the
+# peer to become primary stranded the RG past any deadline (recorded
 # 300s strand on 61c7d45603 and 9e94cf62ab; #15734 fixed the product
 # half by releasing the spent hold, which deliberately does NOT promote
-# the committed secondary). The operator path that converges in ~1s is:
+# the committed secondary). Since #18559 the plain form on the owner of a
+# data RG with a live peer runs the targeted transfer itself, but it still
+# resigns locally where it cannot (RG0, a dead peer, a fallback), so the
+# failback keeps the explicit sequence. The operator path that converges in ~1s is:
 # release the stranded hold on the target node (failover reset), then a
 # TARGETED request naming the target node, which runs the coordinated
 # RequestPeerFailover transfer and commits the target as primary.

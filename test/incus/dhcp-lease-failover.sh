@@ -348,9 +348,11 @@ restore_cluster_state() {
 			>/dev/null 2>&1 || true
 	done
 
-	# The transfer request creates a manual pin. Wait for ownership to land
-	# before clearing it; resetting immediately races the election and can
-	# leave the cluster on the survivor even though the CLI returned success.
+	# The request leaves a pin: the Manual hold of a local resign (RG0, a
+	# fallback) or, since #18559, the committed-transfer role pin of a data
+	# RG's owner. Wait for ownership to land before clearing it; resetting
+	# immediately races the election and can leave the cluster on the survivor
+	# even though the CLI returned success.
 	all_ok=0
 	for ((try = 0; try < 30; try++)); do
 		status="$(cluster_status)"
