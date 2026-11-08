@@ -1096,8 +1096,9 @@ On `BulkEnd` the receiver:
 When the receiver withholds steps 3 and 4 — the ack certifies a reconciled
 table — it now asks for the replacement itself (#18521). Every withholding
 outcome of a completed window qualifies: the reconcile was skipped (the
-zone-ownership map changed mid-bulk, #9655; no zone snapshot; no dataplane) or
-failed, the window was aborted (cap or deadline, #16039), or rows hit transient
+zone-ownership map or RG mastership changed mid-bulk, #9655/#18548; no zone
+snapshot; no dataplane) or failed, the window was aborted (cap or deadline,
+#16039), or rows hit transient
 helper-install failures (expected right after a restart). An ignored BulkEnd
 does not: it closes no window, and its bulk is still streaming or superseded.
 The receiver queues one `BulkRequest` after an exponential backoff (1s doubling
@@ -1148,9 +1149,11 @@ private DNS-refresh clone; its install uses its recorded base's digest when
 that base is the store's compiled active config (DNS answers are not read by
 the fold). A genuine change, an unknown digest (a config the store cannot
 identify, such as a candidate or a DNS clone of a non-active config), or a
-legacy setter still advances it and still voids the reconcile. RG mastership is
-not part of the generation, before or after #18374: the snapshot judges by the
-primary answers captured at `BulkStart` (see #18548).
+legacy setter still advances it and still voids the reconcile. RG mastership
+is not part of the generation: BulkEnd separately re-reads the snapshot's RG
+primary set and voids/rerequests if any answer changed since BulkStart
+(#18548). If mastership is unchanged, the snapshot's primary answers judge
+the rows.
 
 ### Config-Epoch Guard (#5274)
 

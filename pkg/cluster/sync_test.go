@@ -1596,15 +1596,14 @@ func TestBulkEpochMismatchIgnored(t *testing.T) {
 	}
 }
 
-func TestReconcileUsesSnapshotNotLive(t *testing.T) {
-	// When IsPrimaryForRGFn flips between BulkStart and BulkEnd,
-	// reconciliation should use the snapshot taken at BulkStart time.
+func TestReconcileUsesBulkStartOwnershipWhenStable(t *testing.T) {
+	// With unchanged RG mastership, stale reconciliation still judges by the
+	// bulk-start snapshot. #18548 separately voids a bulk if the captured RG
+	// primary set changes before BulkEnd.
 	//
-	// Scenario: at BulkStart we're secondary for RG 2 (zone 2 owned by peer).
-	// Peer sends bulk with sessionA in zone 2. We also have staleB in zone 2.
-	// Between BulkStart and BulkEnd, we become primary for RG 2.
-	// With the snapshot, reconciliation still sees zone 2 as peer-owned →
-	// staleB gets deleted. Without snapshot, it would skip zone 2 and keep staleB.
+	// Scenario: this node is secondary for RG 2 (zone 2 owned by peer). The
+	// peer's fresh session and our stale row both use zone 2. A successful
+	// reconcile keeps the received session and deletes the absent stale one.
 
 	freshKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 3, 1}, Protocol: 6, SrcPort: 1000, DstPort: 80}
 	staleKey := dataplane.SessionKey{SrcIP: [4]byte{10, 0, 3, 2}, Protocol: 6, SrcPort: 2000, DstPort: 443}
@@ -1616,15 +1615,9 @@ func TestReconcileUsesSnapshotNotLive(t *testing.T) {
 		},
 	}
 
-	primaryForRG2 := false // starts as secondary for RG 2
 	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
 	ss.IsPrimaryFn = func() bool { return false }
-	ss.IsPrimaryForRGFn = func(rgID int) bool {
-		if rgID == 2 {
-			return primaryForRG2
-		}
-		return rgID == 1
-	}
+	ss.IsPrimaryForRGFn = func(rgID int) bool { return rgID == 1 }
 	ss.SetZoneRGMap(map[uint16]int{1: 1, 2: 2})
 
 	// BulkStart — snapshot sees us as secondary for RG 2
@@ -1634,10 +1627,7 @@ func TestReconcileUsesSnapshotNotLive(t *testing.T) {
 	payload := encodeSessionV4Payload(freshKey, dataplane.SessionValue{IsReverse: 0, IngressZone: 2})
 	ss.handleMessage(nil, syncMsgSessionV4, payload)
 
-	// FLIP: we become primary for RG 2 mid-bulk
-	primaryForRG2 = true
-
-	// BulkEnd — reconciliation should use snapshot (secondary for RG 2)
+	// BulkEnd — mastership is unchanged, so the snapshot remains authoritative.
 	ss.handleMessage(nil, syncMsgBulkEnd, nil)
 
 	// freshKey should remain

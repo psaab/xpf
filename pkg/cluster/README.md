@@ -5971,18 +5971,20 @@ it.
     reconcile snapshot captures the NAT-scope folder — only the send-side
     stamp reads it. The legacy `SetZoneRGMap` setter adapts a single-RG map and
     bumps the generation only when its contents change. Reconcile skips a bulk
-    whose ownership snapshot generation is stale, because old answers could
-    delete a session this node now owns.
+    whose ownership snapshot generation is stale or whose captured RG primary
+    answers changed before BulkEnd, because old answers could delete a session
+    this node now owns.
   - Before publishing a new session-sync object, the daemon seeds a stable
     active-applied config's ownership snapshot. Exact-text and
     credential-equivalent config-sync skips also repair a still-nil map from
     the latest applied config, covering boot applies that precede session-sync
     creation without weakening the nil-map safety guard.
-  - When the bulk-start ownership snapshot is absent or its generation changes
-    before reconcile, the receiver keeps sessions and withholds `BulkAck`,
-    `bulkEverCompleted`, and `OnBulkSyncReceived`. The failover sync hold therefore
-    stays armed until a later complete bulk is reconciled instead of treating a
-    keep-all fallback as authoritative.
+  - When the bulk-start ownership snapshot is absent, its generation changes,
+    or any captured RG's primary answer changes before reconcile, the receiver
+    keeps sessions and withholds `BulkAck`, `bulkEverCompleted`, and
+    `OnBulkSyncReceived`. The failover sync hold therefore stays armed until a
+    later complete bulk is reconciled instead of treating a keep-all fallback
+    as authoritative.
   - Transient helper transport failures are tracked per v4/v6 key, separately
     from the received-key set. A failed key keeps the receive window open at
     `BulkEnd`, so the receiver neither reconciles an incomplete snapshot nor
@@ -6037,8 +6039,9 @@ it.
     `sync_bulk_retry_12166_test.go`, and
     `pkg/dataplane/userspace/synced_import_refusal_6785_test.go`.
   - `snapshotZoneOwnership` captures each RG's primary answer, the zone-level
-    answers and RG 0 fallback at BulkStart; per-session reconcile uses only
-    those captured answers, never re-querying ownership at BulkEnd.
+    answers and RG 0 fallback at BulkStart. Before judging rows, BulkEnd
+    re-reads the captured RG set and voids/rerequests the bulk if mastership
+    changed; otherwise per-session reconcile uses the captured answers.
   - A nil zone map has no ownership answers and takes no snapshot, so the bulk
     deletes nothing and the next one tries again. An installed empty map is a
     valid all-unmapped snapshot and still reconciles

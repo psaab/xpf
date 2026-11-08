@@ -173,7 +173,7 @@ func TestAZoneMapNamingNoZoneSkipsTheReconcile_9655(t *testing.T) {
 
 // A zone map installed during the bulk with different contents skips the
 // reconcile; an identical map re-set by a config apply does not.
-func TestReconcileIsSkippedOnlyWhenTheZoneMapChangedDuringTheBulk_9655(t *testing.T) {
+func TestReconcileIsSkippedOnZoneMapChangeDuringBulk_9655(t *testing.T) {
 	bulk := func(during func(*SessionSync)) *mockSweepDP {
 		rx, dp := receiver9655(t, false, map[uint16]int{1: 1, 5: 5})
 		rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
@@ -212,5 +212,50 @@ func TestZoneMapChangeDuringBulkWithholdsCompletion9655(t *testing.T) {
 	case <-released:
 		t.Fatal("#11070: a nonauthoritative bulk released the failover gate")
 	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+// #18548: mastership can move without changing zoneRGMapGen. If this node
+// becomes primary after BulkStart, a new local row is absent from the peer's
+// table and must not be judged by the stale secondary answer.
+func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
+	const zone uint16 = 18
+	const rg = 5
+	local := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 18, 1}, DstIP: [4]byte{172, 16, 80, 200},
+		Protocol: 6, SrcPort: 41850, DstPort: 5201,
+	}
+	dp := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+	rx := NewSessionSync(":0", "10.0.0.3:4785", dp)
+	primary := false
+	rx.IsPrimaryForRGFn = func(rgID int) bool { return rgID == rg && primary }
+	rx.SetZoneRGMap(map[uint16]int{zone: rg})
+	rx.stats.Connected.Store(true)
+	rx.testZoneMapSettle = 10 * time.Millisecond
+	rx.testBulkRerequestBackoff = 20 * time.Millisecond
+
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	primary = true
+	if err := dp.SetSessionV4(local, establishedIn(zone)); err != nil {
+		t.Fatalf("create local row after promotion: %v", err)
+	}
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+	if _, ok := dp.v4sessions[local]; !ok {
+		t.Fatal("#18548: local row created after promotion was judged using BulkStart mastership and deleted")
+	}
+	if rx.BulkEverCompleted() {
+		t.Fatal("#18548: a bulk whose reconcile was voided by mastership change was marked complete")
+	}
+	if got := rx.stats.BulkSyncEndTime.Load(); got != 0 {
+		t.Fatalf("#18548: a nonauthoritative bulk recorded end time %d", got)
+	}
+
+	if !waitFor18521(t, 5*time.Second, func() bool { return !rx.bulkRerequestInFlight.Load() }) {
+		t.Fatal("#18548: voided reconcile did not complete its bulk re-request")
+	}
+	rx.wg.Wait()
+	if got := rx.Stats().BulkRerequestsSent; got != 1 {
+		t.Fatalf("#18548: queued bulk re-requests = %d, want 1", got)
 	}
 }

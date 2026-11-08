@@ -2816,10 +2816,11 @@ type zoneOwnershipSnapshot struct {
 	zones map[uint16]bool
 	// fallbackPrimary is the captured RG 0 answer for absent zones.
 	fallbackPrimary bool
-	// Per-session ownership is evaluated only against these bulk-start answers.
-	useRG   bool
-	foldRG  map[uint32]int
-	foldFn  func(uint32, uint16) uint32
+	useRG  bool
+	foldRG map[uint32]int
+	foldFn func(uint32, uint16) uint32
+	// primary holds the per-RG answers captured at BulkStart. BulkEnd
+	// revalidates this exact set before per-session ownership is judged (#18548).
 	primary map[int]bool
 	// zoneRGsByZone is the bulk-start RG set per zone (#14357), so
 	// shouldSyncV4/V6 can tell a multi-RG zone from a single-RG one without
@@ -2965,6 +2966,37 @@ func (s *SessionSync) reconcileStaleSessions(bulkSerial uint64) (bool, uint64, u
 	// different contents installed during the bulk can move a zone to this node,
 	// and judging by the old answers would delete a session this node now owns.
 	// Keep everything; the next bulk reconciles.
+	// #18548: zoneRGMapGen tracks ownership MAP content only; an RG mastership
+	// transition installs no map, so a failover onto this node between BulkStart
+	// and BulkEnd moves no generation while the snapshot's primary answers go
+	// stale. Re-read the live primary set for the RGs the snapshot judged and
+	// void the reconcile on any change: rows created locally after the
+	// takeover are absent from the peer's bulk and would otherwise be judged
+	// stale on BulkStart answers.
+	var changedRG int
+	var primaryAtBulkStart, primaryAtBulkEnd bool
+	mastershipChanged := false
+	if zoneSnap.useRG {
+		s.zoneRGMu.RLock()
+		isPrimaryForRG := s.IsPrimaryForRGFn
+		s.zoneRGMu.RUnlock()
+		if isPrimaryForRG == nil {
+			slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership unavailable at BulkEnd)")
+			return false, inventoryGeneration, inventoryRequestToken, inventoryRequested
+		}
+		for rg, wasPrimary := range zoneSnap.primary {
+			if isPrimaryForRG(rg) != wasPrimary {
+				mastershipChanged = true
+				changedRG, primaryAtBulkStart, primaryAtBulkEnd = rg, wasPrimary, !wasPrimary
+				break
+			}
+		}
+	}
+	if mastershipChanged {
+		slog.Info("cluster sync: reconcile stale sessions skipped (RG mastership changed during the bulk)",
+			"rg", changedRG, "primary_at_bulk_start", primaryAtBulkStart, "primary_at_bulk_end", primaryAtBulkEnd)
+		return false, inventoryGeneration, inventoryRequestToken, inventoryRequested
+	}
 	s.zoneRGMu.RLock()
 	mapGen := s.zoneRGMapGen
 	s.zoneRGMu.RUnlock()

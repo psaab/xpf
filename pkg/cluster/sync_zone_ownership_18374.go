@@ -26,8 +26,10 @@ package cluster
 // config): the compiled config's canonical text digest and the ifindex->name
 // table the closure was built from. A zero digest means "unknown" and always
 // advances, so every caller that cannot prove equality keeps #9655's fail-
-// closed behaviour, and a genuine mid-bulk ownership move still voids the
-// reconcile exactly as before.
+// closed behaviour, and a genuine change to these captured map/resolver inputs
+// still voids the reconcile. RG mastership is not part of this generation;
+// BulkEnd re-reads the snapshot's primary set and voids on a changed answer
+// (#18548).
 
 // ResolverDigest fingerprints everything an ingress fold resolver closes
 // over. The zero value is "unknown".
