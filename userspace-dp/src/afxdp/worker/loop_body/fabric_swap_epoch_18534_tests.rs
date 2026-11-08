@@ -37,6 +37,7 @@ fn run_fabric_swap_18534(forwarding: &mut Arc<ForwardingState>, live: Vec<Fabric
     let indexes = SharedSessionOwnerRgIndexes::default();
     let (mut cursor, mut cycle_start, mut last_slice, mut high_water, mut est_cursor) =
         (0usize, 0u64, 0u64, 0u64, 0usize);
+    let mut pending_stage_counts = None;
     run_ct_slice(
         &mut sessions,
         forwarding,
@@ -55,6 +56,7 @@ fn run_fabric_swap_18534(forwarding: &mut Arc<ForwardingState>, live: Vec<Fabric
         &shared_forward_wire_sessions,
         &indexes,
         &mut est_cursor,
+        &mut pending_stage_counts,
     );
 }
 

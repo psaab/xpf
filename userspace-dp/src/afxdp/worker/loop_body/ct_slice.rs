@@ -177,8 +177,23 @@ impl CtSlicePairSet {
 /// #18655/#18662: the node-wide work uses a persistent table cursor and
 /// advances at most `CT_EVIDENCE_CHUNK` worker slots per ct-slice. Pending
 /// shared-evidence rows use one map-lock pair per chunk. Stage/count indexed
-/// reads fetch at most 128 rows per map hold and charge lookup plus output-slot
-/// folds to 128 work units per chunk, releasing all locks before each fold.
+/// traversal persists its alias cursor and folds across slices, charging at
+/// most `STAGE_COUNTS_INVOCATION_BUDGET_18662` total work per invocation.
+pub(super) struct PendingStageCountsEmission {
+    next_cursor: usize,
+    traversal: crate::afxdp::shared_ops::StageCountsTraversal,
+}
+
+fn emit_completed_stage_counts(
+    sessions: &mut crate::session::SessionTable,
+    traversal: crate::afxdp::shared_ops::StageCountsTraversal,
+) {
+    let (emit_keys, rows) = traversal.finish();
+    for ((key, _nat), (stage, fwd, rev)) in emit_keys.iter().zip(rows) {
+        sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
+    }
+}
+
 #[inline(never)]
 fn run_shared_evidence_leg(
     sessions: &mut crate::session::SessionTable,
@@ -186,7 +201,25 @@ fn run_shared_evidence_leg(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     established_cursor: &mut usize,
+    stage_counts_pending: &mut Option<PendingStageCountsEmission>,
 ) {
+    if let Some(pending) = stage_counts_pending.as_mut() {
+        let (complete, visited, max_hold, max_work) = pending.traversal.advance(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+            crate::afxdp::shared_ops::STAGE_COUNTS_INVOCATION_BUDGET_18662,
+        );
+        crate::afxdp::shared_ops::record_stage_counts_work(visited, max_hold, max_work, 0);
+        if complete {
+            let pending = stage_counts_pending
+                .take()
+                .expect("completed stage/count traversal remains pending");
+            emit_completed_stage_counts(sessions, pending.traversal);
+            *established_cursor = pending.next_cursor;
+        }
+        return;
+    }
     let cursor = *established_cursor;
     let mut established: Vec<(SessionKey, crate::nat::NatDecision)> = Vec::new();
     let established_next =
@@ -323,21 +356,38 @@ fn run_shared_evidence_leg(
                 emit_keys.push(pair.clone());
             }
         }
-        // #18655/#18662: one indexed batch for the emit set; it reads the
-        // requested canonical/reverse rows and exact entry.key alias slots,
-        // releasing both shared-map locks after at most one fixed chunk.
-        // The former per-key helper scanned both whole maps for every key.
-        let rows = crate::afxdp::shared_ops::shared_rows_stage_and_counts(
-            shared_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            &emit_keys,
-        );
-        for ((key, _nat), (stage, fwd, rev)) in emit_keys.iter().zip(rows) {
-            sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
+        // Persist the requested-key/alias cursors and partial folds when this
+        // invocation spends its total stage/count work allowance. No
+        // incomplete output is visible to the delta consumer.
+        if emit_keys.is_empty() {
+            *established_cursor = next_cursor;
+        } else {
+            let mut traversal =
+                crate::afxdp::shared_ops::StageCountsTraversal::new(emit_keys);
+            let requested = traversal.output_count();
+            let (complete, visited, max_hold, max_work) = traversal.advance(
+                shared_sessions,
+                shared_forward_wire_sessions,
+                &shared_owner_rg_indexes.stage_counts_forward_wire_sessions,
+                crate::afxdp::shared_ops::STAGE_COUNTS_INVOCATION_BUDGET_18662,
+            );
+            crate::afxdp::shared_ops::record_stage_counts_work(
+                visited,
+                max_hold,
+                max_work,
+                requested,
+            );
+            if complete {
+                emit_completed_stage_counts(sessions, traversal);
+                *established_cursor = next_cursor;
+            } else {
+                *stage_counts_pending = Some(PendingStageCountsEmission {
+                    next_cursor,
+                    traversal,
+                });
+            }
         }
     }
-    *established_cursor = next_cursor;
 }
 
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
@@ -367,6 +417,7 @@ pub(super) fn run_ct_slice(
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     established_cursor: &mut usize,
+    stage_counts_pending: &mut Option<PendingStageCountsEmission>,
 ) {
     // Incrementally refresh last_seen in BPF conntrack entries so Go-side
     // callers of IterateSessions (CLI, gRPC, Prometheus) see accurate
@@ -381,13 +432,17 @@ pub(super) fn run_ct_slice(
     // subtract — no allocation, no regression to the empty/idle table.
     let should_slice = *ct_refresh_cursor != 0
         || *established_cursor != 0
+        || stage_counts_pending.is_some()
         || loop_now_ns.saturating_sub(*ct_cycle_start_ns) >= CT_REFRESH_WINDOW_NS;
     if should_slice && loop_now_ns.saturating_sub(*last_ct_slice_ns) >= CT_SLICE_INTERVAL_NS {
         *last_ct_slice_ns = loop_now_ns;
         // Stamp the cycle start on the FIRST slice of a cycle (cursor at the
         // top) so successive cycles are paced to the freshness window.
-        let new_cycle = *ct_refresh_cursor == 0 && *established_cursor == 0;
-        let shared_evidence_due = new_cycle || *established_cursor != 0;
+        let new_cycle = stage_counts_pending.is_none()
+            && *ct_refresh_cursor == 0
+            && *established_cursor == 0;
+        let shared_evidence_due =
+            stage_counts_pending.is_some() || new_cycle || *established_cursor != 0;
         if new_cycle {
             *ct_cycle_start_ns = loop_now_ns;
         }
@@ -409,9 +464,9 @@ pub(super) fn run_ct_slice(
             *session_volume_high_water =
                 (*session_volume_high_water).max(ct_outcome.max_session_volume);
         }
-        // #18662: the worker-table pass advances by one fixed chunk per
-        // cadence tick. It starts with the conntrack cycle and continues
-        // even if the faster BPF cursor has already wrapped.
+        // #18662: worker-table traversal and stage/count lookup both resume
+        // across cadence ticks. A pending stage/count pass forces resumption
+        // even when its worker cursor is at the cycle boundary.
         if shared_evidence_due {
             run_shared_evidence_leg(
                 sessions,
@@ -419,6 +474,7 @@ pub(super) fn run_ct_slice(
                 shared_forward_wire_sessions,
                 shared_owner_rg_indexes,
                 established_cursor,
+                stage_counts_pending,
             );
         }
     }

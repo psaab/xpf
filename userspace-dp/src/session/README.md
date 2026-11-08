@@ -664,19 +664,21 @@ The evidence is scoped and bounded (#18722/#18742):
   packet timestamp—not the max-only shared count—is the relevant recency proof.
   The timestamp remains the packet's time, not the restamp's time: GC-only
   retention cannot manufacture sibling evidence, and a quiet source still
-  ages out. Production computes the cadence bound from the live
-  session-table slab on each housekeeping pass; the default is 13 s, covering
-  the 10 s ct-slice target and the 2x default `max_sessions` population
-  (12.8 s, rounded up), while larger HA-import populations compute a longer
-  bound from their actual slab size. A live source therefore cannot be reaped
-  only because its next production restamp falls after a shorter configured
-  window.
+  Production computes a worker-slab cadence baseline from the live
+  session-table extent on each housekeeping pass; the default is 13 s,
+  covering the 10 s ct-slice target and the 2x default `max_sessions`
+  population (12.8 s, rounded up), while larger HA-import populations compute
+  a longer baseline from their slab size. This covers the worker-table cursor
+  cycle but not extra ticks for a pending stage/count alias/fold traversal;
+  high alias fan-out can delay its output beyond that estimate (see
+  `docs/log/18662.md`). The slab baseline prevents a worker-table sweep alone
+  from exceeding the configured window.
 
 For physical GC, an idle-crossed nonclosing TCP row with a matching
 Established shared incarnation receives a retention-only deadline of
 `max(expires_after_ns, shared_evidence_max_cadence_ns + SESSION_GC_INTERVAL_NS)`.
-The expiry wheel uses the live cadence supplied by housekeeping from the same
-refresh-walk slab bound; this does not change the configured timeout used by
+The expiry wheel uses the live worker-slab baseline supplied by housekeeping
+from the refresh-walk slab bound; this does not change the configured timeout used by
 packet lookups or re-stamp packet activity. The next wheel check can observe
 the sibling's packet timestamp within one additional wheel tick. If the shared
 packet time remains frozen, the row is reaped after that evidence ages out.

@@ -2275,9 +2275,10 @@ impl SessionTable {
     /// #16223: collect this table's completed forward pairs for periodic
     /// shared-wire maintenance: canonical forward keys that are fully
     /// established (pending cleared, not closing) and served reverse traffic.
-    /// The caller advances a bounded slot cursor across paced ct-slices and
-    /// resets it at the end of the table; this is not a full-table first-slice
-    /// walk.
+    /// The caller commits this bounded slot cursor across paced ct-slices
+    /// only after the associated shared-evidence stage/count outputs complete;
+    /// a pending indexed traversal retains the cursor until its folds finish.
+    /// The cursor resets at the end of the table; no full-table first-slice walk.
     /// Serving state only — replica rows in this table are
     /// reported too when they themselves completed, which is correct:
     /// their completion is equally node-level proof.
@@ -2325,7 +2326,9 @@ impl SessionTable {
     /// No chicken-and-egg: inputs are counters/completion observed
     /// anywhere node-local; a shared row's Established wire is
     /// OUTPUT only (the restamp this feeds), never an input here.
-    /// One bounded walk per slice.
+    /// The initial completion-evidence batch is one bounded worker-slot walk
+    /// per chunk. Pending stage/count output resumes separately without
+    /// repeating that table scan.
     ///
     /// #16217 (backup arm): a HA-peer replica row (`SyncImport` /
     /// `SharedMaterialize`) is ALSO collected — into the SHARED
@@ -2354,7 +2357,9 @@ impl SessionTable {
     /// The timestamp distinguishes a live sibling with a lower counter total
     /// from an idle owner row whose shared count is already at its max.
     /// Cursor-bounded by slot count so #18662 can spread this maintenance
-    /// across ct-slices. Returns the next slot cursor (zero at the end).
+    /// across ct-slices; the caller commits the returned cursor only when the
+    /// associated indexed stage/count output completes. Returns the next slot
+    /// cursor (zero at the end).
     pub(crate) fn ct_slice_forward_pairs(
         &self,
         cursor: usize,

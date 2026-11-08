@@ -22,14 +22,16 @@ const _: () = assert!(EXPORT_SLICE_EMITS <= EXPORT_SLICE_BUDGET);
 pub(super) const CT_REFRESH_WINDOW_NS: u64 = 10_000_000_000; // full-table freshness target
 pub(super) const CT_SLICE_INTERVAL_NS: u64 = 100_000_000; // 100ms between slices
 pub(super) const CT_REFRESH_SLICE_BUDGET: usize = 2048; // max slab slots per slice
-/// #18662: fixed upper bound on rows advanced by the shared-evidence
-/// worker-table cursor in one ct-slice. Stage/count indexed reads separately
-/// cap map-lock row visits and combined lookup/fold work at 128 per chunk.
+/// #18662: fixed upper bound on worker-table slots advanced by the shared-
+/// evidence cursor in one ct-slice. Stage/count traversal charges at most
+/// 16,384 lookup/fold operations per invocation while each map-lock hold
+/// visits at most 128 candidates/rows; a pending traversal pauses the worker
+/// cursor until a later paced slice.
 pub(super) const CT_EVIDENCE_CHUNK: usize = 2048;
-/// Maximum interval between shared-evidence visits to a worker row.
-/// The worker cursor advances `CT_EVIDENCE_CHUNK` slots on the first due
-/// slice and each paced slice while work remains; a large slab stretches
-/// the full sweep beyond its 10 s target.
+/// Slab-only baseline estimate for the interval between shared-evidence
+/// visits to a worker row. A pending stage/count traversal can add paced
+/// slices according to its alias/fold work; this formula is not a hard bound
+/// for pathological alias fan-out.
 pub(super) fn shared_evidence_max_cadence_ns(slab_len: usize) -> u64 {
     CT_REFRESH_WINDOW_NS.max(
         (slab_len.div_ceil(CT_EVIDENCE_CHUNK) as u64)
@@ -50,19 +52,19 @@ mod tests {
         assert_eq!(shared_evidence_max_cadence_ns(300_000), 14_700_000_000);
     }
 }
-// #18655/#18662: the shared-evidence leg runs on the first due slice and
-// resumes on each paced slice while its worker cursor is nonzero, advancing
-// at most CT_EVIDENCE_CHUNK slots. A row completing before its slot is visited
-// may be advanced later in the current cycle; after its slot has passed, it
-// waits for the next cycle. The maximum row-visit interval is
-//     max(CT_REFRESH_WINDOW_NS, ceil(slab / CT_EVIDENCE_CHUNK) * CT_SLICE_INTERVAL_NS)
-// which is 10 s at the default cap; HA imports can stretch it to about 13 s
-// at the usual 2x population. Static asserts below guard the default-cap
-// contract against the 20 s TCP opening window. Imports have no per-table cap,
-// so production expiry also computes the current cycle from this same slab
-// bound; a larger population receives a correspondingly longer short-window
-// evidence grace instead of a hard-coded 13 s ceiling. The only hard import
-// bound, #5674's shared-map ceiling, is looser; see #18687.
+// #18655/#18662: the shared-evidence leg starts on the first due slice and
+// advances at most CT_EVIDENCE_CHUNK worker slots on each paced slice when no
+// stage/count traversal is pending. The stage/count pass is bounded to 16,384
+// lookup/fold operations per invocation and holds each map-lock pair for at
+// most 128 visits; if unfinished, it retains the worker cursor and resumes
+// on later paced slices, emitting only after the requested folds complete.
+// The slab formula above therefore describes worker-slot cadence without
+// pathological alias fan-out. Large alias buckets add ceil(work / 16,384)
+// paced intervals; the expiry grace currently uses the slab-only baseline.
+// At the default cap that baseline is 10 s; HA imports can stretch it to
+// about 13 s at the usual 2x population. Imports have no per-table cap, so
+// production expiry computes the worker-slab baseline from this live slab
+// rather than using a hard-coded 13 s ceiling. See #18687.
 const _: () = assert!(
     (crate::session::DEFAULT_MAX_SESSIONS.div_ceil(CT_REFRESH_SLICE_BUDGET) as u64)
         * CT_SLICE_INTERVAL_NS

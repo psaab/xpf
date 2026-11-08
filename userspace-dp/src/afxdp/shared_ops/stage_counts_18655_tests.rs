@@ -15,8 +15,9 @@
 //! 2. LOCK BOUNDS. `STAGE_COUNTS_WORK_18655` records actual rows fetched per
 //!    dual-map hold at small and 64k populations, not merely query keys.
 //! 3. FAN-OUT WORK. Lookup candidates and every output-slot fold iteration
-//!    share a 128-operation chunk budget; the shared-wire-key collision and
-//!    65,536-duplicate cells exercise both forms of fan-out.
+//!    share a 16,384-operation invocation budget while each map-lock hold is
+//!    limited to 128 visits; the collision and 65,536-duplicate cells exercise
+//!    both forms of fan-out.
 //! 4. The batched count restamp leaves the maps exactly as the per-pair helper
 //!    does. Stable-slot lifecycle and between-hold cells pin mutation behavior.
 
@@ -26,6 +27,7 @@ use std::net::{IpAddr, Ipv4Addr};
 
 type Map = Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>;
 const EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662: usize = 128;
+pub(crate) const EXPECTED_STAGE_COUNTS_INVOCATION_BUDGET_18662: usize = 16_384;
 
 
 /// The pre-#18655 per-key helper, verbatim apart from taking the guarded
@@ -1122,4 +1124,97 @@ fn wire_alias_restamp_keeps_first_canonical_on_collision_18655() {
     let alias = lock_shared_recover(&wire_map).get(&wire_key).cloned().expect("alias reinserted");
     assert_eq!(alias.key, first, "#18655: the alias must clone the FIRST completed key's canonical row");
     assert_eq!(alias.session_id, 5001);
+}
+
+#[test]
+fn retained_alias_fanout_resumes_with_constant_invocation_budget_18662() {
+    const ALIAS_COUNTS: [usize; 4] = [1, 64, 512, 8_192];
+    let server = v4(172, 16, 80, 200);
+    for alias_count in ALIAS_COUNTS {
+        let (shared, nat_map, wire_map, indexes) = maps();
+        let forward = key(
+            v4(10, 0, 61, 105),
+            32_001,
+            server,
+            443,
+            crate::ip_proto::PROTO_TCP,
+        );
+        let mut query_nat = snat(Some(30_000));
+        for i in 0..alias_count {
+            query_nat = snat(Some(30_000 + i as u16));
+            let stage = if i % 3 == 0 {
+                TcpHandshakeState::Established.to_wire()
+            } else {
+                TcpHandshakeState::HandshakePending.to_wire()
+            };
+            publish_shared_session(
+                &shared,
+                &nat_map,
+                &wire_map,
+                &indexes,
+                &row(
+                    &forward,
+                    query_nat,
+                    stage,
+                    10 + i as u64,
+                    20 + i as u64,
+                    false,
+                    8_000 + i as u64,
+                ),
+            );
+        }
+        let alias_count_live = lock_shared_recover(&indexes.stage_counts_forward_wire_sessions)
+            .get(&forward)
+            .expect("the repeated canonical row retains its alias bucket")
+            .iter()
+            .filter(|slot| slot.live)
+            .count();
+        assert_eq!(alias_count_live, alias_count);
+
+        let requested = vec![(forward.clone(), query_nat)];
+        assert_eq!(requested.len(), 1, "worker-row count stays fixed");
+        let expected = {
+            let holders = lock_shared_recover(&shared);
+            let wires = lock_shared_recover(&wire_map);
+            scan_reference(&holders, &wires, &forward, query_nat)
+        };
+        let mut traversal = StageCountsTraversal::new(requested.clone());
+        let mut max_invocation_work = 0usize;
+        let mut invocations = 0usize;
+        loop {
+            let (complete, _visited, max_hold, work) = traversal.advance(
+                &shared,
+                &wire_map,
+                &indexes.stage_counts_forward_wire_sessions,
+                usize::MAX,
+            );
+            assert!(
+                work <= EXPECTED_STAGE_COUNTS_INVOCATION_BUDGET_18662,
+                "A={alias_count}: lookup plus slot-fold work exceeded the independent per-invocation cap"
+            );
+            assert!(
+                max_hold <= EXPECTED_STAGE_COUNTS_LOCK_CHUNK_18662,
+                "A={alias_count}: map-lock hold exceeded the unchanged per-hold cap"
+            );
+            max_invocation_work = max_invocation_work.max(work);
+            invocations += 1;
+            assert!(invocations < 16, "A={alias_count}: traversal must finish");
+            if complete {
+                let (finished_keys, actual) = traversal.finish();
+                assert_eq!(finished_keys, requested);
+                assert_eq!(actual, vec![expected], "A={alias_count}: complete fold must match scan");
+                break;
+            }
+        }
+        if alias_count == 8_192 {
+            assert!(
+                invocations > 1,
+                "A=8,192 exceeds one invocation and resumes instead of delaying RX"
+            );
+        }
+        assert!(
+            max_invocation_work <= EXPECTED_STAGE_COUNTS_INVOCATION_BUDGET_18662,
+            "A={alias_count}: every invocation stays at the independent fixed cap"
+        );
+    }
 }

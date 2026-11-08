@@ -508,6 +508,7 @@ pub(crate) fn worker_loop(
     let mut ct_refresh_cursor: usize = 0;
     // #16223: cursor for the shared-wire Established maintenance walk.
     let mut established_shared_cursor: usize = 0;
+    let mut pending_stage_counts: Option<ct_slice::PendingStageCountsEmission> = None;
     // #16217 (FZDiag28, part b): 100 ms timer pending-neighbor retry state.
     let mut pending_neigh_timer = PendingNeighTimer::new();
     // #869: worker-runtime telemetry.  Local counters, published to
@@ -1624,6 +1625,7 @@ pub(crate) fn worker_loop(
             &shared_forward_wire_sessions,
             &shared_owner_rg_indexes,
             &mut established_shared_cursor,
+            &mut pending_stage_counts,
         );
         // #16217 (FZDiag28, part b): timer-driven pending-neighbor retry
         // at the same 100 ms cadence, packet-independent: a parked
