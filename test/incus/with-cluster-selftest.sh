@@ -18,10 +18,13 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 cat >"$T/bin/incus" <<'STUB'
 #!/usr/bin/env bash
-case "$*" in
-	*"--format json"*) printf '{"type":"virtual-machine"}\n' ;;
-	*"/proc/sys/kernel/random/boot_id"*) printf '00000000-0000-0000-0000-000000000001\n' ;;
-esac
+if [[ "$1" == list ]]; then
+	if [[ "${2:-}" == *: ]]; then name="${3:-}"; else name="${2#*:}"; fi
+	printf '[{"name":"%s","type":"virtual-machine"}]\n' "$name"
+fi
+if [[ "$*" == *"/proc/sys/kernel/random/boot_id"* ]]; then
+	printf '00000000-0000-0000-0000-000000000001\n'
+fi
 exit 0
 STUB
 chmod +x "$T/bin/incus"

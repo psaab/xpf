@@ -148,7 +148,7 @@ xpf_cell_wiring_check() {
 		printf '%s does not source cluster-cell.sh in its preamble (#4020 lock dropped?)\n' "$s"
 		return 1
 	fi
-	call_line=$(grep -n '^xpf_enter_destructive_cluster_cell' "$p" | head -1 | cut -d: -f1)
+	call_line=$(grep -n '^xpf_enter_destructive_cluster_cell[[:space:]]' "$p" | head -1 | cut -d: -f1)
 	if [[ -z "$call_line" ]]; then
 		printf '%s never calls xpf_enter_destructive_cluster_cell (#4020 lock dropped?)\n' "$s"
 		return 1
@@ -211,6 +211,8 @@ _wiring_fixture if-false.sh 'if false; then' "	${_wiring_src}" "	${_wiring_call}
 _wiring_fixture colon-src.sh ": ${_wiring_src}" "$_wiring_call" "$_wiring_mut"
 _wiring_fixture echo-call.sh "$_wiring_src" "echo ${_wiring_call}" "$_wiring_mut"
 _wiring_fixture or-call.sh "$_wiring_src" "true || ${_wiring_call}" "$_wiring_mut"
+_wiring_fixture indented-call.sh "$_wiring_src" 'lock() {' "	${_wiring_call}" '}' "$_wiring_mut" 'lock'
+_wiring_fixture redefined-call.sh "$_wiring_src" 'xpf_enter_destructive_cluster_cell() { :; }' "$_wiring_mut"
 if ! _out=$(xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
 	fail "static: the wiring check false-reds a correct script with a 70-line header: ${_out}"
 fi
@@ -220,7 +222,8 @@ for _fx in no-source:'does not source' commented-source:'does not source' \
 	source-after-call:'before sourcing' source-after-mutation:'before sourcing' \
 	call-after-mutation:'before taking the lock' no-call:'never calls' \
 	commented-call:'never calls' fn-wrapped:'does not source' if-false:'does not source' \
-	colon-src:'does not source' echo-call:'never calls' or-call:'never calls'; do
+	colon-src:'does not source' echo-call:'never calls' or-call:'never calls' \
+	indented-call:'never calls' redefined-call:'never calls'; do
 	_name="${_fx%%:*}" _want="${_fx#*:}"
 	if _out=$(xpf_cell_wiring_check "${_wiring_fx}/${_name}.sh"); then
 		fail "static: the wiring check accepted the ${_name} fixture (lock line ${_out})"
@@ -289,10 +292,15 @@ export XPF_CLUSTER_OWNER="$T/owner"
 mkdir -p "$T/bin"
 cat >"$T/bin/incus" <<'STUB'
 #!/usr/bin/env bash
-case "$*" in
-	*"--format json"*) printf '{"type":"virtual-machine"}\n' ;;
-	*"/proc/sys/kernel/random/boot_id"*) printf '00000000-0000-0000-0000-000000000001\n' ;;
+case "$1" in
+	list)
+		if [[ "${2:-}" == *: ]]; then name="${3:-}"; else name="${2#*:}"; fi
+		printf '[{"name":"%s","type":"virtual-machine"}]\n' "$name"
+		;;
 esac
+if [[ "$*" == *"/proc/sys/kernel/random/boot_id"* ]]; then
+	printf '00000000-0000-0000-0000-000000000001\n'
+fi
 exit 0
 STUB
 chmod +x "$T/bin/incus"
@@ -374,6 +382,7 @@ incus() {
 		calls=$(( $(cat "${INCUS_TRACE}.${n}.owner" 2>/dev/null || echo 0) + 1 ))
 		printf '%s' "$calls" >"${INCUS_TRACE}.${n}.owner"
 		[[ "$TEST_MODE" == owner-unreadable && "$n" == fw1 ]] && return 1
+		[[ "$TEST_MODE" == owner-after-unreadable && "$n" == fw0 && "$calls" -ge 2 ]] && return 1
 		local holder="$STUB_OWNER"
 		[[ "$TEST_MODE" == owner-moves && "$calls" -ge 2 ]] && holder=fw1
 		[[ "$TEST_MODE" == owner-none ]] && holder=none
@@ -395,13 +404,16 @@ incus() {
 		if [[ "$TEST_MODE" == owner-no-route6 ]]; then
 			printf 'RTNETLINK answers: Network is unreachable\n'
 			return 2
+		elif [[ "$TEST_MODE" == via-route6 ]]; then
+			printf '2001:559:8585:80::211 via fe80::1 dev ge-0-0-2.80 src 2001:559:8585:80::a metric 256 pref medium\n'
+		else
+			printf '2001:559:8585:80::211 from :: dev ge-0-0-2.80 proto kernel src 2001:559:8585:80::a metric 256 pref medium\n'
 		fi
-		printf '2001:559:8585:80::211 from :: dev ge-0-0-2.80 proto kernel src 2001:559:8585:80::a metric 256 pref medium\n'
 		;;
 	"exec ${STUB_OWNER} -- ip neigh show 172.16.80.211 dev ge-0-0-2.80")
 		case "$TEST_MODE" in
 		owner-failed | split-failed) printf '172.16.80.211 FAILED\n' ;;
-		owner-entry-missing) ;;
+		owner-entry-missing | split-entry-missing) ;;
 		split-v4-on-v6) printf '172.16.80.211 lladdr 00:11:22:33:44:66 REACHABLE\n' ;;
 		*) printf '172.16.80.211 lladdr 00:11:22:33:44:55 REACHABLE\n' ;;
 		esac
@@ -584,6 +596,9 @@ run_connectivity_case() {
 	via-route) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"not on-link"* ]] || fail "a via route to the target was not a not-on-link VOID" ;;
 	prefix) [[ "$output" == *"PASS  cluster: Group12 read-only neighbor identity on the RG owner fw0"* ]] || fail "a text-prefix address on fw1 was counted as holding WAN_GW80_4" ;;
 	route-local-fail) [[ "$output" == *"FAIL  cluster: Group12 IPv4 route"* ]] || fail "local route was not a measured FAIL" ;;
+	split-entry-missing) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity on the RG owner fw0"*"v4 ip neigh show 172.16.80.211"* ]] || fail "a split-mode missing v4 entry was not a VOID" ;;
+	owner-after-unreadable) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"RG owner changed during the reads"*"could not read"* ]] || fail "an unreadable second owner read was not a VOID naming it" ;;
+	via-route6) [[ "$output" == *"VOID  cluster: Group12 read-only neighbor identity"*"not on-link"* ]] || fail "a v6 via route to the target was not a not-on-link VOID" ;;
 	esac
 	ok "test_cluster Groups 10–12 behavior: ${mode}"
 }
@@ -610,6 +625,9 @@ run_connectivity_case owner-moves "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case owner-unreadable "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case owner-entry-missing "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case owner-no-route6 "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case split-entry-missing "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case owner-after-unreadable "PASS=8 FAIL=0 VOID=1"
+run_connectivity_case via-route6 "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case via-route "PASS=8 FAIL=0 VOID=1"
 run_connectivity_case prefix "PASS=9 FAIL=0 VOID=0"
 ok "Groups 10–12 issue read-only route-scoped neighbor queries only"

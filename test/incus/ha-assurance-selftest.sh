@@ -1477,6 +1477,7 @@ CLAIM_OTHER_CLUSTER=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 02
 CLAIM_OTHER_AND_FOREIGN=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 18:e8:29:2c:13:7a probe\nreply 172.16.50.10 02:bf:72:16:01:00 probe\n'"$GWP"
 CLAIM_PHYS=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.10 10:66:6a:f6:c3:d2 probe\n'"$GWP"
 CLAIM_GW_OTHER=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.1 00:10:db:ff:10:01 other'
+CLAIM_GW_WRONGFIELD=$'iface ge-0-0-2.50 02:bf:72:17:01:00\nreply 172.16.50.1 02:bf:72:17:01:00 probe'
 CLAIM_DRIFT=$'iface ge-0-0-2.50 02:bf:72:18:01:00\n'"$GWP"
 CLAIM_NORETH=$'iface ge-0-0-2.50 10:66:6a:f6:c3:d2\n'"$GWP"
 CLAIM_BLIND=$'iface ge-0-0-2.50 02:bf:72:17:01:00'
@@ -1505,6 +1506,9 @@ assert_helper_status 0 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PHYS"$'\nown 
 assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_PHYS"
 # The gateway control counts only an answer to OUR probe.
 assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_GW_OTHER"
+assert_helper_status 2 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_GW_WRONGFIELD"
+assert_contains "$(<"${ERR}")" 'probe read the wrong field' \
+	'a gateway-only wrong-field reply is VOID, never a PASS'
 # A foreign claim is positive evidence even when the gateway was silent.
 assert_helper_status 1 wcv "$OWN" 172.16.50.10 172.16.50.1 "$CLAIM_DUP_BLIND"
 # Identity: conf vs live RETH MAC disagree -> VOID; no conf -> the live
@@ -1789,21 +1793,35 @@ assert_eq "$(claim_cell_run 1)" FAIL 'test-connectivity claim cell: a non-xpf cl
 assert_eq "$(claim_cell_run 3)" FAIL 'test-connectivity claim cell: another xpf cluster FAILs'
 assert_eq "$(claim_cell_run 2)" VOID 'test-connectivity claim cell: an unmeasured probe is VOID'
 # #18580: reachability, not text. Run the extracted test_cluster with every
-# helper it calls failing as an unknown command does (command_not_found_handle
-# returns 127, as bash itself would), incus refused and the firewall nodes
-# "running", and count real invocations of the cell. Run it with the LAN host
-# running and with it stopped: the cell must be reached once in each, so a
-# call moved into either branch of the LAN-host check, into a dead branch or
-# after an early return is caught.
+# helper it calls as a successful empty no-op and incus returning success with
+# empty output. That keeps this reachability probe runnable under set -eu while
+# counting real invocations of the cell. Run it with the LAN host running and
+# stopped: the cell must be reached once in each, so a call moved into either
+# branch of the LAN-host check, into a dead branch or after an early return is
+# caught.
 reach_count() { # <wiring-file> <cell> <lan-running|lan-stopped>
 	(
-		set +eu
+		set -eu
 		CALLS="${TMP_DIR}/reach-calls-${2}-${3}"
 		: >"$CALLS"
 		# shellcheck disable=SC1090
 		source "$1"
-		command_not_found_handle() { return 127; }
-		incus() { return 1; }
+		command_not_found_handle() { return 0; }
+		incus() { return 0; }
+		pass() { :; }
+		fail() { :; }
+		void() { :; }
+		info() { :; }
+		skip() { :; }
+		assurance_verdict() { :; }
+		xpf_assert_cluster_lock_idle() { :; }
+		service_check() { :; }
+		failover_clock_ntp_cell() { :; }
+		ping_test() { :; }
+		ping6_test() { :; }
+		mtr_test() { :; }
+		internet_test() { :; }
+		target_neighbor_identity_cell() { :; }
 		LAN_STATE="$3"
 		instance_running() {
 			[[ "$1" == "$FW0" || "$1" == "$FW1" ]] && return 0
@@ -1811,7 +1829,11 @@ reach_count() { # <wiring-file> <cell> <lan-running|lan-stopped>
 		}
 		wan_claim_cell() { printf 'wan_claim_cell\n' >>"$CALLS"; }
 		iperf_target_claim_cell() { printf 'iperf_target_claim_cell\n' >>"$CALLS"; }
-		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF=/nonexistent PROJECT_ROOT="$ROOT"
+		FW0=loss:fw0 FW1=loss:fw1 CLUSTER_LAN_HOST=loss:lan CLUSTER_CONF="${ROOT}/docs/ha-cluster.conf" PROJECT_ROOT="$ROOT"
+		SCRIPT_DIR="${ROOT}/test/incus"
+		WAN_GW4=10.0.0.1 LAN_HOST_IP=172.16.80.10 LAN_VIP4=172.16.80.1
+		LAN_VIP6=2001:559:8585:80::1 IPERF_TARGET4=172.16.80.211
+		IPERF_TARGET6=2001:559:8585:80::211 WAN_GW80_4=172.16.80.10
 		test_cluster >/dev/null 2>&1
 		grep -cxF "$2" "$CALLS"
 	)
