@@ -96,12 +96,12 @@ use crate::test_support::source_scan::{
 /// the README. Do not "fix" one number to match the other by
 /// widening a ceiling; re-measure with the stated rule instead.
 const UNSAFE_CEILING_PER_DIR: &[(&str, usize)] = &[
-    (".", 97),
-    ("afxdp", 80),
+    (".", 95),
+    ("afxdp", 78),
     ("afxdp/binding_state", 2),
-    // #18560: +3, the userspace_ctrl row open (map info), lookup and update
+    // #18560 added the userspace_ctrl row open (map info), lookup and update
     // (`bpf_map/ctrl_row.rs`) behind the helper-side stamp advance.
-    ("afxdp/bpf_map", 67),
+    ("afxdp/bpf_map", 51),
     ("afxdp/coordinator", 0),
     ("afxdp/coordinator/reconcile", 0),
     ("afxdp/coordinator/wg_control", 30),
@@ -111,18 +111,18 @@ const UNSAFE_CEILING_PER_DIR: &[(&str, usize)] = &[
     ("afxdp/forwarding", 12),
     ("afxdp/forwarding_build", 0),
     ("afxdp/forwarding_build/cos", 0),
-    ("afxdp/frame", 10),
+    ("afxdp/frame", 9),
     ("afxdp/frame/build", 1),
     ("afxdp/frame/rewrite", 1),
     ("afxdp/ha", 0),
     ("afxdp/icmp_embed", 0),
     ("afxdp/mirror", 1),
-    ("afxdp/poll_descriptor", 15),
+    ("afxdp/poll_descriptor", 4),
     ("afxdp/session_glue", 0),
     ("afxdp/session_glue/commands", 0),
     ("afxdp/shared_ops", 0),
     ("afxdp/tx", 8),
-    ("afxdp/tx/dispatch", 5),
+    ("afxdp/tx/dispatch", 3),
     ("afxdp/tx/dispatch/tests", 0),
     ("afxdp/tx/drain", 2),
     ("afxdp/tx/transmit", 2),
@@ -130,7 +130,7 @@ const UNSAFE_CEILING_PER_DIR: &[(&str, usize)] = &[
     ("afxdp/types/shared_cos_lease", 0),
     ("afxdp/umem", 9),
     ("afxdp/wg", 3),
-    ("afxdp/worker", 5),
+    ("afxdp/worker", 3),
     ("afxdp/worker/cos", 0),
     ("afxdp/worker/loop_body", 2),
     ("bin", 0),
@@ -146,7 +146,7 @@ const UNSAFE_CEILING_PER_DIR: &[(&str, usize)] = &[
     ("nat/source", 0),
     ("protocol", 0),
     ("screen", 0),
-    ("server", 3),
+    ("server", 5),
     ("server/handlers", 0),
     ("server/helpers", 0),
     ("session", 0),
@@ -453,35 +453,16 @@ fn production_unsafe_only_ever_decreases_per_directory_16187() {
     }
 
     assert!(
-        uncovered.is_empty(),
-        "{} director(ies) contain production unsafe with NO ceiling row:\n  {}\n\n\
-         A new directory gained unsafe surface with no published baseline. \
-         Add the directory to UNSAFE_CEILING_PER_DIR at the measured count \
-         ONLY if the new unsafe is deliberate and reviewed — the ceiling is \
-         the audit surface, so adding a row is the act of accepting it. \
-         Prefer removing the unsafe.",
+        uncovered.is_empty() && regressions.is_empty() && improvements.is_empty(),
+        "unsafe ratchet found row violations:\n\n\
+         {} director(ies) contain production unsafe with NO ceiling row:\n  {}\n\n\
+         {} director(ies) GAINED production unsafe:\n  {}\n\n\
+         {} director(ies) now have FEWER production unsafe hits than their \
+         ceiling; tighten the ceiling to the census count:\n  {}",
         uncovered.len(),
-        uncovered.join("\n  ")
-    );
-    assert!(
-        regressions.is_empty(),
-        "{} director(ies) GAINED production unsafe:\n  {}\n\n\
-         New unsafe in a packet-path binary must be a deliberate, visible \
-         act (#16187). If this unsafe is genuinely required, raise the \
-         named ceiling in UNSAFE_CEILING_PER_DIR in this same change and \
-         say why in the commit — that diff is the review surface. If it \
-         is not required, remove it. Do not delete this assertion.",
+        uncovered.join("\n  "),
         regressions.len(),
-        regressions.join("\n  ")
-    );
-    // Improvements are not a failure, but the ceiling must be
-    // tightened or the ratchet silently stops ratcheting.
-    assert!(
-        improvements.is_empty(),
-        "{} director(ies) now have FEWER production unsafe hits than their \
-         ceiling. That is the fix working — tighten the ceiling in \
-         UNSAFE_CEILING_PER_DIR to the new numbers so the ground gained \
-         is held:\n  {}",
+        regressions.join("\n  "),
         improvements.len(),
         improvements.join("\n  ")
     );

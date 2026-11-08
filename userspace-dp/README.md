@@ -776,3 +776,18 @@ the same commit, or add unsafe only with a raised ceiling in the
 same diff — that diff is the review. A first unsafe in a
 zero-ceiling directory (`forwarding_build/`, `session/`, `filter/`,
 …) reds by name. Test files are not policed by this ratchet.
+
+The five `server/` hits at this ratchet revision are retained for distinct
+OS interactions; none has a safe standard-library equivalent:
+
+| Site | Required operation |
+|---|---|
+| `server/accept_loop.rs` | `poll(2)` waits on the listener fd and distinguishes queued connections from hangup/error states without spinning. |
+| `server/lifecycle.rs` (`getsockopt`) | `SO_PEERCRED` reads the connecting Unix peer's kernel credentials; `UnixStream::peer_cred` remains unstable. |
+| `server/lifecycle.rs` (`geteuid`) | `geteuid(2)` obtains this process's uid for the peer authorization comparison. |
+| `server/lifecycle.rs` (`signal`) | `signal(2)` installs `SIG_IGN` for SIGHUP before helper threads start. |
+| `server/reinject_9506.rs` | `recv(MSG_PEEK | MSG_DONTWAIT)` checks the queued completion byte without consuming it or blocking the shutdown loop. |
+
+The source ratchet reports uncovered directories, increased counts, and
+untightened decreases in one failure, so a regression in one row cannot hide
+the remaining rows' status.
