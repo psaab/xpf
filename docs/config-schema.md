@@ -11728,8 +11728,10 @@ reserved for whole-dataplane selection where a rewrite shim
     conversion and subnet-mask rules, DN wildcard RDN values, and DN encodings
     differing only in BER length octets (because `matches_dn` skips
     `equals()`'s total-length check). Regex exact and prefix forms are
-    intersected directly; if a regex language cannot be decided, it is treated
-    as colliding rather than left fail-open. A DN and a KEY_ID/FQDN raw
+    intersected directly against their literal-language models. strongSwan
+    regexes inspect the printable `%Y` identity; nonprintable encodings are
+    not assumed disjoint, and undecidable languages are treated as collisions.
+    A DN and a KEY_ID/FQDN raw
     encoding of the same DER remain type-distinct and do not collide, in either
     gateway order.
     An effective local identity is a directed lookup:

@@ -689,6 +689,9 @@ func ipsecClassifyRegexOwner(identity ipsecIKEIdentity) ipsecRegexOwnerPattern {
 		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
 	}
 	pattern := identity.encoding
+	if !ipsecRegexStringPrintable(pattern) {
+		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
+	}
 	if len(pattern) < 2 || pattern[0] != '^' || pattern[len(pattern)-1] != '$' {
 		return ipsecRegexOwnerPattern{kind: ipsecRegexOwnerUndecidable}
 	}
@@ -753,9 +756,10 @@ func ipsecRegexLiteral(pattern string) (string, bool) {
 	}
 	return literal.String(), true
 }
-func ipsecRegexStringASCII(value string) bool {
+
+func ipsecRegexStringPrintable(value string) bool {
 	for i := 0; i < len(value); i++ {
-		if value[i] >= 0x80 {
+		if value[i] < 0x20 || value[i] > 0x7e {
 			return false
 		}
 	}
@@ -763,19 +767,19 @@ func ipsecRegexStringASCII(value string) bool {
 }
 
 func ipsecRegexPatternMatches(pattern ipsecRegexOwnerPattern, value string) bool {
-	// REG_ICASE behavior outside ASCII depends on the charon's locale; never
-	// use the ASCII model to prove a non-ASCII candidate disjoint.
-	if !ipsecRegexStringASCII(value) {
+	// REG_ICASE behavior outside printable ASCII depends on charon's locale,
+	// and strongSwan replaces nonprintable identity bytes with '?' for `%Y`.
+	// Never use the raw encoding to prove such a candidate disjoint.
+	if !ipsecRegexStringPrintable(value) {
 		return true
 	}
 	switch pattern.kind {
 	case ipsecRegexOwnerMatchAll:
-		return !strings.Contains(value, "\n")
+		return true
 	case ipsecRegexOwnerExact:
 		return ipsecASCIIEqualFold(pattern.literal, value)
 	case ipsecRegexOwnerPrefix:
-		return ipsecASCIIHasPrefix(value, pattern.literal) &&
-			!strings.Contains(value[len(pattern.literal):], "\n")
+		return ipsecASCIIHasPrefix(value, pattern.literal)
 	default:
 		return false
 	}
@@ -803,7 +807,7 @@ func ipsecRegexIdentityOwnersIntersect(a, b ipsecIKEIdentity) (string, bool) {
 			return "", false
 		}
 		if strings.IndexByte(other.encoding, 0) >= 0 ||
-			!ipsecRegexStringASCII(other.encoding) {
+			!ipsecRegexStringPrintable(other.encoding) {
 			return "undecidable regex owner intersection", true
 		}
 		if strings.HasPrefix(other.encoding, "*") {
@@ -1356,7 +1360,8 @@ func ipsecLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, bool) {
 			return "", false
 		}
 		if pattern.kind == ipsecRegexOwnerUndecidable ||
-			strings.IndexByte(lookup.encoding, 0) >= 0 {
+			strings.IndexByte(lookup.encoding, 0) >= 0 ||
+			!ipsecRegexStringPrintable(lookup.encoding) {
 			return "undecidable regex owner lookup", true
 		}
 		if ipsecRegexPatternMatches(pattern, lookup.encoding) {

@@ -1061,9 +1061,10 @@ all files stay in `package ipsec`, so the public API is unchanged.
   regex owners (`fqdn:`/`dns:`, `rfc822:`/`email:`/`userfqdn:` and `asn1dn:`),
   address/subnet/range match sets using strongSwan's range conversion and
   subnet-mask matching, and DN RDN patterns.
-  Regex exact and prefix forms are intersected directly;
-  undecidable regex languages fail closed as possible collisions. DN matching
-  can match encodings that differ only in BER length octets because
+  Regex exact and prefix forms are intersected directly. strongSwan runs regexes
+  against the printable `%Y` identity, so nonprintable encodings are not
+  assumed disjoint; undecidable languages fail closed as possible collisions.
+  DN matching can match encodings that differ only in BER length octets because
   `matches_dn` skips `equals()`'s total-length check; a `*` DN value matches
   any value at that RDN. A DN and a KEY_ID (or FQDN raw bytes) with the same
   DER remain type-distinct and do not select each other's secret.

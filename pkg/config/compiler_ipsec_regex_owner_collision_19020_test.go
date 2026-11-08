@@ -15,6 +15,16 @@ func TestIPsecRegexOwnerCollision19020(t *testing.T) {
 		}
 	})
 
+	t.Run("match-all regex intersects raw nonprintable owner encoding", func(t *testing.T) {
+		for _, pair := range [][4]string{
+			{"inet", "fqdn:^.*$", "inet", "fqdn:#780a79"},
+			{"inet", "fqdn:#780a79", "inet", "fqdn:^.*$"},
+		} {
+			requireCollision17772(t, identityPair17772(pair[0], pair[1], pair[2], pair[3]))
+		}
+	})
+
+
 	t.Run("literal and prefix regexes retain their language", func(t *testing.T) {
 		requireCollision17772(t, identityPair17772("inet", "fqdn:^vpn$", "hostname", "vpn"))
 		requireNoCollision17772(t, identityPair17772("inet", "fqdn:^vpn$", "hostname", "other"))
@@ -51,6 +61,7 @@ func TestIPsecRegexOwnerLookupSelectsOwner19020(t *testing.T) {
 		wantSelect bool
 	}{
 		{"match all", "^.*$", "hostname", "vpn.example", true},
+		{"match all matches raw nonprintable FQDN bytes", "^.*$", "inet", "fqdn:#780a79", true},
 		{"exact match", "^vpn$", "hostname", "vpn", true},
 		{"exact mismatch", "^vpn$", "hostname", "other", false},
 		{"prefix match", "^vpn.*$", "hostname", "vpn.example", true},
