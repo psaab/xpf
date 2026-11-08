@@ -2154,83 +2154,154 @@ assert_contains "$(<"${ERR}")" 'Session misses paired delta 2000 (node0=1000 nod
 # misses` line. VOID.
 g1_row - 15 0 41 39 0
 assert_helper_status 2 g1b_verdict
-printf 'Group 1c continuous UDP sequence and translated-identity continuity (#18679)\n'
-UDP_PROBE_BEFORE="${RG1_DIR}/udp-before.log"
+printf 'Group 1c continuous UDP session continuity (#18679)\n'
+UDP_PROBE_CHECKPOINT="${RG1_DIR}/udp-after-cli.log"
 UDP_PROBE_SURVIVED="${RG1_DIR}/udp-survived.log"
 UDP_PROBE_RECREATED="${RG1_DIR}/udp-recreated.log"
 UDP_PROBE_LOST="${RG1_DIR}/udp-lost.log"
-cat >"$UDP_PROBE_BEFORE" <<'UDP'
-SENT 0
-REPLY 0 172.16.80.7 41000
-SENT 1
-REPLY 1 172.16.80.7 41000
-SENT 2
-REPLY 2 172.16.80.7 41000
+UDP_PROBE_PRE="${RG1_DIR}/udp-before-cli.log"
+cat >"$UDP_PROBE_PRE" <<'UDP'
+BOOT 0123456789abcdef0123456789abcdef
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
+SENT 100
+REPLY 100 172.16.80.7 41000
 UDP
+cat >"$UDP_PROBE_CHECKPOINT" <<'UDP'
+BOOT 0123456789abcdef0123456789abcdef
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
+SENT 100
+REPLY 100 172.16.80.7 41000
+SENT 101
+REPLY 101 172.16.80.7 41000
+SENT 102
+REPLY 102 172.16.80.7 41000
+UDP
+# The replies through 102 are the realistic 0.1-0.4s grace packets emitted
+# while the CLI was running. They are already in the post-return checkpoint;
+# only later sends/replies can prove survival.
 cat >"$UDP_PROBE_SURVIVED" <<'UDP'
-SENT 0
-REPLY 0 172.16.80.7 41000
-SENT 1
-REPLY 1 172.16.80.7 41000
-SENT 2
-REPLY 2 172.16.80.7 41000
-SENT 3
-REPLY 3 172.16.80.7 41000
-SENT 4
-SENT 5
-REPLY 5 172.16.80.7 41000
+BOOT 0123456789abcdef0123456789abcdef
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
+SENT 100
+REPLY 100 172.16.80.7 41000
+SENT 101
+REPLY 101 172.16.80.7 41000
+SENT 102
+REPLY 102 172.16.80.7 41000
+SENT 103
+REPLY 103 172.16.80.7 41000
+SENT 104
+REPLY 104 172.16.80.7 41000
+SENT 105
+REPLY 105 172.16.80.7 41000
 UDP
-assert_helper_status 0 ha_udp_probe_survival_verdict "$UDP_PROBE_BEFORE" "$UDP_PROBE_SURVIVED"
-assert_contains "$(<"${OUT}")" 'SURVIVED: sequence advanced 2->5' 'UDP survived fixture sequence continuity'
-assert_contains "$(<"${OUT}")" 'lost=1 reordered=0' 'UDP survived fixture counts sequence loss'
+assert_helper_status 0 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SURVIVED" 71 71
+assert_contains "$(<"${OUT}")" 'SURVIVED: firewall Session ID 71 persisted; sequence advanced 102->105' \
+	'UDP survived fixture proves post-CLI sequence and stable firewall session identity'
+assert_contains "$(<"${OUT}")" 'lost=0 reordered=0' 'UDP survived fixture counts post-CLI replies'
+assert_helper_status 2 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SURVIVED" "" 71
+assert_contains "$(<"${ERR}")" 'no matching firewall session in the synced pre-move baseline' \
+	'missing synced standby session identity is per-cell VOID'
 cat >"$UDP_PROBE_LOST" <<'UDP'
-SENT 0
-REPLY 0 172.16.80.7 41000
-SENT 1
-REPLY 1 172.16.80.7 41000
-SENT 2
-REPLY 2 172.16.80.7 41000
-SENT 3
-SENT 4
-SENT 5
+BOOT 0123456789abcdef0123456789abcdef
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
+SENT 100
+REPLY 100 172.16.80.7 41000
+SENT 101
+REPLY 101 172.16.80.7 41000
+SENT 102
+REPLY 102 172.16.80.7 41000
+SENT 103
+SENT 104
+SENT 105
 UDP
-assert_helper_status 1 ha_udp_probe_survival_verdict "$UDP_PROBE_BEFORE" "$UDP_PROBE_LOST"
-assert_contains "$(<"${ERR}")" 'UDP probe LOST: sent 3 post-move datagrams (seq 3..5) but received no replies' \
-	'UDP post-move silence cannot be satisfied by pre-move replies'
+assert_helper_status 1 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_LOST" 71 71
+assert_contains "$(<"${ERR}")" 'UDP probe LOST: confirmed 3 post-move datagrams (seq 103..105) but received no replies' \
+	'grace replies emitted during CLI latency cannot satisfy the post-return window'
 cat >"$UDP_PROBE_RECREATED" <<'UDP'
+BOOT 0123456789abcdef0123456789abcdef
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
+SENT 100
+REPLY 100 172.16.80.7 41000
+SENT 101
+REPLY 101 172.16.80.7 41000
+SENT 102
+REPLY 102 172.16.80.7 41000
+SENT 103
+REPLY 103 172.16.80.7 41000
+SENT 104
+REPLY 104 172.16.80.7 41000
+SENT 105
+REPLY 105 172.16.80.7 41000
+UDP
+assert_helper_status 1 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_RECREATED" 71 84
+assert_contains "$(<"${ERR}")" 'RECREATED: firewall Session ID changed 71->84' \
+	'recreated fixture is caught despite the same client socket and preserved translated tuple'
+# The real CLI writes the local node header before its rows. Ignore that first
+# header and stop before the peer block to select the local flow's stable ID.
+UDP_PROBE_SESSIONS="${RG1_DIR}/udp-sessions.txt"
+cat >"$UDP_PROBE_SESSIONS" <<'CLI'
+node0:
+--------------------------------------------------------------------------
+Session ID: 71, Policy name: allow/1, Timeout: 30, Origin: USERSPACE, Session State: Unknown
+  In: 10.33.0.5/39000 --> 172.16.80.202/6201;udp, Conn Tag: 0x0, If: ge-0/0/1.80
+
+node1:
+--------------------------------------------------------------------------
+Session ID: 84, Policy name: allow/1, Timeout: 30, Origin: USERSPACE, Session State: Unknown
+  In: 10.33.0.5/39000 --> 172.16.80.202/6201;udp, Conn Tag: 0x0, If: ge-0/0/1.80
+CLI
+assert_helper_status 0 python3 "${ROOT}/test/incus/udp_session_probe.py" session-id \
+	"$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SESSIONS"
+assert_contains "$(<"${OUT}")" '71' 'session-id parser selects the local header row, not the peer copy'
+UDP_PROBE_RESET="${RG1_DIR}/udp-reset.log"
+cat >"$UDP_PROBE_RESET" <<'UDP'
+BOOT fedcba9876543210fedcba9876543210
+SOCKET 10.33.0.5 39000 172.16.80.202 6201
 SENT 0
 REPLY 0 172.16.80.7 41000
-SENT 1
-REPLY 1 172.16.80.7 41000
-SENT 2
-REPLY 2 172.16.80.7 41000
-SENT 3
-REPLY 3 172.16.80.7 41001
-SENT 4
-REPLY 4 172.16.80.7 41001
 UDP
-assert_helper_status 1 ha_udp_probe_survival_verdict "$UDP_PROBE_BEFORE" "$UDP_PROBE_RECREATED"
-assert_contains "$(<"${ERR}")" 'RECREATED: seq 3 arrived with translated identity 172.16.80.7:41001' \
-	'UDP recreated fixture reds survived assertion with identity evidence'
-# Fail-on-revert: removing the identity comparison makes this same recreated
-# fixture PASS, and that would violate the exact status-1 assertion above.
-UDP_PROBE_IDENTITY_MUTANT="${RG1_DIR}/udp-session-probe-identity-reverted.py"
-python3 - "${ROOT}/test/incus/udp_session_probe.py" "$UDP_PROBE_IDENTITY_MUTANT" <<'PY'
+assert_helper_status 0 python3 "${ROOT}/test/incus/udp_session_probe.py" same-client \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT"
+assert_contains "$(<"${OUT}")" 'client identity persisted' 'same-client accepts adjacent snapshots of one sender'
+assert_helper_status 2 python3 "${ROOT}/test/incus/udp_session_probe.py" same-client \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_RESET"
+assert_contains "$(<"${ERR}")" 'boot nonce changed' 'same-client refuses a restarted probe sender'
+assert_helper_status 2 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_RESET" 71 71
+assert_contains "$(<"${ERR}")" 'sender restarted (boot nonce' \
+	'a sender restart without firewall session change is VOID'
+UDP_PROBE_SENDERR="${RG1_DIR}/udp-senderr.log"
+cat "$UDP_PROBE_CHECKPOINT" >"$UDP_PROBE_SENDERR"
+printf 'SENDERR 103\n' >>"$UDP_PROBE_SENDERR"
+assert_helper_status 2 ha_udp_probe_survival_verdict \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SENDERR" 71 71
+assert_contains "$(<"${ERR}")" 'made no confirmed sends after the move returned' \
+	'a failed UDP send is not counted as observed post-move traffic'
+# Fail-on-revert: removing the firewall Session ID comparison makes the
+# same-tuple recreated fixture PASS, so this exact assertion kills the revert.
+UDP_PROBE_SESSION_MUTANT="${RG1_DIR}/udp-session-probe-session-id-reverted.py"
+python3 - "${ROOT}/test/incus/udp_session_probe.py" "$UDP_PROBE_SESSION_MUTANT" <<'PY'
 import pathlib
 import sys
 
 source, output = map(pathlib.Path, sys.argv[1:])
 text = source.read_text(encoding="utf-8")
-anchor = "if identity != baseline_identity:"
+anchor = "if after_session_id and before_session_id != after_session_id:"
 if text.count(anchor) != 1:
-    raise SystemExit(f"UDP identity mutant anchor count is {text.count(anchor)}, want 1")
+    raise SystemExit(f"UDP Session ID mutant anchor count is {text.count(anchor)}, want 1")
 output.write_text(text.replace(anchor, "if False:"), encoding="utf-8")
 PY
-if ( assert_helper_status 1 python3 "$UDP_PROBE_IDENTITY_MUTANT" classify \
-	"$UDP_PROBE_BEFORE" "$UDP_PROBE_RECREATED" ) >"${OUT}" 2>"${ERR}"; then
-	fail_test 'UDP recreated fixture did not fail its survived assertion under identity-comparison revert'
+if ( assert_helper_status 1 python3 "$UDP_PROBE_SESSION_MUTANT" classify \
+	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_RECREATED" \
+	--before-session-id 71 --after-session-id 84 ) >"${OUT}" 2>"${ERR}"; then
+	fail_test 'same-tuple recreated fixture did not fail its survived assertion under Session ID comparison revert'
 fi
-assert_contains "$(<"${ERR}")" 'expected 1, got 0' 'UDP recreated fixture kills the identity-comparison revert'
+assert_contains "$(<"${ERR}")" 'expected 1, got 0' 'recreated fixture kills the Session ID comparison revert'
 
 # The report-only host-inbound path (#18681): the helper PID from the
 # data-plane capture is appended to the flow-statistics capture, then the
@@ -2548,7 +2619,7 @@ if not body:
 b = body.group(0)
 a = re.findall(r'ha_emit_verdict "RG1 Group 1a [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops"', b)
 f = re.findall(r'ha_emit_verdict "RG1 Group 1b [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses"', b)
-udp = re.findall(r'ha_emit_diagnostic_verdict "RG1 Group 1c [^"]*"\s*\\\n\s*ha_udp_probe_survival_verdict "\$RG1_UDP_BEFORE" "\$RG1_UDP_AFTER"', b)
+udp = re.findall(r'ha_emit_diagnostic_verdict "RG1 Group 1c [^"]*"\s*\\\n\s*ha_udp_probe_survival_verdict "\$RG1_UDP_BEFORE" "\$RG1_UDP_AFTER_CLI" "\$RG1_UDP_AFTER" \\\n\s*"\$RG1_UDP_SESSION_BEFORE" "\$RG1_UDP_SESSION_AFTER"', b)
 if len(a) != 1 or len(f) != 1 or len(udp) != 1:
     raise SystemExit(1)
 if 'MAX_FAILOVER_SESSION_MISS_DELTA+x' not in text:
@@ -2561,13 +2632,25 @@ run = re.search(r"^ha_run_rg1_failback_slice\(\) \{\n.*?^\}\n", text, re.M | re.
 if not run or "ha_rg1_udp_begin" not in run.group(0) or "ha_rg1_udp_finish" not in run.group(0):
     raise SystemExit(1)
 move_body = run.group(0)
-if ("ha_rg1_udp_before_move" not in move_body or "request_output=$(incus exec \"$FW1\"" not in move_body
-        or move_body.index("ha_rg1_udp_before_move") > move_body.index("request_output=$(incus exec \"$FW1\"")):
+request = move_body.find('request_output=$(incus exec "$FW1"')
+post_cli = move_body.find("ha_rg1_udp_after_cli")
+owner_poll = move_body.find('ha_wait_rg1_owner node0')
+if ("ha_rg1_udp_before_move" not in move_body or min(request, post_cli, owner_poll) < 0
+        or not request < post_cli < owner_poll or "ha_rg1_udp_after_move" not in move_body):
     raise SystemExit(1)
 checkpoint = re.search(r"^ha_rg1_udp_before_move\(\) \{\n.*?^\}\n", text, re.M | re.S)
-if not checkpoint or "ha_udp_probe_snapshot" not in checkpoint.group(0) or 'baseline "$RG1_UDP_BEFORE"' not in checkpoint.group(0):
+if not checkpoint or "ha_udp_probe_session_id" not in checkpoint.group(0):
     raise SystemExit(1)
-if 'void "RG1 Group 1c UDP datagram continuity: ${RG1_UDP_REASON}"' not in b:
+checkpoint_body = checkpoint.group(0)
+first_snapshot = checkpoint_body.find('ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_SESSION_PROBE"')
+session_query = checkpoint_body.find("ha_udp_probe_session_id")
+pre_cli_snapshot = checkpoint_body.find('ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_BEFORE"')
+if (min(first_snapshot, session_query, pre_cli_snapshot) < 0
+        or not first_snapshot < session_query < pre_cli_snapshot
+        or "same-client" not in checkpoint_body
+        or 'baseline "$RG1_UDP_BEFORE"' not in checkpoint_body):
+    raise SystemExit(1)
+if 'void "RG1 Group 1c UDP session continuity: ${RG1_UDP_REASON}"' not in b:
     raise SystemExit(1)
 PY
 

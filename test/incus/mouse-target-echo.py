@@ -45,13 +45,16 @@ class UDPProbeEcho(asyncio.DatagramProtocol):
 
     def datagram_received(self, data, addr):
         try:
-            magic, run_id, sequence = data.decode("ascii").split()
+            magic, run_id, boot_id, sequence = data.decode("ascii").split()
             if magic != UDP_PROBE_MAGIC:
                 return
             if (not all(char.isalnum() or char in "_.-" for char in run_id)
+                    or len(boot_id) != 32
+                    or any(char not in "0123456789abcdef" for char in boot_id)
                     or not sequence.isascii() or not sequence.isdigit()):
                 return
-            response = f"{UDP_PROBE_MAGIC} {run_id} {sequence} {addr[0]} {addr[1]}"
+            response = (f"{UDP_PROBE_MAGIC} {run_id} {boot_id} {sequence} "
+                        f"{addr[0]} {addr[1]}")
             self.transport.sendto(response.encode("ascii"), addr)
         except (UnicodeDecodeError, ValueError):
             return

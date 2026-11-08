@@ -2163,11 +2163,10 @@ ha_rg_owner_node() {
 }
 
 # #18679: launch the long-lived sequence-numbered UDP probe on the LAN host.
-# It uses one socket for the whole window so the observed reply identity is
-# the actual NAT 5-tuple. Per-window snapshots are cumulative; the pure
-# classifier below counts post-baseline sequence gaps/reordering and detects
-# either a changed translated identity (RECREATED), a silent window (LOST),
-# or continuous forwarding (SURVIVED).
+# One client socket and boot nonce span the move; a firewall Session ID from the
+# target node's synced standby state is compared with the same node after
+# promotion. Post-CLI snapshots keep grace replies from command latency out of
+# the measured window.
 ha_udp_probe_start() {
 	if [[ $# -ne 5 ]]; then
 		printf 'UDP probe start: expected <run-id> <client-host> <target-ip> <target-port> <remote-dir>\n' >&2
@@ -2230,15 +2229,32 @@ ha_udp_probe_stop() {
 	incus exec "$client" -- rm -rf "$remote_dir" >/dev/null 2>&1 || true
 }
 
+
+# ha_udp_probe_session_id <node> <probe-snapshot> <session-capture>
+# Query the exact client UDP tuple on the local firewall and print its Session ID.
+ha_udp_probe_session_id() {
+	if [[ $# -ne 3 ]]; then
+		printf 'UDP probe session ID: expected <node> <probe-snapshot> <session-capture>\n' >&2
+		return 2
+	fi
+	local node="$1" probe_snapshot="$2" capture="$3" lib_dir
+	lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 2
+	if ! incus exec "$node" -- cli -c 'show security flow session' >"$capture" 2>/dev/null; then
+		printf 'UDP probe session ID: could not capture flow sessions on %s\n' "$node" >&2
+		return 2
+	fi
+	python3 "${lib_dir}/udp_session_probe.py" session-id "$probe_snapshot" "$capture"
+}
 # The common shell verdict API; rg_move_soak.py imports the same Python core.
 # Status 0=SURVIVED, 1=measured RECREATED/LOST FAIL, 2=unusable evidence VOID.
 ha_udp_probe_survival_verdict() {
-	if [[ $# -ne 2 ]]; then
-		printf 'UDP probe survival: expected <before-snapshot> <after-snapshot>\n' >&2
+	if [[ $# -ne 5 ]]; then
+		printf 'UDP probe survival: expected <pre-CLI-snapshot> <post-CLI-checkpoint> <after-snapshot> <before-session-id> <after-session-id>\n' >&2
 		return 2
 	fi
 	local lib_dir
 	lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 2
-	python3 "${lib_dir}/udp_session_probe.py" classify "$1" "$2"
+	python3 "${lib_dir}/udp_session_probe.py" classify "$1" "$2" "$3" \
+		--before-session-id "$4" --after-session-id "$5"
 }
 

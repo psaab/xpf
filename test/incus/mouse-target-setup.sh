@@ -174,6 +174,7 @@ claim_skip_markers() {
 }
 
 do_up() {
+    local echo_source_hash echo_installed_hash echo_content_changed=false
     if ! instance_exists; then
         echo "creating ${ref} from ${MOUSE_TARGET_IMAGE}"
         inc init "$MOUSE_TARGET_IMAGE" "$ref" || return 1
@@ -250,6 +251,12 @@ ExecStart=/sbin/ip link set eth0 up
 WantedBy=multi-user.target
 UNIT"
 
+    echo_source_hash="$(sha256sum "${SCRIPT_DIR}/mouse-target-echo.py")" || return 1
+    echo_source_hash="${echo_source_hash%% *}"
+    echo_installed_hash="$(inc exec "$ref" -- sha256sum /usr/local/bin/mouse-echo.py 2>/dev/null || true)"
+    echo_installed_hash="${echo_installed_hash%% *}"
+    [[ "$echo_source_hash" == "$echo_installed_hash" ]] || echo_content_changed=true
+
     echo "installing the echo daemon"
     inc file push "${SCRIPT_DIR}/mouse-target-echo.py" "${ref}/usr/local/bin/mouse-echo.py" || return 1
     inc exec "$ref" -- chmod +x /usr/local/bin/mouse-echo.py
@@ -283,7 +290,16 @@ WantedBy=multi-user.target
 UNIT"
 
     inc exec "$ref" -- systemctl daemon-reload
-    inc exec "$ref" -- systemctl enable --now mouse-addr.service mouse-echo.service >/dev/null 2>&1
+    inc exec "$ref" -- systemctl enable --now mouse-addr.service >/dev/null 2>&1
+    inc exec "$ref" -- systemctl enable mouse-echo.service >/dev/null 2>&1
+    if [[ "$echo_content_changed" == true ]]; then
+        # An active process keeps the old Python source after file push. Restart
+        # only when its content changed so live TCP echo flows are undisturbed
+        # by a no-op `up`.
+        inc exec "$ref" -- systemctl restart mouse-echo.service >/dev/null 2>&1 || return 1
+    else
+        inc exec "$ref" -- systemctl start mouse-echo.service >/dev/null 2>&1 || return 1
+    fi
     # #18576: re-run the address unit so a CHANGED address set applies now.
     # mouse-addr is a RemainAfterExit oneshot, so `enable --now` on a host
     # where it already ran is a no-op: a new alias would wait for the next

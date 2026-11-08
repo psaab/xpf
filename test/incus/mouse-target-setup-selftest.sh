@@ -72,6 +72,9 @@ case "$1" in
         [[ "${STUB_PROBE_DEAF:-}" == 1 ]] || echo "reply ${control} 02:bf:72:16:01:00 probe"
         [[ "${STUB_FOREIGN:-}" == "$target" ]] && echo "reply ${target} f6:f0:06:10:77:d5 probe"
         exit 0 ;;
+      *"sha256sum /usr/local/bin/mouse-echo.py"*)
+        echo "${STUB_ECHO_HASH:-missing}  /usr/local/bin/mouse-echo.py"
+        exit 0 ;;
       *systemctl*is-active*) echo active; exit 0 ;;
       *list-units*) echo "mouse-iperf3@5200.service loaded active running"; exit 0 ;;
       *) exit 0 ;;
@@ -139,6 +142,21 @@ if [[ -n "$restart_line" && -n "$write_line" && "$restart_line" -gt "$write_line
 else
     fail "#18576: up does not restart mouse-addr.service after rewriting it (write line ${write_line:-none}, restart line ${restart_line:-none}); a changed alias waits for a reboot"
 fi
+
+# #18679: pushing unchanged source must not interrupt a live TCP echo flow,
+# while a content change must restart the active process to load UDP/6201.
+echo_source_hash="$(sha256sum "${SCRIPT_DIR}/mouse-target-echo.py")"
+echo_source_hash="${echo_source_hash%% *}"
+run_up "STUB_ECHO_HASH=${echo_source_hash}" > /dev/null
+if grep -q 'systemctl restart mouse-echo.service' "${TMP}/exec.log"; then
+    fail "#18679: unchanged mouse-echo source caused an unnecessary restart"
+else
+    pass "up leaves mouse-echo running when source content is unchanged"
+fi
+run_up STUB_ECHO_HASH=old-content-hash > /dev/null
+grep -q 'systemctl restart mouse-echo.service' "${TMP}/exec.log" \
+    && pass "up restarts mouse-echo after source content changes" \
+    || fail "#18679: changed mouse-echo source was not activated by a restart"
 
 # --- 1e. `up` runs inside a cluster lock cell (#18576) ---------------------
 # It rewrites and restarts the unit on a target every gate measures, so it

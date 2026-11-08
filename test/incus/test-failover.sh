@@ -122,13 +122,15 @@ FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
 # delta; a single-stream loss can stay under it and is left to the iperf3
 # stream-continuity cells.
 #
-# 1c, an independent UDP datagram continuity observation. The long-lived
-# sender on the LAN host keeps one socket and an increasing sequence while
-# RG1 moves; the mouse target's UDP echo returns both sequence and the
-# translated source IP:port. Sequence gaps are reported as datagram loss.
-# Continuing sequences with the same translated identity are SURVIVED;
-# restarted sequences or a changed identity are RECREATED, and no post-move
-# replies are LOST. Missing/invalid evidence is VOID, never a false PASS.
+# 1c, an independent UDP session-continuity observation. The LAN sender keeps
+# one socket, boot nonce and increasing sequence while RG1 moves; the mouse
+# target echoes the source IP:port seen after translation. The exact firewall
+# Session ID must be present on fw0's synced standby before the move and remain
+# stable after fw0 is promoted. The immediate post-CLI snapshot excludes replies
+# emitted during CLI latency; only later successful sends/replies count.
+# A changed firewall Session ID or translated identity is RECREATED, confirmed
+# sends with no later replies are LOST, and missing sync/restarted-sender
+# evidence is VOID.
 MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4}"
 MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
@@ -197,7 +199,7 @@ die() { echo "FATAL: $*" >&2; exit 2; }
 # #18670/#18679: the old raw session-miss budget (64) is gone; an override of
 # it would be silently ignored, so refuse it.
 if [[ -n "${MAX_FAILOVER_SESSION_MISS_DELTA+x}" ]]; then
-	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1a judges Screen drops, 1b the coarse raw Session misses floor, and 1c UDP sequence/translated-identity continuity"
+	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1a judges Screen drops, 1b the coarse raw Session misses floor, and 1c UDP sequence plus firewall Session ID continuity"
 fi
 failover_duration_value() {
 	local requested="$1" minimum="$2"
@@ -246,7 +248,11 @@ RG1_FAILBACK_ELAPSED=0
 RG1_UDP_RUN_ID="test-failover-$$"
 RG1_UDP_REMOTE_DIR="/tmp/${RG1_UDP_RUN_ID}"
 RG1_UDP_BEFORE="${HA_CAPTURE_DIR}/rg1-udp-before.log"
+RG1_UDP_SESSION_PROBE="${HA_CAPTURE_DIR}/rg1-udp-session-probe.log"
+RG1_UDP_AFTER_CLI="${HA_CAPTURE_DIR}/rg1-udp-after-cli.log"
 RG1_UDP_AFTER="${HA_CAPTURE_DIR}/rg1-udp-after.log"
+RG1_UDP_SESSION_BEFORE=""
+RG1_UDP_SESSION_AFTER=""
 RG1_UDP_STARTED=false
 RG1_UDP_READY=false
 RG1_UDP_REASON="probe did not start"
@@ -275,18 +281,40 @@ ha_rg1_udp_begin() {
 	RG1_UDP_READY=true
 }
 
-# Refresh the cumulative baseline at the transition boundary. Traffic between
-# probe start and the failover request is pre-move traffic and must not satisfy
-# the post-move reply check.
+# Require the target node's synced standby session, then take the fresh
+# sequence baseline immediately before CLI. Verify the sender stayed on the
+# same boot/socket while the firewall session query was running.
 ha_rg1_udp_before_move() {
 	if [[ "$RG1_UDP_STARTED" != true ]]; then
 		RG1_UDP_READY=false
 		RG1_UDP_REASON="UDP sender was not running at the failover boundary"
 		return 2
 	fi
+	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_SESSION_PROBE"; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="UDP probe snapshot for the synced Session ID query was unavailable"
+		return 2
+	fi
+	if ! RG1_UDP_SESSION_BEFORE=$(ha_udp_probe_session_id "$FW0" "$RG1_UDP_SESSION_PROBE" \
+		"${HA_CAPTURE_DIR}/rg1-udp-session-before.txt"); then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="pre-move UDP Session ID query on standby/fw0 failed"
+		return 2
+	fi
+	if [[ "$RG1_UDP_SESSION_BEFORE" == NONE ]]; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="UDP flow was not present on synced standby/fw0 before the move"
+		return 2
+	fi
 	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_BEFORE"; then
 		RG1_UDP_READY=false
 		RG1_UDP_REASON="immediate pre-move UDP probe snapshot was unavailable"
+		return 2
+	fi
+	if ! python3 "${SCRIPT_DIR}/udp_session_probe.py" same-client \
+		"$RG1_UDP_SESSION_PROBE" "$RG1_UDP_BEFORE" >/dev/null 2>"${RG1_UDP_BEFORE}.identity.err"; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="UDP sender restarted while verifying the synced standby session"
 		return 2
 	fi
 	if ! python3 "${SCRIPT_DIR}/udp_session_probe.py" baseline "$RG1_UDP_BEFORE" >/dev/null 2>"${RG1_UDP_BEFORE}.err"; then
@@ -296,6 +324,25 @@ ha_rg1_udp_before_move() {
 		return 2
 	fi
 	RG1_UDP_READY=true
+}
+
+ha_rg1_udp_after_cli() {
+	if [[ "$RG1_UDP_STARTED" != true || "$RG1_UDP_READY" != true ]]; then return 2; fi
+	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_AFTER_CLI"; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="post-CLI-return UDP probe checkpoint was unavailable"
+		return 2
+	fi
+}
+
+ha_rg1_udp_after_move() {
+	if [[ "$RG1_UDP_STARTED" != true || "$RG1_UDP_READY" != true ]]; then return 2; fi
+	if ! RG1_UDP_SESSION_AFTER=$(ha_udp_probe_session_id "$FW0" "$RG1_UDP_AFTER_CLI" \
+		"${HA_CAPTURE_DIR}/rg1-udp-session-after.txt"); then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="post-move UDP Session ID query on primary/fw0 failed"
+		return 2
+	fi
 }
 
 ha_rg1_udp_finish() {
@@ -309,7 +356,6 @@ ha_rg1_udp_finish() {
 	RG1_UDP_STARTED=false
 	[[ "$captured" == true ]]
 }
-
 ha_ensure_capture_dir() {
 	mkdir -p "$HA_CAPTURE_DIR"
 }
@@ -942,7 +988,7 @@ ha_rg1_mark_groups_void() {
 	local reason="$1"
 	void "RG1 Group 1a session-miss drops: ${reason}"
 	void "RG1 Group 1b raw session-miss floor: ${reason}"
-	void "RG1 Group 1c UDP datagram continuity: ${reason}"
+	void "RG1 Group 1c UDP session continuity: ${reason}"
 	void "RG1 Group 2 neighbor-miss budget: ${reason}"
 	void "RG1 Group 3 route-miss budget: ${reason}"
 	void "RG1 Group 4 policy-denied budget: ${reason}"
@@ -1071,10 +1117,11 @@ ha_rg1_evaluate() {
 		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
 		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
 	if [[ "$RG1_UDP_READY" == true ]]; then
-		ha_emit_diagnostic_verdict "RG1 Group 1c UDP datagram continuity across the RG1 move (sequence and translated 5-tuple)" \
-			ha_udp_probe_survival_verdict "$RG1_UDP_BEFORE" "$RG1_UDP_AFTER"
+		ha_emit_diagnostic_verdict "RG1 Group 1c UDP session continuity across the RG1 move (post-CLI sequence, stable firewall Session ID)" \
+			ha_udp_probe_survival_verdict "$RG1_UDP_BEFORE" "$RG1_UDP_AFTER_CLI" "$RG1_UDP_AFTER" \
+			"$RG1_UDP_SESSION_BEFORE" "$RG1_UDP_SESSION_AFTER"
 	else
-		void "RG1 Group 1c UDP datagram continuity: ${RG1_UDP_REASON}"
+		void "RG1 Group 1c UDP session continuity: ${RG1_UDP_REASON}"
 	fi
 	ha_emit_verdict "RG1 Group 2 neighbor misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_NEIGHBOR_MISS_DELTA})" \
 		ha_pair_counter_budget_verdict "$MAX_FAILOVER_NEIGHBOR_MISS_DELTA" "Neighbor misses" \
@@ -1248,6 +1295,9 @@ ha_run_rg1_failback_slice() {
 	else
 		request_rc=$?
 	fi
+	if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]] && ! ha_rg1_udp_after_cli; then
+		info "RG1 Group 1c UDP probe unavailable at CLI-return checkpoint: ${RG1_UDP_REASON}"
+	fi
 	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
 	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
 		owner_moved=true
@@ -1263,6 +1313,9 @@ ha_run_rg1_failback_slice() {
 		fi
 	fi
 	if [[ "$owner_moved" == true ]]; then
+		if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]] && ! ha_rg1_udp_after_move; then
+			info "RG1 Group 1c UDP probe unavailable after RG1 landed: ${RG1_UDP_REASON}"
+		fi
 		if ! main_iperf_running; then
 			load_ok=false
 			failure_reason="${failure_reason:+${failure_reason}; }main iperf process was not alive at phase-mid"
@@ -1323,6 +1376,10 @@ ha_run_rg1_failback_slice() {
 		ha_external_sweep "RG1 failback post-sampler"
 		ha_recent_dead_streams_cell "RG1 failback post-sampler"
 	else
+		if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]]; then
+			RG1_UDP_READY=false
+			RG1_UDP_REASON="RG1 did not land on fw0; post-move UDP session identity is unavailable"
+		fi
 		if ha_target_reachability_cell "after RG1 failback attempt"; then :; else :; fi
 		ha_external_sweep "RG1 failback immediate"
 		ha_recent_dead_streams_cell "RG1 failback immediate"

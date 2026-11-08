@@ -454,7 +454,7 @@ class MoveRecord:
     t_next_lan: float
     rgs: List[RGMoveResult]
     traffic: Optional[Dict[str, Dict]] = None  # family -> facts
-    udp_probe: Optional[Dict] = None  # sequence + translated-identity verdict for this move window
+    udp_probe: Optional[Dict] = None  # per-CLI sequence + firewall Session ID verdicts
     verdict: str = ""
     reasons: List[str] = field(default_factory=list)
 
@@ -538,6 +538,7 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
     evidence the previous verdict was built from.
     """
     reasons: List[str] = []
+    udp_void_reason: Optional[str] = None
     for r in rec.rgs:
         if r.pre_owner != 1 - r.target:
             where = "unowned/unreadable" if r.pre_owner is None else f"on node{r.pre_owner}"
@@ -548,8 +549,8 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
         probe_status = rec.udp_probe.get("status")
         probe_detail = rec.udp_probe.get("detail", "UDP probe verdict has no detail")
         if probe_status == "VOID":
-            return VOID, [probe_detail]
-        if probe_status in ("RECREATED", "LOST"):
+            udp_void_reason = probe_detail
+        elif probe_status in ("RECREATED", "LOST"):
             reasons.append(probe_detail)
         elif probe_status != "SURVIVED":
             return VOID, [f"unknown UDP probe status {probe_status!r}: {probe_detail}"]
@@ -606,7 +607,11 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             elif stall > budget.max_stall_ms and not t.get("died_streams"):
                 costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered; ping and aggregate within budget)")
     if reasons:
+        if udp_void_reason:
+            reasons.append(f"UDP probe evidence VOID: {udp_void_reason}")
         return FAIL, reasons + costs
+    if udp_void_reason:
+        return VOID, [udp_void_reason]
     if costs:
         return COST, costs
     return PASS, []
@@ -929,6 +934,17 @@ class IncusCluster:
         rc, out = self._exec(self.lan, ["cat", logfile], timeout=10)
         return out if rc == 0 and out.strip() else None
 
+    def udp_probe_session_id(self, node: int, probe_snapshot: str) -> Tuple[Optional[str], Optional[str]]:
+        """Read the exact local UDP flow's stable dataplane Session ID."""
+        rc, out = self._exec(self.fw[node], ["cli", "-c", "show security flow session"], timeout=20)
+        if rc != 0:
+            return None, f"could not capture flow sessions on node{node}: {out.strip()}"
+        try:
+            session_id = udp_session_probe.session_id_for_probe(probe_snapshot, out)
+        except ValueError as exc:
+            return None, f"could not parse flow-session capture on node{node}: {exc}"
+        return session_id, None
+
     def udp_probe_stop(self, run_id: str) -> None:
         root, script, _log = self._udp_probe_paths(run_id)
         self._exec(self.lan, ["python3", script, "stop", "--pidfile", f"{root}/probe.pid"])
@@ -1162,68 +1178,91 @@ class Soak:
             parsed = udp_session_probe.parse_log(baseline)
         except ValueError as exc:
             return f"UDP sequence probe baseline is malformed: {exc}"
-        if not parsed.sent or not parsed.replies:
-            return "UDP sequence probe did not exchange pre-move datagrams"
+        if not parsed.sent or not parsed.replies or not parsed.boot_ids or not parsed.socket_tuple:
+            return "UDP sequence probe did not exchange a complete pre-move baseline"
         self.udp_probe_baseline = baseline
         return None
-
-    def udp_probe_before_move(self) -> Optional[Dict]:
-        """Checkpoint the cumulative log immediately before issuing a move."""
+    def udp_probe_before_move(self, target_node: int) -> Dict:
+        """Require the synced target-side session, then checkpoint just before CLI."""
+        def void(detail):
+            return {"status": "VOID", "detail": detail, "metrics": {}}
         if not self.udp_probe_started:
-            return {"status": "VOID", "detail": "UDP sequence probe was not running before the move",
-                    "metrics": {}}
+            return void("UDP sequence probe was not running before the move")
+        if self.udp_probe_baseline is None:
+            return void("UDP sequence probe has no usable cumulative baseline")
+        session_probe = self.c.udp_probe_snapshot(self.cfg.run_id)
+        if session_probe is None:
+            return void("UDP sequence probe snapshot for the Session ID query became unavailable")
+        try:
+            udp_session_probe.parse_log(self.udp_probe_baseline)
+            parsed_session_probe = udp_session_probe.parse_log(session_probe)
+        except ValueError as exc:
+            return void(f"UDP sequence probe Session ID evidence is malformed: {exc}")
+        same, identity_detail = udp_session_probe.same_client_identity(self.udp_probe_baseline, session_probe)
+        if not same:
+            self.udp_probe_baseline = session_probe
+            return void(f"UDP sequence probe sender identity changed before Session ID query: {identity_detail}")
+        if not parsed_session_probe.sent or not parsed_session_probe.replies:
+            return void("UDP sequence probe has no sent-and-answered baseline for the Session ID query")
+        session_id, error = self.c.udp_probe_session_id(target_node, session_probe)
+        if error:
+            self.udp_probe_baseline = session_probe
+            return void(f"UDP sequence probe pre-move Session ID query failed: {error}")
+        if session_id is None:
+            self.udp_probe_baseline = session_probe
+            return void(f"UDP sequence probe flow was absent on synced standby node{target_node}")
         baseline = self.c.udp_probe_snapshot(self.cfg.run_id)
         if baseline is None:
-            self.udp_probe_baseline = None
-            return {"status": "VOID", "detail": "UDP sequence probe pre-move snapshot became unavailable",
-                    "metrics": {}}
+            self.udp_probe_baseline = session_probe
+            return void("UDP sequence probe pre-move snapshot became unavailable")
         try:
             parsed = udp_session_probe.parse_log(baseline)
         except ValueError as exc:
-            self.udp_probe_baseline = None
-            return {"status": "VOID", "detail": f"UDP sequence probe pre-move evidence is malformed: {exc}",
-                    "metrics": {}}
+            return void(f"UDP sequence probe pre-move evidence is malformed: {exc}")
+        same, identity_detail = udp_session_probe.same_client_identity(session_probe, baseline)
+        if not same:
+            self.udp_probe_baseline = baseline
+            return void(f"UDP sequence probe sender identity changed during Session ID query: {identity_detail}")
         if not parsed.sent or not parsed.replies:
-            self.udp_probe_baseline = None
-            return {"status": "VOID", "detail": "UDP sequence probe has no pre-move sent-and-answered baseline",
-                    "metrics": {}}
+            return void("UDP sequence probe has no pre-move sent-and-answered baseline")
         self.udp_probe_baseline = baseline
-        return None
+        return {"status": "READY", "snapshot": baseline, "session_id_before": session_id}
 
-    def udp_probe_window(self, baselines: List[str]) -> Dict:
-        if not self.udp_probe_started or not baselines:
-            return {"status": "VOID", "detail": "UDP sequence probe has no usable per-move baseline",
-                    "metrics": {}}
-        current = self.c.udp_probe_snapshot(self.cfg.run_id)
+    def udp_probe_window(self, pending: Dict, after_snapshot: Optional[str] = None) -> Dict:
+        if pending.get("status") != "READY":
+            return pending
+        current = after_snapshot or self.c.udp_probe_snapshot(self.cfg.run_id)
         if current is None:
             return {"status": "VOID", "detail": "UDP sequence probe snapshot became unavailable",
                     "metrics": {}}
-        checks = []
-        for baseline in baselines:
-            status, detail, metrics = udp_session_probe.classify_snapshots(baseline, current)
-            checks.append({"status": status, "detail": detail, "metrics": metrics})
-        statuses = [check["status"] for check in checks]
-        if "VOID" in statuses:
-            status = "VOID"
-        elif "RECREATED" in statuses:
-            status = "RECREATED"
-        elif "LOST" in statuses:
-            status = "LOST"
-        else:
-            status = "SURVIVED"
-        detail = "; ".join(f"move-{index + 1} {check['status']}: {check['detail']}"
-                           for index, check in enumerate(checks))
+        status, detail, metrics = udp_session_probe.classify_snapshots(
+            pending["pre_move_snapshot"], pending["post_cli_snapshot"], current,
+            pending["session_id_before"], pending["session_id_after"])
         self.udp_probe_baseline = current
-        return {"status": status, "detail": detail, "metrics": {"checks": checks}}
+        return {"status": status, "detail": detail, "metrics": metrics}
 
     # -- one move -------------------------------------------------------
 
-    def one_rg(self, rg: int, target: int, pre: Ownership) -> Tuple[RGMoveResult, float]:
+    def one_rg(self, rg: int, target: int, pre: Ownership,
+               udp_probe_pre: Optional[Dict] = None) -> Tuple[RGMoveResult, float, Optional[Dict]]:
         cmd = f"request chassis cluster failover redundancy-group {rg} node {target}"
         t0 = self.now()
         self.move_commands_issued += 1
         rc, out = self.c.cli(self.cfg.issuer, cmd)
         t_ret = self.now()
+        udp_probe = None
+        post_cli_snapshot = None
+        if udp_probe_pre is not None:
+            if udp_probe_pre.get("status") != "READY":
+                udp_probe = udp_probe_pre
+            else:
+                # This is deliberately the first probe operation after CLI
+                # return; packets emitted during command latency are excluded.
+                post_cli_snapshot = self.c.udp_probe_snapshot(self.cfg.run_id)
+                if post_cli_snapshot is None:
+                    udp_probe = {"status": "VOID",
+                                 "detail": "UDP sequence probe post-CLI checkpoint became unavailable",
+                                 "metrics": {}}
         cls, first = classify_cli(rc, out, rg)
         landed, dual, last = None, False, pre.detail
         # Bound: the RG must have landed before the operator's next command,
@@ -1240,12 +1279,29 @@ class Soak:
             if self.now() >= deadline:
                 break
             self.sleep(self.cfg.poll_s)
+        if udp_probe_pre is not None and udp_probe_pre.get("status") == "READY" and udp_probe is None:
+            if landed is None:
+                udp_probe = {"status": "VOID",
+                             "detail": f"UDP probe could not query node{target} after RG{rg} failed to land",
+                             "metrics": {}}
+            else:
+                session_id_after, error = self.c.udp_probe_session_id(target, post_cli_snapshot)
+                if error:
+                    udp_probe = {"status": "VOID",
+                                 "detail": f"UDP sequence probe post-move Session ID query failed: {error}",
+                                 "metrics": {}}
+                else:
+                    udp_probe = {"status": "READY",
+                                 "pre_move_snapshot": udp_probe_pre["snapshot"],
+                                 "post_cli_snapshot": post_cli_snapshot,
+                                 "session_id_before": udp_probe_pre["session_id_before"],
+                                 "session_id_after": session_id_after}
         # self._owners (the next move's precondition) is refreshed by
         # watch_window at the END of the window, not here at landing.
         res = RGMoveResult(rg, target, pre.owner, pre.detail, cls, first, rc, round(t_ret - t0, 3),
                            None if landed is None else round(landed, 3), last, dual)
         res.follow_expected = self.cfg.traffic and self.cfg.helper_check and bool(self.members.get(rg))
-        return res, t_ret
+        return res, t_ret, udp_probe
 
     def watch_window(self, results: List[RGMoveResult], until: float):
         """Keep sampling both views until the window ends: a move that
@@ -1383,32 +1439,38 @@ class Soak:
                     raise VoidRun(f"traffic preflight: {bad}")
                 bad = self.start_udp_probe()
                 if bad:
-                    raise VoidRun(f"UDP sequence probe preflight: {bad}")
+                    self.log(f"UDP sequence probe unavailable; each move's UDP cell will be VOID: {bad}")
             for i in range(1, cfg.moves + 1):
                 target = targets[rgs[0]]
                 t_issue = self.now()
-                udp_probe_baselines = []
-                udp_probe_pre_errors = []
+                udp_probe_checks = []
+                udp_probe_pending = None
                 results: List[RGMoveResult] = []
                 t_ret_last = t_issue
                 for rg in rgs:
                     if cfg.traffic:
-                        pre_error = self.udp_probe_before_move()
-                        if pre_error is not None:
-                            udp_probe_pre_errors.append(pre_error["detail"])
-                        elif self.udp_probe_baseline is None:
-                            udp_probe_pre_errors.append("UDP sequence probe did not retain its pre-move baseline")
-                        else:
-                            udp_probe_baselines.append(self.udp_probe_baseline)
-                    r, t_ret_last = self.one_rg(rg, targets[rg], self._owners[rg])
+                        if udp_probe_pending is not None:
+                            # Close this CLI's evidence before the next CLI can
+                            # cause recovery and mask its post-move loss.
+                            udp_probe_checks.append(self.udp_probe_window(udp_probe_pending))
+                            udp_probe_pending = None
+                        udp_probe_pre = self.udp_probe_before_move(targets[rg])
+                    else:
+                        udp_probe_pre = None
+                    r, t_ret_last, udp_window = self.one_rg(
+                        rg, targets[rg], self._owners[rg], udp_probe_pre)
                     results.append(r)
+                    if cfg.traffic and udp_window is not None:
+                        if udp_window.get("status") == "READY":
+                            udp_probe_pending = udp_window
+                        else:
+                            udp_probe_checks.append(udp_window)
                 h1 = self.helpers()
                 for r in results:
                     if r.landed_s is not None and cfg.helper_check:
                         r.helper = {n: (None if h1[n] is None else h1[n]["ha"].get(r.rg)) for n in (0, 1)}
                 # The operator's `sleep S` starts when the CLI returns. Watch
-                # the views for the rest of it, then read the traffic-follow
-                # evidence just before the next move.
+                # the views for the rest of it, then close the last UDP window.
                 self.watch_window(results, t_ret_last + cfg.sleep_s)
                 if cfg.traffic:
                     h2 = self.helpers()
@@ -1421,12 +1483,19 @@ class Soak:
                             r.member_delta = {n: (None if a[n] is None or b[n] is None else b[n] - a[n]) for n in (0, 1)}
                         if self._lan_rg is not None and r.rg == self._lan_rg:
                             r.neigh_node = neigh
-                if cfg.traffic:
-                    if udp_probe_pre_errors:
-                        udp_probe = {"status": "VOID", "detail": "; ".join(udp_probe_pre_errors),
-                                     "metrics": {}}
+                    if udp_probe_pending is not None:
+                        udp_probe_checks.append(self.udp_probe_window(udp_probe_pending))
+                    if udp_probe_checks:
+                        status, detail, metrics = udp_session_probe.combine_classifications([
+                            (check["status"], check["detail"], check.get("metrics", {}))
+                            for check in udp_probe_checks
+                        ])
+                        udp_probe = {"status": status, "detail": detail, "metrics": metrics,
+                                     "windows": udp_probe_checks}
                     else:
-                        udp_probe = self.udp_probe_window(udp_probe_baselines)
+                        udp_probe = {"status": "VOID",
+                                     "detail": "UDP sequence probe has no per-move windows",
+                                     "metrics": {}}
                 else:
                     udp_probe = None
                 rec = MoveRecord(i, target, cfg.issuer, self.lan_time(t_issue), 0.0,

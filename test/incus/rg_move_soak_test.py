@@ -178,6 +178,19 @@ class MoveVerdict(unittest.TestCase):
     def test_healthy_move_passes(self):
         self.assertEqual(self.verdict(rec([rgres()])), (soak.PASS, []))
 
+
+    def test_udp_void_is_per_move_void_when_other_evidence_is_clean(self):
+        r = rec([rgres()])
+        r.udp_probe = {"status": soak.VOID, "detail": "missing synced UDP session"}
+        self.assertEqual(self.verdict(r), (soak.VOID, ["missing synced UDP session"]))
+
+    def test_udp_void_does_not_mask_an_independent_move_failure(self):
+        r = rec([rgres(cli=soak.CLI_ERROR)])
+        r.udp_probe = {"status": soak.VOID, "detail": "UDP post-move session unavailable"}
+        verdict, reasons = self.verdict(r)
+        self.assertEqual(verdict, soak.FAIL)
+        self.assertTrue(any("CLI error" in reason for reason in reasons))
+        self.assertTrue(any("UDP probe evidence VOID" in reason for reason in reasons))
     def test_precondition_failure_is_void_not_fail(self):
         # The cascade after a failed move: the RG is still on the target, the
         # CLI says "already primary". That is ONE VOID, not a second FAIL.
@@ -617,6 +630,12 @@ class FakeCluster:
         self.udp_probe_run_id = None
         self.udp_probe_identity_port = 41000
         self.udp_probe_lost_after_seq = None
+        self.udp_probe_next_seq = 0
+        self.udp_probe_sent = set()
+        self.udp_probe_replied = set()
+        self.udp_probe_boot_id = "0123456789abcdef0123456789abcdef"
+        self.udp_probe_session_value = 71
+        self.udp_probe_session_queries = []
         self.ping_seq = {}
         self.iv_index = {}
         self.events = []  # (lan_t0, lan_t1, kind)
@@ -630,25 +649,55 @@ class FakeCluster:
         return result
 
     def udp_probe_start(self, run_id, target, port):
+        if "udp-start-fail" in self.faults.values():
+            return "fake UDP probe setup failed"
         self.udp_probe_started_at = self.clock_.t
         self.udp_probe_run_id = run_id
         self.udp_probe_identity_port = 41000
+        self.udp_probe_lost_after_seq = None
+        self.udp_probe_next_seq = 0
+        self.udp_probe_sent = set()
+        self.udp_probe_replied = set()
+        self.udp_probe_session_value = 71
         return None
+
+    def _advance_udp_probe(self, t):
+        if self.udp_probe_started_at is None:
+            return
+        count = max(1, int((t - self.udp_probe_started_at) /
+                           soak.udp_session_probe.INTERVAL_S) + 1)
+        while self.udp_probe_next_seq < count:
+            seq = self.udp_probe_next_seq
+            self.udp_probe_sent.add(seq)
+            if self.udp_probe_lost_after_seq is None or seq < self.udp_probe_lost_after_seq:
+                self.udp_probe_replied.add(seq)
+            self.udp_probe_next_seq += 1
 
     def udp_probe_snapshot(self, run_id):
         if run_id != self.udp_probe_run_id or self.udp_probe_started_at is None:
             return None
-        count = max(1, int((self.clock_.t - self.udp_probe_started_at) /
-                           soak.udp_session_probe.INTERVAL_S) + 1)
-        lost_after = self.udp_probe_lost_after_seq
-        lines = []
-        for seq in range(count):
+        self._advance_udp_probe(self.clock_.t)
+        lines = ["BOOT " + self.udp_probe_boot_id + "\n",
+                 "SOCKET 10.0.61.2 39000 203.0.113.9 6201\n"]
+        for seq in sorted(self.udp_probe_sent):
             lines.append(f"SENT {seq}\n")
-            if lost_after is None or seq < lost_after:
+            if seq in self.udp_probe_replied:
                 lines.append(f"REPLY {seq} 203.0.113.9 {self.udp_probe_identity_port}\n")
-        if lost_after is not None:
-            self.udp_probe_lost_after_seq = None
         return "".join(lines)
+
+    def udp_probe_session_id(self, node, probe_snapshot):
+        self.udp_probe_session_queries.append(node)
+        if self.faults.get(self.moves_seen + 1) == "udp-restart-in-session-query":
+            self.udp_probe_boot_id = "fedcba9876543210fedcba9876543210"
+        if self.faults.get(self.moves_seen + 1) == "udp-pre-session-missing":
+            return None, None
+        try:
+            parsed = soak.udp_session_probe.parse_log(probe_snapshot)
+        except ValueError as exc:
+            return None, str(exc)
+        if parsed.socket_tuple is None:
+            return None, "missing fake UDP socket tuple"
+        return str(self.udp_probe_session_value), None
 
     def udp_probe_stop(self, run_id):
         self.udp_probe_started_at = None
@@ -683,6 +732,8 @@ class FakeCluster:
         self.moves_seen += 1
         lan_now = self.clock_.t + self.lan_off
         fault = self.faults.get(self.moves_seen)
+        if self.udp_probe_lost_after_seq is not None and fault != "udp-lost":
+            self.udp_probe_lost_after_seq = None
         if fault == "gap":
             self.events.append((lan_now + 0.3, lan_now + 1.8, "gap"))
         elif fault == "stall":
@@ -692,11 +743,12 @@ class FakeCluster:
         elif fault == "die":
             self.events.append((lan_now + 0.3, float("inf"), "stall"))
         elif fault == "udp-recreated":
-            self.udp_probe_identity_port = 41001
+            self.udp_probe_session_value = 84
         elif fault == "udp-lost":
-            self.udp_probe_lost_after_seq = max(
-                1, int((self.clock_.t - self.udp_probe_started_at) /
-                       soak.udp_session_probe.INTERVAL_S) + 1)
+            self._advance_udp_probe(self.clock_.t)
+            self.udp_probe_lost_after_seq = self.udp_probe_next_seq
+        elif fault == "udp-recover":
+            self.udp_probe_lost_after_seq = None
         self.clock_.sleep(0.6)
         if target != node and abs(self.skew_s) > 60:
             return self.cli_rc_on_error, USER_ERROR + "\n"
@@ -771,6 +823,7 @@ class FakeCluster:
         return any(a <= lan_t < b and (k == kind or k == "gap") for a, b, k in self.events)
 
     def _tick(self, t):
+        self._advance_udp_probe(t)
         # RETH-member counters: whoever forwards each RG carries its packets.
         for rg, by_node in MEMBERS.items():
             if rg in self.owner:
@@ -1070,8 +1123,12 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(res["preflight"]["lan_rg"], 2)
         for m in res["moves"]:
             self.assertEqual(m["udp_probe"]["status"], "SURVIVED")
+        self.assertEqual(len(c.udp_probe_session_queries), 12)
+        for index, m in enumerate(res["moves"]):
+            self.assertEqual(c.udp_probe_session_queries[index * 2:index * 2 + 2],
+                             [m["target"], m["target"]])
 
-    def test_udp_translated_identity_recreation_fails_move(self):
+    def test_udp_session_identity_recreation_fails_even_with_stable_nat_tuple(self):
         clock = FakeClock()
         c = FakeCluster(clock, {2: 0}, faults={1: "udp-recreated"})
         rc, res, _ = run_fake(c, clock, moves=2)
@@ -1079,8 +1136,9 @@ class Orchestration(unittest.TestCase):
         first = res["moves"][0]
         self.assertEqual(first["udp_probe"]["status"], "RECREATED")
         self.assertEqual(first["verdict"], "FAIL")
-        self.assertIn("UDP probe RECREATED", " ".join(first["reasons"]))
+        self.assertIn("Session ID changed 71->84", first["udp_probe"]["detail"])
         self.assertEqual(res["moves"][1]["udp_probe"]["status"], "SURVIVED")
+        self.assertEqual(c.udp_probe_identity_port, 41000)
 
     def test_udp_post_move_silence_fails_move(self):
         clock = FakeClock()
@@ -1091,6 +1149,46 @@ class Orchestration(unittest.TestCase):
         self.assertEqual(first["udp_probe"]["status"], "LOST")
         self.assertEqual(first["verdict"], "FAIL")
         self.assertIn("received no replies", first["udp_probe"]["detail"])
+        self.assertEqual(res["moves"][1]["udp_probe"]["status"], "SURVIVED")
+
+    def test_udp_loss_before_second_rg_cannot_be_masked_by_later_recovery(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, faults={1: "udp-lost", 2: "udp-recover"})
+        rc, res, _ = run_fake(c, clock, moves=1, rgs="1,2", sleep_s=1.0)
+        self.assertEqual(rc, 1)
+        probe = res["moves"][0]["udp_probe"]
+        self.assertEqual([check["status"] for check in probe["windows"]], ["LOST", "SURVIVED"])
+        self.assertEqual(probe["status"], "LOST")
+        self.assertEqual(res["moves"][0]["verdict"], "FAIL")
+
+    def test_udp_probe_start_failure_is_per_move_void_not_whole_run_preflight_void(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={1: "udp-start-fail"})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertEqual(len(res["moves"]), 2)
+        self.assertNotIn("void", res)
+        self.assertTrue(all(m["udp_probe"]["status"] == "VOID" for m in res["moves"]))
+        self.assertTrue(all(m["traffic"] and m["traffic"]["v4"] for m in res["moves"]))
+
+    def test_missing_synced_standby_session_is_per_move_void(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={1: "udp-pre-session-missing"})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        self.assertEqual(res["moves"][0]["udp_probe"]["status"], "VOID")
+        self.assertIn("absent on synced standby node", res["moves"][0]["udp_probe"]["detail"])
+        self.assertEqual(res["moves"][1]["udp_probe"]["status"], "SURVIVED")
+        self.assertTrue(res["moves"][0]["traffic"]["v4"])
+
+    def test_sender_restart_during_session_query_is_per_move_void(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={1: "udp-restart-in-session-query"})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 2)
+        first = res["moves"][0]["udp_probe"]
+        self.assertEqual(first["status"], "VOID")
+        self.assertIn("sender identity changed during Session ID query", first["detail"])
         self.assertEqual(res["moves"][1]["udp_probe"]["status"], "SURVIVED")
 
     def test_traffic_that_never_moved_fails(self):
