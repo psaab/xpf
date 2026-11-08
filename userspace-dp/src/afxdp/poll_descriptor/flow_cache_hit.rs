@@ -942,9 +942,10 @@ pub(super) fn stage_flow_cache_hit(
         // Established canonical + forward-wire alias restamps below
         // ran on EVERY established cache hit (an
         // `handshake_state_wire_for == Established` read), taking the
-        // shared-map locks per packet. The ct-slice (10 s cadence) is
-        // the backstop for completions that never take a completing
-        // cache hit.
+        // shared-map locks per packet. The ct-slice (10 s cadence) is the
+        // backstop for completions that never take a completing cache hit.
+        // For conntrack timeout mirroring, it only refreshes an existing row
+        // after successful lookup and tuple-gate acquisition.
         // #18520: restamp the FORWARD pair the transition completed — a
         // reverse cache hit (the #16223 companion arm, a SYN-ACK-first
         // reverse ACK) completes it too, and keying these restamps on the
@@ -1002,8 +1003,9 @@ pub(super) fn stage_flow_cache_hit(
             );
             // #18530: refresh the forward conntrack timeout only at this
             // one-shot Established transition. The row RMW preserves live
-            // counters/NAT/timestamps; the ct-slice remains the fallback if
-            // the row is missing or tuple-gated.
+            // counters/NAT/timestamps. The periodic ct-slice can converge an
+            // existing row when it sees a missed transition, but cannot
+            // recreate a missing row or bypass the tuple gate.
             let timeout_secs = sessions.timeout_secs_for(&stage_forward_key);
             crate::afxdp::bpf_map::restamp_bpf_conntrack_timeout(
                 conntrack_v4_fd,
