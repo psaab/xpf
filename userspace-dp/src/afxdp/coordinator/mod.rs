@@ -1043,11 +1043,8 @@ impl Coordinator {
     }
 
     /// See [`Coordinator::upsert_synced_session`].
-    pub(in crate::afxdp) fn synced_import_cap_for(
-        &self,
-        records: &BTreeMap<u32, Arc<WorkerRuntimeRecord>>,
-    ) -> usize {
-        self.session_domain.synced_import_cap_for(records)
+    pub(in crate::afxdp) fn synced_import_cap_for(&self) -> usize {
+        self.session_domain.synced_import_cap_for()
     }
 
     /// See [`Coordinator::upsert_synced_session`].

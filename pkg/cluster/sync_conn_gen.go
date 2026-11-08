@@ -541,10 +541,11 @@ func (s *SessionSync) recvCap() int {
 	return s.genState.recvGenGuardCap
 }
 
-// maxCap returns the growth ceiling (#9915 F-044): the injected test override
-// when set; else the wired helper session capacity clamped to
-// [genGuardMapDefaultCap, genGuardMapCap]; else the default (unwired paths
-// never grow past status quo — no provisioning proof, no new headroom).
+// maxCap returns the generation-guard map growth ceiling (#9915 F-044): the
+// injected test override when set; else the wired helper capacity clamped to
+// [genGuardMapDefaultCap, genGuardMapCap]; else the default. Unlike
+// bulkRecvCap, these maps retain the 200k minimum floor when a smaller helper
+// ceiling is wired.
 func (s *SessionSync) maxCap() int {
 	if s != nil && s.genState.genGuardMapCeilingOverride != 0 {
 		return s.genState.genGuardMapCeilingOverride

@@ -555,16 +555,23 @@ func (s *SessionSync) bulkRecvNow() time.Time {
 	return time.Now()
 }
 
-// bulkRecvCap is the ceiling for the combined distinct keys in one bulk
-// receive window (#16039): the forward-session table capacity. Forward
-// keys are half of dataplane.MaxSessions, which counts forward+reverse
-// entries; the wired helper capacity (SetGenGuardSessionCap) replaces
-// the ceiling when known, exactly as maxCap clamps the gen-guard caps.
-// A zero result (only reachable via a zero genGuardMapCeilingOverride
-// with an empty wired report, which maxCap never returns) admits nothing.
+// bulkRecvCap is the ceiling for combined distinct keys in one bulk receive
+// window (#16039). A nonzero helper report is the exact replicated node
+// ceiling; it must not inherit maxCap's 200k minimum for generation-guard
+// maps. The absolute generation-map limit remains the safety clamp, and
+// unwired paths retain maxCap's default.
 func (s *SessionSync) bulkRecvCap() int {
 	if s == nil {
 		return 0
+	}
+	if s.genState.genGuardMapCeilingOverride != 0 {
+		return s.maxCap()
+	}
+	if wired := s.genState.genGuardSessionCap.Load(); wired != 0 {
+		if wired > uint64(genGuardMapCap) {
+			return genGuardMapCap
+		}
+		return int(wired)
 	}
 	return s.maxCap()
 }

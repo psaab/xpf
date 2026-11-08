@@ -674,9 +674,9 @@ type SyncStats struct {
 	// Nonzero means live demand exceeded the starting default.
 	GenCapGrown atomic.Uint64
 	// GenCapShrunk counts generation-guard cap clamp-downs (#9915 F-044
-	// review): the wired ceiling dropped below a grown side cap and the stored
-	// cap was clamped to the ceiling in force. Nonzero means provisioned
-	// capacity shrank (fewer helper workers) after demand had grown past it.
+	// review): the wired node ceiling dropped below a grown side cap and the
+	// stored cap was clamped to the ceiling in force. Nonzero means provisioned
+	// node capacity shrank after demand had grown past it.
 	GenCapShrunk atomic.Uint64
 	// AuthUpgradeIdentityErrors counts #6628/#7163 upgrade attempts refused
 	// because the LOCAL cluster/node identity could not be resolved (#9915

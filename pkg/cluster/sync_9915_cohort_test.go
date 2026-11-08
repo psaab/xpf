@@ -57,6 +57,23 @@ func TestGenGuardCapCoversMaxLiveSessions_9915(t *testing.T) {
 	}
 }
 
+// The bulk receiver uses the helper's exact node ceiling even when it is below
+// the 200k minimum retained by generation-guard maps.
+func TestBulkReceiveCapUsesReplicatedNodeCeiling_18687(t *testing.T) {
+	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
+	const helperReportedNodeCeiling = 131072
+	ss.SetGenGuardSessionCap(helperReportedNodeCeiling)
+
+	if got := ss.bulkRecvCap(); got != helperReportedNodeCeiling {
+		t.Fatalf("bulkRecvCap with helper ceiling = %d, want %d",
+			got, helperReportedNodeCeiling)
+	}
+	if got := ss.maxCap(); got != genGuardMapDefaultCap {
+		t.Fatalf("generation-guard maxCap = %d, want the distinct %d default floor",
+			got, genGuardMapDefaultCap)
+	}
+}
+
 // F-044 (observability half): guard-map saturation must be operator-visible in
 // cluster status, not only a counter — the #9653 ClockSyncsRefused posture.
 func TestGenGuardSaturationRenderedInStatus_9915(t *testing.T) {
@@ -358,8 +375,8 @@ func TestGenGuardCapStaysDefaultWhenUnwired_9915(t *testing.T) {
 }
 
 // F-044 (setter semantics): unknown retains, values clamp to
-// [default, absolute], each report tracks current (a replacement reporting
-// fewer workers shrinks honestly). GREEN-only (new API).
+// [default, absolute], each nonzero report tracks current capacity, even when
+// a replacement reports a lower node ceiling. GREEN-only (new API).
 func TestGenGuardSessionCapClampAndTrack_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	if got := ss.maxCap(); got != genGuardMapDefaultCap {
@@ -632,16 +649,16 @@ func TestInstallTableMemoReceiverUnwiredBoundary_9915(t *testing.T) {
 	}
 }
 
-// F-044 review (spark-MAJOR-3): a wired ceiling that shrinks below a grown cap
-// clamps the stored cap down — the sender never outruns provisioned RAM
-// forever. Clamp-at-read makes the effective cap follow immediately; the grow
-// path persists the clamp and counts it.
+// F-044 review (spark-MAJOR-3): a wired node ceiling that shrinks below a
+// grown cap clamps the stored cap down — the sender never outruns provisioned
+// RAM forever. Clamp-at-read makes the effective cap follow immediately; the
+// grow path persists the clamp and counts it.
 func TestGenGuardCapClampsOnShrink_9915(t *testing.T) {
 	ss := NewSessionSync(":0", "10.0.0.2:4785", nil)
 	ss.genState.genSentMu.Lock()
 	ss.genState.sentGenGuardCap = 800000 // as if demand-grown under a larger ceiling
 	ss.genState.genSentMu.Unlock()
-	ss.SetGenGuardSessionCap(200000) // replacement reports fewer workers
+	ss.SetGenGuardSessionCap(200000) // replacement reports a lower node ceiling
 	ss.genState.genSentMu.Lock()
 	if got := ss.sentCap(); got != 200000 {
 		ss.genState.genSentMu.Unlock()

@@ -1983,9 +1983,8 @@ mod session_domain_tests_7209 {
         coordinator
             .synced_import_cap_override
             .store(3, Ordering::Relaxed);
-        let empty = std::collections::BTreeMap::new();
         assert_eq!(
-            coordinator.session_domain().synced_import_cap_for(&empty),
+            coordinator.session_domain().synced_import_cap_for(),
             9,
             "the override is a per-table local-admission ceiling and the cap \
              includes N local rows plus 2N imported forward/reverse rows, so \

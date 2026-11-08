@@ -1288,13 +1288,12 @@ fn synced_import_cap_production_formula_is_three_times_replicated_node_ceiling()
          install cap, never a worker-count aggregate"
     );
 
-    // No workers registered (early boot / teardown): a zero ceiling DISABLES
-    // the bound, so a transient window never rejects legitimate imports.
+    // Worker registration controls fan-out only; imports during early boot
+    // remain bounded in shared authority and can be replayed later.
     assert_eq!(
-        coordinator.synced_import_cap_for(&coordinator.workers.records()),
-        0,
-        "an unregistered-worker coordinator must report a zero (disabled) \
-         ceiling, not a nonzero cap that would reject during early boot"
+        coordinator.synced_import_cap_for(),
+        per_table_ceiling.saturating_mul(3),
+        "the production 3N entry cap must stay active with zero workers"
     );
 
     const WORKERS: usize = 3;
@@ -1307,7 +1306,7 @@ fn synced_import_cap_production_formula_is_three_times_replicated_node_ceiling()
         );
     }
 
-    let entry_cap = coordinator.synced_import_cap_for(&coordinator.workers.records());
+    let entry_cap = coordinator.synced_import_cap_for();
     assert_eq!(
         entry_cap,
         per_table_ceiling.saturating_mul(3),
@@ -1321,6 +1320,175 @@ fn synced_import_cap_production_formula_is_three_times_replicated_node_ceiling()
          reverse companion"
     );
 }
+
+// Early-boot imports remain bounded before worker registration; later
+// registration must preserve the shared authority admitted within the cap.
+#[test]
+fn synced_import_cap_applies_without_workers_and_preserves_shared_authority_18687() {
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .synced_import_cap_override
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    seed_local_shared_rows(&coordinator, 1);
+
+    let admitted = synced_entry_port(1000, 0);
+    let admitted_key = admitted.key.clone();
+    coordinator.upsert_synced_session(admitted);
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        3,
+        "one local row plus one imported forward/reverse pair fills 3N"
+    );
+    assert!(
+        synced_generation(&coordinator, &admitted_key).is_some(),
+        "within-bound early import must be authoritative without workers"
+    );
+
+    let drops_before = coordinator.synced_import_cap_drops_total();
+    let rejected = synced_entry_port(2000, 0);
+    let rejected_key = rejected.key.clone();
+    coordinator.upsert_synced_session(rejected);
+    assert!(
+        synced_generation(&coordinator, &rejected_key).is_none(),
+        "the first early-boot import beyond 3N must be refused"
+    );
+    assert_eq!(
+        coordinator.synced_import_cap_drops_total(),
+        drops_before + 1,
+        "early-boot capacity refusal must be counted"
+    );
+
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands)),
+        None,
+    );
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        3,
+        "worker registration must preserve existing shared authority"
+    );
+    assert!(
+        synced_generation(&coordinator, &admitted_key).is_some(),
+        "an admitted early-boot import must remain available after registration"
+    );
+}
+
+#[test]
+fn synced_import_cap_allows_nat_changing_replacement_at_ceiling_18687() {
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .synced_import_cap_override
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+    coordinator.set_forwarding_for_test(reserve6600_forwarding());
+    register_test_worker_7209(&mut coordinator);
+    seed_local_shared_rows(&coordinator, 1);
+
+    let original = reserve6600_entry(40020, 52000);
+    let forward_key = original.key.clone();
+    let old_reverse_key = reverse_session_key(&forward_key, original.decision.nat);
+    assert_eq!(
+        coordinator.upsert_synced_session(original),
+        SyncedImportOutcome::Applied
+    );
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        3,
+        "the local row and original imported pair must fill the 3N cap"
+    );
+
+    let replacement = reserve6600_entry(40020, 52001);
+    let new_reverse_key = reverse_session_key(&forward_key, replacement.decision.nat);
+    assert_ne!(
+        old_reverse_key,
+        new_reverse_key,
+        "NAT change must replace the companion key"
+    );
+    assert_eq!(
+        coordinator.upsert_synced_session(replacement),
+        SyncedImportOutcome::Applied,
+        "an at-cap replacement must account for the old reverse it retires"
+    );
+    assert!(
+        synced_generation(&coordinator, &forward_key).is_some(),
+        "the replacement forward must remain authoritative"
+    );
+    assert!(
+        synced_generation(&coordinator, &new_reverse_key).is_some(),
+        "the replacement reverse must be published"
+    );
+    assert!(
+        synced_generation(&coordinator, &old_reverse_key).is_none(),
+        "the displaced reverse must be retired"
+    );
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        3,
+        "replacing the companion must leave aggregate occupancy at the cap"
+    );
+
+    assert_eq!(
+        coordinator.upsert_synced_session(reserve6600_entry(40021, 52002)),
+        SyncedImportOutcome::RejectedCapacity,
+        "a distinct new forward must still be refused at the full cap"
+    );
+}
+
+#[test]
+fn concurrent_synced_imports_do_not_exceed_aggregate_cap_18687() {
+    let mut coordinator = Coordinator::new();
+    const PER_TABLE_CEILING: u16 = 3;
+    coordinator.synced_import_cap_override.store(
+        PER_TABLE_CEILING as usize,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        WorkerRuntimeRecord::for_test(test_worker_handle(commands)),
+        None,
+    );
+    seed_local_shared_rows(&coordinator, 1);
+    for port in 1000..1003 {
+        coordinator.upsert_synced_session(synced_entry_port(port, 0));
+    }
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        7,
+        "one local row plus three imported pairs leaves two aggregate slots"
+    );
+
+    let coordinator = Arc::new(coordinator);
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let first_coordinator = Arc::clone(&coordinator);
+    let first_start = Arc::clone(&start);
+    let first = std::thread::spawn(move || {
+        first_start.wait();
+        first_coordinator.upsert_synced_session(synced_entry_port(2000, 0));
+    });
+    let second_coordinator = Arc::clone(&coordinator);
+    let second_start = Arc::clone(&start);
+    let second = std::thread::spawn(move || {
+        second_start.wait();
+        second_coordinator.upsert_synced_session(synced_entry_port(2001, 0));
+    });
+    start.wait();
+    first.join().expect("first import thread");
+    second.join().expect("second import thread");
+
+    assert_eq!(
+        coordinator.sessions.synced.lock().expect("shared sessions").len(),
+        9,
+        "concurrent imports may fill, but never exceed, the 3N aggregate cap"
+    );
+    assert_eq!(
+        coordinator.synced_import_cap_drops_total(),
+        1,
+        "exactly one of the two competing final-slot imports must be refused"
+    );
+}
+
 
 // A new forward plus its reverse requires two slots. Checking only
 // `synced_len >= cap` admits one entry past the aggregate bound when the map is

@@ -434,8 +434,9 @@ reverse before RG activation. That second request was redundant:
 `synthesized_synced_reverse_entry` for EVERY non-reverse import — a total
 function on forwards — and publishes both halves through
 `publish_shared_session`. A single forward upsert therefore already leaves a
-COMPLETE PAIR; the #5674 shared-map ENTRY cap is twice the replicated node's
-one-table ceiling (#18687), accounting for both halves. Synthesis happens
+COMPLETE PAIR; the #5674 shared-map ENTRY cap is three times the replicated
+node's one-table ceiling: N local rows + 2N peer forward/reverse rows = 3N
+total (#18687). Synthesis happens
 AT IMPORT, which is earlier
 than the Go pre-install ever was, so #310's invariant is satisfied by the
 request that remains — and the helper's companion is the better one, because it

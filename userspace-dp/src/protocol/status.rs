@@ -552,15 +552,13 @@ pub(crate) struct ProcessStatus {
     #[serde(rename = "handshake_relay_lock_contended_total", default)]
     pub handshake_relay_lock_contended_total: u64,
     /// #5674/#18687: peer-synced session imports rejected by the coordinator's
-    /// admission bound. Each worker table is a full replica, so the node's
-    /// logical ceiling is `REPLICATED_NODE_SESSION_CEILING`, not a
-    /// worker-count multiple. The shared map admits two entries per forward
-    /// (the forward plus synthesized reverse) and therefore has 2x that
-    /// per-table ceiling to let a full peer table meet this receiver's own
-    /// population. A rising value means a peer exceeded this receiver-local
-    /// bound. Surfaced as the Prometheus counter
-    /// `xpf_userspace_synced_import_cap_drops_total`. Additive / defaulted for
-    /// backward compatibility.
+    /// admission bound. Each worker table is a replica, so the node ceiling is
+    /// `REPLICATED_NODE_SESSION_CEILING`, not a worker-count multiple. The
+    /// aggregate shared map admits N local rows plus 2N imported rows (N peer
+    /// forwards and their synthesized reverses), for a total cap of 3N. A rising
+    /// value means a peer exceeded this receiver-local bound. Surfaced as the
+    /// Prometheus counter `xpf_userspace_synced_import_cap_drops_total`.
+    /// Additive / defaulted for backward compatibility.
     #[serde(rename = "synced_import_cap_drops_total", default)]
     pub synced_import_cap_drops_total: u64,
     /// #1760 W3': shared-map NAT reverse-key displacement events — a

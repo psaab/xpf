@@ -1351,6 +1351,7 @@ does not hold.
 The helper can refuse an import for three SEMANTIC reasons, none of which are
 faults:
 
+| Refusal | Meaning | Reference |
 |---|---|---|
 | `stale-generation` | the stored entry is NEWER than the incoming one | #2170 |
 | `capacity` | the shared-map aggregate bound (N local rows + 2N peer forward/reverse rows = 3N) is full | #5674/#18687 |

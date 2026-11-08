@@ -2148,6 +2148,10 @@ bound is N local rows + 2N imported rows = 3N entries. This permits a
 full local table and one full peer table to coexist without multiplying
 the ceiling by worker count.
 
+The bound is unconditional: worker registration controls fan-out and NAT
+reservation, not shared-map admission. Within-bound early-boot imports remain
+authoritative and are available for replay when workers register.
+
 `upsert_synced_session` checks projected map growth before its shared
 publish and worker fan-out. When the map has N local rows, N peer
 forwards (2N entries) exactly fit; a new pair that would take aggregate
@@ -2158,13 +2162,14 @@ occupancy beyond 3N is **drop-newest**-rejected and bumps
 pre-existing local or imported rows consume the same shared-map budget.
 The rejected key is never published or enqueued to any worker.
 
-Each admitted forward needs up to TWO new map entries — the forward key
-and synthesized reverse — so the gate counts its projected additions
-under the shared-map lock. At the full-local boundary, `K=N` peer
-forwards occupy `2N` imported entries and fit alongside N local rows.
-Sizing only for 2N total entries would under-sync when local rows already
-occupied slots; multiplying the corrected 3N bound by worker count would
-reintroduce the #18687 replicated-table bug.
+Each admitted forward can add its forward key and synthesized reverse. The
+import admission gate checks projected additions against an authoritative
+shared-map length, then holds through pair publication and stale-companion
+retirement so concurrent imports cannot claim the same final slots. At the
+full-local boundary, `K=N` peer forwards occupy `2N` imported entries and fit
+alongside N local rows. Sizing only for 2N total entries would under-sync when
+local rows already occupied slots; multiplying the corrected 3N bound by worker
+count would reintroduce the #18687 replicated-table bug.
 
 The admission check accounts for the FORWARD and its synthesized reverse
 as one projected pair. A rejected forward returns before either key is
@@ -2207,18 +2212,19 @@ deleted and the peer path excluded, no shipped daemon can produce the
 condition, and a metric that can only read zero says nothing. The typed
 outcome already reaches the caller through the control response.
 
-A REPLACE whose forward and reverse rows are already present remains allowed
-at the ceiling (it has no projected growth); an existing entry is never evicted
-make room. One documented residual: a peer whose per-table ceiling is
-larger than this node's can exceed the receiver's 3N aggregate bound, so
-a legitimate over-cap import would be dropped. The uncapped
+A REPLACE at the ceiling is allowed when its projected NET growth remains
+within the cap: a NAT-changing replacement can publish its new reverse while
+the old companion is counted as retiring. Existing sessions are never evicted
+to make room. One documented residual: a peer whose per-table ceiling is
+larger than this node's can exceed the receiver's 3N aggregate bound, so a
+legitimate over-cap import would be dropped. The uncapped
 `upsert_synced_with_origin` and the local `UpsertLocal` / shared-hit
-materialization paths are unchanged — they are locally bounded and do
-not carry the peer-DoS vector. Pinned by
-`upsert_synced_session_rejects_over_ceiling_import_and_does_not_fan_out`
-(`afxdp/ha_tests.rs`), which preloads N local rows, admits N peer
-forwards beside them with zero drops, and rejects the next new forward
-without fan-out.
+materialization paths are unchanged — they are locally bounded and do not
+carry the peer-DoS vector. Pinned by
+`synced_import_cap_allows_nat_changing_replacement_at_ceiling_18687` and
+`synced_import_cap_rejects_over_ceiling_import_and_does_not_fan_out_18687`
+(`afxdp/ha_tests.rs`), which preload local rows, admit peer forwards within 3N,
+and prove that the next distinct new forward is refused without fan-out.
 
 ### HA install-generation guard on SyncedSessionEntry (#2170)
 

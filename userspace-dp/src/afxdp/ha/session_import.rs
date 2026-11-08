@@ -563,21 +563,11 @@ impl crate::afxdp::ha::SessionDomain {
     /// local table plus one full peer's forward imports and synthesized reverse
     /// companions needs N + 2N entries, so the aggregate map cap is 3N.
     ///
-    /// A zero-worker snapshot disables the bound during early boot/teardown,
-    /// avoiding rejection while no worker can consume imports. The test seam
-    /// substitutes a small per-table ceiling but follows the production 3x
-    /// aggregate entry conversion.
-    ///
-    /// #7209: calculate against the EXPLICIT records snapshot used for the
-    /// reservation gate and fan-out. Independent `records()` loads inside one
-    /// import could straddle teardown and disagree about whether workers exist.
-    pub(in crate::afxdp) fn synced_import_cap_for(
-        &self,
-        records: &std::collections::BTreeMap<
-            u32,
-            std::sync::Arc<crate::afxdp::coordinator::WorkerRuntimeRecord>,
-        >,
-    ) -> usize {
+    /// This bound is unconditional: worker registration controls fan-out, not
+    /// admission. Early-boot imports remain bounded in shared authority and are
+    /// available for replay when workers register. The test seam substitutes a
+    /// small per-table ceiling but follows the same 3x aggregate conversion.
+    pub(in crate::afxdp) fn synced_import_cap_for(&self) -> usize {
         #[cfg(test)]
         let override_ceiling = self
             .synced_import_cap_override
@@ -591,14 +581,6 @@ impl crate::afxdp::ha::SessionDomain {
         #[cfg(not(test))]
         let per_table_ceiling = crate::session::REPLICATED_NODE_SESSION_CEILING;
 
-        #[cfg(test)]
-        if records.is_empty() && override_ceiling == 0 {
-            return 0;
-        }
-        #[cfg(not(test))]
-        if records.is_empty() {
-            return 0;
-        }
         per_table_ceiling.saturating_mul(3)
     }
 
@@ -1452,14 +1434,11 @@ impl crate::afxdp::ha::SessionDomain {
         // today — so that weakening or moving the early return degrades to the
         // previous behaviour rather than to an unguarded publish.
         //
-        // Drop-NEWEST: reject a NEW forward key at/above
-        // the ceiling (never enqueue it to any worker), but ALWAYS allow a
-        // REPLACE of an existing synced key (`previous_entry.is_some()` — it
-        // does not grow the map) so an in-flight synced session keeps
-        // refreshing. Never evict an existing synced session to make room; that
-        // would drop a legitimate failover session. A zero ceiling (no workers
-        // registered yet — early boot / teardown) disables the bound so a
-        // transient window never rejects legitimate imports.
+        // Drop-NEWEST: reject a NEW forward whose projected map occupancy
+        // exceeds the cap, but allow replacements when their net occupancy
+        // remains within the bound. A NAT-changing replacement can create a
+        // new reverse key while retiring its old companion; account for that
+        // retirement before refusing it.
         let reverse_entry = if !entry.metadata.is_reverse {
             synthesized_synced_reverse_entry(
                 forwarding,
@@ -1488,14 +1467,35 @@ impl crate::afxdp::ha::SessionDomain {
         // Re-read all authoritative shared state while the lease excludes
         // tuple writers; generation, capacity, ownership, and merge decisions
         // below must use this current incarnation.
-        let (previous_entry, synced_len, reverse_present) = {
+        // Serialize imported-pair admission through publication and any stale
+        // companion retirement so concurrent imports see one coherent count.
+        let import_cap_gate = lock_shared_recover(&self.sessions.import_cap_gate);
+        let (previous_entry, synced_len, reverse_present, stale_reverse_present) = {
             let sessions = lock_shared_recover(&self.sessions.synced);
+            let previous_entry = sessions.get(&entry.key).cloned();
+            let stale_reverse_present = previous_entry.as_ref().is_some_and(|previous| {
+                let old_reverse_key =
+                    reverse_session_key(&previous.key, previous.decision.nat);
+                let new_reverse_key = reverse_session_key(&entry.key, entry.decision.nat);
+                !previous.metadata.is_reverse
+                    && old_reverse_key != new_reverse_key
+                    // Subtract only the companion that stale cleanup will
+                    // match by owner key, generation, and session ID.
+                    && sessions.get(&old_reverse_key).is_some_and(|reverse| {
+                        reverse.metadata.is_reverse
+                            && reverse.generation == previous.generation
+                            && reverse.session_id == previous.session_id
+                            && reverse_session_key(&reverse.key, reverse.decision.nat)
+                                == previous.key
+                    })
+            });
             (
-                sessions.get(&entry.key).cloned(),
+                previous_entry,
                 sessions.len(),
                 reverse_entry
                     .as_ref()
                     .is_some_and(|reverse| sessions.contains_key(&reverse.key)),
+                stale_reverse_present,
             )
         };
         if previous_entry.as_ref().is_some_and(|previous| {
@@ -1531,10 +1531,15 @@ impl crate::afxdp::ha::SessionDomain {
             if reverse_entry.is_some() && !reverse_present {
                 additional_entries += 1;
             }
-            let synced_cap = self.synced_import_cap_for(&worker_records);
-            if synced_cap != 0
-                && synced_len.saturating_add(additional_entries) > synced_cap
-            {
+            // A NAT-changing replacement grows by its new companion but later
+            // retires the old reverse. Charge only that NET map growth so an
+            // otherwise in-cap replacement is not terminally refused.
+            let mut projected_len = synced_len.saturating_add(additional_entries);
+            if stale_reverse_present {
+                projected_len = projected_len.saturating_sub(1);
+            }
+            let synced_cap = self.synced_import_cap_for();
+            if projected_len > synced_cap {
                 self.sessions
                     .import_cap_drops
                     .fetch_add(1, Ordering::Relaxed);
@@ -1570,8 +1575,8 @@ impl crate::afxdp::ha::SessionDomain {
         //
         // Skipped when NO worker is registered: nothing polls, so there is no
         // racing local allocation to guard against, and an `Untracked`
-        // reservation that no worker ever adopts has no one to release it. Same
-        // shape as the zero-ceiling carve-out above, and for the same reason.
+        // reservation that no worker ever adopts has no one to release it.
+        // The shared-map admission ceiling remains active independently.
         // #9678: decide LOCAL OWNERSHIP before anything below touches the
         // allocator or the shared maps.
         //
@@ -1930,6 +1935,7 @@ impl crate::afxdp::ha::SessionDomain {
             // import above has already been ordered (#17144).
             let _ = self.delete_synced_reverse_companion(old_reverse_key, &previous, &_tuple_lease);
         }
+        drop(import_cap_gate);
         outcome
     }
 

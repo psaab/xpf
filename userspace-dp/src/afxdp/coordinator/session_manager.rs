@@ -55,6 +55,10 @@ pub(in crate::afxdp) struct SessionManager {
     pub(in crate::afxdp) synced: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) nat: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     pub(in crate::afxdp) forward_wire: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    /// Serializes capacity checks and shared publication of imported pairs.
+    /// Concurrent imports must not both claim the same final forward/reverse
+    /// slots.
+    pub(in crate::afxdp) import_cap_gate: Mutex<()>,
     pub(in crate::afxdp) owner_rg_indexes: SharedSessionOwnerRgIndexes,
     pub(in crate::afxdp) export_seq: AtomicU64,
     /// #9856: random per-helper incarnation. It is emitted with every
@@ -267,6 +271,7 @@ impl SessionManager {
             synced: Arc::new(Mutex::new(FastMap::default())),
             nat: Arc::new(Mutex::new(FastMap::default())),
             forward_wire: Arc::new(Mutex::new(FastMap::default())),
+            import_cap_gate: Mutex::new(()),
             owner_rg_indexes: SharedSessionOwnerRgIndexes::default(),
             export_seq: AtomicU64::new(0),
             export_incarnation: crate::protocol::session_export_incarnation(),

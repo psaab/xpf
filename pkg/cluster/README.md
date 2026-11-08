@@ -6004,9 +6004,11 @@ it.
     (#16039). Admission to `bulkRecvV4/V6` precedes the install verdict
     (a transiently failed key must still count as received), so the cap
     is what bounds that pre-verdict growth: the combined live keys in
-    one window may not exceed `bulkRecvCap()` — the forward-session
-    table capacity (`maxCap()`: the wired helper capacity, else the
-    200k default, ceiling `dataplane.MaxSessions/2`). The cap is on
+    one window may not exceed `bulkRecvCap()` — the helper's exact replicated
+    node ceiling when wired (up to the absolute safety limit), otherwise the
+    200k default. This receiver cap honors a helper report below 200k; the
+    distinct generation-guard growth ceiling (`maxCap()`) retains its 200k
+    minimum floor.
     live occupancy, not cumulative distinct keys: a successful delete
     during the window frees its key's slot
     (`removeBulkRecvV4/V6` from the delete paths), so delete+reinstall
