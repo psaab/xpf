@@ -47,6 +47,30 @@ func newBatchResultSync14160(ack, fallback net.Conn) *SessionSync {
 	return ss
 }
 
+// TestSendInstallHeartbeatWriteFailureDisconnects18599 pins the install-time
+// heartbeat's write-error teardown: a failed or partial frame leaves the
+// stream state unknown, so it must be removed rather than kept as active.
+func TestSendInstallHeartbeatWriteFailureDisconnects18599(t *testing.T) {
+	broken := &failoverResultConn14160{writeErr: errors.New("install heartbeat write failed")}
+	ss := newBatchResultSync14160(broken, nil)
+	ss.stats.Connected.Store(true)
+
+	ss.sendInstallHeartbeat(broken)
+
+	if !broken.closed.Load() {
+		t.Fatal("connection was not closed after install heartbeat write failed")
+	}
+	ss.mu.Lock()
+	installed := ss.conn0 == broken
+	ss.mu.Unlock()
+	if installed || ss.getActiveConn() != nil {
+		t.Fatal("connection remained installed after install heartbeat write failed")
+	}
+	if ss.stats.Connected.Load() {
+		t.Fatal("sync still reports connected after install heartbeat write failed")
+	}
+}
+
 // TestSendFailoverBatchResultDisconnectsBrokenAckConn14160 pins #14160:
 // when the active (ack) conn fails and the fallback conn delivers the batch
 // result, the broken ack conn must still be disconnected, exactly as the

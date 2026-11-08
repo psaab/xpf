@@ -193,10 +193,19 @@ const minLivenessProbeAnswer = 50 * time.Millisecond
 // livenessProbeAnswerWindowLocked is the answer window for a probe that could
 // not be pre-armed and went out on the timeout tick itself (a receiver
 // leaving a restart or boot grace with the peer already late, for instance):
-// the same (threshold - 1.5) x interval a pre-armed probe gets, so a live peer
-// is never judged on one interval (seat U). Caller must hold m.mu.
+// it gives the full (threshold - 1.5) x interval that normally remains
+// between the first missed heartbeat's pre-armed probe and the timeout tick.
+// Since a probe sent on the timeout tick has no such head start, a live peer
+// gets that remaining time to answer instead of being judged on one interval.
+// The threshold and interval come from the running receiver
+// (liveHeartbeatTimingLocked, #5081): between a commit that changes the
+// heartbeat timing and the restart that adopts it, the configured values are
+// not the cadence being judged, and sizing from them can under-run the live
+// window badly enough to declare a live peer one tick after the probe
+// (#18599). Caller must hold m.mu.
 func (m *Manager) livenessProbeAnswerWindowLocked() time.Duration {
-	w := time.Duration(2*m.hbThreshold-3) * m.hbInterval / 2
+	interval, threshold := m.liveHeartbeatTimingLocked()
+	w := time.Duration(2*threshold-3) * interval / 2
 	if w < minLivenessProbeAnswer {
 		return minLivenessProbeAnswer
 	}

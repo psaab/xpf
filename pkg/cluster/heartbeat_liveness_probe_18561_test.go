@@ -183,6 +183,73 @@ func TestNewWindowIgnoresEarlierProbe18561(t *testing.T) {
 	}
 }
 
+// TestProbeWindowUsesLiveHeartbeatTiming18599 pins #18599: until the
+// receiver restarts, configured timing can differ from the cadence that
+// actually times out the peer. With desired threshold 2 but a live threshold
+// of 5, the desired-value window is only 50 ms; one interval after a
+// timeout-tick probe must still be inside the live 350 ms answer window.
+func TestProbeWindowUsesLiveHeartbeatTiming18599(t *testing.T) {
+	g := newProbeRig18561(t, true, 100*time.Millisecond)
+	g.m.mu.Lock()
+	g.m.hbInterval = DefaultHeartbeatInterval
+	g.m.hbThreshold = 2
+	liveInterval, liveThreshold := g.m.liveHeartbeatTimingLocked()
+	if liveInterval != DefaultHeartbeatInterval || liveThreshold != DefaultHeartbeatThreshold {
+		g.m.mu.Unlock()
+		t.Fatalf("fixture live timing = %s x %d, want %s x %d",
+			liveInterval, liveThreshold, DefaultHeartbeatInterval, DefaultHeartbeatThreshold)
+	}
+	if g.m.hbThreshold == liveThreshold {
+		g.m.mu.Unlock()
+		t.Fatal("fixture desired threshold must differ from the running receiver")
+	}
+	now := MonotonicNanos()
+	if ok, _ := g.m.syncSuppressesPeerTimeoutLocked(now); !ok || g.src.probes != 1 {
+		g.m.mu.Unlock()
+		t.Fatalf("timeout-tick probe: suppress=%v probes=%d, want true and one probe", ok, g.src.probes)
+	}
+	window := time.Duration(2*liveThreshold-3) * liveInterval / 2
+	if got := time.Duration(g.m.hbLivenessProbeAnswerBy - g.m.hbLivenessProbeMono); got != window {
+		g.m.mu.Unlock()
+		t.Fatalf("probe answer window = %s, want live-timing window %s", got, window)
+	}
+	ok, _ := g.m.syncSuppressesPeerTimeoutLocked(now + liveInterval.Nanoseconds())
+	g.m.mu.Unlock()
+	if !ok {
+		t.Fatal("live peer was judged one interval after its timeout-tick probe using configured timing")
+	}
+}
+
+// TestPrearmedLivenessProbeKeepsFloor18599 pins the pre-arm's 50 ms answer
+// floor at a phase where the heartbeat has only 250 ms left before its
+// 500 ms timeout. Giving this probe the full 350 ms timeout-tick window would
+// suppress the timeout and defer declaring the dead peer by another tick.
+func TestPrearmedLivenessProbeKeepsFloor18599(t *testing.T) {
+	g := newProbeRig18561(t, true, 250*time.Millisecond)
+	g.r.checkTimeout()
+	if g.src.probes != 1 {
+		t.Fatalf("first late-heartbeat tick sent %d probes, want 1", g.src.probes)
+	}
+	g.m.mu.RLock()
+	window := time.Duration(g.m.hbLivenessProbeAnswerBy - g.m.hbLivenessProbeMono)
+	g.m.mu.RUnlock()
+	if window != minLivenessProbeAnswer {
+		t.Fatalf("pre-armed probe answer floor = %s, want %s", window, minLivenessProbeAnswer)
+	}
+
+	// The heartbeat crosses its 500 ms stale threshold just after the probe
+	// has been outstanding for 250 ms: the floor has expired, while the full
+	// threshold-derived window has not.
+	g.elapse(250*time.Millisecond + time.Nanosecond)
+	g.r.checkTimeout()
+	if g.m.PeerAlive() {
+		t.Fatal("dead peer stayed alive past heartbeat timeout because pre-armed probe used the full answer window")
+	}
+	if _, sent, unanswered := g.m.LivenessProbeStats(); sent != 1 || unanswered != 1 {
+		t.Fatalf("probe stats sent=%d unanswered=%d, want 1/1", sent, unanswered)
+	}
+}
+
 // A probe sent on the timeout tick itself (no pre-arm) gets the full
 // (threshold - 1.5) x interval window a pre-armed probe has, never a single
 // interval (seat U); the 5s cap still ends an answered window. RED if the
