@@ -687,12 +687,7 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 				rustHasCompetingFreeFn19013(rel, src, name, declLine, candidateModule) {
 				continue
 			}
-			if scope, ok := rustFunctionScope19013(src, start); ok &&
-				(rustParamShadows19013(scope.args, name) ||
-					rustLetShadows19013(src, name, scope.start, scope.end) ||
-					rustClosureParamShadows19013(src, name, scope.start, scope.end) ||
-					rustForBindingShadows19013(src, name, scope.start, scope.end) ||
-					rustMatchArmShadows19013(src, name, scope.start, scope.end)) {
+			if rustBindingPatternShadows19013(src, name, start) {
 				continue
 			}
 		}
@@ -990,33 +985,78 @@ type rustFunctionInfo19013 struct {
 }
 
 func rustFunctionScope19013(src string, pos int) (rustFunctionInfo19013, bool) {
-	lines := strings.Split(src, "\n")
 	best := rustFunctionInfo19013{start: -1}
-	offset := 0
-	for _, line := range lines {
-		if offset > pos {
-			break
+	for i := 0; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
 		}
-		trimmed := strings.TrimSpace(line)
-		if isFnDecl8393(trimmed) {
-			open := rustFunctionBodyOpen19013(src, offset)
-			if open >= 0 {
-				close := rustMatchingBrace19013(src, open)
-				inBody := open < pos && close > pos
-				inHeader := offset <= pos && pos < open && close > pos
-				if (inBody || inHeader) && open > best.start {
-					header := strings.TrimSpace(src[offset:])
-					_, args, ok := fnNameAndArgs15255(header)
-					if !ok {
-						args = ""
-					}
-					best = rustFunctionInfo19013{start: open + 1, end: close, args: args}
-				}
+		if !rustWordAt19013(src, i, "fn") {
+			i++
+			continue
+		}
+		_, args, ok := fnNameAndArgs15255(strings.TrimSpace(src[i:]))
+		if !ok {
+			i += len("fn")
+			continue
+		}
+		open := rustFunctionBodyOpen19013(src, i)
+		if open >= 0 {
+			close := rustMatchingBrace19013(src, open)
+			inBody := open < pos && close > pos
+			inHeader := i <= pos && pos < open && close > pos
+			if (inBody || inHeader) && open > best.start {
+				best = rustFunctionInfo19013{start: open + 1, end: close, args: args}
 			}
 		}
-		offset += len(line) + 1
+		i += len("fn")
 	}
 	return best, best.start >= 0
+}
+
+func rustBindingPatternShadows19013(src, name string, pos int) bool {
+	if scope, ok := rustFunctionScope19013(src, pos); ok {
+		return rustPatternRegionsShadow19013(src, name, scope.start, scope.end, scope.args)
+	}
+	opens := rustEnclosingBraces19013(src, pos)
+	if len(opens) == 0 {
+		return rustPatternRegionsShadow19013(src, name, 0, len(src), "")
+	}
+	for i := len(opens) - 1; i >= 0; i-- {
+		close := rustMatchingBrace19013(src, opens[i])
+		if close > pos && rustPatternRegionsShadow19013(src, name, opens[i]+1, close, "") {
+			return true
+		}
+	}
+	return false
+}
+
+func rustPatternRegionsShadow19013(src, name string, start, end int, args string) bool {
+	return rustParamShadows19013(args, name) ||
+		rustLetShadows19013(src, name, start, end) ||
+		rustClosureParamShadows19013(src, name, start, end) ||
+		rustForBindingShadows19013(src, name, start, end) ||
+		rustMatchArmShadows19013(src, name, start, end)
+}
+
+func rustEnclosingBraces19013(src string, pos int) []int {
+	var opens []int
+	for i := 0; i <= pos && i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case '{':
+			opens = append(opens, i)
+		case '}':
+			if len(opens) > 0 {
+				opens = opens[:len(opens)-1]
+			}
+		}
+		i++
+	}
+	return opens
 }
 
 func rustFunctionBodyOpen19013(src string, start int) int {
@@ -1774,6 +1814,12 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			want: 1,
 		},
 		{
+			name: "const block local does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\nconst X: u8 = { let lost = 1; lost };\n#[test]\nfn uses() { assert!(true); }\n",
+			want: 1,
+		},
+		{
 			name: "tuple let binding does not reference the unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let (lost,) = (|| {},); lost(); }\n",
@@ -1788,7 +1834,7 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 		{
 			name: "tuple function parameter does not reference the unregistered fn",
 			rel:  "tests_x.rs",
-			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() {\n    fn nested((lost,): (fn(),)) { lost(); }\n}\n",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { fn nested((lost,): (fn(),)) { lost(); } }\n",
 			want: 1,
 		},
 		{
