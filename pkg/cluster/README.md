@@ -6009,8 +6009,8 @@ it.
     200k default. This receiver cap honors a helper report below 200k; the
     distinct generation-guard growth ceiling (`maxCap()`) retains its 200k
     minimum floor.
-    live occupancy, not cumulative distinct keys: a successful delete
-    during the window frees its key's slot
+    That bound applies to live occupancy, not cumulative distinct keys: a
+    successful delete during the window frees its key's slot
     (`removeBulkRecvV4/V6` from the delete paths), so delete+reinstall
     churn never consumes it. The first distinct key past the cap, or a
     window still open more than `bulkRecvWindowTimeout` (1h) after the

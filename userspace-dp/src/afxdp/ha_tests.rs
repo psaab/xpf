@@ -1435,61 +1435,6 @@ fn synced_import_cap_allows_nat_changing_replacement_at_ceiling_18687() {
     );
 }
 
-#[test]
-fn concurrent_synced_imports_do_not_exceed_aggregate_cap_18687() {
-    let mut coordinator = Coordinator::new();
-    const PER_TABLE_CEILING: u16 = 3;
-    coordinator.synced_import_cap_override.store(
-        PER_TABLE_CEILING as usize,
-        std::sync::atomic::Ordering::Relaxed,
-    );
-    let commands = Arc::new(Mutex::new(VecDeque::new()));
-    coordinator.workers.register(
-        0,
-        WorkerRuntimeRecord::for_test(test_worker_handle(commands)),
-        None,
-    );
-    seed_local_shared_rows(&coordinator, 1);
-    for port in 1000..1003 {
-        coordinator.upsert_synced_session(synced_entry_port(port, 0));
-    }
-    assert_eq!(
-        coordinator.sessions.synced.lock().expect("shared sessions").len(),
-        7,
-        "one local row plus three imported pairs leaves two aggregate slots"
-    );
-
-    let coordinator = Arc::new(coordinator);
-    let start = Arc::new(std::sync::Barrier::new(3));
-    let first_coordinator = Arc::clone(&coordinator);
-    let first_start = Arc::clone(&start);
-    let first = std::thread::spawn(move || {
-        first_start.wait();
-        first_coordinator.upsert_synced_session(synced_entry_port(2000, 0));
-    });
-    let second_coordinator = Arc::clone(&coordinator);
-    let second_start = Arc::clone(&start);
-    let second = std::thread::spawn(move || {
-        second_start.wait();
-        second_coordinator.upsert_synced_session(synced_entry_port(2001, 0));
-    });
-    start.wait();
-    first.join().expect("first import thread");
-    second.join().expect("second import thread");
-
-    assert_eq!(
-        coordinator.sessions.synced.lock().expect("shared sessions").len(),
-        9,
-        "concurrent imports may fill, but never exceed, the 3N aggregate cap"
-    );
-    assert_eq!(
-        coordinator.synced_import_cap_drops_total(),
-        1,
-        "exactly one of the two competing final-slot imports must be refused"
-    );
-}
-
-
 // A new forward plus its reverse requires two slots. Checking only
 // `synced_len >= cap` admits one entry past the aggregate bound when the map is
 // at cap-1; this pins the projected-pair refusal at odd occupancy.

@@ -9448,6 +9448,124 @@ fn sync_session_upsert_reports_a_semantic_refusal_on_the_wire_6785() {
     );
 }
 
+#[test]
+fn sync_session_concurrent_imports_share_capacity_across_sockets_18687() {
+    fn upsert_request(src_port: u16) -> ControlRequest {
+        let mut request = req("sync_session");
+        request.session_sync = Some(SessionSyncRequest {
+            forward_wire_alias_origin: false,
+            operation: "upsert".to_string(),
+            addr_family: 2,
+            protocol: 6,
+            src_ip: "10.0.0.1".to_string(),
+            dst_ip: "10.0.0.2".to_string(),
+            src_port,
+            dst_port: 80,
+            egress_ifindex: 7,
+            neighbor_mac: "02:bf:72:01:02:03".to_string(),
+            src_mac: "02:bf:72:0a:0b:0c".to_string(),
+            ..SessionSyncRequest::default()
+        });
+        request
+    }
+
+    const PER_TABLE_CEILING: usize = 2;
+    let state = new_state(ProcessStatus::default());
+    state
+        .lock()
+        .expect("state")
+        .afxdp
+        .synced_import_cap_override
+        .store(PER_TABLE_CEILING, std::sync::atomic::Ordering::Relaxed);
+
+    // Two dispatched forward/reverse pairs leave exactly the final pair's
+    // two slots in the 3N shared-map budget.
+    for src_port in 1000..1002 {
+        let response = run_request_with_domain(
+            state.clone(),
+            upsert_request(src_port),
+            domain.clone(),
+            SocketMode::Main,
+        );
+        assert!(
+            response.ok,
+            "seed import through Main must fit: {}",
+            response.error
+        );
+    }
+    assert_eq!(
+        domain.synced_entry_count(),
+        3 * PER_TABLE_CEILING - 2,
+        "dispatched seeds must leave exactly two slots"
+    );
+
+    let start = Arc::new(std::sync::Barrier::new(3));
+    let main_start = Arc::clone(&start);
+    let main_state = Arc::clone(&state);
+    let main_domain = domain.clone();
+    let main = std::thread::spawn(move || {
+        main_start.wait();
+        run_request_with_domain(
+            main_state,
+            upsert_request(2000),
+            main_domain,
+            SocketMode::Main,
+        )
+    });
+    let session_start = Arc::clone(&start);
+    let session_state = Arc::clone(&state);
+    let session_domain = domain.clone();
+    let session = std::thread::spawn(move || {
+        session_start.wait();
+        run_request_with_domain(
+            session_state,
+            upsert_request(2001),
+            session_domain,
+            SocketMode::Session,
+        )
+    });
+    start.wait();
+
+    let responses = [
+        main.join().expect("Main dispatcher thread"),
+        session.join().expect("Session dispatcher thread"),
+    ];
+    assert_eq!(
+        responses.iter().filter(|response| response.ok).count(),
+        1,
+        "exactly one final-slot import across the two socket dispatchers must succeed"
+    );
+    let refusal = responses
+        .iter()
+        .find(|response| !response.ok)
+        .expect("one dispatched import must be refused");
+    assert_eq!(
+        refusal.error,
+        crate::afxdp::SyncedImportOutcome::RejectedCapacity
+            .wire_error()
+            .expect("capacity is a refusal"),
+        "the losing socket must receive the capacity refusal on the wire"
+    );
+    assert_eq!(
+        domain.synced_entry_count(),
+        3 * PER_TABLE_CEILING,
+        "dispatched imports must fill but not exceed the shared 3N ceiling"
+    );
+    assert!(
+        domain.synced_entry_count() <= 3 * PER_TABLE_CEILING,
+        "Main and Session dispatch must not over-admit the same final pair"
+    );
+    assert_eq!(
+        state
+            .lock()
+            .expect("state")
+            .afxdp
+            .synced_import_cap_drops_total(),
+        1,
+        "the shared coordinator must count exactly one capacity refusal"
+    );
+}
+
 /// #6751 PR 2/3: `refresh_status` must PROJECT each interface-mode SNAT
 /// registry counter onto its OWN status field.
 ///
