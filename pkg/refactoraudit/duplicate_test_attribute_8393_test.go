@@ -673,17 +673,20 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 			continue
 		}
 		currentPath := rustModulePath19013(rel, src, start)
-		if qualified, resolves := rustQualifiedPath19013(src, start, candidatePath, currentPath); qualified {
+		qualified, resolves := rustQualifiedPath19013(src, start, candidatePath, currentPath)
+		if qualified {
 			if !resolves {
 				continue
 			}
-		} else if !sameRustPath19013(candidateModule, currentPath) {
-			continue
-		}
-		if scope, ok := rustFunctionScope19013(src, start); ok &&
-			(rustParamShadows19013(scope.args, name) ||
-				rustLetShadows19013(src, name, scope.start, start)) {
-			continue
+		} else {
+			if !sameRustPath19013(candidateModule, currentPath) {
+				continue
+			}
+			if scope, ok := rustFunctionScope19013(src, start); ok &&
+				(rustParamShadows19013(scope.args, name) ||
+					rustLetShadows19013(src, name, scope.start, start)) {
+				continue
+			}
 		}
 		return true
 	}
@@ -1392,6 +1395,12 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			name: "unregistered zero-arg helper passed as a qualified fn item",
 			rel:  "tests_x.rs",
 			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(crate::tests_x::callback); }\n",
+			want: 0,
+		},
+		{
+			name: "qualified fn item is not shadowed by a local",
+			rel:  "tests_x.rs",
+			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { let callback = 1; runner(crate::tests_x::callback); }\n",
 			want: 0,
 		},
 		{
