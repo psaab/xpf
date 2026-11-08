@@ -165,8 +165,8 @@ func TestRetiredSessionSyncLeavesThePeerDisconnected18525(t *testing.T) {
 // startup holds. The currently published sync retains the valid release edge.
 func TestOnBulkSyncReceivedFromRetiredSyncDoesNotReleaseHolds18554(t *testing.T) {
 	d := &Daemon{
-		cluster:   newClusterManager(false),
-		vrrpMgr:   vrrp.NewManager(),
+		cluster: newClusterManager(false),
+		vrrpMgr: vrrp.NewManager(),
 	}
 	t.Cleanup(d.vrrpMgr.ReleaseSyncHold)
 	d.cluster.SetSyncReady(false)
@@ -359,5 +359,181 @@ func TestRetiredBulkAckDoesNotStopSuccessorPrimeRetry18554(t *testing.T) {
 	}
 	if d.syncPeerBulkPrimed.Load() {
 		t.Fatal("the retired ACK primed the successor during its retry loop")
+	}
+}
+
+// pauseCurrentPeerCallbackAtEffects18554 blocks after the identity recheck,
+// while clusterCommsMu should still serialize publication with the callback's
+// daemon-wide effects.
+func pauseCurrentPeerCallbackAtEffects18554(t *testing.T, d *Daemon, lockedHook string, callback func()) (<-chan struct{}, func()) {
+	t.Helper()
+	atEffects, resume := make(chan struct{}), make(chan struct{})
+	var resumeOnce sync.Once
+	release := func() { resumeOnce.Do(func() { close(resume) }) }
+	d.peerCallbackAfterSupersededForTest = func(which string) {
+		if which == lockedHook {
+			close(atEffects)
+			<-resume
+		}
+	}
+	callbackDone := make(chan struct{})
+	go func() {
+		defer close(callbackDone)
+		callback()
+	}()
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-callbackDone:
+		case <-time.After(time.Second):
+			t.Error("paused peer callback did not finish during cleanup")
+		}
+	})
+	select {
+	case <-atEffects:
+	case <-time.After(time.Second):
+		t.Fatal("current peer callback did not reach its locked-effects seam")
+	}
+	return callbackDone, release
+}
+
+func TestBulkReceivedEffectsRetainPublicationLock18554(t *testing.T) {
+	d := &Daemon{
+		cluster: newClusterManager(false),
+		vrrpMgr: vrrp.NewManager(),
+	}
+	t.Cleanup(d.vrrpMgr.ReleaseSyncHold)
+	t.Cleanup(func() { d.releaseNoRethSyncHold("test-cleanup") })
+	d.vrrpMgr.SetSyncHold(time.Hour)
+	d.armNoRethSyncHold(time.Hour)
+
+	current, successor := newWiringTestSessionSync(), newWiringTestSessionSync()
+	d.wireSessionSyncPeerCallbacks(current)
+	d.wireSessionSyncPeerCallbacks(successor)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = current
+	d.clusterCommsMu.Unlock()
+
+	callbackDone, releaseCallback := pauseCurrentPeerCallbackAtEffects18554(
+		t, d, "OnBulkSyncReceivedLocked", current.OnBulkSyncReceived)
+	type publicationResult struct {
+		published   bool
+		holdsClear  bool
+		bulkPrimed  bool
+		syncIsReady bool
+	}
+	publicationProbe := make(chan bool, 1)
+	publicationResults := make(chan publicationResult, 1)
+	publicationDone := make(chan struct{})
+	go func() {
+		canAcquire := d.clusterCommsMu.TryLock()
+		if canAcquire {
+			d.clusterCommsMu.Unlock()
+		}
+		publicationProbe <- canAcquire
+		published := d.publishSessionSyncIfCurrent(0, successor)
+		publicationResults <- publicationResult{
+			published:   published,
+			holdsClear:  !d.vrrpMgr.InSyncHold() && !d.inNoRethSyncHold(),
+			bulkPrimed:  d.syncBulkPrimed.Load() && d.cluster.IsSyncBulkPrimed(),
+			syncIsReady: d.cluster.IsSyncReady(),
+		}
+		close(publicationDone)
+	}()
+	t.Cleanup(func() {
+		releaseCallback()
+		select {
+		case <-publicationDone:
+		case <-time.After(time.Second):
+			t.Error("SessionSync publication did not finish during cleanup")
+		}
+	})
+
+	if canAcquire := <-publicationProbe; canAcquire {
+		t.Fatal("SessionSync publication acquired clusterCommsMu while the current bulk callback was applying effects")
+	}
+	select {
+	case <-publicationResults:
+		t.Fatal("SessionSync publication finished before the current bulk callback completed")
+	default:
+	}
+
+	releaseCallback()
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("current bulk callback did not finish after its effects were resumed")
+	}
+	result := <-publicationResults
+	if !result.published {
+		t.Fatal("successor SessionSync publication was rejected")
+	}
+	if !result.holdsClear || !result.bulkPrimed || !result.syncIsReady {
+		t.Fatalf("publication completed before bulk effects: holds-clear=%v bulk-primed=%v sync-ready=%v",
+			result.holdsClear, result.bulkPrimed, result.syncIsReady)
+	}
+}
+
+func TestBulkAckEffectsRetainPublicationLock18554(t *testing.T) {
+	d := &Daemon{cluster: newClusterManager(false)}
+	current, successor := newWiringTestSessionSync(), newWiringTestSessionSync()
+	d.wireSessionSyncPeerCallbacks(current)
+	d.wireSessionSyncPeerCallbacks(successor)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = current
+	d.clusterCommsMu.Unlock()
+
+	callbackDone, releaseCallback := pauseCurrentPeerCallbackAtEffects18554(
+		t, d, "OnBulkSyncAckReceivedLocked", current.OnBulkSyncAckReceived)
+	type publicationResult struct {
+		published bool
+		ackPrimed bool
+	}
+	publicationProbe := make(chan bool, 1)
+	publicationResults := make(chan publicationResult, 1)
+	publicationDone := make(chan struct{})
+	go func() {
+		canAcquire := d.clusterCommsMu.TryLock()
+		if canAcquire {
+			d.clusterCommsMu.Unlock()
+		}
+		publicationProbe <- canAcquire
+		published := d.publishSessionSyncIfCurrent(0, successor)
+		publicationResults <- publicationResult{
+			published: published,
+			ackPrimed: d.syncPeerBulkPrimed.Load(),
+		}
+		close(publicationDone)
+	}()
+	t.Cleanup(func() {
+		releaseCallback()
+		select {
+		case <-publicationDone:
+		case <-time.After(time.Second):
+			t.Error("SessionSync publication did not finish during cleanup")
+		}
+	})
+
+	if canAcquire := <-publicationProbe; canAcquire {
+		t.Fatal("SessionSync publication acquired clusterCommsMu while the current bulk ACK callback was applying effects")
+	}
+	select {
+	case <-publicationResults:
+		t.Fatal("SessionSync publication finished before the current bulk ACK callback completed")
+	default:
+	}
+
+	releaseCallback()
+	select {
+	case <-callbackDone:
+	case <-time.After(time.Second):
+		t.Fatal("current bulk ACK callback did not finish after its effects were resumed")
+	}
+	result := <-publicationResults
+	if !result.published {
+		t.Fatal("successor SessionSync publication was rejected")
+	}
+	if !result.ackPrimed {
+		t.Fatal("publication completed before the current bulk ACK effect set syncPeerBulkPrimed")
 	}
 }

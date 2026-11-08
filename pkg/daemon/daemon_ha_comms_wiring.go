@@ -430,6 +430,9 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 			return
 		}
 		defer d.clusterCommsMu.Unlock()
+		if hook := d.peerCallbackAfterSupersededForTest; hook != nil {
+			hook("OnBulkSyncReceivedLocked")
+		}
 		d.cluster.RecordEvent(cluster.EventColdSync, -1, "Bulk sync completed")
 		slog.Info("cluster: session sync complete, releasing VRRP hold")
 		d.onSessionSyncBulkReceived()
@@ -502,6 +505,9 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 			return
 		}
 		defer d.clusterCommsMu.Unlock()
+		if hook := d.peerCallbackAfterSupersededForTest; hook != nil {
+			hook("OnBulkSyncAckReceivedLocked")
+		}
 		d.cluster.RecordEvent(cluster.EventColdSync, -1, "Bulk sync acknowledged by peer")
 		d.onSessionSyncBulkAckReceived()
 	}
