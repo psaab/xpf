@@ -437,7 +437,6 @@ func ipsecStrongSwanRegexSelector(selector string) bool {
 	return false
 }
 
-
 // ipsecStrongSwanAnySelector reports whether identification_create_from_string
 // maps the rendered selector to ID_ANY (#18428). strongSwan tests these exact
 // strings, after the type prefixes and the '=' (DN) branch and only for
@@ -869,14 +868,14 @@ func ipsecRegexIdentityOwnersIntersect(a, b ipsecIKEIdentity) (string, bool) {
 // host-to-subnet matching checks the effective mask bytes, so retaining
 // both forms is necessary for explicit subnet encodings too.
 type ipsecAddressBounds struct {
-	family       uint8
-	length       uint8
-	first        [16]byte
-	last         [16]byte
-	subnet       bool
-	subnetBits   uint8
-	subnetNet    [16]byte
-	subnetMask   [16]byte
+	family     uint8
+	length     uint8
+	first      [16]byte
+	last       [16]byte
+	subnet     bool
+	subnetBits uint8
+	subnetNet  [16]byte
+	subnetMask [16]byte
 }
 
 // ipsecSubnetMaskBits mirrors netmask_to_cidr in identification.c,
@@ -1488,11 +1487,14 @@ func ipsecASCIIHasPrefix(value, prefix string) bool {
 		return false
 	}
 	for i := 0; i < len(prefix); i++ {
-		char := value[i]
-		if char >= 'A' && char <= 'Z' {
-			char += 'a' - 'A'
+		valueChar, prefixChar := value[i], prefix[i]
+		if valueChar >= 'A' && valueChar <= 'Z' {
+			valueChar += 'a' - 'A'
 		}
-		if char != prefix[i] {
+		if prefixChar >= 'A' && prefixChar <= 'Z' {
+			prefixChar += 'a' - 'A'
+		}
+		if valueChar != prefixChar {
 			return false
 		}
 	}

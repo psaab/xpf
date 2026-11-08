@@ -655,7 +655,6 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 		}
 	})
 
-
 	t.Run("disjoint wildcard and subnet owners render uniquely", func(t *testing.T) {
 		for _, pair := range []struct{ name, aType, a, bType, b string }{
 			{"disjoint wildcards", "hostname", "*.a.example", "hostname", "*.b.example"},
@@ -693,8 +692,8 @@ func TestPSKIdentityRegexOwnerCollisionRender19020(t *testing.T) {
 	manager := &Manager{configDir: "/tmp", configPath: "/tmp/xpf.conf"}
 	cfg := &config.IPsecConfig{
 		Gateways: map[string]*config.IPsecGateway{
-			"gw-regex": {Name: "gw-regex", Address: "203.0.113.1", RemoteIDType: "inet", RemoteIDValue: "fqdn:^.*$"},
-			"gw-exact": {Name: "gw-exact", Address: "203.0.113.2", RemoteIDType: "hostname", RemoteIDValue: "vpn.example"},
+			"gw-regex":  {Name: "gw-regex", Address: "203.0.113.1", RemoteIDType: "inet", RemoteIDValue: "fqdn:^VPN.*$"},
+			"gw-exact":  {Name: "gw-exact", Address: "203.0.113.2", RemoteIDType: "hostname", RemoteIDValue: "vpn.example"},
 			"gw-unique": {Name: "gw-unique", Address: "203.0.113.3", RemoteIDType: "inet", RemoteIDValue: "198.51.100.8"},
 		},
 		VPNs: map[string]*config.IPsecVPN{

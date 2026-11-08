@@ -24,20 +24,42 @@ func TestIPsecRegexOwnerCollision19020(t *testing.T) {
 		}
 	})
 
-
 	t.Run("literal and prefix regexes retain their language", func(t *testing.T) {
 		requireCollision17772(t, identityPair17772("inet", "fqdn:^vpn$", "hostname", "vpn"))
 		requireNoCollision17772(t, identityPair17772("inet", "fqdn:^vpn$", "hostname", "other"))
 		requireCollision17772(t, identityPair17772("inet", "fqdn:^vpn.*$", "hostname", "vpn.example"))
 		requireNoCollision17772(t, identityPair17772("inet", "fqdn:^vpn.*$", "hostname", "xvpn.example"))
 	})
+	t.Run("mixed-case regex prefix overlaps in either gateway order", func(t *testing.T) {
+		requireCollision17772(t, identityPair17772("inet", "fqdn:^VPN.*$", "hostname", "vpn.example"))
+		requireCollision17772(t, identityPair17772("hostname", "vpn.example", "inet", "fqdn:^VPN.*$"))
+		requireCollision17772(t, identityPair17772("inet", "fqdn:^VPN.*$", "inet", "fqdn:^vpna.*$"))
+		requireNoCollision17772(t, identityPair17772("inet", "fqdn:^VPN.*$", "hostname", "bar.example"))
+	})
+
+	t.Run("mixed-case prefix selects local identity in either gateway placement", func(t *testing.T) {
+		for _, localOnGatewayA := range []bool{false, true} {
+			requireCollision17772(t, localIdentityPair17772(
+				"inet", "fqdn:^VPN.*$", "hostname", "vpn.example", localOnGatewayA))
+		}
+	})
 
 	t.Run("disjoint anchored prefix languages are a positive control", func(t *testing.T) {
 		requireNoCollision17772(t, identityPair17772("inet", "fqdn:^foo.*$", "inet", "fqdn:^bar.*$"))
 	})
 
-	t.Run("undecidable regex intersection fails closed", func(t *testing.T) {
-		requireCollision17772(t, identityPair17772("inet", "fqdn:^vpn[0-9]+$", "hostname", "host.example"))
+	t.Run("complex regex shapes fail closed", func(t *testing.T) {
+		for _, tc := range []struct {
+			pattern, disjointIdentity string
+		}{
+			{"^vpn[0-9]+$", "host.example"},
+			{"^[a-z]+\\.example$", "9.example"},
+			{"^(foo|bar)\\.example$", "other.example"},
+			{"^(ab){2}\\.example$", "ab.example"},
+		} {
+			requireCollision17772(t, identityPair17772(
+				"inet", "fqdn:"+tc.pattern, "hostname", tc.disjointIdentity))
+		}
 	})
 
 	t.Run("only owner parsing enables regex semantics", func(t *testing.T) {
@@ -62,6 +84,8 @@ func TestIPsecRegexOwnerLookupSelectsOwner19020(t *testing.T) {
 	}{
 		{"match all", "^.*$", "hostname", "vpn.example", true},
 		{"match all matches raw nonprintable FQDN bytes", "^.*$", "inet", "fqdn:#780a79", true},
+		{"mixed-case prefix match", "^VPN.*$", "hostname", "vpn.example", true},
+		{"mixed-case prefix mismatch", "^VPN.*$", "hostname", "bar.example", false},
 		{"exact match", "^vpn$", "hostname", "vpn", true},
 		{"exact mismatch", "^vpn$", "hostname", "other", false},
 		{"prefix match", "^vpn.*$", "hostname", "vpn.example", true},
@@ -86,7 +110,7 @@ func TestIPsecRegexOwnerLookupSelectsOwner19020(t *testing.T) {
 	}
 
 	literalOwner, _ := ipsecIKEIdentityKey("hostname", "vpn.example")
-	regexLookup, _ := ipsecIKEIdentityKey("inet", "fqdn:^.*$")
+	regexLookup, _ := ipsecIKEIdentityKey("inet", "fqdn:^VPN.*$")
 	if _, selected := ipsecLookupSelectsOwner(regexLookup, literalOwner); selected {
 		t.Fatal("a regex-looking local identity is an ordinary lookup, not a regex owner")
 	}
