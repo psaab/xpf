@@ -1066,12 +1066,15 @@ all files stay in `package ipsec`, so the public API is unchanged.
   other's secret.
   An effective local identity is the `me` LOOKUP of its own exchange
   (`ipsecLookupSelectsOwner`), so that check remains directed:
-  `lookup->matches(owner)`. Wildcards apply on the owner side: an exact lookup
-  can match a wildcard owner, and a wildcard-valued lookup may match a broader
-  suffix owner (`*.example.com` -> `*.com`), but not the reverse. Local address,
-  subnet or range lookups follow strongSwan's directed matcher, including its
-  subnet-mask rules. `matches_any()` makes an ID_ANY lookup match only an ID_ANY
-  owner, so an unspecified `local-address 0.0.0.0` / `::` is not a collision
+  `lookup->matches(owner)`. Wildcards apply on the owner side. The lookup's full
+  encoded length must be at least the owner's before `strncasecmp` compares
+  equal-length suffixes: `*.example.com` -> `*.com` works one-way, but shorter
+  `example.com` does not select `*example.com`. Embedded NUL stops that compare,
+  so raw `fqdn:#...` wildcard sets can overlap when aligned suffixes share a
+  NUL after matching pre-NUL bytes. Local address, subnet or range lookups follow
+  strongSwan's directed matcher, including its subnet-mask rules. `matches_any()`
+  makes an ID_ANY lookup match only an ID_ANY owner, so an unspecified
+  `local-address 0.0.0.0` / `::` is not a collision
   (charon presents its real source address there).
   Exact identical bytes still match even for malformed DN encodings;
   structural DN equality requires comparable nonempty DNs of the same

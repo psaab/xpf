@@ -924,9 +924,9 @@ func ipsecAddressLookupSelectsOwner(lookup, owner ipsecIKEIdentity) (string, boo
 }
 
 // ipsecWildcardSuffix reports whether a string identity value is a
-// wildcard owner (leading '*') and returns its fixed suffix. matches_string
-// honours only the single leading '*' (#18682, oracle: "*com" is a
-// wildcard with suffix "com"); any other '*' is a literal byte.
+// wildcard owner (leading '*') and returns its raw suffix. `matches_string`
+// aligns using its full raw length but strncasecmp stops at a shared NUL;
+// only the single leading '*' is special (oracle: "*com" has suffix "com").
 func ipsecWildcardSuffix(value string) (string, bool) {
 	if strings.HasPrefix(value, "*") {
 		return value[1:], true
@@ -935,53 +935,72 @@ func ipsecWildcardSuffix(value string) (string, bool) {
 }
 
 // ipsecWildcardStringsIntersect intersects two type-2/3 string owners.
-// A wildcard owner's match set is every string ending in its suffix; an
-// exact owner's set is its own singleton under ASCII case folding
-// (equals() refuses embedded NULs, and matches_string stops at the same
-// NUL, so NUL-carrying values here have an empty set on the exact side).
+// A wildcard requires the lookup's full encoded length to be at least the
+// owner's, then compares the equal-length suffix with strncasecmp semantics.
+// Embedded NULs stop that comparison, while the raw owner length still
+// determines how far from the lookup's end the suffix begins. Exact owners
+// containing NUL have no match set because equals_strcasecmp rejects them.
 func ipsecWildcardStringsIntersect(a, b string) (string, bool) {
-	if strings.IndexByte(a, 0) >= 0 || strings.IndexByte(b, 0) >= 0 {
-		return "", false
-	}
 	aSuffix, aWild := ipsecWildcardSuffix(a)
 	bSuffix, bWild := ipsecWildcardSuffix(b)
 	switch {
 	case aWild && bWild:
-		// Two suffix sets meet iff one suffix ends with the other: the
-		// longer suffix itself is then in both sets.
-		if ipsecASCIIHasSuffixFold(aSuffix, bSuffix) || ipsecASCIIHasSuffixFold(bSuffix, aSuffix) {
+		if ipsecWildcardSuffixesIntersect(aSuffix, bSuffix) {
 			return "wildcard suffixes overlap", true
 		}
 	case aWild:
-		if ipsecASCIIHasSuffixFold(b, aSuffix) {
-			return "wildcard matches peer identity", true
+		if strings.IndexByte(b, 0) < 0 {
+			if _, matches := ipsecWildcardLookupSelectsOwner(b, a); matches {
+				return "wildcard matches peer identity", true
+			}
 		}
 	case bWild:
-		if ipsecASCIIHasSuffixFold(a, bSuffix) {
-			return "wildcard matches peer identity", true
+		if strings.IndexByte(a, 0) < 0 {
+			if _, matches := ipsecWildcardLookupSelectsOwner(a, b); matches {
+				return "wildcard matches peer identity", true
+			}
 		}
 	}
 	return "", false
 }
 
-// ipsecASCIIHasSuffixFold reports whether value ends with suffix under
-// ASCII case folding (matches_string compares with strcaseeq semantics).
-func ipsecASCIIHasSuffixFold(value, suffix string) bool {
-	if len(value) < len(suffix) {
-		return false
+// ipsecWildcardSuffixesIntersect intersects wildcard suffix patterns. The
+// bytes through the first NUL (inclusive) constrain a lookup suffix; later
+// bytes are ignored by strncasecmp. Each constraint is aligned from the end
+// because matches_string compares the same number of trailing bytes.
+func ipsecWildcardSuffixesIntersect(a, b string) bool {
+	aFixed, bFixed := len(a), len(b)
+	if nul := strings.IndexByte(a, 0); nul >= 0 {
+		aFixed = nul + 1
 	}
-	return ipsecASCIIEqualFold(value[len(value)-len(suffix):], suffix)
+	if nul := strings.IndexByte(b, 0); nul >= 0 {
+		bFixed = nul + 1
+	}
+	overlap := len(a)
+	if len(b) < overlap {
+		overlap = len(b)
+	}
+	for distance := 1; distance <= overlap; distance++ {
+		aIndex, bIndex := len(a)-distance, len(b)-distance
+		if aIndex < aFixed && bIndex < bFixed &&
+			!ipsecASCIIEqualFold(a[aIndex:aIndex+1], b[bIndex:bIndex+1]) {
+			return false
+		}
+	}
+	return true
 }
 
-// ipsecWildcardLookupSelectsOwner mirrors matches_string's directed use
-// of the right-side wildcard: the lookup value, including a leading '*',
-// must end with the owner's suffix.
+// ipsecWildcardLookupSelectsOwner mirrors matches_string's directed use of
+// the right-side wildcard. It requires the lookup's full encoded length to be
+// at least the owner's, then applies strncasecmp's NUL-terminated comparison
+// to the equally-sized trailing bytes.
 func ipsecWildcardLookupSelectsOwner(lookup, owner string) (string, bool) {
-	if strings.IndexByte(lookup, 0) >= 0 || strings.IndexByte(owner, 0) >= 0 {
+	suffix, wildcard := ipsecWildcardSuffix(owner)
+	if !wildcard || len(lookup) < len(owner) {
 		return "", false
 	}
-	suffix, wildcard := ipsecWildcardSuffix(owner)
-	if !wildcard || !ipsecASCIIHasSuffixFold(lookup, suffix) {
+	lookupSuffix := lookup[len(lookup)-len(suffix):]
+	if !ipsecASCIIEqualFoldUntilNUL(lookupSuffix, suffix) {
 		return "", false
 	}
 	return "wildcard matches peer identity", true

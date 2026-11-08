@@ -11731,11 +11731,14 @@ reserved for whole-dataplane selection where a rewrite shim
     An effective local identity is a directed lookup:
     `ipsecLookupSelectsOwner(local, peer)` tests `local->matches(peer)`.
     Consequently local address/subnet/range identities follow strongSwan's
-    directed matcher, including its subnet-mask rules. Wildcards apply on the
-    owner side: an exact lookup may select a wildcard owner, and a
-    wildcard-valued lookup may match a broader suffix owner
-    (`*.example.com` -> `*.com`), but not the reverse. An ID_ANY local identity
-    or unspecified `local-address` selects no concrete owner. DN matching assumes charon's default
+    directed matcher, including its subnet-mask rules. Wildcards are right-side
+    owners; the lookup's full encoded length must be at least the owner's before
+    `strncasecmp` compares equally sized suffixes. `*.example.com` -> `*.com`
+    matches one-way; the shorter exact `example.com` does not select
+    `*example.com`. Embedded NUL stops the compare, so raw `fqdn:#...` wildcard
+    sets can overlap when aligned suffixes share a NUL after matching pre-NUL
+    bytes. An ID_ANY local identity or unspecified `local-address` selects no
+    concrete owner. DN matching assumes charon's default
     `rdn_matching = strict` (xpf does not set it); `reordered` or `relaxed`
     would make RDN-order swaps collide unrefused.
     Exact-byte matches still include identical malformed DN/KEY_ID bytes;

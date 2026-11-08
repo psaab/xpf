@@ -606,6 +606,7 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 	t.Run("wildcard address containment and DN match-set collisions skip secrets", func(t *testing.T) {
 		pairs := []struct{ name, aType, a, bType, b string }{
 			{"FQDN wildcard", "hostname", "*.example.com", "hostname", "peer.example.com"},
+			{"NUL-truncated FQDN wildcards", "inet", "fqdn:#2a610062", "inet", "fqdn:#2a610063"},
 			{"RFC822 wildcard", "email", "*@example.com", "email", "peer@example.com"},
 			{"IPv4 address in subnet", "inet", "198.51.100.7", "inet", "198.51.100.0/24"},
 			{"IPv4 subnet and range", "inet", "198.51.100.0/24", "inet", "198.51.100.0-198.51.100.255"},
@@ -631,10 +632,35 @@ func TestPSKIdentityCollisionRender17772(t *testing.T) {
 			})
 		}
 	})
+	t.Run("NUL-bearing lookup selecting both raw wildcard owners skips both secrets", func(t *testing.T) {
+		cfg := build(map[string]*config.IPsecGateway{
+			"gw-a": {
+				Name: "gw-a", Address: "203.0.113.1",
+				RemoteIDType: "inet", RemoteIDValue: "fqdn:#2a610062",
+				LocalIDType: "inet", LocalIDValue: "fqdn:#7878610058",
+			},
+			"gw-b": {
+				Name: "gw-b", Address: "203.0.113.2",
+				RemoteIDType: "inet", RemoteIDValue: "fqdn:#2a610063",
+			},
+			"gw-c": {Name: "gw-c", Address: "203.0.113.3"},
+		}, map[string]*config.IPsecVPN{
+			"a": {Gateway: "gw-a", PSK: config.NewSecret("secret-a")},
+			"b": {Gateway: "gw-b", PSK: config.NewSecret("secret-b")},
+			"c": {Gateway: "gw-c", PSK: config.NewSecret("secret-c")},
+		})
+		text, rendered := assertSkipped(t, cfg, "gw-a", "gw-b")
+		if !rendered["gw-c"] {
+			t.Fatalf("unrelated VPN must render when a NUL-bearing lookup matches both wildcard owners:\n%s", text)
+		}
+	})
+
 
 	t.Run("disjoint wildcard and subnet owners render uniquely", func(t *testing.T) {
 		for _, pair := range []struct{ name, aType, a, bType, b string }{
 			{"disjoint wildcards", "hostname", "*.a.example", "hostname", "*.b.example"},
+			{"short exact below wildcard minimum length", "hostname", "example.com", "hostname", "*example.com"},
+			{"empty exact below bare wildcard minimum", "inet", "fqdn:", "inet", "fqdn:*"},
 			{"disjoint subnets", "inet", "192.0.2.0/24", "inet", "192.0.3.0/24"},
 		} {
 			pair := pair

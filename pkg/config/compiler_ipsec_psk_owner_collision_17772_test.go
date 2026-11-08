@@ -675,6 +675,7 @@ func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
 	}{
 		{"FQDN wildcard and exact", "hostname", "*.example.com", "hostname", "a.example.com"},
 		{"overlapping FQDN wildcards", "hostname", "*.example.com", "hostname", "*.com"},
+		{"NUL-truncated raw FQDN wildcards", "inet", "fqdn:#2a610062", "inet", "fqdn:#2a610063"},
 		{"RFC822 wildcard and exact", "email", "*@example.com", "email", "peer@example.com"},
 		{"IPv4 address inside subnet", "inet", "198.51.100.7", "inet", "198.51.100.0/24"},
 		{"overlapping IPv4 subnets", "inet", "198.51.100.0/24", "inet", "198.51.0.0/16"},
@@ -724,6 +725,7 @@ func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
 		{"FQDN wildcard owner", "hostname", "*.example.com", "hostname", "a.example.com"},
 		{"nested FQDN wildcard owner", "hostname", "*.com", "hostname", "*.example.com"},
 		{"IPv4 subnet contains local address", "inet", "198.51.100.0/24", "inet", "198.51.100.7"},
+		{"NUL-truncated raw FQDN wildcard owner", "inet", "fqdn:#2a610062", "inet", "fqdn:#7878610058"},
 		{"IPv4 subnet contains local subnet", "inet", "198.51.0.0/16", "inet", "198.51.100.0/24"},
 		{"IPv6 subnet contains local address", "inet", "2001:db8::/32", "inet", "2001:db8:1::7"},
 		{"DN wildcard owner", "distinguished-name", "CN=*, O=x", "distinguished-name", "CN=a, O=x"},
@@ -774,6 +776,60 @@ func TestIPsecPSKMatchSetIntersection18682(t *testing.T) {
 		}
 		commands := localIdentityPair17772("hostname", "*.example.com", "hostname", "*.com", false)
 		requireNoCollision17772(t, commands)
+	})
+	t.Run("raw NUL lookup matches both truncated wildcard owners", func(t *testing.T) {
+		ownerA, _ := ipsecIKEIdentityKey("inet", "fqdn:#2a610062")
+		ownerB, _ := ipsecIKEIdentityKey("inet", "fqdn:#2a610063")
+		lookup, _ := ipsecIKEIdentityKey("inet", "fqdn:#7878610058")
+		for _, pair := range []struct {
+			name  string
+			owner ipsecIKEIdentity
+		}{
+			{"owner A", ownerA},
+			{"owner B", ownerB},
+		} {
+			if _, ok := ipsecLookupSelectsOwner(lookup, pair.owner); !ok {
+				t.Errorf("NUL-bearing lookup must select %s through strncasecmp's NUL stop", pair.name)
+			}
+		}
+		if _, ok := ipsecIdentitiesCollide(ownerA, ownerB); !ok {
+			t.Fatal("wildcard owner match sets must overlap through the NUL-bearing lookup")
+		}
+		requireCollision17772(t, identityPair17772("inet", "fqdn:#2a610062",
+			"inet", "fqdn:#2a610063",
+			"set security ike gateway gw-b local-identity inet \"fqdn:#7878610058\""))
+	})
+	t.Run("short exact FQDN is below wildcard owner's minimum length", func(t *testing.T) {
+		wildcard, _ := ipsecIKEIdentityKey("hostname", "*example.com")
+		exact, _ := ipsecIKEIdentityKey("hostname", "example.com")
+		if _, ok := ipsecIdentitiesCollide(wildcard, exact); ok {
+			t.Fatal("an exact identity shorter than the wildcard owner cannot match it")
+		}
+		if _, ok := ipsecLookupSelectsOwner(exact, wildcard); ok {
+			t.Fatal("matches_string's full-length guard must reject the shorter lookup")
+		}
+		if _, ok := ipsecLookupSelectsOwner(exact, exact); !ok {
+			t.Fatal("the exact lookup must still select the identical exact owner")
+		}
+		requireNoCollision17772(t, identityPair17772("hostname", "*example.com",
+			"hostname", "example.com"))
+		requireNoCollision17772(t, identityPair17772("hostname", "example.com",
+			"hostname", "*example.com"))
+	})
+	t.Run("empty exact FQDN is below bare wildcard minimum length", func(t *testing.T) {
+		wildcard, _ := ipsecIKEIdentityKey("inet", "fqdn:*")
+		exact, _ := ipsecIKEIdentityKey("inet", "fqdn:")
+		if _, ok := ipsecIdentitiesCollide(wildcard, exact); ok {
+			t.Fatal("the empty exact owner cannot meet the one-byte wildcard minimum")
+		}
+		if _, ok := ipsecLookupSelectsOwner(exact, wildcard); ok {
+			t.Fatal("the empty exact lookup is shorter than the bare wildcard owner")
+		}
+		if _, ok := ipsecLookupSelectsOwner(exact, exact); !ok {
+			t.Fatal("the empty lookup must still select an identical empty exact owner")
+		}
+		requireNoCollision17772(t, identityPair17772("inet", "fqdn:*", "inet", "fqdn:"))
+		requireNoCollision17772(t, identityPair17772("inet", "fqdn:", "inet", "fqdn:*"))
 	})
 
 	t.Run("disjoint wildcard and subnet controls still commit", func(t *testing.T) {
