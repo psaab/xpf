@@ -673,6 +673,9 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 		if (!isCall && !isValue) || rustFnDeclName19013(src, start) {
 			continue
 		}
+		if rustMacroTokenTree19013(src, start) {
+			continue
+		}
 		currentPath := rustModulePath19013(rel, src, start)
 		qualified, resolves := rustQualifiedPath19013(src, start, candidatePath, currentPath)
 		if qualified {
@@ -695,6 +698,104 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 	}
 	return false
 }
+
+// Macro invocations are opaque regardless of expansion semantics. The in-tree
+// census found no candidate reference that requires an evaluator exception.
+func rustMacroTokenTree19013(src string, pos int) bool {
+	nearestOpen := -1
+	for i := 0; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if rustIdentStart19013(src[i]) && (i == 0 || !rustIdentByte19013(src[i-1])) {
+			open, ok := rustMacroInvocationHead19013(src, i)
+			if ok && open < pos && open > nearestOpen &&
+				pos < rustMatchingDelimiter19013(src, open) {
+				nearestOpen = open
+			}
+		}
+		i++
+	}
+	return nearestOpen >= 0
+}
+
+func rustMacroInvocationHead19013(src string, start int) (int, bool) {
+	i := start
+	for {
+		if i+1 < len(src) && src[i] == 'r' && src[i+1] == '#' {
+			i += 2
+		}
+		if i >= len(src) || !rustIdentStart19013(src[i]) {
+			return -1, false
+		}
+		i++
+		for i < len(src) && rustIdentByte19013(src[i]) {
+			i++
+		}
+		separator := skipRustTrivia19013(src, i)
+		if separator+2 <= len(src) && src[separator:separator+2] == "::" {
+			i = skipRustTrivia19013(src, separator+2)
+			continue
+		}
+		i = separator
+		break
+	}
+	if i >= len(src) || src[i] != '!' {
+		return -1, false
+	}
+	open := skipRustTrivia19013(src, i+1)
+	if open >= len(src) || (src[open] != '(' && src[open] != '[' && src[open] != '{') {
+		return -1, false
+	}
+	return open, true
+}
+
+func rustMatchingDelimiter19013(src string, open int) int {
+	if open < 0 || open >= len(src) {
+		return -1
+	}
+	var closes []byte
+	switch src[open] {
+	case '(':
+		closes = append(closes, ')')
+	case '[':
+		closes = append(closes, ']')
+	case '{':
+		closes = append(closes, '}')
+	default:
+		return -1
+	}
+	for i := open + 1; i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case '(':
+			closes = append(closes, ')')
+		case '[':
+			closes = append(closes, ']')
+		case '{':
+			closes = append(closes, '}')
+		case ')', ']', '}':
+			if len(closes) == 0 || closes[len(closes)-1] != src[i] {
+				return -1
+			}
+			closes = closes[:len(closes)-1]
+			if len(closes) == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return -1
+}
+
+func rustIdentStart19013(c byte) bool {
+	return c == '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c >= 0x80
+}
+
 
 func rustLineOffset19013(src string, line int) int {
 	offset := 0
@@ -1941,6 +2042,12 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			name: "string call mention does not reference an unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn ok() { let _ = \"lost()\"; assert!(true); }\n",
+			want: 1,
+		},
+		{
+			name: "stringify token-tree delimiters do not reference an unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn ok() { let _ = stringify!(lost()); let _ = stringify![lost()]; let _ = stringify!{lost()}; assert!(true); }\n",
 			want: 1,
 		},
 		{
