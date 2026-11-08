@@ -414,6 +414,9 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	}
 
 	ss.OnBulkSyncReceived = func() {
+		if d.peerCallbackSuperseded(ss, "OnBulkSyncReceived", false) {
+			return
+		}
 		d.cluster.RecordEvent(cluster.EventColdSync, -1, "Bulk sync completed")
 		slog.Info("cluster: session sync complete, releasing VRRP hold")
 		d.onSessionSyncBulkReceived()
@@ -511,14 +514,15 @@ func (d *Daemon) wireSessionSyncPeerCallbacks(ss *cluster.SessionSync) {
 	}
 }
 
-// peerCallbackSuperseded reports whether a peer connect/disconnect callback
-// comes from a SessionSync that is no longer the published one (#18521
-// review round 4). The callbacks are ordered per instance (dispatchPeerEvent),
-// but the state they write — syncPeerConnected, the prime-retry generation,
-// the sync-ready timer, SetSyncReady — is daemon-wide and belongs to whichever
-// instance is published. An old instance's disconnect can queue behind its own
-// slow connect and run after the successor's connect; applied, it marked a
-// live successor's peer disconnected until the next reconnect.
+// peerCallbackSuperseded reports whether a daemon-wide peer callback comes
+// from a SessionSync that is no longer the published one (#18521 review
+// round 4). The callbacks are ordered per instance (dispatchPeerEvent), but
+// the state they write — peer connection and prime-retry state, sync-ready
+// state, bulk-primed state, and startup holds/election debt — is daemon-wide
+// and belongs to whichever instance is published. An old peer disconnect can
+// queue behind its own slow connect and run after the successor's connect,
+// marking the live successor disconnected; an old bulk completion could mark
+// it primed and release its startup holds before its own bulk arrives.
 //
 // A CONNECT from any unpublished instance is dropped, including while nothing
 // is published (mid-teardown): the instance is being retired, and applied it

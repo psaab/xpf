@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/vrrp"
 )
 
 // Review of #18525 round 4 (finding 1, HA seat): peer connect/disconnect
@@ -157,4 +158,48 @@ func TestRetiredSessionSyncLeavesThePeerDisconnected18525(t *testing.T) {
 				"the sync-ready timer after the teardown stopped it")
 		}
 	})
+}
+
+// A retired sync's late bulk-complete must not prime the successor or release
+// startup holds. The currently published sync retains the valid release edge.
+func TestOnBulkSyncReceivedFromRetiredSyncDoesNotReleaseHolds18554(t *testing.T) {
+	d := &Daemon{
+		cluster:   newClusterManager(false),
+		vrrpMgr:   vrrp.NewManager(),
+	}
+	t.Cleanup(d.vrrpMgr.ReleaseSyncHold)
+	d.cluster.SetSyncReady(false)
+	d.cluster.SetSyncBulkPrimed(false)
+	d.vrrpMgr.SetSyncHold(time.Hour)
+	d.armNoRethSyncHold(time.Hour)
+
+	old, successor := newWiringTestSessionSync(), newWiringTestSessionSync()
+	d.wireSessionSyncPeerCallbacks(old)
+	d.wireSessionSyncPeerCallbacks(successor)
+	d.clusterCommsMu.Lock()
+	d.sessionSync = successor
+	d.clusterCommsMu.Unlock()
+
+	old.OnBulkSyncReceived()
+
+	if !d.vrrpMgr.InSyncHold() || !d.inNoRethSyncHold() {
+		t.Fatal("a retired SessionSync's bulk-received callback released the current instance's startup holds")
+	}
+	if d.syncBulkPrimed.Load() || d.cluster.IsSyncBulkPrimed() {
+		t.Fatal("a retired SessionSync's bulk-received callback marked the successor bulk-primed")
+	}
+	if d.cluster.IsSyncReady() {
+		t.Fatal("a retired SessionSync's bulk-received callback marked the successor sync-ready")
+	}
+	if mode, active, _ := d.cluster.StartupSyncHoldStatus(); mode != "no-reth" || !active {
+		t.Fatalf("retired callback changed startup hold status to (%q, %v)", mode, active)
+	}
+
+	successor.OnBulkSyncReceived()
+	if d.vrrpMgr.InSyncHold() || d.inNoRethSyncHold() {
+		t.Fatal("the current SessionSync's bulk-received callback did not release startup holds")
+	}
+	if !d.syncBulkPrimed.Load() || !d.cluster.IsSyncBulkPrimed() || !d.cluster.IsSyncReady() {
+		t.Fatal("the current SessionSync's bulk-received callback did not publish bulk priming and readiness")
+	}
 }
