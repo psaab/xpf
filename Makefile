@@ -2303,8 +2303,11 @@ else ifneq ($(DEB_VERSION_EXPLICIT),)
 else ifneq ($(XPF_DEB_REUSE),)
 	@reuse="$(XPF_DEB_REUSE)"; stock="$(DEB_VERSION)"; \
 	  pver=$$(basename "$$reuse" | sed -E 's/^xpf_([^_]+)_.*/\1/'); \
-	  if dpkg --compare-versions "$$pver" ge "$$stock" 2>/dev/null; then \
+	  deploy_dpkg_compare() { bash -c 'source ./test/incus/deploy-lib.sh; deploy_dpkg_compare "$$1" "$$2" "$$3"' _ "$$@"; }; \
+	  if deploy_dpkg_compare "$$pver" ge "$$stock"; then \
 	    echo "==> Reusing prebuilt deb: $$reuse (version $$pver >= stock $$stock) — no rebuild (#16308)"; \
+	  elif [ "$$?" -eq 2 ]; then \
+	    echo "FATAL: cannot compare prebuilt deb version $$pver with stock $$stock (host dpkg unresolved, #19014)" >&2; exit 1; \
 	  else \
 	    echo "==> Prebuilt deb $$reuse (version $$pver) is older than stock $$stock; rebuilding" >&2; \
 	    $(MAKE) --no-print-directory deb; \
