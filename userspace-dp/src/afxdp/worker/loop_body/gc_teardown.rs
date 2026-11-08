@@ -47,6 +47,92 @@ pub(super) fn retire_expired_missing_neighbor_seeds(
     }
 }
 
+/// #16223 replica fence, evaluated for one reap call in ONE pass (#18780).
+///
+/// Returns `fenced[i]` for `expired_entries[i]` (empty when the call has no
+/// candidate, so the shared map is not locked at all). The predicate is the
+/// #16223 one, unchanged: replica `X` is fenced iff `X.origin` is
+/// `WorkerLocalImport`, `X.session_id != 0`, and some shared row `E` has
+/// `E.session_id == X.session_id`, the Established handshake wire, and a stored
+/// key whose bare tuple, or whose derived reverse key's bare tuple
+/// (`reverse_session_key(E.key, E.decision.nat)`), equals `X`'s bare tuple.
+/// It is NOT protocol-gated, and must not become so. The ct-slice collector
+/// (`SessionTable::established_forward_slice`) takes any answered forward
+/// row, UDP included, and `restamp_shared_handshakes_established` then stamps
+/// its shared rows Established, so an answered UDP flow's same-id replica is
+/// fenced exactly as before
+/// (`udp_shared_row_in_established_keeps_todays_fence_decision_18780`).
+///
+/// Cost: before #18780 every replica ran `values().any(..)` under the global
+/// `shared_sessions` lock, and for UDP rows (never Established) the scan could
+/// not short-circuit, so a reap of C replicas against N shared rows cost C x N
+/// under the lock. The T0+120 activation cohort on the authoring node is ~5/6
+/// WorkerLocalImport, which made the reap quadratic in table size. Here the
+/// candidates are sorted by session id once and each shared row is read once
+/// (binary search per Established row), so the call costs O(N + C log C) and
+/// one lock hold; the expiry budget bounds C per call.
+///
+/// The lock is taken with `lock_shared_recover` (engineering-style: a poisoned
+/// shared-session map is recovered, never read as "no rows").
+fn replica_fence_marks(
+    expired_entries: &[crate::session::ExpiredSession],
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) -> Vec<bool> {
+    let mut candidates: Vec<(u64, usize)> = expired_entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| e.origin == SessionOrigin::WorkerLocalImport && e.session_id != 0)
+        .map(|(idx, e)| (e.session_id, idx))
+        .collect();
+    let mut fenced = Vec::new();
+    if candidates.is_empty() {
+        return fenced;
+    }
+    candidates.sort_unstable();
+    fenced.resize(expired_entries.len(), false);
+    let mut unresolved = candidates.len();
+    let established = crate::session::TcpHandshakeState::Established.to_wire();
+    let sessions = crate::afxdp::shared_ops::lock_shared_recover(shared_sessions);
+    for entry in sessions.values() {
+        #[cfg(test)]
+        REPLICA_FENCE_ROWS_VISITED_18780.with(|c| c.set(c.get() + 1));
+        if entry.session_id == 0 || entry.tcp_handshake_state != established {
+            continue;
+        }
+        let first = candidates.partition_point(|&(id, _)| id < entry.session_id);
+        let mut reverse_bare = None;
+        for &(id, idx) in &candidates[first..] {
+            if id != entry.session_id {
+                break;
+            }
+            if fenced[idx] {
+                continue;
+            }
+            let bare = expired_entries[idx].key.bare_tuple();
+            let matches = entry.key.bare_tuple() == bare
+                || *reverse_bare.get_or_insert_with(|| {
+                    crate::session::reverse_session_key(&entry.key, entry.decision.nat)
+                        .bare_tuple()
+                }) == bare;
+            if matches {
+                fenced[idx] = true;
+                unresolved -= 1;
+            }
+        }
+        if unresolved == 0 {
+            break;
+        }
+    }
+    fenced
+}
+
+// #18780: shared rows read by `replica_fence_marks` (test-only work counter).
+#[cfg(test)]
+thread_local! {
+    pub(super) static REPLICA_FENCE_ROWS_VISITED_18780: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// #3776: apply the per-worker teardown side effects for every session the GC
 /// wheel reaped this sweep — release its SNAT allocation, delete its BPF
 /// redirect/conntrack entries, AND invalidate the per-worker flow-cache slot(s)
@@ -105,7 +191,9 @@ pub(super) fn reap_expired_sessions(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
 ) -> crate::session::DeferredConntrackDeletes {
     let mut deferred = crate::session::DeferredConntrackDeletes::new();
-    for expired_entry in expired_entries {
+    // #18780: the replica fence for the whole call, in one shared-map pass.
+    let fenced = replica_fence_marks(expired_entries, shared_sessions);
+    for (idx, expired_entry) in expired_entries.iter().enumerate() {
         // #16223 (replica fence): a WorkerLocalImport replica's expiry
         // must NOT tear down the serving pair's state. The replica
         // adopts the serving incarnation's session_id, so the
@@ -119,25 +207,9 @@ pub(super) fn reap_expired_sessions(
         // lease reference (#17683), which must be released by its exact handle;
         // the serving entry's reference remains held.
         // A replica with no promoted serving entry keeps the full teardown.
-        let replica_fenced = expired_entry.origin == SessionOrigin::WorkerLocalImport
-            && shared_sessions
-                .lock()
-                .map(|sessions| {
-                    sessions.values().any(|entry| {
-                        entry.session_id != 0
-                            && entry.session_id == expired_entry.session_id
-                            && entry.tcp_handshake_state
-                                == crate::session::TcpHandshakeState::Established.to_wire()
-                            && (entry.key.bare_tuple() == expired_entry.key.bare_tuple()
-                                || crate::session::reverse_session_key(
-                                    &entry.key,
-                                    entry.decision.nat,
-                                )
-                                .bare_tuple()
-                                    == expired_entry.key.bare_tuple())
-                    })
-                })
-                .unwrap_or(false);
+        // The predicate is evaluated for every replica of this call at once
+        // by `replica_fence_marks` (#18780).
+        let replica_fenced = fenced.get(idx).copied().unwrap_or(false);
         if replica_fenced {
             if let Some(hold) = expired_entry.persistent_lease_hold {
                 crate::nat::release_recorded_persistent_inbound_hold(

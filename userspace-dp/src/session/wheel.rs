@@ -63,6 +63,14 @@ pub(super) struct SessionWheel {
     /// index is `cursor_tick & WHEEL_MASK`.
     pub(super) cursor_tick: u64,
     pub(super) initialized: bool,
+    /// #18780: hints left in the bucket at `cursor_tick` from the snapshot a
+    /// budget-cut pass took when it started that bucket. A continuation
+    /// visits only these, never the hints rotated or appended behind them
+    /// during the visit (future-scheduled ones, e.g. long-timeout pushes at
+    /// cursor+256). Re-snapshotting the whole bucket instead would re-rotate
+    /// those every call and, past `EXPIRY_PASS_MAX_POPS` of them, never let
+    /// the cursor leave the bucket. `None` = the next visit snapshots afresh.
+    pub(super) resume_due: Option<usize>,
 }
 
 impl SessionWheel {
@@ -75,6 +83,7 @@ impl SessionWheel {
             buckets: buckets.into_boxed_slice(),
             cursor_tick: 0,
             initialized: false,
+            resume_due: None,
         }
     }
 }

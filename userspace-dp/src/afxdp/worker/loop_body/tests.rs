@@ -1620,6 +1620,253 @@ mod flow_cache_invalidation_tests {
         );
         crate::afxdp::bpf_map::clear_conntrack_rows_for_test();
     }
+
+    // ---- #18780: the #16223 replica fence as ONE shared-map pass per call ----
+
+    fn udp_replica_key(i: u32) -> SessionKey {
+        SessionKey {
+            protocol: crate::ip_proto::PROTO_UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::from(0x0a3d_0000u32 + i)),
+            src_port: 40_000,
+            dst_port: 9,
+            ..reap_key(0)
+        }
+    }
+
+    fn shared_row(key: &SessionKey, session_id: u64, handshake_wire: u8) -> SyncedSessionEntry {
+        SyncedSessionEntry {
+            protocol: key.protocol,
+            tcp_handshake_state: handshake_wire,
+            ..serving_shared_entry(key, session_id)
+        }
+    }
+
+    fn fence_rows_visited() -> u64 {
+        super::super::gc_teardown::REPLICA_FENCE_ROWS_VISITED_18780.with(|c| c.get())
+    }
+
+    /// #18780: the reap of C WorkerLocalImport replicas against a shared map of
+    /// N rows must read each shared row once per call (O(N + C)), not once per
+    /// replica (O(N x C)). That per-replica scan under the node-global lock
+    /// was the quadratic left on master after #18663: at T0+120 the authoring
+    /// node's 5/6 WorkerLocalImport rows each scanned the whole map. UDP rows
+    /// are never Established here, so `any()` never short-circuited.
+    /// Decisions unchanged: none of these replicas has a serving Established
+    /// row, so every one is torn down (its descriptor evicted).
+    /// RED on master (with the test-only visit counter): C x N visits.
+    #[test]
+    fn replica_fence_reads_shared_map_once_per_reap_call_18780() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let shared_rows = 512u32;
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            for i in 0..shared_rows {
+                let key = udp_replica_key(10_000 + i);
+                map.insert(key.clone(), shared_row(&key, 90_000 + u64::from(i), 0));
+            }
+            map
+        }));
+        for replicas in [64u32, 256] {
+            let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+            let mut expired = Vec::new();
+            for i in 0..replicas {
+                let key = udp_replica_key(i);
+                insert_cache_entry(&mut binding, &key, None);
+                expired.push(expired_replica(key, 70_000 + u64::from(i)));
+            }
+            let before = fence_rows_visited();
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &expired,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                1_000_000_000,
+                0,
+                &shared,
+            );
+            let visited = fence_rows_visited() - before;
+            assert!(
+                visited <= u64::from(shared_rows),
+                "#18780: {replicas} replica reaps read {visited} shared rows (map holds {shared_rows}); \
+                 the fence must be one pass per call, not one per replica"
+            );
+            for e in &expired {
+                assert!(
+                    !cache_hits(&mut binding, &e.key, &rg_epochs),
+                    "#18780: an unserved replica is still torn down"
+                );
+            }
+        }
+    }
+
+    /// #18780 pin: a UDP shared row CAN carry the Established wire on master,
+    /// through production code. The ct-slice collector
+    /// (`SessionTable::established_forward_slice`) is protocol-blind: any
+    /// forward row that is established, not pending, not closing and has
+    /// `rev_packets > 0` (an answered UDP flow qualifies), and its keys feed
+    /// `restamp_shared_handshakes_established`. Today's fence then matches a
+    /// UDP WorkerLocalImport replica with the same session id and skips its
+    /// teardown. The batched fence keeps that decision exactly, so a "skip the
+    /// fence for non-TCP" shortcut reds here. Control: a different tuple is
+    /// torn down.
+    #[test]
+    fn udp_shared_row_in_established_keeps_todays_fence_decision_18780() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let key = udp_replica_key(7);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(key.clone(), shared_row(&key, 8_780, 0));
+            map
+        }));
+        // The production chain, on a serving worker's table: an answered UDP
+        // flow -> ct-slice collector -> shared Established restamp.
+        let mut table = crate::session::SessionTable::new();
+        let reverse = crate::session::reverse_session_key(&key, NatDecision::default());
+        assert!(table.install_with_protocol(
+            key.clone(),
+            reap_decision(None),
+            reap_metadata(),
+            1_000_000_000,
+            crate::ip_proto::PROTO_UDP,
+            0,
+        ));
+        let mut reverse_md = reap_metadata();
+        reverse_md.is_reverse = true;
+        assert!(table.install_with_protocol(
+            reverse.clone(),
+            reap_decision(None),
+            reverse_md,
+            1_000_000_000,
+            crate::ip_proto::PROTO_UDP,
+            0,
+        ));
+        assert!(table.lookup(&reverse, 2_000_000_000, 0).is_some(), "premise: the reply hits");
+        table.account_packet(&reverse, 100, 0, 0);
+        let mut established = Vec::new();
+        let _ = table.established_forward_slice(0, 64, &mut established);
+        assert!(
+            established.iter().any(|(k, _)| *k == key),
+            "premise: the ct-slice collector takes an answered UDP forward row"
+        );
+        let _ = crate::afxdp::shared_ops::restamp_shared_handshakes_established(
+            &shared,
+            &established,
+        );
+        assert_eq!(
+            shared.lock().unwrap().get(&key).map(|e| e.tcp_handshake_state),
+            Some(crate::session::TcpHandshakeState::Established.to_wire()),
+            "premise: the ct-slice restamp stamps the UDP shared row Established"
+        );
+        let other = udp_replica_key(8);
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        insert_cache_entry(&mut binding, &key, None);
+        insert_cache_entry(&mut binding, &other, None);
+        // `other` has the same session id but its own tuple: no row matches.
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &[expired_replica(key.clone(), 8_780), expired_replica(other.clone(), 8_780)],
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+            &shared,
+        );
+        assert!(
+            cache_hits(&mut binding, &key, &rg_epochs),
+            "#18780: a UDP replica whose shared row is Established stays fenced (today's decision)"
+        );
+        assert!(
+            !cache_hits(&mut binding, &other, &rg_epochs),
+            "#18780 control: a replica with no matching row is torn down"
+        );
+    }
+
+    /// #18780: the batched fence is the per-replica predicate, arm by arm, in
+    /// ONE call: fenced iff origin is WorkerLocalImport, session id is nonzero
+    /// and equal, the shared row is Established, and its stored key or its
+    /// derived reverse key has the replica's bare tuple. Each negative row
+    /// differs from a fenced one in exactly one arm.
+    #[test]
+    fn batched_fence_matches_the_per_replica_predicate_18780() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        let opening = crate::session::TcpHandshakeState::Opening.to_wire();
+        let direct = reap_key(41_001);
+        let alias_forward = reap_key(41_002);
+        let alias = crate::session::reverse_session_key(&alias_forward, NatDecision::default());
+        let opening_row = reap_key(41_003);
+        let zero_id = reap_key(41_004);
+        let not_replica = reap_key(41_005);
+        let other_id = reap_key(41_006);
+        // A shared row in another routing domain still matches: the fence
+        // compares bare tuples (today's predicate, kept exactly).
+        let other_domain_row = SessionKey {
+            routing_domain: 9,
+            ..reap_key(41_007)
+        };
+        let other_domain = reap_key(41_007);
+        let shared = std::sync::Arc::new(std::sync::Mutex::new({
+            let mut map = FastMap::default();
+            map.insert(direct.clone(), shared_row(&direct, 1, established));
+            map.insert(alias_forward.clone(), shared_row(&alias_forward, 2, established));
+            map.insert(opening_row.clone(), shared_row(&opening_row, 3, opening));
+            map.insert(zero_id.clone(), shared_row(&zero_id, 0, established));
+            map.insert(not_replica.clone(), shared_row(&not_replica, 5, established));
+            map.insert(other_id.clone(), shared_row(&other_id, 6, established));
+            map.insert(
+                other_domain_row.clone(),
+                shared_row(&other_domain_row, 7, established),
+            );
+            map
+        }));
+        let cases: [(&SessionKey, ExpiredSession, bool, &str); 7] = [
+            (&direct, expired_replica(direct.clone(), 1), true, "direct key"),
+            (&alias, expired_replica(alias.clone(), 2), true, "derived reverse key"),
+            (&opening_row, expired_replica(opening_row.clone(), 3), false, "row not Established"),
+            (&zero_id, expired_replica(zero_id.clone(), 0), false, "session id 0"),
+            (
+                &not_replica,
+                ExpiredSession {
+                    session_id: 5,
+                    ..expired(not_replica.clone(), None)
+                },
+                false,
+                "not a WorkerLocalImport replica",
+            ),
+            (&other_id, expired_replica(other_id.clone(), 66), false, "different session id"),
+            (&other_domain, expired_replica(other_domain.clone(), 7), true, "bare tuple across domains"),
+        ];
+        let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+        for (key, _, _, _) in &cases {
+            insert_cache_entry(&mut binding, key, None);
+        }
+        let batch: Vec<ExpiredSession> = cases.iter().map(|(_, e, _, _)| e.clone()).collect();
+        reap_expired_sessions(
+            std::slice::from_mut(&mut binding),
+            &batch,
+            &forwarding,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            1_000_000_000,
+            0,
+            &shared,
+        );
+        for (key, _, fenced, arm) in &cases {
+            assert_eq!(
+                cache_hits(&mut binding, key, &rg_epochs),
+                *fenced,
+                "#18780: fence decision for `{arm}` must equal the per-replica predicate"
+            );
+        }
+    }
 }
 
 mod expiry_count_tests {

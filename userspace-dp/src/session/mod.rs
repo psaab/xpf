@@ -1029,6 +1029,39 @@ pub(crate) fn tcp_close_window_ns_with_app(
     }
 }
 const MAX_SESSION_DELTAS: usize = 4096;
+
+/// #18780: the most rows one `expire_stale_entries_ha` call may REAP.
+///
+/// An RG activation re-stamps every HA-managed row to the activation instant
+/// (`refresh_for_ha_transition`), so a whole table can cross its window in one
+/// wheel tick. Before #18780 the pass drained every due bucket in one call, and
+/// each reaped row then costs its teardown in the same `worker_loop` iteration
+/// (BPF steering/conntrack deletes, SNAT release, flow-cache eviction, the
+/// Close flush and its sibling fan-out) — a ~100k-row cohort froze one worker
+/// for ~11 s and the #18704 watchdog moved the RGs (an RG loop between the
+/// nodes every ~135 s).
+///
+/// 256 is the `WORKER_COMMAND_DRAIN_BUDGET` slice for the same class of work
+/// (map syscalls per item; `worker_queue.rs` sizes it against the ~2 ms fill
+/// time of a 4096-slot RX ring at 25 Gb/s) and the `drain_deltas(256)` batch
+/// this loop already flushes in, so one iteration's reap is one flush batch.
+pub(crate) const EXPIRY_PASS_MAX_REAPS: usize = 256;
+
+/// #18780: the most wheel hints one `expire_stale_entries_ha` call may EXAMINE
+/// (stale/gone drops, re-buckets, SELF-HEAL, HOLD, companion keeps and reaps).
+/// Classification without a reap is O(1) and ~0.1-0.3 us, so 4096 bounds the
+/// non-reaping share of an iteration to about a millisecond while still letting
+/// the steady-state stale-hint stream (one per active flow per second) drain in
+/// a handful of iterations.
+pub(crate) const EXPIRY_PASS_MAX_POPS: usize = 4096;
+
+// A reap is also a pop, so the reap cap can bind only below the pop cap.
+const _: () = assert!(EXPIRY_PASS_MAX_REAPS <= EXPIRY_PASS_MAX_POPS);
+// One call's Close deltas fit an EMPTY delta ring (#10309): the overflow
+// suffix path is then reachable from an expiry call only when other producers
+// already filled the ring, never from the expiry cohort alone.
+const _: () = assert!(EXPIRY_PASS_MAX_REAPS < MAX_SESSION_DELTAS);
+
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_OSPF, PROTO_TCP, PROTO_UDP};
 // #2151: TCP flag bits from the shared crate::tcp_flags SSOT. Re-exported
 // so the conntrack submodules (install, lookup, expire) keep referencing
@@ -2174,6 +2207,11 @@ pub(crate) struct SessionTable {
     /// alias cloned from the REVERSE row).
     pending_probe_stage_transitions: Vec<(SessionKey, SessionKey, crate::nat::NatDecision)>,
     last_gc_ns: u64,
+    /// #18780: the last expiry call stopped at `EXPIRY_PASS_MAX_REAPS` /
+    /// `EXPIRY_PASS_MAX_POPS` with due work left. The next call bypasses the
+    /// `SESSION_GC_INTERVAL_NS` gate and resumes the wheel cursor, so a
+    /// cohort drains over consecutive worker-loop iterations, not seconds.
+    expiry_backlog: bool,
     max_sessions: usize,
     /// Raw session slots reserved by an outstanding IPsec install plan.
     reserved_session_slots: usize,
@@ -2612,6 +2650,7 @@ impl SessionTable {
             pending_probe_undo: Vec::new(),
             pending_probe_stage_transitions: Vec::new(),
             last_gc_ns: 0,
+            expiry_backlog: false,
             max_sessions: DEFAULT_MAX_SESSIONS,
             reserved_session_slots: 0,
             timeouts: SessionTimeouts::default(),
@@ -8553,3 +8592,9 @@ mod translated_twin_matrix_17088_tests;
 #[cfg(test)]
 #[path = "moved_session_probe_18656_tests.rs"]
 mod moved_session_probe_18656_tests;
+
+// #18780: bounded per-call expiry work (reap/pop budget + backlog
+// continuation) and lazy node-served evidence on the expire pass.
+#[cfg(test)]
+#[path = "expiry_budget_18780_tests.rs"]
+mod expiry_budget_18780_tests;

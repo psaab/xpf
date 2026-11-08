@@ -791,6 +791,93 @@ sweep walks the wheel bucket for the current tick and physically removes stale
 entries (subject to the HA retention gates). Packet and flow-cache lookups
 reject idle-crossed entries but leave physical removal to the wheel.
 
+### Per-call budget (#18780)
+
+One `expire_stale_entries_ha` call is bounded. It reaps at most
+`EXPIRY_PASS_MAX_REAPS` (256) rows and examines at most `EXPIRY_PASS_MAX_POPS`
+(4096) wheel hints, counting stale/gone drops, re-buckets, SELF-HEAL, HOLD,
+companion keeps and reaps.
+
+- **Continuation.** A call that stops with due work left sets the table's
+  `expiry_backlog` flag. The next call bypasses the 1 s interval gate and
+  resumes at the same cursor tick and bucket position.
+  - The worker loop calls the pass once per iteration, so a backlog drains
+    over consecutive loop iterations, not over seconds.
+  - `last_gc_ns` and the PPTP association sweep advance only on a fresh pass,
+    so the 1 s cadence is unchanged when there is no backlog
+    (`continuation_does_not_shift_the_gc_cadence_18780`).
+  - A continuation resumes the snapshot that the cut pass took of the
+    cursor's bucket (`SessionWheel::resume_due`), not the bucket's current
+    length.
+    - The bucket at the cursor routinely holds far-future hints: one
+      `cursor + 256` hint per active long-timeout flow touched since the last
+      pass, because `target_tick_for` clamps to 255 ticks ahead. A pass
+      rotates these hints to the back.
+    - If a continuation re-counted them, every call would re-rotate them. With
+      more than 4096 such hints the cursor would never leave the bucket, and
+      GC would stop (`pop_budget_never_livelocks_on_future_hints_18780`).
+- **Why 256 and 4096.**
+  - 256 is the `WORKER_COMMAND_DRAIN_BUDGET` slice for the same class of
+    work: map syscalls per item, sized against the ~2 ms fill time of a
+    4096-slot RX ring at 25 Gb/s. It is also the `drain_deltas(256)` flush
+    batch.
+  - 4096 bounds the classify-only share of an iteration to about a
+    millisecond.
+  - Compile-time asserts keep reaps ≤ pops and reaps < `MAX_SESSION_DELTAS`.
+    So one call's Close deltas always fit an empty ring, and the #10309
+    overflow suffix is reachable from an expiry call only when other
+    producers have already filled the ring.
+- **Lag bound** (`reap_budget_lag_for_the_last_row_is_bounded_18780`,
+  `pop_budget_drains_stale_hints_without_stalling_18780`).
+  - A cohort of C rows due in one tick reaps in `ceil(C / 256)` consecutive
+    calls.
+  - H stale hints queued ahead of a row add at most `ceil((H + 1) / 4096)`
+    calls.
+  - The last row's extra delay is therefore `(calls - 1)` worker-loop
+    iterations after the first call that sees it crossed. That is
+    sub-second even for a 100k-row cohort (~400 iterations of ≤ 256 reaps).
+- **During the drain**, rows not yet visited are idle-crossed. Lookups treat
+  them as fail-closed (`SessionExpiryProbe::IdleCrossed`), the same state a
+  row has today between crossing and the next 1 s GC tick. The window is
+  only longer, by the lag above.
+
+**Why it exists.** RG activation (`RefreshOwnerRGS` → `refresh_for_ha_transition`)
+re-stamps every HA-managed row to the activation instant T0. With UDP's 60 s
+window the whole table crosses in ONE tick at T0+60 (SELF-HEAL) and again at
+T0+120 (AGE). The unbounded pass did that cohort's classification, reap,
+teardown and Close flush in one `worker_loop` iteration, so the worker
+heartbeat froze for ~11 s and the #18704 watchdog moved the RGs. The peer then
+repeated the stall 120 s later, an RG loop of about 135 s. The activation
+re-stamp itself is unchanged: it is the #2120 promotion contract, and spreading
+it was considered and not adopted.
+
+**Lazy node-served evidence.** In the expire pass, node-level served evidence
+(the `ExpireHaContext::node_served` closure plus the local
+`node_served_evidence`) is computed only for a row that is
+companion-eligible, TCP and not closing. That is exactly the precondition
+under which `opening_companion_keeps_alive` can keep a row. The production
+closure locks the node-global `shared_sessions` map (#18663 made it keyed), so
+before this every crossed UDP row, and every deliberate reap, took that lock
+for evidence nothing read.
+
+**Replica fence in one pass.** The reap of WorkerLocalImport replicas
+(`afxdp/worker/loop_body/gc_teardown.rs::replica_fence_marks`) evaluates the
+#16223 fence for the whole call in one pass over `shared_sessions`. That is
+O(N + C log C) under one lock hold, instead of a `values().any()` scan per
+replica (O(N × C)). That per-replica scan was the quadratic term left after
+#18663: the authoring node's T0+120 cohort is ~5/6 replicas, and a UDP row is
+never Established, so no scan short-circuited.
+
+- The predicate is unchanged, including its protocol-blindness. The ct-slice
+  collector (`established_forward_slice`) takes any answered forward row, UDP
+  included, and `restamp_shared_handshakes_established` stamps that row's
+  shared rows Established. So an answered UDP flow's same-id replica is still
+  fenced. A "TCP only" shortcut would change that decision.
+- The lock is taken with `lock_shared_recover`.
+
+**Not covered.** `RefreshOwnerRGS` is still one O(table) worker command, with a
+session-map publish per row, at T0 itself.
+
 ## Flow-cache keepalive (#2220)
 
 The flow-cache fast path (`afxdp/poll_descriptor/flow_cache_hit.rs`) is
