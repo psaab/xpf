@@ -22,3 +22,20 @@ takes an `Ownership` interface satisfied directly by
 frontends can map unknown to a distinct non-OK status without parsing
 the message; its message templates are byte-pinned by
 `peerclient_16154_test.go` against the pre-refactor twin wording.
+
+## One "reached the peer" test (#18559)
+
+`ProbeFabricTCP` is the TCP reachability probe both dialers run per fabric
+address: `CLI.dialPeerReached` and `Server.dialPeerReached`. It is the single
+transport-absence test behind the untargeted-failover fallback. A request
+counts as never having reached the peer only when no fabric address accepted
+a TCP connection: the connection was refused, the address was unreachable, or
+no SYN-ACK arrived within `ProbeFabricTCPTimeout` (2 s). Only then may
+`request chassis cluster failover redundancy-group N` on an owner fall back to
+the break-before-make local resign.
+
+A peer that accepted the connection and then answered anything has been
+reached, and its answer is returned. That covers the gRPC dialer's
+authenticated `GetStatus` probe failing (`Unauthenticated` under fabric-token
+skew, or slower than 2 s) and any RPC error. The dialers themselves stay
+separate, as above: they only share the probe and the rule.

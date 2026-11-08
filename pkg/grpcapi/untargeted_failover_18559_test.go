@@ -2,13 +2,17 @@ package grpcapi
 
 import (
 	"context"
+	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
+	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/config"
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -20,6 +24,11 @@ import (
 // planned moves, 71-336 ms on loss). It now runs the node-targeted,
 // make-before-break transfer to the peer. The remote CLI (`cli -c`) reaches
 // this handler, so these cells drive SystemAction itself.
+//
+// The cells named *RealPath* drive the REAL fabric dial and SystemAction RPC
+// against an in-process gRPC peer on 127.0.0.1 (the #8597/#10440 seam,
+// peerFabricGRPCPort); they need a usable loopback, so run them outside the
+// lo-down testguard namespace.
 
 const untargetedTransferOK18559 = "Manual failover completed for redundancy group 1 (transfer committed)"
 
@@ -65,10 +74,14 @@ func failoverCount18559(mgr *cluster.Manager, rgID int) int {
 // ManualFailover and never asked the peer.
 func TestUntargetedFailoverOnOwnerRunsPeerTransfer18559(t *testing.T) {
 	var forwarded []string
-	s, mgr := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+	var mgr *cluster.Manager
+	s, m := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 		forwarded = append(forwarded, req.Action)
+		// The committed transfer demoted this node through its #5640 fence.
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary)
 		return &pb.SystemActionResponse{Message: untargetedTransferOK18559}, nil
 	})
+	mgr = m
 	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
 	if err != nil {
 		t.Fatalf("untargeted failover on the owner: %v", err)
@@ -79,8 +92,8 @@ func TestUntargetedFailoverOnOwnerRunsPeerTransfer18559(t *testing.T) {
 	if resp.GetMessage() != untargetedTransferOK18559 {
 		t.Fatalf("message = %q, want the peer's transfer result %q", resp.GetMessage(), untargetedTransferOK18559)
 	}
-	if !mgr.IsLocalPrimary(1) {
-		t.Fatal("the owner resigned locally (ManualFailover) instead of leaving the demotion to the transfer's fence")
+	if got := failoverCount18559(mgr, 1); got != 0 {
+		t.Fatalf("FailoverCount = %d: the owner ran a local resign on top of the committed transfer", got)
 	}
 }
 
@@ -92,20 +105,20 @@ var notReady18559 = status.Error(codes.FailedPrecondition,
 // A peer that is not takeover-ready refuses before it sends anything. The
 // owner must NOT resign into it: demoting to a peer that will not promote
 // strands the RG (#18731 class). The refusal reaches the operator with the
-// peer's readiness reasons. RED before #18559: the handler resigned and
-// reported "triggered".
+// peer's readiness reasons, worded as the PEER's group, and a next step. RED
+// before #18559: the handler resigned and reported "triggered".
 func TestUntargetedFailoverPeerNotReadyRefusesWithoutDemoting18559(t *testing.T) {
 	calls := 0
 	s, mgr := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 		calls++
 		return nil, notReady18559
 	})
-	before := failoverCount18559(mgr, 1)
 	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Fatalf("err = %v, want the peer's FailedPrecondition refusal", err)
 	}
-	for _, want := range []string{"not ready for explicit failover", "reasons=[session sync not primed]", "node 1", "no local resign"} {
+	for _, want := range []string{"the peer's redundancy group 1 not ready for explicit failover",
+		"reasons=[session sync not primed]", "node 1", "no local resign", "Next:", "in-service-upgrade"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err.Error(), want)
 		}
@@ -113,46 +126,36 @@ func TestUntargetedFailoverPeerNotReadyRefusesWithoutDemoting18559(t *testing.T)
 	if calls != 1 {
 		t.Fatalf("transfer attempts = %d, want 1", calls)
 	}
-	if !mgr.IsLocalPrimary(1) || failoverCount18559(mgr, 1) != before {
+	if !mgr.IsLocalPrimary(1) || failoverCount18559(mgr, 1) != 0 {
 		t.Fatal("the owner demoted although the peer refused the transfer")
 	}
 }
 
-// A request that provably never reached the peer (dialPeer found no fabric
-// address) falls back to the pre-#18559 local resign: nothing happened
-// anywhere, and the peer claims the RG on its next heartbeat.
+// A request that provably never reached the peer (no fabric address
+// configured) falls back to the pre-#18559 local resign, with a reply that
+// says so.
 func TestUntargetedFailoverDialFailureFallsBackToLocalResign18559(t *testing.T) {
 	s, mgr := untargetedServer18559(t, true, true, nil) // no seam: the real dialPeer runs and finds no fabric address
 	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
 	if err != nil {
 		t.Fatalf("a transfer that never reached the peer must fall back to the local resign: %v", err)
 	}
-	if resp.GetMessage() != "Manual failover triggered for redundancy group 1" {
-		t.Fatalf("message = %q, want the local-resign text", resp.GetMessage())
+	if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteUnreachable); resp.GetMessage() != want {
+		t.Fatalf("message = %q, want the distinguishable fallback text %q", resp.GetMessage(), want)
 	}
 	if mgr.IsLocalPrimary(1) {
 		t.Fatal("local resign did not run after the dial failure")
 	}
 }
 
-// An RPC error after the dial may have been delivered, so it is reported and
-// nothing resigns on top of it.
-func TestUntargetedFailoverRPCErrorAfterDialDoesNotResign18559(t *testing.T) {
-	s, mgr := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
-		return nil, status.Error(codes.Unavailable, "connection reset by peer")
-	})
-	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
-	if status.Code(err) != codes.Unavailable {
-		t.Fatalf("err = %v, want the RPC's Unavailable", err)
-	}
-	if !mgr.IsLocalPrimary(1) {
-		t.Fatal("the owner resigned on top of a request that may have reached the peer")
-	}
-}
+// unknown18559 is the #16432 verify-before-retry text the deadline
+// reconciliation returns when node1 does not own RG1 afterwards.
+const unknown18559 = "Cluster failover outcome unknown for redundancy group 1: forwarded request to node 1 timed out; redundancy group 1 is not primary on node 1 — verify ownership before retrying"
 
 // A transfer whose outcome is unknown (the proxy deadline reconciled with the
 // RG not yet on the peer) may still commit, so the owner must not resign on
-// top of it. RED before #18559: the handler resigned and reported success.
+// top of it, and the #16432 verify-before-retry text passes through verbatim.
+// RED before #18559: the handler resigned and reported success.
 func TestUntargetedFailoverUnknownOutcomeDoesNotResign18559(t *testing.T) {
 	s, mgr := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 		return nil, status.Error(codes.DeadlineExceeded, "context deadline exceeded")
@@ -161,36 +164,18 @@ func TestUntargetedFailoverUnknownOutcomeDoesNotResign18559(t *testing.T) {
 	if status.Code(err) != codes.Unknown {
 		t.Fatalf("err = %v, want codes.Unknown (outcome unknown, verify before retrying)", err)
 	}
+	if got := status.Convert(err).Message(); got != unknown18559 {
+		t.Fatalf("unknown-outcome text = %q, want the #16432 text verbatim %q", got, unknown18559)
+	}
 	if !mgr.IsLocalPrimary(1) {
 		t.Fatal("the owner resigned on top of a transfer whose outcome is unknown")
 	}
 }
 
-// A transfer that got as far as this node's applied-ACK has demoted it; its
-// abort or the #5079 lease restores it. The failure is reported and nothing
-// resigns on top of it. RED before #18559 (no transfer, plain resign).
-func TestUntargetedFailoverAfterOwnerAckDoesNotResign18559(t *testing.T) {
-	var mgr *cluster.Manager
-	s, m := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
-		// The peer's request reached this node's OnRemoteFailover, which
-		// demoted it inside the #5640 fence, and then the commit failed.
-		mgr.SetGroupStateForTesting(1, cluster.StateSecondaryHold)
-		return nil, status.Error(codes.FailedPrecondition, "failover commit for redundancy group 1 failed")
-	})
-	mgr = m
-	before := failoverCount18559(mgr, 1)
-	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
-	if status.Code(err) != codes.FailedPrecondition {
-		t.Fatalf("err = %v, want the transfer's FailedPrecondition", err)
-	}
-	if got := failoverCount18559(mgr, 1); got != before {
-		t.Fatalf("FailoverCount %d -> %d: a local resign ran on top of a transfer that had already demoted this node", before, got)
-	}
-}
-
 // The untargeted form keeps its local-resign meaning where there is nothing
 // to make before the break: RG0, a node that does not own the RG, a dead peer,
-// and a request the peer forwarded to us (never re-proxied).
+// and a request the peer forwarded to us (never re-proxied). Each replies the
+// unchanged pre-#18559 text.
 func TestUntargetedFailoverStaysLocalResignOutsideOwnerDataRG18559(t *testing.T) {
 	noProxy := func(t *testing.T) func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 		return func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
@@ -200,11 +185,12 @@ func TestUntargetedFailoverStaysLocalResignOutsideOwnerDataRG18559(t *testing.T)
 	}
 	t.Run("RG0 on the owner", func(t *testing.T) {
 		s, mgr := untargetedServer18559(t, true, true, noProxy(t))
-		if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:0"}); err != nil {
+		resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:0"})
+		if err != nil {
 			t.Fatalf("RG0 untargeted failover: %v", err)
 		}
-		if mgr.IsLocalPrimary(0) {
-			t.Fatal("RG0 must keep the local resign")
+		if mgr.IsLocalPrimary(0) || resp.GetMessage() != "Manual failover triggered for redundancy group 0" {
+			t.Fatalf("RG0 must keep the local resign and its text: primary=%v msg=%q", mgr.IsLocalPrimary(0), resp.GetMessage())
 		}
 	})
 	t.Run("non-owner", func(t *testing.T) {
@@ -239,13 +225,259 @@ func TestUntargetedFailoverClockRefusalFallsBackToLocalResign18559(t *testing.T)
 		return &pb.SystemActionResponse{Message: untargetedTransferOK18559}, nil
 	})
 	mgr.NotePeerWallClockForTesting(-72 * time.Second)
-	if _, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"}); err != nil {
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if err != nil {
 		t.Fatalf("clock-refused transfer must fall back to the local resign: %v", err)
 	}
 	if calls != 0 {
 		t.Fatalf("a clock-refused transfer must not reach the fabric; calls=%d", calls)
 	}
-	if mgr.IsLocalPrimary(1) {
-		t.Fatal("local resign did not run after the clock refusal")
+	if mgr.IsLocalPrimary(1) || resp.GetMessage() != clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteUnreachable) {
+		t.Fatalf("local resign did not run after the clock refusal: primary=%v msg=%q", mgr.IsLocalPrimary(1), resp.GetMessage())
+	}
+}
+
+// A caller that cancelled before the outcome was known gets its context
+// error, and nothing resigns: it cannot observe an ownership change.
+func TestUntargetedFailoverCanceledCallerDoesNotResign18559(t *testing.T) {
+	s, mgr := untargetedServer18559(t, true, true, nil)
+	s.fabricPeerAddrFn = func() []string { return []string{"127.0.0.1"} }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := s.SystemAction(ctx, &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if status.Code(err) != codes.Canceled {
+		t.Fatalf("err = %v, want the caller's Canceled", err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("a cancelled request still resigned the owner")
+	}
+}
+
+// ---- dual-active: the local resign still ends it -------------------------
+
+// twoNodeDualActive18559 builds node0 (owner) and node1, BOTH primary for
+// RG1, with node0's peer seam calling node1's REAL SystemAction handler as
+// the fabric interceptor would (forwarded marker). peerSeesPrimary sets
+// node0's view of node1: true is the cluster-state case, false the transient
+// window where node0 has not yet heard node1's primary heartbeat.
+func twoNodeDualActive18559(t *testing.T, peerSeesPrimary bool) (*Server, *cluster.Manager, *cluster.Manager, *atomic.Int32) {
+	t.Helper()
+	n1 := cluster.NewManager(1, 22)
+	n1.UpdateConfig(&config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{
+		{ID: 0, NodePriorities: map[int]int{0: 100, 1: 90}},
+		{ID: 1, NodePriorities: map[int]int{0: 100, 1: 90}},
+	}})
+	n1.SetGroupStateForTesting(1, cluster.StatePrimary)
+	n1.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+	node1 := &Server{cluster: n1}
+	calls := &atomic.Int32{}
+	s, n0 := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		calls.Add(1)
+		return node1.SystemAction(withPeerMarkers(context.Background(), peerMarkers{forwarded: true}), req)
+	})
+	if peerSeesPrimary {
+		n0.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+	}
+	return s, n0, n1, calls
+}
+
+// Both nodes primary and node0 knows it: the untargeted form is the local
+// resign that ends the dual-active state (a transfer would be answered
+// "already primary" and move nothing).
+func TestUntargetedFailoverDualActiveResignsLocally18559(t *testing.T) {
+	s, n0, n1, calls := twoNodeDualActive18559(t, true)
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if err != nil {
+		t.Fatalf("dual-active untargeted failover: %v", err)
+	}
+	if n0.IsLocalPrimary(1) || !n1.IsLocalPrimary(1) {
+		t.Fatalf("dual-active not ended: node0 primary=%v node1 primary=%v", n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("a dual-active RG must not be proxied as a transfer; calls=%d", calls.Load())
+	}
+	if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive); resp.GetMessage() != want {
+		t.Fatalf("message = %q, want %q", resp.GetMessage(), want)
+	}
+}
+
+// node0 has not yet heard that node1 claims the RG; the REAL peer handler
+// answers "already primary" (success) and nothing demotes. The reply must not
+// be passed off as a move: node0 resigns and the dual-active ends.
+func TestUntargetedFailoverPeerReportsAlreadyPrimaryResignsLocally18559(t *testing.T) {
+	s, n0, n1, calls := twoNodeDualActive18559(t, false)
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if err != nil {
+		t.Fatalf("dual-active untargeted failover: %v", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("peer transfer attempts = %d, want 1 (node0 did not know node1 was primary)", calls.Load())
+	}
+	if n0.IsLocalPrimary(1) || !n1.IsLocalPrimary(1) {
+		t.Fatalf("dual-active not ended: node0 primary=%v node1 primary=%v", n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+	}
+	if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive); resp.GetMessage() != want {
+		t.Fatalf("message = %q, want %q", resp.GetMessage(), want)
+	}
+}
+
+// ---- real fabric transport ----------------------------------------------
+
+// realPeer18559 is an in-process fabric peer. probe is GetStatus's answer
+// (nil = OK), probeDelay delays it, action runs inside SystemAction.
+type realPeer18559 struct {
+	pb.UnimplementedBpfrxServiceServer
+	probe      error
+	probeDelay time.Duration
+	action     func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error)
+	calls      atomic.Int32
+}
+
+func (p *realPeer18559) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
+	if p.probeDelay > 0 {
+		select {
+		case <-time.After(p.probeDelay):
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if p.probe != nil {
+		return nil, p.probe
+	}
+	return &pb.GetStatusResponse{}, nil
+}
+
+func (p *realPeer18559) SystemAction(_ context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+	p.calls.Add(1)
+	return p.action(req)
+}
+
+// realPathServer18559 starts peer on an ephemeral loopback port, points
+// dialPeer at it and returns node0 (owner, RG1, live peer) with NO seam.
+func realPathServer18559(t *testing.T, peer *realPeer18559) (*Server, *cluster.Manager) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := grpc.NewServer()
+	pb.RegisterBpfrxServiceServer(srv, peer)
+	go func() { _ = srv.Serve(lis) }()
+	t.Cleanup(srv.Stop)
+	_, port, _ := net.SplitHostPort(lis.Addr().String())
+	old := peerFabricGRPCPort
+	peerFabricGRPCPort = port
+	t.Cleanup(func() { peerFabricGRPCPort = old })
+	s, mgr := untargetedServer18559(t, true, true, nil)
+	s.fabricPeerAddrFn = func() []string { return []string{"127.0.0.1"} }
+	return s, mgr
+}
+
+// The RPC was issued and the peer failed it: it may have been delivered, so
+// the error is returned and nothing resigns on top of it. Drives the real
+// SystemAction return (proxyPeerSystemActionSent's post-RPC sent=true).
+func TestUntargetedFailoverRealPathRPCErrorAfterDialDoesNotResign18559(t *testing.T) {
+	peer := &realPeer18559{action: func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		return nil, status.Error(codes.Unavailable, "transport is closing")
+	}}
+	s, mgr := realPathServer18559(t, peer)
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if peer.calls.Load() != 1 {
+		t.Fatalf("peer SystemAction calls = %d, want 1", peer.calls.Load())
+	}
+	if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), "no local resign") {
+		t.Fatalf("err = %v, want the post-dial Unavailable, named as the transfer's", err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("the owner resigned on top of a request the peer received")
+	}
+}
+
+// The peer reports a deadline: reconciled to an unknown outcome, returned
+// verbatim, no resign. Real transport.
+func TestUntargetedFailoverRealPathUnknownOutcomeDoesNotResign18559(t *testing.T) {
+	peer := &realPeer18559{action: func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		return nil, status.Error(codes.DeadlineExceeded, "failover ACK timeout")
+	}}
+	s, mgr := realPathServer18559(t, peer)
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if status.Code(err) != codes.Unknown || status.Convert(err).Message() != unknown18559 {
+		t.Fatalf("err = %v, want codes.Unknown with the #16432 text verbatim", err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("the owner resigned on top of an unknown outcome")
+	}
+}
+
+// The transfer demoted this node at its applied-ACK and then failed: its
+// abort or the #5079 lease restores the node, so nothing resigns on top of
+// it. Real transport.
+func TestUntargetedFailoverRealPathAfterOwnerAckDoesNotResign18559(t *testing.T) {
+	var mgr *cluster.Manager
+	peer := &realPeer18559{action: func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondaryHold)
+		return nil, status.Error(codes.FailedPrecondition, "failover commit for redundancy group 1 failed")
+	}}
+	s, m := realPathServer18559(t, peer)
+	mgr = m
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("err = %v, want the transfer's FailedPrecondition", err)
+	}
+	if got := failoverCount18559(mgr, 1); got != 0 {
+		t.Fatalf("FailoverCount = %d: a local resign ran on top of a transfer that had already demoted this node", got)
+	}
+}
+
+// A peer that ACCEPTED the connection and then failed the authenticated
+// GetStatus probe was reached, whatever the probe said: an Unauthenticated
+// fabric token (clock skew under the #18585 60 s refusal), or a probe slower
+// than its 2 s. The error is returned and nothing resigns — the same outcome
+// the in-process CLI gives the same peer.
+func TestUntargetedFailoverRealPathProbeAnsweredIsReached18559(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		peer *realPeer18559
+	}{
+		{"probe Unauthenticated", &realPeer18559{probe: status.Error(codes.Unauthenticated,
+			"fabric RPC authentication failed: invalid auth token")}},
+		{"probe slower than 2 s", &realPeer18559{probeDelay: 3 * time.Second}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.peer.action = func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+				return &pb.SystemActionResponse{Message: untargetedTransferOK18559}, nil
+			}
+			s, mgr := realPathServer18559(t, tc.peer)
+			_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+			if err == nil || !strings.Contains(err.Error(), "no local resign") {
+				t.Fatalf("err = %v, want the reached peer's dial failure returned as the transfer's", err)
+			}
+			if !mgr.IsLocalPrimary(1) {
+				t.Fatal("the owner fell back to the local resign although the peer accepted the connection")
+			}
+		})
+	}
+}
+
+// No fabric address accepts a connection (nothing listens): transport
+// absence, the only real-transport fallback.
+func TestUntargetedFailoverRealPathNoListenerFallsBack18559(t *testing.T) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(lis.Addr().String())
+	_ = lis.Close()
+	old := peerFabricGRPCPort
+	peerFabricGRPCPort = port
+	t.Cleanup(func() { peerFabricGRPCPort = old })
+	s, mgr := untargetedServer18559(t, true, true, nil)
+	s.fabricPeerAddrFn = func() []string { return []string{"127.0.0.1"} }
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if err != nil {
+		t.Fatalf("transport absence must fall back: %v", err)
+	}
+	if resp.GetMessage() != clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteUnreachable) || mgr.IsLocalPrimary(1) {
+		t.Fatalf("fallback did not run: msg=%q primary=%v", resp.GetMessage(), mgr.IsLocalPrimary(1))
 	}
 }

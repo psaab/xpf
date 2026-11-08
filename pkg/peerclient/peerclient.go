@@ -16,7 +16,10 @@
 // timeout sizing (TimeoutFor), deadline classification (IsDeadline),
 // and the post-deadline ownership reconciliation (Reconcile). Each
 // frontend keeps its own dialer, its own RPC deadline construction,
-// and its own fabric-auth credential/token construction.
+// and its own fabric-auth credential/token construction. The one thing
+// the dialers do share is the per-address TCP reachability probe
+// (ProbeFabricTCP, reach.go): the single "did the request reach the
+// peer" test behind the #18559 untargeted-failover fallback.
 package peerclient
 
 import (

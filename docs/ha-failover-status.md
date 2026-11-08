@@ -236,11 +236,14 @@ yet. Here is what is true today:
   stale: applied gen=N behind peer committed gen=M"
 - The untargeted failover, the batch form and `ForceSecondary` refuse a
   config-stale standby too (#9569). The #5563 gate above runs on the node that
-  becomes primary, so only the node-targeted form reached it. The untargeted
-  `request chassis cluster failover redundancy-group N` and the ISSU drain
-  (`request system software in-service-upgrade`) demote the local node instead,
-  and they now refuse while the standby's latest config-apply nack matches the
-  newest generation this node sent. The error names the generation.
+  becomes primary, so only the node-targeted form reached it. Since #18559 the
+  untargeted `request chassis cluster failover redundancy-group N` on the owner
+  of a data RG with a live peer runs that targeted transfer, so it reaches the
+  gate too. Where it still demotes the local node (RG0, the never-reached
+  fallback), and for the ISSU drain (`request system software
+  in-service-upgrade`), the command refuses while the standby's latest
+  config-apply nack matches the newest generation this node sent. The error
+  names the generation.
 - (removed in #8573) HA configs that use per-pool source NAT `persistent-nat`
   used to be refused userspace forwarding entirely, on the #1449 reasoning that
   leases are helper-local and not HA-synchronized. Measured on the loss
@@ -1476,15 +1479,24 @@ loss, a 71-336 ms gap with every flow dropped, and the H1 #19019 stalls.
 
 What the operator now sees:
 
-- The command blocks about 1-1.8 s for the commit.
+- The command blocks for the commit: 1.03-1.76 s (median 1.40 s) over 80
+  untargeted moves on the fix build on loss.
 - It prints `... (transfer committed)`.
 - The old owner ends `secondary` with `Manual: no`, not in the Manual hold.
-- A peer that is not takeover-ready refuses with its readiness reasons, and
-  the owner keeps the group instead of resigning into an ownerless RG.
+- A peer that is not takeover-ready refuses with its readiness reasons and a
+  next step. The owner keeps the group instead of resigning into an ownerless
+  RG.
 
 Only a request that never reached the peer falls back to the old local
-resign: the #18585 clock refusal, or no fabric address answering. RG0 keeps
-its local resign.
+resign: the #18585 clock refusal, or no fabric address accepting a TCP
+connection. Its reply says `(peer unreachable; resigned locally,
+break-before-make)`. A peer that accepted the connection and then answered
+anything (an `Unauthenticated` probe under fabric-token skew, a slow probe,
+an RPC error) was reached, and its error is returned with no resign.
+
+RG0 keeps its local resign. So does a dual-active RG, where the peer also
+claims the group; its reply says `(the peer is also primary; resigned
+locally)`.
 
 The rules are in `pkg/cluster/README.md` ("The untargeted form on the owner
 runs the transfer"). The `data node <peer>` batch is still the better way to

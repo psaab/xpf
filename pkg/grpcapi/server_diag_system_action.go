@@ -57,11 +57,11 @@ func (s *Server) proxyPeerSystemActionWithPersistentNatGeneration(
 }
 
 // proxyPeerSystemActionSent is proxyPeerSystemActionWithPersistentNatGeneration
-// that also reports whether the request may have reached the peer. sent is
-// false only when it provably did not: the peer could not be dialed (dialPeer
-// probes every fabric address before any RPC). Once the RPC is issued, any
-// error — a transport error included — may have been delivered, so it counts
-// as sent (#18559 keys its local-resign fallback on this).
+// that also reports whether the request reached the peer (#18559 keys its
+// local-resign fallback on this). sent is false only when NO fabric address
+// accepted a TCP connection (dialPeerReached, peerclient.ProbeFabricTCP). A
+// peer that accepted one and then failed the dial's GetStatus probe was
+// reached; so was every RPC that was issued, whatever error it returned.
 func (s *Server) proxyPeerSystemActionSent(
 	ctx context.Context,
 	req *pb.SystemActionRequest,
@@ -78,9 +78,9 @@ func (s *Server) proxyPeerSystemActionSent(
 		resp, err = s.peerSystemActionFn(peerCtx, forwardedReq)
 		return resp, err, true
 	}
-	conn, err := s.dialPeer(peerCtx)
+	conn, reached, err := s.dialPeerReached(peerCtx)
 	if err != nil {
-		return nil, err, false
+		return nil, err, reached
 	}
 	defer conn.Close()
 	resp, err = pb.NewBpfrxServiceClient(conn).SystemAction(peerCtx, forwardedReq)
@@ -135,8 +135,9 @@ func (s *Server) proxyClusterFailover(ctx context.Context, req *pb.SystemActionR
 }
 
 // proxyClusterFailoverSent is proxyClusterFailover that also reports whether
-// the request may have reached the peer: false for the #18585 clock refusal
-// and for a peer that could not be dialed (proxyPeerSystemActionSent).
+// the request reached the peer: false only for the #18585 clock refusal and
+// for a dial where no fabric address accepted a connection
+// (proxyPeerSystemActionSent).
 func (s *Server) proxyClusterFailoverSent(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error, bool) {
 	// #18585: refuse up front, with the measured skew and the remedy, when
 	// the peer's clock is past the point where the fabric token can ever
@@ -161,51 +162,66 @@ func (s *Server) proxyClusterFailoverSent(ctx context.Context, req *pb.SystemAct
 }
 
 // untargetedPeerTransfer runs an untargeted RG failover issued on the RG's
-// owner as the node-targeted transfer to the peer (#18559; the decision and
-// the failure rule are documented with clusterfailover.UntargetedPeerTransfer).
-// done reports whether the caller must return resp/err as the result. It is
-// false when the form does not qualify, and when the request provably never
-// reached the peer (no dial, or the #18585 clock refusal): the caller then
-// runs the pre-#18559 local resign. Every failure that reached the peer is
-// returned and nothing resigns on top of it; a peer that is not
-// takeover-ready refuses with its readiness reasons and this node keeps the
-// RG.
-func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.Op) (resp *pb.SystemActionResponse, err error, done bool) {
+// owner as the node-targeted transfer to the peer (#18559). The decision and
+// the outcome rules are documented with clusterfailover.UntargetedPeerTransfer.
+//
+// done reports whether the caller must return resp/err as the result. When it
+// is false the caller runs the local resign and replies
+// clusterfailover.LocalResignMessage(op.RG, note): note is empty when the form
+// did not qualify (RG0, non-owner, dead peer, the peer also primary),
+// ResignNoteUnreachable when the request never reached the peer, and
+// ResignNoteDualActive when the peer answered success while this node is
+// still primary (the peer said "already primary").
+func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.Op) (resp *pb.SystemActionResponse, err error, done bool, note string) {
+	localPrimary := s.cluster.IsLocalPrimary(op.RG)
 	target, ok := clusterfailover.UntargetedPeerTransfer(op, s.cluster.NodeID(),
-		s.cluster.IsLocalPrimary(op.RG), s.cluster.PeerAlive())
+		localPrimary, s.cluster.PeerAlive(), s.cluster.IsPeerPrimary(op.RG))
 	if !ok {
-		return nil, nil, false
+		if localPrimary && op.RG > 0 && s.cluster.IsPeerPrimary(op.RG) {
+			return nil, nil, false, clusterfailover.ResignNoteDualActive
+		}
+		return nil, nil, false, ""
 	}
 	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
 		"rg", op.RG, "target_node", target.Node)
 	resp, err, sent := s.proxyClusterFailoverSent(ctx, &pb.SystemActionRequest{Action: target.Action()}, target)
 	if err == nil {
-		return resp, nil, true
+		if s.cluster.IsLocalPrimary(op.RG) {
+			// A committed transfer has demoted this node (the #5640 fence
+			// runs before the ACK). Still primary means the peer answered
+			// "already primary": both nodes claim the RG.
+			slog.Info("cluster failover: the peer reported the group already primary while this node is still primary; resigning locally to end the dual-active state",
+				"rg", op.RG, "target_node", target.Node, "reply", resp.GetMessage())
+			return nil, nil, false, clusterfailover.ResignNoteDualActive
+		}
+		return resp, nil, true, ""
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		// The caller gave up; it cannot observe a resign, so none runs.
+		return nil, status.FromContextError(ctxErr).Err(), true, ""
 	}
 	if !sent {
 		slog.Info("cluster failover: the transfer request never reached the peer; falling back to the local resign (the peer claims the group on its next heartbeat)",
 			"rg", op.RG, "target_node", target.Node, "reason", err)
-		return nil, nil, false
+		return nil, nil, false, clusterfailover.ResignNoteUnreachable
 	}
-	slog.Warn("cluster failover: the transfer to the peer did not complete; not resigning locally",
+	slog.Warn("cluster failover: the peer did not complete the transfer; not resigning locally",
 		"rg", op.RG, "target_node", target.Node, "err", err)
-	return nil, untargetedTransferError18559(op.RG, target.Node, err), true
+	return nil, untargetedTransferError18559(op.RG, target.Node, err), true, ""
 }
 
 // untargetedTransferError18559 names the transfer in a failure the peer
-// returned and keeps its gRPC code. codes.Unknown is passed through as is: it
-// is the #16432 verify-before-retry outcome and its text already says so.
-// Anything else (for a peer that is not takeover-ready, FailedPrecondition
-// with its readiness reasons) gains the context that the untargeted form ran
-// as a transfer and that no local resign was run.
+// returned and keeps its gRPC code. codes.Unknown is passed through verbatim:
+// it is the #16432 verify-before-retry outcome and its text already says so.
+// Anything else gains what happened, whose redundancy group the peer's text
+// means, and what to do next (pkg/cluster/README.md, "The untargeted form on
+// the owner runs the transfer").
 func untargetedTransferError18559(rg, targetNode int, err error) error {
 	st := status.Convert(err)
 	if st.Code() == codes.Unknown {
 		return st.Err()
 	}
-	return status.Errorf(st.Code(),
-		"untargeted failover of redundancy group %d ran as a make-before-break transfer to node %d, which returned: %s; no local resign was run",
-		rg, targetNode, st.Message())
+	return status.Error(st.Code(), clusterfailover.UntargetedTransferRefusal(rg, targetNode, st.Message()))
 }
 
 // logSystemAction records a destructive maintenance action to the configstore
@@ -1017,8 +1033,14 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 		// pre-activates before this node demotes) instead of the local
 		// resign, which the peer only noticed on its next heartbeat. A
 		// request the peer forwarded to us is never re-proxied.
+		note := ""
 		if !peerForwardedFromContext(ctx) {
-			if resp, err, done := s.untargetedPeerTransfer(ctx, op); done {
+			var (
+				resp *pb.SystemActionResponse
+				err  error
+				done bool
+			)
+			if resp, err, done, note = s.untargetedPeerTransfer(ctx, op); done {
 				return resp, err
 			}
 		}
@@ -1035,7 +1057,7 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 			}, nil
 		}
 		return &pb.SystemActionResponse{
-			Message: fmt.Sprintf("Manual failover triggered for redundancy group %d", op.RG),
+			Message: clusterfailover.LocalResignMessage(op.RG, note),
 		}, nil
 	}
 	// ParseAction only yields the five kinds above; defensive fallthrough.

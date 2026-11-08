@@ -11,7 +11,6 @@ import (
 	"net"
 	"strconv"
 	"syscall"
-	"time"
 
 	"github.com/psaab/xpf/pkg/clusterfailover"
 	"github.com/psaab/xpf/pkg/grpcapi"
@@ -60,12 +59,22 @@ func (c *CLI) peerPort() int {
 // dialPeer establishes a gRPC connection to the cluster peer, trying fab0
 // then fab1 if dual-fabric is configured. Returns nil if not in cluster mode.
 func (c *CLI) dialPeer() *grpc.ClientConn {
+	conn, _ := c.dialPeerReached()
+	return conn
+}
+
+// dialPeerReached is dialPeer that also reports whether ANY fabric address
+// accepted a TCP connection. The reachability test is
+// peerclient.ProbeFabricTCP, the one the gRPC frontend's dialer uses too, so
+// both frontends agree on #18559's "never reached the peer" (no address
+// accepted a connection) and fall back to the local resign only then.
+func (c *CLI) dialPeerReached() (*grpc.ClientConn, bool) {
 	if c.fabricPeerAddrFn == nil {
-		return nil
+		return nil, false
 	}
 	peerIPs := c.fabricPeerAddrFn()
 	if len(peerIPs) == 0 {
-		return nil
+		return nil, false
 	}
 
 	vrfDevice := ""
@@ -99,34 +108,24 @@ func (c *CLI) dialPeer() *grpc.ClientConn {
 	}
 
 	port := c.peerPort()
+	reached := false
 	for _, ip := range peerIPs {
 		peerAddr := peerEndpoint(ip, port)
+		// Quick TCP probe to verify the address is reachable (the shared
+		// #18559 reachability test).
+		if err := peerclient.ProbeFabricTCP(context.Background(), peerAddr, vrfDevice, peerclient.ProbeFabricTCPTimeout); err != nil {
+			slog.Debug("peer dial failed, trying next fabric address", "addr", peerAddr, "err", err)
+			continue
+		}
+		reached = true
 		conn, err := grpc.NewClient(peerAddr, dialOpts...)
 		if err != nil {
 			continue
 		}
-		// Quick TCP probe to verify the address is reachable.
-		d := &net.Dialer{Timeout: 2 * time.Second}
-		if vrfDevice != "" {
-			d.Control = func(network, address string, rc syscall.RawConn) error {
-				var err error
-				rc.Control(func(fd uintptr) {
-					err = unix.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, vrfDevice)
-				})
-				return err
-			}
-		}
-		tc, err := d.DialContext(context.Background(), "tcp", peerAddr)
-		if err != nil {
-			conn.Close()
-			slog.Debug("peer dial failed, trying next fabric address", "addr", peerAddr, "err", err)
-			continue
-		}
-		tc.Close()
-		return conn
+		return conn, true
 	}
 	slog.Warn("failed to dial peer on any fabric address")
-	return nil
+	return nil, reached
 }
 
 // failoverProxyTimeoutMessage reconciles a CLI-forwarded failover whose
@@ -173,10 +172,10 @@ func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Con
 }
 
 // requestPeerSystemActionSent is requestPeerSystemActionWithPersistentNatGeneration
-// that also reports whether the request may have reached the peer. sent is
-// false only when it provably did not: dialPeer found no fabric address that
-// accepts a TCP connection, before any RPC. Once the RPC is issued every error
-// counts as sent (#18559 keys its local-resign fallback on this).
+// that also reports whether the request reached the peer (#18559 keys its
+// local-resign fallback on this). sent is false only when no fabric address
+// accepted a TCP connection (dialPeerReached); once one did, and every time
+// the RPC is issued, the request counts as sent whatever error follows.
 func (c *CLI) requestPeerSystemActionSent(ctx context.Context, action string, origin string, generation uint64) (string, error, bool) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "x-peer-forwarded", "1")
 	req := &pb.SystemActionRequest{Action: action, PersistentNatOrigin: origin, PersistentNatGeneration: generation}
@@ -192,9 +191,9 @@ func (c *CLI) requestPeerSystemActionSent(ctx context.Context, action string, or
 		}
 		return msg, nil, true
 	}
-	conn := c.dialPeer()
+	conn, reached := c.dialPeerReached()
 	if conn == nil {
-		return "", fmt.Errorf("cluster peer not reachable"), false
+		return "", fmt.Errorf("cluster peer not reachable"), reached
 	}
 	defer conn.Close()
 

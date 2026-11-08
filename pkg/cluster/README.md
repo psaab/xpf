@@ -4599,10 +4599,10 @@ between died on the peer's fabric-ingress HA-inactive gate. H1
 (`make test-failover`) issues every one of its planned moves this way, so this
 was the drop behind #19019.
 
-On loss at `b57a950e21`, the gap measured 71, 278 and 336 ms on three moves:
+On loss at `b57a950e21` the gap measured 71, 278 and 336 ms on three moves:
 - 5-19 consecutive 10 ms pings were lost per move, and every iperf stream
   stalled for up to 1.9 s.
-- On the H1-exact move, the new owner counted +12.4k `ha_inactive` exceptions
+- On the H1-exact move the new owner counted +12.4k `ha_inactive` exceptions
   on its fabric ingress, covering every flow.
 - Eight node-targeted moves in the same run saw 0 `ha_inactive` drops and lost
   0-6 pings each.
@@ -4610,62 +4610,91 @@ On loss at `b57a950e21`, the gap measured 71, 278 and 336 ms on three moves:
 
 The CLI and gRPC frontends now share one decision for this form,
 `clusterfailover.UntargetedPeerTransfer`. On the owner of a data RG (ID > 0)
-with a live peer, the untargeted form runs exactly the
-`redundancy-group N node <peer>` proxy. The peer then runs
+with a live peer that does not itself claim the RG, the untargeted form runs
+exactly the `redundancy-group N node <peer>` proxy. The peer then runs
 `RequestPeerFailover`: pre-activation, this node's #5640 fence, ACK, commit.
 
 Operator-visible consequences:
 
-- **The command blocks for the commit.** It took about 1.0-1.8 s on loss,
-  against 0.12-0.2 s for the old local resign.
+- **The command blocks for the commit.** On the fix build on loss, 80
+  untargeted moves (H11, `SOAK_FORM=untargeted-away`) took 1.03-1.76 s,
+  median 1.40 s. The old local resign returned in 0.12-0.2 s.
 - **It prints the transfer's text.** That is
-  `Manual failover completed for redundancy group N (transfer committed)`,
-  not `Manual failover triggered ...`.
+  `Manual failover completed for redundancy group N (transfer committed)`.
 - **The old owner ends as a committed secondary.** It holds the commit role
   pin and shows `Manual: no`, instead of a ManualFailover hold
   (`secondary-hold`, `Manual: yes`). `request chassis cluster failover reset`
   still clears either.
 
-Where the old local resign (`ManualFailover`, unchanged) still runs:
+**Where the local resign (`ManualFailover`) still runs.** Its reply carries a
+note whenever the form qualified for the transfer, so it is never mistaken
+for one (`clusterfailover.LocalResignMessage`):
 
-- **The form does not qualify.**
-  - RG0: config authority with no forwarding, so there is nothing to make
-    before the break. It keeps its local resign, and the peer claims RG0 on
-    its next heartbeat as before.
-  - A node that does not own the RG.
-  - A dead peer.
-  - A request the peer forwarded to us. It is never re-proxied.
-- **The request provably never reached the peer.** Either the #18585
-  cross-node clock refusal stopped it before the fabric RPC, or `dialPeer`
-  found no fabric address that accepts a connection. Both proxy layers report
-  this as `sent=false`: `proxyClusterFailoverSent` and
-  `proxyPeerSystemActionSent` in gRPC, `requestPeerSystemActionSent` in the
-  CLI. Nothing happened anywhere, so the command falls back to the local
-  resign, logs `the transfer request never reached the peer; falling back to
-  the local resign` at Info with the reason, and the peer claims the RG on its
-  next heartbeat.
+| Case | Why | Reply |
+|---|---|---|
+| RG0 | Config authority with no forwarding: nothing to make before the break. The peer claims RG0 on its next heartbeat, as before. | `Manual failover triggered for redundancy group 0` (unchanged) |
+| This node does not own the RG | The form is the local resign hold, as before. | unchanged |
+| The peer is dead | Nobody to transfer to. | unchanged |
+| A request the peer forwarded to us | It is never re-proxied. | unchanged |
+| The peer also claims the RG (dual-active), known from its heartbeat, or answered by the peer with "already primary" | A transfer would move nothing. The local resign is what ends the dual-active state from the CLI. | `... (the peer is also primary; resigned locally)` |
+| The request never reached the peer | Either the #18585 cross-node clock refusal stopped it before any fabric RPC, or no fabric address accepted a TCP connection (refused, unreachable, no SYN-ACK within 2 s). The peer claims the RG on its next heartbeat. The fallback is logged at Info with the reason. | `... (peer unreachable; resigned locally, break-before-make)` |
 
-Every failure that reached the peer is returned to the operator. Nothing
-resigns on top of it:
+"Accepted a TCP connection" is the ONE transport-absence test, and both
+frontends use it: `peerclient.ProbeFabricTCP`, called from
+`Server.dialPeerReached` (gRPC, which `cli -c` reaches) and
+`CLI.dialPeerReached` (in-process). A peer that accepted the connection and
+then answered anything has been reached. That covers an `Unauthenticated`
+GetStatus probe from fabric-token skew below the #18585 60 s refusal, a probe
+slower than its 2 s, and any RPC error. Its answer is returned and the command
+does not resign: the two frontends give the same peer the same outcome. A
+caller that cancelled or timed out gets its context error and no resign.
 
-- **The peer is not takeover-ready.** It refuses before sending its request.
-  The command fails with the peer's readiness reasons and this node keeps the
-  RG. Resigning to a peer that will not promote strands the RG: the #18731
-  class, the #9452 "owned by neither node" shape.
+**Everything that reached the peer is returned to the operator, and nothing
+resigns on top of it:**
+
+- **The peer is not takeover-ready or not transfer-ready**, or its config is
+  stale (#5563/#9569). It refuses before sending its request, and this node
+  keeps the RG. Resigning to a peer that will not promote strands the RG: the
+  #18731 class, the #9452 "owned by neither node" shape.
 - **The outcome is unknown.** That is the #15081 deadline reconciliation's
-  `codes.Unknown`, passed through verbatim with its verify-before-retry text;
-  the transfer may still commit.
+  `codes.Unknown`. Its verify-before-retry text is passed through verbatim,
+  because the transfer may still commit.
 - **The transfer already demoted this node** at its applied-ACK and then
   failed. Its abort, or the #5079 lease, restores the node.
-- **The RPC failed in transport after the dial.** It may have been delivered.
+- **The RPC failed after it was issued.** It may have been delivered.
 
-The failure keeps its gRPC code and gains the context `untargeted failover of
-redundancy group N ran as a make-before-break transfer to node M, which
-returned: ...; no local resign was run`.
+The failure keeps its gRPC code, and `clusterfailover.UntargetedTransferRefusal`
+rewords it:
 
-Cells: `pkg/clusterfailover/untargeted_test.go`,
-`pkg/grpcapi/untargeted_failover_18559_test.go` and
-`pkg/cli/untargeted_failover_18559_test.go` (RED before the fix).
+> untargeted failover of redundancy group N ran as a make-before-break
+> transfer to node M, which answered: the peer's redundancy group N not ready
+> for explicit failover ... reasons=[...]; this command ran no local resign.
+> Next: on node M, check `show chassis cluster status` (Takeover ready /
+> Transfer ready for redundancy group N) and retry once it is ready; to
+> evacuate this node regardless, drain it with `request system software
+> in-service-upgrade`.
+
+The peer words its refusal about its own group ("local redundancy group"),
+and the rewrite makes that "the peer's".
+
+**Recovery when a transfer is refused.**
+- Fix what the peer's reasons name (sync not primed, startup promotion hold,
+  config not applied, a monitor failure), then retry. The targeted
+  `... node <peer>` form gets the same answer.
+- To evacuate a sick owner whose peer refuses every transfer, use the
+  whole-node drain: `request system software in-service-upgrade`
+  (`ForceSecondary`). It demotes every RG on this node, and it too refuses a
+  config-stale standby (#9569).
+- No per-RG break-before-make escape hatch is left on an owner with a
+  reachable peer. That is deliberate: a held RG is preferred to an ownerless
+  one (#5640, #16592).
+
+Cells:
+- `pkg/clusterfailover/untargeted_test.go`;
+- `pkg/grpcapi/untargeted_failover_18559_test.go` and
+  `pkg/cli/untargeted_failover_18559_test.go`. The `*RealPath*` cells drive
+  the real fabric dial and `SystemAction` against an in-process peer on
+  loopback.
 
 ## Failover timing by mode and event (CLAUDE.md authoritative)
 
@@ -4803,10 +4832,14 @@ Cells: `pkg/clusterfailover/untargeted_test.go`,
 - **Every handover that promotes the peer refuses a config-stale peer
   (#9569).** The #5563 config-stale gate lives in `TransferReady`, which only
   the node that becomes primary evaluates, through `RequestPeerFailover`. The
-  node-targeted form reaches it. The untargeted `request chassis cluster
-  failover redundancy-group N`, `ManualFailoverBatch`, and `ForceSecondary` (the
-  ISSU drain and `request system software in-service-upgrade`) demote THIS node
-  instead and never consulted it. For RG0 the stale standby was then promoted,
+  node-targeted form reaches it. So does the untargeted `request chassis
+  cluster failover redundancy-group N` on the owner of a data RG with a live
+  peer, which since #18559 runs that targeted transfer. Where the untargeted
+  form still resigns locally (RG0, the never-reached fallback, see "The
+  untargeted form on the owner runs the transfer"), and for
+  `ManualFailoverBatch` and `ForceSecondary` (the ISSU drain and `request
+  system software in-service-upgrade`), THIS node demotes instead and never
+  consults it. For RG0 the stale standby was then promoted,
   refused the newer config the old primary pushed, and pushed its own older
   config back over the committed one.
   - The demoting node cannot read the peer's `ConfigStale`: heartbeats carry only

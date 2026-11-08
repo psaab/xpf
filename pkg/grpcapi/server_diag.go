@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pb "github.com/psaab/xpf/pkg/grpcapi/xpfv1"
+	"github.com/psaab/xpf/pkg/peerclient"
 	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -27,18 +28,30 @@ var peerFabricGRPCPort = "50051"
 // Returns the connection or an error if not in cluster mode / all addresses fail.
 // The caller context bounds both connection establishment and each liveness probe.
 func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
+	conn, _, err := s.dialPeerReached(ctx)
+	return conn, err
+}
+
+// dialPeerReached is dialPeer that also reports whether ANY fabric address
+// accepted a TCP connection (peerclient.ProbeFabricTCP), whatever happened
+// after it. #18559's untargeted-failover fallback keys on it: only a dial
+// where no address accepted a connection is "never reached the peer"; a peer
+// that accepted the connection and then failed the GetStatus probe (an
+// Unauthenticated fabric token under clock skew, a probe slower than its 2 s)
+// was reached, and its error is reported rather than resigned on.
+func (s *Server) dialPeerReached(ctx context.Context) (*grpc.ClientConn, bool, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, status.FromContextError(err).Err()
+		return nil, false, status.FromContextError(err).Err()
 	}
 	if s.fabricPeerAddrFn == nil {
-		return nil, status.Error(codes.Unavailable, "not in cluster mode")
+		return nil, false, status.Error(codes.Unavailable, "not in cluster mode")
 	}
 	peerIPs := s.fabricPeerAddrFn()
 	if len(peerIPs) == 0 {
-		return nil, status.Error(codes.Unavailable, "cluster peer address not available")
+		return nil, false, status.Error(codes.Unavailable, "cluster peer address not available")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, status.FromContextError(err).Err()
+		return nil, false, status.FromContextError(err).Err()
 	}
 
 	// #4107: authenticate every RPC we dial on the peer's fabric listener with
@@ -74,9 +87,10 @@ func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
 
 	// Try each fabric address; return first successful connection.
 	var lastErr error
+	reached := false
 	for _, ip := range peerIPs {
 		if err := ctx.Err(); err != nil {
-			return nil, status.FromContextError(err).Err()
+			return nil, reached, status.FromContextError(err).Err()
 		}
 		// #8597 (muse-004 K29): net.JoinHostPort, not "%s:port". An IPv6
 		// fabric literal formatted the old way yields `2001:db8::2:50051`,
@@ -87,6 +101,19 @@ func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
 		// fabric LISTENER addresses in `daemon_ha_comms_wiring.go` were the
 		// rest of that class.
 		peerAddr := net.JoinHostPort(ip, peerFabricGRPCPort)
+		// #18559: transport reachability first, with the probe both
+		// frontends share. An address that refuses or never answers the
+		// TCP handshake is transport-absent; one that accepts it has been
+		// reached, whatever the authenticated probe below then says.
+		if err := peerclient.ProbeFabricTCP(ctx, peerAddr, vrfDevice, peerclient.ProbeFabricTCPTimeout); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, reached, status.FromContextError(ctxErr).Err()
+			}
+			lastErr = err
+			slog.Debug("peer fabric address refused or did not answer TCP, trying next", "addr", peerAddr, "err", err)
+			continue
+		}
+		reached = true
 		conn, err := grpc.NewClient(peerAddr, dialOpts...)
 		if err != nil {
 			lastErr = err
@@ -101,7 +128,7 @@ func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
 		cancel()
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			conn.Close()
-			return nil, status.FromContextError(ctxErr).Err()
+			return nil, reached, status.FromContextError(ctxErr).Err()
 		}
 		// #8597 (muse-004 K28): a ResourceExhausted answer PROVES the peer is
 		// alive and must not be read as a dead connection.
@@ -130,7 +157,7 @@ func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
 		if err != nil && status.Code(err) == codes.ResourceExhausted {
 			slog.Debug("peer is alive but at scan capacity; treating as reachable",
 				"addr", peerAddr)
-			return conn, nil
+			return conn, true, nil
 		}
 		if err != nil {
 			conn.Close()
@@ -138,10 +165,10 @@ func (s *Server) dialPeer(ctx context.Context) (*grpc.ClientConn, error) {
 			slog.Debug("peer dial failed, trying next fabric address", "addr", peerAddr, "err", err)
 			continue
 		}
-		return conn, nil
+		return conn, true, nil
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, status.FromContextError(err).Err()
+		return nil, reached, status.FromContextError(err).Err()
 	}
-	return nil, status.Errorf(codes.Unavailable, "cannot connect to peer on any fabric address: %v", lastErr)
+	return nil, reached, status.Errorf(codes.Unavailable, "cannot connect to peer on any fabric address: %v", lastErr)
 }
