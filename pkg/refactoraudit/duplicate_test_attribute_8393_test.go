@@ -222,12 +222,14 @@ func TestDuplicateTestAttrDetectorCanSeeAndCanAbstain8393(t *testing.T) {
 
 // ---- #15255 (A84-01) / #16442: the OTHER half of the #8393 class --------
 //
-// #8393 guarded a function carrying TWO #[test] attributes. The benign
-// half — a zero-arg asserting fn in a test module with NO attribute
-// and no caller — silently never runs: #9962's fix left
+// #8393 guarded a function carrying TWO #[test] attributes.
+// The benign half — a zero-arg asserting fn in a test module with NO
+// attribute and NO recognized source reference — is not registered by
+// the Rust test harness. #9962's fix left
 // `the_poll_paths_reverse_install_releases_a_predecessors_rows_9560`
 // in exactly that state, so one #9560 steering-row ownership cell was
-// lost from `make test` while the suite stayed green.
+// lost from `make test` while the suite stayed green. This audit detects
+// registration/reference shape; it does not prove whether code executes.
 //
 // The naive version of this check ("any un-attributed fn in a test
 // file") over-approximates wildly: test modules legitimately hold
@@ -244,7 +246,9 @@ func TestDuplicateTestAttrDetectorCanSeeAndCanAbstain8393(t *testing.T) {
 //   - fn takes ZERO arguments (helpers/builders take inputs);
 //   - fn body contains an assert (fixtures arrange, tests assert);
 //   - NO test attribute precedes it;
-//   - the name occurs exactly ONCE in the file (nothing calls it).
+//   - no same-module source-level call or supported fn-item reference
+//     resolves to it; this gate checks reference shape, not whether a
+//     reference executes.
 //
 // A helper that goes dead after a refactor is caught by the compiler
 // (dead_code) or is a different defect; only the conjunction above
@@ -633,46 +637,484 @@ func skipRustNonCodeFnItem19013(src string, i int) (int, bool) {
 	return i, false
 }
 
-// fnItemRef19013 reports whether src references name as a fn-item value
-// outside its own declaration: a bare identifier or the last segment of a
-// `::`-qualified path, followed by `,`, `)`, or `;`. The `fn name(`
-// declaration itself is excluded, and comments/literals are ignored.
-func fnItemRef19013(src, name string) bool {
+// rustFnReference19013 reports a code reference to name that resolves to
+// the candidate declaration's module item. It recognizes calls and fn-item
+// values, but not same-spelled locals or paths into unrelated modules.
+func rustFnReference19013(rel, src, name string, declLine int) bool {
 	if name == "" {
 		return false
+	}
+	candidateModule := rustModulePath19013(rel, src, rustLineOffset19013(src, declLine))
+	candidatePath := append([]string(nil), candidateModule...)
+	if owner := rustImplOwner19013(src, rustLineOffset19013(src, declLine)); owner != "" {
+		candidatePath = append(candidatePath, owner)
 	}
 	for i := 0; i < len(src); {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
 			i = next
 			continue
 		}
-		if !strings.HasPrefix(src[i:], name) {
+		if !strings.HasPrefix(src[i:], name) ||
+			(i > 0 && (rustIdentByte19013(src[i-1]) || src[i-1] == '.')) {
 			i++
 			continue
 		}
 		start := i
 		i += len(name)
-		if start > 0 && (rustIdentByte19013(src[start-1]) || src[start-1] == '.') {
+		end := skipRustTrivia19013(src, i)
+		isCall := end < len(src) && src[end] == '('
+		isValue := end < len(src) &&
+			(src[end] == ',' || src[end] == ')' || src[end] == ';' ||
+				src[end] == ']' || src[end] == '}')
+		if !isCall && !isValue && rustWordAt19013(src, end, "as") {
+			isValue = true
+		}
+		if (!isCall && !isValue) || rustFnDeclName19013(src, start) {
 			continue
 		}
-		end := i
-		for end < len(src) {
-			switch src[end] {
-			case ' ', '\t', '\n', '\r':
-				end++
+		currentPath := rustModulePath19013(rel, src, start)
+		if qualified, resolves := rustQualifiedPath19013(src, start, candidatePath, currentPath); qualified {
+			if !resolves {
 				continue
-			case '/':
-				if next, skip := skipRustNonCodeFnItem19013(src, end); skip {
-					end = next
-					continue
-				}
 			}
+		} else if !sameRustPath19013(candidateModule, currentPath) {
+			continue
+		}
+		if scope, ok := rustFunctionScope19013(src, start); ok &&
+			(rustParamShadows19013(scope.args, name) ||
+				rustLetShadows19013(src, name, scope.start, start)) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func rustLineOffset19013(src string, line int) int {
+	offset := 0
+	for line > 0 && offset < len(src) {
+		next := strings.IndexByte(src[offset:], '\n')
+		if next < 0 {
+			return len(src)
+		}
+		offset += next + 1
+		line--
+	}
+	return offset
+}
+
+func rustModulePath19013(rel, src string, offset int) []string {
+	parts := strings.Split(rel, "/")
+	start := len(parts) - 1
+	for i, part := range parts {
+		if part == "src" {
+			start = i + 1
 			break
 		}
-		if end < len(src) &&
-			(src[end] == ',' || src[end] == ')' || src[end] == ';') {
+	}
+	module := append([]string(nil), parts[start:len(parts)-1]...)
+	file := parts[len(parts)-1]
+	if file != "lib.rs" && file != "main.rs" && file != "mod.rs" {
+		module = append(module, strings.TrimSuffix(file, ".rs"))
+	}
+	return append(module, rustInlineModulePath19013(src, offset)...)
+}
+
+func rustImplOwner19013(src string, offset int) string {
+	lines := strings.Split(src, "\n")
+	bestOpen, owner := -1, ""
+	lineOffset := 0
+	for _, line := range lines {
+		if lineOffset > offset {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		implAt := strings.Index(trimmed, "impl")
+		if implAt >= 0 && (implAt == 0 || trimmed[implAt-1] == ' ') {
+			rest := trimmed[implAt+len("impl"):]
+			if rest == "" || rest[0] == ' ' || rest[0] == '<' {
+				open := rustFunctionBodyOpen19013(src, lineOffset)
+				if open >= 0 && open < offset {
+					close := rustMatchingBrace19013(src, open)
+					if close > offset && open > bestOpen {
+						bestOpen = open
+						owner = rustImplOwnerName19013(trimmed[implAt+len("impl"):])
+					}
+				}
+			}
+		}
+		lineOffset += len(line) + 1
+	}
+	return owner
+}
+
+func rustImplOwnerName19013(header string) string {
+	if open := strings.IndexByte(header, '{'); open >= 0 {
+		header = header[:open]
+	}
+	header = strings.TrimSpace(header)
+	if strings.HasPrefix(header, "<") {
+		depth := 0
+		for i := 0; i < len(header); i++ {
+			switch header[i] {
+			case '<':
+				depth++
+			case '>':
+				depth--
+				if depth == 0 {
+					header = strings.TrimSpace(header[i+1:])
+					i = len(header)
+				}
+			}
+		}
+	}
+	if forAt := strings.LastIndex(header, " for "); forAt >= 0 {
+		header = strings.TrimSpace(header[forAt+len(" for "):])
+	}
+	if whereAt := strings.Index(header, " where "); whereAt >= 0 {
+		header = strings.TrimSpace(header[:whereAt])
+	}
+	if genericAt := strings.IndexByte(header, '<'); genericAt >= 0 {
+		header = strings.TrimSpace(header[:genericAt])
+	}
+	if separator := strings.LastIndex(header, "::"); separator >= 0 {
+		header = header[separator+2:]
+	}
+	fields := strings.Fields(header)
+	if len(fields) == 0 {
+		return ""
+	}
+	return strings.Trim(fields[len(fields)-1], "&*")
+}
+
+func rustInlineModulePath19013(src string, offset int) []string {
+	type moduleScope struct {
+		name  string
+		depth int
+	}
+	var stack []moduleScope
+	depth := 0
+	for start := 0; start < offset; {
+		end := strings.IndexByte(src[start:], '\n')
+		if end < 0 || start+end > offset {
+			end = offset - start
+		}
+		line := src[start : start+end]
+		name, isModule := rustInlineModuleDecl19013(strings.TrimSpace(line))
+		nextDepth := rustBraceDepth19013(line, depth)
+		if isModule && nextDepth > depth {
+			stack = append(stack, moduleScope{name: name, depth: depth})
+		}
+		depth = nextDepth
+		for len(stack) > 0 && depth <= stack[len(stack)-1].depth {
+			stack = stack[:len(stack)-1]
+		}
+		start += end + 1
+	}
+	path := make([]string, 0, len(stack))
+	for _, module := range stack {
+		path = append(path, module.name)
+	}
+	return path
+}
+
+func rustInlineModuleDecl19013(trimmed string) (string, bool) {
+	if !isModDecl15255(trimmed) || !strings.Contains(trimmed, "{") {
+		return "", false
+	}
+	mod := strings.Index(trimmed, "mod ")
+	if mod < 0 {
+		return "", false
+	}
+	rest := trimmed[mod+len("mod "):]
+	end := 0
+	for end < len(rest) && rustIdentByte19013(rest[end]) {
+		end++
+	}
+	if end == 0 || !strings.Contains(rest[end:], "{") {
+		return "", false
+	}
+	return rest[:end], true
+}
+
+func rustBraceDepth19013(line string, depth int) int {
+	for i := 0; i < len(line); {
+		if next, skip := skipRustNonCodeFnItem19013(line, i); skip {
+			i = next
+			continue
+		}
+		switch line[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+		}
+		i++
+	}
+	return depth
+}
+
+func sameRustPath19013(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func rustQualifiedPath19013(src string, start int, candidate, current []string) (bool, bool) {
+	segments := rustPathSegmentsBefore19013(src, start)
+	if len(segments) == 0 {
+		end := skipRustWhitespaceBack19013(src, start)
+		if end >= 2 && src[end-2:end] == "::" {
+			return true, false
+		}
+		return false, true
+	}
+	var target []string
+	switch segments[0] {
+	case "crate":
+		target = segments[1:]
+	case "self":
+		target = append(append([]string(nil), current...), segments[1:]...)
+	case "super":
+		if len(current) == 0 {
+			return true, false
+		}
+		target = append(append([]string(nil), current[:len(current)-1]...), segments[1:]...)
+	default:
+		target = append(append([]string(nil), current...), segments...)
+	}
+	return true, sameRustPath19013(candidate, target)
+}
+
+func rustPathSegmentsBefore19013(src string, start int) []string {
+	at := skipRustWhitespaceBack19013(src, start)
+	var reversed []string
+	for at >= 2 && src[at-2:at] == "::" {
+		at = skipRustWhitespaceBack19013(src, at-2)
+		end := at
+		for at > 0 && rustIdentByte19013(src[at-1]) {
+			at--
+		}
+		if at == end {
+			break
+		}
+		reversed = append(reversed, src[at:end])
+		at = skipRustWhitespaceBack19013(src, at)
+	}
+	segments := make([]string, len(reversed))
+	for i := range reversed {
+		segments[len(reversed)-1-i] = reversed[i]
+	}
+	return segments
+}
+
+func skipRustWhitespaceBack19013(src string, at int) int {
+	for at > 0 && (src[at-1] == ' ' || src[at-1] == '\t' ||
+		src[at-1] == '\n' || src[at-1] == '\r') {
+		at--
+	}
+	return at
+}
+
+func rustWordAt19013(src string, at int, word string) bool {
+	if at < 0 || at+len(word) > len(src) || !strings.HasPrefix(src[at:], word) {
+		return false
+	}
+	return (at == 0 || !rustIdentByte19013(src[at-1])) &&
+		(at+len(word) == len(src) || !rustIdentByte19013(src[at+len(word)]))
+}
+
+func skipRustTrivia19013(src string, at int) int {
+	for at < len(src) {
+		if src[at] == ' ' || src[at] == '\t' || src[at] == '\n' || src[at] == '\r' {
+			at++
+			continue
+		}
+		if src[at] == '/' {
+			if next, skip := skipRustNonCodeFnItem19013(src, at); skip {
+				at = next
+				continue
+			}
+		}
+		break
+	}
+	return at
+}
+
+func rustFnDeclName19013(src string, start int) bool {
+	at := skipRustWhitespaceBack19013(src, start)
+	end := at
+	for at > 0 && rustIdentByte19013(src[at-1]) {
+		at--
+	}
+	return src[at:end] == "fn"
+}
+
+type rustFunctionInfo19013 struct {
+	start int
+	args  string
+}
+
+func rustFunctionScope19013(src string, pos int) (rustFunctionInfo19013, bool) {
+	lines := strings.Split(src, "\n")
+	best := rustFunctionInfo19013{start: -1}
+	offset := 0
+	for _, line := range lines {
+		if offset > pos {
+			break
+		}
+		trimmed := strings.TrimSpace(line)
+		if isFnDecl8393(trimmed) {
+			open := rustFunctionBodyOpen19013(src, offset)
+			if open >= 0 && open < pos {
+				close := rustMatchingBrace19013(src, open)
+				if close > pos && open > best.start {
+					_, args, ok := fnNameAndArgs15255(trimmed)
+					if !ok {
+						args = ""
+					}
+					best = rustFunctionInfo19013{start: open + 1, args: args}
+				}
+			}
+		}
+		offset += len(line) + 1
+	}
+	return best, best.start >= 0
+}
+
+func rustFunctionBodyOpen19013(src string, start int) int {
+	for i := start; i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case ';':
+			return -1
+		case '{':
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+func rustMatchingBrace19013(src string, open int) int {
+	depth := 0
+	for i := open; i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return len(src)
+}
+
+func rustParamShadows19013(args, name string) bool {
+	for _, arg := range strings.Split(args, ",") {
+		colon := strings.IndexByte(arg, ':')
+		if colon < 0 {
+			continue
+		}
+		pattern := strings.TrimSpace(arg[:colon])
+		for _, prefix := range []string{"mut ", "ref ", "&mut ", "&"} {
+			pattern = strings.TrimPrefix(pattern, prefix)
+		}
+		if pattern == name {
 			return true
 		}
+	}
+	return false
+}
+
+func rustLetShadows19013(src, name string, start, pos int) bool {
+	depth := 0
+	var shadowDepths []int
+	for i := start; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			for len(shadowDepths) > 0 && shadowDepths[len(shadowDepths)-1] > depth {
+				shadowDepths = shadowDepths[:len(shadowDepths)-1]
+			}
+		}
+		if rustWordAt19013(src, i, "let") {
+			binding := skipRustTrivia19013(src, i+len("let"))
+			for {
+				if rustWordAt19013(src, binding, "mut") ||
+					rustWordAt19013(src, binding, "ref") {
+					word := "mut"
+					if rustWordAt19013(src, binding, "ref") {
+						word = "ref"
+					}
+					binding = skipRustTrivia19013(src, binding+len(word))
+					continue
+				}
+				break
+			}
+			if rustWordAt19013(src, binding, name) &&
+				rustLetTerminatedBefore19013(src, binding+len(name), pos) {
+				shadowDepths = append(shadowDepths, depth)
+			}
+		}
+		i++
+	}
+	for _, shadowDepth := range shadowDepths {
+		if shadowDepth <= depth {
+			return true
+		}
+	}
+	return false
+}
+
+func rustLetTerminatedBefore19013(src string, start, pos int) bool {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		case ';':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				return true
+			}
+		}
+		i++
 	}
 	return false
 }
@@ -781,9 +1223,9 @@ func wholeFileUnregisteredTestFns15255(rel, src string) []string {
 }
 
 // unregisteredTestFns15255 returns one finding per zero-arg asserting
-// fn with no test attribute and no other reference in the file, for
-// fns inside a test region of the file at rel (see
-// rustTestRegions15255). Files with no test region yield no findings.
+// fn with no test attribute and no recognized source reference resolving
+// to it, for fns inside a test region of the file at rel (see
+// rustTestRegions15255). It does not infer whether references execute.
 func unregisteredTestFns15255(rel, src string) []string {
 	ranges, whole, _ := rustTestRegions15255(rel, src)
 	if !whole && len(ranges) == 0 {
@@ -794,8 +1236,8 @@ func unregisteredTestFns15255(rel, src string) []string {
 
 // unregisteredInRanges15255 is the detector core: pendingTest tracks a
 // test attribute on the preceding item; only fns inside a region (or
-// every fn, when whole) are candidates. Name references are counted
-// over the whole file, as before.
+// every fn, when whole) are candidates. References use same-module or
+// explicitly resolved paths and ignore local bindings/non-code text.
 func unregisteredInRanges15255(rel, src string, ranges [][2]int, whole bool) []string {
 	lines := strings.Split(src, "\n")
 	var out []string
@@ -814,10 +1256,9 @@ func unregisteredInRanges15255(rel, src string, ranges [][2]int, whole bool) []s
 					strings.Contains(body, "assert_eq!(") ||
 					strings.Contains(body, "assert_ne!(")
 				if asserting {
-					refs := strings.Count(src, name+"(")
-					if refs <= 1 && !fnItemRef19013(src, name) {
+					if !rustFnReference19013(rel, src, name, i) {
 						out = append(out, rel+":"+itoa8393(i+1)+" — fn "+name+
-							"() asserts but carries no #[test] and is never called")
+							"() asserts but has no #[test] and no recognized source reference")
 					}
 				}
 			}
@@ -900,10 +1341,10 @@ func TestNoUnregisteredAssertingTestFn15255(t *testing.T) {
 			scanned, wholeFiles, regionFiles)
 	}
 	for _, f := range findings {
-		t.Errorf("%s\n\nA zero-arg asserting fn in a test module with no #[test] "+
-			"and no caller never runs (#15255/#16442, the benign half of #8393): the "+
-			"suite stays green while the cell is lost. Restore the attribute "+
-			"— or, if this is a helper, give it an argument or call it.", f)
+		t.Errorf("%s\n\nA zero-arg asserting fn in a test module has no #[test] "+
+			"and no recognized source reference (#15255/#16442, the benign half of #8393): "+
+			"the audit checks reference shape, not whether a reference executes. "+
+			"Restore the attribute, or add a source-level reference if this is a helper.", f)
 	}
 }
 
@@ -950,8 +1391,44 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 		{
 			name: "unregistered zero-arg helper passed as a qualified fn item",
 			rel:  "tests_x.rs",
-			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(crate::tests::callback); }\n",
+			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(crate::tests_x::callback); }\n",
 			want: 0,
+		},
+		{
+			name: "unregistered zero-arg helper cast to a function pointer",
+			rel:  "tests_x.rs",
+			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(callback as fn()); }\n",
+			want: 0,
+		},
+		{
+			name: "unregistered zero-arg helper in an array",
+			rel:  "tests_x.rs",
+			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { let _ = [callback]; }\n",
+			want: 0,
+		},
+		{
+			name: "local variable does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let lost = 1; assert_eq!(lost, 1); }\n",
+			want: 1,
+		},
+		{
+			name: "unrelated qualified item does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { runner(Other::lost); }\n",
+			want: 1,
+		},
+		{
+			name: "comment call mention does not reference an unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n// lost()\n#[test]\nfn ok() { assert!(true); }\n",
+			want: 1,
+		},
+		{
+			name: "string call mention does not reference an unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn ok() { let _ = \"lost()\"; assert!(true); }\n",
+			want: 1,
 		},
 		{
 			name: "comment and string mentions do not reference an unregistered fn",
