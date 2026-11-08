@@ -613,6 +613,10 @@ class FakeCluster:
         self.files = {}
         self.gen_start = None
         self.last_emit = None
+        self.udp_probe_started_at = None
+        self.udp_probe_run_id = None
+        self.udp_probe_identity_port = 41000
+        self.udp_probe_lost_after_seq = None
         self.ping_seq = {}
         self.iv_index = {}
         self.events = []  # (lan_t0, lan_t1, kind)
@@ -624,6 +628,31 @@ class FakeCluster:
         result = self.mouse_target.prepare_iperf(ports)
         self.target_prepared = result is None
         return result
+
+    def udp_probe_start(self, run_id, target, port):
+        self.udp_probe_started_at = self.clock_.t
+        self.udp_probe_run_id = run_id
+        self.udp_probe_identity_port = 41000
+        return None
+
+    def udp_probe_snapshot(self, run_id):
+        if run_id != self.udp_probe_run_id or self.udp_probe_started_at is None:
+            return None
+        count = max(1, int((self.clock_.t - self.udp_probe_started_at) /
+                           soak.udp_session_probe.INTERVAL_S) + 1)
+        lost_after = self.udp_probe_lost_after_seq
+        lines = []
+        for seq in range(count):
+            lines.append(f"SENT {seq}\n")
+            if lost_after is None or seq < lost_after:
+                lines.append(f"REPLY {seq} 203.0.113.9 {self.udp_probe_identity_port}\n")
+        if lost_after is not None:
+            self.udp_probe_lost_after_seq = None
+        return "".join(lines)
+
+    def udp_probe_stop(self, run_id):
+        self.udp_probe_started_at = None
+        self.udp_probe_run_id = None
 
     def forwarder(self, rg):
         return self.initial.get(rg, 0) if self.stuck_traffic else self.owner.get(rg, 0)
@@ -662,6 +691,12 @@ class FakeCluster:
             self.events.append((lan_now + 0.3, lan_now + 3.8, "gap"))
         elif fault == "die":
             self.events.append((lan_now + 0.3, float("inf"), "stall"))
+        elif fault == "udp-recreated":
+            self.udp_probe_identity_port = 41001
+        elif fault == "udp-lost":
+            self.udp_probe_lost_after_seq = max(
+                1, int((self.clock_.t - self.udp_probe_started_at) /
+                       soak.udp_session_probe.INTERVAL_S) + 1)
         self.clock_.sleep(0.6)
         if target != node and abs(self.skew_s) > 60:
             return self.cli_rc_on_error, USER_ERROR + "\n"
@@ -1033,6 +1068,30 @@ class Orchestration(unittest.TestCase):
             self.assertEqual(r["neigh_node"]["v4"], r["target"])
         self.assertIn("end_node1_minus_node0_s", res["preflight"])
         self.assertEqual(res["preflight"]["lan_rg"], 2)
+        for m in res["moves"]:
+            self.assertEqual(m["udp_probe"]["status"], "SURVIVED")
+
+    def test_udp_translated_identity_recreation_fails_move(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={1: "udp-recreated"})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        first = res["moves"][0]
+        self.assertEqual(first["udp_probe"]["status"], "RECREATED")
+        self.assertEqual(first["verdict"], "FAIL")
+        self.assertIn("UDP probe RECREATED", " ".join(first["reasons"]))
+        self.assertEqual(res["moves"][1]["udp_probe"]["status"], "SURVIVED")
+
+    def test_udp_post_move_silence_fails_move(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, faults={1: "udp-lost"})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        first = res["moves"][0]
+        self.assertEqual(first["udp_probe"]["status"], "LOST")
+        self.assertEqual(first["verdict"], "FAIL")
+        self.assertIn("received no replies", first["udp_probe"]["detail"])
+        self.assertEqual(res["moves"][1]["udp_probe"]["status"], "SURVIVED")
 
     def test_traffic_that_never_moved_fails(self):
         # Review B1's fixture: status and helper flip on every move, the

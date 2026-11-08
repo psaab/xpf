@@ -21,9 +21,9 @@
 # WHAT IT BUILDS. An Incus service container on the selected remote, with an
 # SR-IOV VF on the selected PF/VLAN and the grid documented by
 # `target-services.sh`: per-class iperf3 servers on 5200-5211, TCP echo
-# daemons on 6200-6211, and port 7. Harnesses may use it as either target;
-# different addresses on this container do not create distinct target
-# hosts.
+# daemons on 6200-6211 and port 7, plus #18679's UDP sequence/translated
+# identity echo on port 6201. Harnesses may use it as either target; different
+# addresses on this container do not create distinct target hosts.
 #
 # THE PRIMARY TARGET'S ADDRESS IS DECLARED HERE (#16213). On the
 # standing loss cluster, the elephant / iperf target that
@@ -255,7 +255,7 @@ UNIT"
     inc exec "$ref" -- chmod +x /usr/local/bin/mouse-echo.py
     inc exec "$ref" -- sh -c "cat > /etc/systemd/system/mouse-echo.service <<'UNIT'
 [Unit]
-Description=#8259 mouse-latency TCP echo (port 7 and 6200-6211)
+Description=#8259 TCP echo plus #18679 HA UDP sequence/NAT identity echo
 After=network.target
 
 [Service]

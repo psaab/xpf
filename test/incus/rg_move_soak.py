@@ -86,6 +86,7 @@ import sys
 import time
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
+import udp_session_probe
 
 PASS, FAIL, VOID, COST = "PASS", "FAIL", "VOID", "COST"
 
@@ -453,6 +454,7 @@ class MoveRecord:
     t_next_lan: float
     rgs: List[RGMoveResult]
     traffic: Optional[Dict[str, Dict]] = None  # family -> facts
+    udp_probe: Optional[Dict] = None  # sequence + translated-identity verdict for this move window
     verdict: str = ""
     reasons: List[str] = field(default_factory=list)
 
@@ -542,6 +544,15 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             reasons.append(f"precondition: RG{r.rg} was {where} before a move to node{r.target} ({r.pre_detail})")
     if reasons:
         return VOID, reasons
+    if rec.udp_probe is not None:
+        probe_status = rec.udp_probe.get("status")
+        probe_detail = rec.udp_probe.get("detail", "UDP probe verdict has no detail")
+        if probe_status == "VOID":
+            return VOID, [probe_detail]
+        if probe_status in ("RECREATED", "LOST"):
+            reasons.append(probe_detail)
+        elif probe_status != "SURVIVED":
+            return VOID, [f"unknown UDP probe status {probe_status!r}: {probe_detail}"]
     costs: List[str] = []
     for r in rec.rgs:
         other = 1 - r.target
@@ -647,7 +658,7 @@ def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str
 def format_table(moves: List[MoveRecord], traffic_enabled: bool) -> str:
     hdr = f"{'#':>4} {'to':>3} {'rg':>5} {'cli':>8} {'cli_s':>6} {'land_s':>6}"
     if traffic_enabled:
-        hdr += f" {'lost':>5} {'gap_ms':>7} {'stall_ms':>8} {'tail_G':>6} {'v6lost':>6} {'v6gap':>6}"
+        hdr += f" {'lost':>5} {'gap_ms':>7} {'stall_ms':>8} {'tail_G':>6} {'v6lost':>6} {'v6gap':>6} {'udp':>10}"
     hdr += "  verdict  reason"
     lines = [hdr]
     for m in moves:
@@ -665,6 +676,8 @@ def format_table(moves: List[MoveRecord], traffic_enabled: bool) -> str:
             row += (f" {t.get('ping_lost', '-'):>5} {('-' if gap is None else f'{gap:.0f}'):>7}"
                     f" {t.get('worst_stall_ms', 0):>8.0f} {('-' if t.get('tail_gbps') is None else t['tail_gbps']):>6}"
                     f" {t6.get('ping_lost', '-'):>6} {('-' if gap6 is None else f'{gap6:.0f}'):>6}")
+            udp_status = (m.udp_probe or {}).get("status", "-")
+            row += f" {udp_status:>10}"
         row += f"  {m.verdict:<7}  {m.reasons[0] if m.reasons else ''}"
         lines.append(row)
         for extra in m.reasons[1:]:
@@ -882,6 +895,45 @@ class IncusCluster:
     def lan_sh(self, script: str) -> Tuple[int, str]:
         return self._exec(self.lan, ["sh", "-c", script], timeout=20)
 
+    def _udp_probe_paths(self, run_id: str) -> Tuple[str, str, str]:
+        root = f"/tmp/r-soak-{run_id}.udp"
+        return root, f"{root}/udp_session_probe.py", f"{root}/probe.log"
+
+    def udp_probe_start(self, run_id: str, target: str, port: int) -> Optional[str]:
+        """Install and start the one-socket UDP sender on the LAN host."""
+        root, script, _log = self._udp_probe_paths(run_id)
+        source = os.path.join(os.path.dirname(__file__), "udp_session_probe.py")
+        rc, out = self._exec(self.lan, ["mkdir", "-p", root])
+        if rc != 0:
+            return f"could not create UDP probe directory: {out.strip()}"
+        try:
+            copied = subprocess.run(["incus", "file", "push", source, f"{self.lan}{script}"],
+                                    capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            self._exec(self.lan, ["rm", "-rf", root])
+            return f"could not copy UDP probe runner to LAN host: {exc}"
+        if copied.returncode != 0:
+            self._exec(self.lan, ["rm", "-rf", root])
+            return f"could not copy UDP probe runner to LAN host: {(copied.stderr or copied.stdout).strip()}"
+        rc, out = self._exec(self.lan, ["python3", script, "start", "--target", target,
+                                        "--port", str(port), "--run-id", run_id,
+                                        "--logfile", f"{root}/probe.log",
+                                        "--pidfile", f"{root}/probe.pid"])
+        if rc != 0:
+            self._exec(self.lan, ["rm", "-rf", root])
+            return f"could not start UDP probe sender: {out.strip()}"
+        return None
+
+    def udp_probe_snapshot(self, run_id: str) -> Optional[str]:
+        _root, _script, logfile = self._udp_probe_paths(run_id)
+        rc, out = self._exec(self.lan, ["cat", logfile], timeout=10)
+        return out if rc == 0 and out.strip() else None
+
+    def udp_probe_stop(self, run_id: str) -> None:
+        root, script, _log = self._udp_probe_paths(run_id)
+        self._exec(self.lan, ["python3", script, "stop", "--pidfile", f"{root}/probe.pid"])
+        self._exec(self.lan, ["rm", "-rf", root])
+
 
 def measure_offset(clock_fn, ref: str, now_fn=time.time, samples: int = 5) -> Optional[Tuple[float, float]]:
     """NTP-style offset of `ref` against this host: (offset_s, rtt_s) of the
@@ -947,6 +999,8 @@ class Soak:
         self.macs: Dict[str, Tuple[int, str]] = {}
         self.traffic_started = False
         self.terminated = False
+        self.udp_probe_started = False
+        self.udp_probe_baseline: Optional[str] = None
         self.v6_router: Optional[Tuple[str, str]] = None
 
         self.move_commands_issued = 0
@@ -1093,6 +1147,74 @@ class Soak:
             if len(parse_ping(ptxt)) < 20:
                 return f"{fam} ping to {target} is not answering after {self.cfg.warmup_s:g}s warmup"
         return None
+
+    def start_udp_probe(self) -> Optional[str]:
+        """Start one long-lived datagram socket and prove its pre-move baseline."""
+        problem = self.c.udp_probe_start(self.cfg.run_id, self.cfg.target4, udp_session_probe.PORT)
+        if problem:
+            return problem
+        self.udp_probe_started = True
+        self.sleep(0.5)
+        baseline = self.c.udp_probe_snapshot(self.cfg.run_id)
+        if baseline is None:
+            return "UDP sequence probe produced no pre-move snapshot"
+        try:
+            parsed = udp_session_probe.parse_log(baseline)
+        except ValueError as exc:
+            return f"UDP sequence probe baseline is malformed: {exc}"
+        if not parsed.sent or not parsed.replies:
+            return "UDP sequence probe did not exchange pre-move datagrams"
+        self.udp_probe_baseline = baseline
+        return None
+
+    def udp_probe_before_move(self) -> Optional[Dict]:
+        """Checkpoint the cumulative log immediately before issuing a move."""
+        if not self.udp_probe_started:
+            return {"status": "VOID", "detail": "UDP sequence probe was not running before the move",
+                    "metrics": {}}
+        baseline = self.c.udp_probe_snapshot(self.cfg.run_id)
+        if baseline is None:
+            self.udp_probe_baseline = None
+            return {"status": "VOID", "detail": "UDP sequence probe pre-move snapshot became unavailable",
+                    "metrics": {}}
+        try:
+            parsed = udp_session_probe.parse_log(baseline)
+        except ValueError as exc:
+            self.udp_probe_baseline = None
+            return {"status": "VOID", "detail": f"UDP sequence probe pre-move evidence is malformed: {exc}",
+                    "metrics": {}}
+        if not parsed.sent or not parsed.replies:
+            self.udp_probe_baseline = None
+            return {"status": "VOID", "detail": "UDP sequence probe has no pre-move sent-and-answered baseline",
+                    "metrics": {}}
+        self.udp_probe_baseline = baseline
+        return None
+
+    def udp_probe_window(self, baselines: List[str]) -> Dict:
+        if not self.udp_probe_started or not baselines:
+            return {"status": "VOID", "detail": "UDP sequence probe has no usable per-move baseline",
+                    "metrics": {}}
+        current = self.c.udp_probe_snapshot(self.cfg.run_id)
+        if current is None:
+            return {"status": "VOID", "detail": "UDP sequence probe snapshot became unavailable",
+                    "metrics": {}}
+        checks = []
+        for baseline in baselines:
+            status, detail, metrics = udp_session_probe.classify_snapshots(baseline, current)
+            checks.append({"status": status, "detail": detail, "metrics": metrics})
+        statuses = [check["status"] for check in checks]
+        if "VOID" in statuses:
+            status = "VOID"
+        elif "RECREATED" in statuses:
+            status = "RECREATED"
+        elif "LOST" in statuses:
+            status = "LOST"
+        else:
+            status = "SURVIVED"
+        detail = "; ".join(f"move-{index + 1} {check['status']}: {check['detail']}"
+                           for index, check in enumerate(checks))
+        self.udp_probe_baseline = current
+        return {"status": status, "detail": detail, "metrics": {"checks": checks}}
 
     # -- one move -------------------------------------------------------
 
@@ -1259,12 +1381,25 @@ class Soak:
                 bad = self.traffic_preflight()
                 if bad:
                     raise VoidRun(f"traffic preflight: {bad}")
+                bad = self.start_udp_probe()
+                if bad:
+                    raise VoidRun(f"UDP sequence probe preflight: {bad}")
             for i in range(1, cfg.moves + 1):
                 target = targets[rgs[0]]
                 t_issue = self.now()
+                udp_probe_baselines = []
+                udp_probe_pre_errors = []
                 results: List[RGMoveResult] = []
                 t_ret_last = t_issue
                 for rg in rgs:
+                    if cfg.traffic:
+                        pre_error = self.udp_probe_before_move()
+                        if pre_error is not None:
+                            udp_probe_pre_errors.append(pre_error["detail"])
+                        elif self.udp_probe_baseline is None:
+                            udp_probe_pre_errors.append("UDP sequence probe did not retain its pre-move baseline")
+                        else:
+                            udp_probe_baselines.append(self.udp_probe_baseline)
                     r, t_ret_last = self.one_rg(rg, targets[rg], self._owners[rg])
                     results.append(r)
                 h1 = self.helpers()
@@ -1286,14 +1421,25 @@ class Soak:
                             r.member_delta = {n: (None if a[n] is None or b[n] is None else b[n] - a[n]) for n in (0, 1)}
                         if self._lan_rg is not None and r.rg == self._lan_rg:
                             r.neigh_node = neigh
-                rec = MoveRecord(i, target, cfg.issuer, self.lan_time(t_issue), 0.0, results)
+                if cfg.traffic:
+                    if udp_probe_pre_errors:
+                        udp_probe = {"status": "VOID", "detail": "; ".join(udp_probe_pre_errors),
+                                     "metrics": {}}
+                    else:
+                        udp_probe = self.udp_probe_window(udp_probe_baselines)
+                else:
+                    udp_probe = None
+                rec = MoveRecord(i, target, cfg.issuer, self.lan_time(t_issue), 0.0,
+                                 results, udp_probe=udp_probe)
                 moves.append(rec)
                 if len(moves) > 1:
                     moves[-2].t_next_lan = rec.t_issue_lan
                 c = results[-1]
+                probe_status = (udp_probe or {}).get("status", "-")
+                probe_detail = (udp_probe or {}).get("detail", "")
                 self.log(f"move {i:>4} -> node{target}: cli={','.join(r.cli_class for r in results)}"
                          f" landed={','.join('-' if r.landed_s is None else f'{r.landed_s:.2f}' for r in results)}"
-                         f" {c.cli_first[:120]}")
+                         f" udp={probe_status} {probe_detail} {c.cli_first[:120]}")
                 for rg in rgs:
                     targets[rg] = 1 - targets[rg]
             if moves:
@@ -1307,6 +1453,12 @@ class Soak:
             self.terminated = True
             raise
         finally:
+            if self.udp_probe_started:
+                try:
+                    self.c.udp_probe_stop(cfg.run_id)
+                except Exception as e:
+                    self.log(f"WARNING: could not stop UDP sequence probe: {e}")
+                self.udp_probe_started = False
             if cfg.traffic:
                 if not self.terminated:
                     self.sleep(1.0)

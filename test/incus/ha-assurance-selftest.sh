@@ -2154,6 +2154,83 @@ assert_contains "$(<"${ERR}")" 'Session misses paired delta 2000 (node0=1000 nod
 # misses` line. VOID.
 g1_row - 15 0 41 39 0
 assert_helper_status 2 g1b_verdict
+printf 'Group 1c continuous UDP sequence and translated-identity continuity (#18679)\n'
+UDP_PROBE_BEFORE="${RG1_DIR}/udp-before.log"
+UDP_PROBE_SURVIVED="${RG1_DIR}/udp-survived.log"
+UDP_PROBE_RECREATED="${RG1_DIR}/udp-recreated.log"
+UDP_PROBE_LOST="${RG1_DIR}/udp-lost.log"
+cat >"$UDP_PROBE_BEFORE" <<'UDP'
+SENT 0
+REPLY 0 172.16.80.7 41000
+SENT 1
+REPLY 1 172.16.80.7 41000
+SENT 2
+REPLY 2 172.16.80.7 41000
+UDP
+cat >"$UDP_PROBE_SURVIVED" <<'UDP'
+SENT 0
+REPLY 0 172.16.80.7 41000
+SENT 1
+REPLY 1 172.16.80.7 41000
+SENT 2
+REPLY 2 172.16.80.7 41000
+SENT 3
+REPLY 3 172.16.80.7 41000
+SENT 4
+SENT 5
+REPLY 5 172.16.80.7 41000
+UDP
+assert_helper_status 0 ha_udp_probe_survival_verdict "$UDP_PROBE_BEFORE" "$UDP_PROBE_SURVIVED"
+assert_contains "$(<"${OUT}")" 'SURVIVED: sequence advanced 2->5' 'UDP survived fixture sequence continuity'
+assert_contains "$(<"${OUT}")" 'lost=1 reordered=0' 'UDP survived fixture counts sequence loss'
+cat >"$UDP_PROBE_LOST" <<'UDP'
+SENT 0
+REPLY 0 172.16.80.7 41000
+SENT 1
+REPLY 1 172.16.80.7 41000
+SENT 2
+REPLY 2 172.16.80.7 41000
+SENT 3
+SENT 4
+SENT 5
+UDP
+assert_helper_status 1 ha_udp_probe_survival_verdict "$UDP_PROBE_BEFORE" "$UDP_PROBE_LOST"
+assert_contains "$(<"${ERR}")" 'UDP probe LOST: sent 3 post-move datagrams (seq 3..5) but received no replies' \
+	'UDP post-move silence cannot be satisfied by pre-move replies'
+cat >"$UDP_PROBE_RECREATED" <<'UDP'
+SENT 0
+REPLY 0 172.16.80.7 41000
+SENT 1
+REPLY 1 172.16.80.7 41000
+SENT 2
+REPLY 2 172.16.80.7 41000
+SENT 3
+REPLY 3 172.16.80.7 41001
+SENT 4
+REPLY 4 172.16.80.7 41001
+UDP
+assert_helper_status 1 ha_udp_probe_survival_verdict "$UDP_PROBE_BEFORE" "$UDP_PROBE_RECREATED"
+assert_contains "$(<"${ERR}")" 'RECREATED: seq 3 arrived with translated identity 172.16.80.7:41001' \
+	'UDP recreated fixture reds survived assertion with identity evidence'
+# Fail-on-revert: removing the identity comparison makes this same recreated
+# fixture PASS, and that would violate the exact status-1 assertion above.
+UDP_PROBE_IDENTITY_MUTANT="${RG1_DIR}/udp-session-probe-identity-reverted.py"
+python3 - "${ROOT}/test/incus/udp_session_probe.py" "$UDP_PROBE_IDENTITY_MUTANT" <<'PY'
+import pathlib
+import sys
+
+source, output = map(pathlib.Path, sys.argv[1:])
+text = source.read_text(encoding="utf-8")
+anchor = "if identity != baseline_identity:"
+if text.count(anchor) != 1:
+    raise SystemExit(f"UDP identity mutant anchor count is {text.count(anchor)}, want 1")
+output.write_text(text.replace(anchor, "if False:"), encoding="utf-8")
+PY
+if ( assert_helper_status 1 python3 "$UDP_PROBE_IDENTITY_MUTANT" classify \
+	"$UDP_PROBE_BEFORE" "$UDP_PROBE_RECREATED" ) >"${OUT}" 2>"${ERR}"; then
+	fail_test 'UDP recreated fixture did not fail its survived assertion under identity-comparison revert'
+fi
+assert_contains "$(<"${ERR}")" 'expected 1, got 0' 'UDP recreated fixture kills the identity-comparison revert'
 
 # The report-only host-inbound path (#18681): the helper PID from the
 # data-plane capture is appended to the flow-statistics capture, then the
@@ -2459,9 +2536,10 @@ assert_g1_mutant_flips pidonesided 0 g1a_verdict ha_snapshot_same_helper_verdict
 # Guard unwired from the shared delta: row H flips VOID -> PASS.
 assert_g1_mutant_flips pidunwired 0 g1a_verdict ha_snapshot_counter_delta \
 	'if ! ha_snapshot_same_helper_verdict "$before_file" "$after_file" "$node"; then return 2; fi' ':' 20 15 0 41 39 0 999
-# The consumer emits BOTH judged checks with their own budgets and labels, and
-# refuses the retired knob (a call-site revert passes every row above).
-python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'test-failover.sh Group 1a/1b are not wired as judged checks'
+# The consumer emits all three judged checks with their own evidence and
+# budgets, keeps the UDP probe fail-closed on unusable evidence, and refuses
+# the retired knob (a call-site revert must fail this source-level pin).
+python3 - "${ROOT}/test/incus/test-failover.sh" <<'PY' || fail_test 'test-failover.sh Group 1a/1b/1c are not wired as judged checks'
 import pathlib, re, sys
 text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
 body = re.search(r"^ha_rg1_evaluate\(\) \{\n.*?^\}\n", text, re.M | re.S)
@@ -2470,13 +2548,26 @@ if not body:
 b = body.group(0)
 a = re.findall(r'ha_emit_verdict "RG1 Group 1a [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops"', b)
 f = re.findall(r'ha_emit_verdict "RG1 Group 1b [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses"', b)
-if len(a) != 1 or len(f) != 1:
+udp = re.findall(r'ha_emit_diagnostic_verdict "RG1 Group 1c [^"]*"\s*\\\n\s*ha_udp_probe_survival_verdict "\$RG1_UDP_BEFORE" "\$RG1_UDP_AFTER"', b)
+if len(a) != 1 or len(f) != 1 or len(udp) != 1:
     raise SystemExit(1)
 if 'MAX_FAILOVER_SESSION_MISS_DELTA+x' not in text:
     raise SystemExit(1)
 if not re.search(r'^MAX_FAILOVER_SESSION_MISS_DROP_DELTA="\$\{MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4\}"$', text, re.M):
     raise SystemExit(1)
 if not re.search(r'^MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="\$\{MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256\}"$', text, re.M):
+    raise SystemExit(1)
+run = re.search(r"^ha_run_rg1_failback_slice\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not run or "ha_rg1_udp_begin" not in run.group(0) or "ha_rg1_udp_finish" not in run.group(0):
+    raise SystemExit(1)
+move_body = run.group(0)
+if ("ha_rg1_udp_before_move" not in move_body or "request_output=$(incus exec \"$FW1\"" not in move_body
+        or move_body.index("ha_rg1_udp_before_move") > move_body.index("request_output=$(incus exec \"$FW1\"")):
+    raise SystemExit(1)
+checkpoint = re.search(r"^ha_rg1_udp_before_move\(\) \{\n.*?^\}\n", text, re.M | re.S)
+if not checkpoint or "ha_udp_probe_snapshot" not in checkpoint.group(0) or 'baseline "$RG1_UDP_BEFORE"' not in checkpoint.group(0):
+    raise SystemExit(1)
+if 'void "RG1 Group 1c UDP datagram continuity: ${RG1_UDP_REASON}"' not in b:
     raise SystemExit(1)
 PY
 

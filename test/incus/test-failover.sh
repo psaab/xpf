@@ -91,8 +91,8 @@ MAX_STANDBY_WAN_TX_DELTA="${MAX_STANDBY_WAN_TX_DELTA:-0}"
 REQUIRE_FABRIC_ACTIVITY="${REQUIRE_FABRIC_ACTIVITY:-1}"
 MIN_FABRIC_TX_DELTA="${MIN_FABRIC_TX_DELTA:-1}"
 FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
-# #18670: RG1 Group 1 is two judged checks over the RG1 failback window,
-# both nodes summed.
+# #18670/#18679: RG1 Group 1 has three judged checks over the RG1 failback
+# window, summed across both nodes.
 #
 # 1a, session-miss drops. An ESTABLISHED TCP flow whose session is missing
 # after the move is, under the lab's SYN-first default (no `no-syn-check`), a
@@ -121,6 +121,14 @@ FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
 # failback shape), with about 185 misses of headroom over the largest recorded
 # delta; a single-stream loss can stay under it and is left to the iperf3
 # stream-continuity cells.
+#
+# 1c, an independent UDP datagram continuity observation. The long-lived
+# sender on the LAN host keeps one socket and an increasing sequence while
+# RG1 moves; the mouse target's UDP echo returns both sequence and the
+# translated source IP:port. Sequence gaps are reported as datagram loss.
+# Continuing sequences with the same translated identity are SURVIVED;
+# restarted sequences or a changed identity are RECREATED, and no post-move
+# replies are LOST. Missing/invalid evidence is VOID, never a false PASS.
 MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4}"
 MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
@@ -186,10 +194,10 @@ cost()  { echo "  COST  $*"; PASS=$((PASS + 1)); COST=$((COST + 1)); }
 fail()  { echo "  FAIL  $*"; FAIL=$((FAIL + 1)); ERRORS+=("$*"); }
 
 die() { echo "FATAL: $*" >&2; exit 2; }
-# #18670: the old raw session-miss budget (64) is gone; an override of it
-# would be silently ignored, so refuse it.
+# #18670/#18679: the old raw session-miss budget (64) is gone; an override of
+# it would be silently ignored, so refuse it.
 if [[ -n "${MAX_FAILOVER_SESSION_MISS_DELTA+x}" ]]; then
-	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1a judges Screen drops (MAX_FAILOVER_SESSION_MISS_DROP_DELTA) and Group 1b a coarse raw Session misses floor (MAX_FAILOVER_RAW_SESSION_MISS_FLOOR)"
+	die "MAX_FAILOVER_SESSION_MISS_DELTA no longer applies (#18670): RG1 Group 1a judges Screen drops, 1b the coarse raw Session misses floor, and 1c UDP sequence/translated-identity continuity"
 fi
 failover_duration_value() {
 	local requested="$1" minimum="$2"
@@ -235,6 +243,72 @@ declare -A RG1_SAMPLE_STATS=()
 declare -A RG1_SAMPLE_INTERFACES=()
 RG1_FAILBACK_SETTLED=false
 RG1_FAILBACK_ELAPSED=0
+RG1_UDP_RUN_ID="test-failover-$$"
+RG1_UDP_REMOTE_DIR="/tmp/${RG1_UDP_RUN_ID}"
+RG1_UDP_BEFORE="${HA_CAPTURE_DIR}/rg1-udp-before.log"
+RG1_UDP_AFTER="${HA_CAPTURE_DIR}/rg1-udp-after.log"
+RG1_UDP_STARTED=false
+RG1_UDP_READY=false
+RG1_UDP_REASON="probe did not start"
+
+ha_rg1_udp_begin() {
+	mkdir -p "$HA_CAPTURE_DIR"
+	RG1_UDP_STARTED=false
+	RG1_UDP_READY=false
+	RG1_UDP_REASON="probe runner unavailable"
+	if ! ha_udp_probe_start "$RG1_UDP_RUN_ID" "$CLUSTER_LAN_HOST" \
+		"$IPERF_TARGET4" 6201 "$RG1_UDP_REMOTE_DIR"; then
+		RG1_UDP_REASON="could not start the sequence-numbered UDP client on ${CLUSTER_LAN_HOST}"
+		return 2
+	fi
+	RG1_UDP_STARTED=true
+	sleep 1
+	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_BEFORE"; then
+		RG1_UDP_REASON="initial UDP probe snapshot was unavailable"
+		return 2
+	fi
+	if ! python3 "${SCRIPT_DIR}/udp_session_probe.py" baseline "$RG1_UDP_BEFORE" >/dev/null 2>"${RG1_UDP_BEFORE}.err"; then
+		RG1_UDP_REASON="$(<"${RG1_UDP_BEFORE}.err")"
+		[[ -n "$RG1_UDP_REASON" ]] || RG1_UDP_REASON="initial UDP probe received no baseline replies"
+		return 2
+	fi
+	RG1_UDP_READY=true
+}
+
+# Refresh the cumulative baseline at the transition boundary. Traffic between
+# probe start and the failover request is pre-move traffic and must not satisfy
+# the post-move reply check.
+ha_rg1_udp_before_move() {
+	if [[ "$RG1_UDP_STARTED" != true ]]; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="UDP sender was not running at the failover boundary"
+		return 2
+	fi
+	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_BEFORE"; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="immediate pre-move UDP probe snapshot was unavailable"
+		return 2
+	fi
+	if ! python3 "${SCRIPT_DIR}/udp_session_probe.py" baseline "$RG1_UDP_BEFORE" >/dev/null 2>"${RG1_UDP_BEFORE}.err"; then
+		RG1_UDP_READY=false
+		RG1_UDP_REASON="$(<"${RG1_UDP_BEFORE}.err")"
+		[[ -n "$RG1_UDP_REASON" ]] || RG1_UDP_REASON="immediate pre-move UDP baseline has no replies"
+		return 2
+	fi
+	RG1_UDP_READY=true
+}
+
+ha_rg1_udp_finish() {
+	if [[ "$RG1_UDP_STARTED" != true ]]; then return 2; fi
+	local captured=true
+	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_AFTER"; then
+		captured=false
+		RG1_UDP_REASON="post-move UDP probe snapshot was unavailable"
+	fi
+	ha_udp_probe_stop "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR"
+	RG1_UDP_STARTED=false
+	[[ "$captured" == true ]]
+}
 
 ha_ensure_capture_dir() {
 	mkdir -p "$HA_CAPTURE_DIR"
@@ -868,6 +942,7 @@ ha_rg1_mark_groups_void() {
 	local reason="$1"
 	void "RG1 Group 1a session-miss drops: ${reason}"
 	void "RG1 Group 1b raw session-miss floor: ${reason}"
+	void "RG1 Group 1c UDP datagram continuity: ${reason}"
 	void "RG1 Group 2 neighbor-miss budget: ${reason}"
 	void "RG1 Group 3 route-miss budget: ${reason}"
 	void "RG1 Group 4 policy-denied budget: ${reason}"
@@ -995,6 +1070,12 @@ ha_rg1_evaluate() {
 		manual-rg1-failback 1 phase-pre phase-post \
 		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
 		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
+	if [[ "$RG1_UDP_READY" == true ]]; then
+		ha_emit_diagnostic_verdict "RG1 Group 1c UDP datagram continuity across the RG1 move (sequence and translated 5-tuple)" \
+			ha_udp_probe_survival_verdict "$RG1_UDP_BEFORE" "$RG1_UDP_AFTER"
+	else
+		void "RG1 Group 1c UDP datagram continuity: ${RG1_UDP_REASON}"
+	fi
 	ha_emit_verdict "RG1 Group 2 neighbor misses (phase-pre→phase-post, both nodes, limit ${MAX_FAILOVER_NEIGHBOR_MISS_DELTA})" \
 		ha_pair_counter_budget_verdict "$MAX_FAILOVER_NEIGHBOR_MISS_DELTA" "Neighbor misses" \
 		manual-rg1-failback 1 phase-pre phase-post \
@@ -1137,6 +1218,9 @@ ha_run_rg1_failback_slice() {
 		load_ok=false
 		failure_reason="${failure_reason:+${failure_reason}; }main iperf process was not alive at phase-pre"
 	fi
+	if ! ha_rg1_udp_begin; then
+		info "RG1 Group 1c UDP probe unavailable: ${RG1_UDP_REASON}"
+	fi
 	if ! ha_capture_rg1_pair phase-pre; then
 		pre_capture_ok=false
 		failure_reason="${failure_reason:+${failure_reason}; }phase-pre capture was blind"
@@ -1154,6 +1238,9 @@ ha_run_rg1_failback_slice() {
 	# move is scored PASS/COST/FAIL (#18617), anchored at the request AND at
 	# the observed landing, because T is integer SECONDS since the iperf
 	# launch (up to ~1 s off iperf's clock) and a landing takes 1.3-3 s.
+	if [[ "$RG1_UDP_STARTED" == true ]] && ! ha_rg1_udp_before_move; then
+		info "RG1 Group 1c UDP probe unavailable at failover boundary: ${RG1_UDP_REASON}"
+	fi
 	local rg1_request_at=$((SECONDS - iperf_start_seconds))
 	if request_output=$(incus exec "$FW1" -- cli -c \
 		'request chassis cluster failover redundancy-group 1' 2>&1); then
@@ -1242,6 +1329,9 @@ ha_run_rg1_failback_slice() {
 		void "RG1 failback post-sampler: target and external sweeps unavailable because RG1 did not settle on fw0"
 		void "RG1 failback post-sampler: external IPv4 reachability not measured"
 		void "RG1 failback post-sampler: external IPv6 reachability not measured"
+	fi
+	if [[ "$RG1_UDP_STARTED" == true ]] && ! ha_rg1_udp_finish; then
+		RG1_UDP_READY=false
 	fi
 	if [[ "$sync_ok" != true || "$pre_ok" != true || "$pre_capture_ok" != true \
 		|| "$owner_moved" != true || "$mid_capture_ok" != true || "$mid_owner_ok" != true \
@@ -1606,6 +1696,10 @@ pool_src_teardown() {
 }
 failover_teardown() {
 	failover_stop_main_iperf /tmp/iperf3-failover.pid "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" || true
+	if [[ "${RG1_UDP_STARTED:-false}" == true ]]; then
+		ha_udp_probe_stop "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR"
+		RG1_UDP_STARTED=false
+	fi
 	pool_src_teardown
 }
 # The cluster is SHARED: the secondary address must not outlive this run

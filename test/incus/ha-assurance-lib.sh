@@ -2161,3 +2161,84 @@ ha_rg_owner_node() {
 	fi
 	printf '%s\n' "${owners[0]}"
 }
+
+# #18679: launch the long-lived sequence-numbered UDP probe on the LAN host.
+# It uses one socket for the whole window so the observed reply identity is
+# the actual NAT 5-tuple. Per-window snapshots are cumulative; the pure
+# classifier below counts post-baseline sequence gaps/reordering and detects
+# either a changed translated identity (RECREATED), a silent window (LOST),
+# or continuous forwarding (SURVIVED).
+ha_udp_probe_start() {
+	if [[ $# -ne 5 ]]; then
+		printf 'UDP probe start: expected <run-id> <client-host> <target-ip> <target-port> <remote-dir>\n' >&2
+		return 2
+	fi
+	local run_id="$1" client="$2" target="$3" port="$4" remote_dir="$5"
+	local lib_dir remote_script remote_log remote_pid
+	if [[ ! "$run_id" =~ ^[A-Za-z0-9_.-]+$ || ! "$port" =~ ^[0-9]+$ ]]; then
+		printf 'UDP probe start: malformed run id or port\n' >&2
+		return 2
+	fi
+	lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 2
+	remote_script="${remote_dir}/udp_session_probe.py"
+	remote_log="${remote_dir}/probe.log"
+	remote_pid="${remote_dir}/probe.pid"
+	if ! incus exec "$client" -- mkdir -p "$remote_dir" >/dev/null 2>&1; then
+		printf 'UDP probe start: could not create remote directory %s on %s\n' "$remote_dir" "$client" >&2
+		return 2
+	fi
+	if ! incus file push "${lib_dir}/udp_session_probe.py" "${client}${remote_script}" >/dev/null 2>&1; then
+		incus exec "$client" -- rm -rf "$remote_dir" >/dev/null 2>&1 || true
+		printf 'UDP probe start: could not copy the probe runner to %s\n' "$client" >&2
+		return 2
+	fi
+	if ! incus exec "$client" -- python3 "$remote_script" start \
+		--target "$target" --port "$port" --run-id "$run_id" \
+		--logfile "$remote_log" --pidfile "$remote_pid" >/dev/null 2>&1; then
+		incus exec "$client" -- rm -rf "$remote_dir" >/dev/null 2>&1 || true
+		printf 'UDP probe start: client runner failed on %s\n' "$client" >&2
+		return 2
+	fi
+}
+
+# ha_udp_probe_snapshot <client-host> <remote-dir> <local-path>
+ha_udp_probe_snapshot() {
+	if [[ $# -ne 3 ]]; then
+		printf 'UDP probe snapshot: expected <client-host> <remote-dir> <local-path>\n' >&2
+		return 2
+	fi
+	local client="$1" remote_log="${2}/probe.log" local_path="$3"
+	if ! incus exec "$client" -- cat "$remote_log" >"$local_path" 2>/dev/null; then
+		printf 'UDP probe snapshot: could not read %s from %s\n' "$remote_log" "$client" >&2
+		return 2
+	fi
+	if [[ ! -s "$local_path" ]]; then
+		printf 'UDP probe snapshot: %s is empty\n' "$remote_log" >&2
+		return 2
+	fi
+}
+
+# ha_udp_probe_stop <client-host> <remote-dir>; cleanup is safe to repeat.
+ha_udp_probe_stop() {
+	if [[ $# -ne 2 ]]; then
+		printf 'UDP probe stop: expected <client-host> <remote-dir>\n' >&2
+		return 2
+	fi
+	local client="$1" remote_dir="$2" remote_script="${2}/udp_session_probe.py"
+	incus exec "$client" -- python3 "$remote_script" stop --pidfile "${2}/probe.pid" \
+		>/dev/null 2>&1 || true
+	incus exec "$client" -- rm -rf "$remote_dir" >/dev/null 2>&1 || true
+}
+
+# The common shell verdict API; rg_move_soak.py imports the same Python core.
+# Status 0=SURVIVED, 1=measured RECREATED/LOST FAIL, 2=unusable evidence VOID.
+ha_udp_probe_survival_verdict() {
+	if [[ $# -ne 2 ]]; then
+		printf 'UDP probe survival: expected <before-snapshot> <after-snapshot>\n' >&2
+		return 2
+	fi
+	local lib_dir
+	lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 2
+	python3 "${lib_dir}/udp_session_probe.py" classify "$1" "$2"
+}
+
