@@ -5,12 +5,12 @@ import "github.com/prometheus/client_golang/prometheus"
 func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	c.userspaceSessionTableEntries = prometheus.NewDesc(
 		"xpf_userspace_session_table_entries",
-		"Aggregate live userspace session-table entries across workers.",
+		"Live session-table entries in the largest replicated worker table.",
 		nil, nil,
 	)
 	c.userspaceSessionTableCapacity = prometheus.NewDesc(
 		"xpf_userspace_session_table_capacity",
-		"Aggregate userspace session-table capacity across workers.",
+		"Capacity of one replicated userspace session table.",
 		nil, nil,
 	)
 	c.userspaceNATParseErrorsTotal = prometheus.NewDesc(
@@ -440,23 +440,14 @@ func (c *xpfCollector) initUserspaceSessionDescriptors() {
 	c.userspaceSyncedImportCapDrops = prometheus.NewDesc(
 		"xpf_userspace_synced_import_cap_drops_total",
 		"Peer-synced session imports rejected by the coordinator's "+
-			"aggregate admission bound. Locally-created sessions are "+
-			"capped per worker at max_sessions; peer-synced imports were "+
-			"uncapped and fanned out to every worker command queue+table, "+
-			"so a peer under session-table pressure (or a compromised "+
-			"peer) could drive this node past its own aggregate session "+
-			"ceiling and multiply that state across all workers. The "+
-			"import path now bounds the shared synced map at this "+
-			"appliance's own aggregate ENTRY ceiling "+
-			"(2 * worker_count * max_sessions -- 2x the logical session "+
-			"ceiling, because each admitted forward publishes a forward "+
-			"plus a synthesized reverse companion) and drop-newest-rejects "+
-			"an over-ceiling import; a rising value means a peer's import "+
-			"would push THIS appliance past its own aggregate entry "+
-			"ceiling (2N) — receiver-local, so a larger asymmetric peer "+
-			"can legitimately trip a smaller receiver. A symmetric-pair "+
-			"failover (N logical sessions = 2N entries) exactly fits and "+
-			"never trips it (#5674).",
+			"admission bound. Worker tables are full replicas, so the "+
+			"per-table max_sessions is the node's logical ceiling, not a "+
+			"worker-count multiple. Each admitted forward publishes a "+
+			"forward plus a synthesized reverse companion, giving the "+
+			"shared map 2x that ceiling for a full-peer meet. A rising "+
+			"value means a peer exceeded THIS receiver's bound; a larger "+
+			"asymmetric peer can legitimately trip a smaller receiver "+
+			"(#5674/#18687).",
 		nil, nil,
 	)
 	c.userspaceWorkerCommandQueuePoisonRecoveries = prometheus.NewDesc(

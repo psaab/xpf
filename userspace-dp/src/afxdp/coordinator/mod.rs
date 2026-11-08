@@ -610,12 +610,11 @@ pub struct Coordinator {
     /// silently measure the production formula instead of the override — a
     /// test seam that stops seaming without failing.
     /// #5674 test seam (per-instance, NOT a process-global): when nonzero,
-    /// `synced_import_cap()` returns TWICE this value (the override expresses a
-    /// LOGICAL ceiling; `synced_import_cap()` doubles it) instead of the real
-    /// `2 * worker_count * DEFAULT_MAX_SESSIONS` ENTRY ceiling. Lets a test
-    /// exercise the synced-import admission boundary without inserting
-    /// `DEFAULT_MAX_SESSIONS` (131072) entries. Always 0 in release builds
-    /// (the field does not exist); per-instance so parallel tests never race.
+    /// `synced_import_cap()` treats this as a small per-table logical ceiling
+    /// and derives the shared-map ENTRY cap by doubling it. This substitutes
+    /// for `REPLICATED_NODE_SESSION_CEILING` only in test builds and lets
+    /// admission tests reach the boundary without inserting 131072 entries.
+    /// Always 0 in release builds; per-instance so parallel tests never race.
     #[cfg(test)]
     pub(crate) synced_import_cap_override: Arc<std::sync::atomic::AtomicUsize>,
     /// #5166 test seam (per-instance, NOT a process-global): under

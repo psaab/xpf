@@ -249,11 +249,11 @@ never imports this package.
 - **A session-derived view runs IN xpfd, so its memory is the control
   plane's (#8597).** `showTopTalkers` used to append one formatted row per
   SESSION, sort the whole slice, and print twenty. `MaxSessions` is dynamic
-  and large by design (`worker_count × per-worker`, #5323), so on a busy box
-  `show security flow session sort-by bytes` allocated millions of entries —
-  six strings each — inside the daemon, with no recover on the console path.
-  A legitimate, unprivileged diagnostic OOM-killed the process being
-  diagnosed.
+  and is the replicated node's per-table capacity (131,072 by default,
+  #5323/#18687), still large enough that on a busy box `show security flow
+  session sort-by bytes` allocated hundreds of thousands of entries — six
+  strings each — inside the daemon, with no recover on the console path. A
+  legitimate, unprivileged diagnostic OOM-killed the process being diagnosed.
 
   The bound is on the COLLECTION, not the print: a `topTalkerLimit`-sized
   min-heap of RAW session key/value copies, formatted only for the survivors.

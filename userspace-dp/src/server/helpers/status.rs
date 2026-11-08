@@ -549,12 +549,15 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.afxdp.retire_dead_worker_holders();
     // #869: per-worker busy/idle runtime telemetry.
     state.status.worker_runtime = state.afxdp.worker_runtime_snapshots();
+    // Worker tables are full replicas, so report one table's occupancy rather
+    // than multiplying the node's session count by the number of workers.
     state.status.session_table_entries = state
         .status
         .worker_runtime
         .iter()
         .map(|w| w.session_table_entries as usize)
-        .sum();
+        .max()
+        .unwrap_or_default();
     // #1760: aggregate the per-worker NAT reverse-key displacement
     // counters into the top-level status for operator visibility.
     state.status.nat_reverse_key_collisions = state
@@ -614,17 +617,17 @@ pub(crate) fn project_status(state: &mut ServerState) {
         .iter()
         .map(|w| w.pptp_allocator_collisions)
         .sum();
+    // #18687: `max_sessions` is the replicated node ceiling, not a sum of
+    // identical per-worker table capacities.
     state.status.max_sessions = state
         .status
         .worker_runtime
         .iter()
         .map(|w| w.max_sessions as usize)
-        .sum();
-    if state.status.max_sessions == 0 {
-        state.status.max_sessions = state
-            .afxdp
-            .worker_count()
-            .saturating_mul(crate::session::default_max_sessions());
+        .max()
+        .unwrap_or_default();
+    if state.status.max_sessions == 0 && state.afxdp.worker_count() != 0 {
+        state.status.max_sessions = crate::session::REPLICATED_NODE_SESSION_CEILING;
     }
     state.status.debug_worker_threads = state.afxdp.worker_count();
     state.status.debug_identity_slots = state.afxdp.identity_count();
@@ -1267,6 +1270,36 @@ mod status_wiring_tests {
              is published per worker but never aggregated into ProcessStatus; \
              xpf_userspace_session_nat_reverse_key_collisions_distinct_src_total \
              therefore stays zero even when distinct-source collisions occur"
+        );
+    }
+
+    #[test]
+    fn session_capacity_status_uses_largest_replicated_table_18687() {
+        let helper = code_only(&read("src/server/helpers/status.rs"));
+        let refresh_end = helper
+            .find("pub(crate) fn restore_binding_arm_state")
+            .expect("status refresh boundary not found");
+        let refresh = squeeze(&helper[..refresh_end]);
+        assert!(
+            refresh.contains(
+                "state.status.session_table_entries=state.status.worker_runtime.iter().map(|w|w.session_table_entriesasusize).max().unwrap_or_default();"
+            ),
+            "#18687: session_table_entries must describe the largest replicated \
+             worker table, not sum the same sessions across workers"
+        );
+        assert!(
+            refresh.contains(
+                "state.status.max_sessions=state.status.worker_runtime.iter().map(|w|w.max_sessionsasusize).max().unwrap_or_default();"
+            ),
+            "#18687: max_sessions must state one replicated node ceiling, not \
+             multiply it by worker count"
+        );
+        assert!(
+            refresh.contains(
+                "state.status.max_sessions=crate::session::REPLICATED_NODE_SESSION_CEILING;"
+            ),
+            "#18687: the missing-runtime fallback must use the canonical \
+             replicated node ceiling"
         );
     }
 

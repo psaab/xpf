@@ -563,11 +563,10 @@ func (s *SessionSync) maxCap() int {
 	return genGuardMapDefaultCap
 }
 
-// SetGenGuardSessionCap wires the helper-provisioned aggregate session
-// capacity (logical sessions, worker_count × 131072) into guard sizing.
-//
+// SetGenGuardSessionCap wires the helper-provisioned replicated node session
+// ceiling (one per-table logical capacity) into guard sizing.
 // Contract (reconciled #9915 review): a NONZERO report always overwrites, up
-// AND down — a replacement reporting fewer workers shrinks the ceiling
+// AND down — a replacement reporting a lower node ceiling shrinks the ceiling
 // honestly instead of pinning it at a stale larger value. ZERO means
 // "unknown" (a missed daemon report), not "zero capacity", and retains the
 // last known value: a telemetry gap must not shrink live guards and

@@ -122,12 +122,14 @@ pub(crate) struct ProcessStatus {
     pub interface_addresses: usize,
     #[serde(rename = "neighbor_entries", default)]
     pub neighbor_entries: usize,
-    /// Total entries installed in the Rust-owned worker session tables.
+    /// Maximum entries installed in any Rust-owned worker session table.
+    /// Tables are full replicas; this is not the sum of worker entries.
     /// Additive for mixed-version compatibility: older helpers omit it
     /// and Go treats zero max_sessions as "no denominator available".
     #[serde(rename = "session_table_entries", default)]
     pub session_table_entries: usize,
-    /// Aggregate capacity of the Rust-owned worker session tables.
+    /// The replicated node's per-table session capacity. Worker session tables
+    /// are full replicas, so this is not summed across workers.
     #[serde(rename = "max_sessions", default)]
     pub max_sessions: usize,
     /// #1760: aggregate NAT reverse-key displacement events summed across
@@ -549,19 +551,14 @@ pub(crate) struct ProcessStatus {
     pub handshake_relay_lock_attempts_total: u64,
     #[serde(rename = "handshake_relay_lock_contended_total", default)]
     pub handshake_relay_lock_contended_total: u64,
-    /// #5674: peer-synced session imports rejected by the coordinator's
-    /// aggregate admission bound (`upsert_synced_session`). Locally-created
-    /// sessions are capped per worker at `max_sessions`; peer-synced imports
-    /// were previously uncapped and fanned out to every worker, so a peer under
-    /// session-table pressure (or a compromised peer) could drive this node
-    /// past its own aggregate session ceiling and multiply that state across
-    /// all workers. A rising value means a peer exceeded this appliance's own
-    /// ceiling — stated in ENTRIES as `2 * worker_count * max_sessions` (#6413),
-    /// matching `synced_import_cap`, not the LOGICAL `worker_count *
-    /// max_sessions`. Each admitted forward publishes TWO keys (the forward and
-    /// its synthesized reverse companion), so N logical sessions arrive as 2N
-    /// entries and EXACTLY fit the cap; it never trips on a legitimate
-    /// symmetric-pair failover. Surfaced as the Prometheus counter
+    /// #5674/#18687: peer-synced session imports rejected by the coordinator's
+    /// admission bound. Each worker table is a full replica, so the node's
+    /// logical ceiling is `REPLICATED_NODE_SESSION_CEILING`, not a
+    /// worker-count multiple. The shared map admits two entries per forward
+    /// (the forward plus synthesized reverse) and therefore has 2x that
+    /// per-table ceiling to let a full peer table meet this receiver's own
+    /// population. A rising value means a peer exceeded this receiver-local
+    /// bound. Surfaced as the Prometheus counter
     /// `xpf_userspace_synced_import_cap_drops_total`. Additive / defaulted for
     /// backward compatibility.
     #[serde(rename = "synced_import_cap_drops_total", default)]

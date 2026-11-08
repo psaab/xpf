@@ -97,8 +97,10 @@ type ProcessStatus struct {
 	LastSnapshotAt         time.Time `json:"last_snapshot_at,omitempty"`
 	InterfaceAddresses     int       `json:"interface_addresses,omitempty"`
 	NeighborEntries        int       `json:"neighbor_entries,omitempty"`
-	SessionTableEntries    uint64    `json:"session_table_entries,omitempty"`
-	MaxSessions            uint64    `json:"max_sessions,omitempty"`
+	// SessionTableEntries and MaxSessions describe the largest replicated
+	// worker table, not a sum across workers.
+	SessionTableEntries uint64 `json:"session_table_entries,omitempty"`
+	MaxSessions         uint64 `json:"max_sessions,omitempty"`
 	// #1760: aggregate NAT reverse-key displacement events summed across
 	// the per-worker session tables -- the latent 1:N collision (#1758)
 	// made observable. Near-precise upper bound on live collisions (counts
@@ -507,24 +509,13 @@ type ProcessStatus struct {
 	EventStreamProducerSeqLockAcquisitionsTotal uint64 `json:"event_stream_producer_seq_lock_acquisitions_total,omitempty"`
 	EventStreamProducerSeqLockContendedTotal    uint64 `json:"event_stream_producer_seq_lock_contended_total,omitempty"`
 	// SyncedImportCapDropsTotal counts peer-synced session imports rejected by
-	// the coordinator's aggregate admission bound (#5674). Locally-created
-	// sessions are capped per worker at max_sessions; peer-synced imports were
-	// previously uncapped and fanned out to every worker command queue+table, so
-	// a peer under session-table pressure (or a compromised peer) could drive
-	// this node past its own aggregate session ceiling and multiply that state
-	// across all workers — an availability/DoS the local admission bound is meant
-	// to prevent. The bound is this appliance's own aggregate ENTRY ceiling
-	// (2 * worker_count * max_sessions — 2x the logical session ceiling, because
-	// each admitted forward publishes a forward plus a synthesized reverse
-	// companion). 2N is the FORWARD-key admission threshold, not an absolute map
-	// maximum — a lone reverse import bypasses the gate, so occupancy can
-	// momentarily reach 2N+1. A rising value means a peer's import would push
-	// THIS appliance past its own aggregate entry ceiling — receiver-local, so a
-	// larger asymmetric peer (more workers/max_sessions than this receiver) can
-	// legitimately trip a smaller receiver's cap without exceeding its own
-	// ceiling. A symmetric-pair failover (N logical sessions = 2N entries)
-	// exactly fits and never trips it. Surfaced as
-	// xpf_userspace_synced_import_cap_drops_total.
+	// the coordinator's admission bound (#5674/#18687). Worker tables are full
+	// replicas, so the node's per-table logical ceiling is max_sessions, not a
+	// worker-count multiple. The shared map admits two entries per imported
+	// forward (the forward and synthesized reverse), giving it 2x that ceiling
+	// for the receiver's full-table meet point. A rising value means a peer
+	// exceeded THIS receiver's bound; a larger asymmetric peer can legitimately
+	// trip a smaller receiver's cap. A symmetric-pair failover exactly fits.
 	// Omitempty for wire compat with older helpers.
 	SyncedImportCapDropsTotal uint64 `json:"synced_import_cap_drops_total,omitempty"`
 	// #1760 W3': shared-map NAT reverse-key displacement events — a

@@ -246,13 +246,14 @@ Maximum-sessions: 4194304
 ### xpf implementation notes (#5323 / #5320)
 
 - **`Maximum-sessions` is DYNAMIC, not a fixed literal.** xpf renders the
-  live AF_XDP helper's `max_sessions` (worker_count x per-worker capacity,
-  131072/worker) taken from the userspace `ProcessStatus`. It replaces the
-  historical hardcoded `10000000` on both the remote CLI
-  (`cmd/cli/show_flow.go`, from `GetSessionSummaryResponse.max_sessions`) and
-  the local CLI (`pkg/cli/cli_show_flow.go`, from `userspaceDataplaneStatus()`).
-  When no dataplane status is available the value renders `unknown` rather than
-  a fabricated authoritative bound.
+  live AF_XDP helper's `max_sessions` (the replicated node's per-table
+  capacity, 131072 by default; #5323/#18687) from the userspace
+  `ProcessStatus`. It replaces the historical hardcoded `10000000` on both
+  the remote CLI (`cmd/cli/show_flow.go`, from
+  `GetSessionSummaryResponse.max_sessions`) and the local CLI
+  (`pkg/cli/cli_show_flow.go`, from `userspaceDataplaneStatus()`). When no
+  dataplane status is available the value renders `unknown` rather than a
+  fabricated authoritative bound.
 - **The cluster-PEER `node<N>:` block was fixed later, in #7422.** In cluster
   mode the local CLI prints a second block for the peer node, and that block
   kept the hardcoded `10000000` for two years after #5323 removed it from the

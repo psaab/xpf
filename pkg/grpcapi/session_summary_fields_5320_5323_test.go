@@ -54,8 +54,8 @@ func newSummaryFieldsServer(t *testing.T, dp grpcRuntime) *Server {
 }
 
 // TestGetSessionSummaryMaxSessionsFromHelper asserts the response carries the
-// dataplane's dynamic max_sessions (worker_count x per-worker capacity) from
-// the live helper status — NOT the old hardcoded 10000000 (#5323).
+// helper's dynamic per-table max_sessions from the live status — NOT the old
+// hardcoded 10000000 (#5323).
 //
 // FAIL-ON-REVERT: dropping the resp.MaxSessions = st.MaxSessions plumbing
 // leaves MaxSessions 0, flipping the assertion.
@@ -63,15 +63,15 @@ func TestGetSessionSummaryMaxSessionsFromHelper(t *testing.T) {
 	s := newSummaryFieldsServer(t, &summaryFieldsDP{
 		Manager:     dataplane.New(),
 		hasStatus:   true,
-		maxSessions: 786432, // 6 workers x 131072
+		maxSessions: 234567,
 	})
 
 	resp, err := s.GetSessionSummary(context.Background(), &pb.GetSessionSummaryRequest{})
 	if err != nil {
 		t.Fatalf("GetSessionSummary() error = %v", err)
 	}
-	if resp.GetMaxSessions() != 786432 {
-		t.Fatalf("max_sessions = %d, want 786432 (dynamic helper max, not hardcoded)", resp.GetMaxSessions())
+	if resp.GetMaxSessions() != 234567 {
+		t.Fatalf("max_sessions = %d, want 234567 (dynamic per-table helper capacity)", resp.GetMaxSessions())
 	}
 	if resp.GetMaxSessions() == 10000000 {
 		t.Fatal("max_sessions is the retired hardcoded 10000000")

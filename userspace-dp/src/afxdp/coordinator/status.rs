@@ -520,23 +520,15 @@ impl super::Coordinator {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// #5674: total peer-synced session imports rejected by the coordinator's
-    /// aggregate admission bound (`upsert_synced_session`). Locally-created
-    /// sessions are capped per worker at `DEFAULT_MAX_SESSIONS`; peer-synced
-    /// imports were previously uncapped and fanned out to every live worker, so a
-    /// peer under session-table pressure (or a compromised peer) could drive
-    /// this node past its own aggregate session ceiling. A rising value means a
-    /// peer exceeded this appliance's ceiling.
-    ///
-    /// #6413: state that ceiling in ENTRIES, matching `synced_import_cap` and
-    /// `coordinator/session_manager.rs` — it is
-    /// `2 * worker_count * DEFAULT_MAX_SESSIONS`,
-    /// not the LOGICAL `worker_count * DEFAULT_MAX_SESSIONS`. Each admitted
-    /// forward publishes TWO keys into `sessions.synced` (the forward and its
-    /// synthesized reverse companion), so N logical sessions arrive as 2N
-    /// entries and EXACTLY fit the 2N cap. A legitimate symmetric-pair failover
-    /// therefore never trips it; firing semantics are unchanged by this wording.
-    /// Surfaced as `xpf_userspace_synced_import_cap_drops_total`.
+    /// #5674/#18687: peer-synced session imports rejected by the coordinator's
+    /// admission bound (`upsert_synced_session`). Worker tables are full
+    /// replicas, so the per-table `DEFAULT_MAX_SESSIONS` is the node's logical
+    /// ceiling, not a worker-count multiple. The shared map admits two entries
+    /// per imported forward (the forward and synthesized reverse), providing
+    /// 2x that ceiling for a full peer-table meet. A rising value means a peer
+    /// exceeded this receiver's ceiling; firing semantics are unchanged by
+    /// this wording. Surfaced as
+    /// `xpf_userspace_synced_import_cap_drops_total`.
     pub fn synced_import_cap_drops_total(&self) -> u64 {
         self.sessions.import_cap_drops.load(Ordering::Relaxed)
     }

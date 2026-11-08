@@ -17,11 +17,12 @@ import (
 //
 // The console runs IN xpfd (daemon_run.go), with no recover, so the allocation
 // is the control plane's. MaxSessions is dynamic and large by design
-// (worker_count × per-worker, #5323); a busy box carries millions of sessions,
-// and each entry holds six freshly allocated strings. It is a legitimate,
-// unprivileged show command whose memory scales with the session table — an
-// operator, or on-box automation, OOM-kills the control plane by running a
-// diagnostic on the box they are diagnosing.
+// (the replicated node's per-table ceiling, #5323/#18687); a busy box can
+// carry hundreds of thousands of sessions, and each entry holds six freshly
+// allocated strings. It is a legitimate, unprivileged show command whose
+// memory scales with the session table — an operator, or on-box automation,
+// OOM-kills the control plane by running a diagnostic on the box they are
+// diagnosing.
 //
 // The REST side already treats a full conntrack walk as an admission decision
 // (`sessionCountCap`, #5318). The console path had no equivalent.

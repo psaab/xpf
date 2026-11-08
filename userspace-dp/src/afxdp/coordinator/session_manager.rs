@@ -185,28 +185,18 @@ pub(in crate::afxdp) struct SessionManager {
     ///
     /// Surfaced via `Coordinator::synced_reverse_rederived_total()`.
     pub(in crate::afxdp) synced_reverse_rederived: AtomicU64,
-    /// #5674: peer-synced session imports REJECTED by the coordinator's
-    /// aggregate admission bound (`upsert_synced_session`). Locally-created
-    /// sessions are capped per worker at `DEFAULT_MAX_SESSIONS`
-    /// (`install_with_protocol_with_origin`), but peer-synced sessions were
-    /// imported with NO cap and fanned out to every live worker command queue +
-    /// table, so a peer under session-table pressure — or a
-    /// malicious/compromised peer — could drive this node past its own
-    /// aggregate session ceiling and multiply that state across all workers
-    /// (the availability/DoS root of #5674). `upsert_synced_session` now bounds
-    /// the shared synced map (the single fan-out choke point) at this
-    /// appliance's OWN aggregate ENTRY ceiling (`2 * worker_count *
-    /// DEFAULT_MAX_SESSIONS` — 2× the logical ceiling because each admitted
-    /// forward logical session publishes a forward AND a synthesized reverse
-    /// companion into the map) and drop-newest-rejects a NEW over-ceiling
-    /// FORWARD key here (a REPLACE of an existing key, and a lone reverse
-    /// import, never trip the bound — neither grows the forward-keyed count).
+    /// #5674/#18687: peer-synced session imports REJECTED by the coordinator's
+    /// admission bound (`upsert_synced_session`). Each worker table is a full
+    /// replica, so this node's logical ceiling is one per-table
+    /// `DEFAULT_MAX_SESSIONS`, not a worker-count multiple. `upsert_synced_session`
+    /// bounds the shared synced map (the single fan-out choke point) at twice
+    /// that ceiling in ENTRY units: each imported forward publishes a forward
+    /// and synthesized reverse companion. This leaves room for a full peer
+    /// table to meet this node's own population while rejecting a peer that
+    /// exceeds this receiver's ceiling. A REPLACE of an existing key and a
+    /// standalone reverse import do not grow the forward admission count.
     /// Surfaced via `Coordinator::synced_import_cap_drops_total()` and the
-    /// Prometheus counter `xpf_userspace_synced_import_cap_drops_total`. A
-    /// nonzero value means a peer exceeded its own LOGICAL session ceiling (a
-    /// malicious/compromised peer); a legitimate symmetric-pair failover — the
-    /// peer's full logical set (N logical → 2N entries) EXACTLY fits the 2N cap
-    /// — never trips it, at any peer load.
+    /// Prometheus counter `xpf_userspace_synced_import_cap_drops_total`.
     pub(in crate::afxdp) import_cap_drops: AtomicU64,
     /// #7160 (#2387): peer-synced imports REFUSED because this node runs
     /// routing instances and the request named no ingress identity to resolve

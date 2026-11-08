@@ -494,10 +494,11 @@ type SessionSummary struct {
 	// include_peer=true and a reachable peer exists.
 	NodeID int             `json:"node_id"`
 	Peer   *SessionSummary `json:"peer,omitempty"`
-	// MaxSessions is the dataplane's dynamic session-table capacity (#5323):
-	// the live AF_XDP helper publishes worker_count x per-worker capacity.
-	// Omitted (0) when no userspace status is attached — a consumer treats
-	// that as unknown rather than a fabricated authoritative bound.
+	// MaxSessions is the dataplane's dynamic per-table capacity (#5323).
+	// Userspace worker tables are full replicas, so this is the node ceiling
+	// without multiplication by worker count. Omitted (0) when no userspace
+	// status is attached — a consumer treats that as unknown rather than a
+	// fabricated authoritative bound.
 	MaxSessions uint64 `json:"max_sessions,omitempty"`
 	// PeerStatus classifies the include_peer fan-out completeness (#5320):
 	// "ok" (peer summary attached), "unreachable" (peer requested but the

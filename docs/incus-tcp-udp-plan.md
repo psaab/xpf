@@ -223,7 +223,9 @@ note that the generator "only needs ping, mtr, iperf3".
 - `show chassis cluster data-plane statistics`: helper
   `rust-afxdp-bootstrap`, `Enabled: true`, `Forwarding armed/supported: true`,
   `Workers: 6`, `Ring entries: 16384`, `poll-mode interrupt` (from conf
-  `system.dataplane`), session table `12/786432`, flow cache `73728`,
+  `system.dataplane`), session table `12/786432` in the captured pre-#18687
+  status (the denominator summed six replicated tables; the per-table node
+  ceiling is 131072), flow cache `73728`,
   6 AF_XDP queues bound (`xdp_userspace_p` on `ge-0-0-1/2`).
 - Guest interfaces: `fxp0` (mgmt DHCP), `em0` `10.99.12.1/30`, `fab0@ge-0-0-0`
   `10.99.13.1/30`, `ge-0-0-1` = reth1 child (`10.0.61.1`,

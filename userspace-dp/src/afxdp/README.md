@@ -2190,7 +2190,9 @@ landed on that evidence**:
 Shape (i)'s extra reds are not incidental. `synced_import_cap_for`'s 2x is
 load-bearing *because* `synthesized_synced_reverse_entry` returns `Some` for
 every non-reverse import — the cap counts ENTRIES and each admitted forward
-occupies two. Refusing the companion changes that accounting. (Caveat on the
+occupies two. That cap is derived from the single replicated per-table ceiling,
+not multiplied by worker count (#18687). Refusing the companion changes that
+accounting. (Caveat on the
 measurement: the mutant gates on `forwarding.egress.is_empty()`, so it also
 fires for every fixture built on a default `Coordinator::new()`; the six reds
 are real but their count is a property of the fixture population as much as of

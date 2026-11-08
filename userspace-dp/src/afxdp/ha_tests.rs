@@ -1014,37 +1014,30 @@ fn upsert_peer_against_local_arriving_during_snapshot_window_keeps_local_13709()
     );
 }
 
-// ── #5674: synced-import aggregate admission bound (coordinator) ──────
+// ── #5674/#18687: synced-import replicated node admission bound ──────
 //
 // Peer-synced sessions were imported with NO cap and fanned out to EVERY
 // worker command queue+table, so a peer under session-table pressure — or a
-// malicious/compromised peer — could drive this node PAST its own aggregate
-// session ceiling and multiply that state across all workers (the
-// availability/DoS root of #5674). `upsert_synced_session` now bounds the
-// shared synced map at `2 * worker_count * DEFAULT_MAX_SESSIONS` and drop-
-// newest-rejects an over-ceiling NEW FORWARD key. The 2× matters: each
-// admitted forward logical session publishes TWO entries into `sessions.synced`
-// (the forward key + a synthesized reverse companion), so a full symmetric
-// peer holding N logical sessions arrives as 2N entries. Sizing the cap to the
-// LOGICAL ceiling N while counting ENTRIES (the pre-fix bug) rejected ~half of
-// a legitimate full-peer import above ~50% peer load; the entry cap is 2N so a
-// full logical set EXACTLY fits.
+// malicious/compromised peer — could drive this node past its table ceiling
+// and multiply that state across all workers. Worker tables are full replicas;
+// `upsert_synced_session` now bounds the shared synced map at twice the one
+// per-table `REPLICATED_NODE_SESSION_CEILING`, independent of worker count.
+// The 2x is in ENTRY units: each imported forward publishes itself and a
+// synthesized reverse companion. A full peer table fits at the receiver's 2x
+// meet point, while a peer beyond the stated ceiling is drop-newest rejected.
 //
-// This test pins: (a) a FULL symmetric-peer logical set (LOGICAL_CEILING
-// forward sessions = 2×LOGICAL_CEILING entries) ALL admit with ZERO drops —
-// the regression the review found (a >50% silent under-sync); (b) the NEXT
-// forward, EXCEEDING the logical ceiling, is drop-newest REJECTED and never
-// fanned out to the worker command queue (the per-worker multiplication is
-// bounded); (c) a REPLACE of an admitted key still applies at the ceiling (the
-// cap is scoped to NEW forward keys, not a blanket block).
+// This test pins: (a) a full three-session peer table fits a three-worker
+// receiver and all three forwards admit with zero drops; (b) the next forward
+// beyond that table ceiling is rejected and never fanned out; (c) replacing an
+// admitted key still applies at the ceiling.
 //
 // PARENT-RED recipe: neutralize the single reject in the
-// `upsert_synced_session` gate (`ha.rs`, the
+// `upsert_synced_session` gate (`session_import.rs`, the
 // `if synced_cap != 0 && synced_len >= synced_cap { ...; return; }` — e.g.
 // delete the `return;` so the over-ceiling forward falls through and is
-// admitted). The over-ceiling key then lands in the shared map + the worker
-// queue, so the `is_none()` / not-enqueued reject assertions below fail as
-// clean assertions. Target-count = 1 gate site.
+// admitted). The over-ceiling key then lands in the shared map + worker queue,
+// so the `is_none()` / not-enqueued reject assertions below fail as clean
+// assertions. Target-count = 1 gate site.
 fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
     SyncedSessionEntry {
         sibling_last_seen_ns: 0,
@@ -1071,38 +1064,33 @@ fn synced_entry_port(port: u16, generation: u64) -> SyncedSessionEntry {
 }
 
 #[test]
-fn upsert_synced_session_rejects_over_ceiling_import_and_does_not_fan_out() {
+fn synced_import_cap_rejects_over_ceiling_import_and_does_not_fan_out_18687() {
     let mut coordinator = Coordinator::new();
-    // The override expresses a LOGICAL session ceiling; `synced_import_cap()`
-    // doubles it to the ENTRY cap (2×LOGICAL_CEILING) because each admitted
-    // forward logical session publishes a forward AND a synthesized reverse
-    // companion into the shared `synced` map. Choose a small logical ceiling so
-    // the boundary is reachable without inserting DEFAULT_MAX_SESSIONS (131072)
-    // sessions. In production the logical ceiling is
-    // `worker_count * DEFAULT_MAX_SESSIONS` and the entry cap is 2× that.
+    // The override supplies a small per-table logical ceiling so the
+    // production 2x ENTRY conversion can be tested without inserting
+    // DEFAULT_MAX_SESSIONS (131072) sessions. This receiver has multiple
+    // replicated worker tables; worker count must not multiply the ceiling.
     const LOGICAL_CEILING: u16 = 3;
     coordinator.synced_import_cap_override.store(
         LOGICAL_CEILING as usize,
         std::sync::atomic::Ordering::Relaxed,
     );
     let commands = Arc::new(Mutex::new(VecDeque::new()));
-    coordinator.workers.register(
-        0,
-        WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
-        None,
-    );
+    const WORKERS: usize = 3;
+    for worker in 0..WORKERS {
+        coordinator.workers.register(
+            worker as u32,
+            WorkerRuntimeRecord::for_test(test_worker_handle(commands.clone())),
+            None,
+        );
+    }
 
     let before = coordinator.synced_import_cap_drops_total();
 
-    // (a) A FULL symmetric-peer logical set — LOGICAL_CEILING forward sessions,
-    // each publishing a forward + synthesized reverse = 2×LOGICAL_CEILING
-    // entries — must ALL admit with ZERO drops. This is the #5674 dual-entry
-    // regression the review found: sizing the cap to the LOGICAL ceiling while
-    // counting ENTRIES silently dropped ~half of a legitimate full-peer import
-    // above ~50% peer load. Every forward here is a NEW key at/below the logical
-    // ceiling, so none may be rejected. Under the pre-fix (non-2×) cap the third
-    // forward would find synced_len == 4 >= cap 3 and be dropped — this loop
-    // REDs it.
+    // (a) A FULL peer table — LOGICAL_CEILING forward sessions, each
+    // publishing a forward + synthesized reverse = 2×LOGICAL_CEILING entries
+    // — must ALL admit with ZERO drops. If worker count were still multiplied
+    // into the cap, this cell's over-ceiling import below would be admitted.
     let mut admitted_keys = Vec::new();
     for i in 0..LOGICAL_CEILING {
         let entry = synced_entry_port(1000 + i, 0);
@@ -1263,38 +1251,33 @@ fn over_ceiling_import_rejected_on_poisoned_shared_mutex() {
     );
 }
 
-// #6819 §7: both admission tests above set `synced_import_cap_override`, which
-// returns from the `#[cfg(test)]` branch of `synced_import_cap` BEFORE the
-// production expression runs. That test-only seam SHADOWS the production
-// formula: with only those two tests, deleting the trailing
-// `.saturating_mul(2)` from the production path leaves every cap assertion
-// green, because no test ever evaluates it. This test leaves the override at
-// its default 0 so the production arithmetic is the thing under test.
-//
-// The 2x is the property being pinned, not an implementation detail: the cap
-// counts ENTRIES while the ceiling it must express is LOGICAL sessions, and
-// each admitted forward publishes a forward key AND a synthesized reverse
-// companion. A cap sized to the logical ceiling rejects ~half of a legitimate
-// full-peer failover import above ~50% peer load (the #5674 dual-entry
-// regression).
+// #6819 §7/#18687: the admission cells use a per-table override to make the
+// boundary reachable, but they still run the same 2x entry conversion. This
+// cell leaves the override at zero and pins the production node ceiling and
+// the worker-count independence of the formula with three registered workers.
+// Restoring the old `records.len() * DEFAULT_MAX_SESSIONS * 2` formula makes
+// this expected cap three times too large and lets the refusal cell over-admit.
 #[test]
-fn synced_import_cap_production_formula_is_twice_the_logical_ceiling() {
+fn synced_import_cap_production_formula_is_twice_the_replicated_node_ceiling() {
     let mut coordinator = Coordinator::new();
     assert_eq!(
         coordinator
             .synced_import_cap_override
             .load(std::sync::atomic::Ordering::Relaxed),
         0,
-        "this test must exercise the PRODUCTION formula — a nonzero override \
-         short-circuits `synced_import_cap` before it is reached"
+        "this test must exercise the production ceiling, not the test override"
     );
-    // A per-worker ceiling of zero would make the 2x assertion below vacuous
-    // (0 == 2*0), so pin that the multiplicand is real first.
-    let per_worker = crate::session::default_max_sessions();
+    let per_table_ceiling = crate::session::REPLICATED_NODE_SESSION_CEILING;
     assert!(
-        per_worker > 0,
-        "DEFAULT_MAX_SESSIONS must be positive or the ceiling assertions below \
-         cannot distinguish the logical ceiling from twice it"
+        per_table_ceiling > 0,
+        "the replicated node ceiling must be positive or its 2x entry cap \
+         assertion is vacuous"
+    );
+    assert_eq!(
+        per_table_ceiling,
+        crate::session::default_max_sessions(),
+        "the canonical replicated node ceiling must equal one worker table's \
+         install cap, never a worker-count aggregate"
     );
 
     // No workers registered (early boot / teardown): a zero ceiling DISABLES
@@ -1316,21 +1299,18 @@ fn synced_import_cap_production_formula_is_twice_the_logical_ceiling() {
         );
     }
 
-    let logical_ceiling = WORKERS * per_worker;
+    let entry_cap = coordinator.synced_import_cap_for(&coordinator.workers.records());
     assert_eq!(
-        coordinator.synced_import_cap_for(&coordinator.workers.records()),
-        2 * logical_ceiling,
-        "the production ENTRY cap must be TWICE the logical ceiling \
-         (worker_count * DEFAULT_MAX_SESSIONS), because each admitted forward \
-         logical session publishes a forward key AND a synthesized reverse"
+        entry_cap,
+        per_table_ceiling.saturating_mul(2),
+        "the production ENTRY cap is twice the replicated per-table ceiling, \
+         independent of worker count"
     );
-    // Stated separately and explicitly: dropping the trailing 2x is the #5674
-    // regression, and it yields exactly the logical ceiling.
     assert_ne!(
-        coordinator.synced_import_cap_for(&coordinator.workers.records()),
-        logical_ceiling,
-        "the ENTRY cap must not equal the LOGICAL ceiling — that is the \
-         pre-#5674 sizing that silently under-syncs a peer above ~50% load"
+        entry_cap,
+        per_table_ceiling,
+        "the ENTRY cap must account for the forward key and synthesized \
+         reverse companion"
     );
 }
 

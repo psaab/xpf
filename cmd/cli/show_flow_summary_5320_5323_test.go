@@ -16,13 +16,13 @@ import (
 // TestPrintSessionSummaryBlockDynamicMax asserts the render uses the response's
 // max_sessions, not the retired hardcoded 10000000 (#5323).
 //
-// FAIL-ON-REVERT: restoring `Maximum-sessions: 10000000` makes the 786432
-// assertion go red.
+// FAIL-ON-REVERT: restoring `Maximum-sessions: 10000000` makes the 234567
+// assertion go red. #18687: this is a dynamic one-table value, not a worker sum.
 func TestPrintSessionSummaryBlockDynamicMax(t *testing.T) {
 	out := captureStdout(t, func() {
-		printSessionSummaryBlock(&pb.GetSessionSummaryResponse{ForwardOnly: 5, MaxSessions: 786432})
+		printSessionSummaryBlock(&pb.GetSessionSummaryResponse{ForwardOnly: 5, MaxSessions: 234567})
 	})
-	if !strings.Contains(out, "Maximum-sessions: 786432") {
+	if !strings.Contains(out, "Maximum-sessions: 234567") {
 		t.Fatalf("output missing dynamic max:\n%s", out)
 	}
 	if strings.Contains(out, "10000000") {
@@ -97,7 +97,7 @@ func (f *summaryFakeClient) GetSessionSummary(
 func TestShowSessionSummaryPeerUnreachableWarning(t *testing.T) {
 	c := &ctl{client: &summaryFakeClient{resp: &pb.GetSessionSummaryResponse{
 		ForwardOnly: 3,
-		MaxSessions: 786432,
+		MaxSessions: 234567,
 		PeerStatus:  pb.PeerFetchStatus_PEER_FETCH_STATUS_UNREACHABLE,
 		PeerError:   "dial peer node 1: connection refused",
 	}}}
@@ -113,7 +113,7 @@ func TestShowSessionSummaryPeerUnreachableWarning(t *testing.T) {
 	if !strings.Contains(out, "LOCAL-ONLY") {
 		t.Fatalf("output missing LOCAL-ONLY qualifier:\n%s", out)
 	}
-	if !strings.Contains(out, "Maximum-sessions: 786432") {
+	if !strings.Contains(out, "Maximum-sessions: 234567") {
 		t.Fatalf("output missing dynamic max:\n%s", out)
 	}
 }
@@ -123,7 +123,7 @@ func TestShowSessionSummaryPeerUnreachableWarning(t *testing.T) {
 func TestShowSessionSummaryNoWarningWhenOK(t *testing.T) {
 	c := &ctl{client: &summaryFakeClient{resp: &pb.GetSessionSummaryResponse{
 		ForwardOnly: 3,
-		MaxSessions: 786432,
+		MaxSessions: 234567,
 		PeerStatus:  pb.PeerFetchStatus_PEER_FETCH_STATUS_NOT_APPLICABLE,
 	}}}
 	out := captureStdout(t, func() {

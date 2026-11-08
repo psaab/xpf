@@ -1,7 +1,7 @@
 // #5323: the LOCAL interactive `show security flow session summary` rendered a
-// HARDCODED Maximum-sessions:10000000. It now renders the live helper's dynamic
-// max (worker_count x per-worker capacity) via userspaceDataplaneStatus(), and
-// "unknown" when no userspace status is available.
+// HARDCODED Maximum-sessions:10000000. It now renders the helper's dynamic
+// per-table max_sessions via userspaceDataplaneStatus(), and "unknown" when no
+// userspace status is available.
 package cli
 
 import (
@@ -52,19 +52,19 @@ func (d *noStatusCLIDP) IterateSessionsV6(func(dataplane.SessionKeyV6, dataplane
 // TestLocalFlowSessionSummaryDynamicMax asserts the local summary renders the
 // helper's dynamic max, not the retired hardcoded 10000000 (#5323).
 //
-// FAIL-ON-REVERT: restoring `Maximum-sessions: 10000000` makes the 786432
+// FAIL-ON-REVERT: restoring `Maximum-sessions: 10000000` makes the 234567
 // assertion go red.
 func TestLocalFlowSessionSummaryDynamicMax(t *testing.T) {
 	c := &CLI{
 		store: newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf")),
-		dp:    &summaryMaxCLIDP{Manager: dataplane.New(), maxSessions: 786432},
+		dp:    &summaryMaxCLIDP{Manager: dataplane.New(), maxSessions: 234567},
 	}
 	out := captureStdout(t, func() {
 		if err := c.showFlowSession([]string{"summary"}); err != nil {
 			t.Fatalf("showFlowSession summary: %v", err)
 		}
 	})
-	if !strings.Contains(out, "Maximum-sessions: 786432") {
+	if !strings.Contains(out, "Maximum-sessions: 234567") {
 		t.Fatalf("local summary missing dynamic max:\n%s", out)
 	}
 	if strings.Contains(out, "10000000") {

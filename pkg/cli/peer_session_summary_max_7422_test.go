@@ -29,9 +29,9 @@ func TestPeerSessionSummaryRendersThePeersOwnMax7422(t *testing.T) {
 	out := renderPeerSessionSummary(&pb.GetSessionSummaryResponse{
 		NodeId:      1,
 		ForwardOnly: 42,
-		MaxSessions: 786432,
+		MaxSessions: 234567,
 	})
-	if !strings.Contains(out, "Maximum-sessions: 786432") {
+	if !strings.Contains(out, "Maximum-sessions: 234567") {
 		t.Fatalf("peer summary does not render the PEER's reported capacity:\n%s", out)
 	}
 	if strings.Contains(out, "10000000") {

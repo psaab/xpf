@@ -1549,11 +1549,12 @@ func (d *Daemon) publishSessionSyncIfCurrent(gen uint64, ss *cluster.SessionSync
 	return true
 }
 
-// genGuardCapacityForRuntime resolves provisioned session capacity for sync
-// guard sizing (#9915 F-044): helper-backed runtimes report aggregate logical
-// sessions via cached status; anything else is a kernel/legacy backend whose
-// BPF tables are addressed to dataplane.MaxSessions (forward sessions = half).
-// Second return is false only when neither applies (nil or unknown status).
+// genGuardCapacityForRuntime resolves the replicated node session ceiling for
+// sync guard sizing (#9915 F-044): helper-backed runtimes report their
+// per-table logical capacity via cached status; anything else is a kernel/
+// legacy backend whose BPF tables are addressed to dataplane.MaxSessions
+// (forward sessions = half). Second return is false only when neither applies
+// (nil or unknown status).
 func genGuardCapacityForRuntime(rt dataplane.RuntimeDataPlane) (uint64, bool) {
 	if rt == nil {
 		return 0, false

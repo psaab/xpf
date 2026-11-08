@@ -82,17 +82,15 @@ impl SharedNatAmbiguityIndex {
     /// #16561: roster capacity, DECOUPLED from the alias cap above. The
     /// alias index fails closed at 16,384 live keys (#15104); the wire
     /// roster must stay exact for every population the shared session
-    /// map can hold, so it is sized to the shared-session ceiling: the
-    /// synced-import ENTRY cap is `2 * worker_count *
-    /// DEFAULT_MAX_SESSIONS` (131,072 per worker, see
-    /// `synced_import_cap_for`). The roster counts DISTINCT WIRE KEYS,
-    /// at most one per live forward session, so the population it must
-    /// cover is bounded by the number of live forwards. Sized here as a
-    /// generous static bound (16 workers x 131,072) that covers the
-    /// appliance ceiling without needing a runtime worker count in this
+    /// map can hold. Its ENTRY cap is `2 * REPLICATED_NODE_SESSION_CEILING`
+    /// (see `synced_import_cap_for`); the roster counts DISTINCT WIRE KEYS,
+    /// at most one per live forward, so the population it must cover is at
+    /// most one replicated node ceiling. The generous static bound remains
+    /// 16 times that ceiling, without needing a runtime worker count in this
     /// index; above it the roster fails closed from the LIVE size (see
     /// `wire_saturated`), never from a latch.
-    pub(in crate::afxdp) const MAX_WIRE_KEYS: usize = 16 * 131_072;
+    pub(in crate::afxdp) const MAX_WIRE_KEYS: usize =
+        16 * crate::session::REPLICATED_NODE_SESSION_CEILING;
     pub(in crate::afxdp) fn wire_key_cap(&self) -> usize {
         #[cfg(test)]
         {

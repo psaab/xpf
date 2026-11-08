@@ -280,7 +280,7 @@ pub enum SyncedImportOutcome {
     /// #10612: the entry names a zone absent from the current validated
     /// forwarding snapshot and is refused before shared publication.
     RejectedStaleZone,
-    /// #5674: the aggregate synced-import entry ceiling is full.
+    /// #5674/#18687: the twice-per-table synced-import entry ceiling is full.
     RejectedCapacity,
     /// #6600: the translated NAT tuple could not be reserved for this import.
     RejectedReserve,
@@ -556,50 +556,22 @@ impl crate::afxdp::ha::SessionDomain {
         }
     }
 
-    /// #5674: this appliance's aggregate synced-session ENTRY ceiling. The
-    /// LOGICAL ceiling is `worker_count * DEFAULT_MAX_SESSIONS` (each worker
-    /// table caps locally-created sessions at `DEFAULT_MAX_SESSIONS`), but the
-    /// shared `synced` map holds TWO entries per admitted forward logical
-    /// session: the forward key AND a synthesized reverse companion.
-    /// `synthesized_synced_reverse_entry` returns `Some` for EVERY non-reverse
-    /// import, and `upsert_synced_session` publishes both into `sessions.synced`
-    /// via `publish_shared_session`. So the ENTRY cap must be 2× the logical
-    /// ceiling. A symmetric HA pair holds up to `N = worker_count *
-    /// DEFAULT_MAX_SESSIONS` logical sessions, which arrive here as 2N entries
-    /// and EXACTLY fit this 2N cap — a legitimate full-peer failover import
-    /// always fits, and only a peer EXCEEDING its own logical ceiling (a
-    /// malicious/compromised peer) is rejected. Sizing the cap to the LOGICAL
-    /// ceiling (the pre-fix bug) while counting ENTRIES rejected ~half of a
-    /// legitimate symmetric-peer import above ~50% peer load — a 2× shortfall,
-    /// not the "±1 pair overshoot" the old comment claimed. Bounds the shared
-    /// `synced` map so a peer cannot drive this node past its aggregate session
-    /// ceiling via the uncapped sync-import fan-out. Zero when no workers are
-    /// registered (early boot / teardown) — the caller treats a zero ceiling as
-    /// "bound disabled" so a transient window never rejects legitimate imports.
-    /// Visible to `ha::tests` (#6819 §7) so the PRODUCTION arithmetic below can
-    /// be asserted directly. Both admission tests set
-    /// `synced_import_cap_override`, which returns from the `#[cfg(test)]`
-    /// branch BEFORE this function's production expression is ever evaluated —
-    /// a test-only seam shadowing the real formula. With only those tests,
-    /// deleting the trailing `.saturating_mul(2)` here leaves every cap
-    /// assertion green.
-    /// #7209: the cap over an EXPLICIT records snapshot.
+    /// #5674/#18687: cap the shared synced-session map in ENTRY units. Worker
+    /// tables are full replicas, so their count does not multiply the node
+    /// ceiling. `REPLICATED_NODE_SESSION_CEILING` is the one per-table logical
+    /// ceiling. Each imported forward publishes itself and its synthesized
+    /// reverse into the shared map, so the import ceiling is twice that
+    /// per-table value: enough for a full peer table at the receiver's 2x
+    /// meet point, but not a worker-count multiple of it.
     ///
-    /// Takes the MAP, not a count. `upsert_synced_session` must derive the cap
-    /// from the same snapshot it uses for the reservation gate and the fan-out
-    /// — once `sync_session` runs off the `ServerState` mutex, three
-    /// independent `records()` loads inside one import can straddle a teardown
-    /// and disagree: a cap sized for live workers, a gate that then sees none
-    /// and skips the reservation, a fan-out that finds some again.
+    /// A zero-worker snapshot disables the bound during early boot/teardown,
+    /// avoiding rejection while no worker can consume imports. The test seam
+    /// substitutes a small per-table ceiling but follows the production 2x
+    /// entry conversion.
     ///
-    /// The `.len()` lives HERE rather than at the call site deliberately. An
-    /// earlier revision took a `worker_count: usize`, which moved the
-    /// worker-count SOURCING into `upsert_synced_session` where no cap test
-    /// could see it — the three assertions in
-    /// `synced_import_cap_production_formula_is_twice_the_logical_ceiling`
-    /// register N workers and would have stayed green with the live path
-    /// reading anything at all. Keeping the map as the parameter keeps the
-    /// sourcing inside the one function those assertions drive.
+    /// #7209: calculate against the EXPLICIT records snapshot used for the
+    /// reservation gate and fan-out. Independent `records()` loads inside one
+    /// import could straddle teardown and disagree about whether workers exist.
     pub(in crate::afxdp) fn synced_import_cap_for(
         &self,
         records: &std::collections::BTreeMap<
@@ -608,24 +580,27 @@ impl crate::afxdp::ha::SessionDomain {
         >,
     ) -> usize {
         #[cfg(test)]
-        {
-            // #7209: the override is read through the SHARED cell, so a test
-            // that sets it on the `Coordinator` reaches this handle.
-            let override_cap = self
-                .synced_import_cap_override
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if override_cap != 0 {
-                // The override expresses a LOGICAL session ceiling; double it to
-                // the ENTRY cap (fwd + synthesized reverse per logical session),
-                // matching the production formula below so tests exercise the
-                // real arithmetic.
-                return override_cap.saturating_mul(2);
-            }
+        let override_ceiling = self
+            .synced_import_cap_override
+            .load(std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        let per_table_ceiling = if override_ceiling != 0 {
+            override_ceiling
+        } else {
+            crate::session::REPLICATED_NODE_SESSION_CEILING
+        };
+        #[cfg(not(test))]
+        let per_table_ceiling = crate::session::REPLICATED_NODE_SESSION_CEILING;
+
+        #[cfg(test)]
+        if records.is_empty() && override_ceiling == 0 {
+            return 0;
         }
-        records
-            .len()
-            .saturating_mul(crate::session::default_max_sessions())
-            .saturating_mul(2)
+        #[cfg(not(test))]
+        if records.is_empty() {
+            return 0;
+        }
+        per_table_ceiling.saturating_mul(2)
     }
 
     /// #6600: take this node's reservation on a peer-synced forward entry's
@@ -1440,23 +1415,16 @@ impl crate::afxdp::ha::SessionDomain {
         // Only acts when BOTH stored and incoming generations are non-zero;
         // local-origin entries (generation 0) and legacy peers retain the
         // existing unconditional-upsert behavior.
-        // #5674: aggregate synced-import admission bound. Locally-created
-        // sessions are capped per worker at `DEFAULT_MAX_SESSIONS`
-        // (`install_with_protocol_with_origin`), but peer-synced sessions were
-        // imported with NO cap and fanned out to every live worker command queue +
-        // table below, so a peer under session-table pressure — or a
-        // malicious/compromised peer — could drive this node past its own
-        // aggregate session ceiling and multiply that state across all workers
-        // (the availability/DoS root of #5674). Bound the SHARED synced map
-        // (the single fan-out choke point) at this appliance's OWN aggregate
-        // ENTRY ceiling, `2 * worker_count * DEFAULT_MAX_SESSIONS`
-        // (`synced_import_cap`). The 2× is load-bearing: each admitted forward
-        // logical session publishes TWO keys into `sessions.synced` — the
-        // forward key and a synthesized reverse companion — so K admitted
-        // forwards occupy 2K entries. With the entry cap at 2N (N = the logical
-        // ceiling), a NEW forward is rejected exactly when 2K >= 2N ⇔ K >= N:
-        // a full symmetric-peer set (N logical → 2N entries) EXACTLY fits and
-        // only a peer EXCEEDING its own logical ceiling is rejected.
+        // #5674/#18687: synced-import admission bound. Every worker table is a
+        // full replica and locally-created sessions are capped at
+        // `REPLICATED_NODE_SESSION_CEILING`; worker count does not multiply
+        // that node ceiling. Bound the SHARED synced map (the single fan-out
+        // choke point) at twice this per-table value in ENTRY units. Each
+        // admitted forward publishes TWO keys into `sessions.synced` — the
+        // forward key and synthesized reverse companion — so K imported
+        // forwards occupy 2K entries. The 2N entry cap (N = the one-table
+        // ceiling) admits a full peer table at the receiver's 2x meet point,
+        // and rejects a NEW forward once that stated ceiling is exceeded.
         //
         // #8015 CLOSED THE "+1 ORPHAN" CORNER THIS GATE USED TO DOCUMENT. The
         // gate keys on `!entry.metadata.is_reverse`, so a lone `is_reverse=1`

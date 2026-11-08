@@ -1120,10 +1120,11 @@ func (s *Server) GetSessionSummary(ctx context.Context, req *pb.GetSessionSummar
 		return nil, status.FromContextError(err).Err()
 	}
 
-	// max_sessions is the dataplane's dynamic session-table capacity (#5323):
-	// the live AF_XDP helper publishes worker_count x per-worker capacity. A
-	// dataplane with no userspace status surface leaves it 0 = unknown, so a
-	// consumer renders "unknown" rather than the old hardcoded 10000000.
+	// max_sessions is the dataplane's dynamic per-table capacity (#5323). The
+	// live AF_XDP helper reports the replicated node ceiling, not worker_count
+	// times the per-worker capacity. A dataplane with no userspace status
+	// surface leaves it 0 = unknown, so a consumer renders "unknown" rather
+	// than the old hardcoded 10000000.
 	if st, err := s.userspaceDataplaneStatus(); err == nil {
 		resp.MaxSessions = st.MaxSessions
 	}

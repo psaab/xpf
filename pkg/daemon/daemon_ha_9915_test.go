@@ -32,7 +32,7 @@ func TestEventStreamFallbackLoopWiresHelperCapacityIntoSyncGuards_9915(t *testin
 	d := &Daemon{cluster: clusterManagerPrimaryForRGs(0)}
 	ss := cluster.NewSessionSync(":0", ":0", nil)
 	d.sessionSync = ss
-	d.setDataplane(&capacityProbeDP9915{maxSessions: 786432})
+	d.setDataplane(&capacityProbeDP9915{maxSessions: 234567})
 	if got := ss.Stats().GenGuardSessionCap; got != 0 {
 		t.Fatalf("FIXTURE: wired capacity = %d, want 0 before any tick", got)
 	}
@@ -42,9 +42,9 @@ func TestEventStreamFallbackLoopWiresHelperCapacityIntoSyncGuards_9915(t *testin
 		d.eventStreamFallbackLoop(ctx, nil)
 	}()
 	dl := time.Now().Add(5 * time.Second)
-	for ss.Stats().GenGuardSessionCap != 786432 {
+	for ss.Stats().GenGuardSessionCap != 234567 {
 		if time.Now().After(dl) {
-			t.Fatalf("helper capacity was not wired after 5s (got %d, want 786432)", ss.Stats().GenGuardSessionCap)
+			t.Fatalf("helper capacity was not wired after 5s (got %d, want 234567)", ss.Stats().GenGuardSessionCap)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -66,8 +66,8 @@ func TestGenGuardCapacityForRuntime_9915(t *testing.T) {
 	if got, ok := genGuardCapacityForRuntime(nil); ok || got != 0 {
 		t.Fatalf("nil runtime = (%d, %v), want (0, false)", got, ok)
 	}
-	if got, ok := genGuardCapacityForRuntime(&capacityProbeDP9915{maxSessions: 786432}); !ok || got != 786432 {
-		t.Fatalf("helper runtime = (%d, %v), want (786432, true)", got, ok)
+	if got, ok := genGuardCapacityForRuntime(&capacityProbeDP9915{maxSessions: 234567}); !ok || got != 234567 {
+		t.Fatalf("helper runtime = (%d, %v), want (234567, true)", got, ok)
 	}
 	if got, ok := genGuardCapacityForRuntime(&capacityProbeDP9915{maxSessions: 0}); ok || got != 0 {
 		t.Fatalf("unknown helper = (%d, %v), want (0, false)", got, ok)

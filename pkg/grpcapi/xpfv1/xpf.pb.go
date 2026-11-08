@@ -4407,11 +4407,11 @@ type GetSessionSummaryResponse struct {
 	// peer_error carries the human-readable peer-fetch failure detail; empty
 	// unless peer_status == UNREACHABLE (#5320).
 	PeerError string `protobuf:"bytes,11,opt,name=peer_error,json=peerError,proto3" json:"peer_error,omitempty"`
-	// max_sessions is the dataplane's dynamic session-table capacity: the live
-	// AF_XDP helper publishes worker_count x per-worker capacity. 0 = unknown
-	// (no userspace status attached), so a consumer must render "unknown" rather
-	// than a fabricated authoritative bound (#5323, replaces the hardcoded
-	// 10000000 the CLI used to print).
+	// max_sessions is the dataplane's dynamic per-table session capacity: the
+	// AF_XDP helper reports the replicated node ceiling, not worker_count x
+	// per-worker capacity. 0 = unknown (no userspace status attached), so a
+	// consumer must render "unknown" rather than a fabricated authoritative
+	// bound (#5323/#18687, replaces the hardcoded 10000000 the CLI used to print).
 	MaxSessions   uint64 `protobuf:"varint,12,opt,name=max_sessions,json=maxSessions,proto3" json:"max_sessions,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

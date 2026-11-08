@@ -45,7 +45,7 @@ func (d *statusSummaryDP) Status() (dpuserspace.ProcessStatus, error) {
 // sessionSummaryHandler leaves MaxSessions 0.
 func TestRESTSessionSummaryMaxSessions(t *testing.T) {
 	s := &Server{
-		dp:       &statusSummaryDP{Manager: dataplane.New(), maxSessions: 786432},
+		dp:       &statusSummaryDP{Manager: dataplane.New(), maxSessions: 234567},
 		eventBuf: logging.NewEventBuffer(8),
 	}
 	rr := httptest.NewRecorder()
@@ -54,8 +54,8 @@ func TestRESTSessionSummaryMaxSessions(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%s", rr.Code, rr.Body.String())
 	}
 	sum := decodeSummary(t, rr.Body.Bytes())
-	if sum.MaxSessions != 786432 {
-		t.Fatalf("max_sessions = %d, want 786432 (dynamic helper capacity)", sum.MaxSessions)
+	if sum.MaxSessions != 234567 {
+		t.Fatalf("max_sessions = %d, want 234567 (dynamic per-table helper capacity)", sum.MaxSessions)
 	}
 	// Standalone summary makes no peer claim.
 	if sum.PeerStatus != "not-applicable" {

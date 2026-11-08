@@ -2126,7 +2126,7 @@ installs — they cannot fail. The future cap arbitration for the sync
 family (row I11) now covers `UpsertLocal` automatically. Decision
 record: `docs/research/1870-local-tunnel-pair/plan.md`.
 
-### Sync-family aggregate ceiling at the coordinator (#5674)
+### Sync-family replicated node ceiling at the coordinator (#5674/#18687)
 
 `upsert_synced_with_origin` stays uncapped (the infallibility contract
 above), but the sync family is no longer *unbounded*: the row-I11 cap
@@ -2136,12 +2136,15 @@ entry point (`Coordinator::upsert_synced_session`,
 published to the shared `synced` map and fanned out to EVERY worker
 command queue+table with no cap, so a peer under session-table pressure
 — or a malicious/compromised peer — could drive this node past its own
-aggregate session ceiling and multiply that state across all workers (an
-availability/DoS the per-worker `install_with_protocol_with_origin` cap
-is meant to prevent). `upsert_synced_session` now bounds the shared
-`synced` map (the single fan-out choke point) at this appliance's OWN
-aggregate **ENTRY** ceiling — `2 * worker_count * DEFAULT_MAX_SESSIONS`
-(`synced_import_cap()`) — and **drop-newest**-rejects a NEW over-ceiling
+session ceiling and multiply that state across every worker (an
+availability/DoS the per-table `install_with_protocol_with_origin` cap
+is meant to prevent). Worker tables are full replicas, not disjoint
+shards: each local session is replicated to every worker, and each table's
+install cap counts those replicas. Therefore the one-table
+`REPLICATED_NODE_SESSION_CEILING` is the node's session ceiling; worker
+count does not multiply it. `upsert_synced_session` bounds the shared
+`synced` map (the single fan-out choke point) at twice that per-table
+ceiling in ENTRY units and **drop-newest**-rejects a NEW over-ceiling
 FORWARD key: it bumps `SessionManager::import_cap_drops`
 (`Coordinator::synced_import_cap_drops_total()`, Prometheus
 `xpf_userspace_synced_import_cap_drops_total`) and returns BEFORE the
@@ -2154,16 +2157,13 @@ Each admitted **forward** logical session publishes TWO keys into the
 (`synthesized_synced_reverse_entry` returns `Some` for every non-reverse
 import; `upsert_synced_session` publishes both via
 `publish_shared_session`). So `K` admitted forwards occupy `2K` entries.
-With the entry cap at `2N` (`N` = the appliance's logical ceiling), a new
+With the entry cap at `2N` (`N` = the one-table logical ceiling), a new
 forward is rejected exactly when `2K >= 2N ⇔ K >= N`: a full
 symmetric-peer set (`N` logical sessions → `2N` entries) EXACTLY fits and
 only a peer EXCEEDING its OWN logical ceiling is rejected. Sizing the cap
-to the LOGICAL ceiling `N` while counting ENTRIES (the pre-#6172-review
-bug) rejected ~half of a legitimate full-peer import above ~50% peer load
-— a 2× shortfall THROUGHOUT normal operation, not the "±1 session-pair
-overshoot on the last admit" the earlier framing claimed; on failover the
-under-synced flows had no state and TCP broke (the session-miss guard
-drops the non-SYN first packet).
+to the logical ceiling `N` while counting entries was the #5674 dual-entry
+bug; multiplying this bound by worker count was the #18687 replicated-table
+bug.
 
 The gate keys only on FORWARD new keys (`!entry.metadata.is_reverse`): a
 synthesized reverse always rides with its forward (a rejected forward

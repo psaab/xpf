@@ -1351,10 +1351,9 @@ does not hold.
 The helper can refuse an import for three SEMANTIC reasons, none of which are
 faults:
 
-| refusal | reason | issue |
 |---|---|---|
 | `stale-generation` | the stored entry is NEWER than the incoming one | #2170 |
-| `capacity` | the aggregate synced-import entry ceiling is full | #5674 |
+| `capacity` | the shared-map entry ceiling (2x one replicated node table) is full | #5674/#18687 |
 | `reserve` | the translated NAT tuple could not be reserved for this import | #6600 |
 
 Before #6785 all three returned `ok = true`, so the daemon recorded a success

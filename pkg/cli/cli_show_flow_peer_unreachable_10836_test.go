@@ -31,7 +31,7 @@ func TestFlowSessionPeerRPCFailureIsVisible10836(t *testing.T) {
 	}
 	c := &CLI{
 		store:            newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf")),
-		dp:               &summaryMaxCLIDP{Manager: dataplane.New(), maxSessions: 786432},
+		dp:               &summaryMaxCLIDP{Manager: dataplane.New(), maxSessions: 234567},
 		cluster:          cluster.NewManager(0, 1),
 		fabricPeerAddrFn: func() []string { return []string{"127.0.0.1"} },
 		fabricPeerPort:   port,
@@ -45,7 +45,7 @@ func TestFlowSessionPeerRPCFailureIsVisible10836(t *testing.T) {
 	for _, want := range []string{
 		"node0 (LOCAL-ONLY):",
 		"node1: unreachable (fetch peer session summary:",
-		"Maximum-sessions: 786432",
+		"Maximum-sessions: 234567",
 	} {
 		if !strings.Contains(summary, want) {
 			t.Errorf("summary missing %q:\n%s", want, summary)

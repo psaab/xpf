@@ -60,14 +60,15 @@ func TestFirewallValidationHarnessDocGuard(t *testing.T) {
 		t.Fatalf("invalid maxSessions int: %v", err)
 	}
 
-	// Assert doc uses the constant derived directly from the source code
-	docDerivedSessionStr := "DEFAULT_MAX_SESSIONS " + formatIntWithCommas(maxSessionsInt)
-	if !strings.Contains(doc, docDerivedSessionStr) && !strings.Contains(doc, match[1]) {
-		t.Errorf("doc does not contain derived session capacity %q or %s", docDerivedSessionStr, match[1])
+	// Assert the doc names the one replicated table's ceiling derived from
+	// DEFAULT_MAX_SESSIONS and does not restate the old six-worker sum.
+	docDerivedSessionStr := "logical session capacity is " + formatIntWithCommas(maxSessionsInt)
+	if !strings.Contains(doc, docDerivedSessionStr) {
+		t.Errorf("doc does not contain derived per-table session capacity %q", docDerivedSessionStr)
 	}
 	sixWorkersDerived := formatIntWithCommas(6 * maxSessionsInt)
-	if !strings.Contains(doc, sixWorkersDerived) {
-		t.Errorf("doc does not contain derived 6-worker ceiling %q", sixWorkersDerived)
+	if strings.Contains(doc, sixWorkersDerived) {
+		t.Errorf("doc still states the old six-worker multiplied ceiling %q", sixWorkersDerived)
 	}
 
 	// 3. Bind claim: Buffer model field UmemInflightFrames exists in protocol_binding.go

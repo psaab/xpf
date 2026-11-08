@@ -425,9 +425,9 @@ func printSessionSummaryBlock(resp *pb.GetSessionSummaryResponse) {
 	fmt.Printf("  Pending sessions: unknown\n")
 	fmt.Printf("  Invalidated sessions: unknown\n")
 	fmt.Printf("  Sessions in other states: unknown\n")
-	// #5323: render the dataplane's dynamic max (worker_count x per-worker
-	// capacity) the live helper publishes, not the old hardcoded 10000000. A
-	// dataplane with no userspace status attached reports 0 -> "unknown"
+	// #5323 + #18687: render the dynamic per-table node ceiling from live
+	// helper status, not the old hardcoded 10000000. Replicated worker tables
+	// do not multiply that ceiling. Without userspace status, 0 means unknown
 	// (render the truth rather than a fabricated authoritative bound).
 	if max := resp.GetMaxSessions(); max > 0 {
 		fmt.Printf("Maximum-sessions: %d\n", max)

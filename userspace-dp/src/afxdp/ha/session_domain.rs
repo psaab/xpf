@@ -1965,9 +1965,10 @@ mod session_domain_tests_7209 {
     ///
     /// I expected them to pass silently under that mutation and wrote this cell
     /// to be the only thing that caught it. MEASURED, THEY DO NOT: wiring the
-    /// handle to a fresh cell reds four of the five, because an override of 0
-    /// means "bound disabled", so the imports they expect to be REJECTED are
-    /// accepted. The tests are more robust than the argument for this cell was.
+    /// handle to a fresh cell leaves the override at 0, so the imports use the
+    /// production ceiling instead of the tiny test ceiling and the boundary
+    /// expectations fail. The tests are more robust than the argument for this
+    /// cell was.
     ///
     /// It earns its place on DIAGNOSIS rather than detection. Those four fail
     /// with "an import that should have been rejected was accepted", which
@@ -1986,11 +1987,10 @@ mod session_domain_tests_7209 {
         assert_eq!(
             coordinator.session_domain().synced_import_cap_for(&empty),
             6,
-            "the override is a LOGICAL ceiling and the cap is in ENTRIES (a \
-             forward plus its synthesized reverse), so 3 must arrive as 6. \
-             Reading 0 here means the handle copied the override instead of \
-             sharing it, and the six cells that set it are silently measuring \
-             the production formula"
+            "the override is a per-table logical ceiling and the cap is in \
+             ENTRIES (a forward plus its synthesized reverse), so 3 must \
+             arrive as 6. A different result means the handle failed to observe \
+             the shared override and used the production ceiling instead."
         );
     }
 
