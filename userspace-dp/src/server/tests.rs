@@ -9477,6 +9477,7 @@ fn sync_session_concurrent_imports_share_capacity_across_sockets_18687() {
         .afxdp
         .synced_import_cap_override
         .store(PER_TABLE_CEILING, std::sync::atomic::Ordering::Relaxed);
+    let domain = state.lock().expect("state").afxdp.session_domain().clone();
 
     // Two dispatched forward/reverse pairs leave exactly the final pair's
     // two slots in the 3N shared-map budget.
