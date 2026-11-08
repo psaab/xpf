@@ -607,10 +607,10 @@ assert m["stream_zero_intervals_total"] == 1, m
 assert m["stream_zero_intervals_outside_events_total"] == 0, m
 PY
 ok "producer exclusion is decided by the full-length interval bounds, not a shortened stream row"
-# #19021: aggregate collapse uses the same full [T, T+3] window test as the
-# per-stream outside counter. The crash fixture mirrors wave-3: a 16 Gbit/s
-# peak at interval 2, then all 8 streams read zero at 62-63 inside the crash
-# window. A zero outside that window remains a collapse.
+# #19021: aggregate collapse shares the per-stream outside logic's full-window
+# decision. The wave-3 fixture mirrors interval 62-63 after an early peak and
+# verifies a crash/planned-move window zero is excluded. An outside zero after
+# an excluded-window peak must still fail even when higher recovery follows.
 aggregate_window_dir="${fixture_dir}/aggregate-window"
 mkdir -p "$aggregate_window_dir"
 python3 - "$aggregate_window_dir" <<'PY'
@@ -620,10 +620,15 @@ import sys
 
 out = pathlib.Path(sys.argv[1])
 
-def write_fixture(name, zero_interval):
+def write_fixture(name, zero_interval=None, rates=None):
     intervals = []
-    for second in range(70):
-        total = 0 if second == zero_interval else (16e9 if second == 2 else 8e9)
+    interval_count = len(rates) if rates is not None else 70
+    for second in range(interval_count):
+        total = (
+            rates[second] * 1e9
+            if rates is not None
+            else (0 if second == zero_interval else (16e9 if second == 2 else 8e9))
+        )
         rate = total / 8
         streams = [
             {
@@ -649,8 +654,8 @@ def write_fixture(name, zero_interval):
             {
                 "intervals": intervals,
                 "end": {
-                    "sum_sent": {"bits_per_second": 8e9, "end": 70, "retransmits": 0},
-                    "sum_received": {"bits_per_second": 8e9, "end": 70},
+                    "sum_sent": {"bits_per_second": 8e9, "end": interval_count, "retransmits": 0},
+                    "sum_received": {"bits_per_second": 8e9, "end": interval_count},
                 },
             }
         ),
@@ -659,6 +664,8 @@ def write_fixture(name, zero_interval):
 
 write_fixture("crash-window-zero.json", 62)
 write_fixture("outside-window-zero.json", 66)
+write_fixture("excluded-window-peak-outside-zero.json", rates=[8, 32, 0, 0, 0, 16, 16])
+write_fixture("excluded-window-peak-control.json", rates=[8, 32, 0, 0, 16, 16, 16])
 PY
 collapse_metrics() { # <fixture> [metrics producer args...]
 	python3 "${SCRIPT_DIR}/../../scripts/iperf-json-metrics.py" "$aggregate_window_dir/$1" "${@:2}"
@@ -667,13 +674,16 @@ crash_window_metrics=$(collapse_metrics crash-window-zero.json --event-sec 61.44
 planned_window_metrics=$(collapse_metrics crash-window-zero.json --planned-move move=61.442)
 outside_crash_metrics=$(collapse_metrics outside-window-zero.json --event-sec 61.442)
 outside_planned_metrics=$(collapse_metrics outside-window-zero.json --planned-move move=61.442)
+excluded_peak_outside_metrics=$(collapse_metrics "excluded-window-peak-outside-zero.json" --event-sec 1)
+excluded_peak_control_metrics=$(collapse_metrics "excluded-window-peak-control.json" --event-sec 1)
 python3 - "$crash_window_metrics" "$planned_window_metrics" \
-	"$outside_crash_metrics" "$outside_planned_metrics" <<'PY' \
-	|| bad "#19021: aggregate collapse must exclude crash/planned-move windows only"
+	"$outside_crash_metrics" "$outside_planned_metrics" \
+	"$excluded_peak_outside_metrics" "$excluded_peak_control_metrics" <<'PY' \
+	|| bad "#19021: aggregate collapse must exclude only window intervals without shifting its peak"
 import json
 import sys
 
-crash, planned, outside_crash, outside_planned = (
+crash, planned, outside_crash, outside_planned, peak_outside, peak_control = (
     json.loads(value) for value in sys.argv[1:]
 )
 for name, metrics in (("crash", crash), ("planned move", planned)):
@@ -690,8 +700,18 @@ for name, metrics in (("crash", outside_crash), ("planned move", outside_planned
     assert metrics["collapse_reason"] == "1 zero interval(s) after peak", metrics
 assert outside_crash["stream_zero_intervals_outside_events_total"] == 8, outside_crash
 assert outside_planned["planned_moves"][0]["verdict"] == "PASS", outside_planned
+assert peak_outside["peak_gbps"] == 32, peak_outside
+assert peak_outside["peak_interval_index"] == 1, peak_outside
+assert peak_outside["zero_intervals_after_peak"] == 1, peak_outside
+assert peak_outside["collapse_detected"], peak_outside
+assert peak_outside["collapse_reason"] == "1 zero interval(s) after peak", peak_outside
+assert peak_outside["tail_gbps"] == [16.0, 16.0], peak_outside
+assert peak_control["peak_gbps"] == 32, peak_control
+assert peak_control["peak_interval_index"] == 1, peak_control
+assert peak_control["zero_intervals_after_peak"] == 0, peak_control
+assert not peak_control["collapse_detected"], peak_control
 PY
-ok "#19021: crash/planned-move-window zero does not collapse; post-window zero still does"
+ok "#19021: window zeros are excluded, raw peaks stay fixed, and outside collapse still fails"
 
 # #18692/#18708: a stream carried in the five seconds before T is judged by
 # the crash cell, so its T+3..T+5 zeros can be excused when it resumes at T+5.

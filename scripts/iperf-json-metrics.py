@@ -454,8 +454,9 @@ def summarize(path, args):
         if duration >= args.min_full_interval_sec:
             full_intervals.append(bps / 1e9)
             # #19021: share the per-stream outside logic's full-window
-            # decision. Transition intervals are absent from the aggregate
-            # collapse series, but remain in interval_gbps and zero totals.
+            # decision for aggregate tail and post-peak scans. The peak stays
+            # on the raw series, as before, so a later recovery cannot move it
+            # past an outside-window zero.
             full_interval_excluded.append(fully_excluded(start, end_s))
     if client_error or not end:
         # An interrupted client's stub has zero sum_received and a sum_sent
@@ -490,29 +491,32 @@ def summarize(path, args):
         summary["ok"] = True
         return summary
 
-    collapse_intervals = [
-        (index, value)
-        for index, (value, excluded) in enumerate(zip(full_intervals, full_interval_excluded))
+    peak_gbps = max(full_intervals)
+    peak_index = full_intervals.index(peak_gbps)
+    tail_intervals = [
+        value
+        for value, excluded in zip(full_intervals, full_interval_excluded)
         if not excluded
     ]
-    if not collapse_intervals:
+    if not tail_intervals:
         summary["ok"] = True
         return summary
-
-    collapse_values = [value for _, value in collapse_intervals]
-    peak_gbps = max(collapse_values)
-    peak_position = collapse_values.index(peak_gbps)
-    peak_index = collapse_intervals[peak_position][0]
     tail = (
-        collapse_values[-args.tail_window:]
-        if len(collapse_values) >= args.tail_window
-        else list(collapse_values)
+        tail_intervals[-args.tail_window:]
+        if len(tail_intervals) >= args.tail_window
+        else list(tail_intervals)
     )
     tail_median = statistics.median(tail)
     tail_min = min(tail)
-    after_peak = collapse_values[peak_position + 1 :]
-    zero_after_peak = sum(1 for value in after_peak if value <= args.zero_gbps)
-    stalled_after_peak = sum(1 for value in after_peak if value <= args.stall_gbps)
+    after_peak = full_intervals[peak_index + 1 :]
+    after_peak_excluded = full_interval_excluded[peak_index + 1 :]
+    after_peak_outside = [
+        value
+        for value, excluded in zip(after_peak, after_peak_excluded)
+        if not excluded
+    ]
+    zero_after_peak = sum(1 for value in after_peak_outside if value <= args.zero_gbps)
+    stalled_after_peak = sum(1 for value in after_peak_outside if value <= args.stall_gbps)
     tail_peak_ratio = tail_median / peak_gbps if peak_gbps > 0 else 0.0
 
     summary.update(
@@ -533,7 +537,7 @@ def summarize(path, args):
         reasons = []
         if zero_after_peak > 0:
             reasons.append(f"{zero_after_peak} zero interval(s) after peak")
-        if len(after_peak) >= 2 and stalled_after_peak >= 2:
+        if len(after_peak_outside) >= 2 and stalled_after_peak >= 2:
             reasons.append(f"{stalled_after_peak} stalled interval(s) after peak")
         if tail_peak_ratio < args.min_tail_ratio:
             reasons.append(
@@ -562,7 +566,8 @@ def main():
         default=[],
         help="transition instant (seconds from iperf start); may repeat. "
         "Full intervals wholly inside [T, T+--event-window-sec] are excluded "
-        "from stream_zero_intervals_outside_events_total and aggregate collapse checks.",
+        "from stream_zero_intervals_outside_events_total and aggregate collapse "
+        "tail/post-peak scans; the peak remains on the raw series.",
     )
     parser.add_argument(
         "--planned-move",
@@ -572,7 +577,7 @@ def main():
         help="a move the harness itself makes, anchored at each instant given "
         "(the request and the observed landing); may repeat. Its zero intervals "
         "are scored PASS/COST/FAIL in planned_moves, not excused from that score; "
-        "the windows are excluded from aggregate collapse checks.",
+        "the windows are excluded from aggregate tail/post-peak scans, not peak selection.",
     )
     parser.add_argument(
         "--planned-stall-gbps",
