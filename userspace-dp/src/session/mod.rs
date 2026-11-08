@@ -4320,6 +4320,16 @@ impl SessionTable {
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
+    /// Capture the identity used to fence a deferred ct-slice shared-evidence
+    /// emission against a same-key replacement or NAT-decision rewrite.
+    #[inline]
+    pub(crate) fn ct_slice_emit_identity_for(
+        &self,
+        key: &SessionKey,
+    ) -> Option<(u64, NatDecision)> {
+        self.entry_by_key(key)
+            .map(|entry| (entry.session_id, entry.decision.nat))
+    }
 
     /// Read install-time fields together after a successful install.
     /// Callers that need the conntrack mirror and replication payload should
@@ -5941,6 +5951,7 @@ impl SessionTable {
     pub(crate) fn emit_ct_slice_state_update(
         &mut self,
         forward_key: &SessionKey,
+        expected_identity: (u64, NatDecision),
         shared_stage_wire: u8,
         shared_rev_packets: u64,
         shared_fwd_packets: u64,
@@ -5964,7 +5975,10 @@ impl SessionTable {
         let Some(forward) = self.entry_by_key(forward_key) else {
             return false;
         };
-        if forward.metadata.is_reverse || forward.closing {
+        if forward.metadata.is_reverse
+            || forward.closing
+            || (forward.session_id, forward.decision.nat) != expected_identity
+        {
             return false;
         }
         // Rate-limit: once per stage transition per node. Re-arm on

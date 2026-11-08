@@ -1686,10 +1686,13 @@ fn ct_slice_emit_carries_established_stage_and_rev_counts_16217() {
         (table, forward)
     };
     table.drain_deltas(64);
+    let identity = table
+        .ct_slice_emit_identity_for(&forward)
+        .expect("fixture has a live forward row");
     // First slice after the restamp transition: exactly one Update,
     // stamped Established, carrying live counters.
     assert!(
-        table.emit_ct_slice_state_update(&forward, established, 103_505, 1_953_288),
+        table.emit_ct_slice_state_update(&forward, identity, established, 103_505, 1_953_288),
         "#16217 ct-emit: stage transition must emit"
     );
     let updates: Vec<_> = table
@@ -1705,7 +1708,7 @@ fn ct_slice_emit_carries_established_stage_and_rev_counts_16217() {
     assert_eq!(updates[0].key, forward, "#16217 ct-emit: Update keyed on the forward row");
     // Second slice, same shared state: rate-limited silence.
     assert!(
-        !table.emit_ct_slice_state_update(&forward, established, 103_505, 1_953_288),
+        !table.emit_ct_slice_state_update(&forward, identity, established, 103_505, 1_953_288),
         "#16217 ct-emit: steady-state slice must stay silent (once per transition)"
     );
     assert!(
@@ -1757,29 +1760,41 @@ fn ct_slice_emit_counts_first_and_fail_closed_arms_16217() {
 
     // Counts-first (pending + rev>0 + fwd>0): emits once, then silent.
     let (mut t, f) = mk(SessionOrigin::ForwardFlow, pending);
-    assert!(t.emit_ct_slice_state_update(&f, pending, 7, 12), "counts-first must emit");
+    let identity = t
+        .ct_slice_emit_identity_for(&f)
+        .expect("fixture has a live forward row");
+    assert!(t.emit_ct_slice_state_update(&f, identity, pending, 7, 12), "counts-first must emit");
     let ups: Vec<_> = t.drain_deltas(64).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
     assert_eq!(ups.len(), 1, "counts-first: exactly one Update");
-    assert!(!t.emit_ct_slice_state_update(&f, pending, 7, 12), "counts-first: second slice silent");
+    assert!(!t.emit_ct_slice_state_update(&f, identity, pending, 7, 12), "counts-first: second slice silent");
     // Later stage transition still emits (counts-first does not burn the stage arm).
-    assert!(t.emit_ct_slice_state_update(&f, established, 7, 12), "stage transition after counts-first must emit");
+    assert!(t.emit_ct_slice_state_update(&f, identity, established, 7, 12), "stage transition after counts-first must emit");
 
     // Zero counts at Established stage: no evidence, silent.
     let (mut t, f) = mk(SessionOrigin::ForwardFlow, pending);
-    assert!(!t.emit_ct_slice_state_update(&f, established, 0, 12), "rev=0 must not emit");
+    let identity = t
+        .ct_slice_emit_identity_for(&f)
+        .expect("fixture has a live forward row");
+    assert!(!t.emit_ct_slice_state_update(&f, identity, established, 0, 12), "rev=0 must not emit");
 
     // Opening (unanswered SYN) with counts: never laundered.
     let (mut t, f) = mk(SessionOrigin::ForwardFlow, opening);
-    assert!(!t.emit_ct_slice_state_update(&f, opening, 7, 12), "Opening row must not emit");
+    let identity = t
+        .ct_slice_emit_identity_for(&f)
+        .expect("fixture has a live forward row");
+    assert!(!t.emit_ct_slice_state_update(&f, identity, opening, 7, 12), "Opening row must not emit");
 
     // Pure peer replica, counts-first (stage still pending): silent
     // (fw1 must not echo fw0's evidence back).
     let (mut t, f) = mk(SessionOrigin::SyncImport, pending);
-    assert!(!t.emit_ct_slice_state_update(&f, pending, 7, 12), "SyncImport counts-first must stay silent");
+    let identity = t
+        .ct_slice_emit_identity_for(&f)
+        .expect("fixture has a live forward row");
+    assert!(!t.emit_ct_slice_state_update(&f, identity, pending, 7, 12), "SyncImport counts-first must stay silent");
     assert!(t.drain_deltas(64).is_empty(), "SyncImport counts-first must queue nothing");
     // Same replica at the Established stage transition: the
     // stage-advancement carve-out emits (fw0 owns the row).
-    assert!(t.emit_ct_slice_state_update(&f, established, 7, 12), "SyncImport stage-advance must emit");
+    assert!(t.emit_ct_slice_state_update(&f, identity, established, 7, 12), "SyncImport stage-advance must emit");
     let ups: Vec<_> = t.drain_deltas(64).into_iter().filter(|d| d.kind == SessionDeltaKind::Update).collect();
     assert_eq!(ups.len(), 1);
     assert_eq!(ups[0].tcp_handshake_state, established, "carve-out Update must carry wire=4");

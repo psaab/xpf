@@ -122,13 +122,6 @@ fn run_slice_18655(
     );
 }
 
-fn shared_rows(
-    shared: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    wire_map: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-) -> u64 {
-    (crate::afxdp::shared_ops::lock_shared_recover(shared).len()
-        + crate::afxdp::shared_ops::lock_shared_recover(wire_map).len()) as u64
-}
 
 #[test]
 fn ct_slice_reads_shared_stage_in_one_bounded_chunk_18662() {
@@ -598,9 +591,201 @@ fn ct_slice_withholds_partial_alias_folds_until_resumed_pass_completes_18662() {
         .into_iter()
         .filter(|delta| delta.kind == SessionDeltaKind::Update)
         .collect();
+    // Same-incarnation control: the completed paced fold still emits once.
     assert_eq!(updates.len(), 1, "the completed fold emits exactly one Update");
     assert_eq!(updates[0].key, forward);
     assert_eq!(updates[0].tcp_handshake_state, established);
+}
+#[test]
+fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
+    const ALIASES: usize = 8_192;
+    let mut sessions = crate::session::SessionTable::new();
+    let shared: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+        Arc::new(Mutex::new(FastMap::default()));
+    let nat_map: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+        Arc::new(Mutex::new(FastMap::default()));
+    let wire_map: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
+        Arc::new(Mutex::new(FastMap::default()));
+    let indexes = SharedSessionOwnerRgIndexes::default();
+    let forward = fx::key(
+        fx::v4(10, 0, 61, 106),
+        32_002,
+        fx::v4(172, 16, 80, 200),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let nat = fx::snat(Some(30_000 + (ALIASES - 1) as u16));
+    for i in 0..ALIASES {
+        let alias_nat = fx::snat(Some(30_000 + i as u16));
+        let shared_row = fx::row(
+            &forward,
+            alias_nat,
+            TcpHandshakeState::HandshakePending.to_wire(),
+            10 + i as u64,
+            20 + i as u64,
+            false,
+            30_000 + i as u64,
+        );
+        crate::afxdp::shared_ops::publish_shared_session(
+            &shared,
+            &nat_map,
+            &wire_map,
+            &indexes,
+            &shared_row,
+        );
+    }
+
+    let established = TcpHandshakeState::Established.to_wire();
+    let old_local = fx::row(&forward, nat, established, 1, 1, false, 40_001);
+    assert!(sessions.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: old_local.decision,
+            metadata: old_local.metadata.clone(),
+            source_nat_static: None,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: 1_000_000_000,
+            protocol: crate::ip_proto::PROTO_TCP,
+            tcp_flags: 0,
+            session_id: old_local.session_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: established,
+            persistent_lease_hold: None,
+            fwd_packets: 1,
+            rev_packets: 1,
+        },
+        false,
+    ));
+    let old_id = sessions.session_id_for(&forward);
+    assert_ne!(old_id, 0, "fixture: old incarnation has an ID");
+    let _ = sessions.drain_deltas(16);
+
+    let mut clocks = (0usize, 0u64, 0u64, 0u64, 0usize);
+    let mut pending = None;
+    let mut now = 30_000_000_000u64;
+    run_slice_18655(
+        &mut sessions,
+        &shared,
+        &wire_map,
+        &indexes,
+        &mut clocks,
+        &mut pending,
+        now,
+    );
+    assert!(pending.is_some(), "the alias fold must span paced slices");
+    assert!(
+        sessions.drain_deltas(16).is_empty(),
+        "an incomplete traversal emits no partial Update"
+    );
+
+    sessions.delete(&forward);
+    let pending_replacement = TcpHandshakeState::HandshakePending.to_wire();
+    let replacement = fx::row(&forward, nat, pending_replacement, 1, 0, false, 50_001);
+    assert!(sessions.upsert_synced_with_origin(
+        SessionInstall {
+            key: forward.clone(),
+            decision: replacement.decision,
+            metadata: replacement.metadata.clone(),
+            source_nat_static: None,
+            origin: SessionOrigin::WorkerLocalImport,
+            now_ns: 2_000_000_000,
+            protocol: crate::ip_proto::PROTO_TCP,
+            tcp_flags: 0,
+            session_id: replacement.session_id,
+            tcp_close_class: 0,
+            tcp_handshake_state: pending_replacement,
+            persistent_lease_hold: None,
+            fwd_packets: 1,
+            rev_packets: 0,
+        },
+        false,
+    ));
+    assert_ne!(
+        sessions.session_id_for(&forward),
+        old_id,
+        "fixture: the same key now names a different incarnation"
+    );
+    let _ = sessions.drain_deltas(16);
+
+    let mut invocations = 1;
+    while pending.is_some() {
+        now += 100_000_000;
+        run_slice_18655(
+            &mut sessions,
+            &shared,
+            &wire_map,
+            &indexes,
+            &mut clocks,
+            &mut pending,
+            now,
+        );
+        invocations += 1;
+        assert!(invocations < 8, "the old alias traversal must complete");
+    }
+    let updates: Vec<_> = sessions
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|delta| delta.kind == SessionDeltaKind::Update)
+        .collect();
+    assert!(
+        updates.is_empty(),
+        "old Established evidence must not emit an Update for the replacement incarnation"
+    );
+    crate::afxdp::shared_ops::remove_shared_session(
+        &shared,
+        &nat_map,
+        &wire_map,
+        &indexes,
+        &forward,
+    );
+    let replacement_shared = fx::row(&forward, nat, established, 9, 7, false, replacement.session_id);
+    crate::afxdp::shared_ops::publish_shared_session(
+        &shared,
+        &nat_map,
+        &wire_map,
+        &indexes,
+        &replacement_shared,
+    );
+
+    // The next cycle evaluates the replacement against its own shared row;
+    // it emits only after B's current incarnation supplies evidence.
+    now = 40_000_000_000;
+    run_slice_18655(
+        &mut sessions,
+        &shared,
+        &wire_map,
+        &indexes,
+        &mut clocks,
+        &mut pending,
+        now,
+    );
+    let mut next_cycle_invocations = 1;
+    while pending.is_some() {
+        now += 100_000_000;
+        run_slice_18655(
+            &mut sessions,
+            &shared,
+            &wire_map,
+            &indexes,
+            &mut clocks,
+            &mut pending,
+            now,
+        );
+        next_cycle_invocations += 1;
+        assert!(next_cycle_invocations < 8, "replacement evidence traversal must finish");
+    }
+    let replacement_updates: Vec<_> = sessions
+        .drain_deltas(16)
+        .into_iter()
+        .filter(|delta| delta.kind == SessionDeltaKind::Update)
+        .collect();
+    assert_eq!(
+        replacement_updates.len(),
+        1,
+        "the next cycle evaluates B independently and emits its current evidence"
+    );
+    assert_eq!(replacement_updates[0].session_id, replacement.session_id);
+    assert_eq!(replacement_updates[0].tcp_handshake_state, established);
 }
 
 /// A worker row replaced in a slab slot already passed by this cycle is

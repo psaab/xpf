@@ -182,15 +182,27 @@ impl CtSlicePairSet {
 pub(super) struct PendingStageCountsEmission {
     next_cursor: usize,
     traversal: crate::afxdp::shared_ops::StageCountsTraversal,
+    identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
 }
 
 fn emit_completed_stage_counts(
     sessions: &mut crate::session::SessionTable,
     traversal: crate::afxdp::shared_ops::StageCountsTraversal,
+    identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
 ) {
     let (emit_keys, rows) = traversal.finish();
-    for ((key, _nat), (stage, fwd, rev)) in emit_keys.iter().zip(rows) {
-        sessions.emit_ct_slice_state_update(key, stage, rev, fwd);
+    debug_assert_eq!(emit_keys.len(), identities.len());
+    debug_assert_eq!(emit_keys.len(), rows.len());
+    for (((key, nat), (stage, fwd, rev)), identity) in
+        emit_keys.iter().zip(rows).zip(identities)
+    {
+        let Some(identity) = identity else {
+            continue;
+        };
+        if identity.1 != *nat {
+            continue;
+        }
+        sessions.emit_ct_slice_state_update(key, identity, stage, rev, fwd);
     }
 }
 
@@ -215,7 +227,7 @@ fn run_shared_evidence_leg(
             let pending = stage_counts_pending
                 .take()
                 .expect("completed stage/count traversal remains pending");
-            emit_completed_stage_counts(sessions, pending.traversal);
+            emit_completed_stage_counts(sessions, pending.traversal, pending.identities);
             *established_cursor = pending.next_cursor;
         }
         return;
@@ -362,6 +374,14 @@ fn run_shared_evidence_leg(
         if emit_keys.is_empty() {
             *established_cursor = next_cursor;
         } else {
+            let identities: Vec<Option<(u64, crate::nat::NatDecision)>> = emit_keys
+                .iter()
+                .map(|(key, nat)| {
+                    sessions
+                        .ct_slice_emit_identity_for(key)
+                        .filter(|(_, live_nat)| live_nat == nat)
+                })
+                .collect();
             let mut traversal =
                 crate::afxdp::shared_ops::StageCountsTraversal::new(emit_keys);
             let requested = traversal.output_count();
@@ -378,12 +398,13 @@ fn run_shared_evidence_leg(
                 requested,
             );
             if complete {
-                emit_completed_stage_counts(sessions, traversal);
+                emit_completed_stage_counts(sessions, traversal, identities);
                 *established_cursor = next_cursor;
             } else {
                 *stage_counts_pending = Some(PendingStageCountsEmission {
                     next_cursor,
                     traversal,
+                    identities,
                 });
             }
         }

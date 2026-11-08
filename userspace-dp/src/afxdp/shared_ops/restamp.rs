@@ -86,6 +86,7 @@ fn shared_node_served_entry_claims_alias(
     }
 }
 
+#[cfg(test)]
 pub(in crate::afxdp) fn shared_completion_evidence(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -557,6 +558,7 @@ impl StageCountsTraversal {
         }
     }
 
+    #[cfg(test)]
     fn from_parts(
         wanted: &StageCountsWanted,
         requested: &[SessionKey],
@@ -736,9 +738,10 @@ pub(in crate::afxdp) fn record_stage_counts_work(
     let _ = (visited, max_hold, max_work, requested);
 }
 
-/// Run a synchronous compatibility pass for direct stage/count consumers and
-/// tests. The worker loop uses `StageCountsTraversal` directly so its bounded
-/// work resumes across invocations.
+/// Test-only synchronous adapter for direct stage/count checks. The worker
+/// loop uses `StageCountsTraversal` directly so bounded work resumes across
+/// invocations.
+#[cfg(test)]
 pub(super) fn stage_and_counts_pass(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -758,6 +761,7 @@ pub(super) fn stage_and_counts_pass(
     )
 }
 
+#[cfg(test)]
 pub(super) fn stage_and_counts_pass_with_hook<F>(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -822,14 +826,16 @@ thread_local! {
 /// Why not keyed `get()` alone: aliases can remain under a caller-NAT or a
 /// displaced key while their row retains a different `entry.key`. The
 /// `SharedSessionOwnerRgIndexes` forward-wire directory maps each stable
-/// `entry.key` to every live map slot. The worker's `StageCountsTraversal`
-/// resumes at most 128 lookup-plus-fold operations per invocation, releasing
-/// all map locks before folds and between alias chunks.
+/// `entry.key` to every live map slot.
+/// `StageCountsTraversal` resumes at most `STAGE_COUNTS_INVOCATION_BUDGET_18662`
+/// lookup-plus-fold operations per invocation, releasing all map locks before
+/// folds and between alias chunks. Each map-lock hold visits at most
+/// `STAGE_COUNTS_LOCK_CHUNK_18662` rows or candidates.
 ///
 /// Lock order is `shared_sessions` THEN `shared_forward_wire_sessions`,
-/// followed by the wire alias index. Not inlined: it remains independently
-/// measurable on the worker hot path.
-#[inline(never)]
+/// followed by the wire alias index. This adapter drains bounded chunks
+/// synchronously for focused reference tests; production retains its cursor.
+#[cfg(test)]
 pub(in crate::afxdp) fn shared_rows_stage_and_counts(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
