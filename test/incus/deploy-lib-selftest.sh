@@ -3986,7 +3986,7 @@ rm_xfer_refusal() { # <reasons-clause>
 	printf '%s' "error: rpc error: code = FailedPrecondition desc = untargeted failover of redundancy group 2 ran as a make-before-break transfer to node 0, which answered: the peer's redundancy group 2 $1; this command ran no local resign"
 }
 test_restore_readiness_wait_18559() {
-	local settling sync_down stale aborted owed proto fabric hold mixed bad=0
+	local settling sync_down stale aborted owed proto fabric hold mixed xsk bad=0
 	settling=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[session sync startup hold: bulk sync not yet complete]")
 	hold=$(rm_xfer_refusal "not ready for explicit failover ready=true ready_since=2026-11-08T18:00:00Z reasons=[]")
 	sync_down=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[session sync disconnected]")
@@ -3996,20 +3996,26 @@ test_restore_readiness_wait_18559() {
 	proto=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[ha protocol mismatch local=3 peer=2]")
 	fabric=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[fabric forwarding path not ready]")
 	mixed=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[session sync startup hold: bulk sync not yet complete fabric forwarding path not ready]")
+	# #12658: a freshly cut node0 arms its userspace dataplane after RG1 lands.
+	xsk=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[userspace XSK liveness not proven]")
 	local t
-	for t in "$settling" "$hold" \
+	for t in "$settling" "$hold" "$xsk" \
+		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[userspace HA state replay pending]")" \
+		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[session sync startup hold: bulk sync not yet complete userspace XSK liveness not proven]")" \
 		"$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[local bulk receive still in progress epoch=7 sessions=120]")" \
 		"$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[peer still receiving outbound bulk epoch=3 age=1.2s]")"; do
 		[[ "$(deploy_restore_reply_kind "$t")" == wait ]] || { bad=1; echo "  want wait: ${t:120:120}"; }
 	done
 	for t in "$sync_down" "$stale" "$aborted" "$owed" "$proto" "$fabric" "$mixed" "$RM_REFUSAL" \
-		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[]")"; do
+		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[]")" \
+		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[userspace XSK liveness failed]")" \
+		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[userspace XSK liveness not proven session sync disconnected]")"; do
 		[[ "$(deploy_restore_reply_kind "$t")" == refusal ]] || { bad=1; echo "  want refusal: ${t:120:120}"; }
 	done
 	[[ "$(deploy_restore_reply_kind "Manual failover completed for redundancy group 2 (transfer committed)")" == ok &&
 		"$(deploy_restore_reply_kind "Manual failover triggered for redundancy group 0")" == ok ]] || bad=1
 	if ((bad == 0)); then
-		ok "restore reply kind (#18559): only rejoin-settling reasons are waits; sync-down, stale, aborted, owed, protocol, fabric and mixed are refusals"
+		ok "restore reply kind (#18559): only rejoin-settling reasons (incl. #12658 XSK liveness / HA replay) are waits; sync-down, stale, aborted, owed, protocol, fabric, XSK failed and mixed are refusals"
 	else
 		bad "restore reply kind (#18559): misclassified (see above)"
 	fi
@@ -4017,6 +4023,9 @@ test_restore_readiness_wait_18559() {
 	RM_REFUSE_RG=2
 	RM_REFUSAL="$settling"
 	rm_row "fw0 settling once, then restored (#18559)" "rc=0 pass=1 fail=0 yields=4" \
+		"(4 request(s), 0 refused, 1 waited for fw0 readiness)" 1 1 0 normal
+	RM_REFUSAL="$xsk"
+	rm_row "fw0 XSK liveness not proven once (#12658), then restored, PASSes (#18559)" "rc=0 pass=1 fail=0 yields=4" \
 		"(4 request(s), 0 refused, 1 waited for fw0 readiness)" 1 1 0 normal
 	RM_REFUSAL="$sync_down"
 	rm_row "fw0 sync disconnected once, then restored, FAILs (#18559)" "rc=0 pass=0 fail=1 yields=4" \

@@ -1284,10 +1284,17 @@ deploy_restore_reply_kind() {
 		# Go prints the reasons with %v (space-separated, and the reasons
 		# contain spaces), so strip every settling reason and require that
 		# nothing else is left.
+		# The userspace-arming pair is #12658's rejoin window: a freshly cut
+		# node0 reads "XSK liveness not proven" until WAN RX proves it
+		# (~2s), and "HA state replay pending" until its replay lands
+		# (docs/testing.md, "A refused transfer is re-sent"). A stuck one
+		# still FAILs on the restore budget/deadline, which names it.
 		inner=$(sed -nE 's/.*reasons=\[([^]]*)\].*/\1/p' <<<"$out" | head -1)
 		rest=$(sed -E 's/session sync startup hold: bulk sync not yet complete//g
 			s/local bulk receive still in progress epoch=[0-9]+ sessions=[0-9]+//g
 			s/peer still receiving outbound bulk epoch=[0-9]+ age=[0-9a-zµ.]+//g
+			s/userspace XSK liveness not proven//g
+			s/userspace HA state replay pending//g
 			s/[[:space:]]//g' <<<"$inner")
 		if [[ -n "$inner" && -z "$rest" ]]; then
 			echo wait
@@ -1303,8 +1310,10 @@ deploy_restore_reply_kind() {
 # shorter than one admission window plus a post-restart bulk (~50
 # sessions/s), and swallowed the refusal that said why. A readiness refusal
 # from fw0 whose every reason is a rejoin-settling one (#18559,
-# deploy_restore_reply_kind) is counted as a wait, not a refusal; any other
-# reason (session sync disconnected, config stale, ...) stays a refusal.
+# deploy_restore_reply_kind: the sync startup hold, bulk in progress, and
+# #12658's userspace XSK-liveness / HA-replay arming window) is counted as a
+# wait, not a refusal; any other reason (session sync disconnected, config
+# stale, ...) stays a refusal.
 #
 # Verdicts (exactly one per call):
 #   PASS  fw0 already owned every RG, or the restore completed with no

@@ -1277,6 +1277,14 @@ ha_planned_reply_verdict() {
 ha_planned_reply_note() {
 	local rg="$1" text="$2" kind
 	case "$text" in
+	*"rpc error: code = "* | "error:"* | *"ownership of redundancy group $rg changed during the request"*)
+		# An error reply FIRST: the Aborted "ownership changed" text quotes
+		# the peer's reply, which can itself say "(transfer committed)", so a
+		# transfer-first match would count a move that did not happen as a
+		# transfer (#18559 review cycle 3).
+		kind=error
+		PLANNED_REPLY_OTHER=$((PLANNED_REPLY_OTHER + 1))
+		;;
 	*"(transfer committed"*)
 		kind=transfer
 		PLANNED_REPLY_TRANSFER=$((PLANNED_REPLY_TRANSFER + 1))
