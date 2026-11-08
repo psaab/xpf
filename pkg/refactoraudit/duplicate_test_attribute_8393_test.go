@@ -691,7 +691,8 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 				(rustParamShadows19013(scope.args, name) ||
 					rustLetShadows19013(src, name, scope.start, start) ||
 					rustClosureParamShadows19013(src, name, scope.start, start) ||
-					rustForBindingShadows19013(src, name, scope.start, start)) {
+					rustForBindingShadows19013(src, name, scope.start, start) ||
+					rustMatchArmShadows19013(src, name, scope.start, start)) {
 				continue
 			}
 		}
@@ -1281,6 +1282,26 @@ func rustForBodyOpen19013(src string, start, limit int) int {
 			continue
 		}
 		if src[i] == '{' && paren == 0 && bracket == 0 && brace == 0 {
+			close := rustMatchingBrace19013(src, i)
+			if close >= limit {
+				return i
+			}
+			next := close + 1
+			for next < limit {
+				if src[next] == ' ' || src[next] == '\t' || src[next] == '\n' || src[next] == '\r' {
+					next++
+					continue
+				}
+				if after, skip := skipRustNonCodeFnItem19013(src, next); skip {
+					next = after
+					continue
+				}
+				break
+			}
+			if next < limit && src[next] == '{' {
+				i = close + 1
+				continue
+			}
 			return i
 		}
 		switch src[i] {
@@ -1300,6 +1321,188 @@ func rustForBodyOpen19013(src string, start, limit int) int {
 		i++
 	}
 	return -1
+}
+
+func rustMatchArmShadows19013(src, name string, start, pos int) bool {
+	for i := start; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if !rustWordAt19013(src, i, "match") {
+			i++
+			continue
+		}
+		open := rustMatchBodyOpen19013(src, i+len("match"), pos)
+		if open >= 0 {
+			close := rustMatchingBrace19013(src, open)
+			if close > pos && rustMatchArmBindingAt19013(src, name, open, close, pos) {
+				return true
+			}
+		}
+		i += len("match")
+	}
+	return false
+}
+
+func rustMatchBodyOpen19013(src string, start, limit int) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if src[i] == '{' && paren == 0 && bracket == 0 && brace == 0 {
+			close := rustMatchingBrace19013(src, i)
+			if rustMatchContainsArmArrow19013(src, i+1, close) {
+				return i
+			}
+			if close >= limit {
+				return -1
+			}
+			i = close + 1
+			continue
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		}
+		i++
+	}
+	return -1
+}
+
+func rustMatchContainsArmArrow19013(src string, start, limit int) bool {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 && strings.HasPrefix(src[i:], "=>") {
+			return true
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		}
+		i++
+	}
+	return false
+}
+
+func rustMatchArmBindingAt19013(src, name string, open, close, pos int) bool {
+	for armStart := open + 1; armStart < close; {
+		armStart = skipRustTrivia19013(src, armStart)
+		if armStart >= close {
+			return false
+		}
+		arrow := rustMatchArmArrow19013(src, armStart, close)
+		if arrow < 0 {
+			return false
+		}
+		bodyStart := skipRustTrivia19013(src, arrow+2)
+		bodyEnd, nextArm := rustMatchArmBodyEnd19013(src, bodyStart, close)
+		if rustPatternBinds19013(src[armStart:arrow], name) &&
+			((armStart <= pos && pos < arrow) || (bodyStart <= pos && pos < bodyEnd)) {
+			return true
+		}
+		if nextArm >= close {
+			return false
+		}
+		armStart = nextArm
+	}
+	return false
+}
+
+func rustMatchArmArrow19013(src string, start, limit int) int {
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 && strings.HasPrefix(src[i:], "=>") {
+			return i
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+		}
+		i++
+	}
+	return -1
+}
+
+func rustMatchArmBodyEnd19013(src string, start, limit int) (int, int) {
+	paren, bracket, brace := 0, 0, 0
+	lastBlockEnd := -1
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if paren == 0 && bracket == 0 && brace == 0 {
+			if src[i] == ',' {
+				return i, i + 1
+			}
+			if strings.HasPrefix(src[i:], "=>") {
+				if lastBlockEnd >= 0 {
+					return lastBlockEnd + 1, lastBlockEnd + 1
+				}
+				return limit, limit
+			}
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			brace--
+			if brace == 0 && paren == 0 && bracket == 0 {
+				lastBlockEnd = i
+			}
+		}
+		i++
+	}
+	return limit, limit
 }
 
 func rustLetShadows19013(src, name string, start, pos int) bool {
@@ -1700,6 +1903,18 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			name: "for-loop binding does not reference the unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { for lost in [|| {}] { lost(); } }\n",
+			want: 1,
+		},
+		{
+			name: "for-loop binding survives an iterable block",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { for lost in { [|| {}] } { lost(); } }\n",
+			want: 1,
+		},
+		{
+			name: "match-arm binding does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { match Some(|| {}) { Some(lost) => lost(), None => {} } }\n",
 			want: 1,
 		},
 		{
