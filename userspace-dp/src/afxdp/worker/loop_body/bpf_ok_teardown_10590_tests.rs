@@ -1,5 +1,5 @@
 // #10590: bind the CALLER's `!bpf_ok` teardown branch in
-// `rebind_policy_sessions_from_snapshot` (loop_body/mod.rs), which was dead
+// `rebind_policy_sessions_from_snapshot` (loop_body/reconcile.rs), which was dead
 // in every test.
 //
 // Mechanism. The callee `restamp_bpf_conntrack_policy` reports failure in

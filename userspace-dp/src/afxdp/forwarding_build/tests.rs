@@ -13779,10 +13779,9 @@ fn syn_cookie_key_ring_from_snapshot_reaches_forwarding_state_9173() {
     );
 }
 
-// #9173: BIND THE WIRING. The ring only reaches the dataplane through the two
-// worker sites that hand forwarding state to `ScreenState`. A site still calling
-// `update_syn_cookie_master_key` would leave that worker on the legacy key with
-// every screen-level cell green, so both are pinned here.
+// #9173: BIND THE WIRING. The ring reaches `ScreenState` through one-time
+// setup and forwarding rotation. The rotation call lives in reconcile.rs,
+// so both worker sites are pinned by this source guard.
 #[test]
 fn worker_sites_publish_the_syn_cookie_key_ring_9173() {
     fn code(src: &str) -> String {
@@ -13798,8 +13797,8 @@ fn worker_sites_publish_the_syn_cookie_key_ring_9173() {
             "update_syn_cookie_keys(forwarding.syn_cookie_master_key.0,forwarding.syn_cookie_key_ring.clone()",
         ),
         (
-            "worker/loop_body/mod.rs",
-            code(include_str!("../worker/loop_body/mod.rs")),
+            "worker/loop_body/reconcile.rs",
+            code(include_str!("../worker/loop_body/reconcile.rs")),
             "update_syn_cookie_keys(new_forwarding.syn_cookie_master_key.0,new_forwarding.syn_cookie_key_ring.clone()",
         ),
     ] {

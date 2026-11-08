@@ -5,10 +5,10 @@
 // dispatch — never per packet. Contents: missing-neighbor seed retirement
 // (#10419), the expired-session reap (SNAT/NAT64 release + BPF teardown +
 // flow-cache eviction, #3776/#4381/#6211), the #10591 production test
-// seams, the DeleteSynced flow-cache invalidation (#6457), and the
-// create-counted expiry counter (#2428). The seams keep their
-// `pub(in crate::afxdp)` visibility via the re-export in mod.rs, so
-// `worker/mod.rs` and the #10591 window tests are unchanged.
+// seams, the DeleteSynced flow-cache invalidation (#6457), the
+// create-counted expiry counter (#2428), and #18693 worker-exit cleanup.
+// The seams keep their `pub(in crate::afxdp)` visibility via the re-export
+// in mod.rs, so `worker/mod.rs` and the #10591 window tests are unchanged.
 //
 // `use super::*;` chains through loop_body/mod.rs to worker/mod.rs.
 
@@ -523,4 +523,28 @@ pub(in crate::afxdp) fn retry_deferred_conntrack_deletes(
     retry.extend(pending);
     retry.extend(busy);
     sessions.defer_conntrack_deletes(retry);
+}
+/// #18693: complete the worker's final resource/counter teardown after
+/// `worker_loop` observes stop. This executes once on thread exit, never in
+/// the steady-state loop.
+pub(super) fn finish_worker_loop(
+    bindings: &mut [BindingWorker],
+    forwarding: &ForwardingState,
+    cos_status: &ArcSwap<Vec<crate::protocol::CoSInterfaceStatus>>,
+    heartbeat: &AtomicU64,
+) {
+    crate::filter::flush_recorded_filter_counters();
+    // #3073: final flush on worker exit (mirrors the filter-counter flush).
+    crate::policy::flush_recorded_policy_hit_counters();
+    for binding in bindings.iter_mut() {
+        clear_all_cos_exact_backlogs_for_binding(binding);
+        release_all_cos_root_leases(binding);
+        release_all_cos_queue_leases(binding);
+    }
+    cos_status.store(Arc::new(build_worker_cos_statuses(
+        bindings,
+        forwarding,
+        monotonic_nanos(),
+    )));
+    heartbeat.store(monotonic_nanos(), Ordering::Relaxed);
 }

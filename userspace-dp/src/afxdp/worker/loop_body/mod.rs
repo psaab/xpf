@@ -912,335 +912,38 @@ pub(crate) fn worker_loop(
             validation = live_validation;
         }
         if let Some(new_forwarding) = new_forwarding_opt {
-            // Compare BEFORE assignment — needs both old and new.
             let cos_changed =
                 cos_runtime_config_changed(forwarding.as_ref(), new_forwarding.as_ref());
             // #18560: the binding's CoS queues are rebuilt for the new
             // tables; a held pass under the old ones could select a queue that
             // no longer exists. Keep the strict fence for this edge.
             prev_views.on_forwarding_swap(cos_changed);
-            let (mut purge_input_filter_v4, mut purge_input_filter_v6) =
-                crate::filter::input_dscp_filter_ifindexes_changed(
-                    &forwarding.filter_state,
-                    &new_forwarding.filter_state,
-                );
-            // #11330: lo0 republish scans the full session table. Compare
-            // semantic filter content before assignment so unchanged rotations
-            // can skip that walk; positional filter ids are not semantics.
-            let (lo0_filter_changed_v4, lo0_filter_changed_v6) =
-                crate::filter::lo0_filter_families_changed(
-                    &forwarding.filter_state,
-                    &new_forwarding.filter_state,
-                );
-            let lo0_filter_changed = lo0_filter_changed_v4 || lo0_filter_changed_v6;
-            // #2362: per-packet-L4 filters share the DSCP session-hit
-            // re-evaluation path. Merge the per-family sets of interfaces
-            // whose cached route/action semantics changed; ordinary term,
-            // counter, and log edits are handled by the next session hit.
-            let (per_packet_changed_v4, per_packet_changed_v6) =
-                crate::filter::input_per_packet_l4_filter_ifindexes_changed(
-                    &forwarding.filter_state,
-                    &new_forwarding.filter_state,
-                );
-            purge_input_filter_v4.extend(per_packet_changed_v4);
-            purge_input_filter_v6.extend(per_packet_changed_v6);
-            // #9526: compare BEFORE assignment. The Go commit sweep cannot clear
-            // the literal first policy's sessions (policy_id 0 is overloaded on
-            // the wire), so when this rotation removes the old snapshot's
-            // policy_id-0 rule, the sessions bound to it are purged below.
-            // Worker-local old vs new, like the cold-path slot compare: a worker
-            // that skipped intermediate generations still sees the rule vanish.
-            let deleted_first_policy =
-                deleted_first_policy_rule_id(&forwarding.policy, &new_forwarding.policy);
-            // #10510: derive actual old-minus-new zone disappearance before
-            // assigning the new snapshot. Empty producer maps are a safe no-op.
-            let removed_zone_ids = removed_zone_ids_for_rotation(&forwarding, &new_forwarding);
-            // #16026 fold: single→multi-zone transition. Existing PASS
-            // rows in the pinned map were published under the old
-            // single-zone state and stay zoneless until their session
-            // ends; capture the transition BEFORE assignment (worker-
-            // local old vs new, like the removed-zone compare above —
-            // a worker that skipped generations still sees it). The
-            // demotion sweep itself runs after `forwarding` is rotated
-            // below, beside the lo0 republish.
-            let became_multi_zone =
-                !forwarding.has_multiple_zones && new_forwarding.has_multiple_zones;
-            let extensive_rematch = new_forwarding.policy_rematch_extensive;
-
-            // Use NEW values for dependent state updates (forwarding-site
-            // ordering — old `forwarding` is stale once rotated).
-            screen_state.update_profiles(new_forwarding.screen_profiles.clone());
-            // #3082: re-thread the references-missing-profile set on every
-            // runtime forwarding-snapshot rotation so a newly-introduced
-            // dangling screen reference starts WARNing (and a fixed one stops).
-            screen_state.update_missing_profiles(new_forwarding.screen_missing_profiles.clone());
-            screen_state.update_inert_profiles(new_forwarding.screen_inert_profiles.clone());
-            screen_state.update_syn_cookie_keys(
-                new_forwarding.syn_cookie_master_key.0,
-                new_forwarding.syn_cookie_key_ring.clone(),
-            );
-            sessions.set_timeouts(new_forwarding.session_timeouts);
-            // #3527: re-apply the per-screened-zone half-open overrides on every
-            // runtime forwarding-snapshot rotation. `set_opening_overrides` is a
-            // full replace, so a zone whose `syn-flood timeout` was removed
-            // drops out and reverts to the global default on the next install.
-            sessions.set_opening_overrides(new_forwarding.session_opening_overrides.clone());
-            // #2134/#11057: re-derive optional destination accounting on every
-            // runtime forwarding-snapshot rotation. An ON->OFF transition
-            // clears only the destination map; source counts remain current
-            // for the always-enforced default per-source quota.
-            sessions.set_session_limit_active(screen_state.any_session_limit_dst_configured());
-
-            // #1635 (plan §2.4): a config apply may have reassigned
-            // cold-path histogram slots to new zone-pairs. Zero those
-            // slots in every binding's worker-local accumulator BEFORE
-            // any record_sample into the reused slot, so a reused slot
-            // never carries the previous zone-pair's counts.
-            //
-            // Copilot code-r2: derive the zero-set from THIS WORKER's
-            // OWN old map vs the new map, NOT from the coordinator's
-            // `slots_to_zero` list. A worker can skip intermediate
-            // ForwardingState generations (ArcSwap only ever delivers
-            // the latest), and the coordinator computes `slots_to_zero`
-            // relative to its immediately-previous map — so a slot
-            // reassigned in a skipped generation would be absent from
-            // the latest list (it now looks "retained"). Comparing the
-            // worker's actual old slot-map inverse against the new one
-            // is generation-independent: any slot whose mapping changed
-            // since the worker last observed it gets zeroed. The
-            // sibling atomics are overwritten at the next publish merge
-            // from the freshly-zeroed local accumulator.
-            {
-                let old_inverse = &forwarding.cold_path_slot_map.inverse;
-                let new_inverse = &new_forwarding.cold_path_slot_map.inverse;
-                for slot in 0..crate::afxdp::cold_path_hist::POLICY_COLD_PATH_ZONE_PAIR_SLOTS {
-                    let new_pair = new_inverse.get(slot).copied().flatten();
-                    // Zero when the slot now maps to a pair that differs
-                    // from what the worker last saw there. A freed slot
-                    // (new == None) keeps its stale local data harmlessly
-                    // — it is unmapped, never sampled, and gets zeroed
-                    // when next reassigned.
-                    if new_pair.is_some() && new_pair != old_inverse.get(slot).copied().flatten() {
-                        for binding in bindings.iter_mut() {
-                            binding.cold_path.zero_slot(slot);
-                        }
-                    }
-                }
-            }
-
-            // Teardown runs against the NEW state deliberately: interface-NAT
-            // identity is Arc-shared across the rotation, pool/NAT64
-            // allocators are reused-or-reseeded into the new objects
-            // (parse_source_nat_rules_with_previous + carry), and old-only
-            // allocator objects die with the old ForwardingState — so only
-            // the new tables can free the live (possibly carried)
-            // reservation. Releasing against the old state would miss carried
-            // copies and strand them in the new allocators.
-            let (rematched_rebound, rematched_purged) = rematch_bound_first_policy_sessions(
-                &forwarding,
-                &new_forwarding,
+            // #18693: rotation adoption (rematch/rebind/purge/republish +
+            // CoS runtime reset) lives in reconcile.rs; runs only on a
+            // forwarding-snapshot rotation.
+            if adopt_rotated_forwarding(
+                new_forwarding,
+                cos_changed,
+                &mut forwarding,
+                &mut screen_state,
                 &mut sessions,
+                &mut bindings,
+                &binding_lookup,
+                &mut shared_recycles,
+                &mut last_rebind_generation,
+                &ha_state,
                 &session_map,
                 conntrack_v4_fd,
                 conntrack_v6_fd,
+                worker_id,
+                loop_now_ns,
                 &shared_sessions,
                 &shared_nat_sessions,
                 &shared_forward_wire_sessions,
                 &shared_owner_rg_indexes,
                 &peer_worker_commands,
                 &worker_commands_by_id,
-                worker_id,
-                loop_now_ns,
-            );
-            if rematched_rebound + rematched_purged > 0 {
-                debug_log!(
-                    "RENAMED_FIRST_POLICY_REMAP: worker={} rebound={} purged={}",
-                    worker_id,
-                    rematched_rebound,
-                    rematched_purged,
-                );
-            }
-            // Keep the old interface/VLAN mapping for session filter identity
-            // resolution; teardown itself must use the rotated forwarding
-            // state so carried NAT reservations are released there.
-            let old_forwarding_for_filter_purge = forwarding.clone();
-
-            forwarding = new_forwarding;
-            // #15188 (C08-02): consume this generation's single-use rebinds
-            // exactly once. The coordinator strips the retained metadata
-            // after a full apply publishes it, so helper-internal republishes
-            // (neighbor push, HA fabric refresh) already arrive with
-            // `rebinds=0`; this generation guard is the worker-side half of
-            // the same invariant — a republished forwarding Arc that still
-            // carries rebinds for the config generation this worker already
-            // consumed must not re-run the per-record restamp walk. The
-            // record is applied exactly once per generation.
-            let rebind_generation = forwarding.config_generation;
-            let rebind_records: &[crate::protocol::PolicySessionRebind] =
-                if rebind_generation == last_rebind_generation {
-                    &[]
-                } else {
-                    last_rebind_generation = rebind_generation;
-                    &forwarding.policy_session_rebinds
-                };
-            let rebound_policy_sessions = rebind_policy_sessions_from_snapshot(
-                &mut sessions,
-                &forwarding,
-                rebind_records,
-                &session_map,
-                conntrack_v4_fd,
-                conntrack_v6_fd,
-                &shared_sessions,
-                &shared_nat_sessions,
-                &shared_forward_wire_sessions,
-                &shared_owner_rg_indexes,
-                &peer_worker_commands,
-                &worker_commands_by_id,
-                worker_id,
-                loop_now_ns,
-            );
-            if rebound_policy_sessions > 0 {
-                debug_log!(
-                    "RENAMED_POLICY_REBIND: worker={} sessions={}",
-                    worker_id,
-                    rebound_policy_sessions,
-                );
-            }
-
-            let purged_removed_zone_sessions = purge_sessions_with_removed_zone_ids(
-                &mut sessions,
-                session_map.handle(),
-                SharedSessionRefs {
-                    sessions: &shared_sessions,
-                    nat_sessions: &shared_nat_sessions,
-                    forward_wire_sessions: &shared_forward_wire_sessions,
-                    owner_rg_indexes: &shared_owner_rg_indexes,
-                    peer_worker_commands: &peer_worker_commands,
-                    worker_commands_by_id: &worker_commands_by_id,
-                    conntrack: ConntrackFds {
-                        v4: conntrack_v4_fd,
-                        v6: conntrack_v6_fd,
-                    },
-                    tick: Tick::from_ns(loop_now_ns),
-                },
-                &forwarding,
-                &removed_zone_ids,
-                worker_id,
-            );
-            if purged_removed_zone_sessions > 0 {
-                debug_log!(
-                    "REMOVED_ZONE_SYNC_PURGE: worker={} zones={} sessions={}",
-                    worker_id,
-                    removed_zone_ids.len(),
-                    purged_removed_zone_sessions,
-                );
-            }
-            let purged_input_filter = purge_sessions_for_changed_input_filter_cached_semantics(
-                &mut sessions,
-                session_map.handle(),
-                SharedSessionRefs {
-                    sessions: &shared_sessions,
-                    nat_sessions: &shared_nat_sessions,
-                    forward_wire_sessions: &shared_forward_wire_sessions,
-                    owner_rg_indexes: &shared_owner_rg_indexes,
-                    peer_worker_commands: &peer_worker_commands,
-                    worker_commands_by_id: &worker_commands_by_id,
-                    conntrack: ConntrackFds {
-                        v4: conntrack_v4_fd,
-                        v6: conntrack_v6_fd,
-                    },
-                    tick: Tick::from_ns(loop_now_ns),
-                },
-                &old_forwarding_for_filter_purge,
-                &forwarding,
-                &purge_input_filter_v4,
-                &purge_input_filter_v6,
-                worker_id,
-            );
-            if purged_input_filter > 0 {
-                debug_log!(
-                    "INPUT_FILTER_CACHE_REVALIDATION_PURGE: worker={} sessions={}",
-                    worker_id,
-                    purged_input_filter,
-                );
-            }
-            if !extensive_rematch {
-                if let Some(rule_id) = deleted_first_policy.as_deref() {
-                    let purged_first_policy = purge_sessions_bound_to_deleted_first_policy(
-                        &mut sessions,
-                        session_map.handle(),
-                        SharedSessionRefs {
-                            sessions: &shared_sessions,
-                            nat_sessions: &shared_nat_sessions,
-                            forward_wire_sessions: &shared_forward_wire_sessions,
-                            owner_rg_indexes: &shared_owner_rg_indexes,
-                            peer_worker_commands: &peer_worker_commands,
-                            worker_commands_by_id: &worker_commands_by_id,
-                            conntrack: ConntrackFds {
-                                v4: conntrack_v4_fd,
-                                v6: conntrack_v6_fd,
-                            },
-                            tick: Tick::from_ns(loop_now_ns),
-                        },
-                        &forwarding,
-                        rule_id,
-                        worker_id,
-                    );
-                    if purged_first_policy > 0 {
-                        debug_log!(
-                            "DELETED_FIRST_POLICY_PURGE: worker={} rule={} sessions={}",
-                            worker_id,
-                            rule_id,
-                            purged_first_policy,
-                        );
-                    }
-                }
-            }
-            let republished = republish_local_delivery_sessions_for_lo0_filter(
-                &sessions,
-                session_map.handle(),
-                &forwarding,
-                lo0_filter_changed,
-            );
-            if republished > 0 {
-                debug_log!(
-                    "LO0_FILTER_REPUBLISH: worker={} local_delivery_sessions={}",
-                    worker_id,
-                    republished,
-                );
-            }
-            // #16026 fold: demote already-published PASS rows on the
-            // single→multi-zone transition captured above. Runs with
-            // the NEW forwarding state (has_multiple_zones set), so the
-            // republish writes REDIRECT and `publish_session_rows`
-            // migrates each entry's claims without a no-row window.
-            // `ha_state` is sampled here (not the later per-tick load)
-            // so `allow_replace_local` matches this rotation.
-            if became_multi_zone {
-                let demoted = demote_kernel_local_sessions_for_multiple_zones(
-                    &sessions,
-                    session_map.handle(),
-                    &forwarding,
-                    ha_state.load().as_ref(),
-                    loop_now_ns / 1_000_000_000,
-                    became_multi_zone,
-                );
-                if demoted > 0 {
-                    debug_log!(
-                        "MULTI_ZONE_STEERING_DEMOTE: worker={} sessions={}",
-                        worker_id,
-                        demoted,
-                    );
-                }
-            }
-
-            if cos_changed {
-                reset_worker_cos_runtimes(&mut bindings, &mut shared_recycles);
-                apply_shared_recycles_to_bindings(
-                    &mut bindings,
-                    &binding_lookup,
-                    &mut shared_recycles,
-                );
+            ) {
                 rebuild_cos_fast_interfaces = true;
             }
         }
@@ -2114,18 +1817,10 @@ pass). Logged once per worker.",
             }
         }
     }
-    crate::filter::flush_recorded_filter_counters();
-    // #3073: final flush on worker exit (mirrors the filter-counter flush).
-    crate::policy::flush_recorded_policy_hit_counters();
-    for binding in bindings.iter_mut() {
-        clear_all_cos_exact_backlogs_for_binding(binding);
-        release_all_cos_root_leases(binding);
-        release_all_cos_queue_leases(binding);
-    }
-    cos_status.store(Arc::new(build_worker_cos_statuses(
-        &bindings,
+    finish_worker_loop(
+        &mut bindings,
         forwarding.as_ref(),
-        monotonic_nanos(),
-    )));
-    heartbeat.store(monotonic_nanos(), Ordering::Relaxed);
+        &cos_status,
+        &heartbeat,
+    );
 }
