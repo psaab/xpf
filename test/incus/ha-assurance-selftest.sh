@@ -2155,7 +2155,7 @@ assert_contains "$(<"${ERR}")" 'Session misses paired delta 2000 (node0=1000 nod
 g1_row - 15 0 41 39 0
 assert_helper_status 2 g1b_verdict
 printf 'Group 1c continuous UDP session continuity (#18679)\n'
-UDP_PROBE_CHECKPOINT="${RG1_DIR}/udp-after-cli.log"
+UDP_PROBE_CHECKPOINT="${RG1_DIR}/udp-after-landing.log"
 UDP_PROBE_SURVIVED="${RG1_DIR}/udp-survived.log"
 UDP_PROBE_RECREATED="${RG1_DIR}/udp-recreated.log"
 UDP_PROBE_LOST="${RG1_DIR}/udp-lost.log"
@@ -2175,10 +2175,12 @@ SENT 101
 REPLY 101 172.16.80.7 41000
 SENT 102
 REPLY 102 172.16.80.7 41000
+SENT 103
+REPLY 103 172.16.80.7 41000
 UDP
-# The replies through 102 are the realistic 0.1-0.4s grace packets emitted
-# while the CLI was running. They are already in the post-return checkpoint;
-# only later sends/replies can prove survival.
+# Sequence 103 is a realistic reply after the no-target CLI says "triggered"
+# but before the owner poll sees landing. It must be in the checkpoint; only
+# later sends can prove survival.
 cat >"$UDP_PROBE_SURVIVED" <<'UDP'
 BOOT 0123456789abcdef0123456789abcdef
 SOCKET 10.33.0.5 39000 172.16.80.202 6201
@@ -2197,9 +2199,9 @@ REPLY 105 172.16.80.7 41000
 UDP
 assert_helper_status 0 ha_udp_probe_survival_verdict \
 	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SURVIVED" 71 71
-assert_contains "$(<"${OUT}")" 'SURVIVED: firewall Session ID 71 persisted; sequence advanced 102->105' \
-	'UDP survived fixture proves post-CLI sequence and stable firewall session identity'
-assert_contains "$(<"${OUT}")" 'lost=0 reordered=0' 'UDP survived fixture counts post-CLI replies'
+assert_contains "$(<"${OUT}")" 'SURVIVED: firewall Session ID 71 persisted; sequence advanced 103->105' \
+	'UDP survived fixture proves post-landing sequence and stable firewall session identity'
+assert_contains "$(<"${OUT}")" 'lost=0 reordered=0' 'UDP survived fixture counts post-landing replies'
 assert_helper_status 2 ha_udp_probe_survival_verdict \
 	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SURVIVED" "" 71
 assert_contains "$(<"${ERR}")" 'no matching firewall session in the synced pre-move baseline' \
@@ -2214,13 +2216,15 @@ REPLY 101 172.16.80.7 41000
 SENT 102
 REPLY 102 172.16.80.7 41000
 SENT 103
+REPLY 103 172.16.80.7 41000
 SENT 104
 SENT 105
+SENT 106
 UDP
 assert_helper_status 1 ha_udp_probe_survival_verdict \
 	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_LOST" 71 71
-assert_contains "$(<"${ERR}")" 'UDP probe LOST: confirmed 3 post-move datagrams (seq 103..105) but received no replies' \
-	'grace replies emitted during CLI latency cannot satisfy the post-return window'
+assert_contains "$(<"${ERR}")" 'UDP probe LOST: confirmed 3 post-move datagrams (seq 104..106) but received no replies' \
+	'a reply after CLI return but before owner landing cannot satisfy the post-landing window'
 cat >"$UDP_PROBE_RECREATED" <<'UDP'
 BOOT 0123456789abcdef0123456789abcdef
 SOCKET 10.33.0.5 39000 172.16.80.202 6201
@@ -2291,11 +2295,11 @@ assert_contains "$(<"${ERR}")" 'no pre-move sent-and-answered baseline' \
 	'changed Session ID cannot override a missing pre-move reply baseline'
 UDP_PROBE_SENDERR="${RG1_DIR}/udp-senderr.log"
 cat "$UDP_PROBE_CHECKPOINT" >"$UDP_PROBE_SENDERR"
-printf 'SENDERR 103\n' >>"$UDP_PROBE_SENDERR"
+printf 'SENDERR 104\n' >>"${UDP_PROBE_SENDERR}"
 assert_helper_status 2 ha_udp_probe_survival_verdict \
 	"$UDP_PROBE_PRE" "$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SENDERR" 71 71
-assert_contains "$(<"${ERR}")" 'made no confirmed sends after the move returned' \
-	'a failed UDP send is not counted as observed post-move traffic'
+assert_contains "$(<"${ERR}")" 'made no confirmed sends after the transition checkpoint' \
+	'a failed UDP send is not counted as post-landing traffic'
 # Fail-on-revert: removing the firewall Session ID comparison makes the
 # same-tuple recreated fixture PASS, so this exact assertion kills the revert.
 UDP_PROBE_SESSION_MUTANT="${RG1_DIR}/udp-session-probe-session-id-reverted.py"
@@ -2633,7 +2637,7 @@ if not body:
 b = body.group(0)
 a = re.findall(r'ha_emit_verdict "RG1 Group 1a [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_SESSION_MISS_DROP_DELTA" "Screen drops"', b)
 f = re.findall(r'ha_emit_verdict "RG1 Group 1b [^"]*"\s*\\\n\s*ha_pair_counter_budget_verdict "\$MAX_FAILOVER_RAW_SESSION_MISS_FLOOR" "Session misses"', b)
-udp = re.findall(r'ha_emit_diagnostic_verdict "RG1 Group 1c [^"]*"\s*\\\n\s*ha_udp_probe_survival_verdict "\$RG1_UDP_BEFORE" "\$RG1_UDP_AFTER_CLI" "\$RG1_UDP_AFTER" \\\n\s*"\$RG1_UDP_SESSION_BEFORE" "\$RG1_UDP_SESSION_AFTER"', b)
+udp = re.findall(r'ha_emit_diagnostic_verdict "RG1 Group 1c [^"]*"\s*\\\n\s*ha_udp_probe_survival_verdict "\$RG1_UDP_BEFORE" "\$RG1_UDP_AFTER_LANDING" "\$RG1_UDP_AFTER" \\\n\s*"\$RG1_UDP_SESSION_BEFORE" "\$RG1_UDP_SESSION_AFTER"', b)
 if len(a) != 1 or len(f) != 1 or len(udp) != 1:
     raise SystemExit(1)
 if 'MAX_FAILOVER_SESSION_MISS_DELTA+x' not in text:
@@ -2647,10 +2651,13 @@ if not run or "ha_rg1_udp_begin" not in run.group(0) or "ha_rg1_udp_finish" not 
     raise SystemExit(1)
 move_body = run.group(0)
 request = move_body.find('request_output=$(incus exec "$FW1"')
-post_cli = move_body.find("ha_rg1_udp_after_cli")
+landing_checkpoint = move_body.find("ha_rg1_udp_after_landing")
 owner_poll = move_body.find('ha_wait_rg1_owner node0')
-if ("ha_rg1_udp_before_move" not in move_body or min(request, post_cli, owner_poll) < 0
-        or not request < post_cli < owner_poll):
+if ("ha_rg1_udp_before_move" not in move_body or min(request, landing_checkpoint, owner_poll) < 0
+        or not request < owner_poll < landing_checkpoint):
+    raise SystemExit(1)
+owner_success = re.search(r'if ha_wait_rg1_owner node0 .+?; then\n(.*?)^\telse', move_body, re.M | re.S)
+if not owner_success or "ha_rg1_udp_after_landing" not in owner_success.group(1):
     raise SystemExit(1)
 finish = re.search(r"^ha_rg1_udp_finish\(\) \{\n.*?^\}\n", text, re.M | re.S)
 if not finish:

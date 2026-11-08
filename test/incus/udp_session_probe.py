@@ -3,10 +3,12 @@
 
 The sender keeps one UDP socket, boot nonce, and monotonically increasing
 sequence across RG moves. The target echoes the post-NAT source identity. A
-post-CLI checkpoint excludes packets sent during command latency; the firewall
-Session ID on the promoted node is the primary incarnation test. A changed ID
-or translated identity is RECREATED, unanswered confirmed sends are LOST, and
-stable ID plus post-checkpoint replies is SURVIVED. Sender restart is VOID.
+transition-boundary checkpoint excludes packets emitted before the move was
+confirmed: RG1 waits for owner landing, and the directed soak command confirms
+its transfer commit. The firewall Session ID on the promoted node is the
+primary incarnation test. A changed ID or translated identity is RECREATED,
+unanswered confirmed sends are LOST, and stable ID plus post-checkpoint replies
+is SURVIVED. Sender restart is VOID.
 """
 
 from __future__ import annotations
@@ -132,7 +134,7 @@ def session_id_for_probe(probe_text: str, session_text: str) -> Optional[str]:
 def classify_snapshots(before_text: str, checkpoint_text: str, after_text: str,
                        before_session_id: Optional[str],
                        after_session_id: Optional[str]) -> Tuple[str, str, dict]:
-    """Classify replies after a post-CLI checkpoint plus firewall session identity."""
+    """Classify replies after a transition-boundary checkpoint and Session ID comparison."""
     try:
         before = parse_log(before_text)
         checkpoint = parse_log(checkpoint_text)
@@ -175,13 +177,13 @@ def classify_snapshots(before_text: str, checkpoint_text: str, after_text: str,
                                  "session_id_after": after_session_id,
                              }
 
-    # The checkpoint is captured immediately after CLI return. It may include
-    # grace replies for packets sent during command latency; only sequences
-    # greater than its final successful send prove post-move forwarding.
+    # The checkpoint is taken after the move is confirmed: the owner poll for
+    # standalone RG1 and the transfer-committed CLI reply for the directed soak.
+    # Only later successful sends can prove post-transition forwarding.
     checkpoint_last = max(checkpoint.sent)
     new_sent = sorted(seq for seq in after.sent if seq > checkpoint_last)
     if not new_sent:
-        return "VOID", "UDP probe made no confirmed sends after the move returned", {}
+        return "VOID", "UDP probe made no confirmed sends after the transition checkpoint", {}
     new_replies = [record for record in after.replies if record[0] > checkpoint_last]
     if not new_replies:
         return "LOST", (f"UDP probe LOST: confirmed {len(new_sent)} post-move datagrams "

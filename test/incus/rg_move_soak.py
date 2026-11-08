@@ -1242,7 +1242,7 @@ class Soak:
                     "detail": f"UDP sequence probe final-window Session ID query failed: {error}",
                     "metrics": {}}
         status, detail, metrics = udp_session_probe.classify_snapshots(
-            pending["pre_move_snapshot"], pending["post_cli_snapshot"], current,
+            pending["pre_move_snapshot"], pending["post_commit_snapshot"], current,
             pending["session_id_before"], session_id_after)
         return {"status": status, "detail": detail, "metrics": metrics}
 
@@ -1255,20 +1255,25 @@ class Soak:
         self.move_commands_issued += 1
         rc, out = self.c.cli(self.cfg.issuer, cmd)
         t_ret = self.now()
+        cls, first = classify_cli(rc, out, rg)
         udp_probe = None
-        post_cli_snapshot = None
+        post_commit_snapshot = None
         if udp_probe_pre is not None:
             if udp_probe_pre.get("status") != "READY":
                 udp_probe = udp_probe_pre
+            elif cls != CLI_OK:
+                udp_probe = {"status": "VOID",
+                             "detail": "UDP sequence checkpoint requires the directed CLI's transfer-committed confirmation",
+                             "metrics": {}}
             else:
-                # This is deliberately the first probe operation after CLI
-                # return; packets emitted during command latency are excluded.
-                post_cli_snapshot = self.c.udp_probe_snapshot(self.cfg.run_id)
-                if post_cli_snapshot is None:
+                # The directed CLI response confirms the transfer commit.
+                # Snapshot immediately after that confirmation; packets sent
+                # during command latency or before commit cannot prove survival.
+                post_commit_snapshot = self.c.udp_probe_snapshot(self.cfg.run_id)
+                if post_commit_snapshot is None:
                     udp_probe = {"status": "VOID",
-                                 "detail": "UDP sequence probe post-CLI checkpoint became unavailable",
+                                 "detail": "UDP sequence probe post-commit checkpoint became unavailable",
                                  "metrics": {}}
-        cls, first = classify_cli(rc, out, rg)
         landed, dual, last = None, False, pre.detail
         # Bound: the RG must have landed before the operator's next command,
         # which their loop issues `sleep S` after this one returns.
@@ -1295,7 +1300,7 @@ class Soak:
                 # probe snapshot, so later recreation cannot escape detection.
                 udp_probe = {"status": "READY",
                              "pre_move_snapshot": udp_probe_pre["snapshot"],
-                             "post_cli_snapshot": post_cli_snapshot,
+                             "post_commit_snapshot": post_commit_snapshot,
                              "session_id_before": udp_probe_pre["session_id_before"],
                              "target_node": target}
         # self._owners (the next move's precondition) is refreshed by

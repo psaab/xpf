@@ -2164,9 +2164,9 @@ ha_rg_owner_node() {
 
 # #18679: launch the long-lived sequence-numbered UDP probe on the LAN host.
 # One client socket and boot nonce span the move; a firewall Session ID from the
-# target node's synced standby state is compared with the same node after
-# promotion. Post-CLI snapshots keep grace replies from command latency out of
-# the measured window.
+# target node's synced standby state is compared with the same node at the end
+# of the judged window. The checkpoint is supplied only after transition
+# confirmation, keeping CLI/prelanding replies out of the measured window.
 ha_udp_probe_start() {
 	if [[ $# -ne 5 ]]; then
 		printf 'UDP probe start: expected <run-id> <client-host> <target-ip> <target-port> <remote-dir>\n' >&2
@@ -2249,8 +2249,7 @@ ha_udp_probe_session_id() {
 # Status 0=SURVIVED, 1=measured RECREATED/LOST FAIL, 2=unusable evidence VOID.
 ha_udp_probe_survival_verdict() {
 	if [[ $# -ne 5 ]]; then
-		printf 'UDP probe survival: expected <pre-CLI-snapshot> <post-CLI-checkpoint> <after-snapshot> <before-session-id> <after-session-id>\n' >&2
-		return 2
+		printf 'UDP probe survival: expected <pre-move-snapshot> <transition-checkpoint> <final-snapshot> <before-session-id> <final-session-id>\n' >&2
 	fi
 	local lib_dir
 	lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 2

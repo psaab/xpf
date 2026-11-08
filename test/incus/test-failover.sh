@@ -126,11 +126,11 @@ FABRIC_ACTIVITY_TRIGGER_DELTA="${FABRIC_ACTIVITY_TRIGGER_DELTA:-8}"
 # one socket, boot nonce and increasing sequence while RG1 moves; the mouse
 # target echoes the source IP:port seen after translation. The exact firewall
 # Session ID must be present on fw0's synced standby before the move and remain
-# stable after fw0 is promoted. The immediate post-CLI snapshot excludes replies
-# emitted during CLI latency; only later successful sends/replies count.
-# A changed firewall Session ID or translated identity is RECREATED, confirmed
-# sends with no later replies are LOST, and missing sync/restarted-sender
-# evidence is VOID.
+# stable through the end of the judged window. The sequence checkpoint is taken
+# only after the owner poll confirms fw0 landing; replies during CLI latency and
+# prelanding cannot prove survival. A changed firewall Session ID or translated
+# identity is RECREATED, confirmed sends with no postlanding replies are LOST,
+# and missing sync/restarted-sender evidence is VOID.
 MAX_FAILOVER_SESSION_MISS_DROP_DELTA="${MAX_FAILOVER_SESSION_MISS_DROP_DELTA:-4}"
 MAX_FAILOVER_RAW_SESSION_MISS_FLOOR="${MAX_FAILOVER_RAW_SESSION_MISS_FLOOR:-256}"
 MAX_FAILOVER_NEIGHBOR_MISS_DELTA="${MAX_FAILOVER_NEIGHBOR_MISS_DELTA:-60}"
@@ -249,7 +249,7 @@ RG1_UDP_RUN_ID="test-failover-$$"
 RG1_UDP_REMOTE_DIR="/tmp/${RG1_UDP_RUN_ID}"
 RG1_UDP_BEFORE="${HA_CAPTURE_DIR}/rg1-udp-before.log"
 RG1_UDP_SESSION_PROBE="${HA_CAPTURE_DIR}/rg1-udp-session-probe.log"
-RG1_UDP_AFTER_CLI="${HA_CAPTURE_DIR}/rg1-udp-after-cli.log"
+RG1_UDP_AFTER_LANDING="${HA_CAPTURE_DIR}/rg1-udp-after-landing.log"
 RG1_UDP_AFTER="${HA_CAPTURE_DIR}/rg1-udp-after.log"
 RG1_UDP_SESSION_BEFORE=""
 RG1_UDP_SESSION_AFTER=""
@@ -326,11 +326,11 @@ ha_rg1_udp_before_move() {
 	RG1_UDP_READY=true
 }
 
-ha_rg1_udp_after_cli() {
+ha_rg1_udp_after_landing() {
 	if [[ "$RG1_UDP_STARTED" != true || "$RG1_UDP_READY" != true ]]; then return 2; fi
-	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_AFTER_CLI"; then
+	if ! ha_udp_probe_snapshot "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR" "$RG1_UDP_AFTER_LANDING"; then
 		RG1_UDP_READY=false
-		RG1_UDP_REASON="post-CLI-return UDP probe checkpoint was unavailable"
+		RG1_UDP_REASON="post-landing UDP probe checkpoint was unavailable"
 		return 2
 	fi
 }
@@ -1116,8 +1116,8 @@ ha_rg1_evaluate() {
 		"${RG1_STATS[phase-pre:node0]}" "${RG1_STATS[phase-pre:node1]}" \
 		"${RG1_STATS[phase-post:node0]}" "${RG1_STATS[phase-post:node1]}"
 	if [[ "$RG1_UDP_READY" == true ]]; then
-		ha_emit_diagnostic_verdict "RG1 Group 1c UDP session continuity across the RG1 move (post-CLI sequence, stable firewall Session ID)" \
-			ha_udp_probe_survival_verdict "$RG1_UDP_BEFORE" "$RG1_UDP_AFTER_CLI" "$RG1_UDP_AFTER" \
+		ha_emit_diagnostic_verdict "RG1 Group 1c UDP session continuity across the RG1 move (post-landing sequence, stable firewall Session ID)" \
+			ha_udp_probe_survival_verdict "$RG1_UDP_BEFORE" "$RG1_UDP_AFTER_LANDING" "$RG1_UDP_AFTER" \
 			"$RG1_UDP_SESSION_BEFORE" "$RG1_UDP_SESSION_AFTER"
 	else
 		void "RG1 Group 1c UDP session continuity: ${RG1_UDP_REASON}"
@@ -1294,12 +1294,13 @@ ha_run_rg1_failback_slice() {
 	else
 		request_rc=$?
 	fi
-	if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]] && ! ha_rg1_udp_after_cli; then
-		info "RG1 Group 1c UDP probe unavailable at CLI-return checkpoint: ${RG1_UDP_REASON}"
-	fi
 	info "RG1 failover request returned status ${request_rc}; request text is not ownership proof${request_output:+: ${request_output}}"
 	if ha_wait_rg1_owner node0 "$MANUAL_FAILOVER_DEADLINE"; then
 		owner_moved=true
+		if [[ "$RG1_UDP_STARTED" == true && "$RG1_UDP_READY" == true ]] \
+			&& ! ha_rg1_udp_after_landing; then
+			info "RG1 Group 1c UDP probe unavailable after owner landing: ${RG1_UDP_REASON}"
+		fi
 		rg1_move_at_seconds=$rg1_request_at
 		rg1_move_landed_at_seconds=$((SECONDS - iperf_start_seconds))
 		info "Recorded planned RG1 move at ${rg1_move_at_seconds}s (request) and ${rg1_move_landed_at_seconds}s (landed) after iperf start (split begins)"

@@ -637,6 +637,7 @@ class FakeCluster:
         self.udp_probe_session_value = 71
         self.udp_probe_recreate_at = None
         self.udp_probe_session_queries = []
+        self.udp_probe_snapshot_count = 0
         self.ping_seq = {}
         self.iv_index = {}
         self.events = []  # (lan_t0, lan_t1, kind)
@@ -678,6 +679,7 @@ class FakeCluster:
     def udp_probe_snapshot(self, run_id):
         if run_id != self.udp_probe_run_id or self.udp_probe_started_at is None:
             return None
+        self.udp_probe_snapshot_count += 1
         self._advance_udp_probe(self.clock_.t)
         lines = ["BOOT " + self.udp_probe_boot_id + "\n",
                  "SOCKET 10.0.61.2 39000 203.0.113.9 6201\n"]
@@ -1281,6 +1283,8 @@ class Orchestration(unittest.TestCase):
         rc, res, logs = run_fake(c, clock, moves=6)
         self.assertEqual(rc, 1)
         self.assertEqual(res["summary"]["counts"], {"PASS": 0, "COST": 0, "FAIL": 3, "VOID": 3})
+        self.assertEqual(c.udp_probe_snapshot_count, 13,
+                         "a failed/already CLI result must not start a post-transition probe window")
         fails = [m for m in res["moves"] if m["verdict"] == "FAIL"]
         self.assertTrue(all(m["target"] == 1 for m in fails))
         self.assertIn("clock skew", fails[0]["reasons"][0])
