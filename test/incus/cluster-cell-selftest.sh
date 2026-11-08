@@ -149,9 +149,10 @@ xpf_cell_wiring_check() {
 		return 1
 	fi
 	# A definition-shaped line is not evidence that the top-level lock call
-	# runs. Reject both "name() {" and "name () {" spellings, including
-	# indented definitions, before searching for the actual invocation.
-	if def_line=$(grep -nEm1 '^[[:space:]]*xpf_enter_destructive_cluster_cell[[:space:]]*\(\)' "$p"); then
+	# runs. Reject name() forms with arbitrary whitespace inside and around
+	# the parentheses, including indented definitions, before searching for
+	# the actual invocation.
+	if def_line=$(grep -nEm1 '^[[:space:]]*xpf_enter_destructive_cluster_cell[[:space:]]*\([[:space:]]*\)' "$p"); then
 		def_line="${def_line%%:*}"
 		printf '%s defines xpf_enter_destructive_cluster_cell (line %s) instead of calling it (#4020 lock dropped?)\n' \
 			"$s" "$def_line"
@@ -231,6 +232,7 @@ _wiring_fixture redefined-call.sh "$_wiring_src" 'xpf_enter_destructive_cluster_
 _wiring_fixture call-name-prefix.sh "$_wiring_src" 'xpf_enter_destructive_cluster_cell_extra' "$_wiring_mut"
 _wiring_fixture spaced-redefined-call.sh "$_wiring_src" 'xpf_enter_destructive_cluster_cell () { :; }' "$_wiring_mut"
 _wiring_fixture indented-spaced-redefined-call.sh "$_wiring_src" '	xpf_enter_destructive_cluster_cell () { :; }' "$_wiring_mut"
+_wiring_fixture paren-spaced-redefined-call.sh "$_wiring_src" 'xpf_enter_destructive_cluster_cell ( ) { :; }' "$_wiring_mut"
 if ! _out=$(xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
 	fail "static: the wiring check false-reds a correct script with a 70-line header: ${_out}"
 fi
@@ -244,32 +246,39 @@ for _fx in no-source:'does not source' commented-source:'does not source' \
 	indented-call:'never calls' redefined-call:'defines xpf_enter_destructive_cluster_cell' \
 	spaced-redefined-call:'defines xpf_enter_destructive_cluster_cell' \
 	call-name-prefix:'never calls' \
-	indented-spaced-redefined-call:'defines xpf_enter_destructive_cluster_cell'; do
+	indented-spaced-redefined-call:'defines xpf_enter_destructive_cluster_cell' \
+	paren-spaced-redefined-call:'defines xpf_enter_destructive_cluster_cell'; do
 	_name="${_fx%%:*}" _want="${_fx#*:}"
 	if _out=$(xpf_cell_wiring_check "${_wiring_fx}/${_name}.sh"); then
 		fail "static: the wiring check accepted the ${_name} fixture (lock line ${_out})"
 	fi
 	[[ "$_out" == *"$_want"* ]] || fail "static: the ${_name} fixture was refused for the wrong reason: ${_out}"
 done
-# Repeat the review's decisive mutation against the real destructive script:
-# replace its top-level call with a valid spaced Bash function declaration.
-_mutated_failover="${_wiring_fx}/test-failover-spaced-definition.sh"
-_wiring_replacements=0
-while IFS= read -r _line || [[ -n "$_line" ]]; do
-	if [[ "$_line" == 'xpf_enter_destructive_cluster_cell '* ]]; then
-		printf '%s\n' 'xpf_enter_destructive_cluster_cell () { :; }'
-		_wiring_replacements=$((_wiring_replacements + 1))
-	else
-		printf '%s\n' "$_line"
+# Repeat the review's decisive mutations against the real destructive script:
+# replace its top-level call with valid spaced Bash function declarations.
+for _definition_case in spaced spaced-parens; do
+	case "$_definition_case" in
+		spaced) _definition='xpf_enter_destructive_cluster_cell () { :; }' ;;
+		spaced-parens) _definition='xpf_enter_destructive_cluster_cell ( ) { :; }' ;;
+	esac
+	_mutated_failover="${_wiring_fx}/test-failover-${_definition_case}-definition.sh"
+	_wiring_replacements=0
+	while IFS= read -r _line || [[ -n "$_line" ]]; do
+		if [[ "$_line" == 'xpf_enter_destructive_cluster_cell '* ]]; then
+			printf '%s\n' "$_definition"
+			_wiring_replacements=$((_wiring_replacements + 1))
+		else
+			printf '%s\n' "$_line"
+		fi
+	done <"${SCRIPT_DIR}/test-failover.sh" >"$_mutated_failover"
+	[[ "$_wiring_replacements" == 1 ]] || fail "static: the test-failover ${_definition_case} mutation did not replace exactly one lock call"
+	bash -n "$_mutated_failover" || fail "static: the ${_definition_case} lock declaration is not valid Bash"
+	if _out=$(xpf_cell_wiring_check "$_mutated_failover"); then
+		fail "static: the wiring check accepted the ${_definition_case} definition replacement in test-failover.sh"
 	fi
-done <"${SCRIPT_DIR}/test-failover.sh" >"$_mutated_failover"
-[[ "$_wiring_replacements" == 1 ]] || fail "static: the test-failover mutation did not replace exactly one lock call"
-bash -n "$_mutated_failover" || fail "static: the spaced lock declaration is not valid Bash"
-if _out=$(xpf_cell_wiring_check "$_mutated_failover"); then
-	fail "static: the wiring check accepted the spaced-definition replacement in test-failover.sh"
-fi
-[[ "$_out" == *"defines xpf_enter_destructive_cluster_cell"* ]] ||
-	fail "static: the spaced-definition replacement was refused for the wrong reason: ${_out}"
+	[[ "$_out" == *"defines xpf_enter_destructive_cluster_cell"* ]] ||
+		fail "static: the ${_definition_case} definition replacement was refused for the wrong reason: ${_out}"
+done
 # The detector-failure branch: a script the mutation detector cannot read is
 # never waved through as non-destructive.
 if _out=$(xpf_first_mutation_line() { return 1; }; xpf_cell_wiring_check "${_wiring_fx}/long-header.sh"); then
