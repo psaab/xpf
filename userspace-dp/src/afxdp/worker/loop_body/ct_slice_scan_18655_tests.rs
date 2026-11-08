@@ -615,26 +615,6 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
         crate::ip_proto::PROTO_TCP,
     );
     let nat = fx::snat(Some(30_000 + (ALIASES - 1) as u16));
-    for i in 0..ALIASES {
-        let alias_nat = fx::snat(Some(30_000 + i as u16));
-        let shared_row = fx::row(
-            &forward,
-            alias_nat,
-            TcpHandshakeState::HandshakePending.to_wire(),
-            10 + i as u64,
-            20 + i as u64,
-            false,
-            30_000 + i as u64,
-        );
-        crate::afxdp::shared_ops::publish_shared_session(
-            &shared,
-            &nat_map,
-            &wire_map,
-            &indexes,
-            &shared_row,
-        );
-    }
-
     let established = TcpHandshakeState::Established.to_wire();
     let old_local = fx::row(&forward, nat, established, 1, 1, false, 40_001);
     assert!(sessions.upsert_synced_with_origin(
@@ -660,6 +640,26 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
     assert_ne!(old_id, 0, "fixture: old incarnation has an ID");
     let _ = sessions.drain_deltas(16);
 
+    for i in 0..ALIASES {
+        let alias_nat = fx::snat(Some(30_000 + i as u16));
+        let shared_row = fx::row(
+            &forward,
+            alias_nat,
+            TcpHandshakeState::HandshakePending.to_wire(),
+            10 + i as u64,
+            20 + i as u64,
+            false,
+            old_id,
+        );
+        crate::afxdp::shared_ops::publish_shared_session(
+            &shared,
+            &nat_map,
+            &wire_map,
+            &indexes,
+            &shared_row,
+        );
+    }
+
     let mut clocks = (0usize, 0u64, 0u64, 0u64, 0usize);
     let mut pending = None;
     let mut now = 30_000_000_000u64;
@@ -679,8 +679,7 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
     );
 
     sessions.delete(&forward);
-    let pending_replacement = TcpHandshakeState::HandshakePending.to_wire();
-    let replacement = fx::row(&forward, nat, pending_replacement, 1, 0, false, 50_001);
+    let replacement = fx::row(&forward, nat, established, 0, 0, false, 50_001);
     assert!(sessions.upsert_synced_with_origin(
         SessionInstall {
             key: forward.clone(),
@@ -693,9 +692,9 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
             tcp_flags: 0,
             session_id: replacement.session_id,
             tcp_close_class: 0,
-            tcp_handshake_state: pending_replacement,
+            tcp_handshake_state: established,
             persistent_lease_hold: None,
-            fwd_packets: 1,
+            fwd_packets: 0,
             rev_packets: 0,
         },
         false,
@@ -738,7 +737,8 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
         &indexes,
         &forward,
     );
-    let replacement_shared = fx::row(&forward, nat, established, 9, 7, false, replacement.session_id);
+    let replacement_shared =
+        fx::row(&forward, nat, established, 0, 0, false, replacement.session_id);
     crate::afxdp::shared_ops::publish_shared_session(
         &shared,
         &nat_map,
@@ -746,9 +746,44 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
         &indexes,
         &replacement_shared,
     );
+    let stale_aliases = crate::afxdp::shared_ops::lock_shared_recover(&wire_map)
+        .values()
+        .filter(|entry| entry.key == forward && entry.session_id == old_id)
+        .count();
+    assert_eq!(
+        stale_aliases,
+        ALIASES - 1,
+        "removal leaves old incarnation aliases for the provenance check"
+    );
+    let replacement_identity = sessions
+        .ct_slice_emit_identity_for(&forward)
+        .expect("fixture: replacement identity is live");
+    let fold_replacement = || {
+        let mut traversal =
+            crate::afxdp::shared_ops::StageCountsTraversal::new_with_identities(
+                vec![(forward.clone(), nat.clone())],
+                vec![Some(replacement_identity.clone())],
+            );
+        loop {
+            let (complete, _, _, _) = traversal.advance(
+                &shared,
+                &wire_map,
+                &indexes.stage_counts_forward_wire_sessions,
+                crate::afxdp::shared_ops::STAGE_COUNTS_INVOCATION_BUDGET_18662,
+            );
+            if complete {
+                break;
+            }
+        }
+        traversal.finish().2
+    };
+    assert_eq!(
+        fold_replacement(),
+        vec![(established, 0, 0)],
+        "wire aliases from A cannot contribute B's reverse counts"
+    );
 
-    // The next cycle evaluates the replacement against its own shared row;
-    // it emits only after B's current incarnation supplies evidence.
+    // The next cycle sees B's own stage/count row, not A's retained aliases.
     now = 40_000_000_000;
     run_slice_18655(
         &mut sessions,
@@ -774,6 +809,66 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
         next_cycle_invocations += 1;
         assert!(next_cycle_invocations < 8, "replacement evidence traversal must finish");
     }
+    assert!(
+        sessions
+            .drain_deltas(16)
+            .into_iter()
+            .all(|delta| delta.kind != SessionDeltaKind::Update),
+        "stale A reverse counts must not emit a B Update"
+    );
+
+    // A genuinely retained alias belonging to B remains valid evidence even
+    // when the canonical shared row still has rev=0.
+    let retained_nat = fx::snat(Some(60_000));
+    let retained_alias =
+        fx::row(&forward, retained_nat, established, 0, 7, false, replacement.session_id);
+    let retained_wire_key = crate::session::forward_wire_key(&forward, retained_nat);
+    {
+        let mut wires = crate::afxdp::shared_ops::lock_shared_recover(&wire_map);
+        assert!(
+            wires
+                .insert(retained_wire_key.clone(), retained_alias.clone())
+                .is_none(),
+            "fixture: retained control alias has a distinct wire key"
+        );
+        crate::afxdp::shared_ops::update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &retained_wire_key,
+            None,
+            Some(&retained_alias),
+        );
+    }
+    assert_eq!(
+        fold_replacement(),
+        vec![(established, 0, 7)],
+        "same-incarnation retained aliases still contribute counts"
+    );
+
+    now = 50_000_000_000;
+    run_slice_18655(
+        &mut sessions,
+        &shared,
+        &wire_map,
+        &indexes,
+        &mut clocks,
+        &mut pending,
+        now,
+    );
+    let mut retained_alias_invocations = 1;
+    while pending.is_some() {
+        now += 100_000_000;
+        run_slice_18655(
+            &mut sessions,
+            &shared,
+            &wire_map,
+            &indexes,
+            &mut clocks,
+            &mut pending,
+            now,
+        );
+        retained_alias_invocations += 1;
+        assert!(retained_alias_invocations < 8, "B alias evidence traversal must finish");
+    }
     let replacement_updates: Vec<_> = sessions
         .drain_deltas(16)
         .into_iter()
@@ -782,10 +877,15 @@ fn ct_slice_drops_stale_pending_update_after_same_key_reinstall_18662() {
     assert_eq!(
         replacement_updates.len(),
         1,
-        "the next cycle evaluates B independently and emits its current evidence"
+        "B's own retained alias supplies the only first reverse evidence"
     );
     assert_eq!(replacement_updates[0].session_id, replacement.session_id);
     assert_eq!(replacement_updates[0].tcp_handshake_state, established);
+    assert_eq!(
+        replacement_updates[0].counters.rev_packets,
+        0,
+        "B itself has no local reverse packet; only its retained alias vouches"
+    );
 }
 
 /// A worker row replaced in a slab slot already passed by this cycle is

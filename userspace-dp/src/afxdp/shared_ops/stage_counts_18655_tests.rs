@@ -1200,7 +1200,7 @@ fn retained_alias_fanout_resumes_with_constant_invocation_budget_18662() {
             invocations += 1;
             assert!(invocations < 16, "A={alias_count}: traversal must finish");
             if complete {
-                let (finished_keys, actual) = traversal.finish();
+                let (finished_keys, _identities, actual) = traversal.finish();
                 assert_eq!(finished_keys, requested);
                 assert_eq!(actual, vec![expected], "A={alias_count}: complete fold must match scan");
                 break;
@@ -1217,4 +1217,131 @@ fn retained_alias_fanout_resumes_with_constant_invocation_budget_18662() {
             "A={alias_count}: every invocation stays at the independent fixed cap"
         );
     }
+}
+
+#[test]
+fn reverse_companion_distinct_session_id_still_contributes_evidence_18662() {
+    let (shared, nat_map, wire_map, indexes) = maps();
+    let forward = key(
+        v4(10, 0, 61, 107),
+        32_003,
+        v4(172, 16, 80, 200),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let nat = snat(Some(30_123));
+    let stage = TcpHandshakeState::HandshakePending.to_wire();
+    let forward_id = 41_001;
+    let reverse_id = 42_002;
+    publish_shared_session(
+        &shared,
+        &nat_map,
+        &wire_map,
+        &indexes,
+        &row(&forward, nat, stage, 0, 0, false, forward_id),
+    );
+    let reverse_key = crate::session::reverse_session_key(&forward, nat);
+    publish_shared_session(
+        &shared,
+        &nat_map,
+        &wire_map,
+        &indexes,
+        &row(&reverse_key, nat, stage, 0, 9, true, reverse_id),
+    );
+
+    let mut traversal = StageCountsTraversal::new_with_identities(
+        vec![(forward.clone(), nat)],
+        vec![Some((forward_id, nat))],
+    );
+    loop {
+        let (complete, _, _, _) = traversal.advance(
+            &shared,
+            &wire_map,
+            &indexes.stage_counts_forward_wire_sessions,
+            STAGE_COUNTS_INVOCATION_BUDGET_18662,
+        );
+        if complete {
+            break;
+        }
+    }
+    let (_, identities, counts) = traversal.finish();
+    assert_eq!(identities, vec![Some((forward_id, nat))]);
+    assert_eq!(
+        counts,
+        vec![(stage, 0, 9)],
+        "a canonical reverse companion has its own session ID but still supplies reverse counts"
+    );
+}
+
+#[test]
+fn snat_wire_key_alias_from_old_session_does_not_vouch_for_new_output_18662() {
+    let (shared, _nat_map, wire_map, indexes) = maps();
+    let forward = key(
+        v4(10, 0, 61, 108),
+        32_004,
+        v4(172, 16, 80, 200),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let nat = snat(Some(30_124));
+    let translated_wire_key = crate::session::forward_wire_key(&forward, nat);
+    assert_ne!(translated_wire_key, forward, "fixture uses a translated wire key");
+    let alias_map_key = key(
+        v4(192, 0, 2, 57),
+        45_005,
+        v4(198, 51, 100, 100),
+        443,
+        crate::ip_proto::PROTO_TCP,
+    );
+    let stale_id = 43_003;
+    let current_id = 44_004;
+    let stale_alias = row(
+        &translated_wire_key,
+        nat,
+        TcpHandshakeState::Established.to_wire(),
+        0,
+        17,
+        false,
+        stale_id,
+    );
+    {
+        let mut wires = lock_shared_recover(&wire_map);
+        wires.insert(alias_map_key.clone(), stale_alias.clone());
+        update_stage_counts_entry_key_index(
+            &indexes.stage_counts_forward_wire_sessions,
+            &alias_map_key,
+            None,
+            Some(&stale_alias),
+        );
+    }
+
+    let fold_for_owner = |owner_id| {
+        let mut traversal = StageCountsTraversal::new_with_identities(
+            vec![(forward.clone(), nat)],
+            vec![Some((owner_id, nat))],
+        );
+        loop {
+            let (complete, _, _, _) = traversal.advance(
+                &shared,
+                &wire_map,
+                &indexes.stage_counts_forward_wire_sessions,
+                STAGE_COUNTS_INVOCATION_BUDGET_18662,
+            );
+            if complete {
+                break;
+            }
+        }
+        traversal.finish().2
+    };
+
+    assert_eq!(
+        fold_for_owner(current_id),
+        vec![(0, 0, 0)],
+        "a retained translated wire alias from an old session cannot vouch for its replacement"
+    );
+    assert_eq!(
+        fold_for_owner(stale_id),
+        vec![(TcpHandshakeState::Established.to_wire(), 0, 17)],
+        "same-incarnation translated wire aliases remain eligible"
+    );
 }

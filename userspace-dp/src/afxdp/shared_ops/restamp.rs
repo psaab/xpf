@@ -449,10 +449,11 @@ pub(super) type StageCountsWanted = FastMap<SessionKey, Vec<(usize, bool)>>;
 /// stage/count mutex hold, independent of table size.
 pub(in crate::afxdp) const STAGE_COUNTS_LOCK_CHUNK_18662: usize = 128;
 
-/// A captured matching row. It owns its key so fold work can resume after the
-/// map locks are released and across later ct-slice invocations.
+/// A captured matching row. Its session ID fences retained aliases to the
+/// requested output's incarnation while the fold resumes after map unlocks.
 struct StageCountsEvidence {
     key: SessionKey,
+    session_id: u64,
     is_wire: bool,
     is_reverse: bool,
     stage: u8,
@@ -466,9 +467,12 @@ struct PendingStageCountsFold {
 }
 
 /// One incremental traversal for an emit set. The cursor, alias position,
-/// pending row folds, and accumulated outputs survive each worker-loop return.
+/// pending row folds, output identities, and accumulated results survive each
+/// worker-loop return.
 pub(in crate::afxdp) struct StageCountsTraversal {
     output_keys: Vec<(SessionKey, crate::nat::NatDecision)>,
+    output_identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
+    filter_forward_alias_identity: bool,
     wanted: StageCountsWanted,
     requested: Vec<SessionKey>,
     out: Vec<(u8, u64, u64)>,
@@ -492,6 +496,7 @@ fn stage_counts_evidence(
     Some(PendingStageCountsFold {
         row: StageCountsEvidence {
             key: entry.key.clone(),
+            session_id: entry.session_id,
             is_wire,
             is_reverse: entry.metadata.is_reverse,
             stage: entry.tcp_handshake_state,
@@ -510,6 +515,8 @@ fn fold_stage_count_row(
     out: &mut [(u8, u64, u64)],
     work: &mut usize,
     work_budget: usize,
+    output_identities: &[Option<(u64, crate::nat::NatDecision)>],
+    filter_forward_alias_identity: bool,
 ) {
     let slots = wanted
         .get(&pending.row.key)
@@ -519,6 +526,20 @@ fn fold_stage_count_row(
         pending.next_slot += 1;
         *work += 1;
         if wire_only && !pending.row.is_wire {
+            continue;
+        }
+        let is_forward_wire_alias = pending.row.is_wire && !pending.row.is_reverse;
+        // Reverse companions have independent IDs and remain eligible.
+        // Forward rows in the wire map must belong to this output incarnation;
+        // this covers the translated wire key and any reverse-key collision.
+        if filter_forward_alias_identity
+            && is_forward_wire_alias
+            && output_identities
+                .get(index)
+                .and_then(|identity| *identity)
+                .map(|(session_id, _)| session_id)
+                != Some(pending.row.session_id)
+        {
             continue;
         }
         let slot = &mut out[index];
@@ -531,10 +552,12 @@ fn fold_stage_count_row(
 }
 
 impl StageCountsTraversal {
-    /// Construct an owned traversal from the worker's current emit set.
-    pub(in crate::afxdp) fn new(
+    fn from_output_keys(
         output_keys: Vec<(SessionKey, crate::nat::NatDecision)>,
+        output_identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
+        filter_forward_alias_identity: bool,
     ) -> Self {
+        debug_assert_eq!(output_keys.len(), output_identities.len());
         let mut wanted: StageCountsWanted = FastMap::default();
         for (index, (forward_key, nat)) in output_keys.iter().enumerate() {
             let reverse_key = crate::session::reverse_session_key(forward_key, *nat);
@@ -547,6 +570,8 @@ impl StageCountsTraversal {
         let out = vec![(0u8, 0u64, 0u64); output_keys.len()];
         Self {
             output_keys,
+            output_identities,
+            filter_forward_alias_identity,
             wanted,
             requested,
             out,
@@ -558,6 +583,23 @@ impl StageCountsTraversal {
         }
     }
 
+    /// Fence forward-wire aliases to the output's owner session ID; reverse
+    /// companions retain their independently assigned session IDs.
+    pub(in crate::afxdp) fn new_with_identities(
+        output_keys: Vec<(SessionKey, crate::nat::NatDecision)>,
+        output_identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
+    ) -> Self {
+        Self::from_output_keys(output_keys, output_identities, true)
+    }
+
+    #[cfg(test)]
+    pub(in crate::afxdp) fn new(
+        output_keys: Vec<(SessionKey, crate::nat::NatDecision)>,
+    ) -> Self {
+        let output_identities = vec![None; output_keys.len()];
+        Self::from_output_keys(output_keys, output_identities, false)
+    }
+
     #[cfg(test)]
     fn from_parts(
         wanted: &StageCountsWanted,
@@ -566,6 +608,8 @@ impl StageCountsTraversal {
     ) -> Self {
         Self {
             output_keys: Vec::new(),
+            output_identities: vec![None; out.len()],
+            filter_forward_alias_identity: false,
             wanted: wanted.clone(),
             requested: requested.to_vec(),
             out: out.to_vec(),
@@ -600,7 +644,15 @@ impl StageCountsTraversal {
                 let pending = self.folds[self.folds_cursor]
                     .as_mut()
                     .expect("pending stage-count fold slot populated");
-                fold_stage_count_row(pending, &self.wanted, &mut self.out, &mut work, budget);
+                fold_stage_count_row(
+                    pending,
+                    &self.wanted,
+                    &mut self.out,
+                    &mut work,
+                    budget,
+                    &self.output_identities,
+                    self.filter_forward_alias_identity,
+                );
                 let slots_len = self
                     .wanted
                     .get(&pending.row.key)
@@ -696,9 +748,10 @@ impl StageCountsTraversal {
             }
             total_visited += hold_visited;
             max_hold = max_hold.max(hold_visited);
-            // If the remaining unit cannot pay for a direct two-map probe,
-            // this invocation is spent; the next call resumes at this key.
-            if work == hold_start_work {
+            self.folds_cursor = 0;
+            if work == hold_start_work && self.folds_len == 0 {
+                // A new key needs two lookup units; if only one remains in
+                // this invocation, return the partial traversal unchanged.
                 break;
             }
         }
@@ -709,12 +762,17 @@ impl StageCountsTraversal {
 
     pub(in crate::afxdp) fn finish(
         self,
-    ) -> (Vec<(SessionKey, crate::nat::NatDecision)>, Vec<(u8, u64, u64)>) {
+    ) -> (
+        Vec<(SessionKey, crate::nat::NatDecision)>,
+        Vec<Option<(u64, crate::nat::NatDecision)>>,
+        Vec<(u8, u64, u64)>,
+    ) {
         debug_assert!(self.key_cursor >= self.requested.len());
         debug_assert!(self.folds_cursor >= self.folds_len);
-        (self.output_keys, self.out)
+        (self.output_keys, self.output_identities, self.out)
     }
 }
+
 
 
 pub(in crate::afxdp) fn record_stage_counts_work(

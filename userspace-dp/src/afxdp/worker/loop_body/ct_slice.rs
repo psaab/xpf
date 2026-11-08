@@ -182,15 +182,13 @@ impl CtSlicePairSet {
 pub(super) struct PendingStageCountsEmission {
     next_cursor: usize,
     traversal: crate::afxdp::shared_ops::StageCountsTraversal,
-    identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
 }
 
 fn emit_completed_stage_counts(
     sessions: &mut crate::session::SessionTable,
     traversal: crate::afxdp::shared_ops::StageCountsTraversal,
-    identities: Vec<Option<(u64, crate::nat::NatDecision)>>,
 ) {
-    let (emit_keys, rows) = traversal.finish();
+    let (emit_keys, identities, rows) = traversal.finish();
     debug_assert_eq!(emit_keys.len(), identities.len());
     debug_assert_eq!(emit_keys.len(), rows.len());
     for (((key, nat), (stage, fwd, rev)), identity) in
@@ -227,7 +225,7 @@ fn run_shared_evidence_leg(
             let pending = stage_counts_pending
                 .take()
                 .expect("completed stage/count traversal remains pending");
-            emit_completed_stage_counts(sessions, pending.traversal, pending.identities);
+            emit_completed_stage_counts(sessions, pending.traversal);
             *established_cursor = pending.next_cursor;
         }
         return;
@@ -383,7 +381,10 @@ fn run_shared_evidence_leg(
                 })
                 .collect();
             let mut traversal =
-                crate::afxdp::shared_ops::StageCountsTraversal::new(emit_keys);
+                crate::afxdp::shared_ops::StageCountsTraversal::new_with_identities(
+                    emit_keys,
+                    identities,
+                );
             let requested = traversal.output_count();
             let (complete, visited, max_hold, max_work) = traversal.advance(
                 shared_sessions,
@@ -398,13 +399,12 @@ fn run_shared_evidence_leg(
                 requested,
             );
             if complete {
-                emit_completed_stage_counts(sessions, traversal, identities);
+                emit_completed_stage_counts(sessions, traversal);
                 *established_cursor = next_cursor;
             } else {
                 *stage_counts_pending = Some(PendingStageCountsEmission {
                     next_cursor,
                     traversal,
-                    identities,
                 });
             }
         }
