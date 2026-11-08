@@ -489,40 +489,192 @@ func lineInRanges15255(ranges [][2]int, i int) bool {
 	return false
 }
 
-// fnItemRef19013 reports whether src references name as a fn-item value
-// outside its own declaration: a bare identifier or the last segment of a
-// `::`-qualified path, followed by `,`, `)`, or `;` (an argument, a
-// binding, or a returned value — never an invocation, which ends in
-// `(`). The `fn name(` declaration itself is excluded: its next byte is
-// `(` so it can never match, and identifier boundaries keep longer
-// names that merely contain name (name_extra) from counting (#19013).
-func fnItemRef19013(src, name string) bool {
-	for idx := 0; ; {
-		at := strings.Index(src[idx:], name)
-		if at < 0 {
-			return false
+func rustIdentByte19013(c byte) bool {
+	return c == '_' || c >= 0x80 ||
+		('0' <= c && c <= '9') ||
+		('a' <= c && c <= 'z') ||
+		('A' <= c && c <= 'Z')
+}
+
+// skipRustNonCodeFnItem19013 skips comments and literals so their text
+// cannot make a dead fn appear to be referenced.
+func skipRustNonCodeFnItem19013(src string, i int) (int, bool) {
+	n := len(src)
+	if i+1 < n && src[i] == '/' && src[i+1] == '/' {
+		j := i + 2
+		for j < n && src[j] != '\n' {
+			j++
 		}
-		start := idx + at
-		idx = start + len(name)
-		if start > 0 {
-			if prev := src[start-1]; prev == '_' ||
-				('0' <= prev && prev <= '9') ||
-				('a' <= prev && prev <= 'z') ||
-				('A' <= prev && prev <= 'Z') {
+		return j, true
+	}
+	if i+1 < n && src[i] == '/' && src[i+1] == '*' {
+		depth, j := 1, i+2
+		for j+1 < n {
+			if src[j] == '/' && src[j+1] == '*' {
+				depth++
+				j += 2
 				continue
 			}
-		}
-		end := start + len(name)
-		for end < len(src) && (src[end] == ' ' || src[end] == '\t' ||
-			src[end] == '\n' || src[end] == '\r') {
-			end++
-		}
-		if end < len(src) {
-			if next := src[end]; next == ',' || next == ')' || next == ';' {
-				return true
+			if src[j] == '*' && src[j+1] == '/' {
+				depth--
+				j += 2
+				if depth == 0 {
+					return j, true
+				}
+				continue
 			}
+			j++
+		}
+		return n, true
+	}
+
+	// Raw strings may carry any number of hashes; byte and C raw strings
+	// use the same terminator.
+	raw := i
+	if (src[i] == 'b' || src[i] == 'c') && i+1 < n && src[i+1] == 'r' {
+		raw++
+	}
+	if src[raw] == 'r' {
+		j := raw + 1
+		for j < n && src[j] == '#' {
+			j++
+		}
+		hashes := j - raw - 1
+		if j < n && src[j] == '"' {
+			for end := j + 1; end < n; end++ {
+				if src[end] != '"' {
+					continue
+				}
+				close := end + 1
+				for close < n && src[close] == '#' {
+					close++
+				}
+				if close-end-1 == hashes {
+					return close, true
+				}
+			}
+			return n, true
 		}
 	}
+
+	quote := i
+	if (src[i] == 'b' || src[i] == 'c') && i+1 < n {
+		quote++
+	}
+	if quote < n && src[quote] == '"' {
+		j := quote + 1
+		for j < n {
+			if src[j] == '\\' {
+				j += 2
+				continue
+			}
+			if src[j] == '"' {
+				return j + 1, true
+			}
+			j++
+		}
+		return n, true
+	}
+
+	char := i
+	if src[i] == 'b' && i+1 < n && src[i+1] == '\'' {
+		char++
+	}
+	if src[char] == '\'' {
+		j := char + 1
+		if j < n && src[j] == '\\' {
+			j++
+			if j < n {
+				switch src[j] {
+				case 'u':
+					if j+1 < n && src[j+1] == '{' {
+						j += 2
+						for j < n && src[j] != '}' {
+							j++
+						}
+						if j < n {
+							j++
+						}
+					} else {
+						j++
+					}
+				case 'x':
+					if j+3 <= n {
+						j += 3
+					} else {
+						j = n
+					}
+				default:
+					j++
+				}
+			}
+		} else if j < n {
+			j++
+			for j < n && src[j]&0xc0 == 0x80 {
+				j++
+			}
+		}
+		if j < n && src[j] == '\'' {
+			return j + 1, true
+		}
+		if char == i {
+			// An apostrophe followed by an identifier is a lifetime, not
+			// a character literal.
+			j = i + 1
+			if j < n && rustIdentByte19013(src[j]) {
+				for j < n && rustIdentByte19013(src[j]) {
+					j++
+				}
+				return j, true
+			}
+		}
+		return i + 1, true
+	}
+	return i, false
+}
+
+// fnItemRef19013 reports whether src references name as a fn-item value
+// outside its own declaration: a bare identifier or the last segment of a
+// `::`-qualified path, followed by `,`, `)`, or `;`. The `fn name(`
+// declaration itself is excluded, and comments/literals are ignored.
+func fnItemRef19013(src, name string) bool {
+	if name == "" {
+		return false
+	}
+	for i := 0; i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if !strings.HasPrefix(src[i:], name) {
+			i++
+			continue
+		}
+		start := i
+		i += len(name)
+		if start > 0 && (rustIdentByte19013(src[start-1]) || src[start-1] == '.') {
+			continue
+		}
+		end := i
+		for end < len(src) {
+			switch src[end] {
+			case ' ', '\t', '\n', '\r':
+				end++
+				continue
+			case '/':
+				if next, skip := skipRustNonCodeFnItem19013(src, end); skip {
+					end = next
+					continue
+				}
+			}
+			break
+		}
+		if end < len(src) &&
+			(src[end] == ',' || src[end] == ')' || src[end] == ';') {
+			return true
+		}
+	}
+	return false
 }
 
 // fnNameAndArgs15255 parses a fn declaration line, returning the name
@@ -800,6 +952,13 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			rel:  "tests_x.rs",
 			src:  "fn callback() { assert!(true); }\n#[test]\nfn uses() { runner(crate::tests::callback); }\n",
 			want: 0,
+		},
+		{
+			name: "comment and string mentions do not reference an unregistered fn",
+			rel:  "tests_x.rs",
+			src: "fn lost() { assert!(true); }\n// lost,\n/* lost, */\n" +
+				"#[test]\nfn ok() { let _ = \"lost,\"; let _ = r#\"lost,\"#; }\n",
+			want: 1,
 		},
 		{
 			name: "unregistered zero-arg fn without asserts is a fixture",
