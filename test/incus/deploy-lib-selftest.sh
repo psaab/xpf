@@ -4300,9 +4300,9 @@ test_prepare_deb_explicit_version_builds() {
 	teardown_make_fixture
 }
 
-# #19017: an actual `make deb` under the with-cluster testguard PATH must
-# refuse before dpkg-buildpackage; on a clean PATH the same guard must stay
-# silent and let the build reach the controlled dpkg-buildpackage stub.
+# #19017: `make deb` under the with-cluster testguard PATH must refuse before
+# dpkg-buildpackage; clean PATH stays silent, and a real dpkg beside the
+# marker must not be mistaken for the shim.
 test_make_deb_host_shim_guard_19017() {
 	local shim="$SCRIPT_DIR/../support/host-bin-shims" make_bin tmp out rc
 	tmp=$(mktemp -d)
@@ -4325,6 +4325,18 @@ EOF
 		ok "make deb: shimmed PATH refuses with #19017 before dpkg-buildpackage"
 	else
 		bad "make deb shim refusal: rc=$rc out='$out' called=$(test -e "$tmp/dpkg-buildpackage-called" && echo yes || echo no)"
+	fi
+	mkdir -p "$tmp/marked-real-dpkg-bin"
+	cp /usr/bin/dpkg "$tmp/marked-real-dpkg-bin/dpkg"
+	: >"$tmp/marked-real-dpkg-bin/refuse-host-tool"
+	out=$(cd "$SCRIPT_DIR/../.." && \
+		PATH="$tmp/marked-real-dpkg-bin:/usr/bin:/bin" \
+		"$make_bin" --no-print-directory deb-cell-guard 2>&1)
+	rc=$?
+	if [[ $rc -eq 0 && "$out" != *"build outside the lock cell"* ]]; then
+		ok "make deb guard: real dpkg beside marker is not mistaken for the shim"
+	else
+		bad "make deb guard real dpkg+marker: rc=$rc out='$out'"
 	fi
 
 	out=$(cd "$SCRIPT_DIR/../.." && \

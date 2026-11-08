@@ -2325,19 +2325,16 @@ deb-changelog-check:
 # #18038 testguard shim (with-cluster.sh prepends host-bin-shims), and
 # dpkg-buildpackage then dies misleadingly with "dpkg-architecture
 # subprocess failed 125". Refuse EARLY with a named error instead: the
-# PATH-resolved dpkg sits in a refuse-host-tool marker dir (the exact
-# shim signature deploy_host_dpkg in test/incus/deploy-lib.sh skips,
-# #19014). prepare-deb's rebuild branches delegate to this target, so
+# PATH-resolved dpkg must match the testguard shim script, not merely be
+# found beside its refuse-host-tool marker (#19014's resolver skips such
+# directories). prepare-deb's rebuild branches delegate to this target, so
 # they inherit the refusal. A clean PATH is untouched.
 deb-cell-guard:
 	@resolved_dpkg=$$(command -v dpkg 2>/dev/null || true); \
-	  if [ -n "$$resolved_dpkg" ]; then \
-	    resolved_dir=$$(dirname "$$resolved_dpkg"); \
-	    if [ -e "$$resolved_dir/refuse-host-tool" ]; then \
-	      host_dpkg=$$(bash -c 'source ./test/incus/deploy-lib.sh; deploy_host_dpkg' 2>/dev/null || true); \
-	      echo "FATAL: refusing to build the .deb here: the resolved dpkg ($$resolved_dpkg) is the #18038 testguard shim$${host_dpkg:+ (shim-free host dpkg: $$host_dpkg)}; dpkg-buildpackage would fail misleadingly inside it -- build outside the lock cell (run 'make deb' on the host, outside the with-cluster cell) (#19017)" >&2; \
-	      exit 1; \
-	    fi; \
+	  if [ -n "$$resolved_dpkg" ] && cmp -s "$$resolved_dpkg" "$(HOST_BIN_SHIMS)/dpkg"; then \
+	    host_dpkg=$$(bash -c 'source ./test/incus/deploy-lib.sh; deploy_host_dpkg' 2>/dev/null || true); \
+	    echo "FATAL: refusing to build the .deb here: the resolved dpkg ($$resolved_dpkg) is the #18038 testguard shim$${host_dpkg:+ (shim-free host dpkg: $$host_dpkg)}; dpkg-buildpackage would fail misleadingly inside it -- build outside the lock cell (run 'make deb' on the host, outside the with-cluster cell) (#19017)" >&2; \
+	    exit 1; \
 	  fi
 deb: deb-cell-guard deb-changelog-check
 	@source_dirty=$$(python3 "$(CURDIR)/scripts/image/build_provenance.py" \
