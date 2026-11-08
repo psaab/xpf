@@ -112,18 +112,20 @@ type ClusterBulkReconcileInput struct {
 	// carries SessFlagClusterSynced (#10227/#9655 second half).
 	IsZoneMapped func(uint16) bool
 	DeleteReason DeleteReason
-	// WithMastershipSnapshot runs one bounded stale-delete batch only while
-	// the BulkStart RG generations are still current. A false result aborts
-	// the remaining sweep without deleting the batch.
-	WithMastershipSnapshot func(apply func() error) (stable bool, err error)
+	// WithOwnershipSnapshot executes each bounded stale-delete batch only
+	// while the caller's BulkStart ownership snapshot is current. The callback
+	// serializes its validation with apply; false aborts the remainder.
+	WithOwnershipSnapshot func(apply func() error) (stable bool, err error)
 }
 
 type ClusterBulkReconcileResult struct {
-	StaleV4             int
-	StaleV6             int
-	DeletedV4           int
-	DeletedV6           int
-	MastershipChanged   bool
+	StaleV4          int
+	StaleV6          int
+	DeletedV4        int
+	DeletedV6        int
+	// OwnershipChanged means the BulkStart snapshot failed a per-batch or
+	// final validation; callers must not acknowledge the bulk.
+	OwnershipChanged bool
 }
 
 // ScopedSessionKey is a session key plus the ROUTING DOMAIN the row was
@@ -1154,16 +1156,16 @@ func (s dataPlaneSessionStore) preservePersistentNATV6(key SessionKeyV6, val Ses
 func (s dataPlaneSessionStore) deleteStaleV4(
 	entries []SessionEntryV4,
 	reason DeleteReason,
-	withMastershipSnapshot func(func() error) (bool, error),
-) (deleted int, mastershipChanged bool, err error) {
-	if withMastershipSnapshot == nil {
+	withOwnershipSnapshot func(func() error) (bool, error),
+) (deleted int, ownershipChanged bool, err error) {
+	if withOwnershipSnapshot == nil {
 		deleted, err = s.DeleteBatchKnownV4(entries, reason, false)
 		return deleted, false, err
 	}
 	for start := 0; start < len(entries); start += sessionDeleteBatchSize {
 		end := min(start+sessionDeleteBatchSize, len(entries))
 		batchDeleted := 0
-		stable, err := withMastershipSnapshot(func() error {
+		stable, err := withOwnershipSnapshot(func() error {
 			var err error
 			batchDeleted, err = s.DeleteBatchKnownV4(entries[start:end], reason, false)
 			return err
@@ -1182,16 +1184,16 @@ func (s dataPlaneSessionStore) deleteStaleV4(
 func (s dataPlaneSessionStore) deleteStaleV6(
 	entries []SessionEntryV6,
 	reason DeleteReason,
-	withMastershipSnapshot func(func() error) (bool, error),
-) (deleted int, mastershipChanged bool, err error) {
-	if withMastershipSnapshot == nil {
+	withOwnershipSnapshot func(func() error) (bool, error),
+) (deleted int, ownershipChanged bool, err error) {
+	if withOwnershipSnapshot == nil {
 		deleted, err = s.DeleteBatchKnownV6(entries, reason, false)
 		return deleted, false, err
 	}
 	for start := 0; start < len(entries); start += sessionDeleteBatchSize {
 		end := min(start+sessionDeleteBatchSize, len(entries))
 		batchDeleted := 0
-		stable, err := withMastershipSnapshot(func() error {
+		stable, err := withOwnershipSnapshot(func() error {
 			var err error
 			batchDeleted, err = s.DeleteBatchKnownV6(entries[start:end], reason, false)
 			return err
@@ -1273,13 +1275,13 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	}
 	result.StaleV4 = len(staleV4)
 
-	deletedV4, mastershipChanged, err := s.deleteStaleV4(staleV4, reason, input.WithMastershipSnapshot)
+	deletedV4, ownershipChanged, err := s.deleteStaleV4(staleV4, reason, input.WithOwnershipSnapshot)
 	result.DeletedV4 = deletedV4
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if mastershipChanged {
-		result.MastershipChanged = true
+	if ownershipChanged {
+		result.OwnershipChanged = true
 		return result, errors.Join(errs...)
 	}
 
@@ -1312,29 +1314,29 @@ func (s dataPlaneSessionStore) ReconcileClusterBulk(input ClusterBulkReconcileIn
 	}
 	result.StaleV6 = len(staleV6)
 
-	deletedV6, mastershipChanged, err := s.deleteStaleV6(staleV6, reason, input.WithMastershipSnapshot)
+	deletedV6, ownershipChanged, err := s.deleteStaleV6(staleV6, reason, input.WithOwnershipSnapshot)
 	result.DeletedV6 = deletedV6
 	if err != nil {
 		errs = append(errs, err)
 	}
-	if mastershipChanged {
-		result.MastershipChanged = true
+	if ownershipChanged {
+		result.OwnershipChanged = true
 		return result, errors.Join(errs...)
 	}
 	// Even an empty stale set must not complete a bulk on an ownership answer
-	// that changed after BulkEnd's first check. The per-batch guard above binds
-	// deletions to the manager lock; this final check also catches changes
-	// during enumeration when there was nothing to delete.
-	if input.WithMastershipSnapshot != nil {
-		stable, err := input.WithMastershipSnapshot(func() error { return nil })
+	// that changed after BulkEnd's first check. Each batch binds deletions to
+	// the ownership locks; this final check catches changes during enumeration
+	// when there was nothing to delete.
+	if input.WithOwnershipSnapshot != nil {
+		stable, err := input.WithOwnershipSnapshot(func() error { return nil })
 		if !stable {
-			result.MastershipChanged = true
+			result.OwnershipChanged = true
 		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("validate mastership after stale reconcile: %w", err))
+			errs = append(errs, fmt.Errorf("validate ownership after stale reconcile: %w", err))
 		}
 	}
-	if result.MastershipChanged {
+	if result.OwnershipChanged {
 		return result, errors.Join(errs...)
 	}
 	return result, errors.Join(errs...)

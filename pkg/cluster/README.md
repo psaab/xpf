@@ -5971,15 +5971,15 @@ it.
     reconcile snapshot captures the NAT-scope folder — only the send-side
     stamp reads it. The legacy `SetZoneRGMap` setter adapts a single-RG map and
     advances the generation only when its contents change. Reconcile skips a
-    bulk whose ownership-map generation or captured RG mastership generation/
-    answer changed before BulkEnd, including a flip away and back whose
-    endpoint answer is unchanged.
+    bulk when the ownership-map generation or captured RG mastership answer/
+    generation changed before BulkEnd, and revalidates both at each guarded
+    delete batch and the final empty-sweep check.
   - Before publishing a new session-sync object, the daemon seeds a stable
     active-applied config's ownership snapshot. Exact-text and
     credential-equivalent config-sync skips also repair a still-nil map from
     the latest applied config, covering boot applies that precede session-sync
     creation without weakening the nil-map safety guard.
-  - When the bulk-start ownership snapshot is absent, its map generation changes, or any captured RG's primary answer/generation changes before BulkEnd, a guarded delete batch, or the final empty-sweep check, the receiver withholds `BulkAck`, `bulkEverCompleted`, and `OnBulkSyncReceived`. Each bounded delete batch holds the manager read lock across generation validation and exact-value deletion, so a concurrent promotion cannot turn a stale candidate into a newly local row. The failover sync hold therefore stays armed until a later complete bulk is reconciled instead of treating a keep-all fallback as authoritative.
+  - When the bulk-start ownership snapshot is absent, its map generation changes, or any captured RG's primary answer/generation changes before BulkEnd, a guarded delete batch, or the final empty-sweep check, the receiver withholds `BulkAck`, `bulkEverCompleted`, and `OnBulkSyncReceived`. Each bounded delete batch holds the ownership-map read lock across map-generation validation and exact-value deletion, and, when RG snapshots are wired, the manager read lock across generation validation and deletion. The failover sync hold therefore stays armed until a later complete bulk is reconciled instead of treating a keep-all fallback as authoritative.
   - Transient helper transport failures are tracked per v4/v6 key, separately
     from the received-key set. A failed key keeps the receive window open at
     `BulkEnd`, so the receiver neither reconciles an incomplete snapshot nor

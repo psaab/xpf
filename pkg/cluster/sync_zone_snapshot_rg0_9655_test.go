@@ -218,23 +218,26 @@ func TestZoneMapChangeDuringBulkWithholdsCompletion9655(t *testing.T) {
 // #18548: endpoint equality alone is insufficient. Mastership can flip away
 // and back before BulkEnd, and can move after BulkEnd's ownership read. The
 // promotion subtest binds deletion to the generation lock; the empty-sweep
-// subtest ensures an ownership change during enumeration still withholds ACK.
-// FAIL-ON-REVERT: removing those guards makes their corresponding cell fail.
+// subtest checks post-enumeration validation. The map-remap cells install new
+// ownership after BulkEnd's map-generation read and require row survival or
+// ACK withholding as appropriate. FAIL-ON-REVERT: each guard's cell must fail.
 type mastershipState18548 struct {
-	primary    bool
-	generation uint64
+	primary         bool
+	generation      uint64
+	otherPrimary    map[int]bool
+	otherGeneration map[int]uint64
 }
 
 func (state *mastershipState18548) snapshot(rgID int) (bool, uint64) {
-	if rgID != 5 {
-		return false, 0
+	if rgID == 5 {
+		return state.primary, state.generation
 	}
-	return state.primary, state.generation
+	return state.otherPrimary[rgID], state.otherGeneration[rgID]
 }
 
 func (state *mastershipState18548) withSnapshot(snapshot map[int]uint64, apply func() error) (bool, error) {
 	for rgID, generation := range snapshot {
-		current := uint64(0)
+		current := state.otherGeneration[rgID]
 		if rgID == 5 {
 			current = state.generation
 		}
@@ -257,13 +260,10 @@ func mastershipReceiver18548(t *testing.T, dp *mockSweepDP, state *mastershipSta
 	return rx
 }
 
-func assertMastershipVoid18548(t *testing.T, rx *SessionSync, dp *mockSweepDP, local dataplane.SessionKey) {
+func assertReconcileWithheld18548(t *testing.T, rx *SessionSync) {
 	t.Helper()
-	if _, ok := dp.v4sessions[local]; !ok {
-		t.Fatal("#18548: stale BulkStart ownership deleted an RG-mapped local row")
-	}
 	if rx.BulkEverCompleted() {
-		t.Fatal("#18548: a bulk with an invalid mastership judgment was marked complete")
+		t.Fatal("#18548: a bulk with an invalid ownership judgment was marked complete")
 	}
 	if got := rx.stats.BulkSyncEndTime.Load(); got != 0 {
 		t.Fatalf("#18548: a nonauthoritative bulk recorded end time %d", got)
@@ -275,6 +275,14 @@ func assertMastershipVoid18548(t *testing.T, rx *SessionSync, dp *mockSweepDP, l
 	if got := rx.Stats().BulkRerequestsSent; got != 1 {
 		t.Fatalf("#18548: queued bulk re-requests = %d, want 1", got)
 	}
+}
+
+func assertOwnershipVoid18548(t *testing.T, rx *SessionSync, dp *mockSweepDP, key dataplane.SessionKey) {
+	t.Helper()
+	if _, ok := dp.v4sessions[key]; !ok {
+		t.Fatal("#18548: stale BulkStart ownership deleted a row")
+	}
+	assertReconcileWithheld18548(t, rx)
 }
 
 func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
@@ -298,7 +306,7 @@ func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
 		state.primary, state.generation = false, state.generation+1
 		rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
 
-		assertMastershipVoid18548(t, rx, dp, local)
+		assertOwnershipVoid18548(t, rx, dp, local)
 	})
 
 	t.Run("promote after BulkEnd read before V4 sweep", func(t *testing.T) {
@@ -338,7 +346,7 @@ func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
 			t.Fatalf("#18548: guarded stale-delete batches = %d, want 1", guardedDeletes)
 		}
 
-		assertMastershipVoid18548(t, rx, dp, local)
+		assertOwnershipVoid18548(t, rx, dp, local)
 	})
 	t.Run("promotion after BulkEnd read during empty sweep", func(t *testing.T) {
 		state := &mastershipState18548{generation: 1}
@@ -378,6 +386,103 @@ func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
 			t.Fatalf("#18548: queued empty-sweep bulk re-requests = %d, want 1", got)
 		}
 	})
+}
+
+func TestZoneOwnershipChangeAfterBulkEndCheckVoidsReconcile18548(t *testing.T) {
+	const zone uint16 = 18
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 18, 1}, DstIP: [4]byte{172, 16, 80, 200},
+		Protocol: 6, SrcPort: 41850, DstPort: 5201,
+	}
+	value := establishedIn(zone)
+	value.Flags |= dataplane.SessFlagClusterSynced
+	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{key: value}}
+	state := &mastershipState18548{
+		generation:      1,
+		otherPrimary:    map[int]bool{1: true},
+		otherGeneration: map[int]uint64{1: 1},
+	}
+	rx := mastershipReceiver18548(t, dp, state)
+	mapGeneration := rx.ZoneOwnershipGeneration()
+	installedAfterBulkEndCheck := false
+	dp.beforeBatchV4 = func() {
+		installedAfterBulkEndCheck = rx.InstallZoneOwnership(ZoneOwnership{
+			ZoneRG:         ZoneRGMap{zone: []int{1}},
+			FoldRG:         map[uint32]int{},
+			IngressFold:    func(uint32, uint16) uint32 { return 0 },
+			ResolverDigest: ResolverDigest{1},
+		})
+	}
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+	if !installedAfterBulkEndCheck || rx.ZoneOwnershipGeneration() == mapGeneration {
+		t.Fatal("#18548: changed zone->RG ownership was not installed during the stale sweep")
+	}
+	if !state.otherPrimary[1] {
+		t.Fatal("#18548: replacement RG1 must be locally primary")
+	}
+	assertOwnershipVoid18548(t, rx, dp, key)
+}
+
+func TestZoneOwnershipChangeDuringEmptySweepVoidsReconcile18548(t *testing.T) {
+	const zone uint16 = 18
+	state := &mastershipState18548{
+		generation:      1,
+		otherPrimary:    map[int]bool{1: true},
+		otherGeneration: map[int]uint64{1: 1},
+	}
+	dp := &mockSweepDP{v4sessions: make(map[dataplane.SessionKey]dataplane.SessionValue)}
+	rx := mastershipReceiver18548(t, dp, state)
+	mapGeneration := rx.ZoneOwnershipGeneration()
+	installedAfterBulkEndCheck := false
+	dp.beforeBatchV4 = func() {
+		installedAfterBulkEndCheck = rx.InstallZoneOwnership(ZoneOwnership{
+			ZoneRG:         ZoneRGMap{zone: []int{1}},
+			FoldRG:         map[uint32]int{},
+			IngressFold:    func(uint32, uint16) uint32 { return 0 },
+			ResolverDigest: ResolverDigest{1},
+		})
+	}
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+	if !installedAfterBulkEndCheck || rx.ZoneOwnershipGeneration() == mapGeneration {
+		t.Fatal("#18548: changed zone->RG ownership was not installed during the empty sweep")
+	}
+	assertReconcileWithheld18548(t, rx)
+}
+
+func TestZoneOwnershipReadLockCoversStaleDelete18548(t *testing.T) {
+	const zone uint16 = 18
+	key := dataplane.SessionKey{
+		SrcIP: [4]byte{10, 0, 18, 2}, DstIP: [4]byte{172, 16, 80, 201},
+		Protocol: 6, SrcPort: 41851, DstPort: 5201,
+	}
+	value := establishedIn(zone)
+	value.Flags |= dataplane.SessFlagClusterSynced
+	dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{key: value}}
+	rx := mastershipReceiver18548(t, dp, &mastershipState18548{generation: 1})
+	mapLockHeldDuringDelete := false
+	dp.onDeleteV4 = func(dataplane.SessionKey) {
+		if rx.zoneRGMu.TryLock() {
+			rx.zoneRGMu.Unlock()
+			return
+		}
+		mapLockHeldDuringDelete = true
+	}
+	rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
+	rx.handleMessage(nil, syncMsgBulkEnd, bulkStartPayload(1, nil))
+
+	if !mapLockHeldDuringDelete {
+		t.Fatal("#18548: ownership map generation was not serialized with the stale delete")
+	}
+	if _, ok := dp.v4sessions[key]; ok {
+		t.Fatal("#18548: stable peer-owned stale row was not deleted")
+	}
+	if !rx.BulkEverCompleted() {
+		t.Fatal("#18548: stable ownership snapshot did not complete the bulk")
+	}
 }
 
 func TestSettledMastershipReplacementBulkCompletes18548(t *testing.T) {

@@ -1093,13 +1093,15 @@ On `BulkEnd` the receiver:
 3. sends `BulkAck(epoch)`
 4. fires `OnBulkSyncReceived`
 
-The mastership part of that frozen view carries a generation per captured RG,
-so BulkEnd detects a flip-away/flip-back even when the endpoint primary answer
-matches. Stale deletion revalidates all captured generations under the manager
-read lock for each bounded delete batch and holds the lock through exact-value
-deletion; a final generation check also voids an otherwise-empty sweep if
-mastership changed during enumeration. This keeps election unblocked between
-batches while preventing a newly local row from being deleted by the old view.
+The frozen ownership view carries the zone/fold-map generation and a
+mastership generation per captured RG. BulkEnd detects a flip-away/flip-back
+even when the endpoint primary answer matches. Stale deletion revalidates the
+map generation under the ownership-map read lock and the RG generations under
+the manager read lock for each bounded delete batch, holding both locks through
+exact-value deletion. A final check also voids an otherwise-empty sweep if
+ownership changed during enumeration. The locks are released between batches,
+so config ownership installs and elections wait for a synchronous delete batch
+instead of the full table sweep.
 
 When the receiver withholds steps 3 and 4 — the ack certifies a reconciled
 table — it now asks for the replacement itself (#18521). Every withholding
