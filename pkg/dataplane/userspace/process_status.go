@@ -674,6 +674,12 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 			// worker's age, so two polls finishing behind a long m.mu holder
 			// would make a healthy helper's workers look frozen.
 			pollReturnedAt := time.Now()
+			// #18689: record answered-status freshness from the reply-return
+			// timestamp before acquiring m.mu. The tracker does its own
+			// generation check, so an old poll cannot refresh a replacement.
+			if pollErr == nil || errors.Is(pollErr, errStatusDecode) {
+				m.liveTrack.noteAnsweredStatus(pollProcGen, pollReturnedAt)
+			}
 			m.mu.Lock()
 			// A helper restart or replacement may have happened while the poll
 			// was off-lock. Its response belongs to the old process and must not
@@ -695,13 +701,6 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 			// for publication, but does not undo the fact that the helper
 			// answered (or failed to answer).
 			pollResultTime := time.Now()
-			// #18689: use the reply-return time, before any lock wait. This
-			// status-specific clock differs from heartbeat age for ANY control
-			// request; success and answered-but-undecodable replies refresh it
-			// before the publication fence, while silence and other failures do not.
-			if pollErr == nil || errors.Is(pollErr, errStatusDecode) {
-				m.liveTrack.noteAnsweredStatus(pollProcGen, pollReturnedAt)
-			}
 			if pollErr == nil {
 				m.noteStatusPollResultLocked(nil, pollResultTime)
 				// #18685: worker heartbeats and the arm state feed the

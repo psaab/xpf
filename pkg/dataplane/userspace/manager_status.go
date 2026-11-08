@@ -164,21 +164,24 @@ func helperStatusStale(age time.Duration) bool {
 	return age >= helperWedgeMinSpan
 }
 
-// HelperStatusAgeAndStale reports the age of the most recent answered status
-// poll and whether it has crossed the #18685 silence bound. Unlike
-// HelperAnswerAge, unrelated control requests do not refresh this clock.
-// Before any answered status (or after generation retirement), age is -1 and
-// stale is false.
+// HelperStatusAgeAndStale reports the age of the last answered status poll,
+// or the generation-start age while a cached status has never been answered.
+// A missing cached status or retired generation has undefined age (-1) and is
+// not stale.
 func (m *Manager) HelperStatusAgeAndStale() (time.Duration, bool) {
 	if m == nil {
 		return -1, false
 	}
-	age := m.liveTrack.statusAnswerAge(time.Now())
+	return m.helperStatusAgeAndStale(m.helperStatusView.Load() != nil)
+}
+
+func (m *Manager) helperStatusAgeAndStale(hasCachedStatus bool) (time.Duration, bool) {
+	age := m.liveTrack.statusAnswerAge(time.Now(), hasCachedStatus)
 	return age, helperStatusStale(age)
 }
 
 func (m *Manager) stampHelperStatusLiveness(status ProcessStatus) ProcessStatus {
-	status.HelperStatusAge, status.HelperStatusStale = m.HelperStatusAgeAndStale()
+	status.HelperStatusAge, status.HelperStatusStale = m.helperStatusAgeAndStale(true)
 	status.HelperStatusAgeKnown = status.HelperStatusAge >= 0
 	return status
 }

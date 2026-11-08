@@ -75,6 +75,16 @@ const (
 	helperWatchdogTick = time.Second
 )
 
+// helperStatusClock is generation-local and independently readable. The
+// status loop updates it before acquiring Manager.mu, so status freshness
+// reflects the reply-return time even if publication waits behind that lock.
+type helperStatusClock struct {
+	gen       uint64
+	startedAt time.Time
+	answered  atomic.Bool
+	elapsedAt atomic.Int64
+}
+
 // helperLivenessTracker holds the round-trip and heartbeat evidence for ONE
 // helper generation. Its mutex is a leaf: nothing else is locked under it.
 type helperLivenessTracker struct {
@@ -82,16 +92,13 @@ type helperLivenessTracker struct {
 	gen uint64
 	// retired is set by an intentional stop and cleared by the next reset;
 	// while set, no evidence is recorded and no verdict is raised.
-	retired bool
+	retired     bool
+	statusClock atomic.Pointer[helperStatusClock]
 
-	lastAnswer time.Time
-	// lastAnsweredStatusAt is separate from lastAnswer: any control request
-	// refreshes the latter, but only an answered status poll refreshes this.
-	// Guarded by mu; zero until the first answered status of this generation.
-	lastAnsweredStatusAt time.Time
-	silentSince          time.Time
-	silentTrips          int
-	lastRGActivate       time.Time
+	lastAnswer     time.Time
+	silentSince    time.Time
+	silentTrips    int
+	lastRGActivate time.Time
 
 	// heartbeat freeze, from answered statuses. A worker is judged by the
 	// AGE of its heartbeat at the moment a status was answered (status time
@@ -179,9 +186,8 @@ func (t *helperLivenessTracker) resetWithGrace(gen uint64, now time.Time, inheri
 	defer t.unlockAndFlush()
 	t.gen = gen
 	t.retired = false
+	t.statusClock.Store(&helperStatusClock{gen: gen, startedAt: now})
 	t.lastAnswer = now
-	t.lastAnsweredStatusAt = time.Time{}
-	t.silentSince = time.Time{}
 	t.silentTrips = 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak, t.lastStatusAt = 0, -1, 0, time.Time{}
 	t.inherited = inheritNotReady
@@ -229,9 +235,8 @@ func (t *helperLivenessTracker) retireGeneration(keepInherited bool) bool {
 	defer t.mu.Unlock()
 	preserveInherited := keepInherited && t.inherited && !t.forwardingReadySeen
 	t.retired = true
+	t.statusClock.Store(nil)
 	t.lastAnswer = time.Time{} // no live generation: the answer age is undefined, not growing
-	t.lastAnsweredStatusAt = time.Time{}
-	t.silentSince, t.silentTrips = time.Time{}, 0
 	t.hbOldest, t.hbOldestIdx, t.frozenStreak = 0, -1, 0
 	if !preserveInherited {
 		t.suspected, t.inherited = false, false
@@ -339,12 +344,15 @@ func (t *helperLivenessTracker) noteStatus(gen uint64, now time.Time, heartbeats
 
 // noteAnsweredStatus records the status-specific answer clock. It is called
 // by statusLoop only for successful and answered-but-undecodable replies.
+// The generation-local clock is atomic so reply time is recorded without
+// waiting for either the manager mutex or the tracker mutex.
 func (t *helperLivenessTracker) noteAnsweredStatus(gen uint64, at time.Time) {
-	t.mu.Lock()
-	if gen == t.gen && !t.retired {
-		t.lastAnsweredStatusAt = at
+	clock := t.statusClock.Load()
+	if clock == nil || clock.gen != gen {
+		return
 	}
-	t.mu.Unlock()
+	clock.elapsedAt.Store(int64(at.Sub(clock.startedAt)))
+	clock.answered.Store(true)
 }
 
 // noteAppliedForwardingReady records that an armed status has passed all
@@ -493,15 +501,22 @@ func (t *helperLivenessTracker) answerAge(now time.Time) time.Duration {
 	return now.Sub(t.lastAnswer)
 }
 
-// statusAnswerAge is the age of the last status poll answered by this
-// generation, independent of other answered control requests.
-func (t *helperLivenessTracker) statusAnswerAge(now time.Time) time.Duration {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.lastAnsweredStatusAt.IsZero() || t.retired {
+// statusAnswerAge is the age of the most recent status poll answered by this
+// generation. If it has not answered a status poll yet, a published cached
+// status uses the generation-start time as its conservative freshness anchor.
+func (t *helperLivenessTracker) statusAnswerAge(now time.Time, hasCachedStatus bool) time.Duration {
+	clock := t.statusClock.Load()
+	if clock == nil {
 		return -1
 	}
-	return now.Sub(t.lastAnsweredStatusAt)
+	elapsedSinceStart := now.Sub(clock.startedAt)
+	if clock.answered.Load() {
+		return elapsedSinceStart - time.Duration(clock.elapsedAt.Load())
+	}
+	if !hasCachedStatus {
+		return -1
+	}
+	return elapsedSinceStart
 }
 
 // classifyControlRoundTrip maps a requestDetailedAtSocket outcome onto the

@@ -1184,12 +1184,15 @@ count with time and adds a worker-progress input:
   to ANY control request, from the live generation. It is NaN when no
   generation is live (before the first helper, or after an intentional stop),
   so it never reads 0 for "never answered".
-- **`xpf_userspace_helper_status_age_seconds`** is the age of the last answered
-  status poll in the live generation; `xpf_userspace_helper_status_stale` is 1
-  at or beyond `helperWedgeMinSpan` (30 s), and 0 otherwise. The age is NaN
-  before a live generation answers status and whenever no generation is live;
-  stale is 0 in both cases. A successful or answered-but-undecodable status
-  poll clears staleness; silence and other failures do not. The status summary
+  **`xpf_userspace_helper_status_age_seconds`** is the age of the last
+  answered status poll in the live generation; `xpf_userspace_helper_status_stale`
+  is 1 at or beyond `helperWedgeMinSpan` (30 s), and 0 otherwise. Before the
+  first answered poll, a published cached status uses generation-start time as
+  its conservative age anchor (e.g. the startup ping's cached status becomes
+  stale after 30 s without an answered status poll). Before there is a cached
+  status, and whenever no generation is live, age is NaN and stale is 0. A
+  successful or answered-but-undecodable status poll clears staleness at its
+  reply-return time; silence and other failures do not. The status summary
   prints the same age and appends `STALE` at the bound. Cached userspace series
   remain visible; gate on the stale metric rather than interpreting retained
   values as current.

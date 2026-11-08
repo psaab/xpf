@@ -105,15 +105,18 @@ func (c *xpfCollector) initGlobalDescriptors() {
 		"xpf_userspace_helper_status_age_seconds",
 		"Seconds since the userspace helper last answered a status poll. The "+
 			"clock is status-specific (not any control request) and refreshes "+
-			"on decoded or answered-but-undecodable replies (#18689). NaN until "+
-			"the live generation answers a status, and when no generation is live.",
+			"on decoded or answered-but-undecodable replies (#18689). While a "+
+			"cached status exists before the first answered poll, the age is "+
+			"measured from generation start; otherwise it is NaN with no live "+
+			"generation.",
 		nil, nil,
 	)
 	c.helperStatusStale = prometheus.NewDesc(
 		"xpf_userspace_helper_status_stale",
 		"1 when the last answered userspace helper status poll is at least "+
-			"30 seconds old (the #18685 helperWedgeMinSpan); otherwise 0, "+
-			"including before a status answer or when no generation is live "+
+			"30 seconds old (the #18685 helperWedgeMinSpan); before the first "+
+			"answer, a cached status uses generation-start age, with 1 at the "+
+			"same bound. Otherwise 0, including when no generation is live "+
 			"(#18689).",
 		nil, nil,
 	)

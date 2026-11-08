@@ -36,6 +36,52 @@ func TestHelperStatusStalenessUsesStatusAnswersAndBound18689(t *testing.T) {
 	}
 }
 
+func TestPublishedStartupStatusUsesGenerationAgeBeforeFirstPoll18689(t *testing.T) {
+	m := New()
+	started := time.Now().Add(-helperWedgeMinSpan - time.Second)
+	m.liveTrack.reset(1, started, false)
+
+	if age, stale := m.HelperStatusAgeAndStale(); age >= 0 || stale {
+		t.Fatalf("without a cached status age/stale = %s/%v, want undefined/false", age, stale)
+	}
+	m.mu.Lock()
+	m.setLastStatusLocked(ProcessStatus{PID: 4242})
+	m.mu.Unlock()
+
+	if age, stale := m.HelperStatusAgeAndStale(); age < helperWedgeMinSpan || !stale {
+		t.Fatalf("startup-ping status age/stale = %s/%v, want stale from generation start", age, stale)
+	}
+	status, err := m.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.HelperStatusAgeKnown || !status.HelperStatusStale {
+		t.Fatalf("startup-ping status age-known/stale = %v/%v, want known/stale", status.HelperStatusAgeKnown, status.HelperStatusStale)
+	}
+}
+
+func TestHelperGoneCleanupRetiresStatusAge18689(t *testing.T) {
+	m := New()
+	m.liveTrack.reset(1, time.Now(), false)
+	m.liveTrack.noteAnsweredStatus(1, time.Now().Add(-time.Second))
+	m.mu.Lock()
+	m.setLastStatusLocked(ProcessStatus{PID: 4242})
+	m.resetAfterHelperGoneLocked()
+	m.mu.Unlock()
+
+	if age, stale := m.HelperStatusAgeAndStale(); age >= 0 || stale {
+		t.Fatalf("departed helper status age/stale = %s/%v, want undefined/false", age, stale)
+	}
+	m.liveTrack.reset(2, time.Now(), false)
+	if age, stale := m.HelperStatusAgeAndStale(); age >= 0 || stale {
+		t.Fatalf("restart before its first answer retained status age: %s/%v, want undefined/false", age, stale)
+	}
+	m.liveTrack.noteAnsweredStatus(2, time.Now())
+	if age, stale := m.HelperStatusAgeAndStale(); age < 0 || stale {
+		t.Fatalf("restart's first answered status age/stale = %s/%v, want fresh", age, stale)
+	}
+}
+
 func TestStatusPollAnswersClearStalenessBeforePublicationFence18689(t *testing.T) {
 	oldInterval := statusLoopInterval
 	statusLoopInterval = 5 * time.Millisecond
@@ -50,8 +96,7 @@ func TestStatusPollAnswersClearStalenessBeforePublicationFence18689(t *testing.T
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := stalePollManager16653(t)
-			m.liveTrack.reset(m.procGen, time.Now(), false)
-			m.liveTrack.noteAnsweredStatus(m.procGen, time.Now().Add(-helperWedgeMinSpan-time.Second))
+			m.liveTrack.reset(m.procGen, time.Now().Add(-helperWedgeMinSpan-time.Second), false)
 			m.mu.Lock()
 			m.setLastStatusLocked(ProcessStatus{PID: 4242})
 			m.mu.Unlock()
@@ -105,27 +150,31 @@ func TestStatusPollAnswersClearStalenessBeforePublicationFence18689(t *testing.T
 			// the answered-status clock before that fence.
 			m.mu.Lock()
 			m.setLastStatusLocked(ProcessStatus{PID: 4242})
-			m.mu.Unlock()
 			close(release)
 
 			deadline := time.Now().Add(2 * time.Second)
+			fresh := false
 			for time.Now().Before(deadline) {
 				if age, stale := m.HelperStatusAgeAndStale(); age >= 0 && !stale {
-					status, err := m.Status()
-					if err != nil {
-						t.Fatal(err)
-					}
-					if status.PID != 4242 {
-						t.Fatalf("fenced poll replaced cached status PID with %d", status.PID)
-					}
-					if status.HelperStatusStale || !status.HelperStatusAgeKnown {
-						t.Fatalf("fresh status view has age-known=%v stale=%v", status.HelperStatusAgeKnown, status.HelperStatusStale)
-					}
-					return
+					fresh = true
+					break
 				}
 				time.Sleep(time.Millisecond)
 			}
-			t.Fatal("answered status poll did not clear staleness before the publication fence")
+			m.mu.Unlock()
+			if !fresh {
+				t.Fatal("answered status poll did not clear staleness before waiting for m.mu")
+			}
+			status, err := m.Status()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if status.PID != 4242 {
+				t.Fatalf("fenced poll replaced cached status PID with %d", status.PID)
+			}
+			if status.HelperStatusStale || !status.HelperStatusAgeKnown {
+				t.Fatalf("fresh status view has age-known=%v stale=%v", status.HelperStatusAgeKnown, status.HelperStatusStale)
+			}
 		})
 	}
 }
@@ -136,8 +185,7 @@ func TestFailedStatusPollDoesNotClearStaleness18689(t *testing.T) {
 	t.Cleanup(func() { statusLoopInterval = oldInterval })
 
 	m, _ := stalePollManager16653(t)
-	m.liveTrack.reset(m.procGen, time.Now(), false)
-	m.liveTrack.noteAnsweredStatus(m.procGen, time.Now().Add(-helperWedgeMinSpan-time.Second))
+	m.liveTrack.reset(m.procGen, time.Now().Add(-helperWedgeMinSpan-time.Second), false)
 	m.mu.Lock()
 	m.setLastStatusLocked(ProcessStatus{PID: 4242})
 	m.mu.Unlock()

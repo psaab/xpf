@@ -988,22 +988,22 @@ func TestFormatStatusSummaryAggregatesNamedPreL3Drops10498(t *testing.T) {
 	}
 }
 
-func TestFormatStatusSummaryShowsAnsweredStatusAgeAndStale18689(t *testing.T) {
+func TestFormatStatusSummaryShowsStatusAgeAndStale18689(t *testing.T) {
 	status := userspace.ProcessStatus{
 		HelperStatusAge:      31 * time.Second,
 		HelperStatusAgeKnown: true,
 		HelperStatusStale:    true,
 	}
 	out := FormatStatusSummary(status)
-	if !strings.Contains(out, "Last answered status age:  31.0s STALE") {
+	if !strings.Contains(out, "Helper status age:        31.0s STALE") {
 		t.Fatalf("stale summary missing age and marker:\n%s", out)
 	}
 
 	status.HelperStatusAge = time.Second
 	status.HelperStatusStale = false
 	out = FormatStatusSummary(status)
-	if !strings.Contains(out, "Last answered status age:  1.0s\n") ||
-		strings.Contains(out, "Last answered status age:  1.0s STALE") {
+	if !strings.Contains(out, "Helper status age:        1.0s\n") ||
+		strings.Contains(out, "Helper status age:        1.0s STALE") {
 		t.Fatalf("fresh summary age/marker mismatch:\n%s", out)
 	}
 }

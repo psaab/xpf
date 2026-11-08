@@ -1184,6 +1184,10 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 		m.syncCancel()
 		m.syncCancel = nil
 	}
+	// The crash path reaches this cleanup without passing through stopLocked;
+	// retire its tracker here so ages from the departed helper cannot persist
+	// through supervisor backoff.
+	m.liveTrack.retire()
 	m.clearLastStatusLocked()
 	m.neighborsPrewarmed = false
 	m.ctrlEnableAt = time.Time{}

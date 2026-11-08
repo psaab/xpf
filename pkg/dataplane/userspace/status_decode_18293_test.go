@@ -118,6 +118,7 @@ func TestStatusLoopUndecodableAnswersNoKill18293(t *testing.T) {
 	t.Cleanup(func() { statusLoopInterval = old })
 
 	m := New()
+	m.liveTrack.reset(m.procGen, time.Now(), false)
 	m.cfg.ControlSocket = sock
 	proc, err := os.FindProcess(os.Getpid())
 	if err != nil {

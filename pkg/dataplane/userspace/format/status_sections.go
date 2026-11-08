@@ -425,7 +425,7 @@ func writeOverviewSection(b *strings.Builder, status userspace.ProcessStatus, ag
 		if status.HelperStatusStale {
 			marker = " STALE"
 		}
-		fmt.Fprintf(b, "  Last answered status age:  %s%s\n", formatStatusAge(status.HelperStatusAge), marker)
+		fmt.Fprintf(b, "  Helper status age:        %s%s\n", formatStatusAge(status.HelperStatusAge), marker)
 	}
 	fmt.Fprintf(b, "  Interface addresses:       %d\n", status.InterfaceAddresses)
 	fmt.Fprintf(b, "  Neighbor entries:          %d\n", status.NeighborEntries)
