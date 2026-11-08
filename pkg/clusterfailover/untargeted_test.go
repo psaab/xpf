@@ -1,6 +1,8 @@
 package clusterfailover_test
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -8,8 +10,8 @@ import (
 )
 
 // #18559: only the untargeted form of a DATA RG, run on its owner with a live
-// peer that does not itself claim the RG, becomes the targeted transfer to
-// the other chassis node.
+// peer, becomes the targeted transfer to the other chassis node. The peer's
+// cached role is not an input (a stale view would resign the sole owner).
 func TestUntargetedPeerTransfer18559(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
@@ -17,23 +19,21 @@ func TestUntargetedPeerTransfer18559(t *testing.T) {
 		local        int
 		primary      bool
 		peerAlive    bool
-		peerPrimary  bool
 		want         clusterfailover.Op
 		wantTransfer bool
 	}{
-		{"owner node0 RG1", clusterfailover.RGFailover(1), 0, true, true, false, clusterfailover.TargetedRGFailover(1, 1), true},
-		{"owner node1 RG2", clusterfailover.RGFailover(2), 1, true, true, false, clusterfailover.TargetedRGFailover(2, 0), true},
-		{"RG0 keeps the resign", clusterfailover.RGFailover(0), 0, true, true, false, clusterfailover.Op{}, false},
-		{"non-owner keeps the resign", clusterfailover.RGFailover(1), 0, false, true, false, clusterfailover.Op{}, false},
-		{"dead peer keeps the resign", clusterfailover.RGFailover(1), 0, true, false, false, clusterfailover.Op{}, false},
-		{"dual-active keeps the resign", clusterfailover.RGFailover(1), 0, true, true, true, clusterfailover.Op{}, false},
-		{"unsupported local node", clusterfailover.RGFailover(1), 2, true, true, false, clusterfailover.Op{}, false},
-		{"targeted form untouched", clusterfailover.TargetedRGFailover(1, 1), 0, true, true, false, clusterfailover.Op{}, false},
-		{"data form untouched", clusterfailover.DataFailover(1), 0, true, true, false, clusterfailover.Op{}, false},
-		{"reset untouched", clusterfailover.ResetFailover(1), 0, true, true, false, clusterfailover.Op{}, false},
+		{"owner node0 RG1", clusterfailover.RGFailover(1), 0, true, true, clusterfailover.TargetedRGFailover(1, 1), true},
+		{"owner node1 RG2", clusterfailover.RGFailover(2), 1, true, true, clusterfailover.TargetedRGFailover(2, 0), true},
+		{"RG0 keeps the resign", clusterfailover.RGFailover(0), 0, true, true, clusterfailover.Op{}, false},
+		{"non-owner keeps the resign", clusterfailover.RGFailover(1), 0, false, true, clusterfailover.Op{}, false},
+		{"dead peer keeps the resign", clusterfailover.RGFailover(1), 0, true, false, clusterfailover.Op{}, false},
+		{"unsupported local node", clusterfailover.RGFailover(1), 2, true, true, clusterfailover.Op{}, false},
+		{"targeted form untouched", clusterfailover.TargetedRGFailover(1, 1), 0, true, true, clusterfailover.Op{}, false},
+		{"data form untouched", clusterfailover.DataFailover(1), 0, true, true, clusterfailover.Op{}, false},
+		{"reset untouched", clusterfailover.ResetFailover(1), 0, true, true, clusterfailover.Op{}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := clusterfailover.UntargetedPeerTransfer(tc.op, tc.local, tc.primary, tc.peerAlive, tc.peerPrimary)
+			got, ok := clusterfailover.UntargetedPeerTransfer(tc.op, tc.local, tc.primary, tc.peerAlive)
 			if ok != tc.wantTransfer || got != tc.want {
 				t.Fatalf("UntargetedPeerTransfer = (%+v, %v), want (%+v, %v)", got, ok, tc.want, tc.wantTransfer)
 			}
@@ -54,17 +54,84 @@ func TestLocalResignMessage18559(t *testing.T) {
 }
 
 // The refusal names the peer's group as the peer's, keeps the peer's reasons,
-// and ends with a next step and the forced-evacuation path.
+// and ends with the next step for its class: readiness (retry when ready;
+// the in-service-upgrade drain, qualified), auth (clocks / keys, NTP), or the
+// fabric path.
 func TestUntargetedTransferRefusal18559(t *testing.T) {
+	notReady := "local redundancy group 1 not ready for explicit failover ready=false reasons=[sync]"
 	got := clusterfailover.UntargetedTransferRefusal(1, 1,
-		"local redundancy group 1 not ready for explicit failover ready=false reasons=[sync]")
+		clusterfailover.ClassifyRefusal("FailedPrecondition", notReady), notReady)
 	for _, want := range []string{"the peer's redundancy group 1 not ready", "reasons=[sync]", "node 1",
-		"no local resign", "Next: on node 1", "request system software in-service-upgrade"} {
+		"no local resign", "Next: on node 1", "in-service-upgrade", "RG0", "safe only once node 1 shows Takeover ready"} {
 		if !strings.Contains(got, want) {
-			t.Errorf("refusal %q lacks %q", got, want)
+			t.Errorf("readiness refusal %q lacks %q", got, want)
 		}
 	}
-	if strings.Contains(got, "local redundancy group") {
-		t.Errorf("refusal still says \"local redundancy group\": %q", got)
+	if strings.Contains(got, "local redundancy group") || strings.Contains(got, "regardless") {
+		t.Errorf("readiness refusal %q still says \"local redundancy group\" or advertises an unconditional drain", got)
+	}
+	auth := clusterfailover.UntargetedTransferRefusal(1, 1,
+		clusterfailover.ClassifyRefusal("Unauthenticated", "fabric RPC authentication failed: invalid auth token"),
+		"fabric RPC authentication failed: invalid auth token")
+	for _, want := range []string{"chronyc tracking", "routing-instance mgmt", "#18585"} {
+		if !strings.Contains(auth, want) {
+			t.Errorf("auth refusal %q lacks %q", auth, want)
+		}
+	}
+	if strings.Contains(auth, "in-service-upgrade") || strings.Contains(auth, "Takeover ready") {
+		t.Errorf("auth refusal %q points at readiness or the drain", auth)
+	}
+	tr := clusterfailover.UntargetedTransferRefusal(1, 1,
+		clusterfailover.ClassifyRefusal("Unavailable", "transport is closing"), "transport is closing")
+	if !strings.Contains(tr, "fabric path to node 1") || strings.Contains(tr, "in-service-upgrade") {
+		t.Errorf("transport refusal %q", tr)
+	}
+}
+
+// ClassifyRefusal keys on the gRPC code first, then the readiness texts.
+func TestClassifyRefusal18559(t *testing.T) {
+	for _, tc := range []struct {
+		code, msg string
+		want      clusterfailover.RefusalClass
+	}{
+		{"Unauthenticated", "anything", clusterfailover.RefusalAuth},
+		{"PermissionDenied", "anything", clusterfailover.RefusalAuth},
+		{"Unavailable", "peer fabric address x rejected the liveness probe: fabric RPC authentication failed", clusterfailover.RefusalAuth},
+		{"FailedPrecondition", "local redundancy group 2 not ready for explicit failover ready=false", clusterfailover.RefusalReadiness},
+		{"FailedPrecondition", "local redundancy group 2 not transfer-ready for explicit failover reasons=[x]", clusterfailover.RefusalReadiness},
+		{"FailedPrecondition", "failover commit for redundancy group 1 failed", clusterfailover.RefusalTransport},
+		{"Unavailable", "transport is closing", clusterfailover.RefusalTransport},
+	} {
+		if got := clusterfailover.ClassifyRefusal(tc.code, tc.msg); got != tc.want {
+			t.Errorf("ClassifyRefusal(%q, %q) = %v, want %v", tc.code, tc.msg, got, tc.want)
+		}
+	}
+}
+
+// A superseded transfer is reported with the peer's reply and no resign.
+func TestUntargetedSupersededMessage18559(t *testing.T) {
+	got := clusterfailover.UntargetedSupersededMessage(1, 1, "Manual failover completed for redundancy group 1 (transfer committed)")
+	for _, want := range []string{"redundancy group 1 is primary on this node again", "newer move", "node 1 had replied", "no local resign"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("superseded text %q lacks %q", got, want)
+		}
+	}
+}
+
+// The soak (test/incus/rg_move_soak.py) recognises the local-resign notes by
+// their exact text; a wording change on either side must fail here, not drift
+// into a dual-active or fallback reply scored as "other".
+func TestSoakReplyNotesMatchGo18559(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("..", "..", "test", "incus", "rg_move_soak.py"))
+	if err != nil {
+		t.Fatalf("read the soak: %v", err)
+	}
+	for _, note := range []string{clusterfailover.ResignNoteUnreachable, clusterfailover.ResignNoteDualActive} {
+		if !strings.Contains(string(src), note) {
+			t.Errorf("rg_move_soak.py's fallback pattern does not carry the Go note %q", note)
+		}
+	}
+	if got := clusterfailover.LocalResignMessage(7, clusterfailover.ResignNoteDualActive); !strings.HasPrefix(got, "Manual failover triggered for redundancy group 7 (") {
+		t.Errorf("LocalResignMessage %q no longer has the prefix the soak and H1 key on", got)
 	}
 }

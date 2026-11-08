@@ -70,6 +70,15 @@ sibling files (same package, so unexported helpers stay reachable):
   wrapper (joins the sibling `monitor.go` / `monitor_interface.go`).
 - `cli_request_chassis.go` — `request chassis cluster failover` /
   `data-plane`.
+  - **The untargeted form on a data RG's owner runs the transfer
+    (#18559).** `untargetedPeerTransfer` is the in-process twin of the gRPC
+    handler: same decision (`clusterfailover.UntargetedPeerTransfer`), same
+    ownership-epoch fence (`Manager.ManualFailoverIfMastership`), same
+    outcomes, documented in `pkg/cluster/README.md`. Reach comes from
+    `peer.go`'s `dialPeerReached` (`peerclient.ProbeFabricTCP` per fabric
+    address); only a request that never reached the peer, or the #18585
+    clock refusal, falls back to the local resign. The console CLI has no
+    caller context, so it has no cancellation check.
 - `cli_request_system.go` — `request system reboot|halt|power-off|zeroize`
   and `software` / `configuration` / `dynamic-dns`.
   - **`zeroize` runs the FULL shared wipe, not a partial config-only one

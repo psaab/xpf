@@ -1494,9 +1494,14 @@ break-before-make)`. A peer that accepted the connection and then answered
 anything (an `Unauthenticated` probe under fabric-token skew, a slow probe,
 an RPC error) was reached, and its error is returned with no resign.
 
-RG0 keeps its local resign. So does a dual-active RG, where the peer also
-claims the group; its reply says `(the peer is also primary; resigned
-locally)`.
+RG0 keeps its local resign. For a dual-active RG the transfer is still
+attempted. The peer answers "already primary", and this node, still primary at
+the ownership epoch it recorded before sending, resigns locally. Its reply says
+`(the peer is also primary; resigned locally)`.
+
+If a newer move made this node primary again before the reply, nothing
+resigns and the command returns `Aborted`. The decision never rests on the
+cached heartbeat view of the peer's role.
 
 The rules are in `pkg/cluster/README.md` ("The untargeted form on the owner
 runs the transfer"). The `data node <peer>` batch is still the better way to

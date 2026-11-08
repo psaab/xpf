@@ -81,7 +81,7 @@ func TestCLIUntargetedFailoverPeerNotReadyRefusesWithoutDemoting18559(t *testing
 		t.Fatalf("err = %v, want the peer's FailedPrecondition refusal", err)
 	}
 	for _, want := range []string{"the peer's redundancy group 1 not ready for explicit failover",
-		"reasons=[session sync not primed]", "no local resign", "Next:"} {
+		"reasons=[session sync not primed]", "no local resign", "Next:", "safe only once node 1 shows Takeover ready"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err.Error(), want)
 		}
@@ -172,10 +172,10 @@ func TestCLIUntargetedFailoverClockRefusalFallsBackToLocalResign18559(t *testing
 	}
 }
 
-// The peer answers "already primary" (both nodes claim RG1; this node had not
-// heard it yet): the reply is not a move, so the CLI resigns locally and the
-// dual-active ends. With the peer's primary claim already known, nothing is
-// proxied at all.
+// The peer answers "already primary" (both nodes claim RG1): whatever this
+// node's cached view of the peer, the transfer is attempted, and the reply
+// while this node is still primary at the same epoch ends the dual-active
+// state with the fenced local resign.
 func TestCLIUntargetedFailoverDualActiveResignsLocally18559(t *testing.T) {
 	for _, known := range []bool{false, true} {
 		calls := 0
@@ -197,9 +197,67 @@ func TestCLIUntargetedFailoverDualActiveResignsLocally18559(t *testing.T) {
 		if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive); strings.TrimSpace(out) != want {
 			t.Fatalf("known=%v: stdout = %q, want %q", known, out, want)
 		}
-		if wantCalls := map[bool]int{false: 1, true: 0}[known]; calls != wantCalls {
-			t.Fatalf("known=%v: transfer attempts = %d, want %d", known, calls, wantCalls)
+		if calls != 1 {
+			t.Fatalf("known=%v: transfer attempts = %d, want 1", known, calls)
 		}
+	}
+}
+
+// A stale cached "peer is primary" view must not resign the sole owner: the
+// transfer is attempted and the peer's refusal is returned (Codex F1).
+func TestCLIUntargetedFailoverStalePeerPrimaryViewDoesNotResign18559(t *testing.T) {
+	calls := 0
+	c, mgr := untargetedCLI18559(t, true, func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+		calls++
+		return "", status.Error(codes.FailedPrecondition,
+			"local redundancy group 1 not ready for explicit failover ready=false ready_since=<zero> reasons=[]")
+	})
+	mgr.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+	err := c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
+	if calls != 1 || status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("calls=%d err=%v, want one attempt and the peer's refusal", calls, err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("the sole owner resigned on a stale peer view")
+	}
+}
+
+// A newer move made this node primary again before the transfer's success
+// reply: nothing resigns and the supersession is reported (Codex F2).
+func TestCLIUntargetedFailoverSupersededReplyDoesNotResign18559(t *testing.T) {
+	var mgr *cluster.Manager
+	c, m := untargetedCLI18559(t, true, func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary)
+		mgr.SetGroupStateForTesting(1, cluster.StatePrimary)
+		return "Manual failover completed for redundancy group 1 (transfer committed)", nil
+	})
+	mgr = m
+	err := c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
+	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "newer move") ||
+		!strings.Contains(err.Error(), "node 1 had replied:") {
+		t.Fatalf("err = %v, want Aborted naming the newer move and the peer's reply", err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("the delayed reply resigned the owner a newer move installed")
+	}
+}
+
+// The never-reached fallback is fenced to the epoch: a newer move during the
+// dial (here inside fabricPeerAddrFn, which then finds no address) must not be
+// undone by the fallback resign.
+func TestCLIUntargetedFailoverFallbackFencedToEpoch18559(t *testing.T) {
+	c, mgr := untargetedCLI18559(t, true, nil)
+	c.fabricPeerAddrFn = func() []string {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary)
+		mgr.SetGroupStateForTesting(1, cluster.StatePrimary)
+		return nil
+	}
+	err := c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("err = %v, want Aborted: the epoch moved before the fallback", err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("the fallback resigned the owner a newer move installed")
 	}
 }
 

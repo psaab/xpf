@@ -165,63 +165,93 @@ func (s *Server) proxyClusterFailoverSent(ctx context.Context, req *pb.SystemAct
 // owner as the node-targeted transfer to the peer (#18559). The decision and
 // the outcome rules are documented with clusterfailover.UntargetedPeerTransfer.
 //
-// done reports whether the caller must return resp/err as the result. When it
-// is false the caller runs the local resign and replies
-// clusterfailover.LocalResignMessage(op.RG, note): note is empty when the form
-// did not qualify (RG0, non-owner, dead peer, the peer also primary),
-// ResignNoteUnreachable when the request never reached the peer, and
-// ResignNoteDualActive when the peer answered success while this node is
-// still primary (the peer said "already primary").
-func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.Op) (resp *pb.SystemActionResponse, err error, done bool, note string) {
-	localPrimary := s.cluster.IsLocalPrimary(op.RG)
-	target, ok := clusterfailover.UntargetedPeerTransfer(op, s.cluster.NodeID(),
-		localPrimary, s.cluster.PeerAlive(), s.cluster.IsPeerPrimary(op.RG))
+// done=false means the form did not qualify (RG0, a non-owner, a dead peer)
+// and the caller runs the plain local resign, as before #18559. When done is
+// true resp/err is the command's result, including every local resign the
+// transfer path itself derives (dual-active, never reached), which is fenced
+// to the ownership epoch captured before sending.
+func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.Op) (resp *pb.SystemActionResponse, err error, done bool) {
+	localPrimary, epoch := s.cluster.LocalMastershipSnapshot(op.RG)
+	target, ok := clusterfailover.UntargetedPeerTransfer(op, s.cluster.NodeID(), localPrimary, s.cluster.PeerAlive())
 	if !ok {
-		if localPrimary && op.RG > 0 && s.cluster.IsPeerPrimary(op.RG) {
-			return nil, nil, false, clusterfailover.ResignNoteDualActive
-		}
-		return nil, nil, false, ""
+		return nil, nil, false
 	}
 	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
-		"rg", op.RG, "target_node", target.Node)
+		"rg", op.RG, "target_node", target.Node, "epoch", epoch)
 	resp, err, sent := s.proxyClusterFailoverSent(ctx, &pb.SystemActionRequest{Action: target.Action()}, target)
 	if err == nil {
-		if s.cluster.IsLocalPrimary(op.RG) {
-			// A committed transfer has demoted this node (the #5640 fence
-			// runs before the ACK). Still primary means the peer answered
-			// "already primary": both nodes claim the RG.
-			slog.Info("cluster failover: the peer reported the group already primary while this node is still primary; resigning locally to end the dual-active state",
+		primaryNow, epochNow := s.cluster.LocalMastershipSnapshot(op.RG)
+		switch {
+		case !primaryNow:
+			// The committed transfer demoted this node (the #5640 fence
+			// runs before the peer's ACK).
+			return resp, nil, true
+		case epochNow != epoch:
+			// Demoted and made primary again by a newer, completed move
+			// before this reply arrived: that move stands.
+			slog.Warn("cluster failover: a newer ownership move completed before the transfer reply; not resigning",
+				"rg", op.RG, "target_node", target.Node, "epoch", epoch, "epoch_now", epochNow, "reply", resp.GetMessage())
+			return nil, status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, target.Node, resp.GetMessage())), true
+		default:
+			// Still primary at the same epoch: the peer answered "already
+			// primary", so both nodes claim the RG.
+			slog.Info("cluster failover: the peer answered the transfer while this node is still primary at the same epoch (dual-active); resigning locally",
 				"rg", op.RG, "target_node", target.Node, "reply", resp.GetMessage())
-			return nil, nil, false, clusterfailover.ResignNoteDualActive
+			resp, err = s.untargetedFencedResign(ctx, op, target.Node, epoch, clusterfailover.ResignNoteDualActive)
+			return resp, err, true
 		}
-		return resp, nil, true, ""
 	}
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		// The caller gave up; it cannot observe a resign, so none runs.
-		return nil, status.FromContextError(ctxErr).Err(), true, ""
+		return nil, status.FromContextError(ctxErr).Err(), true
 	}
 	if !sent {
 		slog.Info("cluster failover: the transfer request never reached the peer; falling back to the local resign (the peer claims the group on its next heartbeat)",
 			"rg", op.RG, "target_node", target.Node, "reason", err)
-		return nil, nil, false, clusterfailover.ResignNoteUnreachable
+		resp, err = s.untargetedFencedResign(ctx, op, target.Node, epoch, clusterfailover.ResignNoteUnreachable)
+		return resp, err, true
 	}
 	slog.Warn("cluster failover: the peer did not complete the transfer; not resigning locally",
 		"rg", op.RG, "target_node", target.Node, "err", err)
-	return nil, untargetedTransferError18559(op.RG, target.Node, err), true, ""
+	return nil, untargetedTransferError18559(op.RG, target.Node, err), true
+}
+
+// untargetedFencedResign is the local resign the untargeted transfer path
+// derives (#18559): never for a cancelled caller, and only while this node is
+// still primary at the epoch captured before the transfer
+// (Manager.ManualFailoverIfMastership), so it cannot demote an owner a newer
+// move installed. A moved epoch is reported (codes.Aborted), not acted on.
+func (s *Server) untargetedFencedResign(ctx context.Context, op clusterfailover.Op, targetNode int, epoch uint64, note string) (*pb.SystemActionResponse, error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, status.FromContextError(ctxErr).Err()
+	}
+	outcome, err := s.cluster.ManualFailoverIfMastership(op.RG, epoch)
+	if errors.Is(err, cluster.ErrMastershipChanged) {
+		return nil, status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, targetNode, ""))
+	}
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "%v", err)
+	}
+	if outcome == cluster.FailoverSuperseded {
+		return &pb.SystemActionResponse{
+			Message: fmt.Sprintf("Manual failover for redundancy group %d was superseded by a concurrent reset; no failover performed", op.RG),
+		}, nil
+	}
+	return &pb.SystemActionResponse{Message: clusterfailover.LocalResignMessage(op.RG, note)}, nil
 }
 
 // untargetedTransferError18559 names the transfer in a failure the peer
 // returned and keeps its gRPC code. codes.Unknown is passed through verbatim:
 // it is the #16432 verify-before-retry outcome and its text already says so.
 // Anything else gains what happened, whose redundancy group the peer's text
-// means, and what to do next (pkg/cluster/README.md, "The untargeted form on
-// the owner runs the transfer").
+// means, and the next step for its class (clusterfailover.ClassifyRefusal).
 func untargetedTransferError18559(rg, targetNode int, err error) error {
 	st := status.Convert(err)
 	if st.Code() == codes.Unknown {
 		return st.Err()
 	}
-	return status.Error(st.Code(), clusterfailover.UntargetedTransferRefusal(rg, targetNode, st.Message()))
+	class := clusterfailover.ClassifyRefusal(st.Code().String(), st.Message())
+	return status.Error(st.Code(), clusterfailover.UntargetedTransferRefusal(rg, targetNode, class, st.Message()))
 }
 
 // logSystemAction records a destructive maintenance action to the configstore
@@ -1033,14 +1063,8 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 		// pre-activates before this node demotes) instead of the local
 		// resign, which the peer only noticed on its next heartbeat. A
 		// request the peer forwarded to us is never re-proxied.
-		note := ""
 		if !peerForwardedFromContext(ctx) {
-			var (
-				resp *pb.SystemActionResponse
-				err  error
-				done bool
-			)
-			if resp, err, done, note = s.untargetedPeerTransfer(ctx, op); done {
+			if resp, err, done := s.untargetedPeerTransfer(ctx, op); done {
 				return resp, err
 			}
 		}
@@ -1057,7 +1081,7 @@ func (s *Server) executeClusterFailover(ctx context.Context, req *pb.SystemActio
 			}, nil
 		}
 		return &pb.SystemActionResponse{
-			Message: clusterfailover.LocalResignMessage(op.RG, note),
+			Message: clusterfailover.LocalResignMessage(op.RG, ""),
 		}, nil
 	}
 	// ParseAction only yields the five kinds above; defensive fallthrough.

@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -156,8 +157,7 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 		// #18559: on the owner of a data RG with a live peer, run the
 		// make-before-break transfer to the peer instead of the local
 		// resign. Same rule as the gRPC handler (untargetedPeerTransfer).
-		message, err, done, note := c.untargetedPeerTransfer(op)
-		if done {
+		if message, err, done := c.untargetedPeerTransfer(op); done {
 			if err != nil {
 				return err
 			}
@@ -173,7 +173,7 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 			fmt.Printf("Manual failover for redundancy group %d was superseded by a concurrent reset; no failover performed\n", op.RG)
 			return nil
 		}
-		fmt.Println(clusterfailover.LocalResignMessage(op.RG, note))
+		fmt.Println(clusterfailover.LocalResignMessage(op.RG, ""))
 		return nil
 	}
 
@@ -184,45 +184,66 @@ func (c *CLI) handleRequestChassisClusterFailover(args []string) error {
 // untargetedPeerTransfer is the in-process CLI twin of the gRPC handler's
 // (#18559): an untargeted RG failover on the RG's owner runs as the
 // node-targeted transfer to the peer, under the same decision and outcome
-// rules (clusterfailover.UntargetedPeerTransfer). done=false means "run the
-// local resign and reply LocalResignMessage(rg, note)": note is empty when the
-// form did not qualify, ResignNoteUnreachable when the request never reached
-// the peer (the #18585 clock refusal, or no fabric address accepted a
-// connection), ResignNoteDualActive when the peer also claims the RG.
-func (c *CLI) untargetedPeerTransfer(op clusterfailover.Op) (message string, err error, done bool, note string) {
-	localPrimary := c.cluster.IsLocalPrimary(op.RG)
-	target, ok := clusterfailover.UntargetedPeerTransfer(op, c.cluster.NodeID(),
-		localPrimary, c.cluster.PeerAlive(), c.cluster.IsPeerPrimary(op.RG))
+// rules (clusterfailover.UntargetedPeerTransfer). done=false means the form
+// did not qualify (RG0, a non-owner, a dead peer) and the caller runs the
+// plain local resign. When done is true message/err is the result, including
+// every local resign this path derives (dual-active, never reached), fenced
+// to the ownership epoch captured before sending. The in-process CLI has no
+// caller context to cancel.
+func (c *CLI) untargetedPeerTransfer(op clusterfailover.Op) (message string, err error, done bool) {
+	localPrimary, epoch := c.cluster.LocalMastershipSnapshot(op.RG)
+	target, ok := clusterfailover.UntargetedPeerTransfer(op, c.cluster.NodeID(), localPrimary, c.cluster.PeerAlive())
 	if !ok {
-		if localPrimary && op.RG > 0 && c.cluster.IsPeerPrimary(op.RG) {
-			return "", nil, false, clusterfailover.ResignNoteDualActive
-		}
-		return "", nil, false, ""
+		return "", nil, false
 	}
 	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
-		"rg", op.RG, "target_node", target.Node)
+		"rg", op.RG, "target_node", target.Node, "epoch", epoch)
 	sent := false
 	if err = c.cluster.CrossNodeFabricClockError(target.Node); err == nil { // #18585
 		message, err, sent = c.requestPeerSystemActionSent(context.Background(), target.Action(), "", 0)
 		if err == nil {
-			if c.cluster.IsLocalPrimary(op.RG) {
-				// A committed transfer has demoted this node; still primary
-				// means the peer answered "already primary" (dual-active).
-				slog.Info("cluster failover: the peer reported the group already primary while this node is still primary; resigning locally to end the dual-active state",
+			primaryNow, epochNow := c.cluster.LocalMastershipSnapshot(op.RG)
+			switch {
+			case !primaryNow:
+				return message, nil, true // the committed transfer demoted this node
+			case epochNow != epoch:
+				slog.Warn("cluster failover: a newer ownership move completed before the transfer reply; not resigning",
+					"rg", op.RG, "target_node", target.Node, "epoch", epoch, "epoch_now", epochNow, "reply", message)
+				return "", status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, target.Node, message)), true
+			default:
+				slog.Info("cluster failover: the peer answered the transfer while this node is still primary at the same epoch (dual-active); resigning locally",
 					"rg", op.RG, "target_node", target.Node, "reply", message)
-				return "", nil, false, clusterfailover.ResignNoteDualActive
+				message, err = c.untargetedFencedResign(op, target.Node, epoch, clusterfailover.ResignNoteDualActive)
+				return message, err, true
 			}
-			return message, nil, true, ""
 		}
 	}
 	if !sent {
 		slog.Info("cluster failover: the transfer request never reached the peer; falling back to the local resign (the peer claims the group on its next heartbeat)",
 			"rg", op.RG, "target_node", target.Node, "reason", err)
-		return "", nil, false, clusterfailover.ResignNoteUnreachable
+		message, err = c.untargetedFencedResign(op, target.Node, epoch, clusterfailover.ResignNoteUnreachable)
+		return message, err, true
 	}
 	slog.Warn("cluster failover: the peer did not complete the transfer; not resigning locally",
 		"rg", op.RG, "target_node", target.Node, "err", err)
-	return "", untargetedTransferError18559(op.RG, target.Node, err), true, ""
+	return "", untargetedTransferError18559(op.RG, target.Node, err), true
+}
+
+// untargetedFencedResign is the gRPC handler's twin: the local resign the
+// untargeted transfer path derives, only while this node is still primary at
+// the epoch captured before the transfer; a moved epoch is reported.
+func (c *CLI) untargetedFencedResign(op clusterfailover.Op, targetNode int, epoch uint64, note string) (string, error) {
+	outcome, err := c.cluster.ManualFailoverIfMastership(op.RG, epoch)
+	if errors.Is(err, cluster.ErrMastershipChanged) {
+		return "", status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, targetNode, ""))
+	}
+	if err != nil {
+		return "", err
+	}
+	if outcome == cluster.FailoverSuperseded {
+		return fmt.Sprintf("Manual failover for redundancy group %d was superseded by a concurrent reset; no failover performed", op.RG), nil
+	}
+	return clusterfailover.LocalResignMessage(op.RG, note), nil
 }
 
 // untargetedTransferError18559 names the transfer in a failure the peer
@@ -233,7 +254,8 @@ func untargetedTransferError18559(rg, targetNode int, err error) error {
 	if st.Code() == codes.Unknown {
 		return st.Err()
 	}
-	return status.Error(st.Code(), clusterfailover.UntargetedTransferRefusal(rg, targetNode, st.Message()))
+	class := clusterfailover.ClassifyRefusal(st.Code().String(), st.Message())
+	return status.Error(st.Code(), clusterfailover.UntargetedTransferRefusal(rg, targetNode, class, st.Message()))
 }
 
 func (c *CLI) handleRequestChassisClusterDataPlane(args []string) error {

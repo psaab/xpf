@@ -5198,9 +5198,9 @@ group is confirmed released`. When the fence is NOT acked, the
   The node is then plain secondary, with the committed-secondary role pin
   that keeps it secondary while the peer is primary.
 - **After an untargeted failover run on the owner with a live peer**
-  (`request chassis cluster failover redundancy-group <N>`, data RG, the peer
-  not itself primary). Since #18559 this runs the peer-requested transfer
-  above, so the node ends as above. It is plain secondary with the
+  (`request chassis cluster failover redundancy-group <N>`, data RG). Since
+  #18559 this runs the peer-requested transfer above, so the node ends as
+  above. It is plain secondary with the
   committed-secondary pin, not `Manual`.
 - **After a local, untargeted failover** (`request chassis cluster failover
   redundancy-group <N>`, no commit). That is RG0, a node that did not own the

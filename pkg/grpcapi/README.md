@@ -182,6 +182,24 @@ transfer that did not move, since `SystemActionResponse` carries only
 table (byte-golden there); both frontends keep their own dialers, RPC
 deadlines, and fabric-auth credentials.
 
+**Untargeted failover on the owner, and what "reached" means (#18559).**
+`executeClusterFailover` runs an untargeted data-RG failover issued on the
+owner, with a live peer and no forwarded marker, as the node-targeted proxy
+above (`untargetedPeerTransfer`); the outcome rules (the ownership-epoch
+fence, the dual-active resign, `codes.Aborted` for a newer move) are in
+`pkg/cluster/README.md`, "The untargeted form on the owner runs the
+transfer". The only local-resign fallback is a request that provably never
+reached the peer, so `dialPeerReached` reports reach per fabric address:
+`peerclient.ProbeFabricTCP` accepting a TCP connection means reached, before
+the `GetStatus` liveness probe runs. When no address yields a connection it
+returns the first status a peer itself answered that probe with (anything
+but `Unavailable`, `DeadlineExceeded` or `Canceled`, an `Unauthenticated`
+token under clock skew say), naming the address, so a later address's TCP
+failure cannot replace the peer's diagnosis with a generic `Unavailable`.
+`dialPeer` is the reach-agnostic wrapper every other proxy uses. Cells:
+`TestUntargetedFailover*18559` in `untargeted_failover_18559_test.go`; the
+`RealPath*` ones serve a real peer on loopback.
+
 ### Peer hop markers are a listener capability, not a header (#5883)
 
 Two internal metadata keys bound cluster forwarding to one hop:

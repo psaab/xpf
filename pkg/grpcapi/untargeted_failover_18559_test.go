@@ -118,7 +118,8 @@ func TestUntargetedFailoverPeerNotReadyRefusesWithoutDemoting18559(t *testing.T)
 		t.Fatalf("err = %v, want the peer's FailedPrecondition refusal", err)
 	}
 	for _, want := range []string{"the peer's redundancy group 1 not ready for explicit failover",
-		"reasons=[session sync not primed]", "node 1", "no local resign", "Next:", "in-service-upgrade"} {
+		"reasons=[session sync not primed]", "node 1", "no local resign", "Next:",
+		"safe only once node 1 shows Takeover ready"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err.Error(), want)
 		}
@@ -253,21 +254,25 @@ func TestUntargetedFailoverCanceledCallerDoesNotResign18559(t *testing.T) {
 	}
 }
 
-// ---- dual-active: the local resign still ends it -------------------------
+// ---- dual-active, stale views and superseded replies ---------------------
 
-// twoNodeDualActive18559 builds node0 (owner) and node1, BOTH primary for
-// RG1, with node0's peer seam calling node1's REAL SystemAction handler as
-// the fabric interceptor would (forwarded marker). peerSeesPrimary sets
-// node0's view of node1: true is the cluster-state case, false the transient
-// window where node0 has not yet heard node1's primary heartbeat.
-func twoNodeDualActive18559(t *testing.T, peerSeesPrimary bool) (*Server, *cluster.Manager, *cluster.Manager, *atomic.Int32) {
+// twoNode18559 builds node0 (owner of RG1) and node1, with node0's peer seam
+// calling node1's REAL SystemAction handler as the fabric interceptor would
+// (forwarded marker). node1Primary is node1's ACTUAL role; node0Sees is
+// node0's cached (heartbeat) view of node1's role.
+func twoNode18559(t *testing.T, node1Primary bool, node0Sees cluster.NodeState) (*Server, *cluster.Manager, *cluster.Manager, *atomic.Int32) {
 	t.Helper()
 	n1 := cluster.NewManager(1, 22)
 	n1.UpdateConfig(&config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{
 		{ID: 0, NodePriorities: map[int]int{0: 100, 1: 90}},
 		{ID: 1, NodePriorities: map[int]int{0: 100, 1: 90}},
 	}})
-	n1.SetGroupStateForTesting(1, cluster.StatePrimary)
+	role := cluster.StateSecondary
+	if node1Primary {
+		role = cluster.StatePrimary
+	}
+	n1.SetGroupStateForTesting(0, cluster.StateSecondary)
+	n1.SetGroupStateForTesting(1, role)
 	n1.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
 	node1 := &Server{cluster: n1}
 	calls := &atomic.Int32{}
@@ -275,49 +280,108 @@ func twoNodeDualActive18559(t *testing.T, peerSeesPrimary bool) (*Server, *clust
 		calls.Add(1)
 		return node1.SystemAction(withPeerMarkers(context.Background(), peerMarkers{forwarded: true}), req)
 	})
-	if peerSeesPrimary {
-		n0.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
-	}
+	n0.SetPeerGroupStateForTesting(1, node0Sees)
 	return s, n0, n1, calls
 }
 
-// Both nodes primary and node0 knows it: the untargeted form is the local
-// resign that ends the dual-active state (a transfer would be answered
-// "already primary" and move nothing).
+// Both nodes really primary. Whether node0's cached view already shows it or
+// not, the transfer is attempted, node1's REAL handler answers "already
+// primary", and node0 resigns (fenced to its unchanged epoch): the
+// dual-active state ends from the CLI.
 func TestUntargetedFailoverDualActiveResignsLocally18559(t *testing.T) {
-	s, n0, n1, calls := twoNodeDualActive18559(t, true)
-	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
-	if err != nil {
-		t.Fatalf("dual-active untargeted failover: %v", err)
-	}
-	if n0.IsLocalPrimary(1) || !n1.IsLocalPrimary(1) {
-		t.Fatalf("dual-active not ended: node0 primary=%v node1 primary=%v", n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
-	}
-	if calls.Load() != 0 {
-		t.Fatalf("a dual-active RG must not be proxied as a transfer; calls=%d", calls.Load())
-	}
-	if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive); resp.GetMessage() != want {
-		t.Fatalf("message = %q, want %q", resp.GetMessage(), want)
+	for _, sees := range []cluster.NodeState{cluster.StatePrimary, cluster.StateSecondary} {
+		s, n0, n1, calls := twoNode18559(t, true, sees)
+		resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+		if err != nil {
+			t.Fatalf("view %v: dual-active untargeted failover: %v", sees, err)
+		}
+		if calls.Load() != 1 {
+			t.Fatalf("view %v: transfer attempts = %d, want 1 (the decision rests on the peer's answer)", sees, calls.Load())
+		}
+		if n0.IsLocalPrimary(1) || !n1.IsLocalPrimary(1) {
+			t.Fatalf("view %v: dual-active not ended: node0 primary=%v node1 primary=%v", sees, n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+		}
+		if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive); resp.GetMessage() != want {
+			t.Fatalf("view %v: message = %q, want %q", sees, resp.GetMessage(), want)
+		}
 	}
 }
 
-// node0 has not yet heard that node1 claims the RG; the REAL peer handler
-// answers "already primary" (success) and nothing demotes. The reply must not
-// be passed off as a move: node0 resigns and the dual-active ends.
-func TestUntargetedFailoverPeerReportsAlreadyPrimaryResignsLocally18559(t *testing.T) {
-	s, n0, n1, calls := twoNodeDualActive18559(t, false)
-	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
-	if err != nil {
-		t.Fatalf("dual-active untargeted failover: %v", err)
-	}
+// node0's cached view says node1 is primary, but node1 is actually secondary
+// (it lost a dual-active election and its next heartbeat has not arrived).
+// The transfer must still be attempted; node1's REAL handler cannot complete
+// it here (no session sync) and refuses, so node0 — the sole owner — must stay
+// primary. Before cycle 2 the cached view alone resigned node0 (Codex F1).
+func TestUntargetedFailoverStalePeerPrimaryViewDoesNotResign18559(t *testing.T) {
+	s, n0, n1, calls := twoNode18559(t, false, cluster.StatePrimary)
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
 	if calls.Load() != 1 {
-		t.Fatalf("peer transfer attempts = %d, want 1 (node0 did not know node1 was primary)", calls.Load())
+		t.Fatalf("transfer attempts = %d, want 1", calls.Load())
 	}
-	if n0.IsLocalPrimary(1) || !n1.IsLocalPrimary(1) {
-		t.Fatalf("dual-active not ended: node0 primary=%v node1 primary=%v", n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+	if err == nil || !strings.Contains(err.Error(), "no local resign") {
+		t.Fatalf("err = %v, want node1's refusal returned as the transfer's", err)
 	}
-	if want := clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive); resp.GetMessage() != want {
-		t.Fatalf("message = %q, want %q", resp.GetMessage(), want)
+	if !n0.IsLocalPrimary(1) || n1.IsLocalPrimary(1) || failoverCount18559(n0, 1) != 0 {
+		t.Fatalf("the sole owner resigned on a stale peer view: node0 primary=%v node1 primary=%v", n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+	}
+}
+
+// The transfer committed (node0 demoted) and a NEWER move made node0 primary
+// again before the first transfer's success reply arrived: the newer owner
+// stands, nothing resigns, and the supersession is reported (Codex F2).
+func TestUntargetedFailoverSupersededReplyDoesNotResign18559(t *testing.T) {
+	var mgr *cluster.Manager
+	s, m := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary) // the transfer's fence
+		mgr.SetGroupStateForTesting(1, cluster.StatePrimary)   // a newer move back
+		return &pb.SystemActionResponse{Message: untargetedTransferOK18559}, nil
+	})
+	mgr = m
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "newer move") ||
+		!strings.Contains(err.Error(), "node 1 had replied: "+untargetedTransferOK18559) {
+		t.Fatalf("err = %v, want Aborted naming the newer move and the peer's reply", err)
+	}
+	if !mgr.IsLocalPrimary(1) || failoverCount18559(mgr, 1) != 0 {
+		t.Fatal("the delayed reply resigned the owner a newer move installed")
+	}
+}
+
+// The never-reached fallback is fenced too: if this node lost and regained
+// the RG while the dial ran (a newer move), the fallback must not resign the
+// newer owner. The epoch flips inside the dial (fabricPeerAddrFn), which then
+// finds no address.
+func TestUntargetedFailoverFallbackFencedToEpoch18559(t *testing.T) {
+	s, mgr := untargetedServer18559(t, true, true, nil)
+	s.fabricPeerAddrFn = func() []string {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary)
+		mgr.SetGroupStateForTesting(1, cluster.StatePrimary)
+		return nil
+	}
+	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if status.Code(err) != codes.Aborted {
+		t.Fatalf("err = %v, want Aborted: the epoch moved before the fallback", err)
+	}
+	if !mgr.IsLocalPrimary(1) || failoverCount18559(mgr, 1) != 0 {
+		t.Fatal("the fallback resigned the owner a newer move installed")
+	}
+}
+
+// The caller cancels while the peer answers "already primary": the
+// dual-active post-check must not resign for a caller that is gone (Codex F3).
+func TestUntargetedFailoverCanceledCallerDualActiveDoesNotResign18559(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s, mgr := untargetedServer18559(t, true, true, func(context.Context, *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		cancel()
+		return &pb.SystemActionResponse{Message: "Redundancy group 1 is already primary on node 1"}, nil
+	})
+	_, err := s.SystemAction(ctx, &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if status.Code(err) != codes.Canceled {
+		t.Fatalf("err = %v, want the caller's Canceled", err)
+	}
+	if !mgr.IsLocalPrimary(1) {
+		t.Fatal("a cancelled caller still got the dual-active resign")
 	}
 }
 
@@ -329,8 +393,13 @@ type realPeer18559 struct {
 	pb.UnimplementedBpfrxServiceServer
 	probe      error
 	probeDelay time.Duration
-	action     func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error)
-	calls      atomic.Int32
+	// probeSeq, when set, answers the nth probe with probeSeq[n] (the last
+	// entry repeats): one listener answering two fabric addresses
+	// differently.
+	probeSeq []error
+	probes   atomic.Int32
+	action   func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error)
+	calls    atomic.Int32
 }
 
 func (p *realPeer18559) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*pb.GetStatusResponse, error) {
@@ -340,6 +409,9 @@ func (p *realPeer18559) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
+	}
+	if n := int(p.probes.Add(1)) - 1; len(p.probeSeq) > 0 {
+		return nil, p.probeSeq[min(n, len(p.probeSeq)-1)]
 	}
 	if p.probe != nil {
 		return nil, p.probe
@@ -436,21 +508,40 @@ func TestUntargetedFailoverRealPathAfterOwnerAckDoesNotResign18559(t *testing.T)
 // the in-process CLI gives the same peer.
 func TestUntargetedFailoverRealPathProbeAnsweredIsReached18559(t *testing.T) {
 	for _, tc := range []struct {
-		name string
-		peer *realPeer18559
+		name     string
+		peer     *realPeer18559
+		addrs    []string
+		wantCode codes.Code
+		wantText string
 	}{
+		// The peer's own status survives (the CLI twin returns the same code).
 		{"probe Unauthenticated", &realPeer18559{probe: status.Error(codes.Unauthenticated,
-			"fabric RPC authentication failed: invalid auth token")}},
-		{"probe slower than 2 s", &realPeer18559{probeDelay: 3 * time.Second}},
+			"fabric RPC authentication failed: invalid auth token")}, []string{"127.0.0.1"},
+			codes.Unauthenticated, "chronyc tracking"},
+		// A later address that refuses TCP must not overwrite it.
+		{"probe Unauthenticated, then a refused address", &realPeer18559{probe: status.Error(codes.Unauthenticated,
+			"fabric RPC authentication failed: invalid auth token")}, []string{"127.0.0.1", "127.0.0.2"},
+			codes.Unauthenticated, "chronyc tracking"},
+		// Two addresses that both answer: the FIRST answer is returned, not
+		// overwritten by the second (one listener, two probe replies).
+		{"two answering addresses keep the first", &realPeer18559{probeSeq: []error{
+			status.Error(codes.Unauthenticated, "fabric RPC authentication failed: invalid auth token"),
+			status.Error(codes.PermissionDenied, "fabric RPC not allowed for this peer"),
+		}}, []string{"127.0.0.1", "127.0.0.1"}, codes.Unauthenticated, "invalid auth token"},
+		// A probe that timed out after the connect is reached, not an answer.
+		{"probe slower than 2 s", &realPeer18559{probeDelay: 3 * time.Second}, []string{"127.0.0.1"},
+			codes.Unavailable, "fabric path to node 1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			tc.peer.action = func(*pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
 				return &pb.SystemActionResponse{Message: untargetedTransferOK18559}, nil
 			}
 			s, mgr := realPathServer18559(t, tc.peer)
+			s.fabricPeerAddrFn = func() []string { return tc.addrs }
 			_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
-			if err == nil || !strings.Contains(err.Error(), "no local resign") {
-				t.Fatalf("err = %v, want the reached peer's dial failure returned as the transfer's", err)
+			if status.Code(err) != tc.wantCode || !strings.Contains(err.Error(), "no local resign") ||
+				!strings.Contains(err.Error(), tc.wantText) {
+				t.Fatalf("err = %v, want %v naming %q, returned as the transfer's", err, tc.wantCode, tc.wantText)
 			}
 			if !mgr.IsLocalPrimary(1) {
 				t.Fatal("the owner fell back to the local resign although the peer accepted the connection")

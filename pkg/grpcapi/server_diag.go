@@ -87,6 +87,13 @@ func (s *Server) dialPeerReached(ctx context.Context) (*grpc.ClientConn, bool, e
 
 	// Try each fabric address; return first successful connection.
 	var lastErr error
+	// answered is the first status a peer itself returned to the liveness
+	// probe (an Unauthenticated fabric token, say). It is returned as is
+	// when no address yields a connection, so the caller sees the peer's
+	// diagnosis, not a generic Unavailable, and a later address's TCP
+	// failure cannot overwrite it (#18559). A probe that merely timed out
+	// or never connected is not an answer.
+	var answered error
 	reached := false
 	for _, ip := range peerIPs {
 		if err := ctx.Err(); err != nil {
@@ -162,6 +169,14 @@ func (s *Server) dialPeerReached(ctx context.Context) (*grpc.ClientConn, bool, e
 		if err != nil {
 			conn.Close()
 			lastErr = err
+			if st, ok := status.FromError(err); ok && answered == nil {
+				switch st.Code() {
+				case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled:
+				default:
+					answered = status.Errorf(st.Code(), "peer fabric address %s rejected the liveness probe: %s",
+						peerAddr, st.Message())
+				}
+			}
 			slog.Debug("peer dial failed, trying next fabric address", "addr", peerAddr, "err", err)
 			continue
 		}
@@ -169,6 +184,9 @@ func (s *Server) dialPeerReached(ctx context.Context) (*grpc.ClientConn, bool, e
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, reached, status.FromContextError(err).Err()
+	}
+	if answered != nil {
+		return nil, reached, answered
 	}
 	return nil, reached, status.Errorf(codes.Unavailable, "cannot connect to peer on any fabric address: %v", lastErr)
 }

@@ -314,6 +314,35 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 	return m.manualFailoverWith(rgID, nil, nil)
 }
 
+// ErrMastershipChanged is returned by ManualFailoverIfMastership when the
+// redundancy group is no longer primary here at the ownership generation the
+// caller observed (#18559).
+var ErrMastershipChanged = errors.New("redundancy group ownership changed on this node since it was observed")
+
+// ManualFailoverIfMastership is ManualFailover fenced to an observed ownership
+// epoch (#18559). It resigns rgID only while this node is still its primary at
+// the mastership generation the caller captured with LocalMastershipSnapshot
+// (bumped on every primary edge, setLocalRGStateLocked). The fence is the
+// manualFailoverWith admission predicate, so it is evaluated under m.mu in the
+// same critical section that installs the hold: a demotion and re-promotion
+// between the caller's observation and the resign (a newer, completed move)
+// fails it with ErrMastershipChanged and resigns nothing.
+//
+// The untargeted `request chassis cluster failover redundancy-group N` uses it
+// for the local resigns it derives from a transfer attempt, so a delayed reply
+// to an old transfer can never demote the owner a newer move installed.
+func (m *Manager) ManualFailoverIfMastership(rgID int, gen uint64) (FailoverOutcome, error) {
+	if m.UnkeyedAuthorityExpired() {
+		return FailoverApplied, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
+	}
+	return m.manualFailoverWith(rgID, func(rg *RedundancyGroupState, _ time.Time) error {
+		if rg.State != StatePrimary || rg.mastershipGen != gen {
+			return fmt.Errorf("%w (redundancy group %d)", ErrMastershipChanged, rgID)
+		}
+		return nil
+	}, nil)
+}
+
 // manualFailoverWith is ManualFailover with an optional admission predicate
 // that runs under m.mu twice: before the pre-hook (a cheap early refusal) and
 // again in the critical section that installs the hold, so nothing can change
