@@ -1499,9 +1499,19 @@ attempted. The peer answers "already primary", and this node, still primary at
 the ownership epoch it recorded before sending, resigns locally. Its reply says
 `(the peer is also primary; resigned locally)`.
 
-If a newer move made this node primary again before the reply, nothing
-resigns and the command returns `Aborted`. The decision never rests on the
-cached heartbeat view of the peer's role.
+If ownership changed during the request (a newer move or an automatic
+election made this node primary again at a newer epoch), nothing resigns and
+the command returns `Aborted`. If the group already left this node while the
+request ran, the command succeeds and says which node reports it primary.
+The decision never rests on the cached heartbeat view of the peer's role:
+an RPC deadline reconciled from that view is returned as the targeted form
+returns it and never triggers the resign.
+
+One residual remains (#19029): in a dual-active RG the peer can lose the
+election after answering "already primary". This node then resigns, and for
+up to one heartbeat neither node owns the group, until the peer re-claims it
+on this node's next heartbeat. Master's untargeted resign has the same
+window.
 
 The rules are in `pkg/cluster/README.md` ("The untargeted form on the owner
 runs the transfer"). The `data node <peer>` batch is still the better way to

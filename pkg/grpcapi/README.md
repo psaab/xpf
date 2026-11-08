@@ -186,9 +186,14 @@ deadlines, and fabric-auth credentials.
 `executeClusterFailover` runs an untargeted data-RG failover issued on the
 owner, with a live peer and no forwarded marker, as the node-targeted proxy
 above (`untargetedPeerTransfer`); the outcome rules (the ownership-epoch
-fence, the dual-active resign, `codes.Aborted` for a newer move) are in
+fence, the dual-active resign and its #19029 residual, `codes.Aborted` when
+ownership changed during the request, OK when the group already left) are in
 `pkg/cluster/README.md`, "The untargeted form on the owner runs the
-transfer". The only local-resign fallback is a request that provably never
+transfer". `proxyClusterFailoverSent` also reports whether its result was
+RECONCILED from a proxy deadline against the cached heartbeat view
+(#15081/#16432): that outcome is returned as the targeted form returns it
+and never authorizes a local resign, because a cached "peer is primary" bit
+is not the peer's answer. The only local-resign fallback is a request that provably never
 reached the peer, so `dialPeerReached` reports reach per fabric address:
 `peerclient.ProbeFabricTCP` accepting a TCP connection means reached, before
 the `GetStatus` liveness probe runs. When no address yields a connection it

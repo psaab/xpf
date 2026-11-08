@@ -3,6 +3,7 @@ package grpcapi
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -209,10 +210,25 @@ func TestUntargetedFailoverStaysLocalResignOutsideOwnerDataRG18559(t *testing.T)
 			t.Fatal("with no peer the local resign must still run")
 		}
 	})
+	// A request the peer forwarded is never re-proxied (no A->B->A loop) and
+	// keeps the plain local resign: it must SUCCEED, reply the unchanged
+	// text and actually park this node in the manual hold (review T1: a
+	// handler that rejected forwarded requests passed the old version).
 	t.Run("forwarded by the peer", func(t *testing.T) {
-		s, _ := untargetedServer18559(t, true, true, noProxy(t))
+		s, mgr := untargetedServer18559(t, true, true, noProxy(t))
 		ctx := withPeerMarkers(context.Background(), peerMarkers{forwarded: true})
-		_, _ = s.SystemAction(ctx, &pb.SystemActionRequest{Action: "cluster-failover:1"})
+		resp, err := s.SystemAction(ctx, &pb.SystemActionRequest{Action: "cluster-failover:1"})
+		if err != nil {
+			t.Fatalf("forwarded untargeted failover: %v", err)
+		}
+		if resp.GetMessage() != clusterfailover.LocalResignMessage(1, "") {
+			t.Fatalf("forwarded reply = %q, want the unchanged local-resign text", resp.GetMessage())
+		}
+		g := mgr.GroupState(1)
+		if mgr.IsLocalPrimary(1) || g == nil || g.State != cluster.StateSecondaryHold || !g.ManualFailover ||
+			failoverCount18559(mgr, 1) != 1 {
+			t.Fatalf("forwarded request did not run the local resign: primary=%v state=%v", mgr.IsLocalPrimary(1), g)
+		}
 	})
 }
 
@@ -326,9 +342,10 @@ func TestUntargetedFailoverStalePeerPrimaryViewDoesNotResign18559(t *testing.T) 
 	}
 }
 
-// The transfer committed (node0 demoted) and a NEWER move made node0 primary
-// again before the first transfer's success reply arrived: the newer owner
-// stands, nothing resigns, and the supersession is reported (Codex F2).
+// The transfer committed (node0 demoted) and node0 was made primary again (a
+// newer move or an automatic election) before the first transfer's success
+// reply arrived: that ownership stands, nothing resigns, and the change is
+// reported (Codex F2).
 func TestUntargetedFailoverSupersededReplyDoesNotResign18559(t *testing.T) {
 	var mgr *cluster.Manager
 	s, m := untargetedServer18559(t, true, true, func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
@@ -338,9 +355,9 @@ func TestUntargetedFailoverSupersededReplyDoesNotResign18559(t *testing.T) {
 	})
 	mgr = m
 	_, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
-	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "newer move") ||
+	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "changed during the request") ||
 		!strings.Contains(err.Error(), "node 1 had replied: "+untargetedTransferOK18559) {
-		t.Fatalf("err = %v, want Aborted naming the newer move and the peer's reply", err)
+		t.Fatalf("err = %v, want Aborted saying ownership changed, with the peer's reply", err)
 	}
 	if !mgr.IsLocalPrimary(1) || failoverCount18559(mgr, 1) != 0 {
 		t.Fatal("the delayed reply resigned the owner a newer move installed")
@@ -382,6 +399,115 @@ func TestUntargetedFailoverCanceledCallerDualActiveDoesNotResign18559(t *testing
 	}
 	if !mgr.IsLocalPrimary(1) {
 		t.Fatal("a cancelled caller still got the dual-active resign")
+	}
+}
+
+// isolateClusterState18559 points the cluster's on-disk HA state files at
+// the test's temp dir: cells that run real heartbeats through
+// HandlePeerHeartbeatForTesting must not persist peer epochs to /var/lib/xpf.
+func isolateClusterState18559(t *testing.T) {
+	t.Helper()
+	d := t.TempDir()
+	t.Cleanup(cluster.SetUnkeyedAuthorityGraceStatePathForTesting(filepath.Join(d, "unkeyed")))
+	t.Cleanup(cluster.SetFabricAuthGraceStatePathForTesting(filepath.Join(d, "fabric")))
+	t.Cleanup(cluster.SetPeerEpochStatePathForTesting(filepath.Join(d, "epoch")))
+}
+
+// A proxy DEADLINE is not the peer's answer (review N1). node1 is really
+// secondary, node0's cached heartbeat view still says it is primary (it just
+// lost a dual-active election), and the transfer RPC times out. The #15081
+// reconciliation turns that cached bit into "committed"; that is returned as
+// the targeted form returns it, and it must NOT authorize the dual-active
+// resign, which would leave the group with no owner. RED at c2630a05d6:
+// n0 primary=false n1 primary=false failovers=1.
+func TestUntargetedFailoverReconciledDeadlineDoesNotResign18559(t *testing.T) {
+	isolateClusterState18559(t)
+	s, n0, n1, _ := twoNode18559(t, false, cluster.StatePrimary)
+	s.peerSystemActionFn = func(context.Context, *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		return nil, status.Error(codes.DeadlineExceeded, "peer action response timed out")
+	}
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if !n0.IsLocalPrimary(1) || n1.IsLocalPrimary(1) || failoverCount18559(n0, 1) != 0 {
+		t.Fatalf("a reconciled deadline authorized the resign: n0 primary=%v n1 primary=%v failovers=%d err=%v reply=%q",
+			n0.IsLocalPrimary(1), n1.IsLocalPrimary(1), failoverCount18559(n0, 1), err, resp.GetMessage())
+	}
+	if err != nil || !strings.Contains(resp.GetMessage(), "proxy response timed out after the peer committed") {
+		t.Fatalf("want the reconciled outcome returned as the targeted form returns it: err=%v reply=%q", err, resp.GetMessage())
+	}
+}
+
+// Known residual (review N2, #19029), documented, not fixed in #18559. Both nodes
+// claim RG1; node1's REAL handler answers "already primary", and BEFORE node0
+// consumes that answer node1 receives node0's heartbeat and loses the real
+// dual-active election (priority 90 < 100). Only node1's generation moves, so
+// node0's epoch fence passes and node0 resigns: for a moment neither node
+// owns RG1. Master's untargeted command resigns locally in the same race.
+//
+// What this cell holds the product to: the group gets an owner again within
+// one heartbeat. node0's secondary-hold blocks only node0; node1, now a plain
+// secondary, promotes on node0's next frame ("Peer transfer out"), and node0
+// stays parked. If the hold ever stranded the group, this cell fails.
+func TestUntargetedFailoverPeerYieldsBeforeAlreadyPrimaryReply18559(t *testing.T) {
+	isolateClusterState18559(t)
+	s, n0, n1, _ := twoNode18559(t, true, cluster.StatePrimary)
+	peerServer := &Server{cluster: n1}
+	_, before := n0.LocalMastershipSnapshot(1)
+	s.peerSystemActionFn = func(ctx context.Context, req *pb.SystemActionRequest) (*pb.SystemActionResponse, error) {
+		resp, err := peerServer.SystemAction(withPeerMarkers(ctx, peerMarkers{forwarded: true}), req)
+		if err != nil {
+			t.Fatalf("setup: the peer should have answered already primary: %v", err)
+		}
+		n1.HandlePeerHeartbeatForTesting(n0.BuildHeartbeatForTesting())
+		if n1.IsLocalPrimary(1) {
+			t.Fatal("setup: the peer did not lose the real dual-active election")
+		}
+		if primary, gen := n0.LocalMastershipSnapshot(1); !primary || gen != before {
+			t.Fatal("setup: node0's epoch must be unchanged (only the peer's moved)")
+		}
+		return resp, nil
+	}
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	// Today's outcome: the dual-active resign ran and nobody owns RG1.
+	if err != nil || resp.GetMessage() != clusterfailover.LocalResignMessage(1, clusterfailover.ResignNoteDualActive) {
+		t.Fatalf("documented residual changed: err=%v reply=%q", err, resp.GetMessage())
+	}
+	if n0.IsLocalPrimary(1) || n1.IsLocalPrimary(1) {
+		t.Fatalf("documented residual changed: n0 primary=%v n1 primary=%v", n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+	}
+	// One heartbeat from node0 re-elects node1.
+	n1.HandlePeerHeartbeatForTesting(n0.BuildHeartbeatForTesting())
+	if !n1.IsLocalPrimary(1) {
+		t.Fatalf("node0's secondary-hold stranded RG1: node1 did not re-claim it on node0's next heartbeat (node1 state %v)",
+			n1.GroupState(1).State)
+	}
+	// node0 sees node1 primary and stays parked: exactly one owner.
+	n0.HandlePeerHeartbeatForTesting(n1.BuildHeartbeatForTesting())
+	if n0.IsLocalPrimary(1) || !n1.IsLocalPrimary(1) {
+		t.Fatalf("after one exchange RG1 must have exactly one owner: n0 primary=%v n1 primary=%v",
+			n0.IsLocalPrimary(1), n1.IsLocalPrimary(1))
+	}
+}
+
+// The never-reached fallback finds this node NO LONGER primary: the peer
+// claimed the group while the dial ran. That is what the operator asked for,
+// so the reply is OK and names the owner; nothing resigns and no manual hold
+// is set (review R1 LOW: it used to say "primary on this node again").
+func TestUntargetedFailoverFallbackAfterLosingPrimaryRepliesOwner18559(t *testing.T) {
+	s, mgr := untargetedServer18559(t, true, true, nil)
+	s.fabricPeerAddrFn = func() []string {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary)
+		mgr.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+		return nil
+	}
+	resp, err := s.SystemAction(context.Background(), &pb.SystemActionRequest{Action: "cluster-failover:1"})
+	if err != nil {
+		t.Fatalf("the group already left this node; want OK, got %v", err)
+	}
+	if want := clusterfailover.UntargetedNoLongerPrimaryMessage(1, "secondary", 1); resp.GetMessage() != want {
+		t.Fatalf("reply = %q, want %q", resp.GetMessage(), want)
+	}
+	if g := mgr.GroupState(1); g.ManualFailover || failoverCount18559(mgr, 1) != 0 {
+		t.Fatal("a node that was no longer primary still ran the resign")
 	}
 }
 

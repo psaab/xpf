@@ -130,35 +130,39 @@ func (s *Server) failoverProxyTimeoutOutcome(op clusterfailover.Op, err error) (
 // codes.Unknown with the verify text (#16432), so a status-checking
 // client can distinguish the two without parsing the message.
 func (s *Server) proxyClusterFailover(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error) {
-	resp, err, _ := s.proxyClusterFailoverSent(ctx, req, op)
+	resp, err, _, _ := s.proxyClusterFailoverSent(ctx, req, op)
 	return resp, err
 }
 
 // proxyClusterFailoverSent is proxyClusterFailover that also reports whether
-// the request reached the peer: false only for the #18585 clock refusal and
-// for a dial where no fabric address accepted a connection
-// (proxyPeerSystemActionSent).
-func (s *Server) proxyClusterFailoverSent(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (*pb.SystemActionResponse, error, bool) {
+// the request reached the peer (sent: false only for the #18585 clock refusal
+// and for a dial where no fabric address accepted a connection,
+// proxyPeerSystemActionSent) and whether the result was RECONCILED from a
+// proxy deadline against the cached heartbeat view (#15081/#16432) rather
+// than answered by the peer. #18559 keys on the second: a reconciled
+// "committed" is this node's cached view of the peer, not the peer's answer,
+// and must never authorize a local resign.
+func (s *Server) proxyClusterFailoverSent(ctx context.Context, req *pb.SystemActionRequest, op clusterfailover.Op) (resp *pb.SystemActionResponse, err error, sent, reconciled bool) {
 	// #18585: refuse up front, with the measured skew and the remedy, when
 	// the peer's clock is past the point where the fabric token can ever
 	// verify. Below that bound (or with no fresh measurement) the request is
 	// proxied exactly as before.
 	if s.cluster != nil {
 		if err := s.cluster.CrossNodeFabricClockError(op.Node); err != nil {
-			return nil, status.Error(codes.FailedPrecondition, err.Error()), false
+			return nil, status.Error(codes.FailedPrecondition, err.Error()), false, false
 		}
 	}
-	resp, err, sent := s.proxyPeerSystemActionSent(ctx, req, "", 0)
+	resp, err, sent = s.proxyPeerSystemActionSent(ctx, req, "", 0)
 	if err != nil {
 		if outcome, oerr, ok := s.failoverProxyTimeoutOutcome(op, err); ok {
-			return outcome, oerr, sent
+			return outcome, oerr, sent, true
 		}
 		if st, ok := status.FromError(err); ok {
-			return nil, st.Err(), sent
+			return nil, st.Err(), sent, false
 		}
-		return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err), sent
+		return nil, status.Errorf(codes.Unavailable, "peer cluster failover proxy failed: %v", err), sent, false
 	}
-	return resp, nil, sent
+	return resp, nil, sent, false
 }
 
 // untargetedPeerTransfer runs an untargeted RG failover issued on the RG's
@@ -178,7 +182,18 @@ func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.
 	}
 	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
 		"rg", op.RG, "target_node", target.Node, "epoch", epoch)
-	resp, err, sent := s.proxyClusterFailoverSent(ctx, &pb.SystemActionRequest{Action: target.Action()}, target)
+	resp, err, sent, reconciled := s.proxyClusterFailoverSent(ctx, &pb.SystemActionRequest{Action: target.Action()}, target)
+	if reconciled {
+		// The proxy deadline was reconciled against this node's CACHED view
+		// of the peer (#15081/#16432): the outcome is returned exactly as
+		// the targeted form returns it, and nothing resigns. A cached "peer
+		// is primary" bit is not the peer's answer; it can be stale (the
+		// peer just lost a dual-active election), and resigning on it would
+		// leave the group with no owner (review N1).
+		slog.Info("cluster failover: the untargeted transfer's proxy deadline was reconciled from the heartbeat view; returning that outcome, not resigning",
+			"rg", op.RG, "target_node", target.Node, "err", err, "reply", resp.GetMessage())
+		return resp, err, true
+	}
 	if err == nil {
 		primaryNow, epochNow := s.cluster.LocalMastershipSnapshot(op.RG)
 		switch {
@@ -187,14 +202,19 @@ func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.
 			// runs before the peer's ACK).
 			return resp, nil, true
 		case epochNow != epoch:
-			// Demoted and made primary again by a newer, completed move
-			// before this reply arrived: that move stands.
-			slog.Warn("cluster failover: a newer ownership move completed before the transfer reply; not resigning",
+			// Demoted and made primary again before this reply arrived (a
+			// newer move or an automatic election): that ownership stands.
+			slog.Warn("cluster failover: ownership changed during the untargeted transfer (primary again at a newer epoch); not resigning",
 				"rg", op.RG, "target_node", target.Node, "epoch", epoch, "epoch_now", epochNow, "reply", resp.GetMessage())
 			return nil, status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, target.Node, resp.GetMessage())), true
 		default:
-			// Still primary at the same epoch: the peer answered "already
-			// primary", so both nodes claim the RG.
+			// Still primary at the same epoch after an ACTUAL peer reply:
+			// the peer answered "already primary", so both nodes claim the
+			// RG. (Known residual, #19029, documented in the cluster
+			// README: the peer can lose the dual-active election after
+			// building that answer; this resign then leaves the group
+			// ownerless until the peer re-claims it on this node's next
+			// heartbeat.)
 			slog.Info("cluster failover: the peer answered the transfer while this node is still primary at the same epoch (dual-active); resigning locally",
 				"rg", op.RG, "target_node", target.Node, "reply", resp.GetMessage())
 			resp, err = s.untargetedFencedResign(ctx, op, target.Node, epoch, clusterfailover.ResignNoteDualActive)
@@ -220,12 +240,19 @@ func (s *Server) untargetedPeerTransfer(ctx context.Context, op clusterfailover.
 // derives (#18559): never for a cancelled caller, and only while this node is
 // still primary at the epoch captured before the transfer
 // (Manager.ManualFailoverIfMastership), so it cannot demote an owner a newer
-// move installed. A moved epoch is reported (codes.Aborted), not acted on.
+// incarnation installed. A node that is no longer primary at all replies OK
+// with who owns the group (it already left, as asked); primary again at a
+// newer epoch is reported (codes.Aborted), not acted on.
 func (s *Server) untargetedFencedResign(ctx context.Context, op clusterfailover.Op, targetNode int, epoch uint64, note string) (*pb.SystemActionResponse, error) {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, status.FromContextError(ctxErr).Err()
 	}
 	outcome, err := s.cluster.ManualFailoverIfMastership(op.RG, epoch)
+	if errors.Is(err, cluster.ErrNoLongerPrimary) {
+		slog.Info("cluster failover: the group already left this node during the untargeted request; nothing to resign",
+			"rg", op.RG, "target_node", targetNode, "err", err)
+		return &pb.SystemActionResponse{Message: untargetedNoLongerPrimaryReply(s.cluster, op.RG, targetNode)}, nil
+	}
 	if errors.Is(err, cluster.ErrMastershipChanged) {
 		return nil, status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, targetNode, ""))
 	}
@@ -238,6 +265,21 @@ func (s *Server) untargetedFencedResign(ctx context.Context, op clusterfailover.
 		}, nil
 	}
 	return &pb.SystemActionResponse{Message: clusterfailover.LocalResignMessage(op.RG, note)}, nil
+}
+
+// untargetedNoLongerPrimaryReply is clusterfailover.UntargetedNoLongerPrimaryMessage
+// filled from mgr: this node's state now, and the peer as owner when the
+// heartbeat view reports it primary. Shared with the in-process CLI twin.
+func untargetedNoLongerPrimaryReply(mgr *cluster.Manager, rg, peerNode int) string {
+	state := "not primary"
+	if g := mgr.GroupState(rg); g != nil {
+		state = g.State.String()
+	}
+	owner := -1
+	if mgr.IsPeerPrimary(rg) {
+		owner = peerNode
+	}
+	return clusterfailover.UntargetedNoLongerPrimaryMessage(rg, state, owner)
 }
 
 // untargetedTransferError18559 names the transfer in a failure the peer

@@ -198,19 +198,30 @@ func (c *CLI) untargetedPeerTransfer(op clusterfailover.Op) (message string, err
 	}
 	slog.Info("cluster failover: running the untargeted failover on the owner as a make-before-break transfer to the peer",
 		"rg", op.RG, "target_node", target.Node, "epoch", epoch)
-	sent := false
+	sent, reconciled := false, false
 	if err = c.cluster.CrossNodeFabricClockError(target.Node); err == nil { // #18585
-		message, err, sent = c.requestPeerSystemActionSent(context.Background(), target.Action(), "", 0)
+		message, err, sent, reconciled = c.requestPeerSystemActionSent(context.Background(), target.Action(), "", 0)
+		if reconciled {
+			// A proxy deadline reconciled from this node's CACHED view of
+			// the peer (#15081/#16432) is returned as the targeted form
+			// returns it, and never authorizes a resign (review N1).
+			slog.Info("cluster failover: the untargeted transfer's deadline was reconciled from the heartbeat view; returning that outcome, not resigning",
+				"rg", op.RG, "target_node", target.Node, "err", err, "reply", message)
+			return message, err, true
+		}
 		if err == nil {
 			primaryNow, epochNow := c.cluster.LocalMastershipSnapshot(op.RG)
 			switch {
 			case !primaryNow:
 				return message, nil, true // the committed transfer demoted this node
 			case epochNow != epoch:
-				slog.Warn("cluster failover: a newer ownership move completed before the transfer reply; not resigning",
+				slog.Warn("cluster failover: ownership changed during the untargeted transfer (primary again at a newer epoch); not resigning",
 					"rg", op.RG, "target_node", target.Node, "epoch", epoch, "epoch_now", epochNow, "reply", message)
 				return "", status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, target.Node, message)), true
 			default:
+				// An ACTUAL peer reply while still primary at the same epoch:
+				// dual-active. Residual #19029: the peer may have yielded
+				// since it answered (see the gRPC twin).
 				slog.Info("cluster failover: the peer answered the transfer while this node is still primary at the same epoch (dual-active); resigning locally",
 					"rg", op.RG, "target_node", target.Node, "reply", message)
 				message, err = c.untargetedFencedResign(op, target.Node, epoch, clusterfailover.ResignNoteDualActive)
@@ -231,9 +242,24 @@ func (c *CLI) untargetedPeerTransfer(op clusterfailover.Op) (message string, err
 
 // untargetedFencedResign is the gRPC handler's twin: the local resign the
 // untargeted transfer path derives, only while this node is still primary at
-// the epoch captured before the transfer; a moved epoch is reported.
+// the epoch captured before the transfer. No longer primary at all replies
+// who owns the group (it already left, as asked); primary again at a newer
+// epoch is reported (codes.Aborted).
 func (c *CLI) untargetedFencedResign(op clusterfailover.Op, targetNode int, epoch uint64, note string) (string, error) {
 	outcome, err := c.cluster.ManualFailoverIfMastership(op.RG, epoch)
+	if errors.Is(err, cluster.ErrNoLongerPrimary) {
+		slog.Info("cluster failover: the group already left this node during the untargeted request; nothing to resign",
+			"rg", op.RG, "target_node", targetNode, "err", err)
+		state := "not primary"
+		if g := c.cluster.GroupState(op.RG); g != nil {
+			state = g.State.String()
+		}
+		owner := -1
+		if c.cluster.IsPeerPrimary(op.RG) {
+			owner = targetNode
+		}
+		return clusterfailover.UntargetedNoLongerPrimaryMessage(op.RG, state, owner), nil
+	}
 	if errors.Is(err, cluster.ErrMastershipChanged) {
 		return "", status.Error(codes.Aborted, clusterfailover.UntargetedSupersededMessage(op.RG, targetNode, ""))
 	}

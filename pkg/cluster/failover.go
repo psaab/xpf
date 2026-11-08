@@ -319,6 +319,13 @@ func (m *Manager) ManualFailover(rgID int) (FailoverOutcome, error) {
 // caller observed (#18559).
 var ErrMastershipChanged = errors.New("redundancy group ownership changed on this node since it was observed")
 
+// ErrNoLongerPrimary is the ErrMastershipChanged case where this node is not
+// primary for the group at all any more (errors.Is matches both): the group
+// already left this node, so there is nothing to resign (#18559). Its
+// complement, still primary at a newer generation, is a different ownership
+// incarnation that a stale request must not demote.
+var ErrNoLongerPrimary = fmt.Errorf("%w: this node is no longer primary for the group", ErrMastershipChanged)
+
 // ManualFailoverIfMastership is ManualFailover fenced to an observed ownership
 // epoch (#18559). It resigns rgID only while this node is still its primary at
 // the mastership generation the caller captured with LocalMastershipSnapshot
@@ -336,7 +343,10 @@ func (m *Manager) ManualFailoverIfMastership(rgID int, gen uint64) (FailoverOutc
 		return FailoverApplied, fmt.Errorf("%s", unkeyedAuthorityExpiredReason)
 	}
 	return m.manualFailoverWith(rgID, func(rg *RedundancyGroupState, _ time.Time) error {
-		if rg.State != StatePrimary || rg.mastershipGen != gen {
+		if rg.State != StatePrimary {
+			return fmt.Errorf("%w (redundancy group %d, now %s)", ErrNoLongerPrimary, rgID, rg.State)
+		}
+		if rg.mastershipGen != gen {
 			return fmt.Errorf("%w (redundancy group %d)", ErrMastershipChanged, rgID)
 		}
 		return nil

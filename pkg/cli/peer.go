@@ -167,33 +167,37 @@ func (c *CLI) requestPeerSystemAction(ctx context.Context, action string) (strin
 // (x-peer-persistent-nat-*) into the request body, where the #4107 fabric
 // token's request-digest MAC binds them.
 func (c *CLI) requestPeerSystemActionWithPersistentNatGeneration(ctx context.Context, action string, origin string, generation uint64) (string, error) {
-	msg, err, _ := c.requestPeerSystemActionSent(ctx, action, origin, generation)
+	msg, err, _, _ := c.requestPeerSystemActionSent(ctx, action, origin, generation)
 	return msg, err
 }
 
 // requestPeerSystemActionSent is requestPeerSystemActionWithPersistentNatGeneration
 // that also reports whether the request reached the peer (#18559 keys its
-// local-resign fallback on this). sent is false only when no fabric address
+// local-resign fallback on this) and whether the result was RECONCILED from a
+// proxy deadline against this node's cached heartbeat view (#15081/#16432)
+// rather than answered by the peer. sent is false only when no fabric address
 // accepted a TCP connection (dialPeerReached); once one did, and every time
-// the RPC is issued, the request counts as sent whatever error follows.
-func (c *CLI) requestPeerSystemActionSent(ctx context.Context, action string, origin string, generation uint64) (string, error, bool) {
+// the RPC is issued, the request counts as sent whatever error follows. A
+// reconciled "committed" is this node's view, not the peer's answer, and
+// #18559 never resigns on it (review N1).
+func (c *CLI) requestPeerSystemActionSent(ctx context.Context, action string, origin string, generation uint64) (msg string, err error, sent, reconciled bool) {
 	ctx = metadata.AppendToOutgoingContext(ctx, "x-peer-forwarded", "1")
 	req := &pb.SystemActionRequest{Action: action, PersistentNatOrigin: origin, PersistentNatGeneration: generation}
 	if c.peerSystemActionFn != nil {
 		msg, err := c.peerSystemActionFn(ctx, req)
 		if err != nil {
 			if message, outcome := c.failoverProxyTimeoutMessage(action, err); outcome == peerclient.OutcomeCommitted {
-				return message, nil, true
+				return message, nil, true, true
 			} else if outcome == peerclient.OutcomeUnknown {
-				return "", status.Error(codes.Unknown, message), true
+				return "", status.Error(codes.Unknown, message), true, true
 			}
-			return "", err, true
+			return "", err, true, false
 		}
-		return msg, nil, true
+		return msg, nil, true, false
 	}
 	conn, reached := c.dialPeerReached()
 	if conn == nil {
-		return "", fmt.Errorf("cluster peer not reachable"), reached
+		return "", fmt.Errorf("cluster peer not reachable"), reached, false
 	}
 	defer conn.Close()
 
@@ -207,14 +211,14 @@ func (c *CLI) requestPeerSystemActionSent(ctx context.Context, action string, or
 			// verify text) verbatim instead of re-reconciling
 			// against this node's view, which would downgrade it
 			// to a success message.
-			return "", err, true
+			return "", err, true, false
 		}
 		if message, outcome := c.failoverProxyTimeoutMessage(action, err); outcome == peerclient.OutcomeCommitted {
-			return message, nil, true
+			return message, nil, true, true
 		} else if outcome == peerclient.OutcomeUnknown {
-			return "", status.Error(codes.Unknown, message), true
+			return "", status.Error(codes.Unknown, message), true, true
 		}
-		return "", err, true
+		return "", err, true, false
 	}
-	return resp.Message, nil, true
+	return resp.Message, nil, true, false
 }

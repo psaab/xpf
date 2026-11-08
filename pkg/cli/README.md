@@ -77,8 +77,12 @@ sibling files (same package, so unexported helpers stay reachable):
     outcomes, documented in `pkg/cluster/README.md`. Reach comes from
     `peer.go`'s `dialPeerReached` (`peerclient.ProbeFabricTCP` per fabric
     address); only a request that never reached the peer, or the #18585
-    clock refusal, falls back to the local resign. The console CLI has no
-    caller context, so it has no cancellation check.
+    clock refusal, falls back to the local resign. `requestPeerSystemActionSent`
+    also reports whether its result was reconciled from a proxy deadline
+    against the cached heartbeat view (#15081/#16432); a reconciled outcome
+    is printed as the targeted form prints it and never triggers the
+    dual-active resign. The console CLI has no caller context, so it has no
+    cancellation check.
 - `cli_request_system.go` — `request system reboot|halt|power-off|zeroize`
   and `software` / `configuration` / `dynamic-dns`.
   - **`zeroize` runs the FULL shared wipe, not a partial config-only one

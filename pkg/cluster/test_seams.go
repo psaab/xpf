@@ -151,6 +151,14 @@ func (m *Manager) HandlePeerHeartbeatForTesting(pkt *HeartbeatPacket) {
 	m.handlePeerHeartbeat(pkt)
 }
 
+// BuildHeartbeatForTesting returns the heartbeat this node would send now
+// (the real buildHeartbeat), so an external-package cell can exchange real
+// frames between two in-process managers with HandlePeerHeartbeatForTesting
+// and watch the election settle (#18559's dual-active residual cell).
+func (m *Manager) BuildHeartbeatForTesting() *HeartbeatPacket {
+	return m.buildHeartbeat()
+}
+
 // SetPeerSnapshotProtocolVersionForTesting injects the peer's advertised
 // config-snapshot version without a capability-frame exchange.
 func (s *SessionSync) SetPeerSnapshotProtocolVersionForTesting(v uint16) {

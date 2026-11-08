@@ -4638,15 +4638,36 @@ Operator-visible consequences:
 | Peer's answer | This node afterwards | Result |
 |---|---|---|
 | success | not primary | The committed transfer; the peer's reply is returned. |
-| success | primary at the **same** epoch | The peer answered "already primary": both nodes claim the RG. A local resign fenced to that epoch (`Manager.ManualFailoverIfMastership`) ends the dual-active state. Reply: `... (the peer is also primary; resigned locally)`. |
-| success | primary at a **newer** epoch | A newer move completed before the reply arrived. Nothing resigns, and the command returns `codes.Aborted` naming the supersession. |
-| never reached: the #18585 clock refusal, or no fabric address accepted a TCP connection | — | A local resign fenced to the epoch. The peer claims the RG on its next heartbeat. The fallback is logged at Info with the reason. Reply: `... (peer unreachable; resigned locally, break-before-make)`. |
+| success (an ACTUAL peer reply) | primary at the **same** epoch | The peer answered "already primary": both nodes claim the RG. A local resign fenced to that epoch (`Manager.ManualFailoverIfMastership`) ends the dual-active state. Reply: `... (the peer is also primary; resigned locally)`. Residual: see below (#19029). |
+| success | primary at a **newer** epoch | Ownership changed during the request, by a newer move or an automatic election (the code cannot tell which). Nothing resigns, and the command returns `codes.Aborted`: `ownership of redundancy group N changed during the request (a newer move or an automatic election): ... the group did not move and no local resign ran`. |
+| proxy deadline, **reconciled** (#15081/#16432) from this node's cached heartbeat view | any | Returned exactly as the targeted form returns it (`... transfer committed on node M; proxy response timed out ...`, or the `codes.Unknown` verify text), and **nothing resigns**. A reconciled "committed" is this node's cached view of the peer, not the peer's answer. If that view is stale (the peer just lost a dual-active election), resigning on it would leave the group ownerless. |
+| never reached: the #18585 clock refusal, or no fabric address accepted a TCP connection | still primary at the epoch | A local resign fenced to the epoch. The peer claims the RG on its next heartbeat. The fallback is logged at Info with the reason. Reply: `... (peer unreachable; resigned locally, break-before-make)`. |
+| never reached, or dual-active | **no longer primary** (the peer claimed the group meanwhile) | OK, nothing resigns: `Redundancy group N is no longer primary on this node (now <state>); node M reports it primary. Nothing to resign: ...`. The group left this node, which is what the operator asked for. |
 | anything else | — | Returned, never resigned on top of (below). |
 
 The fence is evaluated under the cluster lock, in the same critical section
-that installs the hold. A delayed reply to an old transfer can therefore
-never demote an owner a newer move installed: if the epoch moved, the resign
-returns `ErrMastershipChanged` and the command reports it (`codes.Aborted`).
+that installs the hold, AFTER the unlocked pre-hook (the dataplane barrier).
+A delayed reply to an old transfer, or an election that demotes and
+re-promotes this node while the barrier runs, can therefore never lead to a
+resign of the newer ownership incarnation: the resign returns
+`ErrMastershipChanged` (primary again at a newer epoch, reported as
+`codes.Aborted`) or `ErrNoLongerPrimary` (wraps it; not primary at all,
+reported as OK with the owner).
+
+**Known residual: the peer yields after answering "already primary"
+(#19029).** The epoch fence sees only THIS node's ownership edges. In a
+dual-active RG the peer can build its genuine "already primary" answer and
+then, before this node acts on it, lose the dual-active election to this
+node's heartbeat ("Dual-active: lower priority yields"). Only the peer's
+generation moves, so this node, now the sole owner at exactly its recorded
+epoch, passes the fence and resigns: for up to one heartbeat interval
+(100 ms default, 200 ms in the lab) neither node owns the group. It does not
+strand: this node's secondary-hold blocks only this node, and the peer, now a
+plain secondary, promotes on this node's next heartbeat ("Peer transfer
+out"). `TestUntargetedFailoverPeerYieldsBeforeAlreadyPrimaryReply18559` pins
+both the window and that re-election. Master's untargeted command resigns
+locally in the same race, so this is not a regression. Closing it needs
+cross-node ownership coordination through the handoff, tracked in #19029.
 
 **Where the plain local resign (`ManualFailover`, unchanged) still runs.**
 These forms never attempt the transfer:
@@ -4661,7 +4682,9 @@ These forms never attempt the transfer:
 **Cancellation.** A caller that cancelled or timed out (gRPC) gets its
 context error, and no resign runs. This covers every local resign the
 transfer path derives: the never-reached fallback, the dual-active resign,
-and a transfer that failed after it was sent. The plain local resigns in the
+and a transfer that failed after it was sent. (A caller deadline that
+expires inside the proxy is reconciled like any proxy deadline, above, and
+that outcome is returned; it never resigns either.) The plain local resigns in the
 table above (RG0, non-owner, dead peer, forwarded) ignore the context, as
 they always have on master. The in-process CLI has no caller context.
 
@@ -4699,9 +4722,14 @@ rewords it. The peer words its refusal about its own group ("local redundancy
 group"); the text says "the peer's" instead. It ends with a `Next:` chosen by
 `clusterfailover.ClassifyRefusal`:
 
-- **Readiness** (not takeover-/transfer-ready, config stale): on node M, check
+- **Readiness** (not takeover-/transfer-ready, lost takeover readiness
+  before the commit, config stale): on node M, check
   `show chassis cluster status` (Takeover ready / Transfer ready) and retry
   once ready.
+- **In progress** (`failover already in progress for redundancy group N,
+  please wait`): another failover of the group is running on node M. Wait
+  for it, check `show chassis cluster status`, and retry only if the group is
+  not where you want it.
 - **Credentials** (`Unauthenticated` / `PermissionDenied`): almost always
   clock skew (#18585) or a control-link key mismatch. Check `chronyc tracking`
   and the NTP `server ... routing-instance mgmt` stanza on both nodes.

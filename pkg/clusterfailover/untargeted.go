@@ -27,17 +27,30 @@ import (
 //
 //   - The transfer committed: this node has been demoted by the transfer's
 //     own #5640 fence; the peer's reply is returned.
-//   - The peer replied success but this node is STILL primary at the SAME
-//     epoch: the peer answered "already primary", i.e. both nodes claim the
-//     RG. The frontend runs the local resign fenced to that epoch
+//   - The proxy deadline was RECONCILED (#15081/#16432) from this node's
+//     cached heartbeat view of the peer: that outcome is returned exactly as
+//     the node-targeted form returns it, and nothing resigns. A reconciled
+//     "committed" is this node's view, not the peer's answer; resigning on a
+//     stale "peer is primary" bit would leave the group ownerless.
+//   - The peer ACTUALLY replied success but this node is STILL primary at
+//     the SAME epoch: the peer answered "already primary", i.e. both nodes
+//     claim the RG. The frontend runs the local resign fenced to that epoch
 //     (Manager.ManualFailoverIfMastership) and replies
 //     LocalResignMessage(rg, ResignNoteDualActive), so a dual-active RG can
 //     still be ended from the CLI. The decision rests on the peer's own
-//     answer, never on the cached heartbeat view of the peer's role, which
-//     can be stale and would resign the sole owner.
+//     answer, never on the cached heartbeat view of the peer's role.
+//     Residual (#19029): the peer can lose the dual-active election after
+//     building that answer; only the PEER's epoch moves, so this resign then
+//     leaves the group ownerless until the peer re-claims it on this node's
+//     next heartbeat ("Peer transfer out"). Master's untargeted resign has
+//     the same window.
 //   - The peer replied success and this node is primary at a DIFFERENT
-//     epoch: a newer ownership move completed before the reply arrived. No
-//     resign; the command reports the supersession (codes.Aborted).
+//     epoch: ownership changed during the request (a newer move or an
+//     automatic election). No resign; codes.Aborted
+//     (UntargetedSupersededMessage).
+//   - A derived local resign finds this node NO LONGER primary (the peer
+//     claimed the group while the request ran): OK, with
+//     UntargetedNoLongerPrimaryMessage naming the owner; nothing resigns.
 //   - The request never reached the peer: the #18585 cross-node clock refusal
 //     stopped it before any fabric RPC, or NO fabric address accepted a TCP
 //     connection (peerclient.ProbeFabricTCP, the one transport-absence test
@@ -111,15 +124,36 @@ func UntargetedPeerTransfer(op Op, localNode int, localPrimary, peerAlive bool) 
 
 // UntargetedSupersededMessage is the text returned (codes.Aborted) when this
 // node is primary for rg again, at a newer ownership epoch, by the time the
-// untargeted command would act on the transfer's reply or resign locally: a
-// newer move completed in between, so nothing more is done.
+// untargeted command would act on the transfer's reply or resign locally.
+// Ownership changed while the command ran, by a newer move or by an
+// automatic election (an arm-debt yield-back, a flap); the code cannot tell
+// which, so the text names neither as the cause. The group did not move and
+// nothing more is done. The text leads with "ownership changed" and quotes
+// the peer's reply only after it, so a reader (or H1) matching on the reply
+// is not misled by a quoted "(transfer committed)".
 func UntargetedSupersededMessage(rg, targetNode int, peerReply string) string {
-	m := fmt.Sprintf("redundancy group %d is primary on this node again at a newer ownership epoch "+
-		"(a newer move completed while the untargeted failover ran)", rg)
+	m := fmt.Sprintf("ownership of redundancy group %d changed during the request (a newer move or an "+
+		"automatic election): this node is primary again at a newer ownership epoch, so the group did not "+
+		"move and no local resign ran", rg)
 	if peerReply != "" {
 		m += fmt.Sprintf("; node %d had replied: %s", targetNode, peerReply)
 	}
-	return m + "; no local resign was run. Check `show chassis cluster status` before retrying"
+	return m + ". Check `show chassis cluster status` before retrying"
+}
+
+// UntargetedNoLongerPrimaryMessage is the reply (OK) when a local resign the
+// untargeted transfer path derived finds this node no longer primary for rg:
+// the group already left this node while the request ran (the peer claimed
+// it), which is what the operator asked for, so nothing is resigned.
+// localState is this node's state now; ownerNode is the node the heartbeat
+// view reports primary, or -1 when none does yet.
+func UntargetedNoLongerPrimaryMessage(rg int, localState string, ownerNode int) string {
+	owner := "no node reports it primary yet (an election is in progress)"
+	if ownerNode >= 0 {
+		owner = fmt.Sprintf("node %d reports it primary", ownerNode)
+	}
+	return fmt.Sprintf("Redundancy group %d is no longer primary on this node (now %s); %s. "+
+		"Nothing to resign: the group already left this node during the request", rg, localState, owner)
 }
 
 // RefusalClass selects the next step UntargetedTransferRefusal offers.
@@ -133,8 +167,12 @@ const (
 	// or PermissionDenied); almost always clock skew (#18585) or a key
 	// mismatch.
 	RefusalAuth
-	// RefusalReadiness: the peer is not takeover- or transfer-ready.
+	// RefusalReadiness: the peer is not takeover- or transfer-ready, or lost
+	// takeover readiness before the commit.
 	RefusalReadiness
+	// RefusalInProgress: another failover of the group is already running on
+	// the peer; wait for it, then decide.
+	RefusalInProgress
 )
 
 // UntargetedTransferRefusal is the operator text for a transfer the peer
@@ -157,6 +195,10 @@ func UntargetedTransferRefusal(rg, targetNode int, class RefusalClass, peerMessa
 			"in-service-upgrade` drains this whole node instead: it demotes EVERY redundancy group here, RG0 "+
 			"included, and is safe only once node %d shows Takeover ready: yes; with a peer that is not ready "+
 			"it leaves the groups owned by neither node", targetNode, rg, targetNode)
+	case RefusalInProgress:
+		return head + fmt.Sprintf("another failover of redundancy group %d is already running on node %d. "+
+			"Wait for it to finish, check `show chassis cluster status`, and retry only if the group is not "+
+			"where you want it", rg, targetNode)
 	default:
 		return head + fmt.Sprintf("check the fabric path to node %d (`show chassis cluster status` monitor "+
 			"failures, fab0 reachability) and retry", targetNode)
@@ -171,7 +213,11 @@ func ClassifyRefusal(codeName, msg string) RefusalClass {
 	case codeName == "Unauthenticated" || codeName == "PermissionDenied" ||
 		strings.Contains(msg, "authentication failed"):
 		return RefusalAuth
+	case strings.Contains(msg, "failover already in progress for redundancy group"):
+		// RequestPeerFailover's reservation refusal (cluster/failover.go).
+		return RefusalInProgress
 	case strings.Contains(msg, "not ready for explicit failover") || strings.Contains(msg, "not transfer-ready") ||
+		strings.Contains(msg, "lost takeover readiness before transfer commit") ||
 		strings.Contains(msg, "peer config stale") || strings.Contains(msg, "standby config stale"):
 		return RefusalReadiness
 	default:

@@ -222,8 +222,9 @@ func TestCLIUntargetedFailoverStalePeerPrimaryViewDoesNotResign18559(t *testing.
 	}
 }
 
-// A newer move made this node primary again before the transfer's success
-// reply: nothing resigns and the supersession is reported (Codex F2).
+// This node was made primary again (a newer move or an automatic election)
+// before the transfer's success reply: nothing resigns and the ownership
+// change is reported (Codex F2).
 func TestCLIUntargetedFailoverSupersededReplyDoesNotResign18559(t *testing.T) {
 	var mgr *cluster.Manager
 	c, m := untargetedCLI18559(t, true, func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
@@ -233,9 +234,9 @@ func TestCLIUntargetedFailoverSupersededReplyDoesNotResign18559(t *testing.T) {
 	})
 	mgr = m
 	err := c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
-	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "newer move") ||
+	if status.Code(err) != codes.Aborted || !strings.Contains(err.Error(), "changed during the request") ||
 		!strings.Contains(err.Error(), "node 1 had replied:") {
-		t.Fatalf("err = %v, want Aborted naming the newer move and the peer's reply", err)
+		t.Fatalf("err = %v, want Aborted saying ownership changed, with the peer's reply", err)
 	}
 	if !mgr.IsLocalPrimary(1) {
 		t.Fatal("the delayed reply resigned the owner a newer move installed")
@@ -258,6 +259,54 @@ func TestCLIUntargetedFailoverFallbackFencedToEpoch18559(t *testing.T) {
 	}
 	if !mgr.IsLocalPrimary(1) {
 		t.Fatal("the fallback resigned the owner a newer move installed")
+	}
+}
+
+// A proxy DEADLINE reconciled from the cached heartbeat view is not the
+// peer's answer (review N1). The view says node1 is primary (stale: it just
+// lost a dual-active election), the RPC times out, and the reconciliation
+// reports "committed": that is returned as the targeted form returns it, and
+// the dual-active resign must NOT run. RED at c2630a05d6: node0 resigned.
+func TestCLIUntargetedFailoverReconciledDeadlineDoesNotResign18559(t *testing.T) {
+	c, mgr := untargetedCLI18559(t, true, func(ctx context.Context, req *pb.SystemActionRequest) (string, error) {
+		return "", status.Error(codes.DeadlineExceeded, "peer action response timed out")
+	})
+	mgr.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+	var callErr error
+	out := captureStdout(t, func() {
+		callErr = c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
+	})
+	if g := mgr.GroupState(1); !mgr.IsLocalPrimary(1) || g.FailoverCount != 0 {
+		t.Fatalf("a reconciled deadline authorized the resign: primary=%v failovers=%d err=%v out=%q",
+			mgr.IsLocalPrimary(1), g.FailoverCount, callErr, out)
+	}
+	if callErr != nil || !strings.Contains(out, "proxy response timed out after the peer committed") {
+		t.Fatalf("want the reconciled outcome printed as the targeted form prints it: err=%v out=%q", callErr, out)
+	}
+}
+
+// The never-reached fallback finds this node no longer primary (the peer
+// claimed the group during the dial): OK, naming the owner, nothing resigned
+// (review R1 LOW).
+func TestCLIUntargetedFailoverFallbackAfterLosingPrimaryRepliesOwner18559(t *testing.T) {
+	c, mgr := untargetedCLI18559(t, true, nil)
+	c.fabricPeerAddrFn = func() []string {
+		mgr.SetGroupStateForTesting(1, cluster.StateSecondary)
+		mgr.SetPeerGroupStateForTesting(1, cluster.StatePrimary)
+		return nil
+	}
+	var callErr error
+	out := captureStdout(t, func() {
+		callErr = c.handleRequestChassisClusterFailover([]string{"redundancy-group", "1"})
+	})
+	if callErr != nil {
+		t.Fatalf("the group already left this node; want success, got %v", callErr)
+	}
+	if want := clusterfailover.UntargetedNoLongerPrimaryMessage(1, "secondary", 1); strings.TrimSpace(out) != want {
+		t.Fatalf("stdout = %q, want %q", out, want)
+	}
+	if g := mgr.GroupState(1); g.ManualFailover || g.FailoverCount != 0 {
+		t.Fatal("a node that was no longer primary still ran the resign")
 	}
 }
 

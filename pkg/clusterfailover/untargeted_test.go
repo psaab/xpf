@@ -86,6 +86,17 @@ func TestUntargetedTransferRefusal18559(t *testing.T) {
 	if !strings.Contains(tr, "fabric path to node 1") || strings.Contains(tr, "in-service-upgrade") {
 		t.Errorf("transport refusal %q", tr)
 	}
+	busy := "failover already in progress for redundancy group 1, please wait"
+	ip := clusterfailover.UntargetedTransferRefusal(1, 1, clusterfailover.ClassifyRefusal("Unavailable", busy), busy)
+	if !strings.Contains(ip, "already running on node 1") || !strings.Contains(ip, "Wait for it to finish") ||
+		strings.Contains(ip, "fabric path") || strings.Contains(ip, "in-service-upgrade") {
+		t.Errorf("in-progress refusal %q must say wait, not check the fabric or drain", ip)
+	}
+	lost := "redundancy group 1 lost takeover readiness before transfer commit ready=false ready_since=<zero> reasons=[x]"
+	lr := clusterfailover.UntargetedTransferRefusal(1, 1, clusterfailover.ClassifyRefusal("FailedPrecondition", lost), lost)
+	if !strings.Contains(lr, "Takeover ready") || strings.Contains(lr, "fabric path") {
+		t.Errorf("lost-readiness refusal %q must give the readiness step", lr)
+	}
 }
 
 // ClassifyRefusal keys on the gRPC code first, then the readiness texts.
@@ -99,6 +110,8 @@ func TestClassifyRefusal18559(t *testing.T) {
 		{"Unavailable", "peer fabric address x rejected the liveness probe: fabric RPC authentication failed", clusterfailover.RefusalAuth},
 		{"FailedPrecondition", "local redundancy group 2 not ready for explicit failover ready=false", clusterfailover.RefusalReadiness},
 		{"FailedPrecondition", "local redundancy group 2 not transfer-ready for explicit failover reasons=[x]", clusterfailover.RefusalReadiness},
+		{"FailedPrecondition", "redundancy group 1 lost takeover readiness before transfer commit ready=false ready_since=<zero> reasons=[x]", clusterfailover.RefusalReadiness},
+		{"Unavailable", "failover already in progress for redundancy group 1, please wait", clusterfailover.RefusalInProgress},
 		{"FailedPrecondition", "failover commit for redundancy group 1 failed", clusterfailover.RefusalTransport},
 		{"Unavailable", "transport is closing", clusterfailover.RefusalTransport},
 	} {
@@ -111,10 +124,33 @@ func TestClassifyRefusal18559(t *testing.T) {
 // A superseded transfer is reported with the peer's reply and no resign.
 func TestUntargetedSupersededMessage18559(t *testing.T) {
 	got := clusterfailover.UntargetedSupersededMessage(1, 1, "Manual failover completed for redundancy group 1 (transfer committed)")
-	for _, want := range []string{"redundancy group 1 is primary on this node again", "newer move", "node 1 had replied", "no local resign"} {
+	for _, want := range []string{"ownership of redundancy group 1 changed during the request",
+		"a newer move or an automatic election", "primary again at a newer ownership epoch",
+		"did not move", "no local resign", "node 1 had replied"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("superseded text %q lacks %q", got, want)
 		}
+	}
+	// The cause is unknowable here: it must not be pinned on an operator.
+	if strings.Contains(got, "operator") || strings.Contains(got, "newer move completed") {
+		t.Errorf("superseded text %q asserts a cause the code cannot know", got)
+	}
+	// The ownership change leads; the quoted peer reply comes after it.
+	if strings.Index(got, "changed during the request") > strings.Index(got, "(transfer committed)") {
+		t.Errorf("superseded text %q quotes the peer's reply before saying ownership changed", got)
+	}
+}
+
+func TestUntargetedNoLongerPrimaryMessage18559(t *testing.T) {
+	got := clusterfailover.UntargetedNoLongerPrimaryMessage(1, "secondary", 1)
+	for _, want := range []string{"Redundancy group 1 is no longer primary on this node (now secondary)",
+		"node 1 reports it primary", "Nothing to resign"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("no-longer-primary text %q lacks %q", got, want)
+		}
+	}
+	if got := clusterfailover.UntargetedNoLongerPrimaryMessage(2, "secondary", -1); !strings.Contains(got, "no node reports it primary yet") {
+		t.Errorf("no-owner text %q", got)
 	}
 }
 
