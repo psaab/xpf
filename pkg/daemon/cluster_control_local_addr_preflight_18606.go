@@ -86,11 +86,15 @@ func clusterControlLocalAddressCommitPreflight(running *cluster.Manager, oldCfg,
 		return nil
 	}
 	var running18606 controlLinkAddrs18606
-	if oldCfg != nil && oldCfg.Chassis.Cluster != nil && oldCfg.Chassis.Cluster.ControlInterface != "" {
-		running18606 = controlLinkState18606(oldCfg, oldCfg.Chassis.Cluster.ControlInterface)
+	var runningPeerAddress string
+	if oldCfg != nil && oldCfg.Chassis.Cluster != nil {
+		if oldCfg.Chassis.Cluster.ControlInterface != "" {
+			running18606 = controlLinkState18606(oldCfg, oldCfg.Chassis.Cluster.ControlInterface)
+		}
+		runningPeerAddress = oldCfg.Chassis.Cluster.PeerAddress
 	}
 	return controlLocalAddressDecision18606(running.HeartbeatLocalAddr(), running18606,
-		controlLinkState18606(newCfg, cc.ControlInterface), cc.PeerAddress)
+		controlLinkState18606(newCfg, cc.ControlInterface), runningPeerAddress, cc.PeerAddress)
 }
 
 // controlLinkAddrs18606 is the resolved control-link netdev's ordered rendered
@@ -107,10 +111,10 @@ type controlLinkAddrs18606 struct {
 // controlLocalAddressDecision18606 is the DECISION, split from the accessors so
 // every arm is unit testable without a running heartbeat. have is the running
 // heartbeat's bound address; runningCfg and candidate are the running and
-// candidate resolved control-link netdev states (ordered rendered CIDRs plus
-// primary/preferred selections); peer is the candidate peer address used for
-// fresh-bind selection in both states so the comparison isolates changes.
-func controlLocalAddressDecision18606(have string, runningCfg, candidate controlLinkAddrs18606, peer string) error {
+// candidate resolved control-link netdev states. Fresh-bind selection uses
+// each config's own peer address, so a family change with no local bind is a
+// move to no address rather than an abstention.
+func controlLocalAddressDecision18606(have string, runningCfg, candidate controlLinkAddrs18606, runningPeerAddress, candidatePeerAddress string) error {
 	haveIP := net.ParseIP(have)
 	if haveIP == nil || !cidrListHasIP18606(runningCfg.addrs, haveIP) {
 		return nil
@@ -119,20 +123,34 @@ func controlLocalAddressDecision18606(have string, runningCfg, candidate control
 		// Prefixes and address order are inputs to networkd's selection
 		// (including preferred-per-subnet grouping), even when the selector
 		// strings themselves are unchanged.
-		if !sameFreshBindInputs18606(runningCfg, candidate) {
-			oldWant := freshBindSelection18606(runningCfg, peer)
-			want := freshBindSelection18606(candidate, peer)
-			if want != "" && want != have && want != oldWant {
-				return controlLocalAddressMoveRefusal18606(have, want)
+		if sameFreshBindInputs18606(runningCfg, candidate) &&
+			runningPeerAddress == candidatePeerAddress {
+			return nil
+		}
+		oldWant := freshBindSelection18606(runningCfg, runningPeerAddress)
+		want := freshBindSelection18606(candidate, candidatePeerAddress)
+		if want == "" {
+			if oldWant != "" || bindAddressFamilyChanged18606(runningPeerAddress, candidatePeerAddress) {
+				return controlLocalAddressMoveRefusal18606(have, "no static address")
 			}
+			return nil
+		}
+		if want != have && want != oldWant {
+			return controlLocalAddressMoveRefusal18606(have, want)
 		}
 		return nil
 	}
-	want := freshBindSelection18606(candidate, peer)
+	want := freshBindSelection18606(candidate, candidatePeerAddress)
 	if want == "" {
 		want = "no static address"
 	}
 	return controlLocalAddressMoveRefusal18606(have, want)
+}
+
+func bindAddressFamilyChanged18606(runningPeerAddress, candidatePeerAddress string) bool {
+	runningIP, candidateIP := net.ParseIP(runningPeerAddress), net.ParseIP(candidatePeerAddress)
+	return runningIP != nil && candidateIP != nil &&
+		(runningIP.To4() == nil) != (candidateIP.To4() == nil)
 }
 
 // sameFreshBindInputs18606 recognizes changes to any input that can affect

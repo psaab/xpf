@@ -639,8 +639,10 @@ func clusterPeerControlAddressCommitPreflight(store *configstore.Store, running 
 // peerControlAddressDecision18630 refuses when the running heartbeat peer
 // address is statically rendered by the running peer view and either disappears
 // or a changed rendered selection would make the peer bind a different address
-// on its next heartbeat start. The two peer-address inputs are the running and
-// candidate peer views' actual resolver family selectors.
+// on its next heartbeat start. An empty candidate selection is also a refusal
+// when the running selection existed or the peer-address family changed.
+// The two peer-address inputs are the running and candidate peer views' actual
+// resolver-family selectors.
 func peerControlAddressDecision18630(runningPeerAddr string, runningState, peerCandidate controlLinkAddrs18606, runningBindPeerAddr, candidateBindPeerAddr string) error {
 	peerIP := net.ParseIP(runningPeerAddr)
 	if peerIP == nil || !cidrListHasIP18606(runningState.addrs, peerIP) {
@@ -656,7 +658,13 @@ func peerControlAddressDecision18630(runningPeerAddr string, runningState, peerC
 	}
 	oldWant := freshBindSelection18606(runningState, runningBindPeerAddr)
 	want := freshBindSelection18606(peerCandidate, candidateBindPeerAddr)
-	if want != "" && want != runningPeerAddr && want != oldWant {
+	if want == "" {
+		if oldWant != "" || bindAddressFamilyChanged18606(runningBindPeerAddr, candidateBindPeerAddr) {
+			return peerControlAddressRefusal18630(runningPeerAddr, "")
+		}
+		return nil
+	}
+	if want != runningPeerAddr && want != oldWant {
 		return peerControlAddressRefusal18630(runningPeerAddr, want)
 	}
 	return nil

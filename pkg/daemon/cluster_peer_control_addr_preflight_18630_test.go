@@ -80,6 +80,27 @@ func peerControlAddrSelectionStore18630(t *testing.T) *configstore.Store {
 	return store
 }
 
+func peerControlAddrFamilyFlipStore18630(t *testing.T) *configstore.Store {
+	t.Helper()
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	if err := store.SetFromInput("groups node0 interfaces em0 unit 0 family inet6 address 2001:db8:14::1/64"); err != nil {
+		t.Fatalf("set node-0 IPv6 control address: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("commit node-0 IPv6 control address: %v", err)
+	}
+	if err := store.DeleteFromInput("groups node1 chassis cluster peer-address 10.99.14.1"); err != nil {
+		t.Fatalf("delete node-1 IPv4 peer address: %v", err)
+	}
+	if err := store.SetFromInput("groups node1 chassis cluster peer-address 2001:db8:14::1"); err != nil {
+		t.Fatalf("set node-1 IPv6 peer address: %v", err)
+	}
+	if err := store.SetFromInput("system host-name candidate-peer-family-flip-18630"); err != nil {
+		t.Fatalf("stage family-flip marker: %v", err)
+	}
+	return store
+}
+
 func peerControlAddrDHCPStore18630(t *testing.T) *configstore.Store {
 	t.Helper()
 	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
@@ -253,6 +274,74 @@ func TestPeerControlAddressSelectionSwapRefusedAtCommitBothPaths18630(t *testing
 	local.SetHeartbeatEndpointForTesting("10.99.14.2", "10.99.14.1", "em0")
 	if err := clusterControlLocalAddressCommitPreflight(local, runningPeerView, candidatePeerView); err == nil {
 		t.Fatal("node-1 local preflight must refuse the primary swap while its heartbeat remains bound to 10.99.14.2")
+	}
+}
+
+func TestPeerControlAddressFamilyFlipWithoutBindRefusedBeforeCommitPromotion18630(t *testing.T) {
+	store := peerControlAddrFamilyFlipStore18630(t)
+	activeBefore, candidateBefore := store.ActiveTree().Format(), store.CandidateTree().Format()
+	runningPeerView, err := config.CompileConfigForNodeLenient(store.ActiveTree(), 1)
+	if err != nil {
+		t.Fatalf("compile running peer view: %v", err)
+	}
+	candidatePeerView, err := config.CompileConfigForNodeLenient(store.CandidateTree(), 1)
+	if err != nil {
+		t.Fatalf("compile candidate peer view: %v", err)
+	}
+	runningState := controlLinkState18606(runningPeerView, "em0")
+	candidateState := controlLinkState18606(candidatePeerView, "em0")
+	if got := freshBindSelection18606(runningState, runningPeerView.Chassis.Cluster.PeerAddress); got != "10.99.14.2" {
+		t.Fatalf("running peer bind = %q, want 10.99.14.2", got)
+	}
+	if got := freshBindSelection18606(candidateState, candidatePeerView.Chassis.Cluster.PeerAddress); got != "" {
+		t.Fatalf("candidate peer bind = %q, want no IPv6 bind candidate", got)
+	}
+
+	d := runningPeerControlDaemon18630(store)
+	_, err = d.commitAndApply(context.Background(), configstore.InternalCommitter(),
+		"peer-address family flip without bind", peerSyncNever)
+	requirePeerControlAddressRefusal18630(t, err)
+	if got := store.ActiveTree().Format(); got != activeBefore {
+		t.Fatalf("refused family flip promoted active config:\n--- before\n%s\n--- after\n%s", activeBefore, got)
+	}
+	if got := store.CandidateTree().Format(); got != candidateBefore {
+		t.Fatalf("refused family flip changed candidate config:\n--- before\n%s\n--- after\n%s", candidateBefore, got)
+	}
+}
+
+func TestPeerSyncedAddressFamilyFlipWithoutLocalBindRefusedBeforePromotion18630(t *testing.T) {
+	store := peerControlAddrStore18630(t, peerControlAddrOld18630)
+	store.ExitConfigure()
+	incoming := store.ActiveTree()
+	deletePath, err := config.ParseSetCommand("delete groups node0 chassis cluster peer-address 10.99.14.2")
+	if err != nil {
+		t.Fatalf("parse delete node-0 peer address: %v", err)
+	}
+	if err := incoming.DeletePath(deletePath); err != nil {
+		t.Fatalf("delete node-0 peer address: %v", err)
+	}
+	setPath, err := config.ParseSetCommand("set groups node0 chassis cluster peer-address 2001:db8:14::2")
+	if err != nil {
+		t.Fatalf("parse set node-0 IPv6 peer address: %v", err)
+	}
+	if err := incoming.SetPath(setPath); err != nil {
+		t.Fatalf("set node-0 IPv6 peer address: %v", err)
+	}
+	candidatePeerView, err := config.CompileConfigForNodeLenient(incoming, 0)
+	if err != nil {
+		t.Fatalf("compile synced candidate: %v", err)
+	}
+	if got := freshBindSelection18606(controlLinkState18606(candidatePeerView, "em0"),
+		candidatePeerView.Chassis.Cluster.PeerAddress); got != "" {
+		t.Fatalf("synced candidate local bind = %q, want no IPv6 bind candidate", got)
+	}
+
+	activeBefore := store.ActiveTree().Format()
+	d := runningPeerControlDaemon18630(store)
+	_, err = d.syncAndApplyWithAncestry(context.Background(), incoming.Format(), nil, nil)
+	requireActiveUnchanged18606(t, store, activeBefore, "the refused peer-address family flip")
+	if err == nil || !strings.Contains(err.Error(), "no static address") {
+		t.Fatalf("unselectable synced local bind must be refused by the pre-promotion gate, got %v", err)
 	}
 }
 

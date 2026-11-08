@@ -84,7 +84,8 @@ func TestControlLocalAddressDecision18606(t *testing.T) {
 			candidate := controlLinkAddrs18606{
 				addrs: tc.candidate, primary: tc.candidatePrimary, preferred: tc.candidatePreferred,
 			}
-			err := controlLocalAddressDecision18606(tc.have, runningCfg, candidate, "10.99.14.2")
+			err := controlLocalAddressDecision18606(tc.have, runningCfg, candidate,
+				"10.99.14.2", "10.99.14.2")
 			if tc.refuse && err == nil {
 				t.Errorf("have=%q running=%v candidate=%v must be REFUSED: the commit removes or changes the selected control address",
 					tc.have, tc.runningCfg, tc.candidate)
@@ -97,11 +98,36 @@ func TestControlLocalAddressDecision18606(t *testing.T) {
 	}
 }
 
+func TestControlLocalAddressPeerFamilyFlipWithoutBindRefused18606(t *testing.T) {
+	running := controlLinkAddrs18606{addrs: []string{"10.99.14.1/24"}}
+	err := controlLocalAddressDecision18606("10.99.14.1", running, running,
+		"10.99.14.2", "2001:db8:14::2")
+	if err == nil || !strings.Contains(err.Error(), "no static address") {
+		t.Fatalf("a peer-family flip with no candidate local bind must refuse as a move to nothing, got %v", err)
+	}
+}
+
+func TestControlLocalAddressUnchangedPickPassesWithIPv6Append18606(t *testing.T) {
+	running := controlLinkAddrs18606{addrs: []string{"10.99.14.1/24", "10.99.14.3/24"}}
+	candidate := controlLinkAddrs18606{addrs: []string{
+		"10.99.14.1/24", "10.99.14.3/24", "2001:db8:14::1/64",
+	}}
+	for _, state := range []controlLinkAddrs18606{running, candidate} {
+		if got := freshBindSelection18606(state, "10.99.14.2"); got != "10.99.14.1" {
+			t.Fatalf("V4 fresh bind = %q, want unchanged 10.99.14.1", got)
+		}
+	}
+	if err := controlLocalAddressDecision18606("10.99.14.3", running, candidate,
+		"10.99.14.2", "10.99.14.2"); err != nil {
+		t.Fatalf("appending an IPv6 address must pass when the IPv4 pick remains unchanged: %v", err)
+	}
+}
+
 func TestControlLocalAddressRefusalNamesTheProcedure18606(t *testing.T) {
 	err := controlLocalAddressDecision18606("10.99.14.1",
 		controlLinkAddrs18606{addrs: []string{"10.99.14.1/30"}},
 		controlLinkAddrs18606{addrs: []string{"10.99.14.5/30"}},
-		"10.99.14.2")
+		"10.99.14.2", "10.99.14.2")
 	if err == nil {
 		t.Fatal("a live control-address renumber must be refused")
 	}
