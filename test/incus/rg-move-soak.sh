@@ -27,7 +27,12 @@
 #                    untargeted-away (#18559): a move away from the issuing
 #                    node uses the operator's untargeted form
 #                    `redundancy-group <rg>` (H1's form); a move back uses
-#                    `... node <issuer>`
+#                    `... node <issuer>`. Away-move replies are classed in
+#                    the summary's cli_classes: ok (transfer committed),
+#                    triggered (pre-#18559 local resign, accepted), fallback
+#                    (post-#18559 local resign with a note: VOID)
+#   SOAK_EXPECT_TRANSFER=1 the build runs the untargeted form as a transfer:
+#                    a plain `triggered` away-move FAILs (default 0)
 #   SOAK_CONVERGE_S  seconds after the CLI returns for the RG to land in both
 #                    views                                  (default SOAK_SLEEP)
 #   SOAK_MAX_GAP_MS  longest ping gap allowed per move     (default 1000)

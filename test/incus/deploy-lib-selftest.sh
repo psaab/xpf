@@ -3884,7 +3884,9 @@ rm_incus() {
 	"request chassis cluster failover redundancy-group "*)
 		rg=${cmd##* }
 		left=$(<"$RM_ST/refuse")
-		if ((left > 0)); then
+		# RM_REFUSE_RG (#18559): refuse only that RG's requests (a data-RG
+		# transfer refusal cannot come from RG0, which resigns locally).
+		if ((left > 0)) && [[ -z "${RM_REFUSE_RG:-}" || "$rg" == "$RM_REFUSE_RG" ]]; then
 			echo $((left - 1)) >"$RM_ST/refuse"
 			echo "$RM_REFUSAL"
 			return 1
@@ -3973,27 +3975,57 @@ test_restore_fw0_verdict_18523() {
 		0 0 0 unreadable
 }
 
-# #18559: the untargeted form on fw1 now runs the transfer to fw0, so a
-# rejoining fw0 that is not takeover-ready yet refuses it with its readiness
-# reasons where the old local resign printed "triggered". The restore counts
-# that as a wait (fw0 settling), not a #18521-class refusal: a restore that
-# waited once and then completed within the budget PASSes; a real refusal
-# still FAILs; and the classifier tells the three reply kinds apart.
+# #18559: the untargeted form on fw1 (owner of a data RG) now runs the
+# transfer to fw0, so a rejoining fw0 that is still settling refuses it with
+# its readiness reasons where the old local resign printed "triggered". The
+# restore counts ONLY the rejoin-settling reasons as waits (startup hold, its
+# own bulk receive in progress, fw1's bulk still arriving, the takeover hold
+# time); every other readiness reason stays a #18521-class refusal, and both
+# FAILs name the last wait. Fixtures are data-RG (RG2) transfer refusals.
+rm_xfer_refusal() { # <reasons-clause>
+	printf '%s' "error: rpc error: code = FailedPrecondition desc = untargeted failover of redundancy group 2 ran as a make-before-break transfer to node 0, which answered: the peer's redundancy group 2 $1; this command ran no local resign"
+}
 test_restore_readiness_wait_18559() {
-	local notready='error: rpc error: code = FailedPrecondition desc = untargeted failover of redundancy group 0 ran as a make-before-break transfer to node 0, which answered: the peer'"'"'s redundancy group 0 not ready for explicit failover ready=false reasons=[startup promotion hold]; this command ran no local resign'
-	if [[ "$(deploy_restore_reply_kind "$notready")" == wait &&
-		"$(deploy_restore_reply_kind "$RM_REFUSAL")" == refusal &&
-		"$(deploy_restore_reply_kind "Manual failover completed for redundancy group 2 (transfer committed)")" == ok &&
-		"$(deploy_restore_reply_kind "Manual failover triggered for redundancy group 0")" == ok ]]; then
-		ok "restore reply kind: readiness wait, refusal and ok told apart (#18559)"
+	local settling sync_down stale aborted owed proto fabric hold mixed bad=0
+	settling=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[session sync startup hold: bulk sync not yet complete]")
+	hold=$(rm_xfer_refusal "not ready for explicit failover ready=true ready_since=2026-11-08T18:00:00Z reasons=[]")
+	sync_down=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[session sync disconnected]")
+	stale=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[standby config stale: applied gen=4 behind peer committed gen=5]")
+	aborted=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[local bulk receive aborted epoch=7; awaiting successful bulk reconcile]")
+	owed=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[outbound authoritative bulk retry is owed]")
+	proto=$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[ha protocol mismatch local=3 peer=2]")
+	fabric=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[fabric forwarding path not ready]")
+	mixed=$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[session sync startup hold: bulk sync not yet complete fabric forwarding path not ready]")
+	local t
+	for t in "$settling" "$hold" \
+		"$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[local bulk receive still in progress epoch=7 sessions=120]")" \
+		"$(rm_xfer_refusal "not transfer-ready for explicit failover reasons=[peer still receiving outbound bulk epoch=3 age=1.2s]")"; do
+		[[ "$(deploy_restore_reply_kind "$t")" == wait ]] || { bad=1; echo "  want wait: ${t:120:120}"; }
+	done
+	for t in "$sync_down" "$stale" "$aborted" "$owed" "$proto" "$fabric" "$mixed" "$RM_REFUSAL" \
+		"$(rm_xfer_refusal "not ready for explicit failover ready=false ready_since=<zero> reasons=[]")"; do
+		[[ "$(deploy_restore_reply_kind "$t")" == refusal ]] || { bad=1; echo "  want refusal: ${t:120:120}"; }
+	done
+	[[ "$(deploy_restore_reply_kind "Manual failover completed for redundancy group 2 (transfer committed)")" == ok &&
+		"$(deploy_restore_reply_kind "Manual failover triggered for redundancy group 0")" == ok ]] || bad=1
+	if ((bad == 0)); then
+		ok "restore reply kind (#18559): only rejoin-settling reasons are waits; sync-down, stale, aborted, owed, protocol, fabric and mixed are refusals"
 	else
-		bad "restore reply kind (#18559): readiness wait / refusal / ok misclassified"
+		bad "restore reply kind (#18559): misclassified (see above)"
 	fi
 	local saved="$RM_REFUSAL"
-	RM_REFUSAL="$notready"
-	rm_row "fw0 not ready yet, then restored (#18559)" "rc=0 pass=1 fail=0 yields=4" \
+	RM_REFUSE_RG=2
+	RM_REFUSAL="$settling"
+	rm_row "fw0 settling once, then restored (#18559)" "rc=0 pass=1 fail=0 yields=4" \
 		"(4 request(s), 0 refused, 1 waited for fw0 readiness)" 1 1 0 normal
+	RM_REFUSAL="$sync_down"
+	rm_row "fw0 sync disconnected once, then restored, FAILs (#18559)" "rc=0 pass=0 fail=1 yields=4" \
+		"4 request(s), 1 refused, 0 waited for fw0 readiness; last refusal: RG2: " 1 1 0 normal
+	RM_REFUSAL="$settling"
+	rm_row "fw0 settling until the deadline names the wait (#18559)" "rc=1 pass=0 fail=1" \
+		"could not restore fw0 as primary within 60s (last wait: RG2: " 1 40 0 normal
 	RM_REFUSAL="$saved"
+	unset RM_REFUSE_RG
 }
 
 # #18523: the healthy predicate at its edges: equal to the budget passes,

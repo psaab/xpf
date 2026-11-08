@@ -48,17 +48,27 @@ if [[ -f "$proof" && ! -L "$proof" ]] &&
 	[[ $(stat -c '%u %a' "$proof" 2>/dev/null || true) == "0 444" ]]; then
 	proof_boot=$(cat "$proof")
 fi
+# #18559: inside the private net namespace, bring loopback UP before the
+# command runs. A fresh namespace starts with `lo` DOWN and every package of
+# one `go test ./...` shares it, so before this a cell that serves or dials
+# 127.0.0.1 passed or failed by TEST ORDER: it passed only if a fixture that
+# raises lo itself (pkg/cluster's ensureLoopbackRoutable18038,
+# #18952/#18960; pkg/daemon's sync-pair repairs, #18933/#18935) had already
+# run. Loopback is private
+# to the namespace, so isolation from the host is unchanged. A failure to
+# raise it is reported, not hidden.
+inner='ip link set lo up 2>/dev/null || echo "testguard-run: could not bring loopback up in the test namespace" >&2; exec "$@"'
 if [[ $(id -u) == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]; then
 	# The VM proof permits the privileged lane to retain its VM capabilities
 	# (for BPF/memlock tests); namespace identity is still independently
 	# checked by testguard in the child.
 	XPF_SACRIFICIAL_HOST=1 \
-		unshare -pf --fork --mount-proc sh -c '(unshare -nm "$@")' testguard-run "$@"
+		unshare -pf --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner" "$@"
 else
 	# A caller-supplied intent sentinel is not proof; do not propagate it on
 	# the workstation path.
 	env -u XPF_SACRIFICIAL_HOST \
-		unshare -Urp --fork --mount-proc sh -c '(unshare -nm "$@")' testguard-run "$@"
+		unshare -Urp --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner" "$@"
 fi
 rc=$?
 set -e

@@ -150,6 +150,13 @@ class CLIClassify(unittest.TestCase):
         self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_FALLBACK)
         self.assertEqual(soak.classify_cli(0, text, 2)[0], soak.CLI_OTHER)
 
+    def test_dual_active_reply_is_a_fallback_18559(self):
+        # clusterfailover.ResignNoteDualActive; the Go cell
+        # TestSoakReplyNotesMatchGo18559 keeps the two texts in sync.
+        text = "Manual failover triggered for redundancy group 2 (the peer is also primary; resigned locally)"
+        self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_FALLBACK)
+        self.assertEqual(soak.classify_cli(0, text, 2)[0], soak.CLI_OTHER)
+
     def test_triggered_is_accepted_only_for_an_untargeted_move_18559(self):
         text = "Manual failover triggered for redundancy group 2"
         self.assertEqual(soak.classify_cli(0, text, 2, untargeted=True)[0], soak.CLI_TRIGGERED)

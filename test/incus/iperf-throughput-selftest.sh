@@ -1599,6 +1599,31 @@ run_reply_notes() {
 [[ "$(run_reply_notes)" == "t=2 f=1 g=1 o=1" ]] \
 	|| bad "planned-move reply types must count transfer/fallback/triggered/other as 2/1/1/1, got '$(run_reply_notes)'"
 ok "planned-move reply types (#18559): transfer, fallback, plain triggered and other are counted apart"
+reply_verdict_src="$(tf_fn ha_planned_reply_verdict)"
+[[ -n "$reply_verdict_src" ]] || bad "could not extract ha_planned_reply_verdict from test-failover.sh"
+run_reply_verdict() { # <fallback count> -> the void lines it emitted
+	(
+		set +eu
+		void() { echo "VOID: $*"; }
+		eval "$reply_verdict_src"
+		ha_planned_reply_verdict "$1"
+	)
+}
+[[ -z "$(run_reply_verdict 0)" ]] || bad "zero fallbacks must not VOID, got '$(run_reply_verdict 0)'"
+[[ "$(run_reply_verdict 2)" == "VOID: planned moves: 2 untargeted move(s) replied with a local-resign note"* ]] \
+	|| bad "a fallback planned move must VOID H1, got '$(run_reply_verdict 2)'"
+ok "planned-move reply verdict (#18559): a fallback reply VOIDs H1; none does not"
+# The verdict function is only protection if H1 calls it, at top level, on the
+# fallback counter, before its summary: a dropped call keeps every row above
+# green while H1 silently stops scoring the replies.
+verdict_call_line=$(grep -nxF 'ha_planned_reply_verdict "$PLANNED_REPLY_FALLBACK"' "$TF" | cut -d: -f1 | head -1 || true)
+fallback_metric_line=$(grep -nF 'echo "HARNESS_METRIC: planned_reply_fallback=' "$TF" | cut -d: -f1 | head -1 || true)
+summary_line=$(grep -nF 'echo "  Failover test: $PASS passed, $FAIL failed' "$TF" | cut -d: -f1 | tail -1 || true)
+[[ -n "$verdict_call_line" && -n "$fallback_metric_line" && "$verdict_call_line" -gt "$fallback_metric_line" ]] \
+	|| bad "test-failover.sh must call ha_planned_reply_verdict \"\$PLANNED_REPLY_FALLBACK\" at top level after the planned_reply metrics (call line '${verdict_call_line}', metric line '${fallback_metric_line}')"
+[[ -n "$summary_line" && "$verdict_call_line" -lt "$summary_line" ]] \
+	|| bad "ha_planned_reply_verdict must run before H1's summary (call line ${verdict_call_line}, summary line ${summary_line})"
+ok "planned-move reply verdict (#18559): H1 calls it on the fallback counter before its summary"
 # shellcheck disable=SC2154 # set by the eval'd ha_build_planned_move_args
 run_builder() { # <rg1 req> <rg1 land> <failback reqs> <failback lands>
 	(

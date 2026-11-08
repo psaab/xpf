@@ -1254,23 +1254,47 @@ deploy_restore_healthy() {
 
 # deploy_restore_reply_kind <reply>: how deploy_restore_fw0_primary counts
 # one reply to `request chassis cluster failover redundancy-group N` on fw1.
-#   wait     fw0 is not takeover-ready / transfer-ready yet. Since #18559 the
-#            untargeted form on fw1 (the owner) runs the make-before-break
-#            transfer to fw0, so a rejoining fw0 that is still in its startup
-#            hold or bulk refuses it with its readiness reasons where the old
-#            local resign printed "triggered". That is fw0 settling, not the
-#            #18521 class; the restore retries and the budget still bounds it.
-#   refusal  any other error/refusal (the #18521 class).
-#   ok       anything else.
+#   wait     fw0 is still SETTLING after its rejoin. Since #18559 the
+#            untargeted form on fw1 (the owner of a data RG) runs the
+#            make-before-break transfer to fw0, so a rejoining fw0 refuses it
+#            with its readiness reasons where the old local resign printed
+#            "triggered". Only the rejoin-settling reasons count:
+#              - the startup hold:        "session sync startup hold"
+#              - its own bulk receive:    "local bulk receive still in progress"
+#              - fw1's bulk to it:        "peer still receiving outbound bulk"
+#              - the takeover hold time:  "not ready for explicit failover
+#                                          ready=true" (ready, hold not elapsed)
+#            The restore retries and RESTORE_FW0_BUDGET still bounds it.
+#   refusal  everything else, the #18521 class this verdict exists to catch:
+#            session sync disconnected, bulk retry owed, bulk receive aborted,
+#            ha protocol mismatch, standby config stale, fabric forwarding path
+#            not ready, any other readiness reason, barrier/fence errors.
+#   ok       no error.
 deploy_restore_reply_kind() {
-	local out="$1"
-	if grep -qiE "not ready for explicit failover|not transfer-ready" <<<"$out"; then
-		echo wait
-	elif grep -qiE "error|refus|not connected|failed" <<<"$out"; then
-		echo refusal
-	else
+	local out="$1" inner rest
+	if ! grep -qiE "error|refus|not connected|failed|not ready|not transfer-ready" <<<"$out"; then
 		echo ok
+		return
 	fi
+	if grep -qE "not ready for explicit failover ready=true .*reasons=\[\]" <<<"$out"; then
+		echo wait # ready, takeover hold time not yet elapsed
+		return
+	fi
+	if grep -qE "not (ready|transfer-ready) for explicit failover.*reasons=\[[^]]+\]" <<<"$out"; then
+		# Go prints the reasons with %v (space-separated, and the reasons
+		# contain spaces), so strip every settling reason and require that
+		# nothing else is left.
+		inner=$(sed -nE 's/.*reasons=\[([^]]*)\].*/\1/p' <<<"$out" | head -1)
+		rest=$(sed -E 's/session sync startup hold: bulk sync not yet complete//g
+			s/local bulk receive still in progress epoch=[0-9]+ sessions=[0-9]+//g
+			s/peer still receiving outbound bulk epoch=[0-9]+ age=[0-9a-zµ.]+//g
+			s/[[:space:]]//g' <<<"$inner")
+		if [[ -n "$inner" && -z "$rest" ]]; then
+			echo wait
+			return
+		fi
+	fi
+	echo refusal
 }
 
 # deploy_restore_fw0_primary <label> moves RG0-2 back to fw0 one RG at a
@@ -1278,8 +1302,9 @@ deploy_restore_reply_kind() {
 # (default 60s) runs out. A single fixed sleep after three blind requests was
 # shorter than one admission window plus a post-restart bulk (~50
 # sessions/s), and swallowed the refusal that said why. A readiness refusal
-# from fw0 (#18559, deploy_restore_reply_kind) is counted as a wait, not a
-# refusal.
+# from fw0 whose every reason is a rejoin-settling one (#18559,
+# deploy_restore_reply_kind) is counted as a wait, not a refusal; any other
+# reason (session sync disconnected, config stale, ...) stays a refusal.
 #
 # Verdicts (exactly one per call):
 #   PASS  fw0 already owned every RG, or the restore completed with no
@@ -1288,9 +1313,9 @@ deploy_restore_reply_kind() {
 #         took longer than the budget. Returns 0, so the run continues on a
 #         restored cluster, but the run is not healthy.
 #   FAIL  "could not restore": RESTORE_FW0_WAIT ran out. Returns 1.
-# Both FAILs name the last refusal.
+# Both FAILs name the last refusal and the last readiness wait.
 deploy_restore_fw0_primary() {
-	local label="$1" deadline rg out last_err="" started=$SECONDS requests=0 refusals=0 waits=0
+	local label="$1" deadline rg out last_err="" last_wait="" started=$SECONDS requests=0 refusals=0 waits=0
 	local wait_s="${RESTORE_FW0_WAIT:-60}" budget="${RESTORE_FW0_BUDGET:-30}" took
 	if deploy_restore_fw0_owns_all; then
 		pass "$label: fw0 already primary"
@@ -1319,7 +1344,10 @@ deploy_restore_fw0_primary() {
 				out=$(incus exec "$FW1" -- cli -c "request chassis cluster failover redundancy-group $rg" 2>&1 || true)
 				requests=$((requests + 1))
 				case "$(deploy_restore_reply_kind "$out")" in
-				wait) waits=$((waits + 1)) ;;
+				wait)
+					waits=$((waits + 1))
+					last_wait="RG$rg: $(head -1 <<<"$out")"
+					;;
 				refusal)
 					refusals=$((refusals + 1))
 					last_err="RG$rg: $(head -1 <<<"$out")"
@@ -1333,12 +1361,12 @@ deploy_restore_fw0_primary() {
 		done
 	done
 	if ! deploy_restore_fw0_owns_all; then
-		fail "$label: could not restore fw0 as primary within ${wait_s}s${last_err:+ (last refusal: $last_err)}"
+		fail "$label: could not restore fw0 as primary within ${wait_s}s${last_err:+ (last refusal: $last_err)}${last_wait:+ (last wait: $last_wait)}"
 		return 1
 	fi
 	took=$((SECONDS - started))
 	if ! deploy_restore_healthy "$took" "$budget" "$refusals"; then
-		fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused, ${waits} waited for fw0 readiness${last_err:+; last refusal: $last_err})"
+		fail "$label: fw0 restored only after ${took}s (budget ${budget}s; ${requests} request(s), ${refusals} refused, ${waits} waited for fw0 readiness${last_err:+; last refusal: $last_err}${last_wait:+; last wait: $last_wait})"
 		return 0
 	fi
 	pass "$label: fw0 restored as primary in ${took}s (${requests} request(s), ${refusals} refused, ${waits} waited for fw0 readiness)"

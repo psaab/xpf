@@ -1259,6 +1259,20 @@ PLANNED_REPLY_TRANSFER=0
 PLANNED_REPLY_FALLBACK=0
 PLANNED_REPLY_TRIGGERED=0
 PLANNED_REPLY_OTHER=0
+# ha_planned_reply_verdict <fallback count>: H1 SCORES the reply types
+# (#18559). A planned move whose reply carries a local-resign note ("fallback":
+# the transfer request never reached the peer, or the peer also claimed the
+# RG) can only come from a build that runs the transfer, and that move ran the
+# break-before-make resign instead, so the planned-move cells did not measure
+# what they claim: VOID. A plain "triggered" is a pre-#18559 build (or RG0) and
+# is not judged here.
+ha_planned_reply_verdict() {
+	local fallback="$1"
+	if ((fallback > 0)); then
+		void "planned moves: ${fallback} untargeted move(s) replied with a local-resign note (peer unreachable, or the peer also primary) on a build that runs the make-before-break transfer; the planned-move cells did not measure the transfer"
+	fi
+}
+
 # ha_planned_reply_note <rg> <reply text>
 ha_planned_reply_note() {
 	local rg="$1" text="$2" kind
@@ -2329,6 +2343,7 @@ echo "HARNESS_METRIC: planned_reply_transfer=${PLANNED_REPLY_TRANSFER}"
 echo "HARNESS_METRIC: planned_reply_fallback=${PLANNED_REPLY_FALLBACK}"
 echo "HARNESS_METRIC: planned_reply_triggered=${PLANNED_REPLY_TRIGGERED}"
 echo "HARNESS_METRIC: planned_reply_other=${PLANNED_REPLY_OTHER}"
+ha_planned_reply_verdict "$PLANNED_REPLY_FALLBACK"
 
 # Verify iperf3 survived manual failover
 if main_iperf_running; then

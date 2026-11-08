@@ -24,7 +24,11 @@
 #              the current primary. t0 = command ISSUE: since #18559 the
 #              command runs the make-before-break transfer and returns only
 #              after the peer has promoted (and sent its NA/GARP burst), so
-#              an anchor at completion would miss the burst.
+#              an anchor at completion would miss the burst. The neighbour
+#              SAMPLING below still starts only after the command returns
+#              (1-1.8 s after t0), so the first sampled flip bounds the flip
+#              from above at that coarser resolution; any NA in [t0, first
+#              sample] is eligible to attribute it.
 #   4. SAMPLE   `ip -6 neigh` for both addresses every $V6_NA_POLL_MS for
 #              $V6_NA_WINDOW_MS, then 5 pings to the WAN-side v6 target
 #              (IPERF_TARGET6, the same 3-of-5 oracle check_v6_transit uses).
