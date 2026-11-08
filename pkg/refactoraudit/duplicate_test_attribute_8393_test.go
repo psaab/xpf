@@ -646,8 +646,9 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 	}
 	candidateModule := rustModulePath19013(rel, src, rustLineOffset19013(src, declLine))
 	candidatePath := append([]string(nil), candidateModule...)
-	if owner := rustImplOwner19013(src, rustLineOffset19013(src, declLine)); owner != "" {
-		candidatePath = append(candidatePath, owner)
+	candidateOwner := rustImplOwner19013(src, rustLineOffset19013(src, declLine))
+	if candidateOwner != "" {
+		candidatePath = append(candidatePath, candidateOwner)
 	}
 	for i := 0; i < len(src); {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
@@ -682,9 +683,14 @@ func rustFnReference19013(rel, src, name string, declLine int) bool {
 			if !sameRustPath19013(candidateModule, currentPath) {
 				continue
 			}
+			if candidateOwner != "" &&
+				rustHasCompetingFreeFn19013(rel, src, name, declLine, candidateModule) {
+				continue
+			}
 			if scope, ok := rustFunctionScope19013(src, start); ok &&
 				(rustParamShadows19013(scope.args, name) ||
-					rustLetShadows19013(src, name, scope.start, start)) {
+					rustLetShadows19013(src, name, scope.start, start) ||
+					rustClosureParamShadows19013(src, name, scope.start, start)) {
 				continue
 			}
 		}
@@ -788,6 +794,22 @@ func rustImplOwnerName19013(header string) string {
 		return ""
 	}
 	return strings.Trim(fields[len(fields)-1], "&*")
+}
+
+func rustHasCompetingFreeFn19013(rel, src, name string, candidateLine int, candidateModule []string) bool {
+	offset := 0
+	for lineNo, line := range strings.Split(src, "\n") {
+		if lineNo != candidateLine && isFnDecl8393(strings.TrimSpace(line)) {
+			otherName, _, ok := fnNameAndArgs15255(strings.TrimSpace(line))
+			if ok && otherName == name &&
+				rustImplOwner19013(src, offset) == "" &&
+				sameRustPath19013(candidateModule, rustModulePath19013(rel, src, offset)) {
+				return true
+			}
+		}
+		offset += len(line) + 1
+	}
+	return false
 }
 
 func rustInlineModulePath19013(src string, offset int) []string {
@@ -1044,6 +1066,134 @@ func rustParamShadows19013(args, name string) bool {
 		}
 	}
 	return false
+}
+
+func rustClosureParamShadows19013(src, name string, start, pos int) bool {
+	for i := start; i < pos; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if src[i] != '|' || !rustClosureStart19013(src, i, start) {
+			i++
+			continue
+		}
+		close := rustClosureParamEnd19013(src, i+1, pos)
+		if close < 0 {
+			i++
+			continue
+		}
+		if rustClosureHasParam19013(src[i+1:close], name) {
+			bodyStart := skipRustTrivia19013(src, close+1)
+			if pos >= bodyStart && pos < rustClosureBodyEnd19013(src, bodyStart) {
+				return true
+			}
+		}
+		i = close + 1
+	}
+	return false
+}
+
+func rustClosureStart19013(src string, at, scopeStart int) bool {
+	prev := skipRustWhitespaceBack19013(src, at)
+	if prev <= scopeStart {
+		return true
+	}
+	if prev >= 2 && src[prev-2:prev] == "=>" {
+		return true
+	}
+	switch src[prev-1] {
+	case '=', '(', '[', '{', ',', ';', ':':
+		return true
+	}
+	end := prev
+	for prev > 0 && rustIdentByte19013(src[prev-1]) {
+		prev--
+	}
+	switch src[prev:end] {
+	case "move", "async", "return":
+		return true
+	default:
+		return false
+	}
+}
+
+func rustClosureParamEnd19013(src string, start, limit int) int {
+	for i := start; i < limit; {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		if src[i] == '|' {
+			return i
+		}
+		i++
+	}
+	return -1
+}
+
+func rustClosureHasParam19013(params, name string) bool {
+	for _, param := range strings.Split(params, ",") {
+		if colon := strings.IndexByte(param, ':'); colon >= 0 {
+			param = param[:colon]
+		}
+		for i := 0; i+len(name) <= len(param); {
+			at := strings.Index(param[i:], name)
+			if at < 0 {
+				break
+			}
+			at += i
+			end := at + len(name)
+			if (at == 0 || (!rustIdentByte19013(param[at-1]) && param[at-1] != ':')) &&
+				(end == len(param) || !rustIdentByte19013(param[end])) {
+				return true
+			}
+			i = end
+		}
+	}
+	return false
+}
+
+func rustClosureBodyEnd19013(src string, start int) int {
+	if start < len(src) && src[start] == '{' {
+		return rustMatchingBrace19013(src, start) + 1
+	}
+	paren, bracket, brace := 0, 0, 0
+	for i := start; i < len(src); {
+		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
+			i = next
+			continue
+		}
+		switch src[i] {
+		case '(':
+			paren++
+		case ')':
+			if paren == 0 {
+				return i
+			}
+			paren--
+		case '[':
+			bracket++
+		case ']':
+			if bracket == 0 {
+				return i
+			}
+			bracket--
+		case '{':
+			brace++
+		case '}':
+			if brace == 0 {
+				return i
+			}
+			brace--
+		case ',', ';':
+			if paren == 0 && bracket == 0 && brace == 0 {
+				return i
+			}
+		}
+		i++
+	}
+	return len(src)
 }
 
 func rustLetShadows19013(src, name string, start, pos int) bool {
@@ -1422,9 +1572,29 @@ func TestUnregisteredTestFnDetector15255(t *testing.T) {
 			want: 1,
 		},
 		{
+			name: "closure parameter does not reference the unregistered fn",
+			rel:  "tests_x.rs",
+			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { let f = |lost: fn()| lost(); f(); }\n",
+			want: 1,
+		},
+		{
 			name: "unrelated qualified item does not reference the unregistered fn",
 			rel:  "tests_x.rs",
 			src:  "fn lost() { assert!(true); }\n#[test]\nfn uses() { runner(Other::lost); }\n",
+			want: 1,
+		},
+		{
+			name: "free call does not resolve an impl method with the same name",
+			rel:  "tests_x.rs",
+			src: "fn lost() { assert!(true); }\nimpl Owner {\n    fn lost() { assert!(true); }\n}\n" +
+				"#[test]\nfn uses() { lost(); }\n",
+			want: 1,
+		},
+		{
+			name: "owner-qualified method call does not resolve same-named free fn",
+			rel:  "tests_x.rs",
+			src: "fn lost() { assert!(true); }\nimpl Owner {\n    fn lost() { assert!(true); }\n}\n" +
+				"#[test]\nfn uses() { Owner::lost(); }\n",
 			want: 1,
 		},
 		{
