@@ -2256,4 +2256,3 @@ ha_udp_probe_survival_verdict() {
 	python3 "${lib_dir}/udp_session_probe.py" classify "$1" "$2" "$3" \
 		--before-session-id "$4" --after-session-id "$5"
 }
-
