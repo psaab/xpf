@@ -22,6 +22,13 @@ else
 	PATH="$shim_dir"
 fi
 export PATH
+# #19066: inside these namespaces a further private namespace is always
+# creatable, so a test that could not get one has a broken mechanism, not an
+# unlucky environment. Netns cells report that through
+# testguard.NetnsUnavailable, which FAILS under XPF_REQUIRE_NETNS instead of
+# skipping. Before this, 10 re-exec cells skipped as "netns unavailable" on
+# every run while the package guard was refusing their child.
+export XPF_REQUIRE_NETNS=1
 
 command=$1
 shift

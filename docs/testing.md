@@ -220,6 +220,33 @@ Privileged kernel tests belong only in `make vm-test-root` inside a disposable V
 
 Incus cluster cells pass through `test/incus/with-cluster.sh`, which checks both firewall targets are virtual machines before invoking the cell. Direct provisioning paths use the shared `vm-target-guard.sh`; it checks Incus's instance type before installing the guest-side shims and a systemd boot service that refreshes the boot-ID proof after every VM restart. The census registry `test/host-mutation-census.tsv` records each discovered source's mutation class, namespace boundary, and proof. The scanner rejects unregistered or stale paths and enforces the class floors; update the registry and floors whenever a mutation-bearing test source is intentionally added or removed.
 
+### Netns re-exec cells under testguard (#19066)
+
+Many kernel cells re-execute their own test binary in a fresh namespace
+(`unshare … os.Args[0] -test.run=…`). The child is a guarded package's test
+binary, so its `TestMain` runs `testguard.ExitIfUnsafe`, which reads
+`/proc/1/ns/{net,mnt}`. Under `testguard-run.sh` the suite is already uid 0
+(in a user namespace, or real root on a VM leg). An `unshare -r` there NESTS
+a second user namespace whose root cannot read PID 1's links, so the guard
+refused the child. At master `b8bd60dc61`, 27 of the 42 re-exec cells were
+refused. Of those, 10 skipped as "netns unavailable" on every run and 17
+failed. Two rules now apply:
+
+- **No nesting.** Re-exec cells build their flags with
+  `testguard.UnshareFlags(...)`, which drops `-U`/`-r` (and `--user`,
+  `--map-*`) when the caller is already uid 0. A non-root caller keeps them.
+- **No silent skip.** A re-exec cell reports a missing namespace, tool or
+  child through `testguard.NetnsUnavailable`, which skips normally but FAILS
+  under `XPF_REQUIRE_NETNS`. `testguard-run.sh` exports that variable,
+  because a private namespace is always creatable inside it.
+
+`TestNetnsReexecCensus19066` (`internal/testguard`) enforces both over every
+guarded package. Its scope is functions that run `unshare` and re-execute a
+test binary (`os.Args[0]` or `os.Executable()`). A literal user-namespace
+flag outside `UnshareFlags`, or a `t.Skip*` call, fails it. Shell-script
+children (`unshare -rn bash -c …`) are out of scope: they are not guarded
+binaries.
+
 ### The go-skip census, and the thing it found
 
 `make go-skip-census` counts skip call sites into four **named** buckets and
