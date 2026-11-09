@@ -868,8 +868,13 @@ The rest of the contract:
     lab stall: 268-309 ms for 34k rows per worker), the replica fence pass
     (below), and in interrupt mode up to 1 ms of idle poll.
   - On those estimates a 100k-row cohort (~400 iterations) adds about
-    1-1.3 s. That is an extrapolation: the lab measured at most 48k rows per
-    worker.
+    1-1.3 s on a PEER-SYNCED table, the shape the lab measured (no replica
+    fence runs there). On the authoring node, where ~5/6 of the cohort is
+    WorkerLocalImport, each reap call also holds the fence pass below: about
+    1.1-1.7 ms per call at a ~100k-row shared map (interpolated from the
+    measured holds), or ~0.2-0.65 s more over the ~200-400 calls, so ~1-2 s
+    in all. Both figures are extrapolations: the lab measured at most 48k
+    rows per worker.
 - **Above the ceiling.** The sustained drain ceiling is 256 reaps per loop
   iteration. If due work arrives faster than that for long, every call is a
   continuation: the cursor lags further behind, and `last_gc_ns` and the PPTP
@@ -969,12 +974,18 @@ short-circuited.
     for the same cell on the workstation at load 13-17. At 131k+ rows one
     call's hold exceeds the ~2 ms RX-ring fill the 256 slice is sized
     against, and other workers' shared lookups wait behind it.
-  - Keying it was considered and not adopted, because a keyed fence would not
-    be the same predicate. The direct arm could use `bare_tuple_sessions`
-    exactly (the #16491 index). The reverse arm, however, matches the bare
-    tuple of each row's derived reverse key across routing domains, and the
-    only reverse index (`served_aliases`, #18663) is keyed on the scoped
-    alias.
+  - Keying it was considered and not built here, because no EXISTING index
+    keys it exactly. The direct arm could use `bare_tuple_sessions` exactly
+    (the #16491 index). The reverse arm, however, matches the bare tuple of
+    each row's derived reverse key across routing domains, and the only
+    reverse index (`served_aliases`, #18663) is keyed on the scoped alias, so
+    it cannot serve that arm. An exact keyed form is possible: the predicate
+    also requires `E.session_id == X.session_id != 0`, so a new
+    `session_id -> shared keys` index, used to generate candidates that are
+    then re-checked against the unchanged predicate, would be exact and
+    domain-independent. It would have to be hooked into every publish,
+    remove and id-mutation path of `shared_sessions`, which is a change of
+    its own (R7 N2).
   - Not exercised live: the udp lab bounce left fw0 all peer-synced.
 
 **Not covered.** `RefreshOwnerRGS` is still one O(table) worker command, with a
