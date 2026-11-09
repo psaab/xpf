@@ -2,6 +2,7 @@ package routing
 
 import (
 	"fmt"
+	"github.com/psaab/xpf/internal/testguard"
 	"os"
 	"os/exec"
 	"strings"
@@ -82,26 +83,26 @@ func TestTunnelKeepaliveVRFHeldSourcePeerAlive12083(t *testing.T) {
 		return
 	}
 	if _, err := exec.LookPath("unshare"); err != nil {
-		t.Skip("unshare not available")
+		testguard.NetnsUnavailable(t, "unshare not available")
 	}
 	if _, err := exec.LookPath("ip"); err != nil {
-		t.Skip("iproute2 not available")
+		testguard.NetnsUnavailable(t, "iproute2 not available")
 	}
-	if out, err := exec.Command("unshare", "-rn", "true").CombinedOutput(); err != nil {
+	if out, err := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), "true")...).CombinedOutput(); err != nil {
 		if os.Getenv("XPF_REQUIRE_NETNS") == "" {
-			t.Skipf("netns unavailable (%v): %s", err, out)
+			testguard.NetnsUnavailable(t, "netns unavailable (%v): %s", err, out)
 		}
 		t.Fatalf("netns unavailable (XPF_REQUIRE_NETNS is set): %v\n%s", err, out)
 	}
 
-	cmd := exec.Command("unshare", "-rn", os.Args[0], "-test.run=^TestTunnelKeepaliveVRFHeldSourcePeerAlive12083$", "-test.v")
+	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run=^TestTunnelKeepaliveVRFHeldSourcePeerAlive12083$", "-test.v")...)
 	cmd.Env = append(os.Environ(), keepalive12083NetnsChild+"=1")
 	out, err := cmd.CombinedOutput()
 	if strings.Contains(string(out), "NETNS-CHILD-SKIPPED-12083") {
 		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
 			t.Fatalf("ICMP datagram sockets unavailable with XPF_REQUIRE_NETNS set:\n%s", out)
 		}
-		t.Skipf("ICMP datagram socket capability unavailable in netns: %s", out)
+		testguard.NetnsUnavailable(t, "ICMP datagram socket capability unavailable in netns: %s", out)
 	}
 	if err != nil || !strings.Contains(string(out), "NETNS-CHILD-PASSED-12083") {
 		t.Fatalf("VRF-held source/peer keepalive cell failed (%v):\n%s", err, out)

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"github.com/psaab/xpf/internal/testguard"
 	"net"
 	"os"
 	"os/exec"
@@ -107,17 +108,17 @@ func TestQ53ProxyARPCloseDoesNotUnblockRecv(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skip("acceptance skipped: unshare is not available")
+		testguard.NetnsUnavailable(t, "acceptance skipped: unshare is not available")
 	}
-	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run",
-		"^TestQ53ProxyARPCloseDoesNotUnblockRecv$", "-test.v", "-test.count=1")
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run",
+		"^TestQ53ProxyARPCloseDoesNotUnblockRecv$", "-test.v", "-test.count=1")...)
 	cmd.Env = append(os.Environ(), proxyARP17231InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("private-netns proxyarp output:\n%s", out)
 	if err != nil {
 		if strings.Contains(string(out), "Operation not permitted") ||
 			strings.Contains(string(out), "unshare:") {
-			t.Skipf("acceptance skipped: cannot create private namespace: %v", err)
+			testguard.NetnsUnavailable(t, "acceptance skipped: cannot create private namespace: %v", err)
 		}
 		t.Fatalf("private-netns proxyarp acceptance failed: %v", err)
 	}

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"github.com/psaab/xpf/internal/testguard"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,16 +139,16 @@ func TestTransitBarrierNetlinkParity9852(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skip("bridge-barrier kernel cell SKIPPED: unshare not found")
+		testguard.NetnsUnavailable(t, "bridge-barrier kernel cell SKIPPED: unshare not found")
 	}
-	args := []string{"-rn", os.Args[0], "-test.run", "^TestTransitBarrierNetlinkParity9852$", "-test.v"}
+	args := append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestTransitBarrierNetlinkParity9852$", "-test.v")
 	cmd := exec.Command(unshare, args...)
 	cmd.Env = append(os.Environ(), transitBarrierInnerEnv9852+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("inner bridge-barrier output:\n%s", out)
 	if err != nil {
 		if strings.Contains(string(out), "Operation not permitted") || strings.Contains(string(out), "operation not permitted") || strings.Contains(string(out), "unshare:") {
-			t.Skipf("bridge-barrier kernel cell SKIPPED: cannot create private netns (%v)", err)
+			testguard.NetnsUnavailable(t, "bridge-barrier kernel cell SKIPPED: cannot create private netns (%v)", err)
 		}
 		t.Fatalf("bridge-barrier kernel cell FAILED: %v", err)
 	}

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/binary"
+	"github.com/psaab/xpf/internal/testguard"
 	"net"
 	"os"
 	"os/exec"
@@ -701,17 +702,17 @@ func TestHostInboundStaleReplyPacketPath10752And10764(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skip("unshare is not installed; packet-path proof needs an isolated network namespace")
+		testguard.NetnsUnavailable(t, "unshare is not installed; packet-path proof needs an isolated network namespace")
 	}
-	cmd := exec.Command(unshare, "-Urn", os.Args[0], "-test.run=^TestHostInboundStaleReplyPacketPath10752And10764$", "-test.v")
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-Urn"), os.Args[0], "-test.run=^TestHostInboundStaleReplyPacketPath10752And10764$", "-test.v")...)
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	output, err := cmd.CombinedOutput()
 	if strings.Contains(string(output), "XPF-NETNS-SKIP:") {
-		t.Skipf("packet-path proof unavailable: %s", strings.TrimSpace(string(output)))
+		testguard.NetnsUnavailable(t, "packet-path proof unavailable: %s", strings.TrimSpace(string(output)))
 	}
 	if err != nil {
 		if !strings.Contains(string(output), "=== RUN") {
-			t.Skipf("network namespace is unavailable: %v: %s", err, strings.TrimSpace(string(output)))
+			testguard.NetnsUnavailable(t, "network namespace is unavailable: %v: %s", err, strings.TrimSpace(string(output)))
 		}
 		t.Fatalf("isolated packet-path test failed: %v\n%s", err, output)
 	}
