@@ -7943,6 +7943,7 @@ fn owner_rg_export_bulk_response_keeps_every_session_past_binding_cap_9856() {
                 &forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                &mut false,
                 None,
             );
         }
@@ -8234,6 +8235,7 @@ fn owner_rg_export_echo_still_emits_every_visit_9856() {
                 &forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                &mut false,
                 None,
             );
         }
@@ -13371,6 +13373,7 @@ fn flush_session_deltas_without_binding_reaches_global_consumers() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
 
@@ -13542,6 +13545,7 @@ fn over_capacity_expiry_close_overflow_reaches_all_consumers_10309() {
             &forwarding,
             &runtime_reader,
             &mut worker_lossless_wedged,
+            &mut false,
             None,
         );
     };
@@ -13777,6 +13781,7 @@ fn flush_session_deltas_rt_flow_app_id_tracks_redefinition_by_session_id_12191()
                 forwarding,
                 &__r3_reader,
                 &mut worker_lossless_wedged,
+                &mut false,
                 None,
             );
             let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -13959,6 +13964,7 @@ fn flush_session_deltas_session_close_reresolves_policy_id_after_reorder() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
     let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -14068,6 +14074,7 @@ fn flush_session_deltas_event_stream_drop_latches_out_of_sync() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
 
@@ -14173,6 +14180,7 @@ mod flush_tuple_gate_contention_13654 {
             &forwarding,
             &__r3_reader,
             worker_lossless_wedged,
+            &mut false,
             if with_slot { Some(&mut slot) } else { None },
         );
         (out_of_sync, with_slot.then_some(slot))
@@ -14453,6 +14461,7 @@ fn flush_session_deltas_bulk_resync_event_stream_loss_does_not_rearm_14646() {
             &forwarding,
             &__r3_reader,
             &mut wedged,
+            &mut false,
             None,
         );
         (out_of_sync, wedged)
@@ -14567,6 +14576,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            &mut false,
             None,
         ),
         "CommandExport echo must not arm loss-of-sync",
@@ -14610,6 +14620,7 @@ fn flush_session_deltas_suppresses_command_export_event_stream_echo_9630() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            &mut false,
             None,
         ),
         "LossResync event-stream delivery must remain lossless",
@@ -14745,6 +14756,7 @@ fn flush_session_deltas_full_queue_send_is_bounded_and_latches_out_of_sync() {
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
     let elapsed = start.elapsed();
@@ -14884,6 +14896,7 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            &mut false,
             None,
         );
         all_latched &= out_of_sync;
@@ -18839,6 +18852,7 @@ fn flush_one_and_report_armed_8593(bulk_resync: bool) -> (bool, (u64, u64, u64))
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
 
@@ -20389,6 +20403,7 @@ fn flush_session_deltas_update_syncs_without_an_rt_flow_create_9412() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            &mut false,
             None,
         );
         std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>()
@@ -25287,6 +25302,7 @@ fn resync_and_promote_do_not_reemit_session_create_15126() {
             &forwarding,
             &__r3_reader,
             &mut worker_lossless_wedged,
+            &mut false,
             None,
         );
         let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
@@ -26520,6 +26536,7 @@ fn flush_open_fallback_depth_16627(
         &forwarding,
         &__r3_reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
     let drained = live.drain_session_deltas(usize::MAX);
@@ -26577,6 +26594,7 @@ fn flush_open_with_provenance_16627(
         &forwarding,
         &reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
     let drained = live.drain_session_deltas(usize::MAX);
@@ -26773,6 +26791,7 @@ fn command_export_echo_does_not_replay_after_streamed_close_17751() {
         &forwarding,
         &reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
     assert!(
@@ -26809,6 +26828,7 @@ fn command_export_echo_does_not_replay_after_streamed_close_17751() {
         &forwarding,
         &reader,
         &mut worker_lossless_wedged,
+        &mut false,
         None,
     );
     let frames: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();

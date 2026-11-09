@@ -518,6 +518,22 @@ cluster-scoped.
       So the AGGREGATE worker-loop lossless wait per drain cycle is ~1 budget
       regardless of K; every wedged batch still returns out-of-sync, so the
       latch stays set and the resync RETRIES next cycle (never a silent drop).
+    - **#18780: the bulk kind has its own per-cycle latch.** #14646 split the
+      attempt gate per kind but kept the bulk gate per CALL
+      (`bulk_loss_this_batch` started false in every `flush_session_deltas`
+      call). The LossResync export's deltas are bulk, so against an unread
+      stream each 256-delta export batch paid its own budget: ~K/256 budgets
+      in one iteration, exactly the aggregate the latch above was meant to
+      prevent. `flush_session_deltas` now also takes `bulk_lossless_wedged`,
+      reset with `worker_lossless_wedged` at the top of each `worker_loop`
+      iteration: the first bulk failure of the cycle sets it, and every later
+      call this cycle starts with the bulk gate closed. A bulk failure still
+      never sets `worker_lossless_wedged` or the return value (#14646), and the
+      first bulk attempt of a cycle is still made. The aggregate per iteration
+      is therefore at most one budget per kind (the `* 2` compile-time assert
+      beside `WORKER_LOSSLESS_QUEUE_BUDGET`); see
+      `expiry_continuation_resync_waits_one_budget_per_kind_18780` and
+      `loss_resync_of_live_rows_waits_one_bulk_budget_per_cycle_18780`.
     - Only the off-worker-loop paths (bulk export on connect
       `AllSessionsExport::push`, tunnel-remap purge `push_purge_close_deltas`)
       keep the longer 5 s `LOSSLESS_QUEUE_TIMEOUT` via `push_delta_lossless`,

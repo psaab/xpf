@@ -610,6 +610,21 @@ pub(in crate::afxdp) fn export_close_direct(
 // `true` so the caller keeps the loss-of-sync latch set and the resync retries
 // next cycle (deliver-or-resync, never a silent drop). Net effect: the worker
 // loop's total lossless WAIT per drain cycle is ~1 budget regardless of K.
+//
+// #18780 (bulk aggregate): `bulk_lossless_wedged` is the same per-drain-cycle
+// latch for the OTHER kind. #14646 split the attempt gate per kind so a bulk
+// (LossResync) failure never arms loss-of-sync, but kept the bulk gate
+// per-CALL (`bulk_loss_this_batch` started false in every call). The LossResync
+// export flushes once per 256-delta batch, so against a connected-but-unread
+// stream it paid one `WORKER_LOSSLESS_QUEUE_BUDGET` per batch: ~K/256 budgets
+// for K exported sessions in ONE iteration, past `HEARTBEAT_STALE_AFTER` once K
+// passes ~1000. The first bulk failure of a cycle now sets this latch and every
+// later call this cycle seeds `bulk_loss_this_batch` from it, so the cycle's
+// lossless wait is at most one budget per kind (two in all, pinned by the
+// compile-time assert beside `WORKER_LOSSLESS_QUEUE_BUDGET`). Skipped bulk
+// deltas take the non-arming RPC-fallback route, exactly like the rest of a
+// batch after its first bulk failure, and a bulk failure still never sets
+// `worker_lossless_wedged` or the return value (#14646).
 pub(super) fn flush_session_deltas(
     ident: &BindingIdentity,
     live: Option<&BindingLiveState>,
@@ -636,6 +651,8 @@ pub(super) fn flush_session_deltas(
     shared_runtime: &RuntimeViewReader,
     // #5468: per-drain-cycle aggregate lossless-wedge latch (see doc above).
     worker_lossless_wedged: &mut bool,
+    // #18780: per-drain-cycle bulk (LossResync) lossless-wedge latch (see doc above).
+    bulk_lossless_wedged: &mut bool,
     mut current_sessions: Option<&mut crate::session::SessionTable>,
 ) -> bool {
     let zone_name_to_id = &forwarding.zone_name_to_id;
@@ -658,7 +675,9 @@ pub(super) fn flush_session_deltas(
     // A prior non-bulk failure this cycle may have pre-seeded the wedge;
     // the first bulk failure in this batch must not be masked by it (#14646).
     let mut event_stream_out_of_sync = *worker_lossless_wedged;
-    let mut bulk_loss_this_batch = false;
+    // #18780: and the bulk kind's first failure this cycle closes the bulk gate
+    // for every later call this cycle (one bulk budget per cycle, not per batch).
+    let mut bulk_loss_this_batch = *bulk_lossless_wedged;
     for (delta_index, delta) in deltas.iter().enumerate() {
         // #10512: the plan's bounded worker retry contract forbids dropping a
         // close when its install permit is busy. Requeue this suffix before
@@ -995,8 +1014,10 @@ pub(super) fn flush_session_deltas(
                 // non-bulk failures only). Attempts stop at the first
                 // failure of EITHER kind this drain — the remainder is
                 // superseded by the resync the genuine drop schedules,
-                // or by the reconnect FullResync for bulk-only loss — so
-                // the per-cycle lossless wait stays ~1 budget (#5468):
+                // or by the reconnect FullResync for bulk-only loss — and
+                // BOTH gates are seeded from per-drain-cycle latches
+                // (#5468 incremental, #18780 bulk), so the per-cycle
+                // lossless wait is at most one budget per kind:
                 //   bulk delta:        attempted unless bulk_loss_this_batch
                 //   incremental delta: attempted unless event_stream_out_of_sync
                 let gate_open = if delta.bulk_resync {
@@ -1017,6 +1038,15 @@ pub(super) fn flush_session_deltas(
                             streamed_seq = seq;
                         }
                         Err(err) => {
+                            #[cfg(test)]
+                            LOSSLESS_FAILURES_18780.with(|c| {
+                                let (incremental, bulk) = c.get();
+                                c.set(if delta.bulk_resync {
+                                    (incremental, bulk + 1)
+                                } else {
+                                    (incremental + 1, bulk)
+                                });
+                            });
                             if delta.bulk_resync {
                                 bulk_loss_this_batch = true;
                                 es.record_dropped_frames(1);
@@ -1183,7 +1213,22 @@ pub(super) fn flush_session_deltas(
     if event_stream_out_of_sync {
         *worker_lossless_wedged = true;
     }
+    // #18780: the bulk kind's wedge carries to the next batch of this cycle too,
+    // but never into the return value (#14646: bulk loss does not arm).
+    if bulk_loss_this_batch {
+        *bulk_lossless_wedged = true;
+    }
     event_stream_out_of_sync
+}
+
+// #18780: failed lossless event-stream pushes on this thread, as
+// (incremental, bulk). Against a connected-but-unread stream each one is one
+// `WORKER_LOSSLESS_QUEUE_BUDGET` wait, so this counts the worker-loop stall in
+// budgets rather than timing it (test-only work counter, #8218).
+#[cfg(test)]
+thread_local! {
+    pub(in crate::afxdp) static LOSSLESS_FAILURES_18780: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 fn session_delta_event(kind: SessionDeltaKind) -> &'static str {
