@@ -57,7 +57,21 @@ fi
 # run. Loopback is private
 # to the namespace, so isolation from the host is unchanged. A failure to
 # raise it is reported, not hidden.
-inner='ip link set lo up 2>/dev/null || echo "testguard-run: could not bring loopback up in the test namespace" >&2; exec "$@"'
+#
+# #19049: also allow unprivileged ICMP datagram ("ping") sockets in the
+# namespace. A fresh network namespace starts with net.ipv4.ping_group_range
+# at the kernel default "1 0" (no group), so icmp.ListenPacket("udp4"/"udp6")
+# fails with EACCES for every caller, uid 0 included — the check is by group,
+# not capability. Every host the product runs on has the systemd default
+# "0 2147483647". The product's ICMP prober (pkg/cluster ip-monitoring) and
+# tunnel keepalive (pkg/routing) open exactly these sockets, so under the old
+# namespace the real prober could not open a socket at all and its cells read
+# "probe not completed": TestIPMonitorPrimaryDualStackDemotes16425 was red on
+# every testguard run. The sysctl is per network namespace, so the host's
+# value is untouched. The full range is written first; inside an unprivileged
+# user namespace only the mapped gid is valid, so the fallback is the
+# caller's own gid. A failure is reported, not hidden.
+inner='ip link set lo up 2>/dev/null || echo "testguard-run: could not bring loopback up in the test namespace" >&2; { echo "0 2147483647" >/proc/sys/net/ipv4/ping_group_range || echo "$(id -g) $(id -g)" >/proc/sys/net/ipv4/ping_group_range; } 2>/dev/null || echo "testguard-run: could not allow ICMP datagram sockets (ping_group_range) in the test namespace" >&2; exec "$@"'
 if [[ $(id -u) == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]; then
 	# The VM proof permits the privileged lane to retain its VM capabilities
 	# (for BPF/memlock tests); namespace identity is still independently

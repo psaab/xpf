@@ -65,8 +65,10 @@ fi
 # into a failure; without it an environment that silently degrades would read
 # green. unshare propagates the environment into the namespace.
 # The scoped loopback round trip is capability-gated independently and skips
-# when this fresh netns denies ICMP datagrams. The VRF acceptance cell widens
-# ping_group_range itself and remains forced below.
+# when the netns denies ICMP datagrams; testguard-run.sh now widens
+# ping_group_range in its namespace (#19049), so under this runner it runs.
+# The VRF acceptance cell widens ping_group_range itself (in its own child
+# netns) and remains forced below.
 runner="$(cd "$(dirname "$0")/../.." && pwd)/scripts/testguard-run.sh"
 out=$(XPF_REQUIRE_NETNS=1 "$runner" "$GO" test -json=false -count=1 -v -run '9420|9819|11319|12083' ./pkg/routing/ 2>&1)
 rc=$?
