@@ -200,3 +200,50 @@ pub(in crate::afxdp) fn lookup_neighbor_entry(
     // by the helper's own netlink dump+subscribe path.
     None
 }
+
+/// #19034: whether a cached decision's next-hop neighbor still resolves to
+/// the MAC the decision was seeded with, judged against every source that
+/// can resolve it.
+///
+/// The flow cache's #3048/#5147 check is a per-SHARD epoch: any MAC change
+/// or removal of ANY neighbor in the shard marks every entry resolved
+/// through that shard stale. That is cheap and sound for an ordinary pass,
+/// which re-resolves on the slow path at the cost of one trip per flow. A
+/// #18560 held pass cannot re-resolve, so a stale shard drops the packet
+/// and, because the hit stage evicts the entry, every packet of the flow
+/// queued behind it. A same-plan `apply_snapshot` bumps the shard of every
+/// manager-owned neighbor (`refresh_runtime_snapshot_inner` removes them
+/// all from the dynamic map) while the new snapshot carries the same
+/// neighbors, so on an RG move this dropped whole ring backlogs whose
+/// neighbor never changed.
+///
+/// The predicate is deliberately stricter than `lookup_neighbor_entry`,
+/// which reads the static table first: the static entry of `state` (the
+/// view the packet was stamped with) AND the live dynamic entry must each
+/// either be absent or carry `resolution.neighbor_mac`, and at least one
+/// must be present. A genuine MAC change reaches the dynamic map (the
+/// helper's netlink monitor, Go's `update_neighbors`), so it fails here
+/// even when the view's static table still names the old MAC. A removal
+/// from both, a directed broadcast, or a decision with no cached
+/// neighbor MAC is `false`. Only held passes call this.
+pub(in crate::afxdp) fn cached_neighbor_resolution_unchanged(
+    state: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    resolution: &ForwardingResolution,
+) -> bool {
+    let (Some(next_hop), Some(cached_mac)) = (resolution.next_hop, resolution.neighbor_mac) else {
+        return false;
+    };
+    let ifindex = outer_neighbor_ifindex(state, Some(dynamic_neighbors), resolution);
+    if super::is_connected_v4_directed_broadcast(state, ifindex, next_hop) {
+        return false;
+    }
+    let key = (ifindex, next_hop);
+    let view_entry = state.neighbors.get(&key).copied();
+    let live_entry = dynamic_neighbors.get(&key);
+    if view_entry.is_none() && live_entry.is_none() {
+        return false;
+    }
+    view_entry.is_none_or(|entry| entry.mac == cached_mac)
+        && live_entry.is_none_or(|entry| entry.mac == cached_mac)
+}

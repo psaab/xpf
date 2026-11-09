@@ -203,6 +203,9 @@ pub(super) fn stage_flow_cache_hit(
         false
     };
 
+    // #19034: read before the lookup borrows the cache (see the neighbor
+    // check below).
+    let held_pass = flow_state.flow_cache.held_compare_only;
     if let Some(cached) = flow_state.flow_cache.lookup_counted_with_scheduler_expiry(
         &flow.forward_key,
         // #5139: resolve the LOGICAL (VLAN-selecting) ingress ifindex into the
@@ -231,7 +234,25 @@ pub(super) fn stage_flow_cache_hit(
         // check reads only this flow's own shard slot: a single indexed
         // relaxed atomic load + compare. A mismatch means the cached dst_mac
         // or neighbor liveness may be stale;
-        let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors);
+        //
+        // #19034: a held pass (packets stamped with a view the worker has
+        // left, #18560) cannot re-resolve, so a stale SHARD would drop this
+        // packet and, through the eviction below, the flow's whole queued
+        // backlog. It therefore asks the finer question for its own flow:
+        // does this decision's next hop still resolve to the cached MAC in
+        // the view it was stamped with AND in the live dynamic map
+        // (`cached_neighbor_resolution_unchanged`)? Only then is the shard
+        // bump someone else's, and the decision is judged by the HA
+        // revalidation below like any fresh hit. A changed or vanished
+        // neighbor still evicts and drops. Ordinary passes are unchanged:
+        // they re-resolve on the slow path.
+        let neighbor_mac_stale = cached.neighbor_mac_epoch_stale(worker_ctx.dynamic_neighbors)
+            && !(held_pass
+                && crate::afxdp::forwarding::cached_neighbor_resolution_unchanged(
+                    worker_ctx.forwarding,
+                    worker_ctx.dynamic_neighbors,
+                    &cached.decision.resolution,
+                ));
         // #16217 (fold B6): on EVERY hit a marked (adopted) entry's
         // ownership is re-derived via `revalidate_fabric_established_fresh`
         // — judged against the AUTHORITATIVE fresh RG set

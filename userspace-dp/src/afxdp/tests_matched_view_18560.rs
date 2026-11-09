@@ -265,6 +265,21 @@ fn run_pass_ha(
     push: bool,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
 ) -> BatchCounters {
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    run_pass_neigh(fx, forwarding, validation, pass, push, ha_state, &dynamic_neighbors)
+}
+
+/// #19034: `run_pass_ha` against a caller-owned dynamic neighbor map, so a
+/// cell can move a neighbor shard epoch between passes.
+fn run_pass_neigh(
+    fx: &mut GreFixture,
+    forwarding: &ForwardingState,
+    validation: ValidationState,
+    pass: PassView<'_>,
+    push: bool,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+) -> BatchCounters {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     if push {
@@ -294,7 +309,6 @@ fn run_pass_ha(
     let ident = fx.binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&fx.binding));
     let mirror_targets = MirrorTargetMap::default();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -313,7 +327,7 @@ fn run_pass_ha(
         forwarding,
         ha_state,
         forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
-        dynamic_neighbors: &dynamic_neighbors,
+        dynamic_neighbors,
         neighbor_resolver: None,
         shared_sessions: &shared_sessions,
         shared_nat_sessions: &shared_nat_sessions,
@@ -1319,4 +1333,287 @@ fn held_pass_wiring_is_present_18560() {
             "poll_binding must use `{needle}`"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// #19034: a neighbor-epoch bump must not cost a held pass its backlog.
+//
+// A same-plan `apply_snapshot` (`refresh_runtime_snapshot_inner`) removes
+// every manager-owned neighbor from the dynamic map with nothing reinserted
+// (`bulk_replace_neighbors(&old_manager_keys, &[])`), which advances the
+// #3048/#5147 MAC epoch of every shard that held one, although the new
+// snapshot carries the same neighbors. On loss that bump lands with every
+// routes-only republish of an RG move, exactly when the rings hold packets
+// stamped with the view the worker just left. The cells below drive that
+// shape: a UDP flow to the WAN gateway (static neighbor in `nat_snapshot`)
+// seeds the flow cache under 7/9 while the gateway is also a manager key in
+// the dynamic map; the worker moves to 8/9; the shard epoch moves; a held
+// pass then runs the queued 7/9 packets.
+
+/// The gateway's static neighbor in the fixture's forwarding state.
+fn wan_gateway_neighbor_19034(fwd: &ForwardingState) -> ((i32, IpAddr), NeighborEntry) {
+    let gateway = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1));
+    fwd.neighbors
+        .iter()
+        .find(|(key, _)| key.1 == gateway)
+        .map(|(key, entry)| (*key, *entry))
+        .expect("premise: nat_snapshot carries a static neighbor for 172.16.80.1")
+}
+
+/// Seed the flow under 7/9 with the gateway also present in `dynamic` (a
+/// manager key), then park `queued` packets with the worker on 8/9.
+fn seed_then_park_19034(
+    fx: &mut GreFixture,
+    fwd: &Arc<ForwardingState>,
+    views: &PrevViews,
+    dynamic: &Arc<ShardedNeighborMap>,
+    queued: usize,
+) {
+    let ha = txn_ha_state();
+    let batch = run_pass_neigh(fx, fwd, STAMPED, PassView::current(), true, &ha, dynamic);
+    assert!(batch.session_creates >= 1, "premise: the flow is established under 7/9");
+    run_pass_neigh(fx, fwd, STAMPED, PassView::current(), true, &ha, dynamic);
+    assert!(
+        txn_flow_cache_entries(&fx.binding) > 0,
+        "premise: the flow's second packet seeds the flow cache under 7/9"
+    );
+    for _ in 0..queued {
+        run_pass_neigh(
+            fx,
+            fwd,
+            NEWER,
+            PassView {
+                prev_views: Some(views),
+                held_pass: false,
+                view: None,
+            },
+            true,
+            &ha,
+            dynamic,
+        );
+    }
+    assert_eq!(
+        fx.binding.view_held.len(),
+        queued,
+        "premise: every queued 7/9 packet is parked for a held pass"
+    );
+}
+
+fn run_held_19034(
+    fx: &mut GreFixture,
+    views: &PrevViews,
+    dynamic: &Arc<ShardedNeighborMap>,
+) -> BatchCounters {
+    let view = views.find(7, 9, NOW_NS);
+    let prev = views.get(view.expect("retained 7/9")).expect("retained view");
+    let forwarding = Arc::clone(&prev.forwarding);
+    run_pass_neigh(
+        fx,
+        &forwarding,
+        prev.validation,
+        PassView {
+            prev_views: Some(views),
+            held_pass: true,
+            view,
+        },
+        false,
+        &txn_ha_state(),
+        dynamic,
+    )
+}
+
+fn held_hits(fx: &GreFixture) -> u64 {
+    fx.binding.live.generation_held_hits.load(Ordering::Relaxed)
+}
+
+fn held_misses(fx: &GreFixture) -> u64 {
+    fx.binding.live.generation_held_misses.load(Ordering::Relaxed)
+}
+
+fn neighbor_mac_evictions(fx: &GreFixture) -> u64 {
+    fx.binding
+        .flow
+        .flow_cache
+        .evictions_for(crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac)
+}
+
+/// The defect cell. The refresh's removal-only bulk replace moves the
+/// gateway's shard epoch; the gateway still resolves to the cached MAC in
+/// the 7/9 view's static table and nowhere to anything else. All three
+/// queued packets must be served from the 7/9 entry, and the entry must
+/// survive. At cd9adfaca4 the first held packet evicted the entry as
+/// `PostHitNeighborMac` and the other two found nothing: 0 hits, 3 misses.
+#[test]
+fn held_pass_survives_a_shard_bump_that_left_its_neighbor_unchanged_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = wan_gateway_neighbor_19034(&fwd);
+    let dynamic = Arc::new(ShardedNeighborMap::default());
+    dynamic.insert(gateway, entry);
+    let views = views_with(STAMPED, &fwd, NEWER);
+    seed_then_park_19034(&mut fx, &fwd, &views, &dynamic, 3);
+
+    let epoch_before = dynamic.mac_change_epoch_for(&gateway);
+    dynamic.bulk_replace_neighbors(&[gateway], &[]);
+    assert_ne!(
+        dynamic.mac_change_epoch_for(&gateway),
+        epoch_before,
+        "premise: the refresh-shaped removal advances the gateway's shard epoch"
+    );
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_eq!(held_hits(&fx), 3, "every queued packet must be served under its own view");
+    assert_eq!(held_misses(&fx), 0, "nothing of the backlog may be dropped");
+    assert_eq!(
+        neighbor_mac_evictions(&fx),
+        0,
+        "an unchanged neighbor must not evict the held view's entry"
+    );
+    assert!(fx.binding.view_held.is_empty(), "the held pass consumes its backlog");
+    assert!(
+        txn_flow_cache_entries(&fx.binding) > 0,
+        "the 7/9 entry is still there for the flow's next queued packet"
+    );
+}
+
+/// Fail-closed control: the gateway's MAC genuinely changed. The live
+/// dynamic map carries the new MAC while the 7/9 view's static table still
+/// names the old one (the cached MAC). A static-first reading would serve
+/// the stale MAC; the held pass must drop instead, exactly as before #19034.
+#[test]
+fn held_pass_drops_when_the_live_neighbor_mac_changed_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = wan_gateway_neighbor_19034(&fwd);
+    let dynamic = Arc::new(ShardedNeighborMap::default());
+    dynamic.insert(gateway, entry);
+    let views = views_with(STAMPED, &fwd, NEWER);
+    seed_then_park_19034(&mut fx, &fwd, &views, &dynamic, 2);
+
+    let epoch_before = dynamic.mac_change_epoch_for(&gateway);
+    let mut moved = entry;
+    moved.mac[5] ^= 0x5a;
+    dynamic.bulk_replace_neighbors(&[gateway], &[(gateway.0, gateway.1, moved)]);
+    assert_ne!(
+        dynamic.mac_change_epoch_for(&gateway),
+        epoch_before,
+        "premise: a MAC replacement advances the shard epoch"
+    );
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_eq!(held_hits(&fx), 0, "a changed neighbor must never be served from the cache");
+    assert_eq!(held_misses(&fx), 2, "the held backlog is dropped, as before");
+    assert!(
+        neighbor_mac_evictions(&fx) >= 1,
+        "the stale entry is evicted as a neighbor-MAC change"
+    );
+}
+
+/// Fail-closed control: the gateway vanished from every source the held
+/// pass can consult (the 7/9 view's static table and the dynamic map).
+#[test]
+fn held_pass_drops_when_the_neighbor_vanished_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = wan_gateway_neighbor_19034(&fwd);
+    let dynamic = Arc::new(ShardedNeighborMap::default());
+    dynamic.insert(gateway, entry);
+    // The retained 7/9 view carries a forwarding state whose static table
+    // no longer has the gateway (everything else identical).
+    let mut without = (*fwd).clone();
+    without.neighbors.remove(&gateway);
+    let without = Arc::new(without);
+    let views = views_with(STAMPED, &without, NEWER);
+    seed_then_park_19034(&mut fx, &fwd, &views, &dynamic, 2);
+    dynamic.bulk_replace_neighbors(&[gateway], &[]);
+    assert!(dynamic.get(&gateway).is_none(), "premise: removed from the dynamic map");
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_eq!(held_hits(&fx), 0, "a neighbor nobody resolves must not be served");
+    assert_eq!(held_misses(&fx), 2);
+}
+
+/// Scope control: an ORDINARY pass keeps the #3048 behaviour. A shard bump
+/// still evicts its entry and sends the packet to the slow path, which
+/// re-resolves (and re-seeds); only held passes ask the finer question.
+#[test]
+fn ordinary_pass_still_reresolves_on_a_shard_bump_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = wan_gateway_neighbor_19034(&fwd);
+    let dynamic = Arc::new(ShardedNeighborMap::default());
+    dynamic.insert(gateway, entry);
+    let ha = txn_ha_state();
+    run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
+    run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(txn_flow_cache_entries(&fx.binding) > 0, "premise: seeded");
+    dynamic.bulk_replace_neighbors(&[gateway], &[]);
+
+    run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert_eq!(
+        neighbor_mac_evictions(&fx),
+        1,
+        "an ordinary pass still evicts on a shard bump and re-resolves"
+    );
+}
+
+/// The predicate on its own, case by case.
+#[test]
+fn cached_neighbor_resolution_unchanged_table_19034() {
+    let fwd = build_forwarding_state(&nat_snapshot());
+    let (gateway, entry) = wan_gateway_neighbor_19034(&fwd);
+    let other_mac = {
+        let mut mac = entry.mac;
+        mac[0] ^= 0x02;
+        mac
+    };
+    let resolution = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: gateway.0,
+        tx_ifindex: gateway.0,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(gateway.1),
+        neighbor_mac: Some(entry.mac),
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let mut no_static = fwd.clone();
+    no_static.neighbors.remove(&gateway);
+    let mut stale_static = fwd.clone();
+    stale_static
+        .neighbors
+        .insert(gateway, NeighborEntry { mac: other_mac });
+    let empty = Arc::new(ShardedNeighborMap::default());
+    let same = Arc::new(ShardedNeighborMap::default());
+    same.insert(gateway, entry);
+    let changed = Arc::new(ShardedNeighborMap::default());
+    changed.insert(gateway, NeighborEntry { mac: other_mac });
+    let check = |state: &ForwardingState, dynamic: &Arc<ShardedNeighborMap>, resolution| {
+        crate::afxdp::forwarding::cached_neighbor_resolution_unchanged(state, dynamic, &resolution)
+    };
+
+    assert!(check(&fwd, &empty, resolution), "view static matches, dynamic absent");
+    assert!(check(&fwd, &same, resolution), "both match");
+    assert!(check(&no_static, &same, resolution), "view static absent, dynamic matches");
+    assert!(!check(&fwd, &changed, resolution), "dynamic carries another MAC");
+    assert!(!check(&stale_static, &same, resolution), "view static carries another MAC");
+    assert!(!check(&no_static, &empty, resolution), "nobody resolves the neighbor");
+    let mut no_mac = resolution;
+    no_mac.neighbor_mac = None;
+    assert!(!check(&fwd, &same, no_mac), "a decision with no cached MAC");
+    let mut no_hop = resolution;
+    no_hop.next_hop = None;
+    assert!(!check(&fwd, &same, no_hop), "a decision with no next hop");
+    let mut broadcast = fwd.clone();
+    broadcast
+        .connected_v4_directed_broadcast_neighbor_keys
+        .insert((gateway.0, Ipv4Addr::new(172, 16, 80, 1)));
+    assert!(
+        !check(&broadcast, &same, resolution),
+        "a directed broadcast never resolves through a neighbor"
+    );
 }

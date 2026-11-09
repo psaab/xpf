@@ -2464,11 +2464,45 @@ own view's flow-cache entry:
     (`FlowCache::held_compare_only`). The cache keeps one entry per key, and a
     lookup with other generations leaves the current entry in place.
   - A miss, or any hit-stage fall-through (an epoch or lease fence,
-    egress/owner departed, stale neighbor MAC, a superseded decision), is
+    egress/owner departed, a changed neighbor MAC, a superseded decision), is
     dropped as a held-view miss. It is not a metadata-generation mismatch:
     the packet is valid against the retained view, so this drop does not
     increment `config_gen_mismatches`, `fib_gen_mismatches`, or the
     AHEAD/BEHIND mismatch witnesses.
+  - **Neighbor epoch, per flow (#19034).** The #3048/#5147 neighbor check is
+    a per-SHARD epoch, so a MAC change or removal of any neighbor in the
+    shard marks every entry resolved through it stale. An ordinary pass pays
+    one slow-path trip for that. A held pass cannot re-resolve, and the hit
+    stage's eviction of the first stale packet's entry left every later
+    queued packet of the flow with no entry at all: the flow's whole ring
+    backlog was dropped. That is what a same-plan `apply_snapshot` did on
+    every routes-only republish of an RG move: `refresh_runtime_snapshot_inner`
+    removes every manager-owned neighbor from the dynamic map with nothing
+    reinserted (`bulk_replace_neighbors(&old_manager_keys, &[])`), bumping
+    the shard of each, although the new snapshot carries the same
+    neighbors. On loss that was about 90% of the packets a planned move
+    lost (diag captures in `docs/log/19034.md`), one iperf3 stream's backlog
+    of up to about 4k segments at a time, and a 0.3-0.6 s stall of that
+    stream.
+    - A held pass therefore re-checks its own flow when the shard is stale
+      (`forwarding::cached_neighbor_resolution_unchanged`): the next hop
+      (the same outer ifindex and directed-broadcast rules as the seed's
+      live-MAC check) must resolve to the cached MAC in the static table of
+      the view it was stamped with AND in the live dynamic map, each entry
+      either absent or equal, at least one present. Then the bump was
+      someone else's, and the entry goes on to the HA decision revalidation
+      like any fresh hit.
+    - The check is stricter than `lookup_neighbor_entry`, which reads the
+      static table first: a genuine MAC change reaches the dynamic map (the
+      helper's netlink monitor, Go's `update_neighbors`), so it fails here
+      even while the retained view's static table still names the old MAC.
+      A changed or vanished neighbor still evicts and drops.
+    - Ordinary passes are unchanged. After a config publish they evict the
+      left view's entry by generation before reaching the neighbor check,
+      and on a neighbor-only bump they still re-resolve.
+    - Cost: two map reads per held packet whose shard epoch moved (a static
+      `FastMap` get and one dynamic-shard lock), bounded by the held backlog
+      of one publish. Nothing changes for a packet whose shard did not move.
   - This describes the ordinary flow-cache route, not every pre-cache arm.
     An admitted IPsec passthrough can reinject before the cache, and a
     pending reverse PMech packet can be deferred before it; those paths are

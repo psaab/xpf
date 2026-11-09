@@ -1471,6 +1471,19 @@ queued in the RX rings. Mechanism, ownership rules and counters:
 `docs/afxdp-packet-processing.md` ("Generation stamp: who writes it").
 Loss-cluster numbers are in `docs/log/18560-ctrl-stamp.md`.
 
+After #18559 and #18560 most of what a planned move still lost was not a
+mismatch drop at all but held misses (#19034). Every routes-only
+`apply_snapshot` of a move (one at the RG edge, one about 2 s later when FRR
+reloads on the new primary) bumped the neighbor-MAC epoch of every shard
+holding a manager-owned neighbor. The held pass that serves the packets still
+queued with the left view then evicted each flow's flow-cache entry on its
+first packet and dropped the rest of that flow's queue, up to about 4k
+segments of one TCP stream at once. A held pass now re-checks its own flow's
+next hop against the stamped view's static table and the live neighbor map
+and keeps serving when the MAC is unchanged. The publish sequence, the
+measured split and the residual (AHEAD and in-batch reseeds) are in
+`docs/ha-rg-move-correctness.md` ("Publishes during a move").
+
 Since #18559 the untargeted form (`request chassis cluster failover
 redundancy-group N`), when run on the owner of a data RG with a live peer, runs
 the node-targeted transfer to the peer, so it is make-before-break too. Before

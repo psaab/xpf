@@ -462,6 +462,43 @@ past `SOAK_MAX_COST_STALL_MS` (10 s), a stream that never recovers. So "the
 traffic stopped for a few seconds and came back" is never a pass.
 `SOAK_STRICT_COST=1` scores COST as FAIL for a hitless-target run.
 
+## Publishes during a move, and what they cost (#19034)
+
+Sessions are on both nodes, so no packet needs to be lost to a move. What a
+move still costs is in the userspace helper's view publishes. On loss, 2026-11-09,
+every planned move published on each node:
+
+| When | What | What it changes in the helper FIB |
+|---|---|---|
+| at the RG edge (pre-activation on the gaining node, after `rg_active=false` on the losing node, #18620) | routes-only `apply_snapshot` (new config generation), then a FIB bump 30-100 ms later | the moving RG's connected prefixes (e.g. `172.16.80.0/24` on `reth0.80`) appear or go; the FIB bump changes nothing (same forwarding tables) |
+| +1.7 to +5 s, on the node that became primary for an RG | the ip-monitoring publish gate flips (`IsLocalPrimaryAny`), its actuator re-renders FRR (two `frr-reload.py` runs, about 1 s), then a routes-only `apply_snapshot` and a FIB bump | only `0.0.0.0/0` and `::/0`: from a cluster-terminal discard (pref 200) to the real next hop, which FRR installs only on the primary. This is the "+2.2 s route republish" |
+
+The shim stamps each packet with the current config/FIB generation pair, and
+a worker serves a packet stamped with a pair it has left only from that view's
+flow-cache entry (the #18560 held pass, which cannot re-resolve). What each
+publish dropped, measured with a diag build (counts per 10 moves, both
+nodes):
+
+- **Whole backlogs at every config publish, about 90% (fixed by #19034).**
+  The same-plan apply bumps the neighbor-MAC epoch of every shard holding a
+  manager-owned neighbor, although nothing about those neighbors changed (see
+  `userspace-dp/src/afxdp/README.md`, "Neighbor epoch, per flow"). The held
+  pass then evicted each flow's entry on its first queued packet and dropped
+  the rest: 15-32k packets, one iperf3 stream's queue of up to about 4k
+  segments at a time, and a 0.3-0.6 s stall of that stream.
+- **AHEAD, about 6%.** The helper advances the stamp right after its view store
+  (#18598); a worker reads its view once per loop tick, so for a few ms it
+  drops packets already stamped with the view it has not adopted yet.
+  About 65% of these are at FIB-only bumps, whose views are identical in
+  content.
+- **NEWER, about 8%.** In the batch that straddles a publish, a flow's
+  current-stamped packet re-seeds its entry before the held pass runs the
+  same flow's older packets, which then miss. At most one batch (63
+  packets) per flow per publish on a native ring.
+
+Neither residual is a forwarding change: both are fail-closed drops of
+packets whose result the publish did not change.
+
 ## Running the soak
 
 ```sh
