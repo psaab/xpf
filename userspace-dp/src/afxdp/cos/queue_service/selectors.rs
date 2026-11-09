@@ -454,7 +454,7 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
     select_cos_surplus_batch_filtered(
         root,
         now_ns,
-        true,
+        false,
         None,
         &mut local_scratch,
         &mut prepared_scratch,
@@ -465,7 +465,7 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
 pub(super) fn select_cos_surplus_batch_filtered(
     root: &mut CoSInterfaceRuntime,
     now_ns: u64,
-    allow_nonexact: bool,
+    nonexact_only: bool,
     nonexact_surplus_budget: Option<u64>,
     local_scratch: &mut VecDeque<TxRequest>,
     prepared_scratch: &mut VecDeque<PreparedTxRequest>,
@@ -483,7 +483,8 @@ pub(super) fn select_cos_surplus_batch_filtered(
             if cos_queue_is_empty(queue) || !queue.hot.runnable {
                 continue;
             }
-            if !allow_nonexact && !queue.config.exact {
+            // #19025: the owed-share pass serves non-exact queues only.
+            if nonexact_only && queue.config.exact {
                 continue;
             }
             if !queue.config.exact {

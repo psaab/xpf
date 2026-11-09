@@ -262,11 +262,35 @@ mod.rs for further file-level breakdown.
   guarantee rate once. Cross-binding demand is imported through
   `SharedCoSExactBacklog` as an exact-queue mask, not a per-worker
   rate, so one shared exact queue does not multiply its reservation by
-  the number of workers. Shared interfaces also use a shared residual
-  token bucket for non-exact surplus; private/local fallbacks use the
-  per-root residual bucket. Exact queues that explicitly enable
+  the number of workers. Exact queues that explicitly enable
   `surplus-sharing` remain eligible for surplus service outside the
   non-exact residual budget.
+- **Per-binding residual shares, owed ahead of the local exact class
+  (#19025, #19023).** While exact demand holds non-exact surplus to the
+  residual, each binding with a backlogged non-exact queue is owed an equal
+  part, `residual / n`, metered by its own bucket
+  (`root.nonexact_surplus_under_exact_tokens`, refilled in
+  `queue_service::nonexact_surplus_budget_under_exact_demand`). `n` is the
+  number of bindings that publish non-exact backlog in their
+  `SharedCoSExactBacklog` slot (`publish_nonexact_backlogged`, written on an
+  empty-to-backlogged enqueue and at every activity refresh, stored only on a
+  change); a private interface is its own only binding. The parts sum to the
+  residual, so the exact reservation is unchanged, and bindings without
+  non-exact backlog take no part, so the residual stays work-conserving. Each
+  part keeps at least one frame of burst. On a binding that has exact demand
+  of its own, the drain serves a non-exact surplus batch bounded by its part
+  BEFORE the local exact guarantee (`build_owed_nonexact_surplus_batch`),
+  whenever that part covers a frame. This is a deliberate change to the
+  guarantee-before-surplus order: on that worker the exact class can lose up
+  to `residual / n`, and only where the worker's TX capacity, not the root,
+  is the bottleneck; interface-wide it keeps its whole reservation. It
+  replaces the interface-wide first-come residual token bucket, which the
+  binding whose worker also served an exact class kept losing (#19025: a
+  colocated instance at 0.25 Gb/s while its peers took 5.7), and the strict
+  local order that never visited a colocated instance beside a TX-capped
+  exact class (#19023: 0 Gb/s). Not addressed: the reserved AMOUNT is still
+  the configured rate, so a TX-capped exact class still over-reserves
+  (#19023's other half). Cells: `queue_service/tests/colocated_share_19025.rs`.
 - **What counts as exact demand (#hb166 T-6(b), #18748).** An exact
   guarantee queue is in the demand mask (`exact_demand.rs`
   `local_exact_demand_mask`, published by `publish_cos_exact_backlog` through

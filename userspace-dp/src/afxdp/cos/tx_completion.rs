@@ -638,7 +638,27 @@ pub(in crate::afxdp) fn clear_all_cos_exact_backlogs_for_binding(binding: &Bindi
     for iface_fast in binding.cos.cos_fast_interfaces.values() {
         if let Some(shared_exact_backlog) = iface_fast.shared_exact_backlog.as_ref() {
             shared_exact_backlog.publish(binding.slot, 0);
+            shared_exact_backlog.publish_nonexact_backlogged(binding.slot, false);
         }
+    }
+}
+
+/// #19025: publish whether this binding has a backlogged non-exact queue on
+/// `root_ifindex` (the `n` of each binding's `residual / n` share). The
+/// backlog stores only on a change.
+#[inline]
+pub(in crate::afxdp) fn publish_cos_nonexact_backlogged_on_cos(
+    cos: &crate::afxdp::worker::WorkerCos,
+    slot: u32,
+    root_ifindex: i32,
+    backlogged: bool,
+) {
+    if let Some(shared_exact_backlog) = cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+    {
+        shared_exact_backlog.publish_nonexact_backlogged(slot, backlogged);
     }
 }
 
@@ -828,6 +848,7 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
     // disjoint `cos_fast_interfaces` field, so it coexists with the
     // `cos_interfaces` mutable borrow below.
     let iface_fast = cos.cos_fast_interfaces.get(&root_ifindex);
+    let mut nonexact_backlogged = false;
     if let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) {
         for (queue_idx, queue) in root.queues.iter_mut().enumerate() {
             normalize_cos_queue_state(queue);
@@ -859,6 +880,7 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
                 continue;
             }
             new_nonempty = new_nonempty.saturating_add(1);
+            nonexact_backlogged |= !queue.config.exact;
             if queue.hot.runnable {
                 new_runnable = new_runnable.saturating_add(1);
             }
@@ -868,6 +890,7 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
     }
     if let Some(slot) = publish_slot {
         publish_cos_exact_backlog_on_cos(cos, slot, root_ifindex);
+        publish_cos_nonexact_backlogged_on_cos(cos, slot, root_ifindex, nonexact_backlogged);
     }
     if old_nonempty == 0 && new_nonempty > 0 {
         cos.cos_nonempty_interfaces = cos.cos_nonempty_interfaces.saturating_add(1);
@@ -925,16 +948,6 @@ pub(in crate::afxdp) fn apply_cos_send_result(
     // the #915 rationale).
     let mut lease_consume_queue_idx = None;
     let binding_slot = binding.slot;
-    // #4972: borrow the shared exact-backlog `Arc` from the disjoint
-    // `cos_fast_interfaces` field instead of cloning it per settlement.
-    // The mutable borrow below is of `cos_interfaces` (a separate field),
-    // and `peer_exact_demand_queue_mask` takes `&BindingWorker`, so the
-    // read-borrow held across both is sound.
-    let shared_exact_backlog = binding
-        .cos
-        .cos_fast_interfaces
-        .get(&root_ifindex)
-        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref());
     let peer_exact_backlogged = binding
         .cos
         .cos_fast_interfaces
@@ -990,13 +1003,11 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             maybe_demote_drained_best_effort(queue);
         }
         if debit_nonexact_surplus_budget {
-            if let Some(backlog) = shared_exact_backlog {
-                backlog.consume_residual_surplus_budget(sent_bytes);
-            } else {
-                root.nonexact_surplus_under_exact_tokens = root
-                    .nonexact_surplus_under_exact_tokens
-                    .saturating_sub(sent_bytes);
-            }
+            // #19025: this binding's `residual / n` share (shared and private
+            // interfaces alike).
+            root.nonexact_surplus_under_exact_tokens = root
+                .nonexact_surplus_under_exact_tokens
+                .saturating_sub(sent_bytes);
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }
@@ -1048,14 +1059,6 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
     // the #915 rationale).
     let mut lease_consume_queue_idx = None;
     let binding_slot = binding.slot;
-    // #4972: borrow the shared exact-backlog `Arc` from the disjoint
-    // `cos_fast_interfaces` field instead of cloning it per settlement
-    // (see `apply_cos_send_result` for the borrow-split rationale).
-    let shared_exact_backlog = binding
-        .cos
-        .cos_fast_interfaces
-        .get(&root_ifindex)
-        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref());
     let peer_exact_backlogged = binding
         .cos
         .cos_fast_interfaces
@@ -1113,13 +1116,11 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             maybe_demote_drained_best_effort(queue);
         }
         if debit_nonexact_surplus_budget {
-            if let Some(backlog) = shared_exact_backlog {
-                backlog.consume_residual_surplus_budget(sent_bytes);
-            } else {
-                root.nonexact_surplus_under_exact_tokens = root
-                    .nonexact_surplus_under_exact_tokens
-                    .saturating_sub(sent_bytes);
-            }
+            // #19025: this binding's `residual / n` share (shared and private
+            // interfaces alike).
+            root.nonexact_surplus_under_exact_tokens = root
+                .nonexact_surplus_under_exact_tokens
+                .saturating_sub(sent_bytes);
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
     }

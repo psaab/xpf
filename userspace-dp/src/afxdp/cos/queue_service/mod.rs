@@ -289,26 +289,35 @@ pub(in crate::afxdp) fn drain_shaped_tx(
         if !prime_cos_root_for_service(binding, root_ifindex, now_ns) {
             continue;
         }
-        let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
-        if let Some(serviced) = service_exact_guarantee_queue_direct_with_info(
-            binding,
-            root_ifindex,
-            now_ns,
-            shared_recycles,
-            &mut lease_telemetry,
-        ) {
-            record_cos_queue_lease_acquire(binding, lease_telemetry);
-            binding.cos.cos_interface_rr =
-                (start + offset + 1) % binding.cos.cos_interface_order.len();
-            return serviced;
-        }
-        record_cos_queue_lease_acquire(binding, lease_telemetry);
-        // #18748 review (R6 P2): the exact pass made no progress, but its
-        // selector may have topped an exact queue up and parked it on root;
-        // peers must see that demand now, not at the next enqueue.
-        republish_cos_exact_demand_if_changed(&binding.cos, binding.slot, root_ifindex);
-        let Some(batch) = build_nonexact_cos_batch(binding, root_ifindex, now_ns) else {
-            continue;
+        // #19025: this binding's owed part of the non-exact residual goes
+        // ahead of its own exact guarantee (bounded by that part's bucket).
+        let batch = match build_owed_nonexact_surplus_batch(binding, root_ifindex, now_ns) {
+            Some(batch) => batch,
+            None => {
+                let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
+                if let Some(serviced) = service_exact_guarantee_queue_direct_with_info(
+                    binding,
+                    root_ifindex,
+                    now_ns,
+                    shared_recycles,
+                    &mut lease_telemetry,
+                ) {
+                    record_cos_queue_lease_acquire(binding, lease_telemetry);
+                    binding.cos.cos_interface_rr =
+                        (start + offset + 1) % binding.cos.cos_interface_order.len();
+                    return serviced;
+                }
+                record_cos_queue_lease_acquire(binding, lease_telemetry);
+                // #18748 review (R6 P2): the exact pass made no progress, but
+                // its selector may have topped an exact queue up and parked
+                // it on root; peers must see that demand now, not at the next
+                // enqueue.
+                republish_cos_exact_demand_if_changed(&binding.cos, binding.slot, root_ifindex);
+                let Some(batch) = build_nonexact_cos_batch(binding, root_ifindex, now_ns) else {
+                    continue;
+                };
+                batch
+            }
         };
         // #751: capture both queue_idx (stable Vec position) and
         // queue_id (stable u8 identifier) BEFORE submit_cos_batch
@@ -345,6 +354,74 @@ fn cos_batch_queue_ref(
         .get(&root_ifindex)
         .and_then(|root| root.queues.get(queue_idx))
         .map(|queue| (queue_idx, queue.queue_id()))
+}
+
+/// #19025: the non-exact batch this binding is OWED ahead of its own exact
+/// guarantee, if any.
+///
+/// The drain serves a worker's exact guarantee before anything else, so on a
+/// worker whose exact class is limited by that worker's TX capacity (or
+/// takes every poll the worker has) the colocated non-exact instance was
+/// never visited and got none of the residual (#19023: 0 Gb/s for the whole
+/// window), and on a busy exact worker it got a small fraction of its peers'
+/// share (#19025). Each binding with non-exact backlog is owed `residual /
+/// n` (`nonexact_surplus_budget_under_exact_demand`); while this binding has
+/// exact demand of its own and its part covers a frame, a non-exact surplus
+/// batch bounded by that part is served first. The exact class loses at
+/// most `residual / n` on this worker, and only where the worker, not the
+/// root, is the bottleneck; interface-wide its reservation is unchanged.
+/// Only non-exact queues are eligible here (surplus-sharing exact queues
+/// wait for the normal surplus pass). Cheap exits first: an interface with
+/// no exact class, or with fewer than two non-empty queues, returns at once.
+#[inline]
+fn build_owed_nonexact_surplus_batch(
+    binding: &mut BindingWorker,
+    root_ifindex: i32,
+    now_ns: u64,
+) -> Option<CoSBatch> {
+    let slot = binding.slot;
+    let shared_exact_backlog = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref());
+    let local_scratch = &mut binding.cos.cos_local_batch_scratch;
+    let prepared_scratch = &mut binding.cos.cos_prepared_batch_scratch;
+    let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
+    if root.exact_queues_by_rate_ascending.is_empty() || root.nonempty_queues < 2 {
+        return None;
+    }
+    let local_demand_mask = local_exact_demand_mask(root);
+    if local_demand_mask.is_empty()
+        || !root
+            .queues
+            .iter()
+            .any(|queue| !queue.config.exact && !cos_queue_is_empty(queue))
+    {
+        return None;
+    }
+    let peer_exact_demand_mask = shared_exact_backlog
+        .map(|backlog| backlog.peer_exact_demand_queue_mask(slot))
+        .unwrap_or(ExactDemandQueueMask::EMPTY);
+    let exact_demand_rate =
+        exact_demand_rate_bytes_for_mask(root, local_demand_mask | peer_exact_demand_mask);
+    let owed = nonexact_surplus_budget_under_exact_demand(
+        root,
+        now_ns,
+        exact_demand_rate,
+        shared_exact_backlog.map(|backlog| &**backlog),
+    )?;
+    if owed < tx_frame_capacity() as u64 {
+        return None;
+    }
+    select_cos_surplus_batch_filtered(
+        root,
+        now_ns,
+        true,
+        Some(owed),
+        local_scratch,
+        prepared_scratch,
+    )
 }
 
 #[inline]
@@ -431,7 +508,7 @@ fn build_nonexact_cos_batch(
                 select_cos_surplus_batch_filtered(
                     root,
                     now_ns,
-                    true,
+                    false,
                     nonexact_budget,
                     local_scratch,
                     prepared_scratch,
@@ -488,16 +565,9 @@ fn hold_root_only_for_spendable_surplus(
 }
 
 #[inline]
-fn reset_nonexact_surplus_under_exact_budget(
-    root: &mut CoSInterfaceRuntime,
-    now_ns: u64,
-    shared_exact_backlog: Option<&SharedCoSExactBacklog>,
-) {
+fn reset_nonexact_surplus_under_exact_budget(root: &mut CoSInterfaceRuntime, now_ns: u64) {
     root.nonexact_surplus_under_exact_tokens = 0;
     root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
-    if let Some(backlog) = shared_exact_backlog {
-        backlog.reset_residual_surplus_budget(now_ns);
-    }
 }
 
 #[inline]
@@ -518,6 +588,21 @@ fn residual_rate_and_burst(
     Some((residual_rate, residual_burst))
 }
 
+/// This binding's non-exact surplus budget while exact demand holds the
+/// non-exact class to the residual (`shaping - reserved exact rate`); `None`
+/// when no exact demand is visible (surplus is unconstrained).
+///
+/// #19025: on a shared interface each binding with a backlogged non-exact
+/// queue is owed an equal part of the residual, `residual / n` with `n` the
+/// bindings that publish non-exact backlog, metered by this binding's own
+/// bucket. The parts sum to the residual, so the exact reservation is
+/// unchanged, and a binding without non-exact backlog takes no part, so the
+/// residual stays work-conserving across the bindings that want it. Before,
+/// every binding drew from one interface-wide first-come bucket, and the
+/// binding whose worker also served an exact class polled less often and
+/// lost the race. Each part keeps at least one frame of burst so a small
+/// share is slow, not stranded. A private interface (no shared backlog) is
+/// its own only binding.
 #[inline]
 fn nonexact_surplus_budget_under_exact_demand(
     root: &mut CoSInterfaceRuntime,
@@ -527,22 +612,29 @@ fn nonexact_surplus_budget_under_exact_demand(
 ) -> Option<u64> {
     let Some((residual_rate, residual_burst)) = residual_rate_and_burst(root, exact_demand_rate)
     else {
-        reset_nonexact_surplus_under_exact_budget(root, now_ns, shared_exact_backlog);
+        reset_nonexact_surplus_under_exact_budget(root, now_ns);
         return None;
     };
     if residual_rate == 0 {
-        reset_nonexact_surplus_under_exact_budget(root, now_ns, shared_exact_backlog);
+        reset_nonexact_surplus_under_exact_budget(root, now_ns);
         return Some(0);
     }
-    if let Some(backlog) = shared_exact_backlog {
+    let bindings = shared_exact_backlog
+        .map(|backlog| backlog.nonexact_backlogged_bindings())
+        .unwrap_or(1)
+        .max(1);
+    // On a shared interface the part starts closed when exact demand is
+    // first seen, as the interface-wide bucket did (`refill_cos_tokens`
+    // would hand a bucket with no refill epoch its whole burst at once). A
+    // private interface keeps its bucket's start-full behaviour.
+    if shared_exact_backlog.is_some() && root.nonexact_surplus_under_exact_last_refill_ns == 0 {
         root.nonexact_surplus_under_exact_tokens = 0;
         root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
-        return Some(backlog.residual_surplus_budget(now_ns, residual_rate, residual_burst));
     }
     refill_cos_tokens(
         &mut root.nonexact_surplus_under_exact_tokens,
-        residual_rate,
-        residual_burst,
+        residual_rate / bindings,
+        (residual_burst / bindings).max(tx_frame_capacity() as u64),
         &mut root.nonexact_surplus_under_exact_last_refill_ns,
         now_ns,
     );

@@ -2313,6 +2313,7 @@ fn enqueue_cos_item(
     }
     let mut root_became_nonempty = false;
     let mut accepted_exact = false;
+    let mut nonexact_became_backlogged = false;
     let (accepted, _queue_id, recycle) = {
         // Split-borrow: `umem` sits alongside `cos_interfaces` on
         // `BindingWorker`, so we can take a shared borrow on the umem
@@ -2450,6 +2451,7 @@ fn enqueue_cos_item(
             queue.hot.queued_bytes = queue.hot.queued_bytes.saturating_add(item_len);
             cos_queue_push_back(queue, item);
             accepted_exact = queue.config.exact;
+            nonexact_became_backlogged = queue_was_empty && !queue.config.exact;
             if queue_was_empty {
                 root.nonempty_queues = root.nonempty_queues.saturating_add(1);
                 root_became_nonempty = root_was_empty;
@@ -2469,6 +2471,15 @@ fn enqueue_cos_item(
     if accepted {
         if accepted_exact {
             publish_cos_exact_backlog(binding, egress_ifindex);
+        }
+        if nonexact_became_backlogged {
+            // #19025: this binding now takes a part of the non-exact residual.
+            publish_cos_nonexact_backlogged_on_cos(
+                &binding.cos,
+                binding.slot,
+                egress_ifindex,
+                true,
+            );
         }
         return Ok(());
     }

@@ -385,8 +385,11 @@ fn apply_cos_send_result_counts_same_worker_sibling_exact_backlog() {
     );
 }
 
+/// #19025: a non-exact surplus send under exact demand debits THIS
+/// binding's `residual / n` share (`nonexact_surplus_under_exact_tokens`).
+/// The interface-wide first-come residual bucket it used to debit is gone.
 #[test]
-fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
+fn apply_cos_send_result_debits_this_bindings_residual_share_19025() {
     let mut root = test_mixed_class_root_with_primed_queues();
     for queue in &mut root.queues {
         if queue.config.exact {
@@ -395,18 +398,10 @@ fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
             queue.hot.runnable = false;
         }
     }
+    root.nonexact_surplus_under_exact_tokens = 10_000;
+    // A peer's exact demand, so the surplus send runs under a reservation.
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
     shared_exact_backlog.publish_demand(1, 1500, ExactDemandQueueMask::EMPTY.with_queue(0));
-    let residual_rate = 100_000_000;
-    let residual_burst = COS_MIN_BURST_BYTES;
-    assert_eq!(
-        shared_exact_backlog.residual_surplus_budget(1, residual_rate, residual_burst),
-        0,
-        "shared residual budget starts closed on first exact-demand observation"
-    );
-    let before =
-        shared_exact_backlog.residual_surplus_budget(1_000_001, residual_rate, residual_burst);
-    assert!(before >= 1500, "test must seed enough residual budget");
 
     let mut fast_interfaces = test_cos_fast_interfaces(
         42,
@@ -424,7 +419,7 @@ fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
     fast_interfaces
         .get_mut(&42)
         .expect("test fast path")
-        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+        .shared_exact_backlog = Some(shared_exact_backlog);
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
 
@@ -438,17 +433,23 @@ fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
         std::collections::VecDeque::new(),
     );
 
-    let after =
-        shared_exact_backlog.residual_surplus_budget(1_000_001, residual_rate, residual_burst);
     assert_eq!(
-        after,
-        before - 1500,
-        "non-exact surplus send must debit the shared residual budget, not a per-worker bucket"
+        binding
+            .cos
+            .cos_interfaces
+            .get(&42)
+            .expect("cos root")
+            .nonexact_surplus_under_exact_tokens,
+        8_500,
+        "a non-exact surplus send under exact demand must debit this binding's residual share"
     );
 }
 
+/// #19025: a non-exact surplus prepared send under exact demand debits THIS
+/// binding's `residual / n` share (`nonexact_surplus_under_exact_tokens`).
+/// The interface-wide first-come residual bucket it used to debit is gone.
 #[test]
-fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
+fn apply_cos_prepared_result_debits_this_bindings_residual_share_19025() {
     let mut root = test_mixed_class_root_with_primed_queues();
     for queue in &mut root.queues {
         if queue.config.exact {
@@ -457,18 +458,10 @@ fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
             queue.hot.runnable = false;
         }
     }
+    root.nonexact_surplus_under_exact_tokens = 10_000;
+    // A peer's exact demand, so the surplus send runs under a reservation.
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
     shared_exact_backlog.publish_demand(1, 1500, ExactDemandQueueMask::EMPTY.with_queue(0));
-    let residual_rate = 100_000_000;
-    let residual_burst = COS_MIN_BURST_BYTES;
-    assert_eq!(
-        shared_exact_backlog.residual_surplus_budget(1, residual_rate, residual_burst),
-        0,
-        "shared residual budget starts closed on first exact-demand observation"
-    );
-    let before =
-        shared_exact_backlog.residual_surplus_budget(1_000_001, residual_rate, residual_burst);
-    assert!(before >= 1500, "test must seed enough residual budget");
 
     let mut fast_interfaces = test_cos_fast_interfaces(
         42,
@@ -486,7 +479,7 @@ fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
     fast_interfaces
         .get_mut(&42)
         .expect("test fast path")
-        .shared_exact_backlog = Some(shared_exact_backlog.clone());
+        .shared_exact_backlog = Some(shared_exact_backlog);
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
 
@@ -500,12 +493,15 @@ fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
         std::collections::VecDeque::new(),
     );
 
-    let after =
-        shared_exact_backlog.residual_surplus_budget(1_000_001, residual_rate, residual_burst);
     assert_eq!(
-        after,
-        before - 1500,
-        "non-exact surplus prepared send must debit the shared residual budget, not a per-worker bucket"
+        binding
+            .cos
+            .cos_interfaces
+            .get(&42)
+            .expect("cos root")
+            .nonexact_surplus_under_exact_tokens,
+        8_500,
+        "a non-exact surplus prepared send under exact demand must debit this binding's residual share"
     );
 }
 

@@ -186,6 +186,10 @@ pub(super) struct Arm {
     /// The interface burst (the root lease's credit pool); the production
     /// default is 1% of the shaping rate.
     pub(super) root_burst_bytes: u64,
+    /// The non-exact class's `surplus_weight` (#19025: a weight above 1
+    /// makes one surplus batch several frames, so a pass that is not bounded
+    /// by its budget shows up as rate, not just as burst).
+    pub(super) nonexact_surplus_weight: u32,
 }
 
 impl Arm {
@@ -207,6 +211,7 @@ impl Arm {
             nonexact_backlogged: vec![true; workers],
             worker_tx_cap_bytes: cap_gbit * GBIT,
             root_burst_bytes: SHAPING_BYTES / 100,
+            nonexact_surplus_weight: 1,
         }
     }
 
@@ -340,6 +345,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
             // worker. Without it the v8 exact lease sees no active buckets
             // on any worker and never grants.
             let mut runtime = lab_runtime(&exact_rates, arm.root_burst_bytes);
+            runtime.queues[nonexact_idx].config.surplus_weight = arm.nonexact_surplus_weight;
             runtime.shared_root_lease = fast_path.shared_root_lease.clone();
             apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path.queue_fast_path, w as u32);
             BindingWorker::new_for_cos_drain_test(w as u32, w as u32, IFX, runtime, fast_path)

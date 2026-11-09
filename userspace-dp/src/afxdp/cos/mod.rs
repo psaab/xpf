@@ -38,6 +38,7 @@ pub(super) use token_bucket::{
 };
 pub(super) use tx_completion::{
     clear_all_cos_exact_backlogs_for_binding, mark_cos_queue_runnable, publish_cos_exact_backlog,
+    publish_cos_nonexact_backlogged_on_cos,
 };
 #[cfg(test)]
 pub(crate) use ecn::cos_l2_view_for_test;

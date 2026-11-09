@@ -2152,7 +2152,8 @@ Each carries a RED-on-revert unit test.
   What this does not fix: the amount reserved is unchanged (configured
   rate), which over-reserves when an exact class is held below it by its
   worker's TX capacity (#19023); a non-exact instance colocated with a
-  self-limited exact class still gets a small share (#19025); exact classes
+  self-limited exact class still gets a small share (#19025, fixed by the
+  per-binding shares below); exact classes
   whose demanding rates sum past the root leave best-effort surplus nothing
   (`exact_classes_summing_past_the_root_leave_best_effort_nothing_18748`;
   `guarantee-rate` splits the root between exact classes and reserves
@@ -2160,6 +2161,42 @@ Each carries a RED-on-revert unit test.
   worker still runs below its rate (#19031: 8.1–9.4 of 12 Gb/s in the
   simulation against 4.8–5.8 on master's predicate; floor-pinned by
   `exact_class_whose_v8_lease_under_grants_a_worker_keeps_most_of_its_rate_18748`).
+
+- **#19025 / #19023 — per-binding residual shares, owed ahead of the local
+  exact class.** With #18748's reservation holding, a non-exact instance on a
+  worker that also carried an exact class still got a small fraction of its
+  peers' share (#19025: 0.25-0.31 Gb/s against 5.7 in the simulation; live
+  X1 two colocated flows at 0.07 Gbit/s with 10-11 s stalls) and nothing
+  beside a TX-capped exact class (#19023: 0 Gb/s for the whole window). Two
+  layers: the drain served a worker's exact guarantee before anything else
+  (`drain_shaped_tx` returns on any exact progress, and
+  `service_shaped_until_noop` repeats it), and every binding's non-exact
+  surplus drew from one interface-wide first-come residual bucket that the
+  busy exact worker lost.
+  Contract now: while exact demand holds non-exact surplus to the residual,
+  each binding with non-exact backlog is owed `residual / n` (`n` = bindings
+  publishing non-exact backlog in `SharedCoSExactBacklog`), metered by its
+  own bucket; the parts sum to the residual (reservation unchanged) and only
+  bindings that want a part count (work-conserving). On a binding with exact
+  demand of its own, a non-exact batch bounded by its part goes BEFORE the
+  local exact guarantee whenever the part covers a frame
+  (`build_owed_nonexact_surplus_batch`). **Semantics change:** this relaxes
+  strict guarantee-before-surplus on the worker: the exact class can lose up
+  to `residual / n` there, only where the worker's TX capacity rather than
+  the root is the bottleneck, and interface-wide it keeps its whole
+  reservation (pinned by
+  `tx_capped_exact_class_loses_at_most_the_owed_share_19025`). A zero
+  residual owes nothing, and #18748's root release still applies to the
+  bindings that cannot spend (`zero_residual_owes_nothing_and_strands_no_root_19025`).
+  The interface-wide residual bucket and its #7206 reset/refill generation
+  guard are removed with it. On a shared interface each part starts closed
+  when exact demand is first seen, as that bucket did. The contract covers
+  only the time exact demand holds: while a self-limited exact class is
+  between grants there is no demand, surplus is unconstrained and the
+  greedy root lease decides the split (simulation R1: the colocated
+  instance 7.0 Gb/s, its peers 3.2-3.5). Not addressed: the reserved
+  amount is still the configured rate, so a TX-capped exact class still
+  over-reserves (#19023's other half).
 
 - **T-6(e) — V_min publish on the CoSBatch settle path.** The CoSBatch
   submit path (`submit_local`/`submit_prepared`) was the 5th of 5 V_min
