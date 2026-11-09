@@ -416,6 +416,8 @@ type InstanceConfig struct {
 	ISIS              *config.ISISConfig
 	StaticRoutes      []*config.StaticRoute
 	Inet6StaticRoutes []*config.StaticRoute
+	// NHTGatedStaticRoutes: see FullConfig.NHTGatedStaticRoutes (#19050).
+	NHTGatedStaticRoutes []*config.StaticRoute
 }
 
 // DHCPRoute represents a learned route emitted by the DHCP route renderer. An
@@ -465,9 +467,16 @@ type FullConfig struct {
 	ISIS              *config.ISISConfig
 	StaticRoutes      []*config.StaticRoute
 	Inet6StaticRoutes []*config.StaticRoute // rib inet6.0 static routes
-	GenerateRoutes    []*config.GenerateRoute
-	DHCPRoutes        []DHCPRoute
-	RIBRoutes         []RIBRoute
+	// NHTGatedStaticRoutes (#19050) are static next-hops this node does not
+	// own yet (their gateway lies in an inactive RG's RETH prefix) that
+	// zebra's next-hop tracking holds inactive until the RETH VIP lands.
+	// They are RENDERED ONLY: every other reader of StaticRoutes (the DHCP
+	// default and classless suppression) sees the owned set, as before.
+	// Either family; address-only by construction (no interface qualifier).
+	NHTGatedStaticRoutes []*config.StaticRoute
+	GenerateRoutes       []*config.GenerateRoute
+	DHCPRoutes           []DHCPRoute
+	RIBRoutes            []RIBRoute
 	// RIBRouteInventoryFailed makes classless routes fail closed after an
 	// incomplete live-RIB read; DHCP defaults retain their independent path.
 	RIBRouteInventoryFailed bool
@@ -648,7 +657,7 @@ func (m *Manager) applyFull(fc *FullConfig, current func() bool) error {
 		len(fc.StaticRoutes) > 0 || len(fc.Inet6StaticRoutes) > 0 || len(fc.GenerateRoutes) > 0 || len(fc.DHCPRoutes) > 0 || fc.ClusterMode ||
 		len(fc.PreferredRoutes) > 0
 	for _, inst := range fc.Instances {
-		if inst.OSPF != nil || inst.OSPFv3 != nil || inst.BGP != nil || inst.RIP != nil || inst.ISIS != nil || len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 {
+		if inst.OSPF != nil || inst.OSPFv3 != nil || inst.BGP != nil || inst.RIP != nil || inst.ISIS != nil || len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 || len(inst.NHTGatedStaticRoutes) > 0 {
 			hasContent = true
 			break
 		}
@@ -873,6 +882,15 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 		b.WriteString("!\n")
 	}
 
+	// 3b. #19050: statics rendered ahead of RG activation; zebra holds them
+	// inactive until the RETH VIP gives their gateway a connected route.
+	if len(fc.NHTGatedStaticRoutes) > 0 {
+		for _, sr := range fc.NHTGatedStaticRoutes {
+			b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, "", 0, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, fc.ISIS))
+		}
+		b.WriteString("!\n")
+	}
+
 	// 4. DHCP-learned default routes (admin distance 200).
 	renderDHCPDefaults(&b, fc)
 
@@ -890,11 +908,15 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 		if inst.VRFName == "" && inst.TableID > 0 {
 			isis = nil
 		}
-		if len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 {
+		if len(inst.StaticRoutes) > 0 || len(inst.Inet6StaticRoutes) > 0 || len(inst.NHTGatedStaticRoutes) > 0 {
 			for _, sr := range inst.StaticRoutes {
 				b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, isis))
 			}
 			for _, sr := range inst.Inet6StaticRoutes {
+				b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, isis))
+			}
+			// #19050: rendered ahead of activation, NHT-gated.
+			for _, sr := range inst.NHTGatedStaticRoutes {
 				b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, inst.VRFName, inst.TableID, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, isis))
 			}
 			b.WriteString("!\n")

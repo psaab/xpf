@@ -557,8 +557,11 @@ default route to a next hop. On a standby the RETH statics are left out of
 the FRR render (#15734), so its kernel default is the cluster Null0. After
 an RG move, the new WAN owner's kernel default stays that Null0 until the
 next FRR render installs the static, 1.4-4.8 s after promotion in lane G's
-loss FIB dumps (#19050). So the soak also probes destinations that no
-connected subnet covers:
+loss FIB dumps (#19050). The #19050 D1 change renders address-only RETH
+hops on the standby too (direct mode), where zebra's next-hop tracking holds
+them inactive until the VIP lands. It still needs this probe to confirm it
+on a cluster. So the soak also probes destinations that no connected subnet
+covers:
 
 - `r4`, `r6`, `s6` (LAN host): scored per move like the connected ping.
   The probe must cover the window, and a window with no reply in its tail

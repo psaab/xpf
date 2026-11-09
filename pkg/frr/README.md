@@ -995,6 +995,20 @@ step. Both are required — neither sees the other's case:
   are untagged and keep flowing, including an operator static default.
   Non-cluster renders are byte-identical: no tag, no deny sequence, bare
   redistribution stays bare.
+- **NHT-gated statics (#19050).** `FullConfig.NHTGatedStaticRoutes` (and
+  `InstanceConfig.NHTGatedStaticRoutes`) carry static next-hops this node
+  does not own yet: the daemon's #15734 HA filter keeps them out of
+  `StaticRoutes` because their gateway lies in an inactive RG's RETH
+  prefix. They are address-only: no interface qualifier, no inferred IPv6
+  interface, no qualified-next-hop metric or preference. The managed
+  section renders them right after the statics (in the instance's table for
+  an instance), and zebra's next-hop tracking holds them inactive until the
+  RETH VIP gives the gateway a connected route. That makes the
+  promotion-time route switch make-before-break instead of waiting for an
+  HA render plus frr-reload. They are render-only: the DHCP default and
+  classless suppression (`renderDHCPDefaults`, `dhcpClasslessCoveredByStatic`)
+  read only the owned `StaticRoutes`, so an inactive gated static never
+  suppresses a DHCP route.
 - **A DHCP route's `vrf` clause names the KERNEL namespace, not the Junos
   one (#9136).** `DHCPRoute.VRF` carries the BARE routing-instance name —
   the suppression maps in `renderDHCPDefaults` key on it and are internally

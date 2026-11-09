@@ -18,6 +18,14 @@ type frrHADemotionState struct {
 	rethInterfaces map[int]map[string]struct{}
 	globalActive   bool
 	peerIGPConfig  *config.Config
+	// nhtGatesAddressHops (#19050): RETH addresses are owner-only VIPs,
+	// so an address-only static hop into an inactive RG's RETH prefix is
+	// held inactive by zebra's next-hop tracking and may be rendered
+	// ahead of activation. True in the compiler-default direct mode
+	// (private-RG election / no-reth-vrrp), whose non-owner deletes every
+	// configured RETH VIP (direct_vip_reconcile_18573.go). False in legacy
+	// VRRP-backed RETH mode, which keeps the #15734 filter unchanged.
+	nhtGatesAddressHops bool
 }
 
 func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
@@ -25,8 +33,9 @@ func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
 		return nil
 	}
 	state := &frrHADemotionState{
-		active:         make(map[int]bool),
-		rethInterfaces: make(map[int]map[string]struct{}),
+		active:              make(map[int]bool),
+		rethInterfaces:      make(map[int]map[string]struct{}),
+		nhtGatesAddressHops: !cfg.Chassis.Cluster.UsesRethVRRP(),
 	}
 	owners := cfg.RethRGOwners()
 	for name, rgID := range owners {
@@ -380,6 +389,12 @@ func isisSpansMultipleDataRGs16810(cfg *config.Config, source, filtered *config.
 // split left node1 owning the LAN (RG2) with every WAN v6 static
 // stranded inactive, so LAN->WAN IPv6 transit blackholed on the kernel
 // default while neighbor recovery (NA) succeeded.
+//
+// #19050: re-rendering on promotion put an HA render plus frr-reload
+// (1.4-4.8 s on loss) between the VIP landing and the new owner's kernel
+// default. Address-only hops this filter drops are now rendered ahead of
+// activation through nhtGatedStaticRoutes (direct mode only); this
+// function's owned set is unchanged.
 func (s *frrHADemotionState) filterStaticRoutes(cfg *config.Config, routes []*config.StaticRoute, v6NextHopInterfaces map[string]string, instanceInterfaces []string) []*config.StaticRoute {
 	if s == nil || len(routes) == 0 {
 		return routes
@@ -413,6 +428,61 @@ func (s *frrHADemotionState) filterStaticRoutes(cfg *config.Config, routes []*co
 		filtered = append(filtered, &pruned)
 	}
 	return filtered
+}
+
+// nhtGatedStaticRoutes returns the static next-hops filterStaticRoutes drops
+// that zebra itself would hold inactive on this node, pruned to those hops
+// (#19050). They are rendered ahead of activation (make-before-break for
+// routes) as a separate FRR list, so nothing else that reads the owned set
+// (the DHCP default/classless suppression) changes.
+//
+// Why: the #15734 filter keeps a non-owner's RETH statics out of FRR, so
+// after an RG move the new owner's kernel default is the cluster Null0
+// until the next HA render plus frr-reload installs the static — 1.4-4.8 s
+// on loss (lane G's #19034 FIB dumps). Rendered on the standby, an
+// address-only hop stays inactive there because its gateway lies in a
+// connected prefix the standby does not hold (RETH addresses are
+// owner-only VIPs in direct mode), and zebra activates it the moment the
+// VIP lands on promotion, with no render or reload in the critical path.
+//
+// A hop qualifies ONLY when, as rendered, it carries no interface: no
+// operator interface and no inferred IPv6 next-hop interface. An
+// interface-qualified hop is resolved over the interface, which is up on
+// the standby too, so zebra would install it there and the standby's
+// kernel would route through a RETH it does not own. Such hops stay
+// filtered, as do hops with a qualified-next-hop metric or preference
+// (rendered by the #11447 metric tiers, not here), and every hop in
+// legacy VRRP-backed RETH mode (nhtGatesAddressHops false).
+func (s *frrHADemotionState) nhtGatedStaticRoutes(cfg *config.Config, routes []*config.StaticRoute, v6NextHopInterfaces map[string]string, instanceInterfaces []string) []*config.StaticRoute {
+	if s == nil || !s.nhtGatesAddressHops || len(routes) == 0 {
+		return nil
+	}
+	instanceGroups := s.groupsForInterfaces(cfg, instanceInterfaces)
+	var out []*config.StaticRoute
+	for _, route := range routes {
+		if route == nil || route.Discard || route.Reject || route.NextTable != "" || len(route.NextHops) == 0 {
+			continue
+		}
+		var gated []config.NextHopEntry
+		for _, hop := range route.NextHops {
+			if hop.Interface != "" || hop.HasMetric || hop.HasPreference {
+				continue
+			}
+			if v6NextHopInterfaces != nil && v6NextHopInterfaces[hop.Address] != "" {
+				continue
+			}
+			if !s.staticHopActive(cfg, hop, v6NextHopInterfaces, instanceGroups) {
+				gated = append(gated, hop)
+			}
+		}
+		if len(gated) == 0 {
+			continue
+		}
+		pruned := *route
+		pruned.NextHops = gated
+		out = append(out, &pruned)
+	}
+	return out
 }
 
 // staticHopActive reports whether one static next-hop's egress is owned

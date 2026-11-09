@@ -227,6 +227,11 @@ func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
 	mgmtSet := managementVRFIfaceSet(cfg)
 	staticRoutes, inet6StaticRoutes := mgmtStaticRoutesForFRR(
 		cfg, mgmtSet, ipv6NextHopInterfaces[""], mgmtRouteInventory)
+	// #19050: RETH statics this node does not own yet, rendered ahead of
+	// activation and held inactive by zebra's next-hop tracking.
+	nhtGated := append(
+		haState.nhtGatedStaticRoutes(cfg, staticRoutes, ipv6NextHopInterfaces[""], nil),
+		haState.nhtGatedStaticRoutes(cfg, inet6StaticRoutes, ipv6NextHopInterfaces[""], nil)...)
 	fc := &frr.FullConfig{
 		OSPF:                    globalProtocols.OSPF,
 		OSPFv3:                  globalProtocols.OSPFv3,
@@ -235,6 +240,7 @@ func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
 		ISIS:                    globalProtocols.ISIS,
 		StaticRoutes:            haState.filterStaticRoutes(cfg, staticRoutes, ipv6NextHopInterfaces[""], nil),
 		Inet6StaticRoutes:       haState.filterStaticRoutes(cfg, inet6StaticRoutes, ipv6NextHopInterfaces[""], nil),
+		NHTGatedStaticRoutes:    nhtGated,
 		GenerateRoutes:          cfg.RoutingOptions.GenerateRoutes,
 		DHCPRoutes:              dhcpRoutes,
 		RIBRoutes:               ribRoutes,
@@ -290,6 +296,10 @@ func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
 			StaticRoutes:      haState.filterStaticRoutes(cfg, ri.StaticRoutes, ipv6NextHopInterfaces[vrfName], ri.Interfaces),
 			Inet6StaticRoutes: haState.filterStaticRoutes(cfg, ri.Inet6StaticRoutes, ipv6NextHopInterfaces[vrfName], ri.Interfaces),
 		}
+		// #19050: this instance's RETH statics not owned yet (NHT-gated).
+		inst.NHTGatedStaticRoutes = append(
+			haState.nhtGatedStaticRoutes(cfg, ri.StaticRoutes, ipv6NextHopInterfaces[vrfName], ri.Interfaces),
+			haState.nhtGatedStaticRoutes(cfg, ri.Inet6StaticRoutes, ipv6NextHopInterfaces[vrfName], ri.Interfaces)...)
 		if forwarding {
 			// #9409: DROP the protocols rather than carry them through.
 			//
