@@ -494,6 +494,13 @@ nodes):
     (`docs/flow-cache-simplification.md`, "Neighbor mapping-change
     invalidation"; `userspace-dp/src/afxdp/README.md`, "Neighbor epochs
     and held passes").
+  - Go's neighbor push now bumps a static-table change it makes. Before,
+    only the refresh's bump of every neighbor covered that change, so the
+    two had to change together.
+  - The refresh keeps an unchanged manager row in the dynamic map rather
+    than removing it silently, so a later learn or DELNEIGH still bumps.
+    It also bumps for a changed fabric link, which a cached FabricRedirect
+    takes its MACs from.
 - **AHEAD, about 6%.** The helper advances the stamp right after its view store
   (#18598); a worker reads its view once per loop tick, so for a few ms it
   drops packets already stamped with the view it has not adopted yet.

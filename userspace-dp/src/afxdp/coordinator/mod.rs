@@ -1182,6 +1182,23 @@ impl Coordinator {
         } else {
             Vec::new()
         };
+        // #19034: every key this push writes or withdraws, with the MAC the
+        // dataplane resolves for it now (static first, then dynamic).
+        // Judged again after the writes below.
+        let resolved_before: Vec<((i32, IpAddr), Option<[u8; 6]>)> = {
+            let mut keys: FastSet<(i32, IpAddr)> = old_manager_keys.iter().copied().collect();
+            keys.extend(neighbors.iter().map(|(ifindex, ip, _)| (*ifindex, *ip)));
+            keys.into_iter()
+                .map(|key| {
+                    let mac = snapshot_refresh::resolved_neighbor_mac(
+                        &self.forwarding,
+                        Some(&self.neighbors.dynamic),
+                        key,
+                    );
+                    (key, mac)
+                })
+                .collect()
+        };
         {
             let mut manager_keys = crate::sync_util::lock_tolerant(&self.neighbors.manager_keys);
             if replace {
@@ -1249,6 +1266,31 @@ impl Coordinator {
             }
             self.publish_runtime_view();
         }
+        // #19034: advance the shard epoch of every key whose resolution this
+        // push changed. `bulk_replace_neighbors` above sees only the dynamic
+        // map. The static table moves too, and lookups read it first: a
+        // dynamic-confirmed MAC change whose dynamic row was a fresh insert
+        // (the state after any snapshot refresh rotated the manager rows
+        // out), a NUD_PERMANENT change, and a replace that withdraws a key
+        // only the static table carried all change what a flow-cache seed
+        // resolved without moving a dynamic row. Master never bumped for
+        // those. The next refresh's bump of every manager key hid it, and
+        // #19034 removed that bump. Bumped after the publish, so a seed that
+        // reads the advanced epoch also reads the new static table.
+        let changed: FastSet<(i32, IpAddr)> = resolved_before
+            .into_iter()
+            .filter(|&(key, before)| {
+                before.is_some()
+                    && before
+                        != snapshot_refresh::resolved_neighbor_mac(
+                            &self.forwarding,
+                            Some(&self.neighbors.dynamic),
+                            key,
+                        )
+            })
+            .map(|(key, _)| key)
+            .collect();
+        self.neighbors.dynamic.bump_resolution_changed(&changed);
         self.neighbors.generation.fetch_add(1, Ordering::Relaxed);
         // #6034: advance the applied replace generation so a later stale /
         // reordered replace is fenced. Only versioned pushes move it.

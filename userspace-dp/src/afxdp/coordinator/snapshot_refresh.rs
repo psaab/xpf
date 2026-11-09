@@ -83,6 +83,9 @@ impl super::Coordinator {
     /// shared Arc-backed state used by workers, so refreshed fabric links
     /// become visible to workers as soon as the new values are published.
     pub fn refresh_fabric_links(&mut self, snapshots: &[crate::FabricSnapshot]) {
+        // #19034: judged against the final set below (see
+        // `fabric_changed_neighbor_keys`).
+        let old_fabrics = self.forwarding.fabrics.clone();
         let (new_fabrics, new_skips) = resolve_fabric_links_from_snapshots(
             snapshots,
             &self.forwarding.egress,
@@ -176,6 +179,15 @@ impl super::Coordinator {
             }
             self.publish_runtime_view();
         }
+        // #19034: a replaced or pruned link invalidates the FabricRedirect
+        // flows cached from it, after the publish (a no-op when neither
+        // branch above changed the set).
+        self.neighbors
+            .dynamic
+            .bump_resolution_changed(&fabric_changed_neighbor_keys(
+                &old_fabrics,
+                &self.forwarding.fabrics,
+            ));
     }
 
     pub fn refresh_runtime_snapshot(
@@ -371,31 +383,45 @@ impl super::Coordinator {
                 Some((neigh.ifindex, ip))
             })
             .collect::<FastSet<_>>();
-        let old_manager_keys = {
+        let (old_manager_keys, still_manager_keys) = {
             let mut manager_keys = crate::sync_util::lock_tolerant(&self.neighbors.manager_keys);
             let old = manager_keys.iter().copied().collect::<Vec<_>>();
+            let still = old
+                .iter()
+                .copied()
+                .filter(|key| next_manager_keys.contains(key))
+                .collect::<FastSet<_>>();
             *manager_keys = next_manager_keys;
-            old
+            (old, still)
         };
         self.neighbors.set_monitored_ifindexes(
             &snapshot.interfaces,
             new_forwarding.neighbors.keys().map(|(ifindex, _)| *ifindex),
         );
-        // #949: bulk-remove the previous snapshot's manager keys atomically
-        // vs readers. #11375/#19034: advance a shard's epoch only for a key
-        // whose resolution this refresh changes. A key the new snapshot
-        // resolves to the same MAC (the steady state of every routes-only
-        // republish) keeps its cached flows valid; bumping it dropped every
-        // packet a #18560 held pass had queued for those flows.
-        let unchanged = refresh_unchanged_manager_neighbors(
+        // #949: bulk-remove previous-snapshot manager rows atomically vs
+        // readers. #11375/#19034: advance the shard of exactly the keys whose
+        // resolution this refresh changes, and remove only the rows of those
+        // keys and of keys that are no longer manager keys. A manager key the
+        // new snapshot resolves the same way (the steady state of every
+        // routes-only republish) keeps its row and its cached flows. Bumping
+        // it dropped every packet a #18560 held pass had queued for those
+        // flows, and removing its row without a bump would break the
+        // first-insert and DELNEIGH rules a later learn relies on
+        // (`ShardedNeighborMap::bulk_remove_manager_keys`).
+        let changed = refresh_changed_neighbor_keys(
             &self.forwarding,
             &new_forwarding,
             &self.neighbors.dynamic,
             &old_manager_keys,
         );
+        let remove_keys = old_manager_keys
+            .iter()
+            .copied()
+            .filter(|key| changed.contains(key) || !still_manager_keys.contains(key))
+            .collect::<Vec<_>>();
         self.neighbors
             .dynamic
-            .bulk_remove_manager_keys(&old_manager_keys, &unchanged);
+            .bulk_remove_manager_keys(&remove_keys, &changed);
         // #1873 R-D (Codex code r3): captured BEFORE the overwrite —
         // gates the new-appearance purge arm below. False only when no
         // coordinator apply has ever installed a snapshot (disarmed
@@ -492,6 +518,9 @@ impl super::Coordinator {
         // and taking the argument from the same expression at both call sites
         // removes the chance of one drifting to the state that frees nothing.
         self.purge_remapped_tunnel_sessions(&tunnel_purge_ids, &new_forwarding);
+        // #19034: the fabric links a cached FabricRedirect took its MACs
+        // from, judged against the final set after the preserved-link merge.
+        let old_fabrics = self.forwarding.fabrics.clone();
         self.forwarding = new_forwarding;
         self.set_ipsec_tunnel_rows_from_snapshot(snapshot);
         // #6832 fold r5: the refresh's commit point for the #3651 per-zone
@@ -617,6 +646,19 @@ impl super::Coordinator {
         // `store_runtime_view` records the intended pair + the previous view
         // for the RED-on-revert test.
         self.publish_runtime_view();
+        // #19034 (Codex review of 1f6c9fa7f1): a cached FabricRedirect takes
+        // its MACs from the fabric link, not from the neighbor tables, and
+        // stamps the `(parent_ifindex, peer_addr)` shard. The neighbor
+        // comparison above cannot see a fabric peer MAC change, and before
+        // #19034 only the removal of every present manager row covered it,
+        // incidentally. Bumped after the publish, so a seed that reads the
+        // advanced epoch also reads the new links.
+        self.neighbors
+            .dynamic
+            .bump_resolution_changed(&fabric_changed_neighbor_keys(
+                &old_fabrics,
+                &self.forwarding.fabrics,
+            ));
         // #15188 (C08-02): the publish above shipped this apply's single-use
         // rename metadata on its clone. Strip the retained copies now so a
         // later helper-internal republish (neighbor push, HA fabric refresh)
@@ -683,35 +725,87 @@ impl super::Coordinator {
     }
 }
 
-/// #19034: the previous snapshot's manager keys whose resolution a refresh
-/// leaves unchanged. That means the same MAC before and after, as
-/// `lookup_neighbor_entry` (the forwarding path's own reader) resolves it:
+/// #19034: the neighbor keys whose resolution a full-snapshot refresh
+/// changes, judged key by key with `lookup_neighbor_entry`, the forwarding
+/// path's own reader:
 ///
-/// - before: `old_forwarding`'s static table first, then the dynamic map,
-///   which still holds the manager row;
-/// - after: `new_forwarding`'s static table only, because the caller is
-///   about to remove the row from the dynamic map.
+/// - before: `old_forwarding`'s static table first, then the dynamic map as
+///   it is now;
+/// - after: `new_forwarding`'s static table first, then the dynamic map as
+///   it will be, i.e. without the previous snapshot's manager rows, which
+///   the caller removes.
 ///
-/// A key resolved by neither side, or a MAC that differs, or one missing on
-/// either side, is a change and keeps its epoch bump (#3048). A concurrent
-/// monitor update cannot be lost by this read: a MAC replacement in the
-/// dynamic map bumps its own shard (#5147).
-pub(super) fn refresh_unchanged_manager_neighbors(
+/// A key is changed when it resolved to a MAC before and resolves to a
+/// different MAC, or to nothing, after. Every key either table names, plus
+/// every previous manager key, is judged, whether or not the dynamic map
+/// holds it. A neighbor that only the static table carried still counts
+/// when the snapshot withdraws it.
+///
+/// A key that resolved to nothing before is not a change: no cached flow can
+/// hold a MAC for it (a `MissingNeighbor` decision is never cached).
+///
+/// A concurrent dynamic-map update cannot be lost by reading outside the
+/// caller's bulk lock: a MAC replacement or removal there bumps its own shard
+/// (#5147).
+pub(super) fn refresh_changed_neighbor_keys(
     old_forwarding: &ForwardingState,
     new_forwarding: &ForwardingState,
     dynamic: &Arc<crate::afxdp::ShardedNeighborMap>,
     old_manager_keys: &[(i32, IpAddr)],
 ) -> FastSet<(i32, IpAddr)> {
-    old_manager_keys
-        .iter()
-        .copied()
-        .filter(|&(ifindex, ip)| {
-            let before =
-                crate::afxdp::forwarding::lookup_neighbor_entry(old_forwarding, Some(dynamic), ifindex, ip);
-            let after =
-                crate::afxdp::forwarding::lookup_neighbor_entry(new_forwarding, None, ifindex, ip);
-            matches!((before, after), (Some(before), Some(after)) if before.mac == after.mac)
+    let removed: FastSet<(i32, IpAddr)> = old_manager_keys.iter().copied().collect();
+    let mut keys = removed.clone();
+    keys.extend(old_forwarding.neighbors.keys().copied());
+    keys.extend(new_forwarding.neighbors.keys().copied());
+    keys.into_iter()
+        .filter(|&key| {
+            let before = resolved_neighbor_mac(old_forwarding, Some(dynamic), key);
+            let after_dynamic = (!removed.contains(&key)).then_some(dynamic);
+            let after = resolved_neighbor_mac(new_forwarding, after_dynamic, key);
+            before.is_some() && before != after
         })
+        .collect()
+}
+
+/// #19034: the MAC the dataplane resolves for `key`: the static table first,
+/// then `dynamic` (`lookup_neighbor_entry`, the lookup a flow-cache seed
+/// used). Both #19034 change tests compare this before and after a write.
+pub(super) fn resolved_neighbor_mac(
+    forwarding: &ForwardingState,
+    dynamic: Option<&Arc<crate::afxdp::ShardedNeighborMap>>,
+    key: (i32, IpAddr),
+) -> Option<[u8; 6]> {
+    crate::afxdp::forwarding::lookup_neighbor_entry(forwarding, dynamic, key.0, key.1)
+        .map(|entry| entry.mac)
+}
+
+/// #19034: the neighbor keys whose cached FabricRedirect resolutions a fabric
+/// link replacement invalidates. `resolve_fabric_redirect_from_list` builds
+/// the resolution from one link:
+/// - `next_hop = peer_addr` and `egress_ifindex = parent_ifindex`, so the
+///   flow cache stamps the `(parent_ifindex, peer_addr)` shard;
+/// - `neighbor_mac = peer_mac` and `src_mac = local_mac`;
+/// - which link it picks depends on `up`.
+///
+/// An old link counts when no new link has the same parent, peer address,
+/// MACs and `up` state, so a withdrawn link counts too. A new link with no
+/// old twin does not: no cached flow used it. `link_authenticated` gates
+/// fabric ingress, not this resolution, so it is not compared.
+pub(super) fn fabric_changed_neighbor_keys(
+    old_fabrics: &[FabricLink],
+    new_fabrics: &[FabricLink],
+) -> FastSet<(i32, IpAddr)> {
+    let resolution = |link: &FabricLink| {
+        (link.parent_ifindex, link.peer_addr, link.peer_mac, link.local_mac, link.up)
+    };
+    old_fabrics
+        .iter()
+        .filter(|old| {
+            !new_fabrics
+                .iter()
+                .any(|new| resolution(new) == resolution(old))
+        })
+        .map(|old| (old.parent_ifindex, old.peer_addr))
         .collect()
 }
 
