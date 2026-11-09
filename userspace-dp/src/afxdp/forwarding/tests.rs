@@ -5029,7 +5029,7 @@ fn helper_local_session_on_miss_clears_stale_shared_aliases() {
     policy_counter_idx: 0,
     policy_counter: None,
     nat_scope_ifindex: None, };
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
     decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,

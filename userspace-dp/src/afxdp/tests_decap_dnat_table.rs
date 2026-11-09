@@ -214,7 +214,7 @@ fn replay_filter_drops_purged_forward_and_derived_reverse_companion() {
     };
     let make =
         |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
-            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+            sibling_last_seen_ns: 0, last_served_ns: 0,
             key: key.clone(),
         decision: SessionDecision {
             resolution,
@@ -348,7 +348,7 @@ fn replay_filter_preserves_order_and_survivors_across_many_drops() {
     };
     let make =
         |key: &SessionKey, resolution: ForwardingResolution, is_reverse: bool| SyncedSessionEntry {
-            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+            sibling_last_seen_ns: 0, last_served_ns: 0,
             key: key.clone(),
         decision: SessionDecision {
             resolution,
@@ -519,7 +519,7 @@ fn replay_filter_drops_stale_zone_pair_and_keeps_tunnel_semantics_10612() {
                 ingress_zone: u32,
                 egress_zone: u32,
                 is_reverse: bool| SyncedSessionEntry {
-        sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: key.clone(),
                 decision: SessionDecision {
                     resolution: resolution(tunnel_endpoint_id),

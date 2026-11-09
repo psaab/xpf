@@ -1105,7 +1105,7 @@ fn poll_descriptor_junos_host_deny_drops_local_delivery_session_hit() {
         TCP_FLAG_SYN,
     ));
     let shared_entry = SyncedSessionEntry {
-        sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: flow_key.clone(),
     decision: local_decision,
     metadata: local_metadata,

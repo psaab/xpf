@@ -8348,7 +8348,7 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                         let reverse_session_id =
                                             sessions.session_id_for(&reverse_key);
                                         let reverse_entry = SyncedSessionEntry {
-                                            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+                                            sibling_last_seen_ns: 0, last_served_ns: 0,
                                             key: reverse_key,
                                             decision: reverse_decision,
                                             metadata: reverse_metadata,

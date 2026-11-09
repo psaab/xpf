@@ -3027,7 +3027,7 @@ impl crate::afxdp::ha::SessionDomain {
         policy_counter: None,
         nat_scope_ifindex: None, };
         let _ = self.upsert_synced_session(SyncedSessionEntry {
-            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+            sibling_last_seen_ns: 0, last_served_ns: 0,
             key,
         decision: SessionDecision {
             resolution,
@@ -3158,7 +3158,7 @@ mod rejected_mirror_reservation_10790_tests {
         session_id: u64,
     ) -> SyncedSessionEntry {
         SyncedSessionEntry {
-            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+            sibling_last_seen_ns: 0, last_served_ns: 0,
             key,
         decision: SessionDecision {
             resolution: ForwardingResolution {
@@ -3293,7 +3293,7 @@ mod rejected_mirror_reservation_10790_tests {
         };
         let pool_port = 23_090;
         let entry = SyncedSessionEntry {
-            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+            sibling_last_seen_ns: 0, last_served_ns: 0,
             key: key.clone(),
         decision: SessionDecision {
             resolution: ForwardingResolution {

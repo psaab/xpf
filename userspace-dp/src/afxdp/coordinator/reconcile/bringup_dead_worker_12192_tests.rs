@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 
 fn session_entry() -> SyncedSessionEntry {
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
