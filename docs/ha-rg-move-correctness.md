@@ -64,7 +64,11 @@ A move of RG *g* to node *t* is correct when all of these hold:
    `ha_groups[].forwarding_active` true on *t* and false on the other node.
    That is what the helper forwards on (`active` AND an unexpired lease), so
    an RG marked active with an expired lease does not pass.
-5. **No dual-active sample**, at any point during the move.
+5. **No dual-active RG**, at any point during the move: both nodes claim it
+   (or both forward it) in a sample AND again in the immediate re-sample
+   (#19041). A pair the re-sample does not repeat is a handoff straddle,
+   counted in `dual_suspects` and not scored (see "Sampling both nodes"
+   below).
 6. **Traffic follows.** Sessions are already on both nodes (session sync), so
    established flows keep running through the new owner:
    - ping loss and the longest ping gap stay within budget;
@@ -562,8 +566,8 @@ One verdict per move:
   - the CLI said "already primary" although the RG was on the other node;
   - the CLI printed anything else unexpected;
   - the RG did not land in both views within the bound;
-  - a dual-active sample, or the RG leaving the target, anywhere in the
-    window after landing;
+  - a dual-active RG (a sample and its immediate re-sample), or the RG
+    leaving the target, anywhere in the window after landing;
   - the helper disagreed with the views;
   - the traffic did not follow: the RETH-member counters or the LAN host's
     neighbour entry stayed on the old node, or nothing flowed in the
@@ -602,6 +606,41 @@ a late dual-active sample and a revert), are in
 `test/incus/rg_move_soak_test.py` (`make test-rg-move-soak-lib`, also run by
 `make selftest`).
 
+### Sampling both nodes
+
+`Soak.views()` reads node0 and node1 with two independent `show chassis
+cluster status` commands, run in parallel. They do not read one instant, so
+a clean handoff can be read as node0 primary just before it and node1
+primary just after it, with no real overlap. Until #19041 the soak scored
+every such pair as a permanent dual-active FAIL. Timing the two commands
+cannot rule a straddle out: parallel reads always overlap in time, and
+neither command says when inside its run it read the state.
+
+A dual-active sample is therefore a suspect. The soak re-samples at once and
+scores dual-active only when the re-sample is dual-active too, which means
+the state persisted, or when the re-sample is unreadable (fail closed). The
+straddle cannot recur in the re-sample, because both of its reads come after
+the handoff. A suspect the re-sample clears is counted in the move's
+`dual_suspects` in `result.json`, and its reading replaces the suspect's for
+the landing and revert checks.
+
+Limit: a real overlap shorter than one re-sample (about one status read)
+looks exactly like a straddle to two independent reads, and is not scored.
+The old rule did not catch such an overlap reliably either; it flagged one
+only when a sample happened to land on it, and it flagged clean handoffs in
+exactly the same way.
+
+The fake cluster reads each node at its own instant, like production (the
+fake clock and the shared fake state are locked against the two worker
+threads). `DualActiveSampling19041` runs the cited Orchestration cells under
+200 deterministic interleavings of the two reads: which read starts first,
+and whether the other read runs after 1-3 of its clock steps or only after
+it returns. `DualActiveScoring19041` drives the real `Soak.views()`,
+`IncusCluster.status()` and `one_rg()` against scripted node reads: a
+straddle in either direction, a real dual-active seen by overlapping reads,
+a sustained one, an unreadable re-sample, and a cleared suspect followed by
+a real dual-active.
+
 ## Reading a failure
 
 | Reason in the table | What it means | Next step |
@@ -619,7 +658,7 @@ a late dual-active sample and a revert), are in
 | `CLI said already primary ... but the RG was on nodeX` | The issuing node's view disagrees with the joint view | Compare the two status outputs in `result.json`. This is a state bug |
 | `did not land on nodeT within Ns` | The CLI returned, but the views never agreed in time. `last:` shows the final joint view | Check whether the RG landed later or not at all. Look for `secondary-hold` or `lost` |
 | `left nodeT after landing, inside the window` | The views agreed, then the RG moved again before the operator's next command (a preempt, an auto-failback, a racing request) | Pull both journals around the window; measure clock skew before pairing them |
-| `dual-active sample during the move window` | Both nodes claimed the RG, or both forwarded it, at one sample | Treat as severe: duplicate VIPs. Pull both journals. Measure clock skew before pairing them |
+| `dual-active during the move window (a sample and its immediate re-sample)` | Both nodes claimed the RG, or both forwarded it, in a sample and again in the immediate re-sample, or the re-sample was unreadable (#19041) | Treat as severe: duplicate VIPs. Pull both journals. Measure clock skew before pairing them |
 | `helper ha_groups[].forwarding_active disagrees` | The daemon's views agree, but the dataplane does not forward for the group (inactive, or active with an expired lease) | Check the helper's status and the daemon's RG apply path |
 | `ping gap ... > budget` / `stream N stalled ...` | The move landed, but the transition cost more than the budget | Compare with H10's master baseline. A single bad window repeated across moves is a regression |
 | `traffic did not follow to nodeT: RETH-member packets after landing node0=… node1=…` | Status and helper flipped, but the packets are still on the old node's RETH members | A forwarding/ownership divergence: check GARP/NA after the move, the helper's RG activation, fabric redirect |

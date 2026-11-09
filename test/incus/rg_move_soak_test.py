@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
 import unittest
 from unittest import mock
 
@@ -568,25 +569,34 @@ class Traffic(unittest.TestCase):
 class FakeClock:
     """Fake time. Listeners see every advance, so the fake LAN host can emit
     ping replies and iperf3 intervals as time passes, exactly as the real
-    generators stream them while the soak sleeps."""
+    generators stream them while the soak sleeps.
+
+    Soak.views() and Soak.helpers() call into the fake from two worker
+    threads. Every advance therefore holds `lock` (#19041): an unlocked
+    read-modify-write of `t` raced between those threads.
+    """
 
     def __init__(self):
         self.t = 1_000_000.0
         self.listeners = []
+        self.lock = threading.RLock()
 
     def _to(self, t):
-        while self.t < t:
-            step = min(0.05, t - self.t)
-            self.t += step
-            for fn in self.listeners:
-                fn(self.t)
+        with self.lock:
+            while self.t < t:
+                step = min(0.05, t - self.t)
+                self.t += step
+                for fn in self.listeners:
+                    fn(self.t)
 
     def now(self):
-        self._to(self.t + 0.001)
-        return self.t
+        with self.lock:
+            self._to(self.t + 0.001)
+            return self.t
 
     def sleep(self, s):
-        self._to(self.t + max(0.0, s))
+        with self.lock:
+            self._to(self.t + max(0.0, s))
 
 
 class Proc:
@@ -638,8 +648,9 @@ class FakeCluster:
     does; the local path (sync channel) works. `stuck_traffic` keeps every
     packet on the initial owner whatever the status says (review B1's
     fixture). `revert_after_s` hands an RG back that many seconds after a
-    move lands. `dual_after_land` makes the views show both nodes primary once,
-    after landing. `faults` maps a move number to a traffic fault injected
+    move lands. `dual_after_land` makes both nodes claim the RG for
+    DUAL_HOLD_S after landing: a real dual-active STATE, which the soak's
+    immediate re-sample sees again (#19041). `faults` maps a move number to a traffic fault injected
     0.3 s after that move's CLI: "gap" (a 1.5 s outage of ping and every
     stream), "stall" (stream 7 stalls 2.5 s), "die" (stream 7 stops for good).
     """
@@ -664,7 +675,7 @@ class FakeCluster:
         self.stuck_traffic = stuck_traffic
         self.revert_after_s = revert_after_s
         self.dual_after_land = dual_after_land
-        self.dual_after_s = dual_after_s  # one dual-active sample this long after landing
+        self.dual_after_s = dual_after_s  # a dual-active period starting this long after landing
         self.helper_lie = helper_lie
         self.busy_iperf = busy_iperf
         self.faults = faults or {}
@@ -673,7 +684,7 @@ class FakeCluster:
         self.target_prepared_when_generators_started = None
         self.pending = {}
         self.landed_at = {}
-        self.dual_pending = 0
+        self.dual_until = float("-inf")  # both nodes claim every RG while clock < dual_until
         self.fw = {0: "fake:fw0", 1: "fake:fw1"}
         self.lan = "fake:lan"
         self.commands = []
@@ -697,6 +708,7 @@ class FakeCluster:
         self.ping_seq = {}
         self.iv_index = {}
         self.events = []  # (lan_t0, lan_t1, kind)
+        self._status_lock = threading.Lock()
         clock.listeners.append(self._tick)
 
     # -- cluster -------------------------------------------------------
@@ -780,7 +792,7 @@ class FakeCluster:
                     self._advance_udp_probe(t)
                     self.udp_probe_lost_after_seq = self.udp_probe_next_seq
                 if self.dual_after_land:
-                    self.dual_pending = 2
+                    self.dual_until = t + self.DUAL_HOLD_S
         if self.udp_probe_recreate_at is not None and t >= self.udp_probe_recreate_at:
             self.udp_probe_session_value = 84
             self.udp_probe_recreate_at = None
@@ -788,7 +800,7 @@ class FakeCluster:
             for rg, at in list(self.landed_at.items()):
                 if t - at >= self.dual_after_s and (rg, at) not in getattr(self, "_dual_done", set()):
                     self._dual_done = getattr(self, "_dual_done", set()) | {(rg, at)}
-                    self.dual_pending = 2
+                    self.dual_until = t + self.DUAL_HOLD_S
         if self.revert_after_s is not None:
             for rg, at in list(self.landed_at.items()):
                 if t - at >= self.revert_after_s and self.owner[rg] == 1:
@@ -846,17 +858,29 @@ class FakeCluster:
             self.owner[rg] = target
             self.landed_at[rg] = self.clock_.t
             if self.dual_after_land:
-                self.dual_pending = 2
+                self.dual_until = self.clock_.t + self.DUAL_HOLD_S
         return 0, f"Manual failover completed for redundancy group {rg} (transfer committed)\n"
 
+    STATUS_READ_S = 0.15  # one `show chassis cluster status` read, in fake time
+    DUAL_HOLD_S = 1.0     # how long a fixture's dual-active state lasts
+
     def status(self, node):
-        self._apply_time(self.clock_.t)
-        self.clock_.sleep(0.15)
-        if self.dual_pending:
-            # Both views of one sample (the soak reads them in parallel).
-            self.dual_pending -= 1
-            return status_text({rg: node for rg in self.owner}, node)
-        return status_text(self.owner, node)
+        """One node's own view, read at ONE instant: when this call starts.
+
+        Each call is independent, like production's two `incus exec ... cli`
+        reads. Nothing ties node0's read to node1's, so a landing between
+        them shows one node's view from before it and the other's from after
+        it (#19041). `_status_lock` keeps the two worker threads' updates of
+        the shared fake state apart. The read's fake time is spent outside
+        that lock, on the clock, which has its own lock."""
+        with self._status_lock:
+            self._apply_time(self.clock_.t)
+            if self.clock_.t < self.dual_until:
+                view = status_text({rg: node for rg in self.owner}, node)
+            else:
+                view = status_text(self.owner, node)
+        self.clock_.sleep(self.STATUS_READ_S)
+        return view
 
     def helper(self, node):
         ha = {rg: (o == node) != self.helper_lie for rg, o in self.owner.items()}
@@ -2022,6 +2046,278 @@ class Orchestration(unittest.TestCase):
                 soak.IncusCluster = orig
                 soak.Soak.__init__ = old
         self.assertEqual(rc, 2)
+
+
+class _InlineFuture:
+    def __init__(self, executor):
+        self._executor = executor
+        self._value = None
+        self._exc = None
+
+    def result(self, timeout=None):
+        self._executor.run_pending()
+        if self._exc is not None:
+            raise self._exc
+        return self._value
+
+
+class InterleavingExecutor:
+    """Stands in for `concurrent.futures.ThreadPoolExecutor` in Soak.views()
+    and Soak.helpers(), and replays ONE thread interleaving of the pair of
+    reads, deterministically and in the calling thread (#19041).
+
+    The `first` read runs. With `steps` 1-3, after that many of its 0.05 s
+    fake-clock steps the other read runs to completion, and then the first
+    read finishes: a worker thread descheduled mid-read while its peer runs.
+    With `steps` 0 the other read starts only after the first has returned:
+    one worker running to completion before the other is scheduled. Each
+    read sees its own instant, so in every shape a landing can fall between
+    the two reads: the handoff straddle that production's parallel status
+    commands can also read. Load produced these shapes at random. A read
+    that never advances the clock, such as helper(), simply runs the other
+    read afterwards."""
+
+    def __init__(self, first, steps):
+        self.first = first
+        self.steps = steps
+        self.pending = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.run_pending()
+        return False
+
+    def submit(self, fn, *args, **kwargs):
+        future = _InlineFuture(self)
+        self.pending.append((future, fn, args, kwargs))
+        return future
+
+    @staticmethod
+    def _call(future, fn, args, kwargs):
+        try:
+            future._value = fn(*args, **kwargs)
+        except BaseException as exc:  # re-raised by result()
+            future._exc = exc
+
+    def run_pending(self):
+        batch, self.pending = self.pending, []
+        if len(batch) != 2:
+            for item in batch:
+                self._call(*item)
+            return
+        a, b = batch if self.first == 0 else batch[::-1]
+        clock = getattr(getattr(a[1], "__self__", None), "clock_", None)
+        ran_b = []
+        if clock is not None and self.steps:
+            count = [0]
+
+            def interleave(_t):
+                count[0] += 1
+                if count[0] == self.steps and not ran_b:
+                    clock.listeners.remove(interleave)
+                    ran_b.append(True)
+                    self._call(*b)
+            clock.listeners.append(interleave)
+        try:
+            self._call(*a)
+        finally:
+            if clock is not None and self.steps and not ran_b and interleave in clock.listeners:
+                clock.listeners.remove(interleave)
+        if not ran_b:
+            self._call(*b)
+
+
+def interleaving_schedule(schedule):
+    """The executor factory for one schedule. Call j uses choice
+    (schedule // 8**(j % 3)) % 8: which read starts first (choice % 2), and
+    when the other read runs (choice // 2: after 1, 2 or 3 of the first
+    read's clock steps, or 0 = after the first read returns). The overlapped
+    shapes shift each later poll's fake-time phase; the sequential shape is
+    the one that can straddle a landing."""
+    uses = [0]
+
+    def factory(max_workers=None):
+        j = uses[0]
+        uses[0] += 1
+        choice = (schedule // 8 ** (j % 3)) % 8
+        return InterleavingExecutor(first=choice % 2, steps=choice // 2)
+    return factory
+
+
+class DualActiveSampling19041(unittest.TestCase):
+    """#19041: Soak.views() reads node0 and node1 with two independent
+    status commands. A clean handoff can be read as node0 primary (just
+    before) and node1 primary (just after), with no real overlap. The old
+    scorer recorded every such pair as a permanent dual-active FAIL; under
+    load, that failed Orchestration cells at random. A dual-active verdict
+    now needs the immediate re-sample to repeat it (or to be unreadable).
+
+    The cited cells run unmodified under SCHEDULES deterministic
+    interleavings of the two reads, against a fake whose reads are
+    independent like production's."""
+
+    CELLS = ("test_landing_bound_is_from_the_cli_return",
+             # The three below exist on #18559's branch; included when present.
+             "test_fallback_away_move_is_void_not_pass_18559",
+             "test_untargeted_local_resign_is_judged_and_udp_checkpoints_at_landing_18559")
+    SCHEDULES = 200
+
+    def test_cited_cells_hold_under_every_interleaving(self):
+        present = [name for name in self.CELLS if hasattr(Orchestration, name)]
+        self.assertIn("test_landing_bound_is_from_the_cli_return", present)
+        failures = []
+        for schedule in range(self.SCHEDULES):
+            with mock.patch.object(soak.concurrent.futures, "ThreadPoolExecutor",
+                                   interleaving_schedule(schedule)):
+                for name in present:
+                    result = unittest.TestResult()
+                    Orchestration(name).run(result)
+                    for _, trace in result.failures + result.errors:
+                        failures.append(f"schedule {schedule} {name}: {trace.strip().splitlines()[-1][:160]}")
+        per_cell = {name: sum(f" {name}: " in f for f in failures) for name in present}
+        print(f"\n#19041 stress: {self.SCHEDULES} schedules x {len(present)} cells: {len(failures)} failed "
+              f"({', '.join(f'{name} {n}' for name, n in per_cell.items())})")
+        self.assertEqual(failures, [], f"{len(failures)} of {self.SCHEDULES * len(present)} runs failed; "
+                                       f"first: {failures[:3]}")
+
+    def test_schedules_cover_both_orders_and_every_step(self):
+        # A scorer that is right for only one read order, or for only one
+        # overlap, cannot pass the stress cell.
+        seen = set()
+        for schedule in range(self.SCHEDULES):
+            factory = interleaving_schedule(schedule)
+            seen.update((ex.first, ex.steps) for ex in (factory() for _ in range(3)))
+        self.assertEqual(seen, {(first, steps) for first in (0, 1) for steps in (0, 1, 2, 3)})
+
+    def test_the_fake_reproduces_the_handoff_straddle(self):
+        # Positive control: the fake must NOT hide the production hazard. A
+        # landing inside the first read, with the other read after it,
+        # yields a dual-active PAIR from a clean handoff.
+        for first, primary_after in ((0, 1), (1, 0)):
+            with self.subTest(first=first):
+                clock = FakeClock()
+                c = FakeCluster(clock, {2: 1 - primary_after})
+                c.pending[2] = (primary_after, clock.t + 0.01)
+                ex = InterleavingExecutor(first, steps=0)
+                f0, f1 = ex.submit(c.status, 0), ex.submit(c.status, 1)
+                v0, v1 = soak.parse_status(f0.result()), soak.parse_status(f1.result())
+                self.assertTrue(soak.rg_ownership(2, v0, v1).dual_active)
+
+
+class ScriptedIncus(soak.IncusCluster):
+    """The REAL IncusCluster (its cli() and status() build the `incus exec
+    <fw> -- cli -c ...` argv) with `_exec` answered from a script: per node,
+    the owner map that node's successive status reads see, the last one
+    repeating. A move CLI reports `transfer committed`."""
+
+    def __init__(self, reads):
+        super().__init__({0: "fw0", 1: "fw1"}, "lan", "target")
+        self.reads = {n: list(r) for n, r in reads.items()}
+        self.status_reads = {0: 0, 1: 0}
+
+    def _exec(self, ref, argv, timeout=None):
+        node = {"fw0": 0, "fw1": 1}[ref]
+        cmd = argv[-1]
+        if cmd.startswith("request chassis cluster failover"):
+            rg = int(re.search(r"redundancy-group (\d+)", cmd).group(1))
+            return 0, f"Manual failover completed for redundancy group {rg} (transfer committed)\n"
+        if cmd == "show chassis cluster status":
+            seq = self.reads[node]
+            owner = seq.pop(0) if len(seq) > 1 else seq[0]
+            self.status_reads[node] += 1
+            if owner is None:
+                return 0, ""  # an unreadable view
+            if owner == "dup":
+                return 0, status_text({2: 1}, node, dup=True)  # duplicate rows: unreadable
+            if owner == "dual":
+                return 0, status_text({2: node}, node)
+            return 0, status_text({2: owner}, node)
+        return 1, f"unexpected {argv!r}"
+
+
+class DualActiveScoring19041(unittest.TestCase):
+    """The soak's dual-active scoring, through the real Soak.views(),
+    IncusCluster.status() and one_rg(), with scripted node reads (#19041,
+    the review seat's reproduction)."""
+
+    def one_rg(self, reads, target=1):
+        clock = FakeClock()
+        c = ScriptedIncus(reads)
+        cfg = soak.Config(traffic=False, helper_check=False, budget=soak.Budget(converge_s=5.0))
+        s = soak.Soak(cfg, c, now_fn=clock.now, sleep_fn=clock.sleep, log=lambda *_: None)
+        pre = soak.Ownership(1 - target, False, "pre")
+        res, _, _ = s.one_rg(2, target, pre)
+        return res, c, s
+
+    def test_handoff_straddle_is_a_suspect_not_a_dual_active(self):
+        # node0 read just before the handoff, node1 just after: a dual PAIR,
+        # no real overlap. The immediate re-sample reads node1 owning it.
+        res, c, _ = self.one_rg({0: [0, 1], 1: [1]})
+        self.assertFalse(res.dual_active, res.last_detail)
+        self.assertEqual(res.dual_suspects, 1)
+        self.assertIsNotNone(res.landed_s)
+        self.assertEqual(c.status_reads, {0: 2, 1: 2})  # the suspect and its re-sample
+        rec = soak.MoveRecord(1, 1, 0, 0.0, 0.0, [res])
+        self.assertEqual(soak.move_verdict(rec, soak.Budget(), traffic_enabled=False)[0], soak.PASS)
+
+    def test_handoff_straddle_back_to_node0_is_a_suspect(self):
+        res, _, _ = self.one_rg({0: [0], 1: [1, 0]}, target=0)
+        self.assertFalse(res.dual_active, res.last_detail)
+        self.assertEqual(res.dual_suspects, 1)
+        self.assertIsNotNone(res.landed_s)
+
+    def test_overlapping_reads_of_a_real_dual_active_fail(self):
+        # Both nodes claim the RG in one sample (simultaneous reads) and the
+        # state is still there for the re-sample: a real dual-active.
+        res, _, _ = self.one_rg({0: ["dual", "dual", 1], 1: ["dual", "dual", 1]})
+        self.assertTrue(res.dual_active)
+        self.assertEqual(res.dual_suspects, 0)
+        rec = soak.MoveRecord(1, 1, 0, 0.0, 0.0, [res])
+        verdict, why = soak.move_verdict(rec, soak.Budget(), traffic_enabled=False)
+        self.assertEqual(verdict, soak.FAIL)
+        self.assertIn("dual-active", " ".join(why))
+
+    def test_sustained_dual_active_fails_and_never_lands(self):
+        res, _, _ = self.one_rg({0: ["dual"], 1: ["dual"]})
+        self.assertTrue(res.dual_active)
+        self.assertIsNone(res.landed_s)
+
+    def test_unreadable_re_sample_keeps_the_dual_active(self):
+        # Fail closed: a suspect the re-sample cannot read is not cleared.
+        res, c, _ = self.one_rg({0: [0, 1], 1: [1, None, 1]})
+        self.assertTrue(res.dual_active)
+        self.assertEqual(res.dual_suspects, 0)
+        self.assertIsNotNone(res.landed_s)  # it landed afterwards; the dual-active stands
+
+    def test_duplicate_row_re_sample_keeps_the_dual_active(self):
+        res, _, _ = self.one_rg({0: [0, "dup", 1], 1: [1]})
+        self.assertTrue(res.dual_active)
+        self.assertEqual(res.dual_suspects, 0)
+
+    def test_a_cleared_suspect_does_not_hide_a_later_real_dual_active(self):
+        # Suspect, cleared, landed; then the window sees a real dual-active.
+        res, c, s = self.one_rg({0: [0, 1, "dual", "dual", 1], 1: [1, 1, "dual", "dual", 1]})
+        self.assertFalse(res.dual_active)
+        self.assertEqual(res.dual_suspects, 1)
+        s._owners = {}
+        s.watch_window([res], s.now() + 1.0)
+        self.assertTrue(res.dual_active)
+
+    def test_window_suspect_is_not_a_revert(self):
+        # In the window, node0 reads primary once while node1 holds the RG,
+        # and the re-sample reads node1 owning it. That is a suspect: not a
+        # dual-active, and not a revert, because the revert check uses the
+        # re-sample's reading.
+        res, c, s = self.one_rg({0: [1, 1, 0, 1], 1: [1, 1, 1, 1]})
+        self.assertIsNotNone(res.landed_s)
+        s._owners = {}
+        before = res.dual_suspects
+        s.watch_window([res], s.now() + 0.5)
+        self.assertFalse(res.dual_active)
+        self.assertEqual(res.dual_suspects, before + 1)
+        self.assertEqual(res.reverted, "")
 
 
 if __name__ == "__main__":

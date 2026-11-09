@@ -26,9 +26,9 @@ What this harness does, per move:
   * polls BOTH nodes' own `show chassis cluster status` until the target is
     primary and the other node secondary/secondary-hold in both views, and the
     target's `Forwarding: rg-active=` line is active and the other's inactive;
-  * keeps sampling both views for the rest of the window, recording any
-    sample where both nodes claim the RG (dual-active) or the RG leaves the
-    target after landing;
+  * keeps sampling both views for the rest of the window, recording a
+    dual-active RG (both nodes claim it in a sample AND again in an immediate
+    re-sample, #19041) or the RG leaving the target after landing;
   * reads each helper's own `ha_groups[].forwarding_active` (active AND an
     unexpired lease) once the views converged;
   * proves the TRAFFIC moved: the target node's RETH members (from the
@@ -198,6 +198,12 @@ def rg_ownership(rg: int, view0: Dict[int, RGView], view1: Dict[int, RGView]) ->
     if r1 == "primary" and r0 in NON_OWNER_ROLES and f1 == "active" and f0 == "inactive":
         return Ownership(1, False, detail)
     return Ownership(None, False, detail)
+
+
+def views_readable(rg: int, view0: Dict[int, RGView], view1: Dict[int, RGView]) -> bool:
+    """Both nodes' own views carry `rg` exactly once."""
+    v0, v1 = view0.get(rg), view1.get(rg)
+    return v0 is not None and v1 is not None and not v0.duplicate and not v1.duplicate
 
 
 # ---------------------------------------------------------------------------
@@ -492,7 +498,7 @@ class RGMoveResult:
     cli_seconds: float
     landed_s: Optional[float]  # seconds from issue until both views agreed, None if never
     last_detail: str
-    dual_active: bool
+    dual_active: bool  # dual-active in a sample AND its immediate re-sample (#19041)
     helper: Optional[Dict[int, Optional[bool]]] = None  # node -> helper rg active, at landing
     reverted: str = ""  # non-empty: the joint view left the target after landing, in-window
     # Traffic-follow evidence, read after landing and at the window's end:
@@ -501,6 +507,10 @@ class RGMoveResult:
     member_delta: Optional[Dict[int, Optional[int]]] = None
     neigh_node: Optional[Dict[str, Optional[int]]] = None
     follow_expected: bool = False  # the RG has RETH members to measure
+    # Dual-active samples that an immediate re-sample did not repeat: two
+    # non-simultaneous reads straddling a clean handoff (#19041). Recorded,
+    # not scored.
+    dual_suspects: int = 0
 
 
 @dataclass
@@ -631,7 +641,7 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
         elif r.cli_class == CLI_OTHER:
             reasons.append(f"RG{r.rg} unexpected CLI output: {r.cli_first}")
         if r.dual_active:
-            reasons.append(f"RG{r.rg} dual-active sample during the move window")
+            reasons.append(f"RG{r.rg} dual-active during the move window (a sample and its immediate re-sample)")
         if r.landed_s is None:
             reasons.append(f"RG{r.rg} did not land on node{r.target} within {budget.converge_s:g}s of the CLI returning (last: {r.last_detail})")
             continue
@@ -1365,15 +1375,18 @@ class Soak:
                     udp_probe = {"status": "VOID",
                                  "detail": "UDP sequence probe post-commit checkpoint became unavailable",
                                  "metrics": {}}
-        landed, dual, last = None, False, pre.detail
+        landed, dual, last, suspects = None, False, pre.detail, 0
         # Bound: the RG must have landed before the operator's next command,
         # which their loop issues `sleep S` after this one returns.
         deadline = t_ret + self.cfg.budget.converge_s
         while True:
             v0, v1 = self.views()
             own = rg_ownership(rg, v0, v1)
+            if own.dual_active:
+                own, confirmed = self.resolve_dual_suspect(rg, own)
+                dual = dual or confirmed
+                suspects += 0 if confirmed else 1
             last = own.detail
-            dual = dual or own.dual_active
             if own.owner == target:
                 landed = self.now() - t0
                 break
@@ -1404,8 +1417,34 @@ class Soak:
         # watch_window at the END of the window, not here at landing.
         res = RGMoveResult(rg, target, pre.owner, pre.detail, cls, first, rc, round(t_ret - t0, 3),
                            None if landed is None else round(landed, 3), last, dual)
+        res.dual_suspects = suspects
         res.follow_expected = self.cfg.traffic and self.cfg.helper_check and bool(self.members.get(rg))
         return res, t_ret, udp_probe
+
+    def resolve_dual_suspect(self, rg: int, suspect: Ownership) -> Tuple[Ownership, bool]:
+        """A dual-active sample is a SUSPECT until an immediate re-sample
+        repeats it (#19041). Returns (the reading to use, dual-active?).
+
+        views() reads node0 and node1 with two independent `show chassis
+        cluster status` commands. They run in parallel but do not read one
+        instant, so a clean handoff can be read as node0 primary (just
+        before) and node1 primary (just after) with no real overlap. Timing
+        the reads cannot rule that out: parallel reads always overlap, and
+        neither command says when inside its run it read the state. A real
+        dual-active is a STATE: it is still there one sample later. The
+        straddle cannot recur in the next sample, because both of that
+        sample's reads come after the handoff.
+
+        Fail closed. If the re-sample is unreadable, the suspicion cannot be
+        cleared and the pair counts as dual-active. If the re-sample is
+        readable and not dual-active, its reading replaces the suspect's."""
+        v0, v1 = self.views()
+        again = rg_ownership(rg, v0, v1)
+        if again.dual_active:
+            return again, True
+        if not views_readable(rg, v0, v1):
+            return Ownership(None, True, f"{suspect.detail} (re-sample unreadable: {again.detail})"), True
+        return again, False
 
     def watch_window(self, results: List[RGMoveResult], until: float):
         """Keep sampling both views until the window ends: a move that
@@ -1414,7 +1453,10 @@ class Soak:
             v0, v1 = self.views()
             for r in results:
                 own = rg_ownership(r.rg, v0, v1)
-                r.dual_active = r.dual_active or own.dual_active
+                if own.dual_active:
+                    own, confirmed = self.resolve_dual_suspect(r.rg, own)
+                    r.dual_active = r.dual_active or confirmed
+                    r.dual_suspects += 0 if confirmed else 1
                 if r.landed_s is not None and own.owner != r.target and not r.reverted:
                     r.reverted = own.detail
                 self._owners[r.rg] = own
