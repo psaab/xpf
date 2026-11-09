@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"log/slog"
+	"net"
 	"strings"
 	"testing"
 
@@ -44,6 +45,15 @@ import (
 //
 // RED-on-revert: put the site back on logging.ParseFacility (or drop the
 // !known warn) and the unmapped subtest goes silent.
+//
+// The installed-client cells dial a UDP sink of their own on loopback
+// (loopbackSyslogSink19049), not a TEST-NET collector. A UDP client dials at
+// construction and a failed dial installs nothing, so `192.0.2.10:514` made
+// "one installed client" a fact about THIS HOST'S ROUTING TABLE: in the
+// test-runner's private network namespace (scripts/testguard-run.sh: loopback
+// only, no default route) connect() fails with ENETUNREACH and every
+// installed-client cell read 0 (#19049). The daemon twin of this test was
+// moved to a loopback sink for the same reason in #9359; this copy was missed.
 func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 	build := func(t *testing.T, facility string) (string, []*logging.SyslogClient) {
 		t.Helper()
@@ -55,7 +65,7 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
 			"audit": {
-				Name: "audit", Host: "192.0.2.10", Port: 514,
+				Name: "audit", Host: "127.0.0.1", Port: loopbackSyslogSink19049(t),
 				Facility: facility, Severity: "info",
 			},
 		}
@@ -132,9 +142,9 @@ func TestBuildSyslogClientsWarnsOnUnmappedFacility_6829(t *testing.T) {
 	t.Run("unmapped and mapped streams get different facilities", func(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Security.Log.Streams = map[string]*config.SyslogStream{
-			"unmappable": {Name: "unmappable", Host: "192.0.2.10", Port: 514,
+			"unmappable": {Name: "unmappable", Host: "127.0.0.1", Port: loopbackSyslogSink19049(t),
 				Facility: "security", Severity: "info"},
-			"mapped": {Name: "mapped", Host: "192.0.2.11", Port: 514,
+			"mapped": {Name: "mapped", Host: "127.0.0.1", Port: loopbackSyslogSink19049(t),
 				Facility: "auth", Severity: "info"},
 		}
 		clients := buildSyslogClients(cfg)
@@ -264,4 +274,19 @@ func TestBuildSyslogClientsKeepsDefaultFacilityWhenUnset_6829(t *testing.T) {
 				"local0", got, logging.FacilityAuth)
 		}
 	})
+}
+
+// loopbackSyslogSink19049 opens a UDP sink on loopback and returns its port,
+// for a cell that needs an INSTALLED client: the client's construction-time
+// dial then depends on loopback only, not on a route off the box. The sink is
+// the test's own, so no other host is contacted and nothing else listens on
+// it. Same shape as pkg/daemon's loopbackSyslogSink9359.
+func loopbackSyslogSink19049(t *testing.T) int {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("open a loopback syslog sink: %v", err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	return pc.LocalAddr().(*net.UDPAddr).Port
 }
