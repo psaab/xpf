@@ -306,6 +306,30 @@ pub(super) fn run_session_housekeeping(
             }
         }
     }
+    // #19026 (Codex review of bbe57884f2, P2#3): an overflow chunk's purge
+    // can succeed and its flush then lose the permit race, requeueing the
+    // chunk into the ring. A purge count does not prove the flush retired it.
+    // Master drained the ring once more after the overflow suffix; so does
+    // this, through the same bounded barrier, so requeued teardown retires (or
+    // holds RX inside the bound) before RX polls.
+    if sessions.has_pending_deltas()
+        && drain_ring_bounded(
+            sessions,
+            bindings,
+            binding_lookup,
+            shared_recycles,
+            shared_runtime,
+            shared_sessions,
+            shared_owner_rg_indexes,
+            worker_lossless_wedged,
+            close_barrier,
+            worker_id,
+            loop_now_ns,
+            flush_deltas,
+        )
+    {
+        return true;
+    }
     close_barrier.clear(sessions);
     false
 }
@@ -436,13 +460,33 @@ fn retry_parked_closes(
         &[SessionDelta],
     ),
 ) {
+    // #19026 (Codex review of bbe57884f2, P1): a pressure-shed Close that
+    // parked is invisible to `SessionTable::cancel_pending_close`, which
+    // searches the ring. Reply evidence found since then records the
+    // cancellation instead; apply it before any parked Close is retried, so a
+    // reply-protected flow is never torn down. Taken every call, so stale
+    // records (the Close already retired) never accumulate.
+    let cancelled = sessions.take_parked_close_cancellations();
     if close_barrier.parked.is_empty() {
         return;
+    }
+    if !cancelled.is_empty() {
+        close_barrier.parked.retain(|delta| {
+            !(delta.kind == SessionDeltaKind::Close
+                && cancelled
+                    .iter()
+                    .any(|(key, session_id)| *key == delta.key && *session_id == delta.session_id))
+        });
     }
     let parked = std::mem::take(&mut close_barrier.parked);
     let mut still_parked = Vec::new();
     for delta in parked {
-        if !close_permits_available(&delta) {
+        // #19026 (Codex review of bbe57884f2, P2#2): a retry whose flush loses
+        // the permit race is requeued by the flush; with no ring room that
+        // requeue drops it, and the retry below would read "not requeued" as
+        // retired. Retry only with room; the ring drain later this tick makes
+        // room.
+        if !close_permits_available(&delta) || !sessions.delta_ring_has_room() {
             still_parked.push(delta);
             continue;
         }

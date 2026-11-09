@@ -150,13 +150,33 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     slot, and the drain continues in the same tick: every delta behind it
     (the other Closes, HA sync, RT_FLOW, the RPC mirror) retires before RX
     polls. The parked Close is retried first on every tick and retires once
-    its permit frees. A same-tuple reincarnation that overtakes it is safe:
+    its permit frees. Three rules keep the parked slot as good as the ring
+    it left (Codex review of bbe57884f2):
+    - **Cancellation reaches it.** `SessionTable::cancel_pending_close` (the
+      pressure-shed retry's reply-evidence protection) searches the ring.
+      For a Close it cannot find there, it records a cancellation, which the
+      parked retry applies before retrying anything. Without that rule a
+      reply-protected flow was torn down by its parked Close.
+    - **A retry needs ring room.** A retry whose flush loses the permit race
+      is requeued by that flush, and `requeue_deltas_front` drops what does
+      not fit. So a parked Close is retried only while the ring has a free
+      slot; the ring drain later in the tick makes one.
+    - **The ring is drained once more after the overflow suffix.** An
+      overflow chunk's flush can lose its permit race and requeue the chunk
+      into the ring, so a successful purge does not mean the Close retired.
+      Master ran a final ring drain after the suffix; so does this, through
+      the same bounded barrier.
+
+    A same-tuple reincarnation that overtakes it is safe:
     the flush's stale-incarnation fence makes the old Close's local teardown
     id-conditional, and when the EXACT key (scope included) now holds the
     reincarnation the old Close's HA legs are skipped altogether. The binary
     HA Close carries no id, so in routing domain 0 it would be a bare delete
     of the reincarnation on the peer (Codex R16 F1; see `afxdp/README.md`
-    "A superseded stale Close sends no HA close").
+    "A superseded stale Close sends no HA close"). That holds only for a
+    reincarnation the peer hears of. A same-id re-materialization (#19047) is
+    NOT a reincarnation: its newer promote Open can follow the parked
+    Close (Codex observed `ha=[2,1]`).
   - **One order for the ring and the deferred overflow suffix (#10309).** An
     overflow Close that could not retire is kept in
     `deferred_expiry_overflow_deltas` and retried on later ticks AFTER the

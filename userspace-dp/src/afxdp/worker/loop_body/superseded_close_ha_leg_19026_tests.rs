@@ -684,3 +684,375 @@ fn a_close_that_is_not_superseded_mirrors_its_rpc_fallback_close_19026() {
         "an ordinary Close keeps its fallback leg"
     );
 }
+
+// ---------------------------------------------------------------------------
+// #19026 Part 1 barrier cells on the real-flush harness, from Codex's review
+// of bbe57884f2 (probes in rev-codex-19026p1/review-probes), plus R13's D10.
+// Each was RED at bbe57884f2.
+// ---------------------------------------------------------------------------
+
+impl F1Worker {
+    fn tick_with_flush_race(&mut self, now_ns: u64) -> bool {
+        let Self {
+            table,
+            queue,
+            barrier,
+            overflow,
+            recycles,
+            wedged,
+            shared_sessions,
+            shared_nat,
+            shared_wire,
+            indexes,
+            recent,
+            event_stream,
+            runtime,
+            rg_epochs,
+            pptp,
+            forwarding,
+            ..
+        } = self;
+        let ha = ha_at(now_ns);
+        let by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> =
+            [(0u32, queue.clone())].into_iter().collect();
+        let command_queues = crate::afxdp::types::WorkerCommandQueues::new(by_id.clone());
+        let shared_runtime = runtime.reader();
+        let peers: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let mut race_once = true;
+        let mut flush_deltas = |sessions: &mut SessionTable,
+                                bindings: &mut [BindingWorker],
+                                wedged: &mut bool,
+                                deltas: &[SessionDelta]| {
+            let hold = if race_once && deltas.first().is_some_and(|d| d.kind == SessionDeltaKind::Close) {
+                race_once = false;
+                Some(crate::afxdp::bpf_map::global_tuple_gate()
+                    .try_acquire_installs(crate::afxdp::session_delta::close_install_keys(&deltas[0]))
+                    .expect("inject another holder between purge and real flush"))
+            } else { None };
+            super::flush_session_deltas_loop(
+                sessions,
+                bindings,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                shared_sessions,
+                shared_nat,
+                shared_wire,
+                indexes,
+                recent,
+                &peers,
+                &by_id,
+                event_stream,
+                forwarding,
+                &shared_runtime,
+                wedged,
+                0,
+                deltas,
+            );
+            drop(hold);
+        };
+        run_session_housekeeping(
+            table,
+            &mut Vec::new(),
+            &WorkerBindingLookup::default(),
+            forwarding,
+            &ha,
+            now_ns,
+            now_ns / SEC,
+            rg_epochs,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            0,
+            &command_queues,
+            pptp,
+            Some(&*queue),
+            &peers,
+            shared_sessions,
+            shared_nat,
+            shared_wire,
+            indexes,
+            &shared_runtime,
+            wedged,
+            recycles,
+            overflow,
+            barrier,
+            &mut flush_deltas,
+        )
+    }
+
+}
+
+/// Codex P1: a pressure-shed Close of an unreplied UDP session parks on its
+/// tuple permit; a serving sibling then publishes reply evidence. The
+/// pressure retry's cancellation must reach the PARKED Close, as on master
+/// it reached the ring head: the reply-protected flow survives, with no
+/// RT_FLOW Close. Returns (A's RT_FLOW Closes, the shared row's id, A's id).
+fn pressure_cancel_case(src_port: u16, park: bool) -> (usize, Option<u64>, u64) {
+    let mut w = F1Worker::new();
+    w.table.set_max_sessions_for_test(1);
+    let key = f1_key(src_port, 0);
+    let t0 = crate::afxdp::neighbor::monotonic_nanos();
+    let old_id = w.install(&key, t0);
+    let row = w.table.synced_entry_for(&key).expect("row");
+    w.export_ring();
+    w.drain_frames();
+    w.frames.clear();
+    let (admitted, sheds) = w.table.can_admit_new_flow(1, PROTO_UDP, 0);
+    assert!(admitted, "FIXTURE: the new flow is admitted by shedding");
+    assert_eq!(sheds.len(), 1, "FIXTURE: one pressure victim");
+    assert_eq!(sheds[0].session_id, old_id, "FIXTURE: A is the victim");
+    w.table.defer_pressure_shed(sheds);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([key.clone()])
+        .expect("hold the victim's permit");
+    assert!(w.tick(t0 + 1), "FIXTURE: the blocked Close holds the first tick");
+    if park {
+        assert!(!w.tick(t0 + 1_000_001), "FIXTURE: past the bound RX polls");
+        assert_eq!(w.barrier.parked.len(), 1, "FIXTURE: the Close parked");
+    } else {
+        assert!(w.barrier.parked.is_empty(), "FIXTURE: the Close is still in the ring");
+    }
+    drop(held);
+    let mut reverse = row.clone();
+    reverse.key = crate::session::reverse_session_key(&key, row.decision.nat);
+    reverse.metadata.is_reverse = true;
+    reverse.rev_packets = 1;
+    w.publish(&reverse);
+    assert!(
+        crate::afxdp::shared_ops::shared_session_replied(&w.shared_sessions, &key, row.decision.nat),
+        "FIXTURE: reply evidence is published"
+    );
+    assert!(!w.tick(t0 + 2_000_001));
+    (w.rt_flow_closes(old_id), w.shared_id(&key), old_id)
+}
+
+#[test]
+fn reply_evidence_cancels_a_parked_pressure_close_19026() {
+    let (rt, shared, id) = pressure_cancel_case(19_191, true);
+    assert_eq!(
+        (rt, shared),
+        (0, Some(id)),
+        "Codex P1: a reply-protected pressure victim survives its parked Close"
+    );
+}
+
+/// Control: the same Close still at the ring head (inside the bound) was
+/// already cancelled before parking existed.
+#[test]
+fn reply_evidence_cancels_a_ring_pressure_close_19026() {
+    let (rt, shared, id) = pressure_cancel_case(19_194, false);
+    assert_eq!((rt, shared), (0, Some(id)));
+}
+
+/// Codex P2#2: a parked Close whose retry loses the flush-side permit race
+/// with a FULL ring. `requeue_deltas_front` drops what does not fit, so the
+/// retry must not run without ring room; the Close stays owed and retires
+/// once room exists. Returns (owed copies of A after the racing tick, A's
+/// RT_FLOW Closes after 4 more ticks, whether the shared row still names A,
+/// ring drops).
+fn parked_race_case(src_port: u16, ring_count: usize, inject_race: bool) -> (usize, usize, usize, u64) {
+    let mut w = F1Worker::new();
+    let key = f1_key(src_port, 0);
+    let t0 = crate::afxdp::neighbor::monotonic_nanos();
+    let old_id = w.install(&key, t0);
+    w.export_ring();
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([key.clone()])
+        .expect("hold A's permit");
+    let mut now = t0;
+    while w.barrier.parked.is_empty() {
+        now += SEC;
+        assert!(now < t0 + 200 * SEC, "FIXTURE: A's Close never parked");
+        w.tick(now);
+    }
+    drop(held);
+    for i in 0..ring_count {
+        w.table.emit_open_delta_with_origin(
+            f1_key(20_000 + i as u16, 0),
+            f1_decision(),
+            f1_metadata(),
+            SessionOrigin::ForwardFlow,
+            false,
+        );
+    }
+    assert_eq!(w.table.pending_delta_count(), ring_count, "FIXTURE: ring fill");
+    if inject_race {
+        w.tick_with_flush_race(now + 1);
+    } else {
+        w.tick(now + 1);
+    }
+    let owed = w.barrier.parked.iter().filter(|d| d.session_id == old_id).count()
+        + w.overflow.iter().filter(|d| d.session_id == old_id).count();
+    for tick in 1..=4 {
+        w.tick(now + tick * 1_000_000);
+    }
+    let rt = w.rt_flow_closes(old_id);
+    let shared = usize::from(w.shared_id(&key) == Some(old_id));
+    (owed, rt, shared, w.table.delta_drops())
+}
+
+#[test]
+fn a_parked_close_survives_a_flush_race_with_a_full_ring_19026() {
+    let (_owed, rt, shared, drops) = parked_race_case(19_190, 4096, true);
+    assert_eq!(
+        (rt, shared, drops),
+        (1, 0, 0),
+        "Codex P2#2: the parked Close survives and retires once, with no ring drop"
+    );
+}
+
+/// Controls: the same race with one free slot, and a full ring with no race.
+#[test]
+fn a_parked_close_flush_race_controls_19026() {
+    let (_, rt, shared, drops) = parked_race_case(19_195, 4095, true);
+    assert_eq!((rt, shared, drops), (1, 0, 0), "room in the ring");
+    let (_, rt, shared, drops) = parked_race_case(19_196, 4096, false);
+    assert_eq!((rt, shared, drops), (1, 0, 0), "full ring, no race");
+}
+
+/// Codex P2#3: an overflow Close whose purge succeeds and whose flush then
+/// loses the permit race is requeued into the ring. The tick must not
+/// return to RX with that teardown pending: it retires the Close or holds RX
+/// inside the bound (master's final ring drain). Returns (skip RX, A's
+/// RT_FLOW Closes, ring depth, parked).
+fn overflow_race_case(src_port: u16, inject_race: bool) -> (bool, usize, usize, usize) {
+    let mut w = F1Worker::new();
+    let key = f1_key(src_port, 0);
+    let t0 = crate::afxdp::neighbor::monotonic_nanos();
+    let old_id = w.install(&key, t0);
+    w.export_ring();
+    w.table.delete_with_control_close(&key, 0);
+    let close = w.table.drain_deltas(1).pop().expect("close");
+    assert_eq!(close.session_id, old_id, "FIXTURE: A's Close");
+    w.overflow.push(close);
+    let skip = if inject_race {
+        w.tick_with_flush_race(t0 + 1)
+    } else {
+        w.tick(t0 + 1)
+    };
+    (
+        skip,
+        w.rt_flow_closes(old_id),
+        w.table.pending_delta_count(),
+        w.barrier.parked.len(),
+    )
+}
+
+#[test]
+fn an_overflow_flush_race_keeps_teardown_before_rx_19026() {
+    let (skip, rt, ring, parked) = overflow_race_case(19_192, true);
+    assert!(
+        rt == 1 || (skip && ring + parked == 1),
+        "Codex P2#3: retire the overflow Close or hold RX inside the bound \
+         (skip={skip} rt={rt} ring={ring} parked={parked})"
+    );
+}
+
+#[test]
+fn an_overflow_close_without_a_race_retires_in_one_tick_19026() {
+    assert_eq!(overflow_race_case(19_197, false), (false, 1, 0, 0));
+}
+
+/// R13 D10 (F1-gap): a replacement the peer never hears of does not
+/// supersede the old Close. Close(A) meets B on its exact key, where B is a
+/// `MissingNeighborSeed` (telemetry-only, #13974) or a `LocalDelivery`
+/// session (the Go sender drops both). A's HA Close must still go, or the
+/// peer keeps A until its own expiry. `in_shared` also publishes B to the
+/// shared map, so both lookups of the gate are exercised.
+fn non_announcing_replacement_case(
+    src_port: u16,
+    origin: SessionOrigin,
+    local_delivery: bool,
+    in_shared: bool,
+) -> Vec<u8> {
+    let mut w = F1Worker::new();
+    let key = f1_key(src_port, 0);
+    let t0 = 10_000 * SEC;
+    let old_id = w.install(&key, t0);
+    w.export_ring();
+    let mut decision = f1_decision();
+    if local_delivery {
+        decision.resolution.disposition = ForwardingDisposition::LocalDelivery;
+    }
+    assert!(
+        w.table.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            f1_metadata(),
+            origin,
+            t0 + SEC,
+            PROTO_UDP,
+            0,
+        ),
+        "FIXTURE: B installs over A"
+    );
+    let b = w.table.synced_entry_for(&key).expect("B");
+    assert_ne!(b.session_id, old_id, "FIXTURE: a new incarnation");
+    if in_shared {
+        w.publish(&b);
+    }
+    w.export_ring();
+    w.drain_frames();
+    w.frames.clear();
+    let close = {
+        let mut producer = SessionTable::new();
+        producer.emit_close_delta_with_origin(
+            key.clone(),
+            f1_decision(),
+            f1_metadata(),
+            SessionOrigin::ForwardFlow,
+            false,
+            old_id,
+        );
+        producer.drain_deltas(1).pop().expect("close")
+    };
+    w.flush(&[close]);
+    w.ha_frames(&key)
+}
+
+#[test]
+fn a_replacement_the_peer_never_hears_of_does_not_suppress_the_old_ha_close_19026() {
+    let close = crate::event_stream::codec::MSG_SESSION_CLOSE;
+    for in_shared in [false, true] {
+        assert_eq!(
+            non_announcing_replacement_case(
+                19_198 + u16::from(in_shared),
+                SessionOrigin::MissingNeighborSeed,
+                false,
+                in_shared
+            ),
+            vec![close],
+            "R13 D10: a seed replacement (in_shared={in_shared}) keeps A's HA Close"
+        );
+        assert_eq!(
+            non_announcing_replacement_case(
+                19_200 + u16::from(in_shared),
+                SessionOrigin::ForwardFlow,
+                true,
+                in_shared
+            ),
+            vec![close],
+            "a local-delivery replacement (in_shared={in_shared}) keeps A's HA Close"
+        );
+    }
+}
+
+/// Twin: an announcing replacement on the same exact key still supersedes
+/// (its Open replaces the peer's row): A's HA Close is suppressed.
+#[test]
+fn an_announcing_replacement_still_suppresses_the_old_ha_close_19026() {
+    let open = crate::event_stream::codec::MSG_SESSION_OPEN;
+    for in_shared in [false, true] {
+        let frames = non_announcing_replacement_case(
+            19_202 + u16::from(in_shared),
+            SessionOrigin::ForwardFlow,
+            false,
+            in_shared,
+        );
+        assert!(
+            !frames.contains(&crate::event_stream::codec::MSG_SESSION_CLOSE),
+            "an announcing replacement (in_shared={in_shared}) suppresses A's HA Close: {frames:?} (open={open})"
+        );
+    }
+}

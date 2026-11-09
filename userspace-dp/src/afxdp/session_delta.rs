@@ -198,9 +198,12 @@ pub(super) fn close_delta_is_stale_incarnation(
 
 /// #19026 (Codex R16 F1): the Close's EXACT key (routing domain and
 /// discriminator included) now holds a different nonzero incarnation, in this
-/// worker's table or in the shared primary map. A replacement under another
-/// scope of the same bare tuple does NOT count: the peer keys that one
-/// differently, so the old key still needs its delete.
+/// worker's table or in the shared primary map, AND that incarnation reaches
+/// the peer's row for the key (`replacement_reaches_the_peer`). A replacement
+/// under another scope of the same bare tuple does NOT count: the old key
+/// keeps its own delete. (For a routing-domain-0 Close that delete is bare on
+/// the peer, so it can retract another scope's peer row; that is #10512's
+/// residual, stated in afxdp/README.md.)
 pub(super) fn close_delta_is_superseded_on_exact_key(
     delta: &SessionDelta,
     current_sessions: Option<&crate::session::SessionTable>,
@@ -210,12 +213,42 @@ pub(super) fn close_delta_is_superseded_on_exact_key(
     if delta.session_id == 0 {
         return false;
     }
-    if current_sessions.is_some_and(|sessions| other(sessions.session_id_for(&delta.key))) {
+    if current_sessions.is_some_and(|sessions| {
+        sessions
+            .exact_row_announcement(&delta.key)
+            .is_some_and(|(id, origin, disposition)| {
+                other(id) && replacement_reaches_the_peer(origin, disposition)
+            })
+    }) {
         return true;
     }
     super::shared_ops::lock_shared_recover(shared_sessions)
         .get(&delta.key)
-        .is_some_and(|entry| other(entry.session_id))
+        .is_some_and(|entry| {
+            other(entry.session_id)
+                && replacement_reaches_the_peer(entry.origin, entry.decision.resolution.disposition)
+        })
+}
+
+/// #19026 (R13 review of bbe57884f2, F1-gap): whether a same-key replacement
+/// replaces the PEER's row for the key, which is what makes the old Close's
+/// bare HA delete redundant (and harmful). A replacement the peer never hears
+/// of does not: suppressing the old Close would leave A on the peer until its
+/// own expiry.
+/// - `MissingNeighborSeed`: telemetry-only here (#13974, `telemetry_only_seed`
+///   below) and dropped by the Go sender (`isTransientLocalSeedOrigin`,
+///   `pkg/daemon/daemon_ha_userspace_stream.go`). It never reaches the peer.
+/// - `LocalDelivery` disposition: the Go sender drops it too.
+/// - `FabricPuntSeed` is also dropped by the Go sender, but it stands for a
+///   flow the PEER adjudicated (#7770, #18620). The peer's own row for the key
+///   is the authority there, and a bare delete of the key would remove it, so
+///   it still supersedes.
+pub(super) fn replacement_reaches_the_peer(
+    origin: crate::session::SessionOrigin,
+    disposition: ForwardingDisposition,
+) -> bool {
+    origin != crate::session::SessionOrigin::MissingNeighborSeed
+        && disposition != ForwardingDisposition::LocalDelivery
 }
 
 pub(super) fn purge_retirement_close_is_stale(

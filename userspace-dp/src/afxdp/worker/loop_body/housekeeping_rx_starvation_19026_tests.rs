@@ -903,6 +903,45 @@ fn closes_behind_a_blocked_head_retire_before_rx_polls_19026() {
     );
 }
 
+/// The same with TWO blocked Closes in the ring, each with a free Close
+/// behind it. Past the bound, the drain parks the first blocked Close and
+/// keeps going, parks the second and keeps going, so both free Closes retire
+/// before RX polls. The final ring drain after the overflow suffix (Codex
+/// review of bbe57884f2, P2#3) covers only ONE more stop, so it cannot stand
+/// in for "keep draining after a park".
+#[test]
+fn closes_behind_two_blocked_heads_retire_before_rx_polls_19026() {
+    let mut h = Harness19026::new();
+    let stuck = [key_19026(19_072), key_19026(19_074)];
+    let behind = [key_19026(19_073), key_19026(19_075)];
+    h.queue_close(stuck[0].clone(), 0x1902_6072);
+    h.queue_close(behind[0].clone(), 0x1902_6073);
+    h.queue_close(stuck[1].clone(), 0x1902_6074);
+    h.queue_close(behind[1].clone(), 0x1902_6075);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([stuck[0].clone(), stuck[1].clone()])
+        .expect("hold both stuck tuples");
+    let mut now = BASE_NS;
+    let mut first_rx_tick = None;
+    for tick in 0..PARKED_BY_TICKS {
+        if !h.tick(now) {
+            first_rx_tick = Some(tick);
+            break;
+        }
+        now += TICK_NS;
+    }
+    let behind_flushed = [h.flushed_closes_for(&behind[0]), h.flushed_closes_for(&behind[1])];
+    let parked = h.close_barrier.parked.len();
+    drop(held);
+    assert!(first_rx_tick.is_some(), "FIXTURE: RX polls within the bound");
+    assert_eq!(parked, 2, "both blocked Closes are parked");
+    assert_eq!(
+        behind_flushed,
+        [1, 1],
+        "#19026 R13 R1(b): every free Close behind a blocked one retires before RX polls"
+    );
+}
+
 /// Codex R15 P1#3 / R13 N2 (cycle 2): a deferred overflow Close must not
 /// overtake an OLDER Open of its own session still queued in the ring behind
 /// a blocked head. 2e7dfd349b retried the deferred suffix before the ring and

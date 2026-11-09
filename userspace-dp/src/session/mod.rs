@@ -2490,6 +2490,9 @@ pub(crate) struct SessionTable {
     /// the post-RX export/recovery slices leave the ring alone instead of
     /// re-draining it and skipping the rest of the tick. Worker-local.
     close_head_blocked: bool,
+    /// #19026: Close cancellations for the worker's parked slot (see
+    /// `cancel_pending_close`). Taken every housekeeping tick.
+    parked_close_cancellations: Vec<(SessionKey, u64)>,
 }
 
 /// #17083: the caller-specific half of an in-place refresh, handed to
@@ -2682,6 +2685,7 @@ impl SessionTable {
             tombstone_log: Vec::new(),
             tombstone_drops: 0,
             close_head_blocked: false,
+            parked_close_cancellations: Vec::new(),
         }
     }
 
@@ -4337,6 +4341,15 @@ impl SessionTable {
     #[inline]
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
+    }
+    /// #19026: the session id, origin and disposition of the row under
+    /// exactly `key` (the superseded-Close gate, `afxdp/session_delta.rs`).
+    pub(crate) fn exact_row_announcement(
+        &self,
+        key: &SessionKey,
+    ) -> Option<(u64, SessionOrigin, crate::afxdp::ForwardingDisposition)> {
+        self.entry_by_key(key)
+            .map(|e| (e.session_id, e.origin, e.decision.resolution.disposition))
     }
     /// Capture the identity used to fence a deferred ct-slice shared-evidence
     /// emission against a same-key replacement or NAT-decision rewrite.
@@ -7508,10 +7521,29 @@ impl SessionTable {
                 && delta.key == *key
                 && delta.session_id == session_id
         }) else {
+            // #19026: the Close may have left the ring for the worker's
+            // parked slot (`worker/loop_body/close_barrier.rs`), which this
+            // table cannot see. Record the cancellation; the parked retry
+            // applies it before retrying anything.
+            if session_id != 0 {
+                self.parked_close_cancellations.push((key.clone(), session_id));
+            }
             return false;
         };
         self.deltas.remove(pos);
         true
+    }
+
+    /// #19026: cancellations `cancel_pending_close` could not apply to the
+    /// ring (see there), taken by the worker's parked-Close retry.
+    pub(crate) fn take_parked_close_cancellations(&mut self) -> Vec<(SessionKey, u64)> {
+        std::mem::take(&mut self.parked_close_cancellations)
+    }
+
+    /// #19026: whether the delta ring can take one more delta (a flush that
+    /// loses its permit race requeues the Close it was handed).
+    pub(crate) fn delta_ring_has_room(&self) -> bool {
+        self.deltas.len() < MAX_SESSION_DELTAS
     }
 
     /// Requeue drained deltas at the front when a tuple gate could not be

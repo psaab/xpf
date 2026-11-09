@@ -2647,7 +2647,9 @@ teardown, but skips the bare-keyed BPF/conntrack deletes. #19026 adds one
 narrower case on top of it. A stale Close is SUPERSEDED when its EXACT key
 (routing domain and discriminator included) holds a different nonzero
 incarnation, in the flushing worker's table or in the shared primary map
-(`close_delta_is_superseded_on_exact_key`). For a superseded Close the flush
+(`close_delta_is_superseded_on_exact_key`), and that incarnation reaches the
+peer's row for the key (`replacement_reaches_the_peer`). For a superseded
+Close the flush
 skips only the HA session-sync legs: the binary event-stream frame and the
 RPC fallback. The id-conditional local teardown and the RT_FLOW
 SESSION_CLOSE still run.
@@ -2664,8 +2666,33 @@ SESSION_CLOSE still run.
 - **Why skipping is safe.** The replacement's own Open overwrites the peer's
   row for that exact key, and the replacement's own Close later retracts it.
 - **Other-scope staleness** (the same bare tuple under another routing domain
-  or discriminator, #10512) is not superseded: the peer keys that session
-  differently, so the old key keeps its HA Close.
+  or discriminator, #10512) is not superseded, so the old key keeps its HA
+  Close. It is the old key's own delete.
+  - **Residual, pre-existing (#10512 class; R14 review of bbe57884f2, B).**
+    A routing-domain-0 Close goes out as a BARE delete
+    (`queueDeltaSink.deleteV4/V6` needs a stated domain for the scoped
+    form). The peer resolves it through its bare-keyed mirror
+    (`pkg/dataplane/types.go` `SessionKey` has no domain;
+    `session_store.go` `DeleteWithCompanions*` -> `GetSession*` ->
+    `DeleteKnown*`).
+  - So if the peer's mirror row for the bare tuple is the OTHER scope's
+    session, the domain-0 Close can retract it. That session is an import
+    there, so the #9714 guard does not refuse it.
+  - Master has the same cross-worker. Parking adds the same-worker order.
+    Gating it is a #10512 design question.
+- **A replacement the peer never hears of does not supersede** (R13 review of
+  bbe57884f2, F1-gap). A `MissingNeighborSeed` is telemetry-only (#13974),
+  and the Go sender drops both it and a `LocalDelivery` session
+  (`daemon_ha_userspace_stream.go`). With such a replacement the peer still
+  holds A, so A keeps its HA Close.
+  - A `FabricPuntSeed` is also dropped by the Go sender, but it stands for a
+    flow the PEER adjudicated (#7770, #18620). The peer's own row is the
+    authority there, and a bare delete would remove it, so it still
+    supersedes.
+    - Residual (R14 review of bbe57884f2, C): if the peer's row for the key
+      is still A, nothing announces a replacement, and A ages out by the
+      peer's own idle or HOLD-ceiling expiry, `min(3 x timeout, ABS)`. That
+      is bounded and converging.
 - **Residual.** A different local or shared id is not proof that the peer
   received Open(B). If Open(B) is lost (stream loss), the peer keeps A until
   the loss latch's LossResync re-exports table truth, B's own Close retracts
@@ -2677,7 +2704,8 @@ SESSION_CLOSE still run.
   restore fixture). One Close per restored session is #19063.
 - Cells: `worker/loop_body/superseded_close_ha_leg_19026_tests.rs` (the
   same-worker schedule through the real flush and a connected event stream,
-  its non-superseded twin, the other-scope flush, and the exact-key gate).
+  its non-superseded twin, the other-scope flush, the exact-key gate, and the
+  non-announcing replacement twins).
 
 ## Hot-path constants
 
