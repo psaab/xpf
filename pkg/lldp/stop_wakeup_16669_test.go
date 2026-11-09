@@ -2,6 +2,7 @@ package lldp
 
 import (
 	"context"
+	"github.com/psaab/xpf/internal/testguard"
 	"net"
 	"os"
 	"os/exec"
@@ -91,17 +92,17 @@ func TestStopSilentVsChatty16669(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skip("stop-wakeup acceptance skipped: unshare is not available")
+		testguard.NetnsUnavailable(t, "stop-wakeup acceptance skipped: unshare is not available")
 	}
-	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run",
-		"^TestStopSilentVsChatty16669$", "-test.v", "-test.count=1")
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run",
+		"^TestStopSilentVsChatty16669$", "-test.v", "-test.count=1")...)
 	cmd.Env = append(os.Environ(), stopWakeup16669InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("private-netns stop-wakeup output:\n%s", out)
 	if err != nil {
 		if strings.Contains(string(out), "Operation not permitted") ||
 			strings.Contains(string(out), "unshare:") {
-			t.Skipf("stop-wakeup acceptance skipped: cannot create private namespace: %v", err)
+			testguard.NetnsUnavailable(t, "stop-wakeup acceptance skipped: cannot create private namespace: %v", err)
 		}
 		t.Fatalf("private-netns stop-wakeup acceptance failed: %v", err)
 	}

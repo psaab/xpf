@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/psaab/xpf/internal/testguard"
 	"net"
 	"os"
 	"os/exec"
@@ -41,16 +42,16 @@ func isolatedVRFRetryChild12168(t *testing.T) bool {
 	// Namespace EPERM is a legitimate environment skip only when this
 	// dedicated capability probe fails. The acceptance child itself is always
 	// fail-closed, even if its error text also contains "operation not permitted".
-	probe := exec.Command(unshare, "-Urnm", "--propagation", "private", "--", "/bin/true")
+	probe := exec.Command(unshare, append(testguard.UnshareFlags("-Urnm", "--propagation", "private", "--"), "/bin/true")...)
 	probeOutput, probeErr := probe.CombinedOutput()
 	if probeErr != nil {
 		if strings.Contains(strings.ToLower(string(probeOutput)), "operation not permitted") {
-			t.Skipf("isolated VRF namespace probe unavailable: %s", probeOutput)
+			testguard.NetnsUnavailable(t, "isolated VRF namespace probe unavailable: %s", probeOutput)
 		}
 		t.Fatalf("isolated VRF namespace probe failed: %v\n%s", probeErr, probeOutput)
 	}
-	cmd := exec.Command(unshare, "-Urnm", "--propagation", "private", "--", os.Args[0],
-		"-test.run=^"+t.Name()+"$", "-test.v")
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-Urnm", "--propagation", "private", "--"), os.Args[0],
+		"-test.run=^"+t.Name()+"$", "-test.v")...)
 	cmd.Env = append(os.Environ(), vrfRetry12168ChildEnv+"="+t.Name())
 	output, err := cmd.CombinedOutput()
 	if err != nil {

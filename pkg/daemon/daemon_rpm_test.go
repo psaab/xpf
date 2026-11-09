@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"github.com/psaab/xpf/internal/testguard"
 	"os"
 	"os/exec"
 	"regexp"
@@ -919,17 +920,17 @@ func TestProbePinKernelDriftReconcilesInPrivateNetns12088(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skip("netns acceptance skipped: unshare is not available")
+		testguard.NetnsUnavailable(t, "netns acceptance skipped: unshare is not available")
 	}
-	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run",
-		"^TestProbePinKernelDriftReconcilesInPrivateNetns12088$", "-test.v")
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run",
+		"^TestProbePinKernelDriftReconcilesInPrivateNetns12088$", "-test.v")...)
 	cmd.Env = append(os.Environ(), probePin12088InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("private-netns acceptance output:\n%s", out)
 	if err != nil {
 		if strings.Contains(string(out), "Operation not permitted") ||
 			strings.Contains(string(out), "unshare:") {
-			t.Skipf("netns acceptance skipped: cannot create private namespace: %v", err)
+			testguard.NetnsUnavailable(t, "netns acceptance skipped: cannot create private namespace: %v", err)
 		}
 		t.Fatalf("private-netns probe pin acceptance failed: %v", err)
 	}
@@ -1183,12 +1184,9 @@ func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
-			t.Fatal("carrier-loss acceptance did not run: unshare is not available (XPF_REQUIRE_NETNS is set)")
-		}
-		t.Skip("carrier-loss acceptance skipped: unshare is not available")
+		testguard.NetnsUnavailable(t, "carrier-loss acceptance skipped: unshare is not available")
 	}
-	cmd := exec.Command(unshare, append(probePinCarrierLossUnshareFlags12088(os.Geteuid()), os.Args[0], "-test.run",
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run",
 		"^"+carrierLossTest12088+"$", "-test.v")...)
 	cmd.Env = append(os.Environ(), probePinCarrierLoss12088InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
@@ -1196,23 +1194,13 @@ func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
 	switch verdict, reason := judgeCarrierLossChild12088(out, err); verdict {
 	case carrierLossChildPassed12088:
 	case carrierLossChildSkipped12088:
-		skipOrRequireNetns12088(t, reason)
+		testguard.NetnsUnavailable(t, "carrier-loss acceptance skipped: %s", reason)
 	default:
 		t.Fatalf("private-netns carrier-loss acceptance failed: %s", reason)
 	}
 }
 
 const carrierLossTest12088 = "TestProbePinCarrierLossTriggersIPMonFailover12088"
-
-// skipOrRequireNetns12088 reports an acceptance that could not run. It is a
-// SKIP, or a failure under XPF_REQUIRE_NETNS (#16470), as in the #9813 cells.
-func skipOrRequireNetns12088(t *testing.T, reason string) {
-	t.Helper()
-	if os.Getenv("XPF_REQUIRE_NETNS") != "" {
-		t.Fatalf("carrier-loss acceptance did not run: %s (XPF_REQUIRE_NETNS is set)", reason)
-	}
-	t.Skipf("carrier-loss acceptance skipped: %s", reason)
-}
 
 type carrierLossChildVerdict12088 int
 
@@ -1280,27 +1268,6 @@ func judgeCarrierLossChild12088(out []byte, runErr error) (carrierLossChildVerdi
 		return carrierLossChildSkipped12088, fmt.Sprintf("cannot create private namespace: %v: %s", runErr, strings.TrimSpace(s))
 	}
 	return carrierLossChildFailed12088, fmt.Sprintf("the child did not report \"--- PASS: %s\" (exit: %v)", carrierLossTest12088, runErr)
-}
-
-// probePinCarrierLossUnshareFlags12088 picks how the re-executed child gets
-// its private network namespace (#19058).
-//
-// The child is this package's test binary, so its TestMain runs
-// testguard.ExitIfUnsafe, which reads /proc/1/ns/net. A caller that is
-// already uid 0 (the suite under scripts/testguard-run.sh, which is uid 0
-// in a user namespace, or real root on a VM leg) holds the privilege for a
-// plain `unshare -n`. The child then stays in the caller's user namespace,
-// can read PID 1's namespace links, and passes the guard, because its
-// network namespace is new. `-r` would nest a fresh user namespace whose
-// root has no ptrace access to PID 1 ("readlink /proc/1/ns/net: permission
-// denied"). The guard refused that child on every testguard run, so the
-// acceptance never ran. A non-root caller still needs `-r` to gain the
-// privilege. Before testguard that was the suite's only shape.
-func probePinCarrierLossUnshareFlags12088(euid int) []string {
-	if euid == 0 {
-		return []string{"-n"}
-	}
-	return []string{"-rn"}
 }
 
 func runProbePinCarrierLossInPrivateNetns12088(t *testing.T) {

@@ -23,6 +23,7 @@ package daemon
 // while comparing the resulting ruleset with the retained exec-`nft` oracle.
 
 import (
+	"github.com/psaab/xpf/internal/testguard"
 	"os"
 	"os/exec"
 	"regexp"
@@ -53,24 +54,24 @@ func TestNftNetlinkParity(t *testing.T) {
 	// distro and a non-root PATH omits it, so the bare lookup made THE SECURITY
 	// MERGE GATE silently SKIP while still reporting a green `make test`.
 	if findNft() == "" {
-		t.Skip("T1 ruleset-parity gate SKIPPED: `nft` binary not found in PATH — " +
-			"this gate MUST run where nft exists (the parent runs it); it proves the " +
+		testguard.NetnsUnavailable(t, "T1 ruleset-parity gate SKIPPED: `nft` binary not found in PATH — "+
+			"this gate MUST run where nft exists (the parent runs it); it proves the "+
 			"normalized netlink output is ruleset-equivalent to the exec-nft oracle")
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skip("T1 ruleset-parity gate SKIPPED: `unshare` not found — cannot self-isolate a private netns")
+		testguard.NetnsUnavailable(t, "T1 ruleset-parity gate SKIPPED: `unshare` not found — cannot self-isolate a private netns")
 	}
 	// Re-exec ONLY this test inside a fresh netns so a forked `nft` shares it and
 	// the host ruleset is never touched.
-	args := []string{"-rn", os.Args[0], "-test.run", "^TestNftNetlinkParity$", "-test.v"}
+	args := append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestNftNetlinkParity$", "-test.v")
 	cmd := exec.Command(unshare, args...)
 	cmd.Env = append(os.Environ(), t1InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("inner T1 output:\n%s", out)
 	if err != nil {
 		if strings.Contains(string(out), "Operation not permitted") || strings.Contains(string(out), "unshare:") {
-			t.Skipf("T1 gate SKIPPED: cannot create private netns under unshare (%v) — run as root or with CAP_NET_ADMIN", err)
+			testguard.NetnsUnavailable(t, "T1 gate SKIPPED: cannot create private netns under unshare (%v) — run as root or with CAP_NET_ADMIN", err)
 		}
 		t.Fatalf("T1 ruleset-parity gate FAILED (netlink build diverged from the exec-nft oracle): %v", err)
 	}

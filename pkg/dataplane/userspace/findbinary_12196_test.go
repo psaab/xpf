@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"github.com/psaab/xpf/internal/testguard"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -188,14 +189,14 @@ func TestFindBinaryDeduplicatesBareArgv0CwdCandidate12196(t *testing.T) {
 
 func TestFindBinarySkipsNoexecCwdCandidate12196(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("noexec tmpfs regression requires Linux")
+		testguard.NetnsUnavailable(t, "noexec tmpfs regression requires Linux")
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
-		t.Skipf("unshare unavailable: %v", err)
+		testguard.NetnsUnavailable(t, "unshare unavailable: %v", err)
 	}
 	if _, err := exec.LookPath("mount"); err != nil {
-		t.Skipf("mount unavailable: %v", err)
+		testguard.NetnsUnavailable(t, "mount unavailable: %v", err)
 	}
 	binary, err := os.Executable()
 	if err != nil {
@@ -210,11 +211,11 @@ func TestFindBinarySkipsNoexecCwdCandidate12196(t *testing.T) {
 	// unshare, uid_map/setgroups, or mount denial (e.g. AppArmor-restricted
 	// CI runners) — so skip; fail only when the sentinel is present.
 	script := `mount -t tmpfs -o noexec,size=4m tmpfs "$1" || exit 77; echo NOEXEC_NS_READY; FIND_BINARY_NOEXEC_DIR="$1" exec "$2" -test.run=^TestFindBinaryNoexecNamespaceHelper12196$ -test.v`
-	cmd := exec.Command(unshare, "-rm", "sh", "-c", script, "sh", mountpoint, binary)
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rm"), "sh", "-c", script, "sh", mountpoint, binary)...)
 	output, err := cmd.CombinedOutput()
 	text := string(output)
 	if !strings.Contains(text, "NOEXEC_NS_READY") {
-		t.Skipf("noexec tmpfs namespace unavailable: err=%v output: %s", err, text)
+		testguard.NetnsUnavailable(t, "noexec tmpfs namespace unavailable: err=%v output: %s", err, text)
 	}
 	if err != nil {
 		t.Fatalf("noexec tmpfs child failed: %v\n%s", err, text)

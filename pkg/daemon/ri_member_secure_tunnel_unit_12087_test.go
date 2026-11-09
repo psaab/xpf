@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"github.com/psaab/xpf/internal/testguard"
 	"os"
 	"os/exec"
 	"strings"
@@ -29,14 +30,14 @@ func TestRIMemberSecureTunnelUnitBindsToVRF12087(t *testing.T) {
 		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
 			t.Fatalf("cannot run the isolated MasterIndex cell: unshare not found (XPF_REQUIRE_NETNS is set): %v", err)
 		}
-		t.Skipf("cannot run the isolated MasterIndex cell: unshare not found: %v", err)
+		testguard.NetnsUnavailable(t, "cannot run the isolated MasterIndex cell: unshare not found: %v", err)
 	}
-	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run", "^TestRIMemberSecureTunnelUnitBindsToVRF12087$", "-test.count=1", "-test.v")
+	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestRIMemberSecureTunnelUnitBindsToVRF12087$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), riMemberSecureTunnelNetnsChild12087+"=1")
 	out, err := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "NETNS-CHILD-STARTED-12087") {
 		if os.Getenv("XPF_REQUIRE_NETNS") == "" {
-			t.Skipf("cannot create an isolated network namespace (%v): %s", err, out)
+			testguard.NetnsUnavailable(t, "cannot create an isolated network namespace (%v): %s", err, out)
 		}
 		t.Fatalf("netns child never started (%v): %s", err, out)
 	}

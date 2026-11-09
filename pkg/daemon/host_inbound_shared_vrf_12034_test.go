@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"github.com/psaab/xpf/internal/testguard"
 	"net"
 	"os"
 	"os/exec"
@@ -74,22 +75,22 @@ func TestHostInboundSharedVRFMasterIngressAndFineDeny12034(t *testing.T) {
 		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
 			t.Fatalf("nft not found (XPF_REQUIRE_NETNS is set)")
 		}
-		t.Skip("nft not found")
+		testguard.NetnsUnavailable(t, "nft not found")
 	}
 	for _, tool := range []string{"unshare", "ip", "nsenter"} {
 		if _, err := exec.LookPath(tool); err != nil {
 			if os.Getenv("XPF_REQUIRE_NETNS") != "" {
 				t.Fatalf("%s not available (XPF_REQUIRE_NETNS is set)", tool)
 			}
-			t.Skipf("%s not available", tool)
+			testguard.NetnsUnavailable(t, "%s not available", tool)
 		}
 	}
-	cmd := exec.Command("unshare", "-rn", os.Args[0], "-test.run", "^TestHostInboundSharedVRFMasterIngressAndFineDeny12034$", "-test.count=1", "-test.v")
+	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestHostInboundSharedVRFMasterIngressAndFineDeny12034$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), netnsChild12034+"=1")
 	out, err := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "NETNS-CHILD-STARTED-12034") {
 		if os.Getenv("XPF_REQUIRE_NETNS") == "" {
-			t.Skipf("netns unavailable (%v): %s", err, out)
+			testguard.NetnsUnavailable(t, "netns unavailable (%v): %s", err, out)
 		}
 		t.Fatalf("netns child never started (%v): %s", err, out)
 	}
