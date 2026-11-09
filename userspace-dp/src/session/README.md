@@ -915,8 +915,11 @@ The rest of the contract:
     A disconnected stream does not re-arm (#14646;
     `bulk_refusal_on_a_disconnected_stream_does_not_owe_the_resync_18780`).
   - Review cycle 3: the owed retry RESUMES at the refused row's slot (a fresh
-    loss episode restarts it at slot 0) and first PROBES the stream with one
-    zero-wait push, deferring 10 ms between refused probes. So recurring
+    loss episode restarts it at slot 0; an RG demote or re-activate, which
+    emits no delta, does not, see #19048) and first PROBES the stream with
+    one zero-wait push, deferring 10 ms between refused probes. Under churn
+    every export is a fresh, unprobed one, so a churning worker still pays
+    one bulk budget per iteration within the `* 2` envelope (#19048). So recurring
     stalls cannot starve the suffix
     (`recurring_stalls_cannot_starve_the_resync_suffix_18780`), and a worker
     with no churn of its own no longer blocks one full budget per iteration

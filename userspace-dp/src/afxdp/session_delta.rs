@@ -1063,8 +1063,12 @@ pub(super) fn flush_session_deltas(
                     } else {
                         WORKER_LOSSLESS_QUEUE_BUDGET
                     };
+                    // Test counters are classified by the BUDGET handed to the
+                    // push, not by the probe flag (#18780 minor fold, R8 J1):
+                    // a flagged probe that is given a non-zero budget counts
+                    // as a wait, so a cell can see that regression.
                     #[cfg(test)]
-                    if probe {
+                    if budget.is_zero() {
                         LOSS_RESYNC_PROBES_18780.with(|c| {
                             let (attempts, refused) = c.get();
                             c.set((attempts + 1, refused));
@@ -1079,7 +1083,7 @@ pub(super) fn flush_session_deltas(
                         }
                         Err(err) => {
                             #[cfg(test)]
-                            if probe {
+                            if budget.is_zero() {
                                 LOSS_RESYNC_PROBES_18780.with(|c| {
                                     let (attempts, refused) = c.get();
                                     c.set((attempts, refused + 1));
@@ -1290,9 +1294,10 @@ pub(super) fn flush_session_deltas(
     event_stream_out_of_sync
 }
 
-// #18780 (review cycle 3): owed-retry probes on this thread, as
-// (attempted, refused). A probe is a zero-wait push, so it is not a budget
-// wait and is not counted in `LOSSLESS_FAILURES_18780` (test-only).
+// #18780 (review cycle 3): zero-BUDGET lossless pushes on this thread (the
+// owed-retry probes), as (attempted, refused). Classified by the budget the
+// push was given, not by the probe flag, so a probe that is handed a full
+// budget lands in `LOSSLESS_FAILURES_18780` instead (test-only).
 #[cfg(test)]
 thread_local! {
     pub(in crate::afxdp) static LOSS_RESYNC_PROBES_18780: std::cell::Cell<(u64, u64)> =

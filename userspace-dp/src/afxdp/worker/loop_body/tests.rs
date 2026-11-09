@@ -3741,8 +3741,16 @@ mod expiry_resync_lossless_wait_18780_tests {
     /// retry after that is a single zero-wait PROBE: no budget wait, no fallback
     /// copy, still owed. Once the consumer reads again the next retry delivers
     /// every row exactly. RED at f5f0fd40d8: every retry waited a full budget.
+    ///
+    /// The WAIT is observed where it happens (#18780 minor fold, R8 J1 / Codex
+    /// N1 / R7): `LOSSLESS_RETRY_SLEEPS_18780` counts the retry sleeps
+    /// `send_lossless_encoded` actually took, and the probe/wait counters are
+    /// classified by the budget the push was given, not by the probe flag. The
+    /// fresh export is the positive control (it does sleep). A probe that keeps
+    /// its flag but is handed the full `WORKER_LOSSLESS_QUEUE_BUDGET` is RED.
     #[test]
     fn owed_retry_probes_a_stalled_consumer_without_waiting_18780() {
+        let sleeps = || crate::event_stream::LOSSLESS_RETRY_SLEEPS_18780.with(|c| c.get());
         let t0 = 1_000 * SEC;
         let owned = 600u32;
         let mut sessions = SessionTable::new();
@@ -3754,8 +3762,13 @@ mod expiry_resync_lossless_wait_18780_tests {
         let (event_stream, rx) = unread_full_stream_with(4);
         let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
         let mut now = t0 + 10 * SEC;
+        let sleeps_before = sleeps();
         let fresh = run_resync(&mut sessions, &mut bindings, now, &event_stream);
         assert_eq!(fresh.bulk_waits, 1, "premise: the fresh export waited one budget");
+        assert!(
+            sleeps() > sleeps_before,
+            "premise (positive control): the send-boundary counter sees the fresh export's wait"
+        );
         assert!(sessions.delta_loss_pending(), "premise: refused and owed");
         let after_fresh = bindings[0].live.snapshot();
         // Inside the retry deferral nothing is attempted at all.
@@ -3772,9 +3785,16 @@ mod expiry_resync_lossless_wait_18780_tests {
             now += 20 * 1_000_000;
             let probes_before =
                 crate::afxdp::session_delta::LOSS_RESYNC_PROBES_18780.with(|c| c.get());
+            let sleeps_before = sleeps();
             let it = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+            let retry_sleeps = sleeps() - sleeps_before;
             let probes_after =
                 crate::afxdp::session_delta::LOSS_RESYNC_PROBES_18780.with(|c| c.get());
+            assert_eq!(
+                retry_sleeps, 0,
+                "#18780 (R8 H1/J1): owed retry {retry} against a stalled consumer WAITED \
+                 ({retry_sleeps} retry sleeps at the send boundary)"
+            );
             assert_eq!(
                 it.bulk_waits, 0,
                 "#18780 (R8 H1): owed retry {retry} against a stalled consumer waited a full budget"

@@ -532,6 +532,16 @@ pub(crate) fn test_worker_handle_connected(
     (handle, rx)
 }
 
+// #18780 (minor fold after cycle 3, R8 J1): retry sleeps a lossless send took
+// on this thread while waiting for channel capacity. It counts the wait
+// actually taken at the send boundary, whatever budget the caller chose, so a
+// cell can assert that an owed-retry probe never waited (test-only).
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LOSSLESS_RETRY_SLEEPS_18780: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
 /// #18780: why a lossless enqueue gave up. Callers that must tell a stalled
 /// CONNECTED reader (`TimedOut`: the channel stayed full for the whole budget,
 /// which only happens while connected) from a stream that is not there at all
@@ -789,6 +799,8 @@ impl EventStreamWorkerHandle {
                     if Instant::now() >= deadline {
                         return Err(LosslessSendError::TimedOut { seq: reported_seq });
                     }
+                    #[cfg(test)]
+                    LOSSLESS_RETRY_SLEEPS_18780.with(|c| c.set(c.get() + 1));
                     thread::sleep(LOSSLESS_QUEUE_RETRY_DELAY);
                 }
                 Err((EventStreamSendError::Disconnected, reported_seq)) => {
