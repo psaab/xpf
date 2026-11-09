@@ -416,9 +416,14 @@ class MoveVerdict(unittest.TestCase):
         self.assertEqual(v, soak.FAIL)
         self.assertIn("v6", why[0])
 
-    def test_traffic_generator_death_fails(self):
-        self.assertEqual(self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, iperf_covered=False)))[0], soak.FAIL)
-        self.assertEqual(self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, ping_covered=False)))[0], soak.FAIL)
+    def test_traffic_generator_death_is_void_never_pass(self):
+        # #19054 changed this cell's expectation from FAIL to VOID: a window
+        # the generators did not cover cannot be scored either way. It is
+        # never PASS, and the reason names it.
+        for gone in ("iperf_covered", "ping_covered"):
+            v, why = self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, **{gone: False})))
+            self.assertEqual(v, soak.VOID, why)
+            self.assertTrue(any("did not cover the move window" in w for w in why), why)
 
     def test_traffic_ignored_when_disabled(self):
         self.assertEqual(self.verdict(rec([rgres()], {}), traffic=False)[0], soak.PASS)
@@ -929,6 +934,12 @@ class FakeCluster:
         if self.gen_start is None:
             self.target_prepared_when_generators_started = self.target_prepared
             self.gen_start = self.last_emit = self.clock_.t
+        # #19054: the generator stops by itself after its own -t/-w seconds.
+        m = re.search(r" -t (\d+) " if kind == "iperf" else r" -w (\d+) ", script)
+        if m:
+            if not hasattr(self, "gen_end"):
+                self.gen_end = {}
+            self.gen_end[(kind, fam)] = self.gen_start + int(m.group(1))
         if kind == "iperf" and self.busy_iperf:
             with open(outfile, "a") as f:
                 f.write(f"{self.clock_.t + self.lan_off:.6f} " + json.dumps(
@@ -955,10 +966,11 @@ class FakeCluster:
         for (kind, fam), path in list(self.files.items()):
             if kind == "iperf" and self.busy_iperf:
                 continue
+            t_gen = min(t, getattr(self, "gen_end", {}).get((kind, fam), t))
             with open(path, "a") as f:
                 if kind == "ping":
                     seq = self.ping_seq.get(fam, 0)
-                    while self.gen_start + (seq + 1) * 0.01 <= t:
+                    while self.gen_start + (seq + 1) * 0.01 <= t_gen:
                         seq += 1
                         ts = self.gen_start + seq * 0.01 + self.lan_off
                         if not self._in(ts, "gap"):
@@ -966,7 +978,7 @@ class FakeCluster:
                     self.ping_seq[fam] = seq
                 else:
                     i = self.iv_index.get(fam, 0)
-                    while self.gen_start + (i + 1) * 0.1 <= t:
+                    while self.gen_start + (i + 1) * 0.1 <= t_gen:
                         mid = self.gen_start + i * 0.1 + 0.05 + self.lan_off
                         gap = self._in(mid, "gap")
                         st = []
@@ -984,7 +996,7 @@ class FakeCluster:
 
 def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
              v6=False, restore=True, files=None, strict_cost=False, managed_v6=None, form=soak.FORM_TARGETED,
-             expect_transfer=False):
+             expect_transfer=False, traffic_s=None, now_fn=None):
     with tempfile.TemporaryDirectory() as d:
         cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=traffic, form=form,
                           helper_check=helper_check, restore=restore, strict_cost=strict_cost,
@@ -992,9 +1004,10 @@ def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=Tr
                           iperf6_on_mouse_target=v6 if managed_v6 is None else managed_v6,
                           budget=soak.Budget(converge_s=sleep_s, expect_transfer=expect_transfer), outdir=d, run_id="t",
                           target4="172.16.80.200", target6="2001:db8::200" if v6 else "",
-                          lan_vip4="10.0.61.1")
+                          lan_vip4="10.0.61.1", **({"traffic_s": traffic_s} if traffic_s is not None else {}))
         logs = []
-        rc = soak.Soak(cfg, cluster, now_fn=clock.now, sleep_fn=clock.sleep, log=logs.append).run()
+        kw = {"mono_fn": clock.now} if now_fn is not None else {}
+        rc = soak.Soak(cfg, cluster, now_fn=now_fn or clock.now, sleep_fn=clock.sleep, log=logs.append, **kw).run()
         with open(os.path.join(d, "result.json")) as f:
             res = json.load(f)
         if files is not None:
@@ -2557,6 +2570,54 @@ class DualSampleReporting19041(unittest.TestCase):
         rc, res, logs = run_fake(c, clock, moves=2)
         self.assertEqual(res["summary"]["dual_samples"], 0)
         self.assertNotIn("dual_samples=", "\n".join(logs))
+
+
+class SlowCliCluster(FakeCluster):
+    """Every move CLI takes `cli_extra_s` more fake seconds: moves slower
+    than the pre-#19054 traffic estimate (sleep + converge + 4 s per move)."""
+
+    cli_extra_s = 20.0
+
+    def cli(self, node, cmd):
+        self.clock_.sleep(self.cli_extra_s)
+        return super().cli(node, cmd)
+
+
+class TrafficCoverage19054(unittest.TestCase):
+    """#19054: a move window the traffic generators did not cover is VOID,
+    never PASS, COST or FAIL, and the default run length covers moves slower
+    than the old estimate."""
+
+    def uncovered(self, res):
+        return [m for m in res["moves"]
+                if any(not (t.get("ping_covered") and t.get("iperf_covered"))
+                       for t in (m.get("traffic") or {}).values())]
+
+    def test_no_uncovered_move_is_scored(self):
+        # The traffic is told to run 12 s; the run needs about 3 x 6 s.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=3, traffic_s=12)
+        gone = self.uncovered(res)
+        self.assertTrue(gone, "the fixture must leave at least one window uncovered")
+        for m in gone:
+            self.assertEqual(m["verdict"], "VOID", m["reasons"])
+            self.assertTrue(any("did not cover the move window" in r and "unscored" in r for r in m["reasons"]),
+                            m["reasons"])
+            self.assertTrue(any("planned end came before this window closed" in r for r in m["reasons"]),
+                            m["reasons"])
+        self.assertEqual(rc, 2)
+        self.assertEqual(res["summary"]["counts"]["FAIL"], 0, res["summary"])
+
+    def test_moves_slower_than_the_old_estimate_stay_covered(self):
+        # 6 moves of ~26 s each: the pre-#19054 run length (6 x 14 + 60 =
+        # 144 s) expires before the last window; the new default does not.
+        clock = FakeClock()
+        c = SlowCliCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=6)
+        self.assertEqual(self.uncovered(res), [])
+        self.assertEqual(rc, 0, res["summary"])
+        self.assertGreaterEqual(res["preflight"]["traffic_s"], 6 * soak.TRAFFIC_S_PER_MOVE_CAP)
 
 
 if __name__ == "__main__":

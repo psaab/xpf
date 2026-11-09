@@ -513,6 +513,7 @@ Knobs:
 | `SOAK_STRICT_COST` | 0 | `1`: a COST (over-budget but recovered) scores FAIL |
 | `SOAK_MAX_COST_STALL_MS` | 10000 | a recovered single-stream stall longer than this is a FAIL, not COST |
 | `SOAK_TRAFFIC` | 1 | `0`: control plane only (the run exits 2) |
+| `SOAK_TRAFFIC_S` | 120 per RG move + 600 | iperf3/ping run length. The soak stops the generators itself after the last window, so this is a cap for a controller that dies (#19054) |
 | `SOAK_HELPER_CHECK` | 1 | `0`: skip the helper reads (the run exits 2) |
 | `SOAK_IPV6` | 1 | `0`: IPv4 only. IPv6 traffic-follow reads the LAN host's RA default router (a RETH link-local), which is what its IPv6 traffic uses; no default route, or an unmappable router MAC, voids the run |
 | `SOAK_RESTORE` | 1 | `0`: do not put node0 back as primary at the end (matrix row D3) |
@@ -582,12 +583,22 @@ One verdict per move:
   - a LAN neighbour entry (IPv4 VIP or IPv6 RA router) that resolves to no
     RETH MAC on a move, after the preflight proved it resolvable
     ("traffic-follow unmeasured");
-  - ping or iperf3 stopped covering the window.
 - **VOID**: the precondition failed. Before a move to node *t*, the RG was not
   cleanly owned by the other node at the end of the previous window. A failed
   move therefore costs one FAIL, and the next move, back to where the RG
   still is, is VOID, not a second FAIL. The operator's "already primary"
   line is that cascade.
+- **VOID, uncovered** (#19054): ping or iperf3 did not cover the move's
+  window. Whatever the traffic checks say about a window with no traffic,
+  they say it about nothing, so the move is never PASS, COST or FAIL.
+  - The reason names the cause: the traffic run's planned end came first
+    (`SOAK_TRAFFIC_S`), or a generator stopped early, with iperf3's error
+    text when it has one.
+  - Any other check that fired is listed as "unscored evidence".
+  - Before #19054 the run length was estimated at sleep + converge + 4 s per
+    move, plus 60 s. A 200-move run outlived it after about 182 moves, and
+    the last 18 moves were scored FAIL on no traffic. Moves also took longer
+    late in that run: about 11 s each at the start, 38 s at the end.
 
 A **void run** (exit 2, `FATAL:` line, no moves scored) when the soak cannot
 measure what it claims to: no RG with a single clean owner at preflight; the
@@ -748,7 +759,7 @@ production; its clock and shared state are locked for the parallel reads.
 | `FATAL: preflight VOID: RGg has no single clean owner ...` / `cannot read the LAN host clock` | The cluster was not in a state a move can be judged from | Restore node0 primary (`SOAK_RESTORE`, row D3) and rerun |
 | `FATAL: traffic preflight: v4 iperf3 to ... failed before any move: ... the server is busy running a test` / `not streaming` / `ping ... is not answering` | The traffic target is busy (another lane's iperf3) or unreachable | Check the target and the lock; rerun |
 | `FATAL: harness error: ...` / `harness terminated by signal` | The harness itself failed; the generators were stopped | Fix the harness; the run measured nothing |
-| `ping/iperf3 did not cover the move window` | A traffic generator stopped (all streams died, or the client exited) | `iperf.jsonl` shows the error event. Streams dying is a FAIL of the move that killed them |
+| `v4/v6 ping/iperf3 did not cover the move window: <cause>; the move is unscored (#19054)` (VOID) | The generators were not running for the whole window. `<cause>` is the planned end of the traffic run, or a generator that stopped early (with iperf3's error) | For the planned end, raise `SOAK_TRAFFIC_S`. For an early stop, read `iperf.jsonl`'s error event and `ping.log`. The move is VOID, not FAIL |
 | `precondition: RGg was on nodeX before a move to nodeX` (VOID) | The previous move did not happen | Read the previous move's FAIL |
 | `UDP sequence probe flow was absent on synced standby nodeN` (VOID) | The tuple-filtered listing on nodeN was complete (its `Total sessions:` equals the rows shown) and did not contain the probe flow: the standby really has no synced row for it | Check session sync (row H7) and the standby's `show security flow session destination-port 6201 limit 10000`. Before #19038 this line also came from the 100-row cap |
 | `UDP sequence probe pre-move Session ID query failed: could not parse flow-session capture on nodeN: ...` or `UDP sequence probe final-window Session ID query failed: could not parse ...`, followed by `shows R rows but reports 'Total sessions: N'` or `no 'Total sessions:' terminator` (VOID) | The local listing was cut short, or has no `Total sessions:` terminator, so it cannot show the flow absent (#19038) | Under the tuple filter a cut listing means the CLI ignored the filter. Compare the CLI build with the query the soak sent |

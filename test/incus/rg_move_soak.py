@@ -94,6 +94,10 @@ import udp_session_probe
 
 PASS, FAIL, VOID, COST = "PASS", "FAIL", "VOID", "COST"
 
+# #19054: traffic run cap, per RG move and overall slack (seconds).
+TRAFFIC_S_PER_MOVE_CAP = 120
+TRAFFIC_S_SLACK = 600
+
 # ---------------------------------------------------------------------------
 # `show chassis cluster status` parsing
 # ---------------------------------------------------------------------------
@@ -683,12 +687,16 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 reasons.append(f"RG{r.rg} helper ha_groups[].forwarding_active disagrees with status (want node{r.target}=True): {' '.join(bad)}")
         if traffic_enabled:
             reasons.extend(follow_reasons(r, budget))
+    uncovered: List[str] = []
     if traffic_enabled:
         for fam, t in sorted((rec.traffic or {}).items()):
-            if not t.get("ping_covered", False):
-                reasons.append(f"{fam} ping did not cover the move window (ping died or never started)")
-            if not t.get("iperf_covered", False):
-                reasons.append(f"{fam} iperf3 did not cover the move window (streams died or the client exited)")
+            # #19054: a window the generators did not cover cannot be scored:
+            # whatever the traffic checks say, they say it about no traffic.
+            missing = [what for what, ok in (("ping", t.get("ping_covered", False)),
+                                             ("iperf3", t.get("iperf_covered", False))) if not ok]
+            if missing:
+                uncovered.append(f"{fam} {' and '.join(missing)} did not cover the move window: "
+                                 f"{t.get('uncovered_cause', 'cause unknown')}; the move is unscored (#19054)")
             if t.get("died_streams"):
                 reasons.append(f"{fam} stream(s) {t['died_streams']} stalled in this window and never recovered")
             if t.get("ping_covered") and t.get("ping_tail_replies", 0) == 0:
@@ -710,6 +718,10 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 reasons.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_cost_stall_ms:g} ms (past the COST cap)")
             elif stall > budget.max_stall_ms and not t.get("died_streams"):
                 costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered; ping and aggregate within budget)")
+    if uncovered:
+        # Never PASS, COST or FAIL a move the traffic did not cover. What the
+        # other checks saw is kept as unscored evidence.
+        return VOID, uncovered + [f"unscored evidence: {r}" for r in reasons + costs]
     if reasons:
         if udp_void_reason:
             reasons.append(f"UDP probe evidence VOID: {udp_void_reason}")
@@ -1127,6 +1139,11 @@ class Config:
     outdir: str = ""
     run_id: str = ""
     form: str = FORM_TARGETED
+    # #19054: iperf3/ping run length in seconds. None: a generous cap
+    # (TRAFFIC_S_PER_MOVE_CAP per RG move + TRAFFIC_S_SLACK); the soak stops
+    # the generators itself after the last window, so the cap only matters
+    # if the controller dies. SOAK_TRAFFIC_S overrides it.
+    traffic_s: Optional[int] = None
 
 
 class Soak:
@@ -1143,6 +1160,7 @@ class Soak:
         self.sleep = sleep_fn
         self.log = log
         self.lan_offset = 0.0  # LAN clock minus this host's clock
+        self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
         self.members: Dict[int, List[str]] = {}
         self.macs: Dict[str, Tuple[int, str]] = {}
         self.traffic_started = False
@@ -1629,8 +1647,14 @@ class Soak:
                 bad = self.c.prepare_iperf(iperf_ports)
                 if bad:
                     raise VoidRun(f"iperf socket preflight: {bad}")
-                per_move = cfg.sleep_s + cfg.budget.converge_s + 4
-                self.start_traffic(int(cfg.moves * per_move * len(rgs) + 60))
+                # #19054: the old estimate (sleep + converge + 4 s per move,
+                # plus 60 s) ran out after about 182 of 200 moves, because
+                # real moves take longer and slow down over a long run. Run
+                # the generators until the soak stops them, with a cap.
+                duration = cfg.traffic_s or int(cfg.moves * len(rgs) * TRAFFIC_S_PER_MOVE_CAP + TRAFFIC_S_SLACK)
+                info["traffic_s"] = duration
+                self.traffic_end_lan = self.lan_time(self.wall()) + duration
+                self.start_traffic(duration)
                 self.sleep(cfg.warmup_s)
                 bad = self.traffic_preflight()
                 if bad:
@@ -1778,10 +1802,19 @@ class Soak:
                 intervals, _, _ = parse_iperf_stream(self._read(self._path("iperf", fam)))
                 gaps = ping_gaps(replies)
                 stalls, agg = stream_stalls(intervals, cfg.budget.low_bps)
+                err = iperf_error(self._read(self._path("iperf", fam)))
                 for m in moves:
                     m.traffic = m.traffic or {}
-                    m.traffic[fam] = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
-                                                        intervals, cfg.budget)
+                    t = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
+                                           intervals, cfg.budget)
+                    if not (t["ping_covered"] and t["iperf_covered"]):
+                        # #19054: say WHY the generators were not there.
+                        t["uncovered_cause"] = (
+                            f"the traffic run's planned end came before this window closed "
+                            f"(SOAK_TRAFFIC_S={info.get('traffic_s')})"
+                            if m.t_next_lan > self.traffic_end_lan else
+                            "a generator stopped early" + (f" (iperf3: {err})" if err else ""))
+                    m.traffic[fam] = t
         for m in moves:
             m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)
         summary = summarize(moves, cfg.traffic, disabled, cfg.strict_cost)
@@ -1884,6 +1917,7 @@ def main(argv=None) -> int:
         outdir=a.outdir,
         run_id=re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(a.outdir.rstrip("/"))),
         form=os.environ.get("SOAK_FORM", FORM_TARGETED),
+        traffic_s=int(os.environ["SOAK_TRAFFIC_S"]) if os.environ.get("SOAK_TRAFFIC_S") else None,
     )
     if cfg.issuer not in (0, 1):
         print("FATAL: SOAK_FROM must be 0 or 1", file=sys.stderr)

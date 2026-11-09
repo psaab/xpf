@@ -46,6 +46,9 @@
 #   SOAK_FOLLOW_MIN_PKTS RETH-member packets the target must carry between
 #                    landing and the window's end (default 500)
 #   SOAK_TRAFFIC=0   skip traffic (control-plane only; the run exits 2)
+#   SOAK_TRAFFIC_S   iperf3/ping run length in seconds (default: 120 per RG
+#                    move + 600; the soak stops the generators itself). A move
+#                    whose window the traffic did not cover is VOID (#19054)
 #   SOAK_HELPER_CHECK=0 skip the helper reads (the run exits 2)
 #   SOAK_IPV6=0      IPv4 only
 #   SOAK_RESTORE=0   do not put node0 back as primary at the end
