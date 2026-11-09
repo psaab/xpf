@@ -1039,6 +1039,8 @@ fn c6_expire_ha_context_covers_hold_and_self_heal_10591() {
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
     node_served: &|_| crate::session::NodeServedEvidence::default(),
     shared_row: &|_| None,
+    claim_close: &|_, _| false,
+    fence_evidence_cadence_ns: 0,
     };
     let self_heal_forwards = |_rg: i32| true;
     let self_heal_epoch = |_rg: i32| 1;
@@ -1050,6 +1052,8 @@ fn c6_expire_ha_context_covers_hold_and_self_heal_10591() {
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
     node_served: &|_| crate::session::NodeServedEvidence::default(),
     shared_row: &|_| None,
+    claim_close: &|_, _| false,
+    fence_evidence_cadence_ns: 0,
     };
     let install = matrix_forwarding(true, false, false);
     let mut sessions = SessionTable::new();

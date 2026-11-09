@@ -135,26 +135,56 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// #16223: node-level served-handshake evidence for `key` (either half of
-/// the pair), with #18722/#18742's counts, incarnation and recency proof.
 /// #19026: the restore close fence's shared-row read — the primary row under
-/// exactly `key` (one keyed lookup, any protocol), as `(session_id,
-/// fwd_packets + rev_packets)`. `fwd_packets`/`rev_packets` are the shared
-/// row's max-merged counters every serving worker restamps, so they advance
-/// whenever ANY worker served the session after a restore. Called only for
-/// an expiring forward `SharedPromote` copy (cold, GC pass).
+/// exactly `key` (one keyed lookup, any protocol): its session id, max-merged
+/// `fwd+rev` counters and `last_served_ns` (the newest packet time any worker
+/// on this node published). Called only for an expiring forward
+/// `SharedPromote` copy (cold, GC pass).
 pub(in crate::afxdp) fn shared_row_identity(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     key: &SessionKey,
 ) -> Option<crate::session::SharedRowIdentity> {
     lock_shared_recover(shared_sessions)
         .get(key)
-        .map(|entry| crate::session::SharedRowIdentity {
-            session_id: entry.session_id,
-            packets: entry.fwd_packets.saturating_add(entry.rev_packets),
-        })
+        .map(shared_row_identity_of)
 }
 
+fn shared_row_identity_of(entry: &SyncedSessionEntry) -> crate::session::SharedRowIdentity {
+    crate::session::SharedRowIdentity {
+        session_id: entry.session_id,
+        packets: entry.fwd_packets.saturating_add(entry.rev_packets),
+        last_served_ns: entry.last_served_ns,
+    }
+}
+
+/// #19026: the restore close fence's CLAIM. Retires the shared primary row
+/// (and its aliases/indexes) iff it still reads exactly `expected`, under the
+/// primary-map lock, so exactly one expiring copy on the node wins and emits
+/// the session's Close. The winner's Close flush then finds the row gone and
+/// runs the rest of the teardown (BPF rows, sibling `DeleteSynced`, HA close).
+pub(in crate::afxdp) fn claim_shared_close(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    key: &SessionKey,
+    expected: crate::session::SharedRowIdentity,
+) -> bool {
+    matches!(
+        remove_shared_session_if(
+            shared_sessions,
+            shared_nat_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            key,
+            |current| shared_row_identity_of(current) == expected,
+        ),
+        SharedRemoval::Removed(_)
+    )
+}
+
+/// #16223: node-level served-handshake evidence for `key` (either half of
+/// the pair), with #18722/#18742's counts, incarnation and recency proof.
 /// #18663: every branch is a keyed primary or alias lookup. Direct and plain
 /// reverse keys retain precedence; translated aliases resolve through the
 /// live alias-owner index maintained with `shared_sessions` under the same
@@ -385,6 +415,9 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
             if let Some(entry) = sessions.get_mut(candidate) {
                 entry.fwd_packets = entry.fwd_packets.max(fwd_packets);
                 entry.rev_packets = entry.rev_packets.max(rev_packets);
+                // #19026: node-level serving evidence from EVERY worker,
+                // the minting one included (the restore close fence).
+                entry.last_served_ns = entry.last_served_ns.max(source_packet_seen_ns);
                 if entry.session_id != 0
                     && source_namespace != (entry.session_id >> 48) as u16
                 {
@@ -431,6 +464,8 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
                 if let Some(entry) = sessions.get_mut(candidate) {
                     entry.fwd_packets = entry.fwd_packets.max(*fwd_packets);
                     entry.rev_packets = entry.rev_packets.max(*rev_packets);
+                    // #19026: every worker, minting one included.
+                    entry.last_served_ns = entry.last_served_ns.max(*source_packet_seen_ns);
                     if entry.session_id != 0
                         && source_namespace != (entry.session_id >> 48) as u16
                     {

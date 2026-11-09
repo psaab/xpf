@@ -420,7 +420,10 @@ pub(in crate::afxdp) fn publish_shared_session(
             // recency advanced by the serving sibling's ct-slice.
             let keep_sibling_last_seen =
                 same && entry.sibling_last_seen_ns < previous.sibling_last_seen_ns;
-            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen {
+            // #19026: the node-level serving evidence is monotonic per
+            // incarnation too (the restore close fence reads it).
+            let keep_last_served = same && entry.last_served_ns < previous.last_served_ns;
+            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen || keep_last_served {
                 entry_owned = entry.clone();
                 if keep_stage {
                     entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
@@ -433,6 +436,9 @@ pub(in crate::afxdp) fn publish_shared_session(
                 }
                 if keep_sibling_last_seen {
                     entry_owned.sibling_last_seen_ns = previous.sibling_last_seen_ns;
+                }
+                if keep_last_served {
+                    entry_owned.last_served_ns = previous.last_served_ns;
                 }
                 &entry_owned
             } else {
@@ -1765,6 +1771,8 @@ mod handshake_monotonic_16223_tests {
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
             shared_row: &|_| None,
+            claim_close: &|_, _| false,
+            fence_evidence_cadence_ns: 0,
         };
         let _ = table.expire_stale_entries_ha(t0 + 12 * SEC, Some(&ha));
         assert_eq!(

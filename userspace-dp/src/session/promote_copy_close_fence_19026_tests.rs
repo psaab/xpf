@@ -1,96 +1,109 @@
-//! #19026 Part 2: the close fence for restored `SharedPromote` copies.
+//! #19026 Part 2 (fold cycle 1): the restore close fence, rule by rule.
 //!
-//! At RG activation the prewarm restores a locally promoted session as
-//! `SharedPromote` on EVERY worker (#15950). Only the worker its packets land
-//! on refreshes its copy; the others age one window after the activation
-//! re-stamp, and each idle copy's expiry Close was the carrier of the shared
-//! removal, the sibling `DeleteSynced` fan-out and the HA delete — all keyed
-//! by tuple, so it tore down the serving worker's live row (udp: live pings
-//! closed "idle Timeout" at T0+62, up to 4 Close frames per session).
+//! At RG activation the prewarm restores a locally promoted row as
+//! `SharedPromote` on EVERY worker (#15950). Before #19026 each idle copy's
+//! expiry Close carried the shared removal, the sibling `DeleteSynced` fan-out
+//! and the HA delete — all keyed by tuple — and so tore down the serving
+//! worker's live row (udp: live pings closed "idle Timeout" at T0+62).
 //!
-//! The approved rule (issue comment, design (b)) for an expiring forward
-//! `SharedPromote` row on a node that forwards its RG:
-//! - R1  shared primary row absent, or a different session id -> silent;
-//! - R2  same session, this copy never served since install
-//!   (`last_packet_seen_ns < created_ns`):
-//!   (a) shared fwd+rev advanced past this copy's install-seeded counters
-//!       -> silent (someone served after the restore);
-//!   (b) not advanced -> only the designated closer closes;
-//! - R3  this copy served -> ordinary AGE with its Close.
+//! `SessionTable::promote_fence_step` (expire.rs) now runs the same rule on
+//! every restored copy, with no designated closer:
+//! R1 shared row gone / other id -> silent; this copy (either direction) or
+//! any worker (`last_served_ns`) served inside the window -> KEEP, re-stamped
+//! to that packet time; node idle -> hold one evidence cadence + GC; evidence
+//! moved without fresh service -> hold again; else CLAIM the shared row
+//! atomically -> exactly one copy closes.
 //!
-//! Every Close delta is exactly one HA delete once flushed
-//! (`flush_session_deltas`: event-stream close + `DeleteSynced` fan-out), so
-//! the cells count Close deltas across all copies as "Close + HA delete".
+//! These cells drive `expire_stale_entries_ha` with a modelled shared row
+//! (`SharedModel`): `shared_row` reads it and `claim_close` retires it iff it
+//! still reads the expected identity, as `shared_ops::claim_shared_close`
+//! does under the shared-map lock. The end-to-end paths (prewarm, restamp,
+//! real flush, sibling deletes) are pinned in
+//! `afxdp/worker/loop_body/promote_fence_concurrency_19026_tests.rs`.
 
 use super::*;
 use crate::SessionSyncRequest;
 use crate::server::helpers::build_synced_session_entry;
 use crate::test_zone_ids::*;
+use std::cell::Cell;
 
 const SEC: u64 = 1_000_000_000;
 const RG: i32 = 1;
-const WORKERS: usize = 6;
 const SESSION_ID: u64 = 0x0001_0000_0000_1906;
-const SEEDED_FWD: u64 = 30;
-const SEEDED_REV: u64 = 30;
 const INSTALL_NS: u64 = 1_000 * SEC;
+const WINDOW_NS: u64 = 60 * SEC;
+/// The fence's hold with `fence_evidence_cadence_ns = CADENCE_NS`. The wheel
+/// visits the deferred row on the first GC pass after the hold's tick, so
+/// post-hold checks run 2 s later.
+const CADENCE_NS: u64 = 13 * SEC;
+const HOLD_NS: u64 = CADENCE_NS + SESSION_GC_INTERVAL_NS;
+
+/// The node's shared primary row as the fence sees it.
+struct SharedModel {
+    row: Cell<Option<SharedRowIdentity>>,
+    claims: Cell<u32>,
+}
+
+impl SharedModel {
+    fn new(packets: u64, last_served_ns: u64) -> Self {
+        Self {
+            row: Cell::new(Some(SharedRowIdentity {
+                session_id: SESSION_ID,
+                packets,
+                last_served_ns,
+            })),
+            claims: Cell::new(0),
+        }
+    }
+
+    fn served(&self, at_ns: u64) {
+        let mut row = self.row.get().expect("shared row");
+        row.packets += 1;
+        row.last_served_ns = row.last_served_ns.max(at_ns);
+        self.row.set(Some(row));
+    }
+}
 
 fn promoted_icmp_entry() -> crate::afxdp::SyncedSessionEntry {
+    promoted_entry(crate::ip_proto::PROTO_ICMP, 3306, 0)
+}
+
+fn promoted_entry(protocol: u8, src_port: u16, dst_port: u16) -> crate::afxdp::SyncedSessionEntry {
     let req = SessionSyncRequest {
         forward_wire_alias_origin: false,
         operation: "upsert".to_string(),
         addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_ICMP,
+        protocol,
         src_ip: "10.0.63.106".to_string(),
         dst_ip: "172.16.80.211".to_string(),
-        src_port: 3306,
-        dst_port: 0,
+        src_port,
+        dst_port,
         ingress_zone_id: TEST_TRUST_ZONE_ID,
         egress_zone_id: TEST_UNTRUST_ZONE_ID,
         owner_rg_id: RG,
         inactivity_timeout: 60,
         session_id: SESSION_ID,
-        fwd_packets: SEEDED_FWD,
-        rev_packets: SEEDED_REV,
+        fwd_packets: 30,
+        rev_packets: 30,
         ..SessionSyncRequest::default()
     };
     let mut entry = build_synced_session_entry(&req, &rustc_hash::FxHashMap::default(), 0)
         .expect("FIXTURE: synced entry");
-    // What the activation prewarm pushes for a locally promoted row (#15950).
     entry.origin = SessionOrigin::SharedPromote;
     entry
 }
 
-/// One table per worker, each holding the restored `SharedPromote` copy as
-/// the prewarm installs it (`handle_upsert_synced` ->
-/// `upsert_synced_with_origin(.., allow_replace_local=false)` on the node
-/// that forwards the RG). `closer` is the designated restore closer.
-fn restored_copies(closer: Option<usize>) -> (Vec<SessionTable>, SessionKey) {
+/// One worker's restored copy, as the prewarm installs it on the node that
+/// forwards the RG.
+fn restored_copy() -> (SessionTable, SessionKey) {
     let entry = promoted_icmp_entry();
     let key = entry.key.clone();
-    let mut tables: Vec<SessionTable> = (0..WORKERS).map(|_| SessionTable::new()).collect();
-    for (worker, table) in tables.iter_mut().enumerate() {
-        assert!(
-            table.upsert_synced_with_origin(entry.clone().into_session_install(INSTALL_NS), false),
-            "FIXTURE: worker {worker} restore"
-        );
-        assert_eq!(
-            table.entry_with_origin(&key).map(|(_, _, origin)| origin),
-            Some(SessionOrigin::SharedPromote),
-            "FIXTURE: worker {worker} holds the SharedPromote copy"
-        );
-    }
-    if let Some(closer) = closer {
-        assert!(
-            tables[closer].mark_restore_closer(&key, SESSION_ID),
-            "FIXTURE: the designated copy is marked"
-        );
-    }
-    (tables, key)
+    let mut table = SessionTable::new();
+    assert!(table.upsert_synced_with_origin(entry.into_session_install(INSTALL_NS), false));
+    assert_eq!(table.timeout_secs_for(&key), 60, "FIXTURE: 60 s window");
+    (table, key)
 }
 
-/// A packet hit on this worker's copy (the production read path plus its
-/// accounting charge), stamping `last_packet_seen_ns` past `created_ns`.
 fn serve(table: &mut SessionTable, key: &SessionKey, now_ns: u64) {
     assert!(table.lookup_with_origin(key, now_ns, 0).is_some(), "FIXTURE: serve hit");
     table.account_packet(key, 84, 0, 0);
@@ -100,11 +113,20 @@ fn expire(
     table: &mut SessionTable,
     now_ns: u64,
     forwards: bool,
-    shared: Option<SharedRowIdentity>,
+    shared: &SharedModel,
 ) -> Vec<ExpiredSession> {
     let forwards_rg = move |_rg: i32| forwards;
     let epoch_of = |_rg: i32| 0u32;
-    let shared_row = move |_key: &SessionKey| shared;
+    let shared_row = |_key: &SessionKey| shared.row.get();
+    let claim_close = |_key: &SessionKey, expected: SharedRowIdentity| {
+        if shared.row.get() == Some(expected) {
+            shared.row.set(None);
+            shared.claims.set(shared.claims.get() + 1);
+            true
+        } else {
+            false
+        }
+    };
     let ha = ExpireHaContext {
         node_active: true,
         forwards_rg: &forwards_rg,
@@ -113,6 +135,8 @@ fn expire(
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &|_| NodeServedEvidence::default(),
         shared_row: &shared_row,
+        claim_close: &claim_close,
+        fence_evidence_cadence_ns: CADENCE_NS,
     };
     table.last_gc_ns = 0;
     table.expire_stale_entries_ha(now_ns, Some(&ha))
@@ -137,207 +161,264 @@ fn tombstones_for(table: &mut SessionTable, key: &SessionKey) -> usize {
     n
 }
 
-/// Past every copy's idle window (60 s from the install re-stamp).
-fn after_window() -> u64 {
-    INSTALL_NS + 62 * SEC
+/// Past the copy's own window (60 s from the install re-stamp).
+fn crossed() -> u64 {
+    INSTALL_NS + WINDOW_NS + 2 * SEC
 }
 
-fn shared(packets: u64) -> Option<SharedRowIdentity> {
-    Some(SharedRowIdentity {
-        session_id: SESSION_ID,
-        packets,
-    })
-}
-
-/// Cell 1: while another worker serves the flow (its packets advanced the
-/// shared row's max-merged counters), every non-serving restored copy is
-/// removed SILENTLY: no Close delta (so no shared removal, no sibling
-/// `DeleteSynced`, no HA delete, no RT_FLOW close), no export tombstone, and
-/// a fenced teardown marker for the reap.
+/// Cell 1: while ANOTHER worker serves (the shared row's `last_served_ns`
+/// is inside the window — the minting worker's restamp stamps it too), an
+/// idle restored copy is KEPT, re-stamped to that packet time: no removal,
+/// no Close (so no shared removal, sibling `DeleteSynced`, HA delete or
+/// RT_FLOW close), no hold, the shared row untouched. Kept rather than
+/// dropped so a copy that can close the session exists on whichever worker
+/// the flow moves to. Once the node goes idle the copy holds and claims.
 #[test]
-fn non_serving_restored_copy_is_silent_while_another_serves_19026() {
-    let (mut tables, key) = restored_copies(Some(0));
-    let serving = 2;
-    // The serving worker keeps the flow alive at 10 Hz-ish cadence.
-    for second in 1..=62u64 {
-        serve(&mut tables[serving], &key, INSTALL_NS + second * SEC);
-    }
-    let advanced = shared(SEEDED_FWD + SEEDED_REV + 124);
-    let mut silent = 0;
-    for (worker, table) in tables.iter_mut().enumerate() {
-        let expired = expire(table, after_window(), true, advanced);
-        if worker == serving {
-            assert!(expired.is_empty(), "the serving copy is live");
-            assert!(table.entry_by_key(&key).is_some());
-            continue;
-        }
-        assert_eq!(expired.len(), 1, "worker {worker}: the idle copy is removed");
-        assert!(
-            expired[0].close_fenced,
-            "worker {worker}: its reap must take the fenced teardown"
-        );
-        assert!(expired[0].overflow_close.is_none());
-        assert_eq!(
-            closes_for(table, &key),
-            0,
-            "#19026: worker {worker}'s non-serving copy (closer or not) emits no Close"
-        );
-        assert_eq!(tombstones_for(table, &key), 0, "no export tombstone either");
-        silent += 1;
-    }
-    assert_eq!(silent, WORKERS - 1);
-}
-
-/// Cell 2: a flow that really goes idle closes EXACTLY ONCE across all
-/// copies — through the copy that served (R3) — with no duplicate from the
-/// fenced copies, and the closer mark does not add a second Close.
-#[test]
-fn idle_flow_closes_exactly_once_across_copies_19026() {
-    let (mut tables, key) = restored_copies(Some(0));
-    let serving = 3;
-    for second in 1..=10u64 {
-        serve(&mut tables[serving], &key, INSTALL_NS + second * SEC);
-    }
-    // Everyone is past the window after the flow stops at +10 s.
-    let now = INSTALL_NS + 75 * SEC;
-    let advanced = shared(SEEDED_FWD + SEEDED_REV + 20);
-    let mut closes = 0;
-    for table in tables.iter_mut() {
-        let _ = expire(table, now, true, advanced);
-        closes += closes_for(table, &key);
-        assert!(table.entry_by_key(&key).is_none(), "every copy is gone");
-    }
-    assert_eq!(closes, 1, "#19026: Close + HA delete == 1 for the session");
-}
-
-/// Cell 4 (twin a): a stale shared row — present, same session, nobody ever
-/// served after the restore, counters not advanced — closes exactly once,
-/// through the designated restore closer.
-#[test]
-fn stale_restored_session_closes_once_via_designated_closer_19026() {
-    let closer = 4;
-    let (mut tables, key) = restored_copies(Some(closer));
-    let stale = shared(SEEDED_FWD + SEEDED_REV);
-    let mut closes_by_worker = Vec::new();
-    for table in tables.iter_mut() {
-        let expired = expire(table, after_window(), true, stale);
-        assert_eq!(expired.len(), 1);
-        closes_by_worker.push(closes_for(table, &key));
-    }
+fn idle_copy_is_kept_while_another_worker_serves_19026() {
+    let (mut table, key) = restored_copy();
+    let now = crossed();
+    let served = now - 5 * SEC;
+    let shared = SharedModel::new(60, served);
+    assert!(expire(&mut table, now, true, &shared).is_empty(), "the idle copy is kept");
     assert_eq!(
-        closes_by_worker.iter().sum::<usize>(),
-        1,
-        "#19026: the stale twin closes exactly once ({closes_by_worker:?})"
+        table.entry_by_key(&key).expect("kept").last_seen_ns,
+        served,
+        "re-stamped to the node's last service"
     );
-    assert_eq!(closes_by_worker[closer], 1, "and it is the designated closer");
-}
-
-/// Cell 4 (twin b, R1): the same never-served restored copies with the
-/// shared row GONE (already closed elsewhere) stay silent — the closer too.
-#[test]
-fn restored_copies_stay_silent_when_shared_row_is_gone_19026() {
-    let (mut tables, key) = restored_copies(Some(1));
-    for (worker, table) in tables.iter_mut().enumerate() {
-        let expired = expire(table, after_window(), true, None);
-        assert_eq!(expired.len(), 1);
-        assert!(expired[0].close_fenced, "worker {worker}");
-        assert_eq!(closes_for(table, &key), 0, "#19026 R1: worker {worker} is silent");
-    }
-}
-
-/// R1, replaced: a different session id under the key is a replacement;
-/// the old copies must not close it.
-#[test]
-fn restored_copies_stay_silent_when_shared_row_was_replaced_19026() {
-    let (mut tables, key) = restored_copies(Some(1));
-    let replaced = Some(SharedRowIdentity {
-        session_id: SESSION_ID + 1,
-        packets: SEEDED_FWD + SEEDED_REV,
-    });
-    for table in tables.iter_mut() {
-        let _ = expire(table, after_window(), true, replaced);
-        assert_eq!(closes_for(table, &key), 0, "#19026 R1 (replaced): silent");
-    }
-}
-
-/// Cell 5: the fence has not muted real expiry. A genuinely idle locally
-/// owned row still closes: a plain `ForwardFlow` row, a `SharedPromote` copy
-/// that served (R3) even when no shared row is consulted, and a
-/// `SharedPromote` row on a node that does NOT forward its RG or runs with
-/// no HA context at all.
-#[test]
-fn genuinely_idle_local_rows_still_close_19026() {
-    // R3: the copy served, then the flow went idle; shared not advanced past
-    // what this copy itself contributed.
-    let (mut tables, key) = restored_copies(None);
-    serve(&mut tables[0], &key, INSTALL_NS + SEC);
-    let own = tables[0].fwd_packets_for(&key) + tables[0].rev_packets_for(&key);
-    let _ = expire(&mut tables[0], INSTALL_NS + 63 * SEC, true, shared(own));
-    assert_eq!(closes_for(&mut tables[0], &key), 1, "R3: a served copy closes");
-
-    // Not forwarding the RG here: the fence does not apply; the standby gate
-    // HOLDs the row exactly as before #19026.
-    let (mut tables, key) = restored_copies(None);
-    let expired = expire(&mut tables[1], after_window(), false, None);
-    assert!(expired.is_empty(), "standby: held, not reaped");
-    assert!(tables[1].entry_by_key(&key).is_some());
-
-    // No HA context: standalone semantics, ordinary Close.
-    let (mut tables, key2) = restored_copies(None);
-    tables[2].last_gc_ns = 0;
-    let expired = tables[2].expire_stale_entries_ha(after_window(), None);
+    assert_eq!(closes_for(&mut table, &key), 0, "#19026: no Close");
+    assert_eq!(tombstones_for(&mut table, &key), 0, "no export tombstone");
+    assert_eq!(table.promote_fence_hold_count(), 0, "not held");
+    assert!(shared.row.get().is_some() && shared.claims.get() == 0, "shared row untouched");
+    // The node goes idle: one window after its last service the copy holds,
+    // then claims and closes exactly once.
+    let idle = served + WINDOW_NS + 2 * SEC;
+    assert!(expire(&mut table, idle, true, &shared).is_empty(), "held");
+    let expired = expire(&mut table, idle + HOLD_NS + 2 * SEC, true, &shared);
     assert_eq!(expired.len(), 1);
     assert!(!expired[0].close_fenced);
-    assert_eq!(closes_for(&mut tables[2], &key2), 1, "no HA: ordinary Close");
-    let _ = key;
+    assert_eq!(closes_for(&mut table, &key), 1, "exactly one Close once idle");
+    assert_eq!(shared.claims.get(), 1);
+}
 
-    // A plain local ForwardFlow row, idle on a forwarding node.
+/// Codex P1 #1: a copy that SERVED (served-since-install was R3 = Close on
+/// bb9608f1a6) is kept without a Close when another worker served more
+/// recently.
+#[test]
+fn copy_that_served_earlier_is_kept_while_another_serves_19026() {
+    let (mut table, key) = restored_copy();
+    serve(&mut table, &key, INSTALL_NS + 5 * SEC);
+    let now = INSTALL_NS + 5 * SEC + WINDOW_NS + 2 * SEC;
+    let shared = SharedModel::new(70, now - 3 * SEC);
+    assert!(expire(&mut table, now, true, &shared).is_empty(), "kept");
+    assert!(table.entry_by_key(&key).is_some());
+    assert_eq!(closes_for(&mut table, &key), 0, "#19026 Codex P1 #1: no Close");
+}
+
+/// R14 F2: service in the REVERSE direction only (a reverse hit stamps the
+/// reverse half; only its counters fold onto the forward copy) is this
+/// copy's own service: the forward copy is kept to the reverse packet time,
+/// then, once idle, holds and closes exactly once (no leak).
+#[test]
+fn reverse_only_service_keeps_the_copy_then_closes_once_19026() {
+    let entry = promoted_entry(crate::ip_proto::PROTO_UDP, 40000, 5000);
+    let key = entry.key.clone();
+    let mut reverse = entry.clone();
+    reverse.key = reverse_session_key(&key, entry.decision.nat);
+    reverse.metadata.is_reverse = true;
+    reverse.origin = SessionOrigin::WorkerLocalImport;
+    let reverse_key = reverse.key.clone();
     let mut table = SessionTable::new();
-    let mut entry = promoted_icmp_entry();
-    entry.origin = SessionOrigin::SyncImport;
-    let mut install = entry.into_session_install(INSTALL_NS);
+    assert!(table.upsert_synced_with_origin(entry.into_session_install(INSTALL_NS), false));
+    assert!(table.upsert_synced_with_origin(reverse.into_session_install(INSTALL_NS), false));
+    let served = INSTALL_NS + 20 * SEC;
+    assert!(table.lookup_with_origin(&reverse_key, served, 0).is_some(), "FIXTURE: reverse hit");
+    table.account_packet(&reverse_key, 84, 0, 0);
+    assert_eq!(
+        table.entry_by_key(&key).expect("forward").last_packet_seen_ns,
+        0,
+        "FIXTURE premise: reverse service does not stamp the forward copy"
+    );
+    // Nobody else served; the shared row has not been restamped yet.
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut table, crossed(), true, &shared).is_empty(), "kept");
+    assert_eq!(table.entry_by_key(&key).expect("kept").last_seen_ns, served);
+    assert_eq!(closes_for(&mut table, &key), 0);
+    let idle = served + WINDOW_NS + 2 * SEC;
+    let _ = expire(&mut table, idle, true, &shared);
+    let _ = expire(&mut table, idle + HOLD_NS + 2 * SEC, true, &shared);
+    assert!(table.entry_by_key(&key).is_none(), "the forward copy left");
+    assert_eq!(closes_for(&mut table, &key), 1, "#19026 R14 F2: exactly one Close");
+}
+
+/// The node looks idle: the copy is HELD for one evidence cadence + GC
+/// interval (no removal, no Close), then claims, and closes exactly once.
+#[test]
+fn node_idle_copy_holds_then_claims_and_closes_once_19026() {
+    let (mut table, key) = restored_copy();
+    let now = crossed();
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut table, now, true, &shared).is_empty(), "held, not removed");
+    assert_eq!(table.promote_fence_hold_count(), 1);
+    assert_eq!(closes_for(&mut table, &key), 0, "no Close during the hold");
+    // Early visit inside the hold: still held.
+    assert!(expire(&mut table, now + HOLD_NS / 2, true, &shared).is_empty());
+    let expired = expire(&mut table, now + HOLD_NS + 2 * SEC, true, &shared);
+    assert_eq!(expired.len(), 1);
+    assert!(!expired[0].close_fenced, "the claim winner takes the ordinary reap");
+    assert_eq!(closes_for(&mut table, &key), 1, "exactly one Close");
+    assert_eq!(shared.claims.get(), 1);
+    assert!(shared.row.get().is_none(), "the claim retired the shared row");
+    assert_eq!(table.promote_fence_hold_count(), 0);
+}
+
+/// Codex P1 #2: serving evidence that surfaces DURING the hold (a restamp
+/// that lagged the copy's crossing) cancels the close: the copy is kept.
+#[test]
+fn evidence_surfacing_during_the_hold_cancels_the_close_19026() {
+    let (mut table, key) = restored_copy();
+    let now = crossed();
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut table, now, true, &shared).is_empty(), "held");
+    shared.served(now - SEC); // another worker's restamp lands late
+    assert!(expire(&mut table, now + HOLD_NS + 2 * SEC, true, &shared).is_empty(), "kept");
+    assert_eq!(table.entry_by_key(&key).expect("kept").last_seen_ns, now - SEC);
+    assert_eq!(closes_for(&mut table, &key), 0, "#19026 Codex P1 #2: no Close");
+    assert_eq!(shared.claims.get(), 0);
+    assert_eq!(table.promote_fence_hold_count(), 0, "the hold is cancelled");
+}
+
+/// Evidence that changes during the hold WITHOUT fresh service (a stale
+/// counter max-merge) neither closes on the stale snapshot nor silences the
+/// copy: the hold re-arms on the new evidence, then claims once.
+#[test]
+fn stale_evidence_change_rearms_the_hold_19026() {
+    let (mut table, key) = restored_copy();
+    let now = crossed();
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut table, now, true, &shared).is_empty(), "held");
+    let mut row = shared.row.get().expect("row");
+    row.packets += 5; // counts moved; no packet inside the window
+    shared.row.set(Some(row));
+    let first_end = now + HOLD_NS + 2 * SEC;
+    assert!(expire(&mut table, first_end, true, &shared).is_empty(), "re-held, not closed");
+    assert_eq!(shared.claims.get(), 0);
+    assert_eq!(table.promote_fence_hold_count(), 1);
+    let expired = expire(&mut table, first_end + HOLD_NS + 2 * SEC, true, &shared);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(closes_for(&mut table, &key), 1, "the re-armed hold claims once");
+}
+
+/// Exactly once across copies: two copies reach their claim; the first
+/// retires the shared row, the second finds it gone (R1) and is silent.
+#[test]
+fn two_copies_claiming_close_exactly_once_19026() {
+    let (mut a, key) = restored_copy();
+    let (mut b, _) = restored_copy();
+    let now = crossed();
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut a, now, true, &shared).is_empty());
+    assert!(expire(&mut b, now, true, &shared).is_empty());
+    let ea = expire(&mut a, now + HOLD_NS + 2 * SEC, true, &shared);
+    let eb = expire(&mut b, now + HOLD_NS + 2 * SEC, true, &shared);
+    assert_eq!(ea.len() + eb.len(), 2, "both copies leave");
+    assert_eq!(
+        closes_for(&mut a, &key) + closes_for(&mut b, &key),
+        1,
+        "#19026: Close + HA delete == 1"
+    );
+    assert_eq!(shared.claims.get(), 1);
+}
+
+/// R1 twins: the shared row gone, or replaced by another incarnation — every
+/// copy is silent, with no hold.
+#[test]
+fn shared_row_gone_or_replaced_is_silent_19026() {
+    for replaced in [false, true] {
+        let (mut table, key) = restored_copy();
+        let shared = SharedModel::new(60, 0);
+        if replaced {
+            shared.row.set(Some(SharedRowIdentity {
+                session_id: SESSION_ID + 1,
+                packets: 60,
+                last_served_ns: 0,
+            }));
+        } else {
+            shared.row.set(None);
+        }
+        let expired = expire(&mut table, crossed(), true, &shared);
+        assert_eq!(expired.len(), 1, "replaced={replaced}");
+        assert!(expired[0].close_fenced);
+        assert_eq!(closes_for(&mut table, &key), 0, "replaced={replaced}: R1 silent");
+        assert_eq!(tombstones_for(&mut table, &key), 0, "a Transfer: no export tombstone");
+        assert_eq!(table.promote_fence_hold_count(), 0);
+    }
+}
+
+/// A copy whose own packets are inside its window (its idle anchor lagged)
+/// is serving: kept and re-stamped to its packet time, never silenced or
+/// held.
+#[test]
+fn copy_with_its_own_recent_packets_is_kept_19026() {
+    let (mut table, key) = restored_copy();
+    serve(&mut table, &key, INSTALL_NS + 30 * SEC);
+    // Model a lagging idle anchor: last_seen older than the last packet.
+    table.entry_by_key_mut(&key).expect("row").last_seen_ns = INSTALL_NS;
+    table.push_to_wheel(&key, INSTALL_NS);
+    let shared = SharedModel::new(61, 0);
+    assert!(expire(&mut table, crossed(), true, &shared).is_empty(), "kept");
+    assert_eq!(table.entry_by_key(&key).expect("kept").last_seen_ns, INSTALL_NS + 30 * SEC);
+    assert_eq!(table.promote_fence_hold_count(), 0, "not held");
+}
+
+/// A hold armed under one idle anchor does not carry over once the row was
+/// re-stamped (here: an RG-transition refresh): the next crossing re-arms a
+/// fresh hold instead of claiming on the stale one.
+#[test]
+fn hold_rearms_after_the_row_is_restamped_19026() {
+    let (mut table, key) = restored_copy();
+    let now = crossed();
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut table, now, true, &shared).is_empty(), "held");
+    let (decision, metadata, _) = table.entry_with_origin(&key).expect("held row");
+    assert!(table.refresh_for_ha_transition(&key, decision, metadata, now + SEC));
+    let later = now + SEC + WINDOW_NS + 2 * SEC;
+    assert!(
+        expire(&mut table, now + HOLD_NS + 2 * SEC, true, &shared).is_empty(),
+        "the stale hold does not claim a re-stamped row"
+    );
+    assert_eq!(shared.claims.get(), 0);
+    assert!(expire(&mut table, later, true, &shared).is_empty(), "a fresh hold");
+    let expired = expire(&mut table, later + HOLD_NS + 2 * SEC, true, &shared);
+    assert_eq!(expired.len(), 1);
+    assert_eq!(closes_for(&mut table, &key), 1, "the re-armed hold claims once");
+}
+
+/// Cell 5: the fence has not muted real expiry elsewhere: a standby node
+/// still HOLDs, no HA context is standalone (ordinary Close), and a plain
+/// local `ForwardFlow` row closes as before.
+#[test]
+fn fence_leaves_other_expiry_paths_unchanged_19026() {
+    let shared = SharedModel::new(60, 0);
+    let (mut standby, key) = restored_copy();
+    assert!(expire(&mut standby, crossed(), false, &shared).is_empty(), "standby HOLD");
+    assert!(standby.entry_by_key(&key).is_some());
+
+    let (mut standalone, key) = restored_copy();
+    standalone.last_gc_ns = 0;
+    let expired = standalone.expire_stale_entries_ha(crossed(), None);
+    assert_eq!(expired.len(), 1);
+    assert!(!expired[0].close_fenced);
+    assert_eq!(closes_for(&mut standalone, &key), 1, "no HA: ordinary Close");
+
+    let mut table = SessionTable::new();
+    let mut install = promoted_icmp_entry().into_session_install(INSTALL_NS);
     install.origin = SessionOrigin::ForwardFlow;
     install.session_id = 0;
     let local_key = install.key.clone();
-    assert!(table.upsert_synced_with_origin(install, true), "FIXTURE: local row");
-    let expired = expire(&mut table, after_window(), true, None);
+    assert!(table.upsert_synced_with_origin(install, true));
+    let expired = expire(&mut table, crossed(), true, &shared);
     assert_eq!(expired.len(), 1);
     assert!(!expired[0].close_fenced);
     assert_eq!(closes_for(&mut table, &local_key), 1, "a local ForwardFlow row closes");
-}
-
-/// The restore-closer mark is per incarnation: it survives a same-id
-/// re-import (a resend that is allowed to replace the local row) and is
-/// dropped by a new incarnation. (On the forwarding node a resend is refused
-/// by the local-replace guard and the marked row simply stays.)
-#[test]
-fn restore_closer_mark_follows_the_incarnation_19026() {
-    let (mut tables, key) = restored_copies(Some(0));
-    let entry = promoted_icmp_entry();
-    assert!(
-        !tables[0].upsert_synced_with_origin(entry.clone().into_session_install(INSTALL_NS), false),
-        "premise: on the forwarding node the local-replace guard refuses the resend"
-    );
-    assert!(tables[0].upsert_synced_with_origin(
-        entry.clone().into_session_install(INSTALL_NS + SEC),
-        true
-    ));
-    let stale = shared(SEEDED_FWD + SEEDED_REV);
-    let _ = expire(&mut tables[0], INSTALL_NS + 63 * SEC, true, stale);
-    assert_eq!(closes_for(&mut tables[0], &key), 1, "same-id resend keeps the mark");
-
-    let (mut tables, key) = restored_copies(Some(0));
-    let mut next = promoted_icmp_entry();
-    next.session_id = SESSION_ID + 7;
-    assert!(tables[0].upsert_synced_with_origin(next.into_session_install(INSTALL_NS), true));
-    assert!(
-        !tables[0].mark_restore_closer(&key, SESSION_ID),
-        "a mark for the old incarnation does not apply to the new one"
-    );
-    let replaced = Some(SharedRowIdentity {
-        session_id: SESSION_ID + 7,
-        packets: SEEDED_FWD + SEEDED_REV,
-    });
-    let _ = expire(&mut tables[0], after_window(), true, replaced);
-    assert_eq!(closes_for(&mut tables[0], &key), 0, "the new incarnation was never marked");
+    assert_eq!(shared.claims.get(), 0, "no claim outside the fence");
 }

@@ -9864,6 +9864,8 @@ fn sync_liveness_refresh_renews_both_session_halves_until_refreshes_stop_16880()
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
             shared_row: &|_| None,
+            claim_close: &|_, _| false,
+            fence_evidence_cadence_ns: 0,
         };
         table.expire_stale_entries_ha(now_ns, Some(&ha))
     };
@@ -10768,11 +10770,9 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_restores_shared_promote_forward
     assert_eq!(reverse.metadata.owner_rg_id, 2);
     let commands = worker_commands[0].lock().expect("commands");
     assert_eq!(commands.len(), 2);
-    // #19026: the only (lowest accepting) queue is the restore closer.
     assert!(matches!(
         &commands[0],
-        WorkerCommand::UpsertSyncedRestoreCloser(session)
-            if session.origin == SessionOrigin::SharedPromote
+        WorkerCommand::UpsertSynced(session) if session.origin == SessionOrigin::SharedPromote
     ));
     assert!(matches!(
         &commands[1],
@@ -16529,6 +16529,8 @@ fn arm_standby_hold_clock_5152(table: &mut SessionTable, now_ns: u64) {
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
     node_served: &|_| crate::session::NodeServedEvidence::default(),
     shared_row: &|_| None,
+    claim_close: &|_, _| false,
+    fence_evidence_cadence_ns: 0,
     };
     let expired = table.expire_stale_entries_ha(now_ns, Some(&ctx));
     assert!(expired.is_empty(), "arming HOLD pass must hold, not reap");

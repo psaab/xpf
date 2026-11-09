@@ -157,21 +157,34 @@ pub(crate) struct ExpireHaContext<'a> {
     /// counters (see `NodeServedEvidence`); tests drive it directly.
     pub(crate) node_served: &'a dyn Fn(&SessionKey) -> NodeServedEvidence,
     /// #19026: keyed, protocol-agnostic read of the node's SHARED primary
-    /// row under the same key: its session id and max-merged `fwd+rev`
-    /// packet counters (the only fields every serving worker stamps for any
-    /// protocol). Consulted only for an expiring forward `SharedPromote` copy
-    /// on a node that forwards its RG (the restore close fence). Production:
+    /// row under the same key (identity + node-level serving evidence).
+    /// Consulted only for an expiring forward `SharedPromote` copy on a node
+    /// that forwards its RG (the restore close fence). Production:
     /// `afxdp::shared_ops::shared_row_identity`; `None` = no shared row.
     pub(crate) shared_row: &'a dyn Fn(&SessionKey) -> Option<SharedRowIdentity>,
+    /// #19026: atomically retire the shared primary row iff it still reads
+    /// exactly `expected` — the close CLAIM. Exactly one copy on the node
+    /// wins; only the winner emits the session's Close (and so its HA
+    /// delete). Production: `afxdp::shared_ops::claim_shared_close`.
+    pub(crate) claim_close: &'a dyn Fn(&SessionKey, SharedRowIdentity) -> bool,
+    /// #19026: the shared serving evidence's worst-case publication lag (the
+    /// ct-slice restamp cadence). The fence holds an idle-looking copy this
+    /// long plus one GC interval before it may claim the Close.
+    pub(crate) fence_evidence_cadence_ns: u64,
 }
 
-/// #19026: the shared primary row's identity for the restore close fence.
+/// #19026: the shared primary row's identity and node-level serving
+/// evidence, as the restore close fence reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct SharedRowIdentity {
     pub(crate) session_id: u64,
     /// `fwd_packets + rev_packets` of the shared row (max-merged across the
     /// workers that restamp it).
     pub(crate) packets: u64,
+    /// Greatest admitted-packet time any worker on this node published for
+    /// the row (`SyncedSessionEntry::last_served_ns`, minting worker
+    /// included). 0 = never stamped.
+    pub(crate) last_served_ns: u64,
 }
 /// #16223: node-level served-handshake evidence for one tuple — the
 /// promoted serving companion's handshake wire state plus its admitted
@@ -196,6 +209,22 @@ pub(crate) struct SharedRowIdentity {
 /// silent (no periodic spam); a key that regresses below the emitted
 /// stage (new incarnation / re-pend) re-arms. Bounded by the session
 /// table's forward-row count; entries die with their session.
+/// #19026: one restore-close-fence freshness hold (see expire.rs
+/// `promote_fence_step`). The hold is valid only for the idle anchor it was
+/// armed under; a row that served again is kept (re-stamped) and its hold
+/// dropped, and a later crossing arms a fresh one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PromoteFenceHold {
+    /// The row's `last_seen_ns` when the hold was armed.
+    pub(crate) armed_last_seen_ns: u64,
+    /// The claim may run at or after this time.
+    pub(crate) until_ns: u64,
+    /// The shared evidence when the hold was armed. The claim runs only on
+    /// exactly this evidence; a change without a packet inside the window
+    /// re-arms the hold.
+    pub(crate) seen: SharedRowIdentity,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct CtSliceEmitMark {
     /// Highest handshake wire this key has emitted an Update for

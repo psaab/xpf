@@ -1371,13 +1371,6 @@ struct SessionEntry {
     /// same pass. Preserved across a same-incarnation re-import; never
     /// synced.
     served_here: bool,
-    /// #19026: this worker's copy of a restored `SharedPromote` row is the
-    /// prewarm's designated restore closer: when NO copy served after the
-    /// restore (shared counters not advanced), only this copy's expiry emits
-    /// the Close (and so the HA delete). Set by
-    /// `WorkerCommand::UpsertSyncedRestoreCloser` via `mark_restore_closer`;
-    /// preserved across a same-incarnation re-import; never synced.
-    restore_closer: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
     /// #965: absolute tick in the ordinary expiry wheel. Updated when a
     /// non-held deadline changes; while held, it is the horizon recheck tick.
@@ -2483,6 +2476,10 @@ pub(crate) struct SessionTable {
     /// table size, seeded like `node_served_stamps`, and dropped with
     /// its session via `remove_entry`. Node-local, never synced.
     ct_slice_emit_marks: SeededKeyMap<CtSliceEmitMark>,
+    /// #19026: restore-close-fence freshness holds, one per expiring forward
+    /// `SharedPromote` copy that looked node-idle (see expire.rs
+    /// `promote_fence_step`). Dropped with the row in `remove_entry`.
+    promote_fence_holds: SeededKeyMap<PromoteFenceHold>,
     /// #9856: terminal-removal harvests awaiting export (`remove_entry`
     /// with `RemovalKind::Terminal`). Drained every tick by the worker
     /// loop (`take_tombstones_into`) — pushed when a window is open,
@@ -2680,7 +2677,8 @@ impl SessionTable {
             handshake_progress_probes: AtomicU64::new(0),
             #[cfg(test)]
             probe_cost_probes: ProbeCostProbes::default(),
-            ct_slice_emit_marks: HashMap::with_hasher(state),
+            ct_slice_emit_marks: HashMap::with_hasher(state.clone()),
+            promote_fence_holds: HashMap::with_hasher(state),
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
             // until `set_session_id_namespace` is called at worker setup.
@@ -7628,24 +7626,6 @@ impl SessionTable {
         self.close_head_blocked = blocked;
     }
 
-    /// #19026: mark this worker's restored `SharedPromote` copy of exactly
-    /// the `session_id` incarnation as the designated restore closer (the
-    /// activation prewarm's `UpsertSyncedRestoreCloser`). Returns whether a
-    /// row was marked; any other origin or incarnation is left untouched.
-    pub(crate) fn mark_restore_closer(&mut self, key: &SessionKey, session_id: u64) -> bool {
-        match self.entry_by_key_mut(key) {
-            Some(entry)
-                if entry.origin == SessionOrigin::SharedPromote
-                    && !entry.metadata.is_reverse
-                    && entry.session_id == session_id =>
-            {
-                entry.restore_closer = true;
-                true
-            }
-            _ => false,
-        }
-    }
-
     /// #2442: read-and-clear the loss-of-sync latch. Returns true iff
     /// `push_delta` dropped at least one delta since the last call — i.e. the
     /// incremental session-sync stream went lossy and the downstream consumer's
@@ -7724,6 +7704,7 @@ impl SessionTable {
         {
             self.node_served_stamps.remove(key);
             self.ct_slice_emit_marks.remove(key);
+            self.promote_fence_holds.remove(key);
         }
         // The pressure-shed index contains only forward opening entries.
         // Remove by key here so every terminal and replacement path keeps it

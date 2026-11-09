@@ -45,10 +45,11 @@ fn promoted_row() -> SyncedSessionEntry {
 }
 
 /// One restored, never-served `SharedPromote` copy on this worker, the
-/// shared primary row with `shared_packets`, and the worker's housekeeping
-/// run past the copy's idle window. Returns (Close deltas the loop flushed
-/// for the key, shared row still present, copy still in the table).
-fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
+/// shared primary row (with `last_served_ns` = `served_at`, 0 = never), and
+/// the worker's housekeeping run at `checks` (absolute offsets past the
+/// install). Returns (Close deltas the loop flushed for the key, shared row
+/// still present, copy still in the table).
+fn run_restored_copy(served_at: Option<u64>, checks: &[u64]) -> (usize, bool, bool) {
     let row = promoted_row();
     let install_ns = 10_000 * SEC;
     let mut sessions = SessionTable::new();
@@ -56,9 +57,6 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
         sessions.upsert_synced_with_origin(row.clone().into_session_install(install_ns), false),
         "FIXTURE: restore install"
     );
-    if closer {
-        assert!(sessions.mark_restore_closer(&row.key, SESSION_ID));
-    }
     let shared_sessions: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
         Arc::new(Mutex::new(FastMap::default()));
     let shared_nat: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> =
@@ -67,8 +65,7 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
         Arc::new(Mutex::new(FastMap::default()));
     let indexes = SharedSessionOwnerRgIndexes::default();
     let mut published = row.clone();
-    published.fwd_packets = shared_packets / 2;
-    published.rev_packets = shared_packets - shared_packets / 2;
+    published.last_served_ns = served_at.map_or(0, |offset| install_ns + offset);
     crate::afxdp::shared_ops::publish_shared_session(
         &shared_sessions,
         &shared_nat,
@@ -77,17 +74,6 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
         &published,
     );
 
-    let now_ns = install_ns + 3 * 3_600 * SEC;
-    let now_secs = now_ns / SEC;
-    let mut ha_runtime: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
-    ha_runtime.insert(
-        1,
-        HAGroupRuntime {
-            active: true,
-            watchdog_timestamp: now_secs,
-            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
-        },
-    );
     let rg_epochs: [AtomicU32; crate::afxdp::flow_cache::MAX_RG_EPOCHS] =
         std::array::from_fn(|_| AtomicU32::new(0));
     let runtime = RuntimeViewChannel::default();
@@ -105,6 +91,18 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
         |_: &mut SessionTable, _: &mut [BindingWorker], _: &mut bool, deltas: &[SessionDelta]| {
             flushed.extend(deltas.iter().cloned());
         };
+    for check in checks {
+    let now_ns = install_ns + check;
+    let now_secs = now_ns / SEC;
+    let mut ha_runtime: BTreeMap<i32, HAGroupRuntime> = BTreeMap::new();
+    ha_runtime.insert(
+        1,
+        HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+        },
+    );
     let _ = run_session_housekeeping(
         &mut sessions,
         &mut bindings,
@@ -133,6 +131,7 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
         &mut barrier,
         &mut flush_deltas,
     );
+    }
     let closes = flushed
         .iter()
         .filter(|d| d.kind == SessionDeltaKind::Close && d.key == row.key)
@@ -142,27 +141,30 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
     (closes, shared_present, sessions.entry_with_origin(&row.key).is_some())
 }
 
-/// Cell 1 (production wiring): while another worker serves — the shared
-/// row's counters advanced past this copy's seeded ones — the worker's
-/// housekeeping removes its non-serving restored copy without handing the
-/// loop's flush any Close (the sole carrier of the shared removal, sibling
-/// `DeleteSynced` and HA delete). Holds for the designated closer too.
+/// Cell 1 (production wiring): while another worker on this node serves —
+/// the shared row's `last_served_ns`, which every worker's restamp stamps,
+/// is inside the window — the worker's housekeeping keeps its idle restored
+/// copy and hands the loop's flush no Close (the sole carrier of the shared
+/// removal, sibling `DeleteSynced` and HA delete).
 #[test]
-fn housekeeping_silences_non_serving_restored_copy_19026() {
-    for closer in [false, true] {
-        let (closes, shared_present, copy_present) = run_restored_copy(2 * SEEDED + 40, closer);
-        assert!(!copy_present, "closer={closer}: the idle copy is removed");
-        assert_eq!(closes, 0, "#19026: closer={closer}: no Close reaches the flush");
-        assert!(shared_present, "the serving copy's shared row is untouched");
-    }
+fn housekeeping_keeps_idle_copy_while_another_serves_19026() {
+    let late = 3 * 3_600 * SEC;
+    let (closes, shared_present, copy_present) = run_restored_copy(Some(late - 10 * SEC), &[late]);
+    assert!(copy_present, "the idle copy is kept while the node serves");
+    assert_eq!(closes, 0, "#19026: no Close reaches the flush");
+    assert!(shared_present, "the serving copy's shared row is untouched");
 }
 
-/// Twin: a never-served restored session (shared counters NOT advanced)
-/// still closes through the designated copy, and only through it.
+/// The production claim: a genuinely idle restored copy is held for the
+/// evidence cadence + GC interval (13 s + 1 s with the default slab), then
+/// claims the shared row through `shared_ops::claim_shared_close` and closes.
 #[test]
-fn housekeeping_closes_stale_restore_only_on_the_closer_19026() {
-    assert_eq!(run_restored_copy(2 * SEEDED, true).0, 1, "the closer closes");
-    assert_eq!(run_restored_copy(2 * SEEDED, false).0, 0, "a non-closer is silent");
+fn housekeeping_holds_then_claims_an_idle_restore_19026() {
+    let late = 3 * 3_600 * SEC;
+    let held = run_restored_copy(None, &[late]);
+    assert_eq!(held, (0, true, true), "inside the hold: kept, no Close, shared intact");
+    let claimed = run_restored_copy(None, &[late, late + 15 * SEC]);
+    assert_eq!(claimed, (1, false, false), "after the hold: one Close, shared retired");
 }
 
 /// The fenced reap keeps the tuple's conntrack mirror row (under the same
@@ -226,4 +228,92 @@ fn fenced_reap_keeps_the_live_conntrack_mirror_row_19026() {
         );
     }
     clear_conntrack_rows_for_test();
+}
+
+type SharedMap = Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>;
+
+fn shared_maps_with(row: &SyncedSessionEntry) -> (SharedMap, SharedMap, SharedMap, SharedSessionOwnerRgIndexes) {
+    let sessions: SharedMap = Arc::new(Mutex::new(FastMap::default()));
+    let nat: SharedMap = Arc::new(Mutex::new(FastMap::default()));
+    let wire: SharedMap = Arc::new(Mutex::new(FastMap::default()));
+    let indexes = SharedSessionOwnerRgIndexes::default();
+    crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, row);
+    (sessions, nat, wire, indexes)
+}
+
+/// The claim is a compare-and-remove: a stale expectation (the row was
+/// restamped after the fence read it) neither removes the row nor wins; the
+/// exact current identity removes it once, and a second claim finds nothing.
+#[test]
+fn claim_shared_close_is_compare_and_remove_19026() {
+    let row = promoted_row();
+    let (sessions, nat, wire, indexes) = shared_maps_with(&row);
+    let key = row.key.clone();
+    let read = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
+    crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+        &sessions,
+        &wire,
+        1,
+        &[(key.clone(), crate::nat::NatDecision::default(), SEEDED + 1, SEEDED, 77 * SEC)],
+    );
+    let claim = |expected| {
+        crate::afxdp::shared_ops::claim_shared_close(&sessions, &nat, &wire, &indexes, &key, expected)
+    };
+    assert!(!claim(read), "a stale identity must not win the claim");
+    assert!(crate::afxdp::shared_ops::lock_shared_recover(&sessions).contains_key(&key));
+    let current = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
+    assert_eq!(current.last_served_ns, 77 * SEC);
+    assert!(claim(current), "the exact identity wins");
+    assert!(!crate::afxdp::shared_ops::lock_shared_recover(&sessions).contains_key(&key));
+    assert!(!claim(current), "exactly one winner");
+}
+
+/// `last_served_ns` is stamped by EVERY worker's restamp, the minting
+/// worker included (namespace 0 here, `session_id >> 48`), max-merged;
+/// `sibling_last_seen_ns` keeps its #18742 meaning (minting excluded).
+/// Same-incarnation republication keeps the larger value; a new incarnation
+/// starts from its own.
+#[test]
+fn last_served_is_stamped_by_every_worker_and_kept_per_incarnation_19026() {
+    let row = promoted_row();
+    assert_eq!(row.session_id >> 48, 1, "FIXTURE: minted in namespace 1");
+    let (sessions, nat, wire, indexes) = shared_maps_with(&row);
+    let key = row.key.clone();
+    let restamp = |namespace: u16, packet_seen_ns: u64| {
+        crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+            &sessions,
+            &wire,
+            namespace,
+            &[(key.clone(), crate::nat::NatDecision::default(), SEEDED, SEEDED, packet_seen_ns)],
+        );
+    };
+    let read = || {
+        let map = crate::afxdp::shared_ops::lock_shared_recover(&sessions);
+        let entry = map.get(&key).expect("row");
+        (entry.last_served_ns, entry.sibling_last_seen_ns)
+    };
+    restamp(1, 50 * SEC);
+    assert_eq!(read(), (50 * SEC, 0), "the minting worker stamps last_served only");
+    restamp(2, 40 * SEC);
+    assert_eq!(read(), (50 * SEC, 40 * SEC), "max-merged; a sibling stamps both");
+    restamp(2, 60 * SEC);
+    assert_eq!(read(), (60 * SEC, 60 * SEC));
+    // The single-pair restamp (cache-hit stage transition) stamps it too.
+    crate::afxdp::shared_ops::restamp_shared_packet_counts(
+        &sessions,
+        &wire,
+        &key,
+        crate::nat::NatDecision::default(),
+        1,
+        65 * SEC,
+        SEEDED,
+        SEEDED,
+    );
+    assert_eq!(read(), (65 * SEC, 60 * SEC), "single-pair restamp, minting worker");
+    crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, &row);
+    assert_eq!(read().0, 65 * SEC, "same-incarnation republication keeps it");
+    let mut next = row.clone();
+    next.session_id += 1;
+    crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, &next);
+    assert_eq!(read().0, 0, "a new incarnation starts from its own");
 }

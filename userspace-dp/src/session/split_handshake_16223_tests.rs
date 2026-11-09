@@ -455,6 +455,8 @@ fn syn_ack_first_replica_completes_from_node_evidence_16223() {
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &|_| None,
+        claim_close: &|_, _| false,
+        fence_evidence_cadence_ns: 0,
     };
     let expired = replica.expire_stale_entries_ha(now + 22 * SEC, Some(&ha));
     assert!(

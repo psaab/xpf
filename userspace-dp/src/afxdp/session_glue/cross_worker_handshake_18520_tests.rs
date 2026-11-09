@@ -645,6 +645,8 @@ fn imported_opening_session_served_mid_stream_survives_opening_window_18520() {
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &|_| None,
+        claim_close: &|_, _| false,
+        fence_evidence_cadence_ns: 0,
     };
     // 60 s of mid-stream service, 250 ms apart, with a GC pass every second.
     let mut sent = 0u32;
@@ -748,6 +750,8 @@ fn imported_opening_session_held_on_standby_survives_takeover_service_18520() {
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &|_| None,
+        claim_close: &|_, _| false,
+        fence_evidence_cadence_ns: 0,
     };
     // Standby for 30 s: the owner re-sends the same Opening snapshot every
     // 5 s (anchor-preserving same-id re-imports), GC every second.
@@ -901,6 +905,8 @@ fn established_replica_is_not_regressed_and_survives_standby_until_failback_1852
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &|_| None,
+        claim_close: &|_, _| false,
+        fence_evidence_cadence_ns: 0,
     };
     for sec in 2..=61u64 {
         let _ = standby.expire_stale_entries_ha(t0 + sec * SEC, Some(&ha));
@@ -943,6 +949,8 @@ fn standby_retention_ceiling_opening_vs_established_18520() {
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &|_| None,
+        claim_close: &|_, _| false,
+        fence_evidence_cadence_ns: 0,
     };
     let mut opening_reaped_at = None;
     for sec in 1..=120u64 {

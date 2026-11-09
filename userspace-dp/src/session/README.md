@@ -1824,8 +1824,8 @@ At RG activation the prewarm
 (`afxdp/shared_ops/owner_rg.rs::prewarm_reverse_synced_sessions_for_owner_rgs`)
 restores a locally promoted row as `SharedPromote` on EVERY live worker
 (#15950). Only the worker the flow's packets land on refreshes its copy.
-`SharedPromote` is not peer-synced, so the others get no SELF-HEAL. They
-AGE one window after the activation re-stamp.
+`SharedPromote` is not peer-synced, so the other copies get no SELF-HEAL.
+They AGE one window after the activation re-stamp.
 
 Before #19026, each idle copy's expiry Close was the carrier of:
 - the shared-map removal;
@@ -1833,70 +1833,118 @@ Before #19026, each idle copy's expiry Close was the carrier of:
 - the HA delete to the peer.
 
 All three are keyed by tuple, so a non-serving copy tore down the serving
-worker's live row. On udp, live pings were closed "idle Timeout" at T0+62,
-with up to four Close frames per session.
+worker's live row. On udp, live pings were closed "idle Timeout" at T0+62.
 
-The fence applies to an expiring **forward `SharedPromote`** row, on a node
-that **forwards its RG**, with an HA context. It reads the shared primary row
-under the same key through `ExpireHaContext::shared_row`, a keyed,
-protocol-agnostic read of `(session_id, fwd_packets + rev_packets)`. In
-production that read is `shared_ops::shared_row_identity`.
+**When the fence applies.** `SessionTable::promote_fence_step` (expire.rs)
+runs for an expiring **forward `SharedPromote`** row, on a node that
+**forwards its RG**, with an HA context. It runs after every unchanged
+keep-alive arm (for TCP that includes the #18722 node-evidence arm, which
+already keeps a served copy). It applies the same rule to every restored
+copy; no copy is designated:
 
-| rule | condition | result |
+| step | condition | result |
 |---|---|---|
-| R1 | shared row absent, or a different `session_id` (already closed or replaced elsewhere) | silent |
-| R3 | this copy served since install (`last_packet_seen_ns >= created_ns`, nonzero) | ordinary AGE + Close |
-| R2(a) | never served here; shared `fwd+rev` exceeds this copy's install-seeded counters (someone served after the restore) | silent |
-| R2(b) | never served here; shared counters not advanced (a never-served restored session) | Close only on the designated restore closer |
+| R1 | the shared primary row (`ExpireHaContext::shared_row`) is gone, or names another session id | silent: the session was closed or replaced elsewhere |
+| served | this copy served inside its window in EITHER direction (`packet_counts_and_last_packet_seen_for`: the newer of the forward copy's and its reverse half's packet time), or ANY worker did (the shared row's `last_served_ns`) | keep: re-stamp `last_seen_ns` to that packet time and re-bucket |
+| hold | the node looks idle | hold for `fence_evidence_cadence_ns` + one GC interval, remembering the evidence |
+| after hold | the evidence changed but holds no packet inside the window (a stale max-merge) | hold again on the new evidence |
+| claim | the evidence is unchanged: `ExpireHaContext::claim_close` retires the shared row iff it still reads exactly that evidence | winner: ordinary AGE + Close. A copy whose row the winner already retired takes R1 (silent); a claim lost to a concurrent restamp holds again |
 
-R1 is checked first, so a copy whose shared row is gone stays silent even if
-it served. R3 then wins over R2.
+**Why keep, not drop.** A copy is never removed while the session is served
+on this node. A reverse hit stamps only the reverse half (its count folds
+onto the forward copy), so "served" must read both halves (R14 F2). And the
+copy that closes the session must still exist on whichever worker the flow
+ends on. If idle copies were dropped while another worker served, a flow
+that later moved to a worker whose copy was gone would be served by a
+re-materialized `WorkerLocalImport`. That row can never close (#19030), and
+the session would leak. Keeping copies is what the #18722 node-evidence arm
+already does for TCP. The cost: after an RG activation, a restored session
+keeps its copy on every worker until the node stops serving it, not just for
+one window.
 
-**What "silent" does.**
-- No Close delta is pushed, and none rides `overflow_close`.
-- The row is removed with `RemovalKind::Transfer`, so no export tombstone can
-  later announce a close to the peer.
+**`last_served_ns`.** This is `SyncedSessionEntry::last_served_ns`. Every
+worker's ct-slice restamp sets it (`restamp_shared_packet_counts_batch`),
+including the minting worker, from the same either-direction packet time. So
+it sees a flow that moved to any worker, which the max-merged counters
+cannot. `sibling_last_seen_ns` keeps its #18742 meaning, minting namespace
+excluded. Same-incarnation republication keeps the larger value.
+
+**The hold.** It covers the restamp lag: the ct-slice runs about every 10 s,
+and R14 F4 is a packet at +55 s whose restamp lands after an idle copy
+crosses at +61 s. In production, `fence_evidence_cadence_ns` is the worker's
+`shared_evidence_max_cadence_ns` (13 s with the default slab). **Worst-case
+added close delay** for a genuinely idle restored session is therefore
+cadence + one GC interval + up to one wheel tick: about 14 s at the default
+slab. It grows with `ct_refresh_slab_len` the way the #18742 evidence cadence
+does. Each evidence change without fresh service re-arms the hold once more.
+
+**The claim.** `afxdp/shared_ops/restamp.rs::claim_shared_close` is a
+compare-and-remove under the shared-map lock. That makes exactly-once hold by
+construction:
+- no designation can be lost to a dead or refused worker;
+- no designation can be duplicated by a second prewarm;
+- the winner's Close flush finds the row gone and runs the rest of the
+  teardown: BPF rows, sibling `DeleteSynced`, HA close.
+
+A hold is valid only for the idle anchor it was armed under, so a re-stamped
+row re-arms. Holds live in a side map dropped with the row; `SessionEntry`
+stays at the 648 B pin.
+
+**What "silent" does.** Silent applies only under R1.
+- No Close delta is emitted, so there is no HA delete and no RT_FLOW close.
+- The row is removed as a `Transfer`, so no export tombstone is left.
 - `ExpiredSession::close_fenced` is set. The reap
-  (`afxdp/worker/loop_body/gc_teardown.rs::reap_expired_sessions`) then skips
-  only the session-id-gated conntrack mirror delete, which under R2 would
-  delete the live incarnation's kernel row.
+  (`afxdp/worker/loop_body/gc_teardown.rs`) skips only the session-id-gated
+  conntrack mirror delete, which would delete the live incarnation's kernel
+  row.
 - The reap still releases the copy's own per-worker resources:
-  - this worker's source-NAT and NAT64 holder bit, with its persistent hold.
-    The copy reserved them at restore (#15966r), and nothing else releases
-    them once the row is gone.
-  - its steering-row claims, whose ownership registry keeps rows a sibling
-    owns;
+  - this worker's NAT/NAT64 holder bit and hold, which the copy reserved at
+    restore (#15966r);
+  - its steering claims;
   - its flow-cache slots.
-- The worker housekeeping does not forget a TCP/1723 PPTP control channel
-  for a fenced copy, because the serving copy still carries that channel.
+- Housekeeping does not forget a TCP/1723 PPTP control channel for a fenced
+  copy.
 
-**Designated closer.** The prewarm hands the first live worker queue that
-ACCEPTS the push (lowest index) `WorkerCommand::UpsertSyncedRestoreCloser`.
-Every other queue gets the plain `UpsertSynced`. The worker applies it as an
-`UpsertSynced` and then `SessionTable::mark_restore_closer(key, session_id)`
-sets the worker-local `SessionEntry::restore_closer` bit on the
-`SharedPromote` row of that exact incarnation. A same-id re-import keeps the
-bit; a new incarnation drops it.
+**Residual: when no copy closes, and its bound.** The session ends without a
+Close only when NO restored copy of it survives on this node to reach the
+claim. Copies leave only through:
+- the claim winner's Close (its sibling `DeleteSynced` removes the rest);
+- R1;
+- a removal outside the fence.
 
-The approved plan preferred the session's minting worker. The activation path
-carries no node id (it lives only on the bring-up `ConfigSnapshot`), and
-R2(b) needs exactly one closer, not a particular one.
+So the residual is the set of cases with no surviving copy:
+- the prewarm reached no worker: every queue refused it, or every install
+  was refused;
+- every copy-holding worker died (a panicked worker is not respawned);
+- the #19030 whole-helper bring-up demotion, which leaves only
+  `WorkerLocalImport` replicas (out of scope here).
 
-The bit fits in existing padding: `SessionEntry` stays at the 648 B pin
-(`idle_served_keepalive_18722_tests.rs`).
+In those cases, ON THIS NODE, nothing has a TTL: the shared forward and
+reverse rows, the coordinator's steering claims, and the re-materialization
+admission (a later packet re-materializes a `WorkerLocalImport`). They stay
+until the next activation of that RG, whose prewarm re-seeds copies that then
+hold and claim, or until a helper restart. On the PEER, the copy is bounded
+by its HOLD ceiling, `min(3 x timeout, ABS cap)`. Traffic shape alone (which
+direction, which worker, when) does not reach the residual: any served copy
+is kept, and every kept copy reaches the claim.
 
-Accepted residual: a restored copy replaced by a later plain upsert of the
-same incarnation keeps its bit (preserved). A copy that never received the
-closer command is never a closer. If the closer worker's copy is lost
-otherwise, a never-served restored session ends with no Close. The peer's
-copy then waits for its stale-synced HOLD ceiling,
-`min(3 × timeout, ~7 d)` (`STALE_SYNCED_CEILING_MULT` /
-`STALE_SYNCED_CEILING_ABS_NS`). The respawn path has the same shape and is
-tracked in #19030.
-
-Cells: `session/promote_copy_close_fence_19026_tests.rs` (rules, twins,
-exactly-once) and `afxdp/shared_ops/restore_closer_19026_tests.rs` (closer
-designation, respawn then activation).
+Cells:
+- `session/promote_copy_close_fence_19026_tests.rs`, rule by rule.
+- `afxdp/worker/loop_body/promote_fence_concurrency_19026_tests.rs`. It drives
+  prewarm, restamp, every worker's housekeeping in one instant, the real flush
+  and the sibling deletes, for these cases:
+  - a served copy while another serves;
+  - counter lag;
+  - a lost closer;
+  - double prewarm;
+  - respawn then activation;
+  - genuinely idle;
+  - R14's cells, ported to these paths: served-then-moved (F1), reverse-only
+    service with its forward control twin (F2), two prewarms under backlog
+    with its single-prewarm control (F3), the restamp-cadence close (F4), and
+    the fenced PPTP control copy (F5(b)).
+- `afxdp/worker/loop_body/promote_fence_19026_tests.rs`, the production
+  wiring and the fenced reap.
 
 ## "Current sessions" gauge accounting (#2428)
 

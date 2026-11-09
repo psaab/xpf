@@ -119,6 +119,8 @@ fn shared_restamps_keep_an_opening_replica_only_while_they_advance_18722() {
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &|_| None,
+        claim_close: &|_, _| false,
+        fence_evidence_cadence_ns: 0,
     };
 
     // The serving worker forwards 100 packets each way per second; its

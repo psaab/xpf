@@ -28,9 +28,12 @@
 use super::*;
 
 use super::close_barrier::{
-    BlockedAt, BlockedVerdict, ClosePermitBarrier, close_permits_available,
-    front_close_still_blocked, retire_rx_exposed_zombie,
+    BlockedAt, BlockedVerdict, close_permits_available, front_close_still_blocked,
+    retire_rx_exposed_zombie,
 };
+// Re-exported under its pre-split path so cells that predate the
+// close_barrier.rs split (and run unchanged against older heads) name it.
+pub(super) use super::close_barrier::ClosePermitBarrier;
 
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
@@ -123,10 +126,22 @@ pub(super) fn run_session_housekeeping(
         evidence.shared_evidence_max_cadence_ns = Some(shared_evidence_max_cadence_ns);
         evidence
     };
-    // #19026: the restore close fence's keyed shared-row read.
+    // #19026: the restore close fence's keyed shared-row read and its
+    // atomic close claim.
     let shared_row = |key: &crate::session::SessionKey| {
         crate::afxdp::shared_ops::shared_row_identity(shared_sessions, key)
     };
+    let claim_close =
+        |key: &crate::session::SessionKey, expected: crate::session::SharedRowIdentity| {
+            crate::afxdp::shared_ops::claim_shared_close(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                shared_owner_rg_indexes,
+                key,
+                expected,
+            )
+        };
     let ha_ctx = crate::session::ExpireHaContext {
         node_active,
         forwards_rg: &forwards_rg,
@@ -135,6 +150,8 @@ pub(super) fn run_session_housekeeping(
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
         shared_row: &shared_row,
+        claim_close: &claim_close,
+        fence_evidence_cadence_ns: shared_evidence_max_cadence_ns,
     };
     let mut deferred_delta_cleanup = false;
     retry_deferred_pressure_sheds(

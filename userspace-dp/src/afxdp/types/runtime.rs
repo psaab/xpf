@@ -1105,11 +1105,6 @@ impl PolicyReadCollector {
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
-    /// #19026: an activation-prewarm restore of a `SharedPromote` row that
-    /// also designates THIS worker's copy as the restore closer (exactly one
-    /// queue per restored row gets it). Applied as `UpsertSynced`, then
-    /// `SessionTable::mark_restore_closer` for that incarnation.
-    UpsertSyncedRestoreCloser(SyncedSessionEntry),
     InstallPptpAssociation(crate::session::pptp::PptpCall),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),

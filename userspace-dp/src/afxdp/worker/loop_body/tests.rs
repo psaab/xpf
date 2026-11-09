@@ -340,6 +340,8 @@ mod flow_cache_invalidation_tests {
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
             shared_row: &|_| None,
+            claim_close: &|_, _| false,
+            fence_evidence_cadence_ns: 0,
         };
         let gc = |table: &mut crate::session::SessionTable,
                       binding: &mut BindingWorker,
@@ -596,6 +598,8 @@ mod flow_cache_invalidation_tests {
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
             shared_row: &|_| None,
+            claim_close: &|_, _| false,
+            fence_evidence_cadence_ns: 0,
         };
 
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);

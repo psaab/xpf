@@ -693,7 +693,6 @@ impl SessionTable {
                 handshake_relayed: false,
                 // #18520: a fresh install has not been served by a hit yet.
                 served_here: false,
-                restore_closer: false,
                 // #7212: no static input-filter verdict has been derived for
                 // this ENTRY yet. The forward install's own first packet was
                 // adjudicated by the session-MISS path, but this constructor
@@ -1129,13 +1128,6 @@ impl SessionTable {
             && self
                 .entry_by_key_quiet(&key)
                 .is_some_and(|existing| existing.session_id == wire_session_id && existing.served_here);
-        // #19026: the designated restore-closer bit belongs to the
-        // incarnation, like `served_here`: a same-id re-import keeps it, a
-        // new incarnation (or a zero/legacy id) starts unmarked.
-        let preserved_restore_closer = wire_session_id != 0
-            && self.entry_by_key_quiet(&key).is_some_and(|existing| {
-                existing.session_id == wire_session_id && existing.restore_closer
-            });
         let preserved = self.preserved_install_table_for(&key, &decision, wire_session_id);
         let mut decision = decision;
         if let Some((domain, check)) = preserved {
@@ -1226,7 +1218,6 @@ impl SessionTable {
                 handshake_relayed: false,
                 // #18520: a same-incarnation re-import keeps the bit.
                 served_here: preserved_served_here,
-                restore_closer: preserved_restore_closer,
                 // #7212: a peer-synced import carries NO locally-derived
                 // input-filter verdict — the peer adjudicated it against the
                 // peer's own interfaces. `UNVALIDATED` makes the first packet
