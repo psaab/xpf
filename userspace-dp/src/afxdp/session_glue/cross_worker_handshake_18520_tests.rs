@@ -157,7 +157,7 @@ fn pump(node: &mut Node) {
 
 fn reverse_synced_entry(node: &Node, origin: SessionOrigin, handshake: u8, session_id: u64) -> SyncedSessionEntry {
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: node.reverse_key.clone(),
         decision: node.reverse_decision,
         metadata: reverse_metadata(),
@@ -595,7 +595,7 @@ fn imported_opening_session_served_mid_stream_survives_opening_window_18520() {
     // SyncImport replica on every worker, both halves Opening.
     let peer_id = (1u64 << 63) | 0x42;
     let forward_entry = SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: fwd.clone(),
         decision: node.decision,
         metadata: test_metadata(),

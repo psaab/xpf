@@ -76,6 +76,11 @@ pub(crate) struct SyncedSessionEntry {
     /// re-stamps therefore cannot refresh sibling evidence. Node-local shared
     /// evidence only; never part of SessionDelta / HA wire data.
     pub(crate) sibling_last_seen_ns: u64,
+    /// #19026: greatest admitted-packet timestamp published by ANY worker on
+    /// this node for this row — the owning (minting) worker included, unlike
+    /// `sibling_last_seen_ns`. Node-local shared evidence only; never part of
+    /// SessionDelta / HA wire data.
+    pub(crate) last_served_ns: u64,
     /// #14303: the PPTP call-id pair (`PptpCall::to_wire_call_ids`) for a
     /// `Pptp(handle)` forward session, `PPTP_CALL_IDS_ABSENT` (0) otherwise.
     /// Carried on the shared entry so the coordinator bulk export and the
