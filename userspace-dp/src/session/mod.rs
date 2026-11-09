@@ -7577,6 +7577,20 @@ impl SessionTable {
         !self.deltas.is_empty()
     }
 
+    /// #19026: queued delta count. The worker's close-drain loop compares it
+    /// across one drain+flush pass: a pass that requeued everything it drained
+    /// made no progress, so the loop must yield instead of spinning on a tuple
+    /// permit it cannot take.
+    pub(crate) fn pending_delta_count(&self) -> usize {
+        self.deltas.len()
+    }
+
+    /// #19026: the oldest queued delta (the one a blocked close drain retries
+    /// first), for the cold-path barrier diagnostic only.
+    pub(crate) fn front_pending_delta(&self) -> Option<&SessionDelta> {
+        self.deltas.front()
+    }
+
     /// #2442: read-and-clear the loss-of-sync latch. Returns true iff
     /// `push_delta` dropped at least one delta since the last call — i.e. the
     /// incremental session-sync stream went lossy and the downstream consumer's
