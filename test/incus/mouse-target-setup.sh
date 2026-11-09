@@ -197,6 +197,21 @@ claim_probe_new_v4() {
 
 instance_exists() { inc info "$ref" >/dev/null 2>&1; }
 
+# target_presence: ONE existence decision for `up` (#19022, Codex P2):
+# "present", "absent" (incus answered not-found), or "unknown: <error>". A
+# transient `incus info` failure must not read as absent, or an existing
+# target would skip socket_unit_precheck and be treated as new.
+target_presence() {
+    local err
+    if err="$(inc info "$ref" 2>&1 >/dev/null)"; then
+        echo present
+    elif [[ "${err,,}" == *"not found"* ]]; then
+        echo absent
+    else
+        printf 'unknown: %s\n' "$(tr '\n' ' ' <<<"${err:-no error text}")"
+    fi
+}
+
 # target_v4_addrs: the v4 addresses this host pins (MOUSE_TARGET_V4, plus the
 # TARGET_ALIAS_V4 alias on VLAN 80 when it differs). They are the same set
 # mouse-addr.service pins and harnesses dial (#16213, #18576).
@@ -303,11 +318,21 @@ claim_skip_markers() {
         "grep '^# claim-probe: SKIPPED' /etc/systemd/system/mouse-addr.service 2>/dev/null || true" 2>/dev/null
 }
 
+# unit_live <port>: our mouse-iperf3@<port> is enabled, or in any state but
+# inactive/failed. A DISABLED unit in `failed` is not live: it holds no port
+# and will not restart, and `disable --now` cannot clear `failed` (only
+# `reset-failed` does), so counting it would refuse an operator who already
+# followed the printed commands (#19022 E1).
+unit_live() {
+    [[ "${UNIT_FILE[$1]}" == enabled* ]] && return 0
+    [[ "${UNIT_ACTIVE[$1]}" != inactive && "${UNIT_ACTIVE[$1]}" != failed ]]
+}
+
 # socket_unit_precheck: under `socket`, `up` changes NO mouse-iperf3 unit
 # state. So BEFORE `up` changes anything, refuse if any of our
-# mouse-iperf3@52xx units is enabled or not inactive (a leftover from an
-# earlier `up`, or a target that really is units-served), or if their state
-# cannot be read. Standing them down is the operator's decision; the refusal
+# mouse-iperf3@52xx units is live (unit_live: enabled, or running), being a
+# leftover from an earlier `up` or a target that really is units-served, or
+# if their state cannot be read. Standing them down is the operator's decision; the refusal
 # prints the exact commands (#19022).
 socket_unit_precheck() {
     local p live=() cmds=""
@@ -317,9 +342,9 @@ socket_unit_precheck() {
         return 1
     fi
     for p in "${IPERF_PORTS[@]}"; do
-        if [[ "${UNIT_FILE[$p]}" == enabled* || "${UNIT_ACTIVE[$p]}" != inactive ]]; then
+        if unit_live "$p"; then
             live+=("mouse-iperf3@${p}(${UNIT_ACTIVE[$p]},${UNIT_FILE[$p]})")
-            cmds+="${cmds:+; }systemctl disable --now mouse-iperf3@${p}"
+            cmds+="${cmds:+; }systemctl disable --now mouse-iperf3@${p}; systemctl reset-failed mouse-iperf3@${p}"
         fi
     done
     if [[ ${#live[@]} -gt 0 ]]; then
@@ -329,13 +354,20 @@ socket_unit_precheck() {
 }
 
 do_up() {
-    local echo_source_hash echo_installed_hash echo_content_changed=false
-    # #19022: under `socket`, refuse before ANY change while a mouse-iperf3
-    # unit is enabled or active (a new instance has none).
-    if [[ "$MOUSE_TARGET_IPERF_PROVIDER" == socket ]] && instance_exists; then
+    local echo_source_hash echo_installed_hash echo_content_changed=false presence
+    # #19022: decide existence ONCE; an unreadable answer refuses instead of
+    # falling through. Then, under `socket`, refuse before ANY change while
+    # a mouse-iperf3 unit is enabled or active (a new instance has none).
+    presence="$(target_presence)"
+    case "$presence" in
+        present|absent) ;;
+        *) echo "REFUSE: could not tell whether ${ref} exists (incus info: ${presence#unknown: }); nothing was changed (#19022)" >&2
+           return 1 ;;
+    esac
+    if [[ "$MOUSE_TARGET_IPERF_PROVIDER" == socket && "$presence" == present ]]; then
         socket_unit_precheck || return 1
     fi
-    if ! instance_exists; then
+    if [[ "$presence" == absent ]]; then
         echo "creating ${ref} from ${MOUSE_TARGET_IMAGE}"
         inc init "$MOUSE_TARGET_IMAGE" "$ref" || return 1
     else
@@ -533,7 +565,7 @@ do_status() {
         if [[ "$MOUSE_TARGET_IPERF_PROVIDER" == units ]]; then
             [[ "${UNIT_ACTIVE[$p]}" == active && "${UNIT_FILE[$p]}" == enabled* ]] \
                 || off+=("${p}(${UNIT_ACTIVE[$p]},${UNIT_FILE[$p]})")
-        elif [[ "${UNIT_LOAD[$p]}" == loaded && ( "${UNIT_FILE[$p]}" == enabled* || "${UNIT_ACTIVE[$p]}" != inactive ) ]]; then
+        elif [[ "${UNIT_LOAD[$p]}" == loaded ]] && unit_live "$p"; then
             off+=("${p}(${UNIT_ACTIVE[$p]},${UNIT_FILE[$p]})")
         fi
     done
@@ -545,7 +577,7 @@ do_status() {
             echo "iperf3:   mouse-iperf3 not active+enabled: ${off[*]}"
         fi
     elif [[ ${#off[@]} -gt 0 ]]; then
-        echo "iperf3:   mouse-iperf3 units enabled or active under \`socket\` (\`up\` refuses until they are stood down): ${off[*]}"
+        echo "iperf3:   mouse-iperf3 units enabled or running under \`socket\` (\`up\` refuses until they are stood down): ${off[*]}"
     fi
     echo "echo:     $(inc exec "$ref" -- systemctl is-active mouse-echo 2>/dev/null)"
     # #18576: a claim probe skipped for a pinned address stays visible.

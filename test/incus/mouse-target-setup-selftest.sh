@@ -43,7 +43,16 @@ case "$*" in
   *"/proc/sys/kernel/random/boot_id"*) printf '00000000-0000-0000-0000-000000000001\n'; exit 0 ;;
 esac
 case "$1" in
-  info) exit 0 ;;                       # instance exists
+  info)
+    # Instance exists, unless STUB_INFO=absent (incus's not-found error) or
+    # STUB_INFO_FLAKY=<file>: the FIRST call fails transiently (#19022).
+    if [[ "${STUB_INFO:-}" == absent ]]; then
+      echo 'Error: Failed to fetch instance "x" in project "default": Instance not found' >&2; exit 1
+    fi
+    if [[ -n "${STUB_INFO_FLAKY:-}" && ! -e "$STUB_INFO_FLAKY" ]]; then
+      : > "$STUB_INFO_FLAKY"; echo 'Error: websocket: close 1006 (abnormal closure)' >&2; exit 1
+    fi
+    exit 0 ;;
   list) echo "xpf-mouse-target,RUNNING"; exit 0 ;;
   config) exit 0 ;;                     # eth0 device already present
   file) exit 0 ;;
@@ -86,9 +95,11 @@ case "$1" in
         [[ "${STUB_REAL_LISTENERS:-}" == 1 ]] && exec "$@"
         exit 1 ;;
       *"unit-state (#19022)"*)
-        # Our mouse-iperf3 units' state, "<port> <load> <file> <active>".
-        # STUB_UNIT_STATE=FAIL: the exec fails. Unset: 12 already-stood-down
-        # units (the live tcp/udp shape).
+        # STUB_REAL_UNITSTATE=1: run the REAL POSIX parser against a stub
+        # `systemctl show` (STUB_SYSBIN). Otherwise canned parsed rows,
+        # "<port> <load> <file> <active>": STUB_UNIT_STATE=FAIL makes the
+        # exec fail; unset gives 12 already-stood-down units (live tcp/udp).
+        [[ "${STUB_REAL_UNITSTATE:-}" == 1 ]] && PATH="${STUB_SYSBIN:?}:$PATH" exec "$@"
         case "${STUB_UNIT_STATE-}" in
           FAIL) exit 1 ;;
           "") for p in $(seq 5200 5211); do echo "$p loaded disabled inactive"; done ;;
@@ -323,18 +334,23 @@ else
     fail "#19022: provider 'sockets' was not refused up front (rc=$(<"${TMP}/rc")); output:
 $(<"${TMP}/up.out")"
 fi
-changes_made() { # any state-changing exec ON THE TARGET, or the echo push
+exec_changes() { # a state-changing exec ON THE TARGET
     grep -E '^tcp:xpf-tcp-target :: ' "${TMP}/exec.log.ref" \
-        | grep -qE 'apt-get|cat > |chmod|systemctl (enable|disable|restart|start|stop|daemon-reload|reset-failed)' \
-        || grep -q 'mouse-echo.py' "${TMP}/incus.log"
+        | grep -qE 'apt-get|cat > |chmod|systemctl (enable|disable|restart|start|stop|daemon-reload|reset-failed)'
 }
+incus_changes() { # an incus-level change to the target: lifecycle, devices, config, files (Codex P3)
+    grep -E '^(init|launch|start|stop|restart|delete|rename|config (device )?(add|set|unset|remove|edit)|file (push|delete|create)) ' "${TMP}/incus.log" \
+        | grep -q 'tcp:xpf-tcp-target'
+}
+changes_made() { exec_changes || incus_changes; }
 # 7c. socket, our units all stood down, but the listeners cannot be listed:
 # REFUSE, no unit touched, with the socket-unit restore command.
 run_up "${TCP_ENV[@]}" > /dev/null
-# Positive control for changes_made (7g/7h): this `up` passed the unit
-# precheck and DID change the target (apt-get, unit files, echo push) before
-# the listener refusal, so changes_made must see it.
-if [[ "$(<"${TMP}/rc")" != 0 && "$(iperf_counts)" == "0 0 0" ]] && ! template_written && changes_made \
+# Positive control for changes_made (7g/7h/7k): this `up` passed the unit
+# precheck and DID change the target before the listener refusal, both by
+# exec (apt-get, unit files) and at the incus level (`incus start`, the echo
+# push), so each half of changes_made must see it.
+if [[ "$(<"${TMP}/rc")" != 0 && "$(iperf_counts)" == "0 0 0" ]] && ! template_written && exec_changes && incus_changes \
         && grep -q "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has no TCP listener on 172.16.80.210 for port(s) none; listeners could not be listed for port(s) ${ALL_IPERF[*]}; no mouse-iperf3 unit was changed" "${TMP}/up.out" \
         && grep -qF "systemctl enable --now iperf3@\$p.socket" "${TMP}/up.out"; then
     pass "provider socket, listeners unlistable: REFUSE with no unit touched, and the socket-unit restore command"
@@ -343,16 +359,18 @@ else
 $(<"${TMP}/up.out")"
 fi
 # 7g. socket on a target where some of OUR units are enabled or active
-# (5205 started by hand, 5210 enabled+active, 5211 a crash-looping
-# leftover): REFUSE before ANY change, naming exactly those units and
-# printing the exact disable commands. `up` stands nothing down itself.
+# (5205 started by hand, 5207 enabled but inactive, which would start at the
+# next boot and compete with the socket unit (R10 F2), 5210 enabled+active,
+# 5211 a crash-looping leftover): REFUSE before ANY change, naming exactly
+# those units and printing the exact commands. `up` stands nothing down.
 run_up "${TCP_ENV[@]}" STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do
-        case $p in 5205) echo "$p loaded disabled active" ;; 5210) echo "$p loaded enabled active" ;;
-                   5211) echo "$p loaded enabled failed" ;; *) echo "$p loaded disabled inactive" ;; esac; done)" > /dev/null
+        case $p in 5205) echo "$p loaded disabled active" ;; 5207) echo "$p loaded enabled inactive" ;;
+                   5210) echo "$p loaded enabled active" ;; 5211) echo "$p loaded enabled failed" ;;
+                   *) echo "$p loaded disabled inactive" ;; esac; done)" > /dev/null
 if [[ "$(<"${TMP}/rc")" != 0 ]] && ! changes_made \
-        && grep -qF "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has mouse-iperf3 unit(s) enabled or active: mouse-iperf3@5205(active,disabled) mouse-iperf3@5210(active,enabled) mouse-iperf3@5211(failed,enabled). Under \`socket\`, \`up\` changes no mouse-iperf3 unit; nothing was changed." "${TMP}/up.out" \
-        && grep -qF "incus exec tcp:xpf-tcp-target -- sh -c 'systemctl disable --now mouse-iperf3@5205; systemctl disable --now mouse-iperf3@5210; systemctl disable --now mouse-iperf3@5211'" "${TMP}/up.out"; then
-    pass "provider socket with enabled/active mouse-iperf3 units: REFUSE before any change, naming them with the exact disable commands"
+        && grep -qF "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has mouse-iperf3 unit(s) enabled or active: mouse-iperf3@5205(active,disabled) mouse-iperf3@5207(inactive,enabled) mouse-iperf3@5210(active,enabled) mouse-iperf3@5211(failed,enabled). Under \`socket\`, \`up\` changes no mouse-iperf3 unit; nothing was changed." "${TMP}/up.out" \
+        && grep -qF "incus exec tcp:xpf-tcp-target -- sh -c 'systemctl disable --now mouse-iperf3@5205; systemctl reset-failed mouse-iperf3@5205; systemctl disable --now mouse-iperf3@5207; systemctl reset-failed mouse-iperf3@5207; systemctl disable --now mouse-iperf3@5210; systemctl reset-failed mouse-iperf3@5210; systemctl disable --now mouse-iperf3@5211; systemctl reset-failed mouse-iperf3@5211'" "${TMP}/up.out"; then
+    pass "provider socket with enabled/active mouse-iperf3 units: REFUSE before any change, naming them with the exact disable + reset-failed commands"
 else
     fail "#19022: provider socket with live mouse-iperf3 units: rc=$(<"${TMP}/rc"), changes made: $(changes_made && echo yes || echo no); output:
 $(<"${TMP}/up.out")"
@@ -364,6 +382,85 @@ if [[ "$(<"${TMP}/rc")" != 0 ]] && ! changes_made \
     pass "provider socket with unreadable unit state: REFUSE before any change"
 else
     fail "#19022: unreadable unit state was not refused before any change (rc=$(<"${TMP}/rc")); output:
+$(<"${TMP}/up.out")"
+fi
+
+# 7j. status under `socket` lists a LIVE unit and not a disabled+failed one
+# (E1): the positive control for 7d's "status lists none".
+st="$(run_status "${TCP_ENV[@]}" STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do
+        case $p in 5210) echo "$p loaded enabled active" ;; 5211) echo "$p loaded disabled failed" ;;
+                   *) echo "$p loaded disabled inactive" ;; esac; done)")"
+if [[ "$st" == *"iperf3:   mouse-iperf3 units enabled or running under \`socket\` (\`up\` refuses until they are stood down): 5210(active,enabled)"* \
+      && "$st" != *"5211(failed,disabled)"* ]]; then
+    pass "socket status lists the live 5210 and not the disabled+failed 5211"
+else
+    fail "#19022 E1: socket status unit listing wrong:
+${st}"
+fi
+
+# 7k. a transient failure of the existence check refuses (Codex P2). The
+# existence decision is made ONCE: before, a first `incus info` that failed
+# skipped socket_unit_precheck, and a second that succeeded treated the
+# target as existing, so live units survived and `up` returned 0.
+LIVE_5210="$(for p in "${ALL_IPERF[@]}"; do if [[ $p == 5210 ]]; then echo "$p loaded enabled active"; else echo "$p loaded disabled inactive"; fi; done)"
+rm -f "${TMP}/info-flaky"
+run_up "${TCP_ENV[@]}" STUB_INFO_FLAKY="${TMP}/info-flaky" STUB_UNIT_STATE="$LIVE_5210" > /dev/null
+if [[ "$(<"${TMP}/rc")" != 0 && -e "${TMP}/info-flaky" ]] && ! changes_made \
+        && grep -q 'REFUSE: could not tell whether tcp:xpf-tcp-target exists (incus info: Error: websocket: close 1006 (abnormal closure)' "${TMP}/up.out"; then
+    pass "a flaky first incus info REFUSES before any change (one existence decision)"
+else
+    fail "#19022: a flaky existence check was not refused before any change (rc=$(<"${TMP}/rc"), changes: $(changes_made && echo yes || echo no)); output:
+$(<"${TMP}/up.out")"
+fi
+# 7l. incus's not-found answer is ABSENT: the instance is created, and the
+# unit precheck does not run (a new instance has no units, so even staged
+# live rows must not refuse).
+run_up "${TCP_ENV[@]}" STUB_INFO=absent STUB_UNIT_STATE="$LIVE_5210" > /dev/null
+if grep -q '^init images:debian/trixie tcp:xpf-tcp-target' "${TMP}/incus.log" \
+        && ! grep -q 'has mouse-iperf3 unit(s) enabled or active' "${TMP}/up.out"; then
+    pass "incus not-found reads as absent: the target is created, no unit precheck"
+else
+    fail "#19022: an absent target was not created (or was prechecked); output:
+$(<"${TMP}/up.out")"
+fi
+# 7m/7n. the REAL unit-state POSIX parser (Codex P3) against a stub
+# `systemctl show` that prints Key=Value lines, one port in a different
+# property order. 7m: activating, enabled-runtime and enabled+active are
+# live; inactive+disabled, not-found (empty UnitFileState) and
+# disabled+failed are not. 7n: `systemctl show` failing for 5207 makes
+# exactly 5207 unreadable.
+mkdir -p "${TMP}/sysbin"
+cat > "${TMP}/sysbin/systemctl" <<'SYSTEMCTL'
+#!/usr/bin/env bash
+# systemctl show -p LoadState -p UnitFileState -p ActiveState mouse-iperf3@<p>.service
+[[ "$1" == show ]] || exit 1
+unit="${!#}"; p="${unit#mouse-iperf3@}"; p="${p%.service}"
+[[ " ${STUB_SHOW_FAIL:-} " == *" $p "* ]] && exit 1
+line="$(awk -v p="$p" '$1 == p { $1 = ""; print; exit }' "${STUB_SHOW_TABLE:?}")"
+[[ -n "$line" ]] || line=" LoadState=loaded ActiveState=inactive UnitFileState=disabled"
+tr ' ' '\n' <<<"${line# }"
+SYSTEMCTL
+chmod +x "${TMP}/sysbin/systemctl"
+printf '%s\n' '5201 LoadState=not-found ActiveState=inactive UnitFileState=' \
+    '5202 LoadState=loaded ActiveState=failed UnitFileState=disabled' \
+    '5203 LoadState=loaded ActiveState=activating UnitFileState=disabled' \
+    '5204 UnitFileState=enabled-runtime ActiveState=inactive LoadState=loaded' \
+    '5205 LoadState=loaded ActiveState=active UnitFileState=enabled' > "${TMP}/show-table"
+REAL_UNITS=(STUB_REAL_UNITSTATE=1 STUB_SYSBIN="${TMP}/sysbin" STUB_SHOW_TABLE="${TMP}/show-table")
+run_up "${TCP_ENV[@]}" "${REAL_UNITS[@]}" > /dev/null
+if [[ "$(<"${TMP}/rc")" != 0 ]] && ! changes_made \
+        && grep -qF 'has mouse-iperf3 unit(s) enabled or active: mouse-iperf3@5203(activating,disabled) mouse-iperf3@5204(inactive,enabled-runtime) mouse-iperf3@5205(active,enabled). ' "${TMP}/up.out"; then
+    pass "real unit-state parser: activating, enabled-runtime, enabled+active live; inactive, not-found, disabled+failed not"
+else
+    fail "#19022: real unit-state parser misread the states (rc=$(<"${TMP}/rc")); output:
+$(<"${TMP}/up.out")"
+fi
+run_up "${TCP_ENV[@]}" "${REAL_UNITS[@]}" STUB_SHOW_FAIL=5207 > /dev/null
+if [[ "$(<"${TMP}/rc")" != 0 ]] && ! changes_made \
+        && grep -q 'could not be read for port(s) 5207 (is the instance running?); nothing was changed' "${TMP}/up.out"; then
+    pass "real unit-state parser: a failed systemctl show leaves exactly that port unreadable, refused"
+else
+    fail "#19022: real unit-state parser with a failing show for 5207 (rc=$(<"${TMP}/rc")); output:
 $(<"${TMP}/up.out")"
 fi
 
@@ -440,16 +537,20 @@ if ! have_netns; then
 else
     # 7d. socket, every port served by a dual-stack `*` listener (the shape
     # systemd's iperf3@52xx.socket has on tcp/udp). Our units: 5200-5205
-    # absent (not-found), 5206-5211 already stood down: `up` proceeds and
-    # changes no mouse-iperf3 unit.
+    # absent (not-found), 5206-5210 already stood down, and 5211 `loaded
+    # disabled failed`: the state an operator reaches with `disable --now`
+    # alone, since that cannot clear `failed` (E1). `up` proceeds, changes no
+    # mouse-iperf3 unit, and status does not list 5211.
     UNITS_7D="$(for p in 5200 5201 5202 5203 5204 5205; do echo "$p not-found - inactive"; done
-                for p in 5206 5207 5208 5209 5210 5211; do echo "$p loaded disabled inactive"; done)"
+                for p in 5206 5207 5208 5209 5210; do echo "$p loaded disabled inactive"; done
+                echo "5211 loaded disabled failed")"
     run_ns "$(specs_for 6,:: "${ALL_IPERF[@]}")" up "${TCP_ENV[@]}" STUB_UNIT_STATE="$UNITS_7D"
     if [[ "$(<"${TMP}/rc")" == 0 && "$(iperf_counts)" == "0 0 0" ]] && ! template_written \
             && ! grep -q 'mouse-iperf3@' <(grep -E '^systemctl ' "${TMP}/exec.log") \
             && grep -q 'iperf3 provider socket: all 12 ports have a listener on 172.16.80.210; no mouse-iperf3 unit installed or changed' "${TMP}/up.out" \
-            && grep -q 'iperf3:   provider socket; 12 / 12 per-class ports have a listener on 172.16.80.210' "${TMP}/up.out"; then
-        pass "provider socket, all 12 listening, our units absent or stood down: proceeds, no mouse-iperf3 unit touched"
+            && grep -q 'iperf3:   provider socket; 12 / 12 per-class ports have a listener on 172.16.80.210' "${TMP}/up.out" \
+            && ! grep -q 'mouse-iperf3 units enabled or running under' "${TMP}/up.out"; then
+        pass "provider socket, all 12 listening, our units absent, stood down or disabled+failed (5211): proceeds untouched, status lists none"
     else
         fail "#19022: provider socket, all listening: rc=$(<"${TMP}/rc") enable/disable/reset = $(iperf_counts) (want 0, 0 0 0); output:
 $(<"${TMP}/up.out")"
