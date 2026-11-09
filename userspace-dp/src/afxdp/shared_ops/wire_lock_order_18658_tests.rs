@@ -235,7 +235,7 @@ fn row(key: &SessionKey, nat: crate::nat::NatDecision, session_id: u64) -> Synce
         nat_scope_ifindex: None,
     };
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: key.clone(),
         decision: crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
