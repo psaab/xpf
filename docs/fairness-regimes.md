@@ -2120,8 +2120,8 @@ Each carries a RED-on-revert unit test.
   where the class is limited by itself (empty, parked on its own tokens, v8
   lease not granting); only the root-short state flips to "keep", because
   the root is the resource the reservation protects — reserving makes peers
-  yield it and the rate is spent, not idled. Three review fixes (R4, R6)
-  belong to the same change:
+  yield it and the rate is spent, not idled. The review fixes (R4, R6,
+  Codex) belong to the same change:
   - A PARKED queue's demand is decided where it parks
     (`record_exact_park_demand` → `CoSInterfaceRuntime::parked_exact_demand`;
     a root park with own tokens covering the head demands, an own-token park
@@ -2134,24 +2134,46 @@ Each carries a RED-on-revert unit test.
     republished at once (`republish_cos_exact_demand_if_changed`): no
     enqueue or settle follows a finite burst to publish it, and peers kept
     the stale "no demand".
-  - A worker whose only work is residual-bounded surplus that cannot cover a
-    frame returns its root credit to the shared lease and stops priming
-    (`hold_root_only_for_spendable_surplus`). With a reservation equal to the
-    root rate (zero residual) and a small interface burst, idle peers'
-    primed credit reached the lease's outstanding cap (`burst / 4`) and the
-    exact worker sent 0.00 Gb/s.
-  - Review cycle 2 (Codex, #18748): that release still exempted a worker
-    with exact backlog, and with small root and exact-lease bursts the
-    credit crossed (B held all root and could not get exact-lease credit, E
-    held all exact-lease credit and waited on root): nothing moved. Instead
-    of another predicate, root credit held unspent for one root-lease
-    interval (`COS_ROOT_RECLAIM_NS`, 200 us) is reclaimed at the next prime
-    whatever the backlog, with one interval of cooldown
-    (`reclaim_idle_root_credit`); a property cell varies root burst, exact
-    rate, exact-lease burst and class mix and requires progress in every
-    2 ms. A parked queue whose own tokens were returned by a live lease-set
-    replacement no longer counts as demand (own tokens are checked before
-    the cached park decision).
+  - A parked queue whose own tokens were returned by a live lease-set
+    replacement no longer counts as demand: own tokens are checked before
+    the cached park decision (review cycle 2).
+  - Review cycle 3 (Codex, #18748): cycles 1 and 2 guessed whether credit a
+    worker held would be spent (cycle 1 released it when the worker's only
+    work was residual-bounded surplus that could not cover a frame, unless
+    it had exact backlog; cycle 2 reclaimed root credit held unspent for
+    200 us). Each guess had a counterexample: the crossed lease (B held all
+    root and could not get exact-lease credit, E held all exact-lease credit
+    and waited on root), a 1 Mb/s class whose credit was reclaimed on the
+    pass that woke it (0 bytes in a second), a waiter polled every 400 us
+    that missed every cooldown (0 of 9,000 bytes), and a best-effort holder
+    whose 1 Gb/s trickle kept resetting the timer (0 of 6,000 exact bytes;
+    master's predicate starves that one too). Both mechanisms are removed.
+    On a root with an exact class no worker holds root credit between
+    drains: each batch acquires root after its own gate passes and returns
+    the rest before the drain returns (Rule 2). Rule 2 applies to every
+    batch on such a root, best-effort included and whether or not exact
+    traffic is present: on the lab's `reth0.80` that is all WAN traffic.
+    And non-exact service
+    acquires only from `C - R` of the root lease's outstanding cap `C`,
+    where `R` is the demanding exact classes' share of it, one frame from
+    either end, and never takes the lease's available pool below one frame
+    `F` (Rule 1; the pool floor keeps an exact frame that arrives at an idle
+    exact queue from root-parking behind best-effort that drained the pool). Codex's three findings are cells, RED at
+    5e1b3c55cc; the progress property is per exact class (it failed to see
+    an exact class starved while best-effort moved).
+
+  **Non-exact transmit-rate guarantees under Rule 1.** The reservation
+  protects exact classes only. A non-exact queue with a transmit-rate
+  guarantee acquires root from the unreserved side, like surplus: while the
+  exact classes demand `D` of an `S` root it shares `C - R` of the
+  outstanding cap with surplus (at least one frame while `D < S`), and while
+  exact demand covers the root it gets nothing, as best-effort surplus does.
+  Its guarantee pass still runs before surplus. Configurations whose exact
+  plus non-exact guarantees exceed the shaping rate are oversubscribed, and
+  the non-exact guarantee is the one squeezed. Pinned by
+  `a_nonexact_guarantee_is_served_from_the_unreserved_share_18748` and
+  `an_idle_exact_class_reserves_nothing_18748`
+  (`cos/queue_service/tests/root_reservation_18748.rs`).
 
   Cells: `cos/queue_service/tests/exact_starvation_18748.rs` over the
   multi-worker simulation in `cos_drain_sim.rs` (production `drain_shaped_tx`,
@@ -2171,7 +2193,9 @@ Each carries a RED-on-revert unit test.
   nothing for best-effort); and a class whose v8 lease under-grants one
   worker still runs below its rate (#19031: 8.1–9.4 of 12 Gb/s in the
   simulation against 4.8–5.8 on master's predicate; floor-pinned by
-  `exact_class_whose_v8_lease_under_grants_a_worker_keeps_most_of_its_rate_18748`).
+  `exact_class_whose_v8_lease_under_grants_a_worker_keeps_most_of_its_rate_18748`);
+  and a root whose outstanding cap is under two frames cannot give each
+  side of the reserve a full frame, nor send at all under one (#19051).
 
 - **T-6(e) — V_min publish on the CoSBatch settle path.** The CoSBatch
   submit path (`submit_local`/`submit_prepared`) was the 5th of 5 V_min

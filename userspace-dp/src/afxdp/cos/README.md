@@ -301,27 +301,70 @@ mod.rs for further file-level breakdown.
     nothing (`republish_cos_exact_demand_if_changed`): a selector top-up can
     turn a queue into demand and park it on root with no enqueue, service or
     settle to publish the change.
-  - A worker whose only work is residual-bounded non-exact surplus that
-    cannot cover a frame, with no exact or guarantee backlog of its own,
-    gives its root credit back to the shared lease and stops priming the
-    root until the budget returns (`queue_service`
-    `hold_root_only_for_spendable_surplus`, `surplus_root_released`). Without
-    it, a reservation equal to the shaping rate (zero residual) let idle
-    peers' primed credit reach the lease's outstanding cap (`burst / 4`) and
-    the worker the reservation exists for could never acquire root.
-  - Bounded root reclamation: root credit a worker has held for
-    `COS_ROOT_RECLAIM_NS` (one 200 us root-lease interval) without spending
-    any goes back to the shared root lease at the next prime, whatever the
-    worker's backlog, and the worker takes none for one more interval
-    (`tx_completion::reclaim_idle_root_credit`, `cos_root_may_top_up`).
-    Retaining a root-starved queue's reservation means credit can sit with
-    a worker that cannot spend it; the predicate above cannot see every such
-    cycle. Codex's crossed-lease case: a 16,000-byte root burst and a
-    4,096-byte exact-lease burst, worker B holding all root credit and
-    unable to get exact-lease credit, worker E holding all exact-lease
-    credit and parked on root: nothing moved before the reclamation. Root
-    spend is counted at every send settle (`root_spent_bytes`), so a worker
-    that is spending is never reclaimed from.
+  - Root credit on a root with an exact class (#18748 review cycle 3). The
+    shared root lease grants whoever asks first, up to its outstanding cap
+    `C` (`max_total_leased`, `burst / 4` at most), and credit a worker keeps
+    in `root.tokens` between drains is out of every other worker's reach.
+    Two rules make "a worker holds root it cannot spend" impossible rather
+    than detected after the fact:
+    - Rule 2, no root credit held between drains
+      (`tx_completion::cos_root_credit_per_batch`: shaped, an exact class,
+      a shared root lease). It changes EVERY batch on such a root, exact,
+      non-exact guarantee and best-effort alike, whether or not an exact
+      class is backlogged: in the lab, `reth0.80` carries exact classes, so
+      it covers all WAN traffic. The prime takes no root on such a root; each
+      selector acquires root only for the batch it is about to build, after
+      that batch's own gate passes (an exact queue's own tokens cover its
+      head; a non-exact guarantee's tokens cover its head; a surplus visit's
+      residual budget and deficit cover its head), sized to that visit
+      (`acquire_root_for_batch`, `queue_service::acquire_exact_visit_root`).
+      Whatever the settle did not consume goes back before the drain returns,
+      on every exit (`return_unspent_batch_root_credit`). An exact queue that
+      waits on queue-lease credit therefore never holds root (the crossed
+      lease: worker B holding all root credit and unable to get exact-lease
+      credit while worker E held all exact-lease credit and waited on root),
+      a worker whose surplus the residual budget cuts takes none, and a
+      worker that trickles best-effort holds none between its sends. Roots
+      without an exact class still prime and hold
+      (`maybe_top_up_cos_root_lease`), unchanged.
+    - Rule 1, the exact share is reserved at the lease. Non-exact service,
+      guarantee and surplus alike, acquires with
+      `SharedCoSRootLease::acquire_unreserved(.., R, F)`: no grant raises the
+      lease's outstanding credit above `C - R`, where
+      `R = tx_completion::exact_root_reserve_bytes(C, D, S)` is the
+      demanding exact classes' share `C * D / S` of the cap (`D` the demand
+      mask's rate, the same one the residual budget uses), kept one frame
+      `F = min(tx_frame_capacity, C / 2)` away from either end; `R = 0`
+      with no exact demand and `R = C` when exact demand covers the root.
+      Exact service acquires against the full cap, so while exact holders
+      hold `X` an exact request always finds `R - X` of headroom, whatever
+      non-exact workers are doing concurrently.
+    - The pool floor, part of Rule 1: a non-exact grant on such a root also
+      never takes the lease's AVAILABLE pool below one frame `F`, whether or
+      not exact demand is published (`RootGrantLimit::nonexact`, the
+      `pool_floor` of `acquire_unreserved`). The reservation above bounds
+      outstanding credit, not the pool. With no root credit held between
+      drains, an exact frame arriving at an idle exact queue found the pool
+      best-effort had just drained, root-parked for a 50 us wheel tick and
+      published demand that throttled every non-exact instance to the
+      residual while it caught up. In the drain simulation the colocated
+      non-exact instance fell to 0.63-0.69 Gb/s against its 1.0 floor. The
+      floor costs non-exact a one-frame offset of the pool, not rate. Both
+      bounds sit in the same single CAS on the same packed word, with no new
+      shared state.
+    - What it costs: on a root with an exact class, one acquire CAS per
+      batch and one release CAS when a drain ends with unspent credit (a
+      partial grant, a short TX ring), on top of the settle's consume.
+      `root_reservation_18748.rs` measures it (uncontended per batch, and
+      a six-worker contention bench run on demand); docs/log/18748.md has
+      the numbers.
+    - This replaces cycle 1's surplus-release predicate
+      (`hold_root_only_for_spendable_surplus`) and cycle 2's 200 us idle
+      reclaim timer (`reclaim_idle_root_credit`), both removed: each guessed
+      whether held credit would be spent, and each had a counterexample (a
+      low-rate class whose credit was reclaimed on the pass that woke it, a
+      waiter whose poll period missed every cooldown, a holder whose
+      best-effort trickle kept resetting the timer).
   - The reserved AMOUNT is still the configured rate. An exact class held
     below it by its worker's TX capacity over-reserves (#19023). Exact
     classes whose demanding rates sum to the shaping rate or more leave a
@@ -330,7 +373,10 @@ mod.rs for further file-level breakdown.
     splits the root between the exact classes, it reserves nothing for
     best-effort). An exact class whose v8 lease under-grants one of its
     workers still runs below its rate (#19031). `exact_starvation_18748.rs`
-    pins the oversubscribed and the under-grant shapes.
+    pins the oversubscribed and the under-grant shapes. A root whose
+    outstanding cap is under two frames (an explicit burst-size of a frame
+    or so) cannot give each side of the reserve a full frame, and cannot
+    send a frame at all when the cap is under one (#19051).
 - **Shared queue-lease conservation for non-exact lease-metered queues
   (#4265 / #5156).** A non-exact GUARANTEED queue whose configured rate
   trips `COS_SHARED_EXACT_MIN_RATE_BYTES` runs the sharded `shared_exact`

@@ -10,10 +10,11 @@ use std::sync::atomic::Ordering;
 
 use std::sync::Arc;
 
+use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::{
     CoSInterfaceRuntime, CoSPendingTxItem, CoSQueueRuntime, ExactDemandQueueMask,
-    PreparedTxRequest, SharedCoSQueueLease, TxRequest, COS_TIMER_WHEEL_L0_SLOTS,
-    COS_TIMER_WHEEL_L1_SLOTS,
+    PreparedTxRequest, SharedCoSQueueLease, SharedCoSRootLease, TxRequest,
+    COS_TIMER_WHEEL_L0_SLOTS, COS_TIMER_WHEEL_L1_SLOTS,
 };
 use crate::afxdp::worker::BindingWorker;
 
@@ -460,52 +461,137 @@ pub(in crate::afxdp) fn cos_root_can_service_after_prime(
 // TX-completion cluster
 // ============================================================================
 
-/// #18748 review cycle 2: how long root credit may sit in a worker's bucket
-/// with nothing spent before it is returned to the shared root lease. One
-/// root-lease interval (`SharedCoSRootLease` sizes its top-up for 200 us of
-/// the shaping rate).
-pub(in crate::afxdp) const COS_ROOT_RECLAIM_NS: u64 = 200_000;
-
-/// #18748 review cycle 2 (Codex F1): return root credit that has sat unspent
-/// in this worker's bucket for `COS_ROOT_RECLAIM_NS`, and hold off taking
-/// more for the same interval so the workers it was held from get it first.
-/// Returns whether credit was returned. O(1); one CAS on the shared root
-/// lease when it returns credit.
+/// #18748 review cycle 3 (Rule 2): whether this root takes root credit per
+/// batch instead of priming and holding it. True for a shaped root that has
+/// an exact class and a shared root lease. On such a root a worker acquires
+/// root credit only for the batch it is about to build, after that batch's
+/// own gate passed (`acquire_root_for_batch`), and returns whatever the
+/// settle did not consume before the drain returns
+/// (`return_unspent_batch_root_credit`), so it holds no root credit between
+/// drains. A worker therefore never holds root it cannot spend: not while
+/// its exact queue waits on queue-lease credit (the crossed lease), not
+/// while its surplus waits on a residual budget, and not across a stretch in
+/// which it spends a trickle of best-effort. Roots without an exact class
+/// keep priming and holding (`maybe_top_up_cos_root_lease`).
 #[inline]
-pub(in crate::afxdp) fn reclaim_idle_root_credit(
-    root: &mut CoSInterfaceRuntime,
-    shared_root_lease: &crate::afxdp::types::SharedCoSRootLease,
-    now_ns: u64,
-) -> bool {
-    let spent_since_last_prime = root.root_spent_bytes != root.root_spent_at_last_prime;
-    root.root_spent_at_last_prime = root.root_spent_bytes;
-    // A transparent root (no shaping) fills its bucket locally; there is no
-    // shared credit to hold.
-    // A first look (`root_idle_since_ns == 0`) only starts the clock:
-    // credit is reclaimed only after it was SEEN idle for the interval.
-    if root.shaping_rate_bytes == 0
-        || root.tokens == 0
-        || spent_since_last_prime
-        || root.root_idle_since_ns == 0
-    {
-        root.root_idle_since_ns = now_ns;
-        return false;
-    }
-    if now_ns.saturating_sub(root.root_idle_since_ns) < COS_ROOT_RECLAIM_NS {
-        return false;
-    }
-    let held = core::mem::take(&mut root.tokens);
-    shared_root_lease.release_unused(held);
-    root.root_idle_since_ns = now_ns;
-    root.root_reclaim_cooldown_until_ns = now_ns.saturating_add(COS_ROOT_RECLAIM_NS);
-    true
+pub(in crate::afxdp) fn cos_root_credit_per_batch(root: &CoSInterfaceRuntime) -> bool {
+    root.shaping_rate_bytes > 0
+        && root.shared_root_lease.is_some()
+        && !root.exact_queues_by_rate_ascending.is_empty()
 }
 
-/// #18748 review cycle 2: whether this worker may take root credit now (it
-/// is not in the cooldown after a reclamation).
+/// #18748 review cycle 3 (Rule 1): the share of the root lease's outstanding
+/// cap `cap` that non-exact acquisitions leave to exact service while exact
+/// classes demand `exact_demand_rate` of a `shaping_rate` root.
+/// - No exact demand: zero, so an idle exact class costs non-exact nothing.
+/// - Exact demand covering the root: the whole cap (the residual is zero).
+/// - Otherwise the demanding share of the cap, kept at least one frame
+///   `F = min(tx_frame_capacity, cap / 2)` away from either end, so one
+///   frame always fits on each side. A root whose cap is under two frames
+///   cannot give each side a full one (#19051).
 #[inline]
-pub(in crate::afxdp) fn cos_root_may_top_up(root: &CoSInterfaceRuntime, now_ns: u64) -> bool {
-    now_ns >= root.root_reclaim_cooldown_until_ns
+pub(in crate::afxdp) fn exact_root_reserve_bytes(
+    cap: u64,
+    exact_demand_rate: u64,
+    shaping_rate: u64,
+) -> u64 {
+    if exact_demand_rate == 0 || shaping_rate == 0 || cap == 0 {
+        return 0;
+    }
+    if exact_demand_rate >= shaping_rate {
+        return cap;
+    }
+    let share = ((cap as u128) * (exact_demand_rate as u128)).div_ceil(shaping_rate as u128) as u64;
+    let frame = exact_root_frame_bytes(cap);
+    share.clamp(frame, cap - frame)
+}
+
+/// #18748 review cycle 3: one frame of a root lease whose outstanding cap is
+/// `cap`, `F = min(tx_frame_capacity, cap / 2)`: the reserve's distance from
+/// either end of the cap, and the floor non-exact service leaves in the
+/// lease's available pool.
+#[inline]
+pub(in crate::afxdp) fn exact_root_frame_bytes(cap: u64) -> u64 {
+    (tx_frame_capacity() as u64).min(cap / 2)
+}
+
+/// #18748 review cycle 3 (Rule 1): how much of a root lease a per-batch
+/// grant must leave to others. Exact service takes `FULL`. Non-exact
+/// service on a root with an exact class leaves the exact reserve `R` of
+/// the outstanding cap (`exact_root_reserve_bytes`) and one frame `F` of the
+/// available pool (`exact_root_frame_bytes`), whether or not exact demand
+/// is published: with no root credit held between drains (Rule 2), an exact
+/// frame arriving at an idle exact queue would otherwise race best-effort
+/// for a pool best-effort had just drained, root-park for a wheel tick and
+/// throttle every non-exact instance to the residual while it caught up.
+/// The floor costs non-exact a one-frame offset of the pool, not rate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct RootGrantLimit {
+    pub(in crate::afxdp) reserve: u64,
+    pub(in crate::afxdp) pool_floor: u64,
+}
+
+impl RootGrantLimit {
+    /// The whole cap and the whole pool (exact service).
+    pub(in crate::afxdp) const FULL: Self = Self {
+        reserve: 0,
+        pool_floor: 0,
+    };
+
+    /// Non-exact service on a root with an exact class.
+    #[inline]
+    pub(in crate::afxdp) fn nonexact(cap: u64, exact_demand_rate: u64, shaping_rate: u64) -> Self {
+        Self {
+            reserve: exact_root_reserve_bytes(cap, exact_demand_rate, shaping_rate),
+            pool_floor: exact_root_frame_bytes(cap),
+        }
+    }
+}
+
+/// #18748 review cycle 3 (Rule 2): top this worker's root credit up to
+/// `need` for the batch it is about to build. The caller has checked the
+/// batch's own gate (exact: own queue tokens cover the head; non-exact
+/// guarantee: its tokens cover the head; surplus: the residual budget covers
+/// it). Exact service passes `RootGrantLimit::FULL`; non-exact service
+/// passes `RootGrantLimit::nonexact`. `lease == None` (a root that primes
+/// and holds) is a no-op.
+#[inline]
+pub(in crate::afxdp) fn acquire_root_for_batch(
+    root_tokens: &mut u64,
+    lease: Option<&SharedCoSRootLease>,
+    need: u64,
+    limit: RootGrantLimit,
+    now_ns: u64,
+) {
+    let Some(lease) = lease else {
+        return;
+    };
+    if *root_tokens >= need {
+        return;
+    }
+    let granted =
+        lease.acquire_unreserved(now_ns, need - *root_tokens, limit.reserve, limit.pool_floor);
+    *root_tokens = root_tokens.saturating_add(granted);
+}
+
+/// #18748 review cycle 3 (Rule 2): give back the root credit a per-batch root
+/// did not spend in this drain (a partial grant below a head, a short TX
+/// ring, a batch the budget cut). One CAS when there is any; none otherwise.
+#[inline]
+pub(in crate::afxdp) fn return_unspent_batch_root_credit(
+    cos: &mut crate::afxdp::worker::WorkerCos,
+    root_ifindex: i32,
+) {
+    let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) else {
+        return;
+    };
+    if root.tokens == 0 || !cos_root_credit_per_batch(root) {
+        return;
+    }
+    let unspent = core::mem::take(&mut root.tokens);
+    if let Some(lease) = root.shared_root_lease.as_ref() {
+        lease.release_unused(unspent);
+    }
 }
 
 #[inline]
@@ -530,21 +616,10 @@ pub(in crate::afxdp) fn prime_cos_root_for_service(
         };
         ticks_advanced = advance_cos_timer_wheel(root, now_ns);
         if let Some(shared_root_lease) = shared_root_lease {
-            // #18748 review cycle 2 (Codex F1): root credit this worker has
-            // held without spending for a lease interval goes back, whatever
-            // its backlog says. #18748 retains an exact queue's reservation
-            // while it waits on root, so credit can now be held by a worker
-            // that cannot spend it (its own exact queue starved of queue-lease
-            // credit, its surplus held to a zero residual) while the worker
-            // whose exact queue holds that lease credit waits on root: a
-            // cycle no predicate on local backlog reliably sees. Bounding how
-            // long credit may sit unspent breaks every cycle of this class.
-            let reclaimed = reclaim_idle_root_credit(root, shared_root_lease, now_ns);
-            // #18748 review (R6 P1): a worker that gave its root credit back
-            // because it cannot spend it does not take more until the
-            // non-exact batch build finds the residual budget, or exact or
-            // guarantee backlog, back (`hold_root_only_for_spendable_surplus`).
-            if !reclaimed && !root.surplus_root_released && cos_root_may_top_up(root, now_ns) {
+            // #18748 review cycle 3 (Rule 2): a root with an exact class takes
+            // root credit per batch, after the batch's own gate, and holds
+            // none between drains; only other roots prime and hold.
+            if !cos_root_credit_per_batch(root) {
                 maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
             }
         }
@@ -653,25 +728,30 @@ pub(in crate::afxdp) fn publish_cos_exact_backlog_on_cos(
 /// queue waits for exactly the root the reservation protects. Called after
 /// an exact selection pass that made no progress; the comparison is O(exact
 /// queues) with parked queues O(1), and the store happens only on a change.
+///
+/// Returns the local demand mask it computed, so the non-exact build that
+/// follows in the same drain pass does not walk the queues (and a runnable
+/// flow-fair exact queue's buckets) for it a second time (#18748 R4-C2-2).
 #[inline]
 pub(in crate::afxdp) fn republish_cos_exact_demand_if_changed(
     cos: &crate::afxdp::worker::WorkerCos,
     slot: u32,
     root_ifindex: i32,
-) {
-    let Some(shared_exact_backlog) = cos
+) -> ExactDemandQueueMask {
+    let Some(root) = cos.cos_interfaces.get(&root_ifindex) else {
+        return ExactDemandQueueMask::EMPTY;
+    };
+    let local = local_exact_demand_mask(root);
+    if let Some(shared_exact_backlog) = cos
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
-    else {
-        return;
-    };
-    let Some(root) = cos.cos_interfaces.get(&root_ifindex) else {
-        return;
-    };
-    if local_exact_demand_mask(root) != shared_exact_backlog.published_demand_queue_mask(slot) {
-        publish_cos_exact_backlog_on_cos(cos, slot, root_ifindex);
+    {
+        if local != shared_exact_backlog.published_demand_queue_mask(slot) {
+            shared_exact_backlog.publish_demand(slot, exact_backlog_bytes(root), local);
+        }
     }
+    local
 }
 
 /// #18748: record, at an exact queue's park site, whether it parks still
@@ -772,7 +852,6 @@ pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
         account_queue_drain_sent_bytes(queue, CoSServicePhase::Guarantee, sent_bytes, false);
     }
     root.tokens = root.tokens.saturating_sub(sent_bytes);
-    root.root_spent_bytes = root.root_spent_bytes.wrapping_add(sent_bytes);
 }
 
 #[inline]
@@ -933,11 +1012,6 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
     } else if old_nonempty > 0 && new_nonempty == 0 {
         cos.cos_nonempty_interfaces = cos.cos_nonempty_interfaces.saturating_sub(1);
         release_cos_root_lease_on_cos(cos, root_ifindex);
-        // #18748: an idle interface has no residual-bounded surplus left to
-        // hold root back for; the next work tops up as usual.
-        if let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) {
-            root.surplus_root_released = false;
-        }
     }
     if let Some(iface_fast) = cos.cos_fast_interfaces.get(&root_ifindex) {
         for &(queue_idx, worker_id, released) in &released_queue_leases {
@@ -1058,7 +1132,6 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             }
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
-        root.root_spent_bytes = root.root_spent_bytes.wrapping_add(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
         .cos
@@ -1182,7 +1255,6 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             }
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
-        root.root_spent_bytes = root.root_spent_bytes.wrapping_add(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
         .cos

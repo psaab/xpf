@@ -389,6 +389,12 @@ fn exact_demand_keeps_root_starved_and_releases_self_limited_queues_18748() {
 /// again on them must release its reservation: a demand bit left set from the
 /// earlier park would keep a self-limited class reserving its rate (the
 /// T-6(b) over-reservation) for as long as it stays parked on itself.
+///
+/// #18748 review cycle 3 (Codex): the re-park leaves a POSITIVE balance one
+/// byte short of the head. With a zero balance the cycle-2 own-tokens guard
+/// (`tokens == 0`) answered no demand by itself, so the cell passed even
+/// with the earlier park's bit left set; with a sub-head balance only the
+/// re-park clearing the bit can make it pass.
 #[test]
 fn an_exact_queue_reparked_on_its_own_tokens_releases_its_demand_18748() {
     let mut root = predicate_root(10_000, 0, 2);
@@ -402,7 +408,7 @@ fn an_exact_queue_reparked_on_its_own_tokens_releases_its_demand_18748() {
         queue.hot.parked = false;
         queue.hot.runnable = true;
         queue.hot.next_wakeup_tick = 0;
-        queue.hot.tokens = 0;
+        queue.hot.tokens = FRAME as u64 - 1;
     }
     park(&mut root);
     assert!(
@@ -667,32 +673,120 @@ fn own_root_parked_exact_queue_meters_this_workers_surplus_18748() {
 /// Two workers, a 25 Gb/s root with a 16,000-byte burst (a 4,000-byte
 /// aggregate outstanding cap), one 25 Gb/s exact class whose lease burst is
 /// 4,096 bytes; each worker queues two 1,500-byte exact packets, worker 1
-/// two best-effort packets too. Worker 1 primes all 4,000 root bytes before
-/// worker 0's exact pass takes all 4,096 exact-lease bytes and parks on
-/// root. Worker 1 cannot get exact-lease credit, its best-effort residual is
-/// zero, and its exact backlog kept it from returning the root it held: at
-/// 6d41c6e911 nothing was sent in 20,000 50-us steps. Root credit held
-/// unspent for a lease interval is now reclaimed, so all 9,000 bytes drain,
-/// under every pass order tried, including worker 1 draining twice per
-/// worker 0 pass (it must not take the returned credit straight back).
+/// two best-effort packets too. The setup is the one that crossed the credit
+/// at 6d41c6e911: worker 1 primes all 4,000 root bytes, then worker 0's exact
+/// pass takes all 4,096 exact-lease bytes and parks on root. Worker 1 cannot
+/// get exact-lease credit, its best-effort residual is zero, and it held the
+/// root: nothing was sent in 20,000 50-us steps.
+///
+/// Cycle 3: on a root with an exact class no worker holds root credit
+/// between drains (Rule 2), so the setup cannot cross the credit; every
+/// pass order must drain all 9,000 bytes.
 #[test]
 fn crossed_root_and_exact_lease_credit_cannot_deadlock_18748() {
     for order in [&[0usize, 1][..], &[1, 0], &[1, 1, 0]] {
-        let sent = crossed_credit_run(order);
+        let run = crossed_run(&CrossedShape::order(order));
         assert_eq!(
-            sent, 9_000,
-            "pass order {order:?}: {sent} of the 9,000 queued bytes sent after a second of \
-             drain passes with crossed root and exact-lease credit"
+            run.total, 9_000,
+            "pass order {order:?}: {} of the 9,000 queued bytes sent after a second of \
+             drain passes with crossed root and exact-lease credit",
+            run.total
         );
     }
 }
 
-fn crossed_credit_run(order: &[usize]) -> u64 {
+/// #18748 review cycle 3 (Codex re-review of 5e1b3c55cc, P1 #2): the same
+/// crossed setup with unequal polling, worker 1 every 50 us and worker 0
+/// every `period` x 50 us at every phase. At 5e1b3c55cc (Codex's trace)
+/// worker 1 returned its idle root at 200 us, cooled down until 400 us and
+/// took all 4,000 bytes back; worker 0 polled at 450 us and got nothing, and
+/// so on for the whole second: 0 of 9,000 bytes, at four of eight phases of
+/// a 400 us period and at 800 us and 2 ms too. With no root credit held
+/// between drains there is nothing to take back.
+#[test]
+fn crossed_credit_drains_at_every_poll_ratio_18748() {
+    let mut failures = Vec::new();
+    for period in [1usize, 2, 4, 5, 6, 8, 10, 12, 16, 20, 40] {
+        for phase in 0..period {
+            let mut shape = CrossedShape::order(&[1, 0]);
+            shape.worker0_period = period;
+            shape.worker0_phase = phase;
+            let run = crossed_run(&shape);
+            if run.total != 9_000 {
+                failures.push(format!(
+                    "worker 0 every {} us at phase {} us: {} of 9,000 bytes",
+                    period * 50,
+                    phase * 50,
+                    run.total
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} poll ratios stalled:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
+/// #18748 review cycle 3 (Codex re-review of 5e1b3c55cc, P1 #3): a holder
+/// that keeps SPENDING is never reclaimed by an idle timer. The crossed
+/// setup with a 24 Gb/s exact class (a 1 Gb/s residual) and worker 1's
+/// best-effort queue refilled every step: worker 1's residual-bounded
+/// best-effort sends reset its idle clock, so it kept the root credit and
+/// the exact class sent 0 of its 6,000 bytes in a second at 5e1b3c55cc
+/// while worker 1 sent about 1 Gb/s of best-effort. Master's predicate
+/// starves it as well (Codex's control). Both workers drain until noop each
+/// step. Every exact byte must go.
+#[test]
+fn a_spending_best_effort_holder_cannot_starve_the_exact_class_18748() {
+    let mut shape = CrossedShape::order(&[1, 0]);
+    shape.exact_rate = 24 * GBIT;
+    shape.refill_best_effort = true;
+    shape.drains_per_step = 64;
+    let run = crossed_run(&shape);
+    assert_eq!(
+        run.exact, 6_000,
+        "{} of the 6,000 exact bytes sent in a second beside a spending best-effort holder \
+         ({} bytes in all)",
+        run.exact, run.total
+    );
+}
+
+struct CrossedShape {
+    exact_rate: u64,
+    order: Vec<usize>,
+    worker0_period: usize,
+    worker0_phase: usize,
+    refill_best_effort: bool,
+    drains_per_step: usize,
+}
+
+impl CrossedShape {
+    fn order(order: &[usize]) -> Self {
+        Self {
+            exact_rate: SHAPING_BYTES,
+            order: order.to_vec(),
+            worker0_period: 1,
+            worker0_phase: 0,
+            refill_best_effort: false,
+            drains_per_step: 1,
+        }
+    }
+}
+
+struct CrossedRun {
+    exact: u64,
+    total: u64,
+}
+
+fn crossed_run(shape: &CrossedShape) -> CrossedRun {
     use crate::afxdp::cos::tx_completion::prime_cos_root_for_service;
     let start = 2_000_000_000u64;
     let root_lease = Arc::new(SharedCoSRootLease::new(SHAPING_BYTES, 16_000, 2));
     let exact_lease = Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode_and_policy(
-        SHAPING_BYTES,
+        shape.exact_rate,
         4_096,
         2,
         1,
@@ -718,7 +812,7 @@ fn crossed_credit_run(order: &[usize]) -> u64 {
             );
             fast.get_mut(&IFX).expect("fast path").shared_exact_backlog = Some(backlog.clone());
             let fast = fast.get(&IFX).expect("fast path").clone();
-            let mut root = lab_runtime(&[SHAPING_BYTES], 16_000);
+            let mut root = lab_runtime(&[shape.exact_rate], 16_000);
             root.queues[EXACT_IDX].config.buffer_bytes = 4_096;
             root.shared_root_lease = Some(root_lease.clone());
             apply_cos_queue_flow_fair_promotion(&mut root, &fast.queue_fast_path, w);
@@ -741,17 +835,36 @@ fn crossed_credit_run(order: &[usize]) -> u64 {
             sim_item(NONEXACT_QUEUE, 40_000, start)
         ));
     }
-    // Worker 1 primes root; worker 0 reaches its exact-lease acquire first.
-    assert!(prime_cos_root_for_service(&mut bindings[1], IFX, start));
-    assert_eq!(
-        bindings[1].cos.cos_interfaces[&IFX].tokens, 4_000,
-        "premise: worker 1 holds the root's whole outstanding allowance"
-    );
+    // The setup that crossed the credit before cycle 3: worker 1 primes root
+    // (at 5e1b3c55cc it then held the whole 4,000-byte outstanding cap), and
+    // worker 0 drains until its exact queue holds the exact lease's whole
+    // 4,096-byte allowance. Since cycle 3 the prime takes no root credit on
+    // this root and worker 0 just sends; neither is asserted, the outcome is.
+    let _ = prime_cos_root_for_service(&mut bindings[1], IFX, start);
     let mut recycles = Vec::new();
     let mut descs: Vec<crate::xsk_ffi::XdpDesc> = Vec::new();
     let mut now = start;
+    let mut pass = |binding: &mut BindingWorker, now: u64, recycles: &mut Vec<(u32, u64)>| {
+        let before = binding
+            .live
+            .tx_bytes
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let _ = drain_shaped_tx(binding, now, recycles);
+        descs.clear();
+        binding.xsk.tx.take_submitted_for_test(&mut descs);
+        for desc in &descs {
+            binding.xsk.device.push_comp_for_test(desc.addr);
+        }
+        let _ = crate::afxdp::tx::reap_tx_completions(binding, recycles);
+        recycles.clear();
+        binding
+            .live
+            .tx_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > before
+    };
     for _ in 0..100 {
-        let _ = drain_shaped_tx(&mut bindings[0], now, &mut recycles);
+        let _ = pass(&mut bindings[0], now, &mut recycles);
         if bindings[0].cos.cos_interfaces[&IFX].queues[EXACT_IDX]
             .hot
             .tokens
@@ -761,31 +874,186 @@ fn crossed_credit_run(order: &[usize]) -> u64 {
         }
         now += 50_000;
     }
-    assert_eq!(
-        bindings[0].cos.cos_interfaces[&IFX].queues[EXACT_IDX]
-            .hot
-            .tokens,
-        4_096,
-        "premise: worker 0 holds the exact lease's whole outstanding allowance"
-    );
-    for _ in 0..20_000 {
+    for step in 0..20_000usize {
         now += 50_000;
-        for &w in order {
-            let binding = &mut bindings[w];
-            let _ = drain_shaped_tx(binding, now, &mut recycles);
+        if shape.refill_best_effort {
+            while queued_bytes(&bindings[1], NONEXACT_IDX) < 48 * FRAME as u64 {
+                if !sim_enqueue(
+                    &mut bindings[1],
+                    NONEXACT_QUEUE,
+                    sim_item(NONEXACT_QUEUE, 40_000, now),
+                ) {
+                    break;
+                }
+            }
+        }
+        for &w in &shape.order {
+            if w == 0 && step % shape.worker0_period != shape.worker0_phase {
+                continue;
+            }
+            for _ in 0..shape.drains_per_step {
+                if !pass(&mut bindings[w], now, &mut recycles) {
+                    break;
+                }
+            }
+        }
+    }
+    let exact = bindings
+        .iter()
+        .map(|b| {
+            b.cos.cos_interfaces[&IFX].queues[EXACT_IDX]
+                .telemetry
+                .owner_profile
+                .drain_sent_bytes
+                .load(std::sync::atomic::Ordering::Relaxed)
+        })
+        .sum();
+    let total = bindings
+        .iter()
+        .map(|b| b.live.tx_bytes.load(std::sync::atomic::Ordering::Relaxed))
+        .sum();
+    CrossedRun { exact, total }
+}
+
+/// #18748 review cycle 3 (Codex re-review of 5e1b3c55cc, P1 #1): nothing
+/// may take a low-rate exact class's root credit away on a clock. One
+/// worker, a root of 1 Mb/s, 10 Mb/s or 100 Mb/s with a 16,000-byte burst,
+/// an exact class at the root's rate, half of it or a tenth of it, polled
+/// every 50, 200 or 500 us, alone or beside an always-backlogged best-effort
+/// class. Over the second second the class must carry at least 90% of its
+/// rate (less one frame of quantization). At 5e1b3c55cc (Codex's trace) a
+/// 1 Mb/s class beside best-effort, polled every 50 us, sent nothing in the
+/// measured second: the root credit it was waking to spend was reclaimed on
+/// the pass that woke it, every 12 ms. A 50 Mb/s class on a 100 Mb/s root
+/// polled every 500 us got 24 Mb/s against 48 Mb/s without reclamation.
+#[test]
+fn a_low_rate_exact_class_keeps_its_rate_at_any_poll_period_18748() {
+    let mut failures = Vec::new();
+    for root_rate in [125_000u64, 1_250_000, 12_500_000] {
+        for divisor in [1u64, 2, 10] {
+            for poll_ns in [50_000u64, 200_000, 500_000] {
+                for best_effort in [false, true] {
+                    let exact_rate = root_rate / divisor;
+                    let sent = low_rate_run(root_rate, exact_rate, poll_ns, best_effort);
+                    let floor = (exact_rate * 9 / 10).saturating_sub(FRAME as u64);
+                    if sent < floor {
+                        failures.push(format!(
+                            "root {root_rate} B/s, exact {exact_rate} B/s, poll {} us, \
+                             best-effort {best_effort}: {sent} B/s < {floor}",
+                            poll_ns / 1_000
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} shapes under-served:\n  {}",
+        failures.len(),
+        failures.join("\n  ")
+    );
+}
+
+/// Exact bytes sent in the second second of a two-second run (see
+/// `a_low_rate_exact_class_keeps_its_rate_at_any_poll_period_18748`).
+fn low_rate_run(root_rate: u64, exact_rate: u64, poll_ns: u64, best_effort: bool) -> u64 {
+    let start = 2_000_000_000u64;
+    let root_burst = 16_000;
+    let root_lease = Arc::new(SharedCoSRootLease::new(root_rate, root_burst, 1));
+    loop {
+        let granted = root_lease.acquire(start, u64::MAX);
+        if granted == 0 {
+            break;
+        }
+        root_lease.consume(granted);
+    }
+    let exact_lease = Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode_and_policy(
+        exact_rate,
+        96_000,
+        1,
+        0,
+        V8RateMode::CstructDefault,
+        EqualFlowTargetPolicy::Slowest,
+    ));
+    let backlog = Arc::new(SharedCoSExactBacklog::new(0));
+    let mut fast = test_cos_fast_interfaces(
+        IFX,
+        IFX,
+        NONEXACT_QUEUE,
+        vec![
+            (
+                EXACT_QUEUE,
+                test_queue_fast_path(true, 0, None, Some(exact_lease)),
+            ),
+            (NONEXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
+        ],
+        None,
+        Some(root_lease.clone()),
+    );
+    fast.get_mut(&IFX).expect("fast path").shared_exact_backlog = Some(backlog);
+    let fast = fast.get(&IFX).expect("fast path").clone();
+    let mut root = lab_runtime(&[exact_rate], root_burst);
+    root.shaping_rate_bytes = root_rate;
+    root.queues[EXACT_IDX].config.buffer_bytes = 96_000;
+    root.queues[NONEXACT_IDX].config.buffer_bytes = 96_000;
+    root.queues[NONEXACT_IDX].config.transmit_rate_bytes = root_rate;
+    root.shared_root_lease = Some(root_lease);
+    apply_cos_queue_flow_fair_promotion(&mut root, &fast.queue_fast_path, 0);
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFX, root, fast);
+    let mut recycles = Vec::new();
+    let mut descs: Vec<crate::xsk_ffi::XdpDesc> = Vec::new();
+    let exact_sent = |binding: &BindingWorker| {
+        binding.cos.cos_interfaces[&IFX].queues[EXACT_IDX]
+            .telemetry
+            .owner_profile
+            .drain_sent_bytes
+            .load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let mut base = 0;
+    for step in 0..(2_000_000_000 / poll_ns) {
+        let now = start + step * poll_ns;
+        for (idx, queue_id) in [(EXACT_IDX, EXACT_QUEUE), (NONEXACT_IDX, NONEXACT_QUEUE)] {
+            if idx == NONEXACT_IDX && !best_effort {
+                continue;
+            }
+            while queued_bytes(&binding, idx) < 12_000 {
+                if !sim_enqueue(
+                    &mut binding,
+                    queue_id,
+                    sim_item(queue_id, 30_000 + idx as u16, now),
+                ) {
+                    break;
+                }
+            }
+        }
+        for _ in 0..64 {
+            let before = binding
+                .live
+                .tx_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let _ = drain_shaped_tx(&mut binding, now, &mut recycles);
             descs.clear();
             binding.xsk.tx.take_submitted_for_test(&mut descs);
             for desc in &descs {
                 binding.xsk.device.push_comp_for_test(desc.addr);
             }
-            let _ = crate::afxdp::tx::reap_tx_completions(binding, &mut recycles);
+            let _ = crate::afxdp::tx::reap_tx_completions(&mut binding, &mut recycles);
             recycles.clear();
+            if binding
+                .live
+                .tx_bytes
+                .load(std::sync::atomic::Ordering::Relaxed)
+                == before
+            {
+                break;
+            }
+        }
+        if step * poll_ns < 1_000_000_000 {
+            base = exact_sent(&binding);
         }
     }
-    bindings
-        .iter()
-        .map(|b| b.live.tx_bytes.load(std::sync::atomic::Ordering::Relaxed))
-        .sum()
+    exact_sent(&binding) - base
 }
 
 /// #18748 review cycle 2 (Codex F2): a live lease-set replacement returns a
@@ -851,61 +1119,139 @@ fn returning_a_parked_queues_own_tokens_withdraws_its_demand_18748() {
     );
 }
 
-/// #18748 review cycle 2: the drain makes progress in every shape of root
-/// burst, exact rate, exact-lease burst and class mix, and every worker
-/// interleaving the committed seeds produce: no stretch of more than 2 ms in
-/// which no worker sends while work is queued. Two workers, each with exact
-/// and best-effort traffic. The retained exact reservation can leave root
-/// credit with a worker that cannot spend it (Codex F1); a fix for one shape
-/// at a time is not enough, so the shapes are varied.
+/// #18748 review cycle 3: every backlogged exact class makes progress in
+/// every shape of root burst, exact rate, exact-lease burst, class mix and
+/// per-worker poll cadence. Two workers, each with exact and best-effort
+/// traffic. Per exact class:
+/// - no stretch of more than 2 ms may pass with the class queued and none of
+///   it sent;
+/// - with every worker polled every microsecond, the class carries at least
+///   `share` of what it can (its rate or its offered load, whichever is
+///   lower); with unequal polling it carries something.
+///
+/// `share` is 0.5, except "root 16k, exact 15 + 10 lease 4k" at 0.4. There
+/// each class's 4,096-byte v8 lease (two workers sharing four KB of queue
+/// credit at 15 Gb/s) is what binds: about 2,800 own-token parks in the
+/// 60 ms window against 870 root parks, and master b57a950e21 carries
+/// 4.86-5.12 of 15 Gb/s there (this: 6.83-7.16). That is #19031's class of
+/// v8 under-grant, not the root. Every shape was measured on master, at
+/// 5e1b3c55cc and here with this harness, on the committed seeds; this is
+/// at or above master for every class of every shape (docs/log/18748.md).
+///
+/// The cycle-2 form of this cell watched only the global stall (no worker
+/// sending anything), which resets on any send: Codex showed it passes with
+/// the exact class fully starved while best-effort moves. This form fails
+/// on exactly that outcome (mutant: exact service never runs).
 #[test]
-fn drain_makes_progress_across_burst_lease_and_class_shapes_18748() {
+fn every_exact_class_progresses_across_burst_lease_class_and_cadence_shapes_18748() {
     let class = |rate_gbit: u64, buffer: Option<u64>| ExactClass {
         rate_bytes: rate_gbit * GBIT,
         offered_bytes: vec![rate_gbit * GBIT / 2; 2],
         flows: vec![1; 2],
         buffer_bytes: buffer,
     };
-    let shapes: Vec<(&str, u64, Vec<ExactClass>)> = vec![
+    let default_burst = SHAPING_BYTES / 100;
+    let lease_4k = Some(4_096);
+    let shapes: Vec<(&str, u64, Vec<ExactClass>, [u64; 2], f64)> = vec![
         (
             "root 16k, exact 25 lease 4k",
             16_000,
-            vec![class(25, Some(4_096))],
+            vec![class(25, lease_4k)],
+            [1, 1],
+            0.5,
         ),
         (
             "root 96k, exact 25 lease 4k",
             96_000,
-            vec![class(25, Some(4_096))],
+            vec![class(25, lease_4k)],
+            [1, 1],
+            0.5,
         ),
         (
             "root 16k, exact 12 lease default",
             16_000,
             vec![class(12, None)],
+            [1, 1],
+            0.5,
         ),
         (
             "root default, exact 25 lease 4k",
-            SHAPING_BYTES / 100,
-            vec![class(25, Some(4_096))],
+            default_burst,
+            vec![class(25, lease_4k)],
+            [1, 1],
+            0.5,
         ),
         (
             "root 16k, exact 15 + 10 lease 4k",
             16_000,
-            vec![class(15, Some(4_096)), class(10, Some(4_096))],
+            vec![class(15, lease_4k), class(10, lease_4k)],
+            [1, 1],
+            0.4,
+        ),
+        (
+            "root 96k, exact 15 + 10 lease 4k",
+            96_000,
+            vec![class(15, lease_4k), class(10, lease_4k)],
+            [1, 1],
+            0.5,
+        ),
+        (
+            "root 16k, exact 15 + 10 lease default",
+            16_000,
+            vec![class(15, None), class(10, None)],
+            [1, 1],
+            0.5,
+        ),
+        (
+            "root 16k, exact 25 lease 4k, polls 50/400 us",
+            16_000,
+            vec![class(25, lease_4k)],
+            [50, 400],
+            0.0,
+        ),
+        (
+            "root 96k, exact 12 lease default, polls 1/400 us",
+            96_000,
+            vec![class(12, None)],
+            [1, 400],
+            0.0,
+        ),
+        (
+            "root default, exact 24 lease default, polls 50/50 us",
+            default_burst,
+            vec![class(24, None)],
+            [50, 50],
+            0.0,
+        ),
+        (
+            "root 16k, exact 1 lease default, polls 1/500 us",
+            16_000,
+            vec![class(1, None)],
+            [1, 500],
+            0.0,
         ),
     ];
-    for (label, root_burst, exact) in shapes {
+    for (label, root_burst, exact, polls, share) in shapes {
         let mut arm = Arm::new(2, 15, 25, &[]);
         arm.exact = exact;
         arm.root_burst_bytes = root_burst;
+        arm.poll_period_steps = polls.to_vec();
         assert_every_seed(label, &arm, |o| {
-            if o.longest_global_stall_ns > 2_000_000 {
-                return Err(format!(
-                    "no worker sent anything for {} us while work was queued",
-                    o.longest_global_stall_ns / 1_000
-                ));
-            }
-            if o.total_gbps() == 0.0 {
-                return Err("nothing sent in the window".into());
+            for (c, class) in arm.exact.iter().enumerate() {
+                if o.longest_exact_class_stall_ns[c] > 2_000_000 {
+                    return Err(format!(
+                        "exact class {c} sent nothing for {} us while it was queued",
+                        o.longest_exact_class_stall_ns[c] / 1_000
+                    ));
+                }
+                let can = class.rate_bytes.min(class.offered_bytes.iter().sum());
+                let floor = share * can as f64 * 8.0 / 1e9;
+                if o.exact_class_gbps(c) <= floor {
+                    return Err(format!(
+                        "exact class {c} carried {:.2} Gb/s, floor {floor:.2}",
+                        o.exact_class_gbps(c)
+                    ));
+                }
             }
             Ok(())
         });

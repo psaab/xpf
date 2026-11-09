@@ -15,7 +15,6 @@
 // queues, so the `builders.rs` >64-exact-queue warning never fires.
 
 use super::*;
-use crate::afxdp::cos::queue_ops::cos_exact_queue_demands_reservation;
 
 const SHAPING_BYTES: u64 = 1_000_000_000 / 8;
 const EXACT_63_BYTES: u64 = 100_000_000 / 8;
@@ -214,17 +213,18 @@ fn shared_backlog_carries_every_mask_word() {
     );
 }
 
-/// The pre-#9365 producer and consumer, apart from names and the per-queue
-/// demand predicate (#18748 swapped it in both producers), as the reference
-/// for every interface a `u64` could represent.
-fn reference_u64_mask(root: &CoSInterfaceRuntime) -> u64 {
+/// The pre-#9365 producer, apart from names, as the reference for every
+/// interface a `u64` could represent. #18748 review cycle 3 (Codex): the
+/// per-queue demand is NOT recomputed with the production predicate
+/// (`cos_exact_queue_demands_reservation`), which would make a wrong
+/// predicate agree with itself; it is the `expected` demand the test wrote
+/// down when it built each queue's state (`QueueState::demands`).
+fn reference_u64_mask(root: &CoSInterfaceRuntime, expected: &[bool]) -> u64 {
     root.queues
         .iter()
         .enumerate()
         .filter(|(queue_idx, queue)| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && cos_exact_queue_demands_reservation(root.parked_exact_demand, *queue_idx, queue)
+            queue.config.exact && queue.config.guarantee_enabled && expected[*queue_idx]
         })
         .fold(0u64, |acc, (queue_idx, _)| {
             if queue_idx < u64::BITS as usize {
@@ -233,6 +233,65 @@ fn reference_u64_mask(root: &CoSInterfaceRuntime) -> u64 {
                 u64::MAX
             }
         })
+}
+
+/// The states a queue can be in when the demand masks are built, and
+/// whether each demands its reservation by the #18748 contract: a queue
+/// demands while it is backlogged and its own tokens cover its head, whether
+/// it is runnable or parked on ROOT with them; a queue that is empty, short
+/// of its own tokens, or parked on its own tokens demands nothing.
+#[derive(Clone, Copy, Debug)]
+enum QueueState {
+    Empty,
+    Serviceable,
+    ShortOfOwnTokens,
+    NoOwnTokens,
+    ParkedOnRoot,
+    ParkedOnOwnTokens,
+}
+
+impl QueueState {
+    const ALL: [Self; 6] = [
+        Self::Empty,
+        Self::Serviceable,
+        Self::ShortOfOwnTokens,
+        Self::NoOwnTokens,
+        Self::ParkedOnRoot,
+        Self::ParkedOnOwnTokens,
+    ];
+
+    fn demands(self) -> bool {
+        matches!(self, Self::Serviceable | Self::ParkedOnRoot)
+    }
+
+    fn apply(self, root: &mut CoSInterfaceRuntime, queue_idx: usize, short_tokens: u64) {
+        let (backlogged, tokens, parked) = match self {
+            Self::Empty => (false, 10_000, false),
+            Self::Serviceable => (true, 10_000, false),
+            Self::ShortOfOwnTokens => (true, short_tokens, false),
+            Self::NoOwnTokens => (true, 0, false),
+            Self::ParkedOnRoot => (true, 10_000, true),
+            Self::ParkedOnOwnTokens => (true, short_tokens, true),
+        };
+        if parked {
+            // The selectors' park sites record the demand they decided at
+            // the park (a root park with own tokens covering the head).
+            crate::afxdp::cos::tx_completion::record_exact_park_demand(
+                root,
+                queue_idx,
+                matches!(self, Self::ParkedOnRoot),
+            );
+        }
+        let queue = &mut root.queues[queue_idx];
+        queue.hot.runnable = !parked;
+        queue.hot.parked = parked;
+        queue.hot.next_wakeup_tick = if parked { 7 } else { 0 };
+        queue.hot.tokens = tokens;
+        if backlogged {
+            queue.hot.items.push_back(test_cos_item(1500));
+            queue.hot.queued_bytes = 1500;
+        }
+    }
 }
 
 fn reference_u64_rate(root: &CoSInterfaceRuntime, mask: u64) -> u64 {
@@ -274,10 +333,11 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
             .collect();
         let mut root = test_cos_runtime_with_queues(SHAPING_BYTES, queues);
         root.tokens = 100_000;
-        for queue_idx in 0..queue_count {
-            if next() % 2 == 0 {
-                make_serviceable(&mut root, queue_idx);
-            }
+        let mut expected = vec![false; queue_count];
+        for (queue_idx, demands) in expected.iter_mut().enumerate() {
+            let state = QueueState::ALL[(next() % QueueState::ALL.len() as u64) as usize];
+            state.apply(&mut root, queue_idx, 1 + next() % 1_499);
+            *demands = state.demands();
         }
         let peer_bits = next()
             & if queue_count == 64 {
@@ -291,14 +351,14 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
                 mask.with_queue(queue_idx)
             });
 
-        let want_local = reference_u64_rate(&root, reference_u64_mask(&root));
+        let want_local = reference_u64_rate(&root, reference_u64_mask(&root, &expected));
         let got_local = exact_demand_rate_bytes_for_mask(&root, local_exact_demand_mask(&root));
         assert_eq!(
             got_local, want_local,
             "local reservation changed for a {queue_count}-queue interface"
         );
 
-        let want = reference_u64_rate(&root, reference_u64_mask(&root) | peer_bits);
+        let want = reference_u64_rate(&root, reference_u64_mask(&root, &expected) | peer_bits);
         let got =
             exact_demand_rate_bytes_for_mask(&root, local_exact_demand_mask(&root) | peer_mask);
         assert_eq!(

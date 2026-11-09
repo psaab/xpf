@@ -39,6 +39,8 @@ mod vtime;
 // shared_cos_lease::{...}`) and the sibling submodules' `use super::*;`
 // continue to resolve every symbol exactly as before the split.
 pub(in crate::afxdp) use backlog::{ExactDemandQueueMask, SharedCoSExactBacklog};
+#[cfg(test)]
+pub(in crate::afxdp) use lease::lease_cas_probe;
 pub(in crate::afxdp) use lease::{SharedCoSQueueLease, SharedCoSRootLease};
 pub(in crate::afxdp) use vtime::SharedCoSQueueVtimeFloor;
 #[cfg(test)]

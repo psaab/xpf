@@ -189,6 +189,10 @@ pub(super) struct Arm {
     /// The interface burst (the root lease's credit pool); the production
     /// default is 1% of the shaping rate.
     pub(super) root_burst_bytes: u64,
+    /// #18748 review cycle 3: how often each worker drains, in simulated
+    /// microseconds (1 = every step). A worker polled every `p` steps gets
+    /// `p` steps of TX capacity at each poll.
+    pub(super) poll_period_steps: Vec<u64>,
 }
 
 impl Arm {
@@ -211,6 +215,7 @@ impl Arm {
             nonexact_backlogged: vec![true; workers],
             worker_tx_cap_bytes: cap_gbit * GBIT,
             root_burst_bytes: SHAPING_BYTES / 100,
+            poll_period_steps: vec![1; workers],
         }
     }
 
@@ -237,6 +242,11 @@ pub(super) struct Outcome {
     /// #18748 review cycle 2: longest stretch in the window in which no
     /// worker sent anything while some queue held work.
     pub(super) longest_global_stall_ns: u64,
+    /// #18748 review cycle 3 (Codex: the global stall resets on any send, so
+    /// it cannot see one class starved while another moves): per exact
+    /// class, the longest stretch in the window in which the class had work
+    /// queued on some worker and sent nothing.
+    pub(super) longest_exact_class_stall_ns: Vec<u64>,
     exact_root_parks: u64,
     exact_queue_parks: u64,
 }
@@ -264,7 +274,8 @@ impl Outcome {
         let round = |b: &u64| (Self::gbps(*b) * 100.0).round() / 100.0;
         format!(
             "{label}: total {:.2}; exact {:.2} per class {:?} per worker {:?}; non-exact {:.2} per worker {:?}; \
-             longest unserved ms {:?}; longest global stall us {}; exact parks root/queue {}/{}",
+             longest unserved ms {:?}; longest global stall us {}; longest stall us per exact class {:?}; \
+             exact parks root/queue {}/{}",
             self.total_gbps(),
             self.exact_gbps(),
             self.exact_class_bytes.iter().map(round).collect::<Vec<_>>(),
@@ -276,6 +287,10 @@ impl Outcome {
                 .map(|ns| ns / 1_000_000)
                 .collect::<Vec<_>>(),
             self.longest_global_stall_ns / 1_000,
+            self.longest_exact_class_stall_ns
+                .iter()
+                .map(|ns| ns / 1_000)
+                .collect::<Vec<_>>(),
             self.exact_root_parks,
             self.exact_queue_parks,
         )
@@ -372,6 +387,9 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
     let mut global_last_sent = 0u64;
     let mut global_last_progress = 0u64;
     let mut longest_global_stall = 0u64;
+    let mut class_last_sent = vec![0u64; classes];
+    let mut class_last_progress = vec![0u64; classes];
+    let mut longest_class_stall = vec![0u64; classes];
     let mut order: Vec<usize> = (0..workers).collect();
     let cap_per_step = (arm.worker_tx_cap_bytes * STEP_NS / 1_000_000_000) as i64;
     let mut tx_credit = vec![0i64; workers];
@@ -418,8 +436,14 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
             rng ^= rng << 17;
             order.swap(i, (rng % (i as u64 + 1)) as usize);
         }
+        let step = (now - start_ns) / STEP_NS;
         for &w in &order {
-            tx_credit[w] = (tx_credit[w] + cap_per_step).min(TX_CREDIT_MAX);
+            let period = arm.poll_period_steps[w].max(1);
+            if (step + w as u64 * 7) % period != 0 {
+                continue;
+            }
+            let poll_cap = cap_per_step * period as i64;
+            tx_credit[w] = (tx_credit[w] + poll_cap).min(TX_CREDIT_MAX.max(poll_cap));
             let binding = &mut bindings[w];
             for _ in 0..MAX_PASSES {
                 if tx_credit[w] <= 0 {
@@ -481,6 +505,19 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                 longest_global_stall = longest_global_stall.max(now - global_last_progress);
             }
         }
+        if now >= measure_ns {
+            for c in 0..classes {
+                let sent = class_sent(&bindings, c);
+                let queued = bindings.iter().any(|binding| queued_bytes(binding, c) > 0);
+                if now == measure_ns || sent > class_last_sent[c] || !queued {
+                    class_last_sent[c] = sent;
+                    class_last_progress[c] = now;
+                } else {
+                    longest_class_stall[c] =
+                        longest_class_stall[c].max(now - class_last_progress[c]);
+                }
+            }
+        }
         now += STEP_NS;
     }
     let nonexact_bytes: Vec<u64> = bindings
@@ -511,6 +548,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         nonexact_bytes,
         longest_unserved_ns: longest,
         longest_global_stall_ns: longest_global_stall,
+        longest_exact_class_stall_ns: longest_class_stall,
         exact_root_parks,
         exact_queue_parks,
     }

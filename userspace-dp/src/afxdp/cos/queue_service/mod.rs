@@ -14,6 +14,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use crate::afxdp::frame::{apply_dscp_rewrite_to_frame, frame_has_tcp_rst};
 use crate::afxdp::mirror::MIRROR_TX_FRAME_RESERVE;
@@ -38,10 +39,11 @@ use super::{
     CoSQueueLeaseAcquireTelemetry, COS_MIN_BURST_BYTES,
 };
 // #1229 v7 per-bucket TX accounting + threshold-gated EWMA.
-use super::exact_demand::{exact_demand_rate_bytes_for_mask, local_exact_demand_mask};
+use super::exact_demand::exact_demand_rate_bytes_for_mask;
+#[cfg(test)]
+use super::exact_demand::local_exact_demand_mask;
 use super::fairness::account_flow_bucket_tx;
 use super::flow_hash::cos_flow_bucket_index;
-use super::token_bucket::maybe_top_up_cos_root_lease;
 
 // #1035 P2: drain stage of the queue service pipeline split into
 // a sibling submodule.
@@ -118,13 +120,14 @@ use selectors::{select_cos_surplus_batch, select_nonexact_cos_guarantee_batch};
 use waterfill::apply_phase1_waterfill_honor_refund;
 
 use super::tx_completion::{
-    apply_cos_prepared_result, apply_cos_send_result, apply_direct_exact_send_result_fields,
-    count_park_reason, count_tx_ring_full_submit_stall,
-    cos_root_can_service_after_prime, cos_root_may_top_up, cos_tick_for_ns,
+    acquire_root_for_batch, apply_cos_prepared_result, apply_cos_send_result,
+    apply_direct_exact_send_result_fields, cos_root_can_service_after_prime,
+    cos_root_credit_per_batch, cos_tick_for_ns, count_park_reason, count_tx_ring_full_submit_stall,
     count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
     publish_cos_exact_backlog_on_cos, record_exact_park_demand, refresh_cos_interface_activity,
     refresh_cos_interface_activity_on_cos, republish_cos_exact_demand_if_changed,
-    restore_cos_local_items_inner, restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
+    restore_cos_local_items_inner, restore_cos_prepared_items_inner,
+    return_unspent_batch_root_credit, CoSServicePhase, ParkReason, RootGrantLimit,
 };
 // Back-edges to crate::afxdp::tx are XSK-ring / worker-binding /
 // prepared-frame primitives — primitives that own the kernel ring
@@ -289,45 +292,75 @@ pub(in crate::afxdp) fn drain_shaped_tx(
         if !prime_cos_root_for_service(binding, root_ifindex, now_ns) {
             continue;
         }
-        let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
-        if let Some(serviced) = service_exact_guarantee_queue_direct_with_info(
-            binding,
-            root_ifindex,
-            now_ns,
-            shared_recycles,
-            &mut lease_telemetry,
-        ) {
-            record_cos_queue_lease_acquire(binding, lease_telemetry);
-            binding.cos.cos_interface_rr =
-                (start + offset + 1) % binding.cos.cos_interface_order.len();
-            return serviced;
+        let step = drain_primed_cos_root(binding, root_ifindex, now_ns, shared_recycles);
+        // #18748 review cycle 3 (Rule 2): a root with an exact class holds no
+        // root credit between drains; whatever this drain acquired and did
+        // not spend goes back now, on every exit.
+        return_unspent_batch_root_credit(&mut binding.cos, root_ifindex);
+        match step {
+            PrimedRootStep::Nothing => continue,
+            PrimedRootStep::Serviced(serviced) => {
+                binding.cos.cos_interface_rr =
+                    (start + offset + 1) % binding.cos.cos_interface_order.len();
+                return serviced;
+            }
         }
-        record_cos_queue_lease_acquire(binding, lease_telemetry);
-        // #18748 review (R6 P2): the exact pass made no progress, but its
-        // selector may have topped an exact queue up and parked it on root;
-        // peers must see that demand now, not at the next enqueue.
-        republish_cos_exact_demand_if_changed(&binding.cos, binding.slot, root_ifindex);
-        let Some(batch) = build_nonexact_cos_batch(binding, root_ifindex, now_ns) else {
-            continue;
-        };
-        // #751: capture both queue_idx (stable Vec position) and
-        // queue_id (stable u8 identifier) BEFORE submit_cos_batch
-        // takes ownership of the batch. Pre-Copilot-review this
-        // resolved only queue_id and the outer loop did a linear
-        // scan by id; now we carry the idx through for direct
-        // indexed access.
-        let located = cos_batch_queue_ref(binding, root_ifindex, &batch);
-        binding.cos.cos_interface_rr = (start + offset + 1) % binding.cos.cos_interface_order.len();
-        if submit_cos_batch(binding, root_ifindex, batch, now_ns, shared_recycles) {
-            return located.map(|(queue_idx, queue_id)| DrainedQueueRef {
-                root_ifindex,
-                queue_idx,
-                queue_id,
-            });
-        }
-        return None;
     }
     None
+}
+
+/// What one drain pass over a primed root did.
+enum PrimedRootStep {
+    /// Nothing selected; the drain moves on to the next root.
+    Nothing,
+    /// A batch was selected on this root (sent or not); the drain returns.
+    Serviced(Option<DrainedQueueRef>),
+}
+
+#[inline]
+fn drain_primed_cos_root(
+    binding: &mut BindingWorker,
+    root_ifindex: i32,
+    now_ns: u64,
+    shared_recycles: &mut Vec<(u32, u64)>,
+) -> PrimedRootStep {
+    let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
+    if let Some(serviced) = service_exact_guarantee_queue_direct_with_info(
+        binding,
+        root_ifindex,
+        now_ns,
+        shared_recycles,
+        &mut lease_telemetry,
+    ) {
+        record_cos_queue_lease_acquire(binding, lease_telemetry);
+        return PrimedRootStep::Serviced(serviced);
+    }
+    record_cos_queue_lease_acquire(binding, lease_telemetry);
+    // #18748 review (R6 P2): the exact pass made no progress, but its
+    // selector may have topped an exact queue up and parked it on root;
+    // peers must see that demand now, not at the next enqueue.
+    let local_exact_demand =
+        republish_cos_exact_demand_if_changed(&binding.cos, binding.slot, root_ifindex);
+    let Some(batch) =
+        build_nonexact_cos_batch_with_demand(binding, root_ifindex, now_ns, local_exact_demand)
+    else {
+        return PrimedRootStep::Nothing;
+    };
+    // #751: capture both queue_idx (stable Vec position) and
+    // queue_id (stable u8 identifier) BEFORE submit_cos_batch
+    // takes ownership of the batch. Pre-Copilot-review this
+    // resolved only queue_id and the outer loop did a linear
+    // scan by id; now we carry the idx through for direct
+    // indexed access.
+    let located = cos_batch_queue_ref(binding, root_ifindex, &batch);
+    if submit_cos_batch(binding, root_ifindex, batch, now_ns, shared_recycles) {
+        return PrimedRootStep::Serviced(located.map(|(queue_idx, queue_id)| DrainedQueueRef {
+            root_ifindex,
+            queue_idx,
+            queue_id,
+        }));
+    }
+    PrimedRootStep::Serviced(None)
 }
 
 #[inline]
@@ -347,11 +380,32 @@ fn cos_batch_queue_ref(
         .map(|queue| (queue_idx, queue.queue_id()))
 }
 
+/// The non-exact batch build as the unit tests drive it: the local demand
+/// mask computed here instead of handed over by the drain pass.
+#[cfg(test)]
 #[inline]
 fn build_nonexact_cos_batch(
     binding: &mut BindingWorker,
     root_ifindex: i32,
     now_ns: u64,
+) -> Option<CoSBatch> {
+    let local_exact_demand = binding
+        .cos
+        .cos_interfaces
+        .get(&root_ifindex)
+        .map(local_exact_demand_mask)
+        .unwrap_or(ExactDemandQueueMask::EMPTY);
+    build_nonexact_cos_batch_with_demand(binding, root_ifindex, now_ns, local_exact_demand)
+}
+
+/// `local_exact_demand` is this binding's local demand mask for the root,
+/// computed once per drain pass (`republish_cos_exact_demand_if_changed`).
+#[inline]
+fn build_nonexact_cos_batch_with_demand(
+    binding: &mut BindingWorker,
+    root_ifindex: i32,
+    now_ns: u64,
+    local_exact_demand: ExactDemandQueueMask,
 ) -> Option<CoSBatch> {
     // #4972: borrow the shared exact-backlog `Arc` from the disjoint
     // `cos_fast_interfaces` field rather than cloning it per non-exact
@@ -366,11 +420,6 @@ fn build_nonexact_cos_batch(
     let peer_exact_demand_mask = shared_exact_backlog
         .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
         .unwrap_or(ExactDemandQueueMask::EMPTY);
-    let shared_root_lease = binding
-        .cos
-        .cos_fast_interfaces
-        .get(&root_ifindex)
-        .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref());
     // #4265 (R-2): the non-exact guarantee refill now routes through the
     // shared queue lease (when the coordinator built one for a sharded
     // non-exact guaranteed queue) so admission is metered class-wide
@@ -399,10 +448,28 @@ fn build_nonexact_cos_batch(
         let local_scratch = &mut binding.cos.cos_local_batch_scratch;
         let prepared_scratch = &mut binding.cos.cos_prepared_batch_scratch;
         let root = binding.cos.cos_interfaces.get_mut(&root_ifindex)?;
+        // The local mask is the one the republish check just computed in
+        // this pass (no queue state changed in between).
+        let exact_demand_rate =
+            exact_demand_rate_bytes_for_mask(root, local_exact_demand | peer_exact_demand_mask);
+        // #18748 review cycle 3 (Rule 1): non-exact service, guarantee and
+        // surplus alike, acquires root per batch (Rule 2) only from the part
+        // of the root lease's outstanding cap that the demanding exact
+        // classes' share leaves, so it can never be granted the credit an
+        // exact batch needs. Zero on a root that primes and holds.
+        let root_limit = match root.shared_root_lease.as_ref() {
+            Some(lease) if cos_root_credit_per_batch(root) => RootGrantLimit::nonexact(
+                lease.max_total_leased(),
+                exact_demand_rate,
+                root.shaping_rate_bytes,
+            ),
+            _ => RootGrantLimit::FULL,
+        };
         match select_nonexact_cos_guarantee_batch_into(
             root,
             queue_fast_path,
             now_ns,
+            root_limit,
             local_scratch,
             prepared_scratch,
         ) {
@@ -414,25 +481,18 @@ fn build_nonexact_cos_batch(
                 // work-conserving, but while exact queues are backlogged it may
                 // consume only the residual root rate after backlogged exact
                 // guarantee rates are reserved.
-                let exact_demand_mask = local_exact_demand_mask(root) | peer_exact_demand_mask;
-                let exact_demand_rate = exact_demand_rate_bytes_for_mask(root, exact_demand_mask);
                 let nonexact_budget = nonexact_surplus_budget_under_exact_demand(
                     root,
                     now_ns,
                     exact_demand_rate,
                     shared_exact_backlog.map(|backlog| &**backlog),
                 );
-                hold_root_only_for_spendable_surplus(
-                    root,
-                    shared_root_lease.map(|lease| &**lease),
-                    now_ns,
-                    nonexact_budget,
-                );
                 select_cos_surplus_batch_filtered(
                     root,
                     now_ns,
                     true,
                     nonexact_budget,
+                    root_limit,
                     local_scratch,
                     prepared_scratch,
                 )
@@ -445,45 +505,50 @@ fn build_nonexact_cos_batch(
     selected
 }
 
-/// #18748 review (R6 P1): a worker must not hold root credit it cannot
-/// spend. A retained exact reservation can leave a zero (or sub-frame)
-/// residual; a worker whose only pending work is that residual-bounded
-/// non-exact surplus would still prime root on every drain and hold it, and
-/// with a small interface burst (the lease's aggregate outstanding cap is
-/// `burst / 4`) two such workers exhaust the cap so the worker whose exact
-/// class the reservation exists for can never acquire root: no worker sends.
-/// So when the residual cannot cover a frame and nothing else here needs
-/// root (no exact backlog, no guarantee backlog on this worker), the worker
-/// gives its root credit back and stops topping up
-/// (`prime_cos_root_for_service`). Every drain that finds no exact or
-/// guarantee work reaches this check again before selecting surplus, so the
-/// first one that sees the budget, or exact or guarantee backlog, back tops
-/// up here and the work does not wait a wheel tick.
+/// #18748 review cycle 3 (Rule 2): the exact selectors' root step on a root
+/// that takes root credit per batch (`root_lease` is `Some` only there). An
+/// exact queue whose own tokens cover its head acquires root for its visit
+/// (own tokens, capped at the visit cap) from the full outstanding cap; one
+/// whose own tokens are short takes no root at all, so a worker never holds
+/// root while its exact queue waits on queue-lease credit (the crossed
+/// lease). Returns whether the selector's root-token gate applies: it does
+/// not for a short queue on a per-batch root, which the own-token gate
+/// handles (parks it on its own tokens, or leaves a surplus-sharing queue to
+/// the surplus pass). On other roots it is a no-op that returns true.
 #[inline]
-fn hold_root_only_for_spendable_surplus(
-    root: &mut CoSInterfaceRuntime,
-    shared_root_lease: Option<&SharedCoSRootLease>,
+fn acquire_exact_visit_root(
+    root_tokens: &mut u64,
+    root_lease: Option<&SharedCoSRootLease>,
+    queue_tokens: u64,
+    head_len: u64,
     now_ns: u64,
-    nonexact_budget: Option<u64>,
-) {
-    let Some(shared_root_lease) = shared_root_lease else {
-        return;
-    };
-    let release = nonexact_budget.is_some_and(|budget| budget < tx_frame_capacity() as u64)
-        && !root.queues.iter().any(|queue| {
-            (queue.config.exact || queue.config.guarantee_enabled) && !cos_queue_is_empty(queue)
-        });
-    if release == root.surplus_root_released {
-        return;
+) -> bool {
+    if root_lease.is_none() {
+        return true;
     }
-    root.surplus_root_released = release;
-    if release {
-        let held = core::mem::take(&mut root.tokens);
-        if held > 0 {
-            shared_root_lease.release_unused(held);
-        }
-    } else if cos_root_may_top_up(root, now_ns) {
-        maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
+    if queue_tokens < head_len {
+        return false;
+    }
+    let visit = queue_tokens
+        .min(cos_guarantee_visit_cap_bytes())
+        .max(head_len);
+    acquire_root_for_batch(root_tokens, root_lease, visit, RootGrantLimit::FULL, now_ns);
+    true
+}
+
+/// The root lease a selector acquires from per batch: `Some` only on a root
+/// that takes root credit per batch (`per_batch`, from
+/// `cos_root_credit_per_batch`). Takes the one field so a selector can call
+/// it while it holds a queue of the same root.
+#[inline]
+fn per_batch_root_lease(
+    per_batch: bool,
+    lease: &Option<Arc<SharedCoSRootLease>>,
+) -> Option<&SharedCoSRootLease> {
+    if per_batch {
+        lease.as_deref()
+    } else {
+        None
     }
 }
 

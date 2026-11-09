@@ -108,6 +108,7 @@ mod v_min_skip;
 mod demand_mask_9365;
 mod fairness;
 mod exact_starvation_18748;
+mod root_reservation_18748;
 mod cos_drain_sim;
 
 // #13065 (source finding D1-14) FAIL-ON-REVERT modularity guard: every

@@ -685,26 +685,6 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// active flow bucket, on each publish and surplus build. Bits of
     /// runnable queues are stale and never read.
     pub(in crate::afxdp) parked_exact_demand: ExactDemandQueueMask,
-    /// #18748: this worker gave its root credit back because its only
-    /// pending work was residual-bounded non-exact surplus that the residual
-    /// budget cannot cover (no local exact backlog, no non-exact guarantee
-    /// backlog). While set, the drain does not top the root up, so a worker
-    /// that cannot spend root does not hold the lease's outstanding credit
-    /// away from the worker whose exact class the reservation is for.
-    pub(in crate::afxdp) surplus_root_released: bool,
-    /// #18748 review cycle 2: root bytes this worker has spent (wrapping),
-    /// bumped at every send settle, and its value at the last root prime.
-    /// A prime that finds root credit held with nothing spent since the
-    /// credit became idle reclaims it (`reclaim_idle_root_credit`).
-    pub(in crate::afxdp) root_spent_bytes: u64,
-    pub(in crate::afxdp) root_spent_at_last_prime: u64,
-    /// #18748 review cycle 2: since when this worker has held root credit
-    /// without spending any of it.
-    pub(in crate::afxdp) root_idle_since_ns: u64,
-    /// #18748 review cycle 2: after a reclamation the worker does not take
-    /// root credit again until this time, so the workers it was held from
-    /// get the returned credit first.
-    pub(in crate::afxdp) root_reclaim_cooldown_until_ns: u64,
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,

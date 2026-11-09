@@ -249,6 +249,7 @@ fn waterfill_phase1_select(
     queue_count: usize,
     ascending_len: usize,
 ) -> Option<ExactCoSQueueSelection> {
+    let per_batch = cos_root_credit_per_batch(root);
     for i in 0..ascending_len {
         let queue_idx = root.exact_queues_by_rate_ascending[i];
         // #1732: at-most-once Phase-1 honor per epoch. Skip a queue already
@@ -297,7 +298,16 @@ fn waterfill_phase1_select(
             .waterfill_counters
             .eligible_visits
             .wrapping_add(1);
-        if root.tokens < head_len {
+        // #18748 review cycle 3 (Rule 2): on a per-batch root, root credit
+        // for this visit only once the queue's own tokens cover its head.
+        let root_gate = acquire_exact_visit_root(
+            &mut root.tokens,
+            per_batch_root_lease(per_batch, &root.shared_root_lease),
+            queue.hot.tokens,
+            head_len,
+            now_ns,
+        );
+        if root_gate && root.tokens < head_len {
             // #18748: whether this queue parks still demanding its reservation.
             let parks_with_demand = queue.hot.tokens >= head_len;
             queue
@@ -459,6 +469,7 @@ fn waterfill_phase2_select(
     queue_count: usize,
     ascending_len: usize,
 ) -> Option<ExactCoSQueueSelection> {
+    let per_batch = cos_root_credit_per_batch(root);
     let mut phase2_idx = root.waterfill_phase2_cursor;
     if phase2_idx >= ascending_len {
         phase2_idx = 0;
@@ -527,6 +538,15 @@ fn waterfill_phase2_select(
             .waterfill_counters
             .eligible_visits
             .wrapping_add(1);
+        // #18748 review cycle 3 (Rule 2): root for this visit only once the
+        // queue's own tokens cover its head (a no-op off a per-batch root).
+        let _ = acquire_exact_visit_root(
+            &mut root.tokens,
+            per_batch_root_lease(per_batch, &root.shared_root_lease),
+            queue.hot.tokens,
+            head_len,
+            now_ns,
+        );
         if root.tokens < head_len || queue.hot.tokens < head_len {
             // Don't park in Phase 2 — the queue may legitimately
             // wait for next epoch. The legacy selector parks; we
