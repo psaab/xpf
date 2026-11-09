@@ -23,6 +23,10 @@
 #              `make vm-test-root`); default is the unprivileged `runner` user.
 #   --no-sync  skip the source sync (re-run against what is already there).
 #
+#   If the runner is FROZEN (a gate cell pauses its same-host runner while it
+#   measures), the script waits for it to resume, up to XPF_TEST_RUNNER_WAIT_S
+#   seconds (default 7200), then exits 75.
+#
 # The sync copies tracked plus untracked-but-not-ignored files of the current
 # worktree (uncommitted edits included), preserving mtimes so cargo and go
 # keep their incremental state. Files deleted locally are deleted on the
@@ -61,6 +65,23 @@ if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ ]]; then
 	exit 2
 fi
 base="/work/${name}"
+
+# A gate measurement cell pauses the same-host runner while it measures
+# (plan section 8). Wait for it to resume rather than fail with "Instance is
+# frozen". A job already running inside the VM just stalls and resumes.
+waited=0
+while [[ "$(incus list "$runner" -c s -f csv 2>/dev/null | head -1)" == "FROZEN" ]]; do
+	if [[ "$waited" -eq 0 ]]; then
+		echo "vm-test-run: ${runner} is FROZEN by a gate cell; waiting for it to resume ..." >&2
+	fi
+	if [[ "$waited" -ge "${XPF_TEST_RUNNER_WAIT_S:-7200}" ]]; then
+		echo "vm-test-run: ${runner} still FROZEN after ${waited}s; giving up" >&2
+		exit 75
+	fi
+	sleep 15
+	waited=$((waited + 15))
+done
+[[ "$waited" -gt 0 ]] && echo "vm-test-run: ${runner} resumed after ${waited}s" >&2
 
 # The runner must be a VM that was provisioned as a test runner.
 if ! incus exec "$runner" -- test -f /etc/xpf-testrunner 2>/dev/null; then
