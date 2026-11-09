@@ -447,6 +447,19 @@ the group fails if either check fails.
     recorded delta.
   - A single-stream loss can stay under the floor. It is left to the
     iperf3 stream-continuity cells.
+  - **Target dependency (#19022).** The 1c UDP probe runs for the whole
+    window at 10 datagrams/s, so the target echo must answer from the
+    address the probe sent to. Before #19022 the `mouse-target-echo.py`
+    UDP socket was bound to the wildcard address and replied from the
+    interface's primary address. On loss the target holds .201 (primary)
+    and .202 (`IPERF_TARGET4`), so a probe to .202 was answered from .201.
+    Those replies matched no session, which made 1c VOID. Each reply also
+    counted as one session miss on the RG owner, so a 1b failure in both
+    arms of a gate can be lab-side, not product. Measured on loss
+    (2026-11-08), Session misses on node0 over 60 s: +20 idle, +626 with
+    the old echo (609 replies), +21 with the fixed echo. The echo now
+    replies through `IP_PKTINFO`/`IPV6_PKTINFO` from the receiving address;
+    `make test-target-services-lib` pins this in a netns.
 - **Why not misses net of creates.** A new flow is one miss and one or two
   creates, depending on whether a local reverse companion is installed. The
   #18676 review found that the create delta matched the RT_FLOW

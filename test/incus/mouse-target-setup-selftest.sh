@@ -75,6 +75,11 @@ case "$1" in
       *"sha256sum /usr/local/bin/mouse-echo.py"*)
         echo "${STUB_ECHO_HASH:-missing}  /usr/local/bin/mouse-echo.py"
         exit 0 ;;
+      *"iperf-port-owner (#19022)"*)
+        # mouse-target-setup.sh's per-port owner table, staged per case
+        # (empty = the exec printed nothing).
+        [[ -n "${STUB_IPERF_OWNERS:-}" ]] && printf '%s\n' "$STUB_IPERF_OWNERS"
+        exit 0 ;;
       *systemctl*is-active*) echo active; exit 0 ;;
       *list-units*) echo "mouse-iperf3@5200.service loaded active running"; exit 0 ;;
       *) exit 0 ;;
@@ -266,6 +271,146 @@ unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_FORE
     && pass "held addresses are not re-probed" \
     || fail "#18576: a held address was probed (or the loss shape refused):
 $(<"${TMP}/up.out")"
+
+# --- 7. iperf3 ports another listener serves are left to it (#19022) -----
+# tcp and udp serve 5200-5211 through socket-activated iperf3@52xx.socket
+# units. `up` installed mouse-iperf3@52xx there anyway, and each one
+# crash-looped on the busy port ("start request repeated too quickly"), until
+# the units were disabled and reset by hand. The classifier runs on the
+# target; these cells pin what `up` does with each answer.
+owner_table() { # <class> [port...]: one "<port> <class>" line per port
+    local class="$1" p; shift
+    for p in "$@"; do printf '%s %s\n' "$p" "$class"; done
+}
+ALL_IPERF=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
+iperf_counts() { # -> "<enable> <disable> <reset>" mouse-iperf3 commands in the exec log
+    printf '%s %s %s' "$(grep -c 'systemctl enable --now mouse-iperf3@' "${TMP}/exec.log")" \
+        "$(grep -c 'systemctl disable --now mouse-iperf3@' "${TMP}/exec.log")" \
+        "$(grep -c 'systemctl reset-failed mouse-iperf3@' "${TMP}/exec.log")"
+}
+run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
+    STUB_IPERF_OWNERS="$(for p in "${ALL_IPERF[@]}"; do echo "$p other iperf3@$p.socket"; done)" > /dev/null
+if [[ "$(iperf_counts)" == "0 12 12" ]] && grep -q 'iperf3 5200: already served by iperf3@5200.socket; not installing mouse-iperf3@5200' "${TMP}/up.out"; then
+    pass "socket-unit ports (tcp/udp shape): no mouse-iperf3 enabled; 12 leftovers disabled and reset"
+else
+    fail "#19022: socket-unit ports: enable/disable/reset = $(iperf_counts) (want 0 12 12); output:
+$(<"${TMP}/up.out")"
+fi
+run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_IPERF_OWNERS="$(owner_table mine "${ALL_IPERF[@]}")" > /dev/null
+[[ "$(iperf_counts)" == "12 0 0" ]] \
+    && pass "our own active mouse-iperf3 ports (loss shape) are enabled, never disabled" \
+    || fail "#19022: loss shape enable/disable/reset = $(iperf_counts) (want 12 0 0)"
+run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
+    STUB_IPERF_OWNERS="5200 other users:((\"iperf3\",pid=77,fd=3))"$'\n'"$(owner_table free "${ALL_IPERF[@]:1}")" > /dev/null
+if [[ "$(iperf_counts)" == "11 1 1" ]] && ! grep -q 'enable --now mouse-iperf3@5200' "${TMP}/exec.log" \
+        && grep -q 'disable --now mouse-iperf3@5200' "${TMP}/exec.log"; then
+    pass "one foreign listener: only its port is skipped, the 11 free ports are installed"
+else
+    fail "#19022: mixed ports enable/disable/reset = $(iperf_counts) (want 11 1 1, 5200 skipped)"
+fi
+run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_IPERF_OWNERS= > /dev/null
+[[ "$(iperf_counts)" == "12 0 0" ]] \
+    && pass "an empty owner table (exec or ss failed) installs all 12, as before #19022" \
+    || fail "#19022: empty owner table enable/disable/reset = $(iperf_counts) (want 12 0 0)"
+st="$(run_status STUB_IPERF_OWNERS="$(for p in "${ALL_IPERF[@]}"; do echo "$p other iperf3@$p.socket"; done)")"
+[[ "$st" == *"iperf3:   12 / 12 per-class ports served (0 mouse-iperf3, 12 by another listener)"* ]] \
+    && pass "status counts ports served by socket units (no false 0 / 12)" \
+    || fail "#19022: status iperf3 line wrong:
+${st}"
+
+# --- 8. the UDP probe echo replies FROM the address it was sent to (#19022) -
+# The REAL mouse-target-echo.py, run in a private unprivileged netns (its
+# fixed ports cannot collide with the host there). The defect: the echo's
+# UDP socket was bound to 0.0.0.0 and replied with a plain sendto(), so the
+# kernel chose the route's preferred source. On loss the target holds .201
+# (primary) and .202 (the alias every harness targets); a probe to .202 got
+# its answer from .201, which matched no firewall session and which the
+# probe's connected socket discards, so every loss H1 Group 1c was VOID.
+# Here 127.0.0.1 is the primary and 127.0.0.3 the alias: 127/8 is local but
+# only 127.0.0.1 is the route's source. Cell C runs the harness's own
+# udp_session_probe.py (a connected socket) to the alias. Each control on the
+# primary address separates "wrong source" from "echo not running". SKIP
+# without unshare/ip or unprivileged user namespaces; XPF_REQUIRE_NETNS=1
+# turns that SKIP into a failure.
+cat > "${TMP}/echo-client.py" <<'PY'
+import socket, subprocess, sys, time
+probe_script, probe_log = sys.argv[1], sys.argv[2]
+PORT, BOOT, ALIAS4, ALIAS6 = 6201, "0123456789abcdef0123456789abcdef", "127.0.0.3", "2001:db8:1902:2::3"
+fails = 0
+def report(ok, label, detail=""):
+    global fails
+    print(f"ok: {label}" if ok else f"FAIL: {label}: {detail}", flush=True)
+    fails += 0 if ok else 1
+def ask(family, bind, dest, payloads, timeout=2.0):
+    s = socket.socket(family, socket.SOCK_DGRAM)
+    s.bind((bind, 0))
+    s.settimeout(timeout)
+    me = s.getsockname()[:2]
+    try:
+        for p in payloads:
+            s.sendto(p.encode(), (dest, PORT))
+        data, src = s.recvfrom(4096)
+        return data.decode(), src[:2], me
+    except socket.timeout:
+        return None, None, me
+    finally:
+        s.close()
+def cell(label, family, bind, dest, seq):
+    data, src, me = ask(family, bind, dest, [f"XPFUDP1 st19022 {BOOT} {seq}"])
+    want = f"XPFUDP1 st19022 {BOOT} {seq} {me[0]} {me[1]}"
+    report(data == want and src == (dest, PORT), label,
+           f"sent {me[0]}:{me[1]} -> {dest}:{PORT}; reply {data!r} from {src}, want {want!r} from {(dest, PORT)}")
+deadline = time.monotonic() + 10
+while ask(socket.AF_INET, "127.0.0.1", "127.0.0.1", [f"XPFUDP1 ready {BOOT} 0"], 0.2)[0] is None:
+    if time.monotonic() > deadline:
+        report(False, "echo answers on 127.0.0.1:6201", "no reply in 10 s")
+        sys.exit(1)
+cell("A: IPv4 control, sent to the primary 127.0.0.1, answered from it", socket.AF_INET, "127.0.0.1", "127.0.0.1", 1)
+cell(f"B: IPv4 sent to the alias {ALIAS4} is answered FROM {ALIAS4}, payload unchanged", socket.AF_INET, "127.0.0.1", ALIAS4, 2)
+probe = subprocess.Popen([sys.executable, probe_script, "run", "--target", ALIAS4, "--run-id", "st19022",
+                          "--logfile", probe_log, "--interval", "0.05"])
+time.sleep(1.5)
+probe.terminate(); probe.wait(5)
+log = open(probe_log).read()
+base = subprocess.run([sys.executable, probe_script, "baseline", probe_log], capture_output=True, text=True)
+report(base.returncode == 0 and any(l.startswith("REPLY ") for l in log.splitlines()),
+       f"C: udp_session_probe.py to the alias {ALIAS4} logs answered sequences (the H1 Group 1c baseline)",
+       f"baseline rc={base.returncode} {base.stdout.strip()} {base.stderr.strip()}; log head {log[:200]!r}")
+cell("D: IPv6 control, sent to ::1, answered from it", socket.AF_INET6, "::1", "::1", 3)
+cell(f"E: IPv6 sent to {ALIAS6} is answered FROM it", socket.AF_INET6, "::1", ALIAS6, 4)
+data, src, me = ask(socket.AF_INET, "127.0.0.1", ALIAS4, [f"XPFUDP2 st19022 {BOOT} 5", f"XPFUDP1 st19022 {BOOT} 6"])
+report(data is not None and data.split()[3] == "6", "F: a wrong-magic datagram is not answered",
+       f"first reply {data!r}")
+sys.exit(1 if fails else 0)
+PY
+if ! command -v unshare >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 \
+        || ! unshare -rn true 2>/dev/null; then
+    if [[ "${XPF_REQUIRE_NETNS:-0}" == 1 ]]; then
+        fail "#19022: echo reply-source cells need unshare, ip and unprivileged user namespaces (XPF_REQUIRE_NETNS=1)"
+    else
+        echo "SKIP: #19022 echo reply-source cells (no unshare/ip or unprivileged user namespaces)"
+    fi
+else
+    echo_out="$(timeout 60 unshare -rn bash -c '
+        export PATH=/usr/sbin:/sbin:$PATH
+        ip link set lo up && ip -6 addr add 2001:db8:1902:2::3/128 dev lo || exit 90
+        python3 "$1" > "$3" 2>&1 &
+        echo_pid=$!
+        python3 "$2" "$4" "$5"; rc=$?
+        kill "$echo_pid" 2>/dev/null; wait "$echo_pid" 2>/dev/null
+        exit "$rc"
+    ' _ "${SCRIPT_DIR}/mouse-target-echo.py" "${TMP}/echo-client.py" "${TMP}/echo.log" \
+        "${SCRIPT_DIR}/udp_session_probe.py" "${TMP}/probe.log" 2>&1)"
+    echo_rc=$?
+    printf '%s\n' "$echo_out"
+    echo_ok="$(grep -c '^ok: ' <<<"$echo_out")"
+    if [[ "$echo_rc" == 0 && "$echo_ok" == 6 ]]; then
+        pass "#19022: the UDP probe echo answers from the address each datagram was sent to (6/6 cells)"
+    else
+        fail "#19022: UDP probe echo reply-source cells: rc=${echo_rc}, ${echo_ok}/6 ok; echo log:
+$(cat "${TMP}/echo.log" 2>/dev/null)"
+    fi
+fi
 
 if [[ $fails -eq 0 ]]; then
     echo "mouse-target-setup selftest: all checks passed"

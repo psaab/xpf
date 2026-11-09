@@ -24,6 +24,12 @@
 # daemons on 6200-6211 and port 7, plus #18679's UDP sequence/translated
 # identity echo on port 6201. Harnesses may use it as either target; different
 # addresses on this container do not create distinct target hosts.
+# #19022: the UDP echo answers from the address each datagram arrived on
+# (IP_PKTINFO), so a probe to the .202 alias is not answered from .201. A port
+# in 5200-5211 that another listener already serves, such as the tcp/udp
+# targets' socket-activated iperf3@52xx.socket, keeps that listener. `up`
+# installs no mouse-iperf3 unit there and disables any left from an earlier
+# run.
 #
 # THE PRIMARY TARGET'S ADDRESS IS DECLARED HERE (#16213). On the
 # standing loss cluster, the elephant / iperf target that
@@ -165,6 +171,29 @@ claim_probe_new_v4() {
 }
 
 instance_exists() { inc info "$ref" >/dev/null 2>&1; }
+
+# iperf_port_owners: one "<port> mine|free|other <who>" line per IPERF_PORT,
+# from one exec on the target (#19022). The tcp and udp targets already serve
+# 5200-5211 through socket-activated iperf3@52xx.socket units; `up` used to
+# install mouse-iperf3@52xx anyway, and each one failed with "start request
+# repeated too quickly" on the busy port. "mine" is an active
+# mouse-iperf3@<port>, checked FIRST so a live unit of ours is never
+# reclassified. "other" is any other TCP listener on the port: a systemd socket
+# unit, named when one is found, or the ss process field. A port with no
+# line, for example when the exec or `ss` failed, counts as free: `up` then
+# installs as it did before #19022.
+IPERF_PORT_OWNER_SCRIPT='# iperf-port-owner (#19022)
+for p in "$@"; do
+    if systemctl is-active --quiet "mouse-iperf3@$p"; then echo "$p mine"; continue; fi
+    l="$(ss -Hltnp "sport = :$p" 2>/dev/null | head -1)"
+    if [ -z "$l" ]; then echo "$p free"; continue; fi
+    u="$(systemctl list-sockets --no-legend 2>/dev/null | awk -v s=":$p" "{ if (substr(\$1, length(\$1) - length(s) + 1) == s) { print \$2; exit } }")"
+    [ -n "$u" ] || u="$(printf "%s\n" "$l" | grep -o "users:([^ ]*" | head -1)"
+    echo "$p other ${u:-unknown-listener}"
+done'
+iperf_port_owners() {
+    inc exec "$ref" -- sh -c "$IPERF_PORT_OWNER_SCRIPT" sh "${IPERF_PORTS[@]}" 2>/dev/null
+}
 
 # claim_skip_markers: the "# claim-probe: SKIPPED ..." lines of the
 # installed mouse-addr.service, if any (#18576).
@@ -308,7 +337,19 @@ UNIT"
     # idempotent and never removes an address, so the restart is safe on a
     # live target.
     inc exec "$ref" -- systemctl restart mouse-addr.service >/dev/null 2>&1 || return 1
+    # #19022: a port another listener already serves keeps that listener;
+    # a mouse-iperf3 unit there only crash-loops. Disable and reset any one a
+    # previous `up` left behind, so the port is served exactly once.
+    local owners owner p
+    owners="$(iperf_port_owners)"
     for p in "${IPERF_PORTS[@]}"; do
+        owner="$(awk -v p="$p" '$1 == p { $1 = ""; sub(/^ /, ""); print; exit }' <<<"$owners")"
+        if [[ "$owner" == other* ]]; then
+            echo "iperf3 ${p}: already served by ${owner#other }; not installing mouse-iperf3@${p} (#19022)"
+            inc exec "$ref" -- systemctl disable --now "mouse-iperf3@${p}" >/dev/null 2>&1 || true
+            inc exec "$ref" -- systemctl reset-failed "mouse-iperf3@${p}" >/dev/null 2>&1 || true
+            continue
+        fi
         inc exec "$ref" -- systemctl enable --now "mouse-iperf3@${p}" >/dev/null 2>&1
     done
 
@@ -336,9 +377,13 @@ do_status() {
             echo "alias:    ${TARGET_ALIAS_V4} MISSING — run '${0##*/} up' to re-pin it (mouse-addr.service, #16213)"
         fi
     fi
-    local active
-    active="$(inc exec "$ref" -- systemctl list-units 'mouse-iperf3@*' --state=active --no-legend 2>/dev/null | wc -l)"
-    echo "iperf3:   ${active} / ${#IPERF_PORTS[@]} per-class servers active"
+    # #19022: count SERVED ports. tcp/udp serve them through socket units,
+    # which a count of mouse-iperf3 units alone reported as 0 / 12.
+    local owners mine other
+    owners="$(iperf_port_owners)"
+    mine="$(grep -c '^[0-9]* mine$' <<<"$owners")"
+    other="$(grep -c '^[0-9]* other ' <<<"$owners")"
+    echo "iperf3:   $((mine + other)) / ${#IPERF_PORTS[@]} per-class ports served (${mine} mouse-iperf3, ${other} by another listener)"
     echo "echo:     $(inc exec "$ref" -- systemctl is-active mouse-echo 2>/dev/null)"
     # #18576: a claim probe skipped for a pinned address stays visible.
     local skips
