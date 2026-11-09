@@ -14926,6 +14926,72 @@ fn resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat() {
         "aggregate resync lossless wait ({elapsed:?}) must collapse to ~1 WORKER_LOSSLESS_QUEUE_BUDGET ({:?}), not scale with the owned-session count (#5468)",
         WORKER_LOSSLESS_QUEUE_BUDGET
     );
+
+    // #18780 (Codex P3): the same aggregate for the BULK kind — what a
+    // LossResync export actually sends (`bulk_resync`, LossResync
+    // provenance). The arm above is incremental-only, so it could not see a
+    // broken bulk gate. BATCHES calls share ONE per-cycle bulk latch, as the
+    // worker loop's flush closure does, with no incremental wedge. Counted,
+    // not timed (#8218): only the first call may spend a lossless budget; no
+    // call returns out-of-sync or sets the incremental wedge (#14646); and
+    // because the stream is CONNECTED, that refusal keeps the resync owed.
+    let (bulk_handle, _bulk_rx) = crate::event_stream::test_worker_handle_connected(
+        capacity,
+        crate::event_stream::DataplaneEventRateLimitConfig::default(),
+    );
+    for _ in 0..capacity {
+        bulk_handle.push_delta(&open, &forwarding.zone_name_to_id);
+    }
+    let bulk_stream = Some(bulk_handle);
+    let bulk = SessionDelta {
+        provenance: crate::session::ExportProvenance::LossResync,
+        bulk_resync: true,
+        ..open.clone()
+    };
+    let mut owed_table = SessionTable::new();
+    let mut incremental_wedge = false;
+    let mut bulk_latch = false;
+    let mut any_out_of_sync = false;
+    let before = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
+    for _ in 0..BATCHES {
+        let __r3_channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let __r3_reader = __r3_channel.reader();
+        any_out_of_sync |= flush_session_deltas(
+            &ident,
+            None,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            std::slice::from_ref(&bulk),
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+            &recent_session_deltas,
+            &peer_worker_commands,
+            crate::afxdp::empty_worker_commands_by_id(),
+            &bulk_stream,
+            &forwarding,
+            &__r3_reader,
+            &mut incremental_wedge,
+            &mut bulk_latch,
+            Some(&mut owed_table),
+        );
+    }
+    let after = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
+    assert_eq!(
+        after.1 - before.1,
+        1,
+        "#18780: {BATCHES} bulk resync batches against an unread stream must spend ONE lossless \
+         budget per cycle, not one per batch"
+    );
+    assert!(!any_out_of_sync, "#14646: a bulk failure never returns out-of-sync");
+    assert!(!incremental_wedge, "#14646: a bulk failure never sets the incremental wedge");
+    assert!(bulk_latch, "#18780: the first bulk failure closes the cycle's bulk gate");
+    assert!(
+        owed_table.delta_loss_pending(),
+        "#18780: a bulk refusal on a CONNECTED stream keeps the resync owed"
+    );
 }
 
 

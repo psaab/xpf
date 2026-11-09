@@ -491,7 +491,10 @@ cluster-scoped.
     incremental gated on `event_stream_out_of_sync`) so neither kind's
     failure suppresses the other kind's first attempt in the batch, and
     reconnect already triggers a FullResync that supersedes the lost
-    bulk deltas. A genuinely-new incremental loss still latches (#2874).
+    bulk deltas — for a DISCONNECTED stream. A connected stream that times
+    out gets no reconnect and no FullResync; since #18780 that case keeps
+    the resync owed instead (next bullet). A genuinely-new incremental loss
+    still latches (#2874).
   - **#5468: the worker-loop lossless wait is BOUNDED — per call AND in
     aggregate.** `flush_session_deltas` runs on the packet worker loop, so it
     uses `push_delta_lossless_within` with a short `WORKER_LOSSLESS_QUEUE_BUDGET`
@@ -532,8 +535,31 @@ cluster-scoped.
       first bulk attempt of a cycle is still made. The aggregate per iteration
       is therefore at most one budget per kind (the `* 2` compile-time assert
       beside `WORKER_LOSSLESS_QUEUE_BUDGET`); see
-      `expiry_continuation_resync_waits_one_budget_per_kind_18780` and
-      `loss_resync_of_live_rows_waits_one_bulk_budget_per_cycle_18780`.
+      `expiry_continuation_resync_waits_one_budget_per_kind_18780`,
+      `loss_resync_of_live_rows_waits_one_bulk_budget_per_cycle_18780` and the
+      bulk arm of `resync_export_aggregate_lossless_wait_is_bounded_below_heartbeat`.
+    - **#18780 (review cycle 2): a connected bulk timeout keeps the resync
+      OWED.** Closing the bulk gate alone routed the rest of the export into
+      the binding's 4,096-slot RPC fallback, whose bulk overflow drops without
+      arming (#8593), and a stall that ends without a reconnect brings no
+      FullResync. R7 measured 0 of 6,000 rows on the stream and 1,904 dropped
+      after a 1.3 s stall. Now a bulk push that times out while the stream is
+      CONNECTED calls `SessionTable::owe_resync_after_refused_export`: the
+      loss latch is re-armed for the next iteration, and the running export
+      stops at its next chunk (`take_resync_export_refused`), so at most one
+      chunk reaches the fallback. The next iteration re-exports the whole
+      owned set and pays its own single bulk budget, so the retry rate is at
+      most one export per budget while the stall lasts. The owe is keyed on
+      the timeout itself (the push waited the whole budget, which
+      `send_lossless_encoded` only does while connected), so it can never
+      re-arm faster than once per budget. An immediate failure — a
+      DISCONNECTED stream, or a dead producer whose channel is gone — never
+      re-arms (#14646). Pinned by
+      `transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780`
+      and `bulk_refusal_on_a_disconnected_stream_does_not_owe_the_resync_18780`.
+      An owed export restarts from the beginning: a consumer that stalls for a
+      full budget more often than one export takes keeps it owed, though each
+      attempt still delivers its prefix.
     - Only the off-worker-loop paths (bulk export on connect
       `AllSessionsExport::push`, tunnel-remap purge `push_purge_close_deltas`)
       keep the longer 5 s `LOSSLESS_QUEUE_TIMEOUT` via `push_delta_lossless`,
