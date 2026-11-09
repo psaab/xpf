@@ -247,6 +247,12 @@ flag outside `UnshareFlags`, or a `t.Skip*` call, fails it. Shell-script
 children (`unshare -rn bash -c …`) are out of scope: they are not guarded
 binaries.
 
+Because those cells now run, `pkg/daemon` under testguard takes longer: about
+4 more minutes, measured at 691 s at runner load 4-8. That is above go test's
+10-minute default `-timeout`, which aborts the package mid-run like a panic.
+The make legs pass `GOTEST_TIMEOUT` (60m, #18778). A hand-run
+`testguard-run.sh go test ./pkg/daemon/` needs an explicit `-timeout` too.
+
 ### The go-skip census, and the thing it found
 
 `make go-skip-census` counts skip call sites into four **named** buckets and
