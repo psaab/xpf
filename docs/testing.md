@@ -8,6 +8,30 @@
 > describe a backend that is no longer selectable and are preserved only as
 > context. For current validation, use the userspace path.
 
+## Where tests run: test-runner VMs, never the workstation (#19035)
+
+User directive, 2026-11-08: the dataplane and its tests must not run on the
+development workstation. Every test command runs in a disposable test-runner
+VM on a lab host. The runners are `tcp:xpf-testrunner` and
+`udp:xpf-testrunner`: Ubuntu 26.04, 8 vCPU at low CPU priority, 32 GiB RAM,
+150 GiB disk, Go per `go.mod`, and Rust per `userspace-dp/rust-toolchain.toml`.
+Run them from the worktree:
+
+```bash
+scripts/vm-test-run.sh -- make test
+scripts/vm-test-run.sh --runner tcp:xpf-testrunner --name my-lane -- \
+    cargo test --release --manifest-path userspace-dp/Cargo.toml 18748
+scripts/vm-test-run.sh --root -- make vm-test-root
+```
+
+The script syncs tracked and untracked-but-not-ignored files (uncommitted
+edits included) into `/work/<lane>/src`, then runs the command there. Cargo
+output stays in `/work/<lane>/target`, so incremental builds persist per lane.
+The workstation keeps compiling (`make build`, `make deb`), runs git, gh and
+incus orchestration, and runs hermetic shell censuses that touch no kernel
+state. If both runners are saturated, provision another one rather than
+running tests locally.
+
 For current userspace validation, use
 [`userspace-ha-validation.md`](userspace-ha-validation.md) and the
 `loss:xpf-userspace-fw0/fw1` cluster.

@@ -32,6 +32,20 @@
   infrastructure on a multi-session host: `go clean -cache` against it
   cold-rebuilds every other session too. Treat it as a deliberate,
   logged, last-resort action, never a routine cleanup step.
+- **Never run the dataplane or its tests on this workstation (#19035,
+  user directive 2026-11-08).** Run test commands in a test-runner VM on
+  the tcp or udp lab host (`tcp:xpf-testrunner`, `udp:xpf-testrunner`)
+  through `scripts/vm-test-run.sh -- <command>`. This covers:
+  - `cargo test`/benches/mutation matrices for userspace-dp/userspace-xdp;
+  - `make test`, `make test-go`, `make test-rust`;
+  - testguard, netns and kernel legs;
+  - Go package suites;
+  - anything that loads the shim, opens AF_XDP/BPF, or runs the helper.
+
+  The workstation compiles (`make build`, `make deb`), runs git/gh/incus
+  orchestration, and runs hermetic shell censuses that touch no kernel
+  state. If both runners are busy, create another with the same
+  provisioning; don't fall back to the workstation.
 
 **Read `docs/engineering-style.md` before writing non-trivial code or
 reviewing a PR.** It encodes the coding and review discipline this
@@ -109,6 +123,9 @@ make test            # Run BOTH the Go suite AND the Rust userspace-dp
                      # cargo suite (#4006) — a Rust dataplane regression
                      # fails `make test`. `make test-go` / `make test-rust`
                      # run one leg. The Rust leg needs cargo (~minutes).
+                     # Run it in a test-runner VM, never on the
+                     # workstation (#19035):
+                     #   scripts/vm-test-run.sh -- make test
 make selftest        # Run ALL day-0/image/dist/deploy self-tests
                      # (scripts/run-selftests.sh) is not hermetic or fast
                      # (~13 min): image/distribution legs need host tools

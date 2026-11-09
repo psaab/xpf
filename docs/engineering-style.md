@@ -518,6 +518,17 @@ the mechanics, so this section is sequencing only.
    The last two are the ones that get skipped, and they are the two whose
    subjects nothing else examines.
 
+## Test execution happens in the runner VMs (#19035)
+
+Never run the dataplane or its tests on the workstation. This covers
+`cargo test`/mutation matrices for userspace-dp/userspace-xdp, Go suites,
+`make test*`, and testguard/netns/kernel legs. Run them with
+`scripts/vm-test-run.sh -- <cmd>` on `tcp:xpf-testrunner` or
+`udp:xpf-testrunner`; `docs/testing.md` has the details. A brief that
+dispatches a lane must say so explicitly. Lanes inherit this file, but not
+the reason: the user, 2026-11-08: "running the dataplane on this host is a
+bad idea".
+
 ## Hot-path coding discipline
 
 ### Allocations

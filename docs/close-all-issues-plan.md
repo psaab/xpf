@@ -532,9 +532,26 @@ skill. Work lands on `master` as ordinary commits:
 
 ## 8. Host isolation and test execution
 
-- Workstation runs only named hermetic tests or proven-hermetic
-  packages. Broad suites of network-reachable packages run in the VM
-  legs or are recorded NOT-EXAMINED with the target.
+- **No test execution on the workstation (#19035, user directive
+  2026-11-08: "running the dataplane on this host is a bad idea ...
+  run them in a VM on tcp or udp, make new vms if necessary").**
+  - Every test command runs in a test-runner VM on a lab host,
+    `tcp:xpf-testrunner` or `udp:xpf-testrunner`, through
+    `scripts/vm-test-run.sh [--runner R] [--name lane] [--root] -- <cmd>`.
+  - "Every test command" covers: `cargo test` and mutation matrices for
+    userspace-dp/userspace-xdp, Go package suites, `make test`,
+    `make test-go`, `make test-rust`, testguard/netns/kernel legs, and
+    `make vm-test-root` (with `--root`).
+  - The workstation compiles (`make build`, `make deb`), runs git, gh and
+    incus orchestration of the lab clusters, and runs hermetic shell
+    censuses that touch no kernel state.
+  - When the runners are saturated, create another runner with the same
+    provisioning (Ubuntu 26.04 VM, low `limits.cpu.priority` so the
+    clusters' gate measurements keep priority). Do not fall back to the
+    workstation.
+  - The bullets below still apply inside the runner VM.
+- Broad suites of network-reachable packages run in the VM legs or are
+  recorded NOT-EXAMINED with the target.
 - Kernel-reachable cells run under `unshare -Urn` (or the repo's
   self-re-exec pattern) or behind `internal/testisolation`; host
   netns/bpffs reach inside a cell is a hard in-test FAIL, never a
