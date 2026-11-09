@@ -671,15 +671,29 @@ then the old owner (T2 > T1).
 
 **Known gaps** (filed; they predate #19041 and it does not fix them):
 
-- [#19055](https://github.com/psaab/xpf/issues/19055): with `SOAK_RG=all`,
-  the landing poll scores only the RG being moved. A dual-active overlap in
-  an RG that already landed earlier in the same move is missed until the
-  window. The per-PR and per-wave runs use `SOAK_RG=2` and are not
-  affected.
+- [#19055](https://github.com/psaab/xpf/issues/19055), fixed: with
+  `SOAK_RG=all`, the landing poll used to score only the RG being moved, so
+  a dual-active overlap in an RG that had already landed earlier in the
+  same move was missed until the window. Every landing-poll sample now
+  scores every RG the run moves (see "Several RGs per move" below).
 - [#19056](https://github.com/psaab/xpf/issues/19056): the LAN traffic
   windows are mapped from the controller's wall clock. A wall-clock step on
   the controller can move a late ping gap or outage outside its move's
   window.
+
+**Several RGs per move** (#19055). With `SOAK_RG` naming several RGs, each
+move moves them one after the other. Every sample of every landing poll
+reads all RGs, and each sample scores dual-active for every RG the run
+moves, not only the one landing:
+
+- An RG that already landed earlier in the move has no pending handoff,
+  so a dual-active reading of it is real, and its own result records it.
+- An RG not yet moved in this move is in the same position. The reading
+  waits for its result.
+- An RG moved earlier that did NOT land is skipped. Its handoff may still
+  be in flight, read in another RG's order, and the move already FAILs
+  "did not land".
+- RGs outside `SOAK_RG` are not scored.
 
 **Outside a move** (the preflight, the owner refresh before restore, and the
 restore poll), the soak only asks who owns each RG and never scores

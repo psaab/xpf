@@ -1161,6 +1161,10 @@ class Soak:
         self.log = log
         self.lan_offset = 0.0  # LAN clock minus this host's clock
         self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
+        # #19055: the RGs this run moves, and dual-active samples seen for an
+        # RG of this move that has no result yet (its own move comes later).
+        self._scope_rgs: List[int] = []
+        self._early_dual: Dict[int, List] = {}
         self.members: Dict[int, List[str]] = {}
         self.macs: Dict[str, Tuple[int, str]] = {}
         self.traffic_started = False
@@ -1430,8 +1434,41 @@ class Soak:
 
     # -- one move -------------------------------------------------------
 
+    def _score_other_rgs(self, rg: int, v0: Dict[int, RGView], v1: Dict[int, RGView], first: int,
+                         landed_before: List[RGMoveResult]):
+        """#19055: a landing-poll sample reads every RG, so score dual-active
+        for every RG this run moves, not only the one landing now.
+
+        - An RG moved earlier in this move and already landed has no pending
+          handoff, so a dual-active reading of it is real; its result records
+          it.
+        - An RG this move has not moved yet is in the same position; the
+          reading is kept until its result exists.
+        - An RG moved earlier in this move that did NOT land is skipped: its
+          handoff may still be in flight, read in this RG's order rather than
+          its own, and it already FAILs "did not land"."""
+        done = {r.rg: r for r in landed_before}
+        for other in self._scope_rgs:
+            if other == rg:
+                continue
+            prior = done.get(other)
+            if prior is not None and prior.landed_s is None:
+                continue
+            own = rg_ownership(other, v0, v1)
+            if not own.dual_active:
+                continue
+            detail = f"{own.detail}; node{first} read first, during RG{rg}'s landing poll"
+            if prior is not None:
+                prior.dual_active = True
+                prior.dual_samples += 1
+                prior.dual_detail = prior.dual_detail or detail
+            else:
+                early = self._early_dual.setdefault(other, [0, detail])
+                early[0] += 1
+
     def one_rg(self, rg: int, target: int, pre: Ownership,
-               udp_probe_pre: Optional[Dict] = None) -> Tuple[RGMoveResult, float, Optional[Dict]]:
+               udp_probe_pre: Optional[Dict] = None,
+               landed_before: Optional[List[RGMoveResult]] = None) -> Tuple[RGMoveResult, float, Optional[Dict]]:
         cmd, untargeted = move_command(rg, target, self.cfg.issuer, self.cfg.form)
         t0 = self.now()
         self.move_commands_issued += 1
@@ -1469,6 +1506,7 @@ class Soak:
             # The target first, then the old owner (#19041: views()).
             v0, v1 = self.views(first=target)
             own = rg_ownership(rg, v0, v1)
+            self._score_other_rgs(rg, v0, v1, target, landed_before or [])
             if own.dual_active:
                 dual = True
                 samples += 1
@@ -1506,6 +1544,11 @@ class Soak:
                            None if landed is None else round(landed, 3), last, dual)
         res.dual_samples = samples
         res.dual_detail = dual_detail
+        early = self._early_dual.pop(rg, None)  # #19055: seen while an earlier RG landed
+        if early:
+            res.dual_active = True
+            res.dual_samples += early[0]
+            res.dual_detail = res.dual_detail or early[1]
         res.follow_expected = self.cfg.traffic and self.cfg.helper_check and bool(self.members.get(rg))
         return res, t_ret, udp_probe
 
@@ -1669,6 +1712,7 @@ class Soak:
                 udp_probe_pending = None
                 results: List[RGMoveResult] = []
                 t_ret_last = self.now()
+                self._scope_rgs, self._early_dual = list(rgs), {}
                 for rg in rgs:
                     if cfg.traffic:
                         if udp_probe_pending is not None:
@@ -1680,7 +1724,7 @@ class Soak:
                     else:
                         udp_probe_pre = None
                     r, t_ret_last, udp_window = self.one_rg(
-                        rg, targets[rg], self._owners[rg], udp_probe_pre)
+                        rg, targets[rg], self._owners[rg], udp_probe_pre, landed_before=results)
                     results.append(r)
                     if cfg.traffic and udp_window is not None:
                         if udp_window.get("status") == "READY":

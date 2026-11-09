@@ -2620,5 +2620,79 @@ class TrafficCoverage19054(unittest.TestCase):
         self.assertGreaterEqual(res["preflight"]["traffic_s"], 6 * soak.TRAFFIC_S_PER_MOVE_CAP)
 
 
+class Rg1DualDuringRg2Landing(FakeCluster):
+    """Codex's #19055 reproduction: after RG2's move CLI, each node's next
+    status read claims RG1 too, so the first sample of RG2's landing poll
+    reads RG1 primary on both nodes. RG1 already landed on node1."""
+
+    def cli(self, node, cmd):
+        out = super().cli(node, cmd)
+        if "redundancy-group 2" in cmd:
+            self.rg1_dual_next = {0, 1}
+        return out
+
+    def status(self, node):
+        if node in getattr(self, "rg1_dual_next", set()):
+            self.rg1_dual_next.discard(node)
+            with self._status_lock:
+                self._apply_time(self.clock_.t)
+                view = status_text({**self.owner, 1: node}, node)
+            self.clock_.sleep(self.STATUS_READ_S)
+            return view
+        return super().status(node)
+
+
+class OtherRgsDuringLandingPoll19055(unittest.TestCase):
+    """#19055: with several RGs moved per move, every landing-poll sample
+    scores dual-active for every RG the run moves."""
+
+    def test_an_earlier_rgs_dual_active_during_a_later_landing_poll_fails(self):
+        clock = FakeClock()
+        c = Rg1DualDuringRg2Landing(clock, {1: 0, 2: 0})
+        rc, res, _ = run_fake(c, clock, moves=1, rgs="1,2")
+        move = res["moves"][0]
+        rg1 = [r for r in move["rgs"] if r["rg"] == 1][0]
+        self.assertTrue(rg1["dual_active"], rg1)
+        self.assertEqual(rg1["dual_samples"], 1)
+        self.assertIn("during RG2's landing poll", rg1["dual_detail"])
+        self.assertEqual(move["verdict"], "FAIL", move["reasons"])
+        self.assertTrue(any(r.startswith("RG1 dual-active") for r in move["reasons"]), move["reasons"])
+        self.assertEqual(rc, 1)
+
+    def test_a_clean_two_rg_move_has_no_dual_sample(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0})
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1,2")
+        self.assertEqual(rc, 0, res["summary"])
+        self.assertEqual(res["summary"]["dual_samples"], 0)
+
+    def test_a_later_rgs_dual_active_seen_early_is_kept(self):
+        # RG2 (moved second) claims both primaries during RG1's landing poll:
+        # the reading waits for RG2's result.
+        class Rg2DualDuringRg1(FakeCluster):
+            def cli(self, node, cmd):
+                out = super().cli(node, cmd)
+                if "redundancy-group 1" in cmd:
+                    self.rg2_dual_next = {0, 1}
+                return out
+
+            def status(self, node):
+                if node in getattr(self, "rg2_dual_next", set()):
+                    self.rg2_dual_next.discard(node)
+                    with self._status_lock:
+                        self._apply_time(self.clock_.t)
+                        view = status_text({**self.owner, 2: node}, node)
+                    self.clock_.sleep(self.STATUS_READ_S)
+                    return view
+                return super().status(node)
+        clock = FakeClock()
+        c = Rg2DualDuringRg1(clock, {1: 0, 2: 0})
+        rc, res, _ = run_fake(c, clock, moves=1, rgs="1,2")
+        rg2 = [r for r in res["moves"][0]["rgs"] if r["rg"] == 2][0]
+        self.assertTrue(rg2["dual_active"], rg2)
+        self.assertIn("during RG1's landing poll", rg2["dual_detail"])
+        self.assertEqual(rc, 1)
+
+
 if __name__ == "__main__":
     unittest.main()
