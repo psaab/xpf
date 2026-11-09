@@ -263,10 +263,10 @@ fn run_shared_evidence_leg(
     // could ever fire for it. `restamp_*` take the max, so a
     // zero-count replica never regresses a served count.
     // #18655: one counted-row chunk is restamped per evidence slice.
-    let mut counted: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)> = Vec::new();
+    let mut counted: Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64, u64)> = Vec::new();
     let next_cursor =
         sessions.ct_slice_forward_pairs(cursor, CT_EVIDENCE_CHUNK, &mut counted);
-    counted.retain(|(_, _, fwd, rev, _)| *fwd > 0 || *rev > 0);
+    counted.retain(|(_, _, fwd, rev, _, _)| *fwd > 0 || *rev > 0);
     let source_namespace = sessions.session_id_namespace();
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
         shared_sessions,
@@ -313,7 +313,14 @@ fn run_shared_evidence_leg(
         let (fwd, rev, packet_seen_ns) =
             sessions.packet_counts_and_last_packet_seen_for(key);
         if fwd > 0 || rev > 0 {
-            counted.push((key.clone(), *nat, fwd, rev, packet_seen_ns));
+            counted.push((
+                key.clone(),
+                *nat,
+                fwd,
+                rev,
+                packet_seen_ns,
+                sessions.session_id_for(key),
+            ));
         }
     }
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(

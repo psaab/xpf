@@ -967,6 +967,7 @@ pub(super) fn stage_flow_cache_hit(
                 &stage_forward_key,
                 stage_forward_nat,
                 sessions.session_id_namespace(),
+                sessions.session_id_for(&stage_forward_key),
                 packet_seen_ns,
                 fwd,
                 rev,

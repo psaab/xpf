@@ -7432,6 +7432,8 @@ fn run_expire_ha(
         ceiling_mult: TEST_CEIL_MULT,
         ceiling_abs_ns: TEST_CEIL_ABS_NS,
     node_served: &|_| NodeServedEvidence::default(),
+    shared_row: &|_| None,
+    fence_evidence_cadence_ns: 0,
     };
     // #18780: one GC pass at `now_ns` is the fresh call plus the
     // continuation calls the worker loop makes on its next iterations when a

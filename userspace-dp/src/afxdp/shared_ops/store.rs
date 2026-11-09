@@ -420,7 +420,10 @@ pub(in crate::afxdp) fn publish_shared_session(
             // recency advanced by the serving sibling's ct-slice.
             let keep_sibling_last_seen =
                 same && entry.sibling_last_seen_ns < previous.sibling_last_seen_ns;
-            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen {
+            // #19063: the restore fence's serving evidence is monotonic per
+            // incarnation too; a new incarnation starts from its own value.
+            let keep_last_served = same && entry.last_served_ns < previous.last_served_ns;
+            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen || keep_last_served {
                 entry_owned = entry.clone();
                 if keep_stage {
                     entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
@@ -433,6 +436,9 @@ pub(in crate::afxdp) fn publish_shared_session(
                 }
                 if keep_sibling_last_seen {
                     entry_owned.sibling_last_seen_ns = previous.sibling_last_seen_ns;
+                }
+                if keep_last_served {
+                    entry_owned.last_served_ns = previous.last_served_ns;
                 }
                 &entry_owned
             } else {
@@ -1411,7 +1417,7 @@ mod handshake_monotonic_16223_tests {
         );
         // Forward traffic alone (no reverse service) must not adopt.
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 0, 0, 12, 0,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 0, 12, 0,
         );
         assert!(
             lookup(&shared, &wire_map, &indexes, &wire_key).is_none(),
@@ -1420,7 +1426,7 @@ mod handshake_monotonic_16223_tests {
         // Completed-handshake evidence: reverse count lands on the
         // reverse companion row; forward count already > 0.
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 0, 0, 12, 5,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 0, 12, 5,
         );
         let found = lookup(&shared, &wire_map, &indexes, &wire_key)
             .expect("pending + rev>0 + fwd>0 must adopt as Established-for-adoption");
@@ -1463,7 +1469,7 @@ mod handshake_monotonic_16223_tests {
             &[(forward.clone(), nat_decision())],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 0, 0, 12, 5,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 0, 12, 5,
         );
         crate::afxdp::shared_ops::restamp_shared_forward_wire_established(
             &shared,
@@ -1518,7 +1524,7 @@ mod handshake_monotonic_16223_tests {
         );
         // Same-scope evidence (restamp keys on the exact key) qualifies.
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat_decision(), 0, 0, 3, 2,
+            &shared, &wire_map, &forward, nat_decision(), 0, 0, 0, 3, 2,
         );
         assert!(
             lookup(&shared, &wire_map, &indexes, &wire_key).is_some(),
@@ -1555,7 +1561,7 @@ mod handshake_monotonic_16223_tests {
             &[(forward.clone(), nat)],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts(
-            &shared, &wire_map, &forward, nat, 0, 0, 8, 4,
+            &shared, &wire_map, &forward, nat, 0, 0, 0, 8, 4,
         );
         assert_eq!(wire(&wire_map, &wire_key), established, "premise: alias Established");
         // Stale republication of the same incarnation must not regress.
@@ -1716,6 +1722,7 @@ mod handshake_monotonic_16223_tests {
             &key,
             source.decision.nat,
             source_namespace,
+            0,
             sibling_packet_seen,
             51,
             50,
@@ -1764,6 +1771,8 @@ mod handshake_monotonic_16223_tests {
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
+            shared_row: &|_| None,
+            fence_evidence_cadence_ns: 0,
         };
         let _ = table.expire_stale_entries_ha(t0 + 12 * SEC, Some(&ha));
         assert_eq!(

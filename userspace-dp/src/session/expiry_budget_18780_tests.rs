@@ -99,6 +99,9 @@ fn ha_ctx<'a>(
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served,
+        // #19063: no shared row and no evidence cadence, as `run_expire_ha`.
+        shared_row: &|_| None,
+        fence_evidence_cadence_ns: 0,
     }
 }
 
