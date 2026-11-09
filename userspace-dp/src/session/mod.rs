@@ -300,7 +300,7 @@ pub(crate) use sync_attribution::*;
 mod wheel;
 use wheel::SessionWheel;
 
-const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
+pub(crate) const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
 /// #18742: default shared-evidence cadence bound at the default per-worker
 /// session cap and its 2x HA-import population (12.8 s, rounded up). Production
 /// expiry contexts compute the bound from their actual session-table slab so
@@ -1060,6 +1060,8 @@ macro_rules! debug_log {
 // crate::session)`) because callers in mod.rs / install / lookup cross
 // the module boundary into `expire`.
 mod expire;
+#[cfg(test)]
+pub(crate) use expire::PromoteFence;
 mod install;
 mod lookup;
 // #18520: cross-worker TCP handshake relay (SYN on one worker, SYN-ACK on
@@ -2476,6 +2478,14 @@ pub(crate) struct SessionTable {
     /// table size, seeded like `node_served_stamps`, and dropped with
     /// its session via `remove_entry`. Node-local, never synced.
     ct_slice_emit_marks: SeededKeyMap<CtSliceEmitMark>,
+    /// #19063: restore-fence holds, one per expiring forward `SharedPromote`
+    /// copy that looked node-idle (see expire.rs `promote_fence_step`).
+    /// Bounded by this worker's held restored copies; dropped with the row
+    /// in `remove_entry` and on any keep-alive.
+    promote_fence_holds: SeededKeyMap<PromoteFenceHold>,
+    /// #19063 cell seam: shared-row reads made by the restore fence.
+    #[cfg(test)]
+    promote_fence_shared_reads: u64,
     /// #9856: terminal-removal harvests awaiting export (`remove_entry`
     /// with `RemovalKind::Terminal`). Drained every tick by the worker
     /// loop (`take_tombstones_into`) — pushed when a window is open,
@@ -2676,7 +2686,10 @@ impl SessionTable {
             handshake_progress_probes: AtomicU64::new(0),
             #[cfg(test)]
             probe_cost_probes: ProbeCostProbes::default(),
-            ct_slice_emit_marks: HashMap::with_hasher(state),
+            ct_slice_emit_marks: HashMap::with_hasher(state.clone()),
+            promote_fence_holds: HashMap::with_hasher(state),
+            #[cfg(test)]
+            promote_fence_shared_reads: 0,
             // #4915: monotonic session-id counter starts at 1 (0 = "unknown"
             // sentinel on the wire); the node/worker namespace defaults to 0
             // until `set_session_id_namespace` is called at worker setup.
@@ -7737,6 +7750,7 @@ impl SessionTable {
         {
             self.node_served_stamps.remove(key);
             self.ct_slice_emit_marks.remove(key);
+            self.promote_fence_holds.remove(key);
         }
         // The pressure-shed index contains only forward opening entries.
         // Remove by key here so every terminal and replacement path keeps it

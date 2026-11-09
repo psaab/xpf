@@ -2364,7 +2364,7 @@ impl SessionTable {
         &self,
         cursor: usize,
         budget: usize,
-        out: &mut Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64)>,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision, u64, u64, u64, u64)>,
     ) -> usize {
         let cap = self.slot_high_watermark.min(self.entries.capacity());
         if cap == 0 || budget == 0 {
@@ -2389,6 +2389,9 @@ impl SessionTable {
                         record.entry.counters.fwd_packets,
                         record.entry.counters.rev_packets,
                         packet_seen_ns,
+                        // #19063: the source incarnation, so a restamp can
+                        // bind its serving evidence to this session id.
+                        record.entry.session_id,
                     ));
                 }
             }

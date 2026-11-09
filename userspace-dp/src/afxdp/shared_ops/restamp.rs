@@ -332,6 +332,38 @@ pub(in crate::afxdp) fn restamp_shared_rev_packets(
         }
     }
 }
+/// #19063: the restore fence's node-level serving evidence, bound to the
+/// incarnation. A restamp raises `last_served_ns` only on a row that carries
+/// the SOURCE copy's session id: the forward row, or its reverse companion,
+/// which adopts the forward's id (#18718). Without that fence, a delayed
+/// restamp of an old incarnation A (another worker's copy, still in its
+/// table) would stamp A's service onto its replacement B under the same key
+/// and keep idle B copies alive. Counters and `sibling_last_seen_ns` keep
+/// their #18742 semantics, untouched here.
+#[inline]
+fn stamp_last_served(entry: &mut SyncedSessionEntry, source_session_id: u64, packet_seen_ns: u64) {
+    if source_session_id != 0 && entry.session_id == source_session_id {
+        entry.last_served_ns = entry.last_served_ns.max(packet_seen_ns);
+    }
+}
+
+/// #19063: the restore fence's shared-row read: the primary row under
+/// exactly `key` (one keyed lookup, any protocol), as its session id,
+/// max-merged `fwd+rev` counters and `last_served_ns`. Called only for an
+/// expiring forward `SharedPromote` copy (GC pass, cold).
+pub(in crate::afxdp) fn shared_row_identity(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> Option<crate::session::SharedRowIdentity> {
+    lock_shared_recover(shared_sessions)
+        .get(key)
+        .map(|entry| crate::session::SharedRowIdentity {
+            session_id: entry.session_id,
+            packets: entry.fwd_packets.saturating_add(entry.rev_packets),
+            last_served_ns: entry.last_served_ns,
+        })
+}
+
 /// #16217 (scoped arm): snapshot a serving pair's ACTUAL forward +
 /// reverse packet counts onto its shared rows (canonical forward +
 /// derived reverse in `shared_sessions`, plus the forward-wire
@@ -353,6 +385,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
     forward_key: &SessionKey,
     nat: crate::nat::NatDecision,
     source_namespace: u16,
+    source_session_id: u64,
     source_packet_seen_ns: u64,
     fwd_packets: u64,
     rev_packets: u64,
@@ -367,6 +400,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
             if let Some(entry) = sessions.get_mut(candidate) {
                 entry.fwd_packets = entry.fwd_packets.max(fwd_packets);
                 entry.rev_packets = entry.rev_packets.max(rev_packets);
+                stamp_last_served(entry, source_session_id, source_packet_seen_ns);
                 if entry.session_id != 0
                     && source_namespace != (entry.session_id >> 48) as u16
                 {
@@ -391,20 +425,22 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts(
 /// `shared_forward_wire_sessions`, taken one after the other and never
 /// nested). Every row is updated max-only, including its latest sibling
 /// packet timestamp; the final state matches calling the single-pair helper
-/// for each `(key, nat, fwd, rev, packet_seen_ns)` in turn.
+/// for each `(key, nat, fwd, rev, packet_seen_ns, session_id)` in turn.
 /// Pairs with zero counts are skipped, as before.
 pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     source_namespace: u16,
-    pairs: &[(SessionKey, crate::nat::NatDecision, u64, u64, u64)],
+    pairs: &[(SessionKey, crate::nat::NatDecision, u64, u64, u64, u64)],
 ) {
-    if pairs.iter().all(|(_, _, fwd, rev, _)| *fwd == 0 && *rev == 0) {
+    if pairs.iter().all(|(_, _, fwd, rev, _, _)| *fwd == 0 && *rev == 0) {
         return;
     }
     {
         let mut sessions = lock_shared_recover(shared_sessions);
-        for (forward_key, nat, fwd_packets, rev_packets, source_packet_seen_ns) in pairs {
+        for (forward_key, nat, fwd_packets, rev_packets, source_packet_seen_ns, source_session_id) in
+            pairs
+        {
             if *fwd_packets == 0 && *rev_packets == 0 {
                 continue;
             }
@@ -413,6 +449,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
                 if let Some(entry) = sessions.get_mut(candidate) {
                     entry.fwd_packets = entry.fwd_packets.max(*fwd_packets);
                     entry.rev_packets = entry.rev_packets.max(*rev_packets);
+                    stamp_last_served(entry, *source_session_id, *source_packet_seen_ns);
                     if entry.session_id != 0
                         && source_namespace != (entry.session_id >> 48) as u16
                     {
@@ -424,7 +461,7 @@ pub(in crate::afxdp) fn restamp_shared_packet_counts_batch(
         }
     }
     let mut wires = lock_shared_recover(shared_forward_wire_sessions);
-    for (forward_key, nat, fwd_packets, rev_packets, _) in pairs {
+    for (forward_key, nat, fwd_packets, rev_packets, _, _) in pairs {
         if *fwd_packets == 0 && *rev_packets == 0 {
             continue;
         }

@@ -118,11 +118,14 @@ fn shared_restamps_keep_an_opening_replica_only_while_they_advance_18722() {
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
+        shared_row: &|_| None,
+        fence_evidence_cadence_ns: 0,
     };
 
     // The serving worker forwards 100 packets each way per second; its
     // ct-slice restamps the live counts every refresh cycle.
     let source_namespace = table.session_id_namespace();
+    let source_session_id = table.session_id_for(&forward);
     let restamp = |now: u64| {
         let elapsed = (now - t0) / SEC;
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
@@ -135,6 +138,7 @@ fn shared_restamps_keep_an_opening_replica_only_while_they_advance_18722() {
                 100 * elapsed,
                 100 * elapsed,
                 now,
+                source_session_id,
             )],
         );
     };

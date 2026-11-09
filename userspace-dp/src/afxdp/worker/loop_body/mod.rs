@@ -89,6 +89,9 @@ mod housekeeping_rx_starvation_19026_tests;
 #[cfg(test)]
 #[path = "superseded_close_ha_leg_19026_tests.rs"]
 mod superseded_close_ha_leg_19026_tests;
+#[cfg(test)]
+#[path = "restore_fence_19063_tests.rs"]
+mod restore_fence_19063_tests;
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,

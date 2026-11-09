@@ -515,6 +515,47 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
+                    // #19063: the restore fence, after every keep-alive arm
+                    // above (unchanged) and before the removal. A restored
+                    // copy of a session this node still serves is kept,
+                    // re-stamped to the newest packet time; an idle-looking
+                    // copy is held for one evidence cadence. Only `Close`
+                    // falls through, to master's ordinary AGE + Close.
+                    if companion_eligible
+                        && let Some(ha) = ha
+                        && e_origin == SessionOrigin::SharedPromote
+                        && !e_is_reverse
+                        && (ha.forwards_rg)(e_owner_rg)
+                    {
+                        // This copy's own service in EITHER direction: the
+                        // same pair max its ct-slice restamp publishes.
+                        let (_, _, own_packet_seen_ns) =
+                            self.packet_counts_and_last_packet_seen_for(&key);
+                        match self.promote_fence_step(
+                            ha,
+                            &key,
+                            e_session_id,
+                            e_last_seen_ns,
+                            own_packet_seen_ns,
+                            e_expires_after_ns,
+                            now_ns,
+                        ) {
+                            PromoteFence::KeepAlive { last_seen_ns } => {
+                                let em = self.entry_by_key_mut(&key).expect(
+                                    "fence keep-alive: entry was just read via entry_by_key in Case 3",
+                                );
+                                em.last_seen_ns = em.last_seen_ns.max(last_seen_ns);
+                                self.last_pop_stats.kept_alive_by_companion += 1;
+                                self.rebucket_alive_entry(&key, now_ns);
+                                continue;
+                            }
+                            PromoteFence::Defer { until_ns } => {
+                                self.defer_expiry_until(&key, now_ns, until_ns);
+                                continue;
+                            }
+                            PromoteFence::Close => {}
+                        }
+                    }
                     if let Some(removed) = self.remove_entry(&key, RemovalKind::Terminal) {
                         self.last_pop_stats.expired += 1;
                         let decision = removed.decision;
@@ -1326,6 +1367,118 @@ impl SessionTable {
             return StandbyGateDecision::AgedOwnerRgZeroActiveNode;
         }
         StandbyGateDecision::Age
+    }
+}
+
+/// #19063: what the restore fence does with one expiring restored copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PromoteFence {
+    /// The session is served on this node (by this copy in either
+    /// direction, or by any worker): keep the copy, re-stamped to that
+    /// packet time.
+    KeepAlive { last_seen_ns: u64 },
+    /// Keep the row; revisit at `until_ns` (the evidence hold).
+    Defer { until_ns: u64 },
+    /// Ordinary AGE with its expiry Close (master's path).
+    Close,
+}
+
+impl SessionTable {
+    /// #19063: the restore fence for an expiring forward `SharedPromote` copy
+    /// on a node that forwards its owner RG. At RG activation the prewarm
+    /// restores the session on EVERY worker, but only the worker its packets
+    /// land on refreshes its copy. Before #19063 every idle copy closed at
+    /// its own deadline, and a Close's key-keyed shared removal and sibling
+    /// `DeleteSynced` fan-out tore down the serving worker's live row.
+    ///
+    /// 1. This copy served inside the window, in either direction
+    ///    (`own_packet_seen_ns`): KeepAlive. First, so no shared-row state
+    ///    can override local service.
+    /// 2. No shared primary row for this key, or it names another id: there
+    ///    is no node evidence to wait for. Close (master's path).
+    /// 3. Any worker of this node served this incarnation inside the window
+    ///    (the shared row's `last_served_ns`): KeepAlive.
+    /// 4. Otherwise hold for `fence_evidence_cadence_ns` + one GC interval,
+    ///    remembering the evidence. A hold is valid only while the row still
+    ///    carries the `last_seen_ns` it was armed under; any re-stamp voids
+    ///    it, and the next crossing arms a full one.
+    /// 5. At hold end: the evidence is unchanged, so Close. It changed (a
+    ///    restamp landed) without service inside the window, so hold again.
+    ///
+    /// No Silent outcome, no claim: every copy that reaches Close emits, as
+    /// on master. The hold length is an ESTIMATE of node-wide publication
+    /// lag, not a bound (#19046; session/README.md).
+    #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+    pub(crate) fn promote_fence_step(
+        &mut self,
+        ha: &ExpireHaContext<'_>,
+        key: &SessionKey,
+        session_id: u64,
+        last_seen_ns: u64,
+        own_packet_seen_ns: u64,
+        expires_after_ns: u64,
+        now_ns: u64,
+    ) -> PromoteFence {
+        let served_within =
+            |served_ns: u64| served_ns != 0 && now_ns.saturating_sub(served_ns) <= expires_after_ns;
+        if served_within(own_packet_seen_ns) {
+            self.promote_fence_holds.remove(key);
+            return PromoteFence::KeepAlive {
+                last_seen_ns: own_packet_seen_ns,
+            };
+        }
+        #[cfg(test)]
+        {
+            self.promote_fence_shared_reads += 1;
+        }
+        let Some(shared) = (ha.shared_row)(key).filter(|shared| shared.session_id == session_id)
+        else {
+            self.promote_fence_holds.remove(key);
+            return PromoteFence::Close;
+        };
+        if served_within(shared.last_served_ns) {
+            self.promote_fence_holds.remove(key);
+            return PromoteFence::KeepAlive {
+                last_seen_ns: shared.last_served_ns,
+            };
+        }
+        if let Some(hold) = self.promote_fence_holds.get(key).copied()
+            && hold.armed_last_seen_ns == last_seen_ns
+        {
+            if now_ns < hold.until_ns {
+                return PromoteFence::Defer {
+                    until_ns: hold.until_ns,
+                };
+            }
+            if hold.seen == shared {
+                self.promote_fence_holds.remove(key);
+                return PromoteFence::Close;
+            }
+        }
+        let until_ns = now_ns
+            .saturating_add(ha.fence_evidence_cadence_ns)
+            .saturating_add(SESSION_GC_INTERVAL_NS);
+        self.promote_fence_holds.insert(
+            key.clone(),
+            PromoteFenceHold {
+                armed_last_seen_ns: last_seen_ns,
+                until_ns,
+                seen: shared,
+            },
+        );
+        PromoteFence::Defer { until_ns }
+    }
+
+    /// #19063 cell seam: the fence hold armed for `key`, if any.
+    #[cfg(test)]
+    pub(crate) fn promote_fence_hold_for(&self, key: &SessionKey) -> Option<PromoteFenceHold> {
+        self.promote_fence_holds.get(key).copied()
+    }
+
+    /// #19063 cell seam: shared-row reads the fence has made.
+    #[cfg(test)]
+    pub(crate) fn promote_fence_shared_reads_for_test(&self) -> u64 {
+        self.promote_fence_shared_reads
     }
 }
 

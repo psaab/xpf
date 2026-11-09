@@ -454,6 +454,8 @@ fn syn_ack_first_replica_completes_from_node_evidence_16223() {
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
+        shared_row: &|_| None,
+        fence_evidence_cadence_ns: 0,
     };
     let expired = replica.expire_stale_entries_ha(now + 22 * SEC, Some(&ha));
     assert!(
@@ -1304,11 +1306,11 @@ fn ct_slice_pairs_include_pending_sync_import_with_live_rev_16217() {
     let mut pairs = Vec::new();
     assert_eq!(table.ct_slice_forward_pairs(0, usize::MAX, &mut pairs), 0);
     assert!(
-        pairs.iter().any(|(k, _, _, _, _)| k == &forward),
+        pairs.iter().any(|(k, _, _, _, _, _)| k == &forward),
         "#16217 fw1 leg: pending SyncImport forward with live rev must be in ct-slice pairs"
     );
     assert!(
-        !pairs.iter().any(|(k, _, _, _, _)| k == &reverse),
+        !pairs.iter().any(|(k, _, _, _, _, _)| k == &reverse),
         "#16217 fw1 leg: reverse row must not be a ct-slice forward pair"
     );
     // Strict-established set still excludes it (premise for why the

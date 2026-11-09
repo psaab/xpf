@@ -902,7 +902,7 @@ fn ct_slice_worker_row_reinsert_after_pass_is_seen_next_cycle_18662() {
         CHUNK,
         "fixture: first worker chunk leaves one row"
     );
-    assert!(first.iter().any(|(key, _, _, _, _)| key == &target));
+    assert!(first.iter().any(|(key, _, _, _, _, _)| key == &target));
 
     // Reinstall the first row in the slab slot the cursor has already passed.
     // The slab's free slot is reused, so the remaining current-cycle chunk
@@ -943,7 +943,7 @@ fn ct_slice_worker_row_reinsert_after_pass_is_seen_next_cycle_18662() {
         "fixture: cursor wraps at the table end"
     );
     assert!(
-        !rest_of_cycle.iter().any(|(key, _, _, _, _)| key == &target),
+        !rest_of_cycle.iter().any(|(key, _, _, _, _, _)| key == &target),
         "replacement in the passed slot is deferred for this cycle"
     );
 
@@ -952,8 +952,8 @@ fn ct_slice_worker_row_reinsert_after_pass_is_seen_next_cycle_18662() {
     assert_eq!(
         next_cycle
             .iter()
-            .find(|(key, _, _, _, _)| key == &target)
-            .map(|(_, _, fwd, rev, _)| (*fwd, *rev)),
+            .find(|(key, _, _, _, _, _)| key == &target)
+            .map(|(_, _, fwd, rev, _, _)| (*fwd, *rev)),
         Some((99, 3)),
         "the next cycle restarts at slot zero and observes the replacement"
     );

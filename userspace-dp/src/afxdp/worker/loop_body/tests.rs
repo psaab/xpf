@@ -338,6 +338,8 @@ mod flow_cache_invalidation_tests {
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
+            shared_row: &|_| None,
+            fence_evidence_cadence_ns: 0,
         };
         let gc = |table: &mut crate::session::SessionTable,
                       binding: &mut BindingWorker,
@@ -375,6 +377,7 @@ mod flow_cache_invalidation_tests {
                         10 * n,
                         10 * n,
                         now,
+                        table.session_id_for(&key),
                     )],
                 );
             }
@@ -523,6 +526,7 @@ mod flow_cache_invalidation_tests {
                 table_a.fwd_packets_for(&key),
                 table_a.rev_packets_for(&key),
                 table_a.packet_counts_and_last_packet_seen_for(&key).2,
+                table_a.session_id_for(&key),
             )],
         );
         crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
@@ -535,6 +539,7 @@ mod flow_cache_invalidation_tests {
                 table_b.fwd_packets_for(&key),
                 table_b.rev_packets_for(&key),
                 table_b.packet_counts_and_last_packet_seen_for(&key).2,
+                table_b.session_id_for(&key),
             )],
         );
         assert!(
@@ -593,6 +598,8 @@ mod flow_cache_invalidation_tests {
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
+            shared_row: &|_| None,
+            fence_evidence_cadence_ns: 0,
         };
 
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
@@ -676,6 +683,7 @@ mod flow_cache_invalidation_tests {
                 table_b.fwd_packets_for(&key),
                 table_b.rev_packets_for(&key),
                 table_b.packet_counts_and_last_packet_seen_for(&key).2,
+                table_b.session_id_for(&key),
             )],
         );
         let expired = table_a.expire_stale_entries_ha(now, Some(&ha));

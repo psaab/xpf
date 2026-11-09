@@ -125,6 +125,10 @@ pub(super) fn run_session_housekeeping(
         evidence.shared_evidence_max_cadence_ns = Some(shared_evidence_max_cadence_ns);
         evidence
     };
+    // #19063: the restore fence's keyed shared-row read.
+    let shared_row = |key: &crate::session::SessionKey| {
+        crate::afxdp::shared_ops::shared_row_identity(shared_sessions, key)
+    };
     let ha_ctx = crate::session::ExpireHaContext {
         node_active,
         forwards_rg: &forwards_rg,
@@ -132,6 +136,8 @@ pub(super) fn run_session_housekeeping(
         ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
+        shared_row: &shared_row,
+        fence_evidence_cadence_ns: shared_evidence_max_cadence_ns,
     };
     retry_deferred_pressure_sheds(
         &mut sessions,

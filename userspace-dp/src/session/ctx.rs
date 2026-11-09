@@ -156,6 +156,47 @@ pub(crate) struct ExpireHaContext<'a> {
     /// Production wires this to the shared synced map + serving
     /// counters (see `NodeServedEvidence`); tests drive it directly.
     pub(crate) node_served: &'a dyn Fn(&SessionKey) -> NodeServedEvidence,
+    /// #19063: keyed read of the node's SHARED primary row under exactly
+    /// this key (identity plus node-level serving evidence). Consulted only
+    /// for an expiring forward `SharedPromote` copy on a node that forwards
+    /// its owner RG (the restore fence). Production:
+    /// `afxdp::shared_ops::shared_row_identity`; `None` = no shared row.
+    pub(crate) shared_row: &'a dyn Fn(&SessionKey) -> Option<SharedRowIdentity>,
+    /// #19063: the estimated publication lag of the shared serving evidence
+    /// (the worker's slab-based ct-slice restamp cadence). The fence holds an
+    /// idle-looking restored copy this long plus one GC interval before its
+    /// ordinary expiry Close. An ESTIMATE, not a bound (session/README.md).
+    pub(crate) fence_evidence_cadence_ns: u64,
+}
+
+/// #19063: the shared primary row's identity and node-level serving
+/// evidence, as the restore fence reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SharedRowIdentity {
+    pub(crate) session_id: u64,
+    /// `fwd_packets + rev_packets` of the shared row (max-merged across the
+    /// workers that restamp it).
+    pub(crate) packets: u64,
+    /// Newest packet time, in either direction, at which any worker on this
+    /// node served THIS incarnation (`SyncedSessionEntry::last_served_ns`).
+    /// 0 = never stamped.
+    pub(crate) last_served_ns: u64,
+}
+
+/// #19063: one restore-fence hold (see expire.rs `promote_fence_step`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PromoteFenceHold {
+    /// The row's `last_seen_ns` when the hold was armed. The hold is valid
+    /// only while the row still carries it: any re-stamp (a keep-alive, an
+    /// HA-transition refresh, SELF-HEAL, a demotion or an import replace)
+    /// voids it, so a copy that crosses again gets a FULL hold.
+    pub(crate) armed_last_seen_ns: u64,
+    /// The expiry Close may run at or after this time.
+    pub(crate) until_ns: u64,
+    /// The shared evidence the hold was armed under, `last_served_ns`
+    /// included. The Close runs only on exactly this evidence; any change
+    /// (a restamp landed) arms a fresh hold.
+    pub(crate) seen: SharedRowIdentity,
 }
 /// #16223: node-level served-handshake evidence for one tuple — the
 /// promoted serving companion's handshake wire state plus its admitted

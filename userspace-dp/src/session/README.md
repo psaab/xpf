@@ -1818,6 +1818,112 @@ the known active/active `owner_rg_id == 0` under-retention residual
 observable — a `==0` entry for a standby RG path on an otherwise-active
 node ages and is re-derived on promotion via the reverse-synced prewarm).
 
+### Restored `SharedPromote` copies: the restore fence (#19063)
+
+**The problem.** At RG activation the prewarm
+(`afxdp/shared_ops/owner_rg.rs::prewarm_reverse_synced_sessions_for_owner_rgs`)
+restores a locally promoted row as `SharedPromote` on EVERY live worker
+(#15950). Only the worker the flow's packets land on refreshes its copy. The
+other copies AGE one window after the activation re-stamp.
+- Before #19063 each idle copy emitted its own expiry Close.
+- A Close carries the KEY-keyed shared removal, the sibling `DeleteSynced`
+  fan-out and the HA delete. So a non-serving copy tore down the serving
+  worker's live row: on udp, live pings were closed "idle Timeout".
+
+**The fence** (`SessionTable::promote_fence_step`, expire.rs).
+- **Where it runs:** on an expiring FORWARD `SharedPromote` row, on a node
+  that forwards the row's owner RG, after every existing keep-alive arm
+  (#18722 for TCP). Off the RG the standby arms govern (#19065 tracks their
+  fabric-ingress and whole-node-standby bypass).
+- **Its rules, in order:**
+
+| order | condition | result |
+|---|---|---|
+| 1 | this copy served inside its window, in either direction (`packet_counts_and_last_packet_seen_for`: the newer of the forward copy's and its reverse half's packet time) | keep, re-stamped to that time. First, so no shared-row state can override local service. |
+| 2 | no shared primary row under exactly this key, or it names another session id | ordinary AGE + expiry Close (master's path) |
+| 3 | any worker of this node served THIS incarnation inside the window (`SyncedSessionEntry::last_served_ns`) | keep, re-stamped to that time |
+| 4 | otherwise, no valid hold | hold for `fence_evidence_cadence_ns` + one GC interval (about 14 s at the default slab) |
+| 5 | the hold has not ended | defer to its end |
+| 6 | the hold ended, and the evidence (`last_served_ns` included) changed | hold again on the new evidence |
+| 7 | the hold ended, and the evidence is unchanged | ordinary AGE + expiry Close (master's path) |
+
+- **A hold's anchor.** A hold is valid only while the row still carries the
+  `last_seen_ns` it was armed under. Any re-stamp voids it: a keep-alive, an
+  HA-transition refresh, SELF-HEAL, a demotion or an import replace. A copy
+  that crosses again therefore gets a FULL hold, never an expired inherited
+  one. Holds are dropped with the row in `remove_entry`.
+- **What the fence never does.** There is no Silent outcome, no claim and no
+  designation. Every copy that reaches a Close emits it, as on master.
+
+**Node-wide service evidence, bound to the incarnation.**
+- **Who stamps it.** `last_served_ns` is set by every worker's ct-slice
+  restamp, the minting worker included, through both
+  `restamp_shared_packet_counts_batch` and the single-pair
+  `restamp_shared_packet_counts`.
+- **What a restamp carries:** the source copy's either-direction packet
+  time, the same pair max as above, and its session id.
+- **Reverse service** reaches it through that packet TIME. The counter fold
+  in `account_packet` alone does not carry it.
+- **The identity fence.** A writer raises it only on a row whose
+  `session_id` equals the source id, the forward row or its reverse
+  companion (which adopts the forward's id, #18718). A delayed restamp of an
+  old incarnation therefore cannot keep its replacement alive.
+- **Publication.** Same-incarnation republication keeps the larger value;
+  a new incarnation starts from its own.
+- **Unchanged:** counters and `sibling_last_seen_ns` keep their #18742
+  meaning.
+
+**Cost.**
+- **Shared-row reads:** one under the shared-map lock when a copy crosses,
+  one at hold end, plus one per evidence change. A held copy is re-bucketed
+  to its hold end, not re-checked each GC interval.
+- **Memory:**
+  - the shared map gains 8 bytes per entry;
+  - `promote_fence_holds` is per worker, bounded by its held restored
+    copies.
+- **Steady state:** no per-tick shared store.
+
+**Guarantees (node-local).**
+- **No live close on this node.** A restored copy does not close an
+  incarnation that a worker of this node served, in either direction,
+  within the copy's window, up to the evidence-publication assumption.
+  Exceptions:
+  - **#19046 class.** The hold is an ESTIMATE of node-wide publication lag.
+    It is the closing worker's slab-based cadence, which
+    `afxdp/worker/loop_body/slice_pacing.rs` calls a baseline, not a bound.
+    Unequal worker cadences, a pending stage/count traversal, pathological
+    alias fan-out or a stalled publisher can each publish a served packet
+    after the hold ends.
+  - **#19047** (a parked Close's tuple re-materializes).
+  - The same-key/same-id restart collision (above).
+  - Off-RG copies, until #19065.
+- **RT_FLOW close of an idle restored session.**
+  - For a fixed cohort of N restored copies, at most N emit attempts:
+    typically 1, because the first non-stale flush fans `DeleteSynced` out
+    to the siblings.
+  - Not exactly once (#19068) and not a delivery guarantee.
+  - It needs a surviving emitting copy and ring/permit progress.
+- **Record losses, stated** (state converges in each; only the RT_FLOW
+  record or counters are lost):
+  - **A forward resume over an idle-crossed or held copy.** The copy's
+    lookups fail closed, so the resume installs a new session B, which drops
+    the old copy as master's `Replace` does. The hold widens that window
+    from at most one GC interval to about cadence + GC. If no other copy of
+    A is left to close it, A's record is lost.
+  - **An RG move inside a hold.** The held copy becomes standby state and is
+    replaced by the new owner's re-import. The new owner's import ages
+    silently, so neither node emits A's record.
+  - **No surviving emitting copy:** the prewarm reached no worker, every
+    copy-holding worker died, or every copy was demoted. Shared state
+    lingers until resync or restart, as on master.
+- **HA delete authority is unchanged.** It is the Go sender gate (primary
+  for `owner_rg > 0`). The fence adds no producer: every Close it lets
+  through is one master's expiry emits on the same row.
+
+**Cells.** `afxdp/worker/loop_body/restore_fence_19063_tests.rs`. Two cells
+are `#[ignore]`d with the CORRECT assertion: the #19046-class residual, and
+the forward-resume record loss (#19068).
+
 ## "Current sessions" gauge accounting (#2428)
 
 The `session_creates` / `session_expires` BindingLiveState counters feed
