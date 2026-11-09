@@ -7736,9 +7736,15 @@ impl SessionTable {
     /// one export window would otherwise refuse the same prefix forever). The
     /// retry re-walks LIVE rows from that slot, so a row removed or replaced
     /// meanwhile is exported as the table holds it, never from a stale copy.
-    /// Rows before the slot were delivered after the episode began; a change
-    /// to one of them since then is a fresh loss episode (an incremental delta
-    /// that failed) and resets the resume point.
+    /// Rows before the slot were delivered after the episode began. A later
+    /// change to one of them that EMITS A DELTA is covered: the delta is
+    /// either streamed, or its failure is a fresh loss episode that resets
+    /// the resume point (`note_fresh_delta_loss`). A change that emits no
+    /// delta does not reset it: an ownership flip (`activate_owner_rgs`,
+    /// `demote_owner_rg`, a RefreshOwnerRGS re-resolve) can make a row below
+    /// the slot an export candidate during the owed window, and that row then
+    /// waits for the next full export (a fresh loss, a reconnect FullResync or
+    /// an owner-RG CommandExport window). Residual, #19048.
     pub fn owe_resync_after_refused_export(&mut self, refused: &SessionKey) {
         self.delta_loss_pending = true;
         self.resync_export_refused = true;

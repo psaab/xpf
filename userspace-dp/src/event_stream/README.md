@@ -567,7 +567,10 @@ cluster-scoped.
         removed or replaced meanwhile is exported as the table holds it. A
         FRESH loss episode (any `set_delta_loss`, a ring overflow, a requeue
         drop) clears the resume point: the peer's view may then be wrong
-        anywhere, so the next resync is a full export.
+        anywhere, so the next resync is a full export. A change that emits
+        no delta does not: an RG demote or re-activate during the owed window
+        can make a row below the resume slot a candidate that waits for the
+        next full export (#19048).
       - *No per-retry budget.* The owed retry's first push is a ZERO-wait
         probe (`arm_loss_resync_probe`); against a still-full channel it
         times out at once, the resync stays owed, the probe is neither
