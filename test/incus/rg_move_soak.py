@@ -667,8 +667,8 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
         if r.landed_s is None:
             reasons.append(f"RG{r.rg} did not land on node{r.target} within {budget.converge_s:g}s of the CLI returning (last: {r.last_detail})")
             continue
-        # The landing is credited when the sample (or re-sample) that saw it
-        # finished, which can be past the bound (#19041).
+        # The landing is credited when the sample that saw it finished,
+        # which can be past the bound (#19041).
         after_cli = r.landed_s - r.cli_seconds
         if after_cli > budget.converge_s + 1e-3:
             reasons.append(f"RG{r.rg} landed on node{r.target} {after_cli:.2f}s after the CLI returned, "
@@ -1171,8 +1171,15 @@ class Soak:
           the RG after the target did: a real overlap. Or the target let go
           again between T1 and T2 while the old owner took it back, which is
           a failed move too.
-        - An overlap that ends inside the T1..T2 gap is not seen. That is
-          the sampling limit of any two reads, parallel ones included.
+        - An overlap is seen only if this sample's T1 AND T2 both fall
+          inside it. The soak misses an overlap that started earlier and ends
+          between the two reads, one that falls between samples (the poll
+          sleep plus the reads), and one that ends before the first sample
+          after the CLI returns (the CLI call is never sampled). Serial
+          reads put T1 and T2 about one full read apart, so the shortest
+          detectable overlap is about one read. That is the price of never
+          false-flagging a clean handoff (docs/ha-rg-move-correctness.md,
+          "Sampling both nodes").
 
         `first` None: read both in parallel. That is for readings that only
         ask who owns the RG and never score dual-active (preflight, the

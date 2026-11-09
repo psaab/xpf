@@ -639,9 +639,36 @@ then the old owner (T2 > T1).
   move takes several RGs to different targets (`SOAK_RG=all`), one sample
   serves them all in the move's own target-first order. That is safe for
   the same reason. An RG that never landed already FAILs "did not land".
-- Limit: an overlap that starts and ends inside one sample's T1..T2 gap,
-  between the two reads, is not seen. Any two reads have that limit, and
-  parallel reads did too.
+- Limit: an overlap is seen only if one sample's target read (T1) AND
+  that same sample's old-owner read (T2) both fall inside it, so the
+  overlap has to span the sample from T1 to T2. The soak misses:
+  - an overlap that started earlier and ends between a sample's two
+    reads;
+  - an overlap that falls between samples: the `poll_s` sleep (0.2 s)
+    plus the reads around it;
+  - an overlap that ends before the first sample after the CLI returns.
+    `one_rg` takes no sample while the CLI call runs, so that call is never
+    sampled. In #18559's gate artefacts it took 0.35-1.97 s, and it is
+    where #18559's transfer runs. This gap predates #19041.
+- Trade-off: two serial reads are about one full read apart, where
+  parallel reads were 0 to about one read apart. Serial reads therefore
+  raise the shortest overlap the soak can detect to about one full read.
+  That is the price of never false-flagging a clean handoff. R16 measured
+  it in the fake (0.15 s reads, `poll_s` 0.2 s): the longest real overlap
+  that still PASSed was 0.64 s, against about 0.35 s for parallel reads at
+  the same cadence.
+
+**Known gaps** (filed; they predate #19041 and it does not fix them):
+
+- [#19055](https://github.com/psaab/xpf/issues/19055): with `SOAK_RG=all`,
+  the landing poll scores only the RG being moved. A dual-active overlap in
+  an RG that already landed earlier in the same move is missed until the
+  window. The per-PR and per-wave runs use `SOAK_RG=2` and are not
+  affected.
+- [#19056](https://github.com/psaab/xpf/issues/19056): the LAN traffic
+  windows are mapped from the controller's wall clock. A wall-clock step on
+  the controller can move a late ping gap or outage outside its move's
+  window.
 
 **Outside a move** (the preflight, the owner refresh before restore, and the
 restore poll), the soak only asks who owns each RG and never scores
