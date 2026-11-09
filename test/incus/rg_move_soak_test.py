@@ -2779,5 +2779,68 @@ class ZeroSampleWindow19061(unittest.TestCase):
             self.assertFalse(m["rgs"][0]["window_extended"])
 
 
+class LastMoveLateStall(FakeCluster):
+    """G1's #19062 shape: on the LAST move, stream 7 stalls from 1.5 s after
+    the CLI returns until 6.0 s after it: a 4.5 s stall that recovers, as
+    the same stream did on every other move."""
+
+    last_move = 1
+
+    def cli(self, node, cmd):
+        out = super().cli(node, cmd)
+        if self.moves_seen == self.last_move:
+            lan_now = self.clock_.t + self.lan_off
+            self.events.append((lan_now + 1.5, lan_now + 6.0, "stall"))
+        return out
+
+
+class FinalMoveTail19062(unittest.TestCase):
+    """#19062: the traffic runs past the last window long enough for a stall
+    there to show its recovery. A stall the traffic stop cuts before the
+    COST cap is VOID, never 'never recovered'."""
+
+    def test_a_recovering_stall_in_the_last_window_is_a_cost_not_a_fail(self):
+        clock = FakeClock()
+        c = LastMoveLateStall(clock, {2: 0})
+        c.last_move = 2
+        rc, res, _ = run_fake(c, clock, moves=2, sleep_s=2.0)
+        last = res["moves"][-1]
+        self.assertEqual(last["verdict"], "COST", last["reasons"])
+        self.assertTrue(any("stream 7 stalled" in r and "recovered" in r for r in last["reasons"]), last["reasons"])
+        self.assertEqual(last["traffic"]["v4"]["died_streams"], [])
+        self.assertEqual(rc, 0, res["summary"])
+
+    def test_a_stall_cut_by_the_traffic_stop_before_the_cap_is_void(self):
+        # The traffic run is told to end about 1.7 s after the last window,
+        # while stream 7 is 2.4 s into its stall: covered, but cut.
+        clock = FakeClock()
+        c = LastMoveLateStall(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=1, sleep_s=2.0, traffic_s=8)
+        last = res["moves"][-1]
+        v4 = last["traffic"]["v4"]
+        self.assertTrue(v4["iperf_covered"] and v4["ping_covered"], v4)  # the fixture's precondition
+        self.assertEqual(v4["cut_streams"], [7], v4)
+        self.assertEqual(v4["died_streams"], [], v4)
+        self.assertEqual(last["verdict"], "VOID", last["reasons"])
+        self.assertTrue(any("recovery was not observable" in r for r in last["reasons"]), last["reasons"])
+        self.assertEqual(rc, 2)
+
+    def test_a_stall_that_outlasts_the_cap_still_fails(self):
+        # Stream 7 stalls from 1.5 s after the last CLI and never comes back.
+        class NeverRecovers(FakeCluster):
+            def cli(self, node, cmd):
+                out = super().cli(node, cmd)
+                lan_now = self.clock_.t + self.lan_off
+                self.events.append((lan_now + 1.5, float("inf"), "stall"))
+                return out
+        clock = FakeClock()
+        c = NeverRecovers(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=1, sleep_s=2.0)
+        last = res["moves"][-1]
+        self.assertEqual(last["traffic"]["v4"]["died_streams"], [7])
+        self.assertEqual(last["verdict"], "FAIL", last["reasons"])
+        self.assertTrue(any("never recovered" in r for r in last["reasons"]), last["reasons"])
+
+
 if __name__ == "__main__":
     unittest.main()

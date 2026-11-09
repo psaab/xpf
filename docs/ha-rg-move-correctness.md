@@ -588,7 +588,8 @@ One verdict per move:
     1 Mbit/s for longer than that (an aggregate outage), in either family;
   - a stream stall past `SOAK_MAX_COST_STALL_MS`, more than one stream
     stalling over `SOAK_MAX_STALL_MS` in the window, or a stream that never
-    recovered;
+    recovered (still stalled when the traffic data ends, after more than
+    `SOAK_MAX_COST_STALL_MS`);
   - a LAN neighbour entry (IPv4 VIP or IPv6 RA router) that resolves to no
     RETH MAC on a move, after the preflight proved it resolvable
     ("traffic-follow unmeasured");
@@ -597,6 +598,15 @@ One verdict per move:
   move therefore costs one FAIL, and the next move, back to where the RG
   still is, is VOID, not a second FAIL. The operator's "already primary"
   line is that cascade.
+- **VOID, recovery not observable** (#19062): a stream was still stalled
+  when the traffic stopped, but for no longer than `SOAK_MAX_COST_STALL_MS`,
+  so the soak could not see whether it would recover.
+  - After the last window the soak keeps the traffic running for
+    `SOAK_MAX_COST_STALL_MS` + 2 s before stopping it, so this happens only
+    when the traffic ended early.
+  - Before #19062 the soak stopped the traffic 1 s after the last window.
+    A 5 s stall that the same stream recovered from on every other move was
+    then scored "never recovered" on the last one.
 - **VOID, uncovered** (#19054): ping or iperf3 did not cover the move's
   window. Whatever the traffic checks say about a window with no traffic,
   they say it about nothing, so the move is never PASS, COST or FAIL.
@@ -788,6 +798,7 @@ production; its clock and shared state are locked for the parallel reads.
 | `traffic did not follow to nodeT: the LAN host's v4 neighbour entry ... still resolves to nodeN's MAC` | The LAN host still sends to the old owner's per-node RETH MAC | The new owner's GARP did not reach or was not accepted; check `garpEpoch` and the old owner's VIP removal |
 | `traffic did not follow: no v4/v6 ping replies ...` / `... iperf3 aggregate under 1 Mbit/s ...` | The views moved, but nothing forwards in the window's tail | A forwarding or ownership divergence: check VIPs, neighbours and fabric redirect |
 | `v4/v6 stream(s) [...] stalled in this window and never recovered` | A stream died at this move | The move killed sessions: check session sync for that flow, and #18531/#18535-class revocations |
+| `v4/v6 stream(s) [...] were still stalled when the traffic stopped, before the N ms COST cap; recovery was not observable, so the move is unscored (#19062)` (VOID) | The traffic ended while a stream was stalled for less than the COST cap: the run (or `SOAK_TRAFFIC_S`) cut it off | Re-run with a longer `SOAK_TRAFFIC_S`, or check why the traffic ended early |
 | `v4 ping gap N ms > 1000 ms` / `v4 aggregate outage: every stream under 1 Mbit/s for N ms` | The traffic stopped, not one TCP stream backing off | Treat as a transition failure: compare with H10's numbers and pull the journals for the window |
 | COST: `v4 stream N stalled ... (recovered; ping and aggregate within budget)` | The move was correct; its transition cost exceeded the budget | Compare the run's COST count and stall distribution with master's (row H11, #18559) |
 | `FATAL: preflight VOID: RGg has no single clean owner ...` / `cannot read the LAN host clock` | The cluster was not in a state a move can be judged from | Restore node0 primary (`SOAK_RESTORE`, row D3) and rerun |

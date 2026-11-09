@@ -97,6 +97,10 @@ PASS, FAIL, VOID, COST = "PASS", "FAIL", "VOID", "COST"
 # #19054: traffic run cap, per RG move and overall slack (seconds).
 TRAFFIC_S_PER_MOVE_CAP = 120
 TRAFFIC_S_SLACK = 600
+# #19062: after the last window, the traffic keeps running for the COST cap
+# plus this margin, so a stall that began in the last window can show it
+# recovered.
+FINAL_TAIL_MARGIN_S = 2.0
 
 # ---------------------------------------------------------------------------
 # `show chassis cluster status` parsing
@@ -567,7 +571,11 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     tail_replies = sum(1 for ts, _ in replies if tail0 <= ts < t1)
     win_stalls = [s for s in stalls if t0 <= s.start < t1]
     worst = max(win_stalls, key=lambda s: s.seconds, default=None)
-    died = sorted({s.stream for s in win_stalls if s.to_end})
+    # #19062: a stall still open when the traffic data ends either lasted
+    # past the COST cap (it did not recover: died) or was cut short by the
+    # traffic stopping before the cap (recovery was not observable: cut).
+    died = sorted({s.stream for s in win_stalls if s.to_end and s.seconds * 1000.0 > budget.max_cost_stall_ms})
+    cut = sorted({s.stream for s in win_stalls if s.to_end and s.seconds * 1000.0 <= budget.max_cost_stall_ms})
     # Every stream whose stall in this window exceeds the per-stream budget:
     # COST is ONE stream backing off, never several (seat AF).
     over = sorted({s.stream for s in win_stalls if s.seconds * 1000.0 > budget.max_stall_ms})
@@ -585,6 +593,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
         "worst_stall_ms": 0.0 if worst is None else round(worst.seconds * 1000.0, 1),
         "worst_stall_stream": None if worst is None else worst.stream,
         "died_streams": died,
+        "cut_streams": cut,
         "stalled_streams": over,
         "agg_zero_ms": round(agg_zero * 1000.0, 1),
         "agg_worst_ms": round(agg_worst * 1000.0, 1),
@@ -701,6 +710,10 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             if missing:
                 uncovered.append(f"{fam} {' and '.join(missing)} did not cover the move window: "
                                  f"{t.get('uncovered_cause', 'cause unknown')}; the move is unscored (#19054)")
+            if t.get("cut_streams"):
+                uncovered.append(f"{fam} stream(s) {t['cut_streams']} were still stalled when the traffic stopped, "
+                                 f"before the {budget.max_cost_stall_ms:g} ms COST cap; recovery was not observable, "
+                                 "so the move is unscored (#19062)")
             if t.get("died_streams"):
                 reasons.append(f"{fam} stream(s) {t['died_streams']} stalled in this window and never recovered")
             if t.get("ping_covered") and t.get("ping_tail_replies", 0) == 0:
@@ -1822,7 +1835,12 @@ class Soak:
                 self.udp_probe_started = False
             if cfg.traffic:
                 if not self.terminated:
-                    self.sleep(1.0)
+                    # #19062: a stall that began in the last window needs time
+                    # to show it recovered. Stopping 1 s after the window,
+                    # as before, scored a normal 5 s recovery "never
+                    # recovered". Keep the traffic running for the COST cap
+                    # plus a margin first.
+                    self.sleep(cfg.budget.max_cost_stall_ms / 1000.0 + FINAL_TAIL_MARGIN_S if moves else 1.0)
                 self.stop_traffic()
             if cfg.restore and not self.terminated:
                 def read_current_owners():
