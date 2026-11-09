@@ -130,15 +130,18 @@ pub(super) fn run_session_housekeeping(
     let shared_row = |key: &crate::session::SessionKey| {
         crate::afxdp::shared_ops::shared_row_identity(shared_sessions, key)
     };
+    // The claim's pending-retirement mark lasts one fence hold: if the
+    // winner's Close has not flushed (and removed the row) by then, another
+    // copy takes the obligation over.
+    let close_claim_takeover_ns =
+        shared_evidence_max_cadence_ns.saturating_add(crate::session::SESSION_GC_INTERVAL_NS);
     let claim_close =
         |key: &crate::session::SessionKey, expected: crate::session::SharedRowIdentity| {
             crate::afxdp::shared_ops::claim_shared_close(
                 shared_sessions,
-                shared_nat_sessions,
-                shared_forward_wire_sessions,
-                shared_owner_rg_indexes,
                 key,
                 expected,
+                loop_now_ns.saturating_add(close_claim_takeover_ns),
             )
         };
     let ha_ctx = crate::session::ExpireHaContext {

@@ -12,12 +12,15 @@
 //! any worker (`last_served_ns`) served inside the window -> KEEP, re-stamped
 //! to that packet time; node idle -> hold one evidence cadence + GC; evidence
 //! moved without fresh service -> hold again; else CLAIM the shared row
-//! atomically -> exactly one copy closes.
+//! atomically -> exactly one copy closes. The claim MARKS the row pending
+//! retirement; the winner's Close flush removes it, and a copy that finds an
+//! expired mark (the winner never flushed) takes the obligation over.
 //!
 //! These cells drive `expire_stale_entries_ha` with a modelled shared row
-//! (`SharedModel`): `shared_row` reads it and `claim_close` retires it iff it
+//! (`SharedModel`): `shared_row` reads it and `claim_close` marks it iff it
 //! still reads the expected identity, as `shared_ops::claim_shared_close`
-//! does under the shared-map lock. The end-to-end paths (prewarm, restamp,
+//! does under the shared-map lock; `SharedModel::flushed` models the
+//! winner's Close flush removing the row. The end-to-end paths (prewarm, restamp,
 //! real flush, sibling deletes) are pinned in
 //! `afxdp/worker/loop_body/promote_fence_concurrency_19026_tests.rs`.
 
@@ -51,6 +54,7 @@ impl SharedModel {
                 session_id: SESSION_ID,
                 packets,
                 last_served_ns,
+                close_claim_until_ns: 0,
             })),
             claims: Cell::new(0),
         }
@@ -61,6 +65,15 @@ impl SharedModel {
         row.packets += 1;
         row.last_served_ns = row.last_served_ns.max(at_ns);
         self.row.set(Some(row));
+    }
+
+    /// The claim winner's Close flush removes the shared row.
+    fn flushed(&self) {
+        self.row.set(None);
+    }
+
+    fn claim_mark(&self) -> u64 {
+        self.row.get().map_or(0, |row| row.close_claim_until_ns)
     }
 }
 
@@ -118,9 +131,14 @@ fn expire(
     let forwards_rg = move |_rg: i32| forwards;
     let epoch_of = |_rg: i32| 0u32;
     let shared_row = |_key: &SessionKey| shared.row.get();
+    // As `shared_ops::claim_shared_close`: compare, then mark pending
+    // retirement for one hold (the row stays until the Close's flush).
     let claim_close = |_key: &SessionKey, expected: SharedRowIdentity| {
         if shared.row.get() == Some(expected) {
-            shared.row.set(None);
+            shared.row.set(Some(SharedRowIdentity {
+                close_claim_until_ns: now_ns + HOLD_NS,
+                ..expected
+            }));
             shared.claims.set(shared.claims.get() + 1);
             true
         } else {
@@ -267,7 +285,11 @@ fn node_idle_copy_holds_then_claims_and_closes_once_19026() {
     assert!(!expired[0].close_fenced, "the claim winner takes the ordinary reap");
     assert_eq!(closes_for(&mut table, &key), 1, "exactly one Close");
     assert_eq!(shared.claims.get(), 1);
-    assert!(shared.row.get().is_none(), "the claim retired the shared row");
+    assert_eq!(
+        shared.claim_mark(),
+        now + HOLD_NS + 2 * SEC + HOLD_NS,
+        "#19026 R15 P1#2: the claim MARKS the row; it stays until the Close's flush"
+    );
     assert_eq!(table.promote_fence_hold_count(), 0);
 }
 
@@ -308,8 +330,9 @@ fn stale_evidence_change_rearms_the_hold_19026() {
     assert_eq!(closes_for(&mut table, &key), 1, "the re-armed hold claims once");
 }
 
-/// Exactly once across copies: two copies reach their claim; the first
-/// retires the shared row, the second finds it gone (R1) and is silent.
+/// Exactly once across copies: two copies reach their claim; the first marks
+/// the shared row and closes; the second finds the live mark and waits; once
+/// the winner's Close flush removes the row, the second is silent (R1).
 #[test]
 fn two_copies_claiming_close_exactly_once_19026() {
     let (mut a, key) = restored_copy();
@@ -318,15 +341,44 @@ fn two_copies_claiming_close_exactly_once_19026() {
     let shared = SharedModel::new(60, 0);
     assert!(expire(&mut a, now, true, &shared).is_empty());
     assert!(expire(&mut b, now, true, &shared).is_empty());
-    let ea = expire(&mut a, now + HOLD_NS + 2 * SEC, true, &shared);
-    let eb = expire(&mut b, now + HOLD_NS + 2 * SEC, true, &shared);
-    assert_eq!(ea.len() + eb.len(), 2, "both copies leave");
-    assert_eq!(
-        closes_for(&mut a, &key) + closes_for(&mut b, &key),
-        1,
-        "#19026: Close + HA delete == 1"
-    );
+    let at_claim = now + HOLD_NS + 2 * SEC;
+    let ea = expire(&mut a, at_claim, true, &shared);
+    let eb = expire(&mut b, at_claim, true, &shared);
+    assert_eq!(ea.len(), 1, "the winner leaves with its Close");
+    assert!(eb.is_empty(), "the second copy waits on the live claim");
+    assert_eq!(closes_for(&mut a, &key), 1, "#19026: Close + HA delete == 1");
+    shared.flushed();
+    // b re-checks every GC interval while it waits on a claim.
+    let eb = expire(&mut b, at_claim + 2 * SEC, true, &shared);
+    assert_eq!(eb.len(), 1, "b leaves within one GC interval of the flush");
+    assert!(eb[0].close_fenced, "R1 after the flush: silent");
+    assert_eq!(closes_for(&mut b, &key), 0);
     assert_eq!(shared.claims.get(), 1);
+}
+
+/// Codex R15 P1#2: the claim winner exits before its Close flushes (its
+/// Close is lost with it). The row stays marked; once the mark expires the
+/// surviving copy takes the obligation over and closes, exactly once.
+#[test]
+fn surviving_copy_takes_over_a_lost_claim_19026() {
+    let (mut a, key) = restored_copy();
+    let (mut b, _) = restored_copy();
+    let now = crossed();
+    let shared = SharedModel::new(60, 0);
+    assert!(expire(&mut a, now, true, &shared).is_empty());
+    assert!(expire(&mut b, now, true, &shared).is_empty());
+    let at_claim = now + HOLD_NS + 2 * SEC;
+    assert_eq!(expire(&mut a, at_claim, true, &shared).len(), 1, "a wins the claim");
+    drop(a); // the claimant exits; its Close never flushes
+    let mark = shared.claim_mark();
+    assert!(mark > at_claim, "FIXTURE: the row carries the live mark");
+    // b's next visit falls after the mark expired: it takes over at once
+    // (it does not first re-hold on the changed row).
+    let taken = expire(&mut b, mark + 2 * SEC, true, &shared);
+    assert_eq!(taken.len(), 1, "b takes the obligation over");
+    assert!(!taken[0].close_fenced, "the taker closes normally (mirror delete included)");
+    assert_eq!(closes_for(&mut b, &key), 1, "#19026 R15 P1#2: the lost Close is re-issued once");
+    assert_eq!(shared.claims.get(), 2, "the takeover is a second claim on the expired mark");
 }
 
 /// R1 twins: the shared row gone, or replaced by another incarnation — every
@@ -341,6 +393,7 @@ fn shared_row_gone_or_replaced_is_silent_19026() {
                 session_id: SESSION_ID + 1,
                 packets: 60,
                 last_served_ns: 0,
+                close_claim_until_ns: 0,
             }));
         } else {
             shared.row.set(None);
@@ -421,4 +474,58 @@ fn fence_leaves_other_expiry_paths_unchanged_19026() {
     assert!(!expired[0].close_fenced);
     assert_eq!(closes_for(&mut table, &local_key), 1, "a local ForwardFlow row closes");
     assert_eq!(shared.claims.get(), 0, "no claim outside the fence");
+}
+
+/// R14 G1 (cycle 2): a new local session that replaces a restored copy the
+/// fence is HOLDING (idle-crossed; its lookups fail closed) emits the old
+/// session's one Close. Replacing a copy still inside its window, or a
+/// crossed copy the fence has not held (no wheel visit yet, or one only
+/// waiting on another copy's claim), emits none: the ordinary silent Replace,
+/// as on master.
+#[test]
+fn local_install_over_a_held_restored_copy_closes_it_once_19026() {
+    // (label, crossed, held by the fence, re-stamped after the hold, Closes)
+    for (label, crossed_copy, held, restamped, closes) in [
+        ("live", false, false, false, 0usize),
+        ("crossed, not yet held", true, false, false, 0),
+        ("held", true, true, false, 1),
+        // A hold armed before an RG-transition re-stamp is stale: the copy is
+        // live again, so replacing it stays the ordinary silent Replace.
+        ("held, then re-stamped live", true, true, true, 0),
+    ] {
+        let (mut table, key) = restored_copy();
+        let (decision, metadata, origin) = table.entry_with_origin(&key).expect("copy");
+        assert_eq!(origin, SessionOrigin::SharedPromote, "FIXTURE: a restored copy");
+        let mut at = if crossed_copy { crossed() } else { INSTALL_NS + 10 * SEC };
+        if held {
+            let shared = SharedModel::new(60, 0);
+            assert!(expire(&mut table, at, true, &shared).is_empty(), "FIXTURE: held");
+            assert_eq!(table.promote_fence_hold_count(), 1, "FIXTURE: held");
+            at += SEC;
+        }
+        if restamped {
+            let (d, m, _) = table.entry_with_origin(&key).expect("held copy");
+            assert!(table.refresh_for_ha_transition(&key, d, m, at), "FIXTURE: re-stamped");
+            at += SEC;
+        }
+        assert!(table.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            metadata,
+            SessionOrigin::ForwardFlow,
+            at,
+            crate::ip_proto::PROTO_ICMP,
+            0,
+        ));
+        assert_ne!(
+            table.entry_with_origin(&key).map(|(_, _, o)| o),
+            Some(SessionOrigin::SharedPromote),
+            "FIXTURE: the new local session replaced the copy"
+        );
+        assert_eq!(
+            closes_for(&mut table, &key),
+            closes,
+            "#19026 R14 G1 ({label}): Close count for the replaced copy"
+        );
+    }
 }

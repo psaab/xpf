@@ -639,7 +639,33 @@ impl SessionTable {
         // proceed to insert the new record — the guard already
         // restored the prior mapping; the subsequent
         // self.key_to_handle.insert(...) overwrites it cleanly.
-        let _previous = self.remove_entry(&key, RemovalKind::Replace);
+        let fence_held = self.promote_fence_held(&key);
+        let previous = self.remove_entry(&key, RemovalKind::Replace);
+        // #19026 (R14 G1): a new local session that replaces a restored copy
+        // the close fence is HOLDING (idle-crossed, its lookups fail closed)
+        // ends the old session: emit the Close the fence would have claimed.
+        // Every other copy then finds the shared row replaced by this
+        // session's id and stays silent, so the old session gets exactly one
+        // Close; its flush is id-fenced (`close_delta_is_stale_incarnation`)
+        // against the new incarnation. A copy that is only waiting on another
+        // copy's claim is not held: that copy owes the Close.
+        if let Some(previous) = previous.as_ref()
+            && fence_held
+            && previous.origin == SessionOrigin::SharedPromote
+            && !previous.metadata.is_reverse
+            && now_ns.saturating_sub(previous.last_seen_ns) > previous.expires_after_ns
+        {
+            let close = self.expiry_close_delta(
+                &key,
+                previous,
+                previous.decision,
+                &previous.metadata,
+                previous.tcp_close_class_wire(),
+            );
+            if !self.push_expiry_close_delta(close) {
+                self.note_install_close_delta_drop();
+            }
+        }
         let epoch = self.next_epoch();
         // #4915/#18718: select the STABLE identity for this entry. Ordinary
         // sessions allocate a node-unique id; a reverse companion adopts the

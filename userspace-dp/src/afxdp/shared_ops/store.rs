@@ -423,7 +423,17 @@ pub(in crate::afxdp) fn publish_shared_session(
             // #19026: the node-level serving evidence is monotonic per
             // incarnation too (the restore close fence reads it).
             let keep_last_served = same && entry.last_served_ns < previous.last_served_ns;
-            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen || keep_last_served {
+            // #19026: a same-incarnation republication must not erase a
+            // pending close claim (the claimant still owes the Close).
+            let keep_close_claim =
+                same && entry.close_claim_until_ns < previous.close_claim_until_ns;
+            if keep_stage
+                || keep_rev
+                || keep_fwd
+                || keep_sibling_last_seen
+                || keep_last_served
+                || keep_close_claim
+            {
                 entry_owned = entry.clone();
                 if keep_stage {
                     entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
@@ -439,6 +449,9 @@ pub(in crate::afxdp) fn publish_shared_session(
                 }
                 if keep_last_served {
                     entry_owned.last_served_ns = previous.last_served_ns;
+                }
+                if keep_close_claim {
+                    entry_owned.close_claim_until_ns = previous.close_claim_until_ns;
                 }
                 &entry_owned
             } else {

@@ -10,11 +10,15 @@
 //   `ExpireHaContext`) on EVERY worker in the same instant, collecting the
 //   deltas each one hands its flush;
 // - close: then the REAL flush (`flush_session_deltas_loop`: shared removal,
-//   sibling `DeleteSynced` fan-out, HA close mirrored into the RPC fallback
-//   ring `recent_session_deltas`), and the siblings' queues applied.
+//   sibling `DeleteSynced` fan-out, and the HA close and RT_FLOW
+//   SESSION_CLOSE sent on a connected event stream), and the siblings' queues
+//   applied.
 //
-// "HA closes" below counts the close records the flush emitted for the
-// session (one per HA delete sent to the peer).
+// "HA closes" below counts the type-2 session-sync CLOSE frames the flush
+// actually DELIVERED on that event stream for the session's tuple (Codex R15
+// P2#6: not the `recent_session_deltas` status history, which is appended
+// whether or not any HA path delivered), and `rt_flow_closes` the type-14
+// RT_FLOW SESSION_CLOSE frames carrying the session's stable id.
 //
 // The file deliberately names no type or field added by the fold, so the
 // same cells run unchanged against bb9608f1a6 (the pre-fold head), where
@@ -51,6 +55,11 @@ struct Fixture {
     shared_wire: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     indexes: SharedSessionOwnerRgIndexes,
     recent: Arc<Mutex<VecDeque<SessionDeltaInfo>>>,
+    /// The connected event stream the flush delivers HA and RT_FLOW frames
+    /// on, and every frame received from it so far.
+    event_stream: Option<crate::event_stream::EventStreamWorkerHandle>,
+    event_rx: std::sync::mpsc::Receiver<crate::event_stream::codec::EventFrame>,
+    frames: Vec<crate::event_stream::codec::EventFrame>,
     runtime: RuntimeViewChannel,
     rg_epochs: [AtomicU32; crate::afxdp::flow_cache::MAX_RG_EPOCHS],
     pptp: crate::session::pptp_control::PptpControlInbox,
@@ -139,6 +148,17 @@ impl Fixture {
                 }
             })
             .collect();
+        let (event_handle, event_rx) = crate::event_stream::test_worker_handle_connected(
+            1 << 16,
+            crate::event_stream::DataplaneEventRateLimitConfig {
+                events_per_second: 0,
+                burst: 0,
+                session_close_events_per_second: 0,
+                session_close_burst: 0,
+                session_create_events_per_second: 0,
+                session_create_burst: 0,
+            },
+        );
         let fixture = Self {
             t0: crate::afxdp::neighbor::monotonic_nanos(),
             workers,
@@ -148,6 +168,9 @@ impl Fixture {
             shared_wire: Arc::new(Mutex::new(FastMap::default())),
             indexes: SharedSessionOwnerRgIndexes::default(),
             recent: Arc::new(Mutex::new(VecDeque::new())),
+            event_stream: Some(event_handle),
+            event_rx,
+            frames: Vec::new(),
             runtime: RuntimeViewChannel::default(),
             rg_epochs: std::array::from_fn(|_| AtomicU32::new(0)),
             pptp: crate::session::pptp_control::PptpControlInbox::default(),
@@ -340,7 +363,7 @@ impl Fixture {
                 &self.recent,
                 &peers,
                 &by_id,
-                &None,
+                &self.event_stream,
                 &self.forwarding,
                 &shared_runtime,
                 &mut worker.wedged,
@@ -351,13 +374,46 @@ impl Fixture {
         self.apply_commands(now_ns);
     }
 
-    /// Close records the real flush emitted for the session (one per HA
-    /// delete sent to the peer).
-    fn ha_closes(&self) -> usize {
-        let key = &self.row.key;
-        crate::sync_util::lock_tolerant(&self.recent)
+    /// Pull every frame the flush has delivered so far.
+    fn drain_frames(&mut self) {
+        while let Ok(frame) = self.event_rx.try_recv() {
+            self.frames.push(frame);
+        }
+    }
+
+    /// HA session-sync CLOSE frames (type 2) DELIVERED for the session's
+    /// tuple (protocol and ports at the payload's head).
+    fn ha_closes(&mut self) -> usize {
+        self.drain_frames();
+        let key = self.row.key.clone();
+        let header = crate::event_stream::codec::FRAME_HEADER_SIZE;
+        self.frames
             .iter()
-            .filter(|info| info.event == "close" && info.src_port == key.src_port && info.dst_port == key.dst_port)
+            .map(|frame| frame.as_bytes())
+            .filter(|bytes| {
+                bytes.len() >= header + 6
+                    && bytes[4] == crate::event_stream::codec::MSG_SESSION_CLOSE
+                    && bytes[header + 1] == key.protocol
+                    && u16::from_le_bytes([bytes[header + 2], bytes[header + 3]]) == key.src_port
+                    && u16::from_le_bytes([bytes[header + 4], bytes[header + 5]]) == key.dst_port
+            })
+            .count()
+    }
+
+    /// RT_FLOW SESSION_CLOSE frames (type 14) DELIVERED for `session_id`
+    /// (the stable id at payload [152:160]).
+    fn rt_flow_closes(&mut self, session_id: u64) -> usize {
+        self.drain_frames();
+        let at = crate::event_stream::codec::FRAME_HEADER_SIZE + 152;
+        self.frames
+            .iter()
+            .map(|frame| frame.as_bytes())
+            .filter(|bytes| {
+                bytes.len() >= at + 8
+                    && bytes[4] == crate::event_stream::codec::MSG_SESSION_CLOSE_RT_FLOW
+                    && u64::from_le_bytes(bytes[at..at + 8].try_into().expect("8 bytes"))
+                        == session_id
+            })
             .count()
     }
 
@@ -839,4 +895,224 @@ fn r14_fenced_pptp_control_copy_does_not_forget_sibling_channel() {
         forgets, 0,
         "#19026 R14 F5(b): a close-fenced TCP/1723 copy must not forget the sibling's live PPTP channel"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fold cycle 2: Codex R15 and R14 (2e7dfd349b) cells, ported onto this
+// fixture so they compile unchanged against 2e7dfd349b (where the claimant-exit
+// and resume-inside-hold cells are RED) and the cycle-2 head (GREEN).
+// ---------------------------------------------------------------------------
+
+/// Hold the session's tuple permit, run until a claim winner's Close is
+/// parked behind it, and return that worker (the claim is detected by the
+/// parked Close: 2e7dfd349b removed the shared row at the claim, cycle 2 only
+/// marks it). `None` if nobody claimed within the horizon.
+fn run_until_a_close_parks(f: &mut Fixture) -> (Option<usize>, u64) {
+    let t0 = f.t0;
+    let horizon = f.idle_close_horizon();
+    let mut now = t0;
+    while now < horizon {
+        now += SEC;
+        f.round(now);
+        if let Some(w) = (0..WORKERS).find(|&w| !f.workers[w].barrier.parked.is_empty()) {
+            return (Some(w), now);
+        }
+    }
+    (None, now)
+}
+
+/// Codex R15 P1#2: the claim winner cannot take its tuple permit, parks its
+/// Close, and exits (its loop-local state dies) before the permit returns.
+/// The surviving copies must still close the session exactly once. On
+/// 2e7dfd349b the claim had already removed the shared row, every survivor
+/// read that as "closed" and dropped silently: 0 Closes ever flushed.
+#[test]
+fn claimant_exit_does_not_lose_the_close_19026() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([f.row.key.clone()])
+        .expect("hold the session's close permit");
+    let (winner, now) = run_until_a_close_parks(&mut f);
+    let winner = winner.expect("FIXTURE: a claim winner parked its blocked Close");
+    assert_eq!(f.ha_closes(), 0, "FIXTURE: no Close delivered yet");
+    f.alive[winner] = false;
+    f.workers[winner].barrier = Default::default();
+    f.workers[winner].table = SessionTable::new();
+    drop(held);
+    f.rounds(now, now + 240 * SEC);
+    assert_eq!(
+        f.ha_closes(),
+        1,
+        "#19026 Codex R15 P1#2: the survivors must finish the claimed Close exactly once"
+    );
+    assert_eq!(f.rt_flow_closes(f.row.session_id), 1, "one RT_FLOW SESSION_CLOSE");
+    assert!(!f.shared_present(), "the shared row is retired by the delivered Close");
+    for w in 0..WORKERS {
+        if f.alive[w] {
+            assert!(!f.has_row(w), "surviving worker {w}'s copy is gone");
+        }
+    }
+}
+
+/// Control twin: the same parked Close, but the claimant survives; its own
+/// Close flushes once the permit returns, exactly once (GREEN at both heads).
+#[test]
+fn surviving_claimant_closes_once_after_its_permit_returns_19026() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([f.row.key.clone()])
+        .expect("hold the session's close permit");
+    let (winner, now) = run_until_a_close_parks(&mut f);
+    assert!(winner.is_some(), "FIXTURE: a claim winner parked its blocked Close");
+    drop(held);
+    f.rounds(now, now + 240 * SEC);
+    assert_eq!(f.ha_closes(), 1, "control: the claimant's own Close, exactly once");
+    assert!(!f.shared_present());
+}
+
+/// R14 (2e7dfd349b re-review) Q2: reverse-only service sustained across
+/// THREE windows on a non-zero worker (restamped on the ct-slice cadence)
+/// never closes the session; once it idles, it closes exactly once and every
+/// copy is gone.
+#[test]
+fn r14b_reverse_only_live_for_three_windows_never_closes() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let window = f.window_ns();
+    let r = 2usize;
+    let live_end = t0 + 3 * window;
+    let mut now = t0;
+    while now < live_end {
+        now += SEC;
+        f.serve_reverse(r, now, ((now - t0) / SEC) % 10 == 0);
+        f.round(now);
+        assert_eq!(
+            f.ha_closes(),
+            0,
+            "R14 Q2: HA close while worker {r} serves the reverse direction (t=t0+{}s)",
+            (now - t0) / SEC
+        );
+    }
+    for w in 0..WORKERS {
+        assert!(f.has_row(w), "R14 Q2: worker {w}'s copy is kept while the node serves");
+    }
+    f.rounds(live_end, live_end + 3 * window);
+    assert_eq!(f.ha_closes(), 1, "R14 Q2: the idle session then closes exactly once");
+    assert!(!f.shared_present());
+    for w in 0..WORKERS {
+        assert!(!f.has_row(w), "worker {w}'s copy is gone");
+    }
+}
+
+/// R14 G1: during the fence hold a crossed copy stays in the table but is
+/// fail-closed for lookups. A forward packet in that window takes the
+/// first-packet path and REPLACES the copy with a new local session; every
+/// other copy then finds the shared row replaced and stays silent. The old,
+/// idled-out incarnation must still get its one Close. 2e7dfd349b: 0.
+#[test]
+fn r14b_forward_resume_inside_hold_still_closes_old_session() {
+    r14b_forward_resume_after(4);
+}
+
+/// TRUE twin of the cell above: the same resume and install, after the hold
+/// (the old incarnation already claimed and closed). Exactly one Close.
+#[test]
+fn r14b_twin_forward_resume_after_hold_closes_old_session_once() {
+    r14b_forward_resume_after(30);
+}
+
+fn r14b_forward_resume_after(secs_past_window: u64) {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let window = f.window_ns();
+    let old_id = f.row.session_id;
+    let resume = t0 + window + secs_past_window * SEC;
+    f.rounds(t0, resume);
+    let key = f.row.key.clone();
+    let w = 2usize;
+    if f.has_row(w) {
+        assert_eq!(f.ha_closes(), 0, "FIXTURE: nothing closed yet (copies held)");
+        assert!(
+            f.workers[w].table.lookup_with_origin(&key, resume, 0).is_none(),
+            "FIXTURE premise: the held copy is fail-closed for lookups"
+        );
+    }
+    // The first-packet path on worker w: a new local session for the tuple
+    // (replacing the crossed row, if any), published and replicated.
+    let (decision, metadata) = (f.row.decision, f.row.metadata.clone());
+    assert!(
+        f.workers[w].table.install_with_protocol_with_origin(
+            key.clone(),
+            decision,
+            metadata,
+            SessionOrigin::ForwardFlow,
+            resume,
+            PROTO_UDP,
+            0,
+        ),
+        "FIXTURE: the new session installs over the crossed copy"
+    );
+    let fresh = f.workers[w].table.synced_entry_for(&key).expect("new row");
+    assert_ne!(fresh.session_id, old_id, "FIXTURE: a new incarnation");
+    crate::afxdp::shared_ops::publish_shared_session(
+        &f.shared_sessions,
+        &f.shared_nat,
+        &f.shared_wire,
+        &f.indexes,
+        &fresh,
+    );
+    for (p, q) in f.queues().iter().enumerate() {
+        if p != w {
+            q.lock().expect("queue").push_back(WorkerCommand::UpsertSynced(
+                crate::afxdp::shared_ops::synced_replica_entry(&fresh),
+            ));
+        }
+    }
+    // Well before the new session's own idle close (resume + window).
+    f.rounds(resume, resume + 40 * SEC);
+    let old_closes = f.rt_flow_closes(old_id);
+    assert_eq!(
+        old_closes, 1,
+        "R14 G1: the idled-out old incarnation got {old_closes} Closes after a resume \
+         {secs_past_window} s past its window"
+    );
+}
+
+/// Codex R15 P1#1 (RESIDUAL, also on master; not fixed by #19026). A copy
+/// installed 20 s late (a later prewarm reached a refusing worker) starts
+/// serving at +73 s, inside an idle copy's hold; its first restamp is due at
+/// +82 s, so at +76 s the idle copy still reads unchanged evidence, wins the
+/// claim and closes the live session. The claim synchronizes with
+/// PUBLICATION, not packet admission; no fixed hold closes that window.
+/// Tracked in #19046; this cell is the reproduction and stays ignored
+/// until that lands.
+#[test]
+#[ignore = "residual tracked in #19046 (Codex R15 P1#1); fails by design"]
+fn late_service_inside_the_hold_must_survive_19026() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    f.workers[2].table = SessionTable::new();
+    f.workers[2].table.set_session_id_namespace(0, 2);
+    assert!(f.workers[2].table.upsert_synced_with_origin(
+        f.row.clone().into_session_install(t0 + 20 * SEC),
+        false
+    ));
+    f.rounds(t0, t0 + 72 * SEC);
+    assert_eq!(f.ha_closes(), 0, "FIXTURE: the hold has not closed");
+    for s in 73..=80u64 {
+        f.serve(2, t0 + s * SEC, false);
+        f.round(t0 + s * SEC);
+        assert_eq!(
+            f.ha_closes(),
+            0,
+            "Codex R15 P1#1: live service at +{s}s must survive until the +82s restamp"
+        );
+    }
 }

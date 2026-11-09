@@ -300,7 +300,7 @@ pub(crate) use sync_attribution::*;
 mod wheel;
 use wheel::SessionWheel;
 
-const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
+pub(crate) const SESSION_GC_INTERVAL_NS: u64 = 1_000_000_000;
 /// #18742: default shared-evidence cadence bound at the default per-worker
 /// session cap and its 2x HA-import population (12.8 s, rounded up). Production
 /// expiry contexts compute the bound from their actual session-table slab so
@@ -7661,6 +7661,14 @@ impl SessionTable {
     /// (each one forces a resync). Test/diagnostic accessor.
     pub fn delta_drops(&self) -> u64 {
         self.delta_drops
+    }
+
+    /// A Close that found the ring full outside the expiry walk (which has
+    /// the #10309 overflow suffix instead): count it and latch loss-of-sync,
+    /// exactly as `push_delta` does, so the owner-RG resync re-exports.
+    pub(in crate::session) fn note_install_close_delta_drop(&mut self) {
+        self.delta_drops = self.delta_drops.saturating_add(1);
+        self.delta_loss_pending = true;
     }
 
     fn push_delta(&mut self, delta: SessionDelta) {

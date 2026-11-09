@@ -154,33 +154,34 @@ fn shared_row_identity_of(entry: &SyncedSessionEntry) -> crate::session::SharedR
         session_id: entry.session_id,
         packets: entry.fwd_packets.saturating_add(entry.rev_packets),
         last_served_ns: entry.last_served_ns,
+        close_claim_until_ns: entry.close_claim_until_ns,
     }
 }
 
-/// #19026: the restore close fence's CLAIM. Retires the shared primary row
-/// (and its aliases/indexes) iff it still reads exactly `expected`, under the
-/// primary-map lock, so exactly one expiring copy on the node wins and emits
-/// the session's Close. The winner's Close flush then finds the row gone and
-/// runs the rest of the teardown (BPF rows, sibling `DeleteSynced`, HA close).
+/// #19026: the restore close fence's CLAIM. Marks the shared primary row
+/// pending retirement until `claim_until_ns` iff it still reads exactly
+/// `expected` (identity, evidence and any earlier mark), under the
+/// primary-map lock, so exactly one copy on the node wins and owes the
+/// session's Close. The row is NOT removed here: the winner's Close flush
+/// removes it (and runs the rest of the teardown: BPF rows, sibling
+/// `DeleteSynced`, HA close), so the row's absence means the Close was
+/// flushed. If the winner never flushes (it exited, its Close was lost), a
+/// copy that finds the mark expired claims again with that mark as
+/// `expected` and takes the obligation over (Codex R15 P1#2).
 pub(in crate::afxdp) fn claim_shared_close(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     key: &SessionKey,
     expected: crate::session::SharedRowIdentity,
+    claim_until_ns: u64,
 ) -> bool {
-    matches!(
-        remove_shared_session_if(
-            shared_sessions,
-            shared_nat_sessions,
-            shared_forward_wire_sessions,
-            shared_owner_rg_indexes,
-            key,
-            |current| shared_row_identity_of(current) == expected,
-        ),
-        SharedRemoval::Removed(_)
-    )
+    let mut sessions = lock_shared_recover(shared_sessions);
+    match sessions.get_mut(key) {
+        Some(entry) if shared_row_identity_of(entry) == expected => {
+            entry.close_claim_until_ns = claim_until_ns.max(1);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// #16223: node-level served-handshake evidence for `key` (either half of

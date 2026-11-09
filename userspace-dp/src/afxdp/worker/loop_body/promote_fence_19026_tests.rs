@@ -158,13 +158,15 @@ fn housekeeping_keeps_idle_copy_while_another_serves_19026() {
 /// The production claim: a genuinely idle restored copy is held for the
 /// evidence cadence + GC interval (13 s + 1 s with the default slab), then
 /// claims the shared row through `shared_ops::claim_shared_close` and closes.
+/// The claim only MARKS the row; this fixture's flush is a collector, so the
+/// row stays (the real flush removes it: see the concurrency cells).
 #[test]
 fn housekeeping_holds_then_claims_an_idle_restore_19026() {
     let late = 3 * 3_600 * SEC;
     let held = run_restored_copy(None, &[late]);
     assert_eq!(held, (0, true, true), "inside the hold: kept, no Close, shared intact");
     let claimed = run_restored_copy(None, &[late, late + 15 * SEC]);
-    assert_eq!(claimed, (1, false, false), "after the hold: one Close, shared retired");
+    assert_eq!(claimed, (1, true, false), "after the hold: one Close, shared row marked");
 }
 
 /// The fenced reap keeps the tuple's conntrack mirror row (under the same
@@ -241,13 +243,15 @@ fn shared_maps_with(row: &SyncedSessionEntry) -> (SharedMap, SharedMap, SharedMa
     (sessions, nat, wire, indexes)
 }
 
-/// The claim is a compare-and-remove: a stale expectation (the row was
-/// restamped after the fence read it) neither removes the row nor wins; the
-/// exact current identity removes it once, and a second claim finds nothing.
+/// The claim is a compare-and-MARK (Codex R15 P1#2): a stale expectation (the
+/// row was restamped after the fence read it) neither marks the row nor
+/// wins; the exact current identity marks it pending retirement (the row
+/// stays published until the winner's Close flush removes it), and a second
+/// claim on the now-marked row fails until a taker presents that mark.
 #[test]
-fn claim_shared_close_is_compare_and_remove_19026() {
+fn claim_shared_close_is_compare_and_mark_19026() {
     let row = promoted_row();
-    let (sessions, nat, wire, indexes) = shared_maps_with(&row);
+    let (sessions, _nat, wire, _indexes) = shared_maps_with(&row);
     let key = row.key.clone();
     let read = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
@@ -256,16 +260,25 @@ fn claim_shared_close_is_compare_and_remove_19026() {
         1,
         &[(key.clone(), crate::nat::NatDecision::default(), SEEDED + 1, SEEDED, 77 * SEC)],
     );
-    let claim = |expected| {
-        crate::afxdp::shared_ops::claim_shared_close(&sessions, &nat, &wire, &indexes, &key, expected)
+    let claim = |expected, until| {
+        crate::afxdp::shared_ops::claim_shared_close(&sessions, &key, expected, until)
     };
-    assert!(!claim(read), "a stale identity must not win the claim");
-    assert!(crate::afxdp::shared_ops::lock_shared_recover(&sessions).contains_key(&key));
+    assert!(!claim(read, 100 * SEC), "a stale identity must not win the claim");
     let current = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
+    assert_eq!(current.close_claim_until_ns, 0, "a failed claim leaves no mark");
     assert_eq!(current.last_served_ns, 77 * SEC);
-    assert!(claim(current), "the exact identity wins");
-    assert!(!crate::afxdp::shared_ops::lock_shared_recover(&sessions).contains_key(&key));
-    assert!(!claim(current), "exactly one winner");
+    assert!(claim(current, 100 * SEC), "the exact identity wins");
+    let marked = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key)
+        .expect("the claim keeps the row until the Close's flush");
+    assert_eq!(marked.close_claim_until_ns, 100 * SEC, "pending retirement until the deadline");
+    assert!(!claim(current, 200 * SEC), "exactly one winner: the row now carries the mark");
+    assert!(claim(marked, 200 * SEC), "a taker presenting the expired mark takes it over");
+    assert_eq!(
+        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key)
+            .expect("row")
+            .close_claim_until_ns,
+        200 * SEC
+    );
 }
 
 /// `last_served_ns` is stamped by EVERY worker's restamp, the minting
@@ -310,8 +323,21 @@ fn last_served_is_stamped_by_every_worker_and_kept_per_incarnation_19026() {
         SEEDED,
     );
     assert_eq!(read(), (65 * SEC, 60 * SEC), "single-pair restamp, minting worker");
+    assert!(crate::afxdp::shared_ops::claim_shared_close(
+        &sessions,
+        &key,
+        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row"),
+        90 * SEC,
+    ));
     crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, &row);
     assert_eq!(read().0, 65 * SEC, "same-incarnation republication keeps it");
+    assert_eq!(
+        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key)
+            .expect("row")
+            .close_claim_until_ns,
+        90 * SEC,
+        "and keeps a pending close claim"
+    );
     let mut next = row.clone();
     next.session_id += 1;
     crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, &next);

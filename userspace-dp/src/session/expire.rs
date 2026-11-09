@@ -45,6 +45,56 @@ impl SessionTable {
             self.wheel.initialized = true;
         }
     }
+    /// The Close delta of an idle-expired entry (shared by the expiry walk
+    /// and, #19026 R14 G1, a local install that replaces a restored copy the
+    /// close fence holds).
+    pub(in crate::session) fn expiry_close_delta(
+        &self,
+        key: &SessionKey,
+        removed: &SessionEntry,
+        decision: SessionDecision,
+        metadata: &SessionMetadata,
+        close_class: u8,
+    ) -> SessionDelta {
+        SessionDelta {
+            provenance: crate::session::ExportProvenance::Incremental,
+            kind: SessionDeltaKind::Close,
+            key: key.clone(),
+            decision,
+            metadata: metadata.clone(),
+            policy_generation: removed.policy_generation,
+            origin: removed.origin,
+            fabric_redirect_sync: false,
+            // #2465: carry the real creation/last-seen instants from the
+            // expiring entry so the RT_FLOW close frame reports a true
+            // StartTime.
+            created_ns: removed.created_ns,
+            last_seen_ns: removed.last_seen_ns,
+            // #2501: harvest the per-direction byte/packet counters off the
+            // entry BEFORE it is dropped. These populate the reserved volume
+            // slots on the SESSION_CLOSE RT_FLOW frame so NetFlow/IPFIX
+            // reports real volume instead of 0.
+            counters: removed.counters,
+            // #2749: harvest the observed forward ToS + cumulative TCP
+            // control bits so the SESSION_CLOSE RT_FLOW frame carries real
+            // NetFlow/IPFIX class-of-service and TCP-flags values.
+            observed_tos: removed.observed_tos,
+            observed_tcp_flags: removed.observed_tcp_flags,
+            // #4915: the stable session id, so the SESSION_CLOSE RT_FLOW
+            // frame carries the SAME id this session's SESSION_CREATE did.
+            session_id: removed.session_id,
+            bulk_resync: false,
+            is_admission: false,
+            // #13971: preserve the TCP terminal class for the RT_FLOW
+            // close-reason projection.
+            tcp_close_class: close_class,
+            tcp_handshake_state: 0,
+            pptp_call_ids: self.pptp_call_ids_wire_for(key),
+            purge_retirement: false,
+            source_nat_static: None,
+        }
+    }
+
     /// #10309: enqueue an expiry Close only when the bounded incremental
     /// ring has room. A full ring is not a loss signal here: the caller
     /// retains the exact Close on the returned `ExpiredSession` and the
@@ -52,7 +102,7 @@ impl SessionTable {
     /// producers continue using `push_delta`, whose overflow remains the
     /// #2442 loss-of-sync path.
     #[inline]
-    fn push_expiry_close_delta(&mut self, delta: SessionDelta) -> bool {
+    pub(in crate::session) fn push_expiry_close_delta(&mut self, delta: SessionDelta) -> bool {
         if self.deltas.len() >= MAX_SESSION_DELTAS {
             return false;
         }
@@ -572,7 +622,7 @@ impl SessionTable {
                         self.last_pop_stats.expired += 1;
                         let decision = removed.decision;
                         let close_class = removed.tcp_close_class_wire();
-                        let metadata = removed.metadata;
+                        let metadata = removed.metadata.clone();
                         if key.protocol == PROTO_TCP {
                             debug_log!(
                                 "SESS_EXPIRE: proto=TCP {}:{} -> {}:{} closing={} age_ns={} timeout_ns={} rev={} origin={} nat=({:?},{:?})",
@@ -598,45 +648,7 @@ impl SessionTable {
                             && !removed.origin.is_local_tun_origin()
                             && removed.origin != crate::session::SessionOrigin::FabricPuntSeed
                         {
-                            let close = SessionDelta { provenance: crate::session::ExportProvenance::Incremental, kind: SessionDeltaKind::Close,
-                            key: key.clone(),
-                            decision,
-                            metadata: metadata.clone(),
-                            policy_generation: removed.policy_generation,
-                            origin: removed.origin,
-                            fabric_redirect_sync: false,
-                            // #2465: carry the real creation/last-seen
-                            // instants from the expiring entry so the
-                            // RT_FLOW close frame reports a true StartTime.
-                            created_ns: removed.created_ns,
-                            last_seen_ns: removed.last_seen_ns,
-                            // #2501: harvest the per-direction byte/packet
-                            // counters off the entry BEFORE it is dropped
-                            // (remove_entry has already returned it). These
-                            // populate the reserved volume slots on the
-                            // SESSION_CLOSE RT_FLOW frame so NetFlow/IPFIX
-                            // reports real volume instead of 0.
-                            counters: removed.counters,
-                            // #2749: harvest the observed forward ToS +
-                            // cumulative TCP control bits off the expiring
-                            // entry so the SESSION_CLOSE RT_FLOW frame
-                            // carries real NetFlow/IPFIX class-of-service
-                            // and TCP-flags values.
-                            observed_tos: removed.observed_tos,
-                            observed_tcp_flags: removed.observed_tcp_flags,
-                            // #4915: harvest the stable session id off the
-                            // expiring entry so the SESSION_CLOSE RT_FLOW
-                            // frame carries the SAME id this session's
-                            // SESSION_CREATE did — the correlatable key.
-                            session_id: removed.session_id,
-                            bulk_resync: false,
-                            is_admission: false,
-                            // #13971: preserve the TCP terminal class for the
-                            // RT_FLOW close-reason projection.
-                            tcp_close_class: close_class,
-                            tcp_handshake_state: 0,
-                            pptp_call_ids: self.pptp_call_ids_wire_for(&key),
-                            purge_retirement: false, source_nat_static: None };
+                            let close = self.expiry_close_delta(&key, &removed, decision, &metadata, close_class);
                             (!self.push_expiry_close_delta(close.clone())).then_some(close)
                         } else {
                             None
@@ -1404,25 +1416,31 @@ impl SessionTable {
     /// copy runs the same rule; no copy is designated.
     ///
     /// 1. The shared primary row is gone or names another session id: the
-    ///    session was already closed or replaced elsewhere → Silent.
+    ///    session's Close was flushed (only that flush removes a claimed row)
+    ///    or a new incarnation replaced it → Silent.
     /// 2. The session is served on this node inside the idle window: by this
     ///    copy in EITHER direction (`own_packet_seen_ns`, the newest packet
     ///    time of the forward copy and its reverse companion; R14 F2), or by
     ///    ANY worker (the shared row's `last_served_ns`, stamped by every
     ///    worker's restamp from the same either-direction value, minting
     ///    worker included; Codex P1 #1, R14 F1) → KeepAlive: the copy stays
-    ///    and is re-stamped to that packet time. A copy is never dropped while
-    ///    the session lives, so the copy that closes it always exists
-    ///    whichever worker the flow moves to (the leak a Silent here had).
-    /// 3. The node looks idle, but the evidence lags by up to one restamp
+    ///    and is re-stamped to that packet time, so the copy that closes the
+    ///    session exists whichever worker the flow ends on.
+    /// 3. Another copy holds the claim (`close_claim_until_ns`): it owes the
+    ///    Close; wait for its flush, re-checking every GC interval (R1 once
+    ///    the flush removed the row). Once the mark expires without a flush
+    ///    (the claimant exited or lost its Close), CLAIM again with the
+    ///    expired mark as the expected identity and take the obligation over
+    ///    (Codex R15 P1#2). Exactly one taker wins.
+    /// 4. The node looks idle, but the evidence lags by up to one restamp
     ///    cadence (Codex P1 #2, R14 F4): hold for `fence_evidence_cadence_ns`
     ///    + one GC interval, remembering the evidence.
-    /// 4. After the hold, evidence unchanged → CLAIM: atomically retire the
-    ///    shared row iff it still reads exactly the remembered evidence.
-    ///    Exactly one copy wins and closes (Codex P1 #3/#4, R14 F3: no
-    ///    designation to lose or duplicate). Evidence changed without fresh
-    ///    service, or the claim lost to a concurrent change → hold again. A
-    ///    copy whose row another copy already retired takes rule 1.
+    /// 5. After the hold, evidence unchanged → CLAIM: atomically mark the
+    ///    shared row pending retirement iff it still reads exactly the
+    ///    remembered evidence. Exactly one copy wins and closes (Codex P1
+    ///    #3/#4, R14 F3); its Close flush removes the row. Evidence changed
+    ///    without fresh service, or the claim lost to a concurrent change →
+    ///    hold again.
     #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn promote_fence_step(
         &mut self,
@@ -1444,6 +1462,18 @@ impl SessionTable {
             self.promote_fence_holds.remove(key);
             return PromoteFence::KeepAlive {
                 last_seen_ns: served_ns,
+            };
+        }
+        if shared.close_claim_until_ns != 0 {
+            self.promote_fence_holds.remove(key);
+            if now_ns >= shared.close_claim_until_ns && (ha.claim_close)(key, shared) {
+                return PromoteFence::Close;
+            }
+            // Re-check every GC interval: once the claimant's flush removes
+            // the row this copy leaves (R1) within one interval instead of
+            // lingering, idle-crossed, until the mark's deadline.
+            return PromoteFence::Defer {
+                until_ns: now_ns.saturating_add(SESSION_GC_INTERVAL_NS),
             };
         }
         let hold = self.promote_fence_holds.get(key).copied();
@@ -1475,6 +1505,11 @@ impl SessionTable {
             },
         );
         PromoteFence::Defer { until_ns }
+    }
+
+    /// #19026 (R14 G1): whether the restore close fence holds `key`'s copy.
+    pub(in crate::session) fn promote_fence_held(&self, key: &SessionKey) -> bool {
+        self.promote_fence_holds.contains_key(key)
     }
 
     /// #19026 cell seam: the fence holds currently armed.

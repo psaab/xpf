@@ -162,10 +162,12 @@ pub(crate) struct ExpireHaContext<'a> {
     /// that forwards its RG (the restore close fence). Production:
     /// `afxdp::shared_ops::shared_row_identity`; `None` = no shared row.
     pub(crate) shared_row: &'a dyn Fn(&SessionKey) -> Option<SharedRowIdentity>,
-    /// #19026: atomically retire the shared primary row iff it still reads
-    /// exactly `expected` — the close CLAIM. Exactly one copy on the node
-    /// wins; only the winner emits the session's Close (and so its HA
-    /// delete). Production: `afxdp::shared_ops::claim_shared_close`.
+    /// #19026: the close CLAIM. Atomically marks the shared primary row as
+    /// pending retirement (`close_claim_until_ns`) iff it still reads exactly
+    /// `expected`. Exactly one copy on the node wins and emits the session's
+    /// Close; the row stays published until that Close's flush removes it, so
+    /// absence means "flushed", and a copy that finds an expired mark takes
+    /// the obligation over. Production: `afxdp::shared_ops::claim_shared_close`.
     pub(crate) claim_close: &'a dyn Fn(&SessionKey, SharedRowIdentity) -> bool,
     /// #19026: the shared serving evidence's worst-case publication lag (the
     /// ct-slice restamp cadence). The fence holds an idle-looking copy this
@@ -185,6 +187,10 @@ pub(crate) struct SharedRowIdentity {
     /// the row (`SyncedSessionEntry::last_served_ns`, minting worker
     /// included). 0 = never stamped.
     pub(crate) last_served_ns: u64,
+    /// The pending-retirement mark (`SyncedSessionEntry::close_claim_until_ns`):
+    /// 0 = unclaimed; otherwise a claimed copy owes the Close and may be taken
+    /// over at or after this time.
+    pub(crate) close_claim_until_ns: u64,
 }
 /// #16223: node-level served-handshake evidence for one tuple — the
 /// promoted serving companion's handshake wire state plus its admitted

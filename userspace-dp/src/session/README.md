@@ -1844,11 +1844,12 @@ copy; no copy is designated:
 
 | step | condition | result |
 |---|---|---|
-| R1 | the shared primary row (`ExpireHaContext::shared_row`) is gone, or names another session id | silent: the session was closed or replaced elsewhere |
+| R1 | the shared primary row (`ExpireHaContext::shared_row`) is gone, or names another session id | silent: the session's Close was flushed (only that flush removes a claimed row) or a new incarnation replaced it |
 | served | this copy served inside its window in EITHER direction (`packet_counts_and_last_packet_seen_for`: the newer of the forward copy's and its reverse half's packet time), or ANY worker did (the shared row's `last_served_ns`) | keep: re-stamp `last_seen_ns` to that packet time and re-bucket |
+| claimed | another copy holds the claim (the row's `close_claim_until_ns` mark) | wait for that copy's Close flush, re-checking every GC interval (R1 within one interval of the flush); once the mark expires without one, claim again on the expired mark and take the obligation over |
 | hold | the node looks idle | hold for `fence_evidence_cadence_ns` + one GC interval, remembering the evidence |
 | after hold | the evidence changed but holds no packet inside the window (a stale max-merge) | hold again on the new evidence |
-| claim | the evidence is unchanged: `ExpireHaContext::claim_close` retires the shared row iff it still reads exactly that evidence | winner: ordinary AGE + Close. A copy whose row the winner already retired takes R1 (silent); a claim lost to a concurrent restamp holds again |
+| claim | the evidence is unchanged: `ExpireHaContext::claim_close` marks the shared row pending retirement iff it still reads exactly that evidence | winner: ordinary AGE + Close; its flush removes the row. A copy that loses waits on the mark (then R1 after the flush); a claim lost to a concurrent restamp holds again |
 
 **Why keep, not drop.** A copy is never removed while the session is served
 on this node. A reverse hit stamps only the reverse half (its count folds
@@ -1878,13 +1879,44 @@ cadence + one GC interval + up to one wheel tick: about 14 s at the default
 slab. It grows with `ct_refresh_slab_len` the way the #18742 evidence cadence
 does. Each evidence change without fresh service re-arms the hold once more.
 
-**The claim.** `afxdp/shared_ops/restamp.rs::claim_shared_close` is a
-compare-and-remove under the shared-map lock. That makes exactly-once hold by
-construction:
-- no designation can be lost to a dead or refused worker;
-- no designation can be duplicated by a second prewarm;
-- the winner's Close flush finds the row gone and runs the rest of the
-  teardown: BPF rows, sibling `DeleteSynced`, HA close.
+**The claim, and why the row survives it (fold cycle 2).**
+`afxdp/shared_ops/restamp.rs::claim_shared_close` is a compare-and-MARK
+under the shared-map lock. It sets `SyncedSessionEntry::close_claim_until_ns`
+(one hold from now) iff the row still reads exactly the evidence the
+claimant held. It does not remove the row:
+- **Exactly once.** No designation can be lost to a dead or refused worker
+  or duplicated by a second prewarm. Two copies cannot both win the same
+  row. A loser sees the live mark and waits.
+- **Absence means "flushed".** The row leaves only through the winner's
+  Close flush, which also runs the rest of the teardown: BPF rows, conntrack
+  mirror, sibling `DeleteSynced`, HA close. Cycle 1 removed the row at the
+  claim. A winner that then exited with its Close parked, or lost it,
+  silenced every survivor: zero Closes, a leaked mirror row (Codex R15
+  P1#2).
+- **Takeover.** If the mark expires and the row is still there, the
+  claimant never flushed. A surviving copy claims again with the expired
+  mark as its expected identity (one taker wins) and closes normally,
+  including the mirror delete. This is exactly-once when the claimant has
+  died. When the claimant is alive but its Close stays parked longer than
+  one hold (its tuple permit is held that long), the taker's Close joins it
+  on the same permit, and both flush when it frees: at-least-once, never
+  zero.
+- Same-incarnation republication keeps a pending mark; a new incarnation
+  starts without one.
+
+**A forward resume inside the hold (R14 G1).** While a copy is held, its
+lookups fail closed (it is idle-crossed), so a forward packet takes the
+first-packet path. A new local session then REPLACES the crossed copy, and
+every other copy finds the shared row replaced and stays silent. The local
+install therefore emits the old session's Close when it replaces a forward
+`SharedPromote` copy the fence is HOLDING (`session/install.rs`): exactly one
+Close for the old incarnation. A copy only waiting on another copy's claim
+is not held (that copy owes the Close), so a resume landing on it adds no
+second Close. Its flush is id-fenced
+(`close_delta_is_stale_incarnation`) against the new one. A REVERSE resume in
+the same window instead re-materializes from the still-published shared
+reverse row and revives the old session: inbound packets are admitted up to
+one hold past the idle timeout.
 
 A hold is valid only for the idle anchor it was armed under, so a re-stamped
 row re-arms. Holds live in a side map dropped with the row; `SessionEntry`
@@ -1905,11 +1937,28 @@ stays at the 648 B pin.
 - Housekeeping does not forget a TCP/1723 PPTP control channel for a fenced
   copy.
 
+**Residual: a packet in the last publication interval (#19046).** The
+claim synchronizes with PUBLICATION, not packet admission. It authorizes a
+Close on evidence left unchanged for one hold. A packet admitted on another
+worker inside the final publication interval before the claim is invisible,
+so the session can still be closed while that worker serves it. Codex R15
+P1#1 reproduces it with a copy installed 20 s late that starts serving
+inside an idle copy's hold. That cell is
+`late_service_inside_the_hold_must_survive_19026`, `#[ignore]`d until #19046
+lands. Master shares the residual with a far wider window: every idle copy
+closes at its own deadline. A longer fixed hold is not the fix.
+
+Related: the hold is `shared_evidence_max_cadence_ns`, the EXPIRING worker's
+slab-based estimate (`loop_body/slice_pacing.rs`). That formula "is not a hard
+bound for pathological alias fan-out", so a serving worker whose stage/count
+traversal runs longer than the estimate can publish after the hold. That is
+the same residual through the #18742 path (R14 G3).
+
 **Residual: when no copy closes, and its bound.** The session ends without a
 Close only when NO restored copy of it survives on this node to reach the
-claim. Copies leave only through:
-- the claim winner's Close (its sibling `DeleteSynced` removes the rest);
-- R1;
+claim or the takeover. Copies leave only through:
+- a delivered Close's sibling `DeleteSynced`;
+- R1 after that flush;
 - a removal outside the fence.
 
 So the residual is the set of cases with no surviving copy:
@@ -1920,13 +1969,22 @@ So the residual is the set of cases with no surviving copy:
   `WorkerLocalImport` replicas (out of scope here).
 
 In those cases, ON THIS NODE, nothing has a TTL: the shared forward and
-reverse rows, the coordinator's steering claims, and the re-materialization
-admission (a later packet re-materializes a `WorkerLocalImport`). They stay
-until the next activation of that RG, whose prewarm re-seeds copies that then
-hold and claim, or until a helper restart. On the PEER, the copy is bounded
-by its HOLD ceiling, `min(3 x timeout, ABS cap)`. Traffic shape alone (which
-direction, which worker, when) does not reach the residual: any served copy
-is kept, and every kept copy reaches the claim.
+reverse rows, the coordinator's steering claims, the re-materialization
+admission (a later packet re-materializes a `WorkerLocalImport`), and the
+conntrack mirror row. They stay until the next activation of that RG, whose
+prewarm re-seeds copies that then hold and claim, or until a helper restart.
+
+**The peer's bound (R14 G2).** The peer's copy is bounded by its HOLD
+ceiling, `min(3 x timeout, ABS cap)`, only once this node's conntrack mirror
+row is gone. While the mirror row exists, Go's primary-liveness sweep
+re-announces it with no idle check (`pkg/cluster/sync_conn_sweep.go`), and
+each liveness import renews the peer's hold anchor
+(`session/install.rs`). So in the no-surviving-copy shapes above, and for
+any copy whose mirror row outlives it, the peer copy is unbounded too, until
+the next activation or a restart (#19030). Not a regression vs master. Traffic
+shape alone (which direction, which worker, when) does not reach these
+residuals: any served copy is kept, and every kept copy reaches the claim or
+the takeover.
 
 Cells:
 - `session/promote_copy_close_fence_19026_tests.rs`, rule by rule.
@@ -1942,7 +2000,16 @@ Cells:
   - R14's cells, ported to these paths: served-then-moved (F1), reverse-only
     service with its forward control twin (F2), two prewarms under backlog
     with its single-prewarm control (F3), the restamp-cadence close (F4), and
-    the fenced PPTP control copy (F5(b)).
+    the fenced PPTP control copy (F5(b));
+  - fold cycle 2: a claimant that exits with its Close parked (Codex R15
+    P1#2) and its surviving-claimant twin; reverse-only service for three
+    windows, and a forward resume inside the hold with its after-hold twin
+    (R14 G1); the #19046 residual (ignored).
+
+  Its "HA closes" are type-2 session-sync CLOSE frames actually delivered on
+  a connected event stream, and its RT_FLOW closes are type-14 frames
+  carrying the session id (Codex R15 P2#6). They are not the
+  `recent_session_deltas` status history.
 - `afxdp/worker/loop_body/promote_fence_19026_tests.rs`, the production
   wiring and the fenced reap.
 
