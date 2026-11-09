@@ -33,8 +33,10 @@ import (
 // ordinary clock event (an RTC that ran fast, corrected back by NTP under an
 // hour). Neither is a dead clock and neither is a dead store: the `.lock`
 // already exists so withEpochFileLock takes it and os.ReadFile succeeds, and
-// only WriteFileDurable's temp file fails. It returns the state path and the
-// value in the file.
+// only WriteFileDurable fails — its rename is refused (refuseDurableWritesInto19049).
+// The refusal used to be a 0555 chmod of the directory, which cannot refuse
+// uid 0, so as uid 0 the "unwritable" store took every write (#19049). It
+// returns the state path and the value in the file.
 func epochUnwritableStore(t *testing.T, lead time.Duration) (string, uint64) {
 	t.Helper()
 	dir := t.TempDir()
@@ -49,10 +51,7 @@ func epochUnwritableStore(t *testing.T, lead time.Duration) (string, uint64) {
 		t.Fatal(err)
 	}
 	lock.Close()
-	if err := os.Chmod(dir, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	refuseDurableWritesInto19049(t, dir)
 
 	orig := bootEpochPath
 	bootEpochPath = path

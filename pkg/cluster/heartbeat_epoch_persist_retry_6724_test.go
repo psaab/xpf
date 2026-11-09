@@ -86,7 +86,7 @@ func TestPersistOwedIsSetOnlyByFAULTS_6724(t *testing.T) {
 			why:      "a parse failure falls through to the write, which succeeds",
 		},
 		{
-			name: "write fails (read-only directory)",
+			name: "write fails (store refuses the write)",
 			prep: func(t *testing.T) string {
 				dir := t.TempDir()
 				sub := filepath.Join(dir, "state")
@@ -94,16 +94,15 @@ func TestPersistOwedIsSetOnlyByFAULTS_6724(t *testing.T) {
 					t.Fatal(err)
 				}
 				// Seed a value so the pass gets past the read and reaches the
-				// write, then make the directory unwritable so the atomic
-				// rename cannot land.
+				// write, then make the store refuse the write so the atomic
+				// rename cannot land. Not a 0555 chmod: that cannot refuse
+				// uid 0, and as non-root it failed the .lock open first and
+				// reported owed from the `!ran` arm instead (#19049).
 				p := filepath.Join(sub, "ha-boot-epoch")
 				if err := os.WriteFile(p, []byte(strconv.FormatUint(now-1000, 10)+"\n"), 0o644); err != nil {
 					t.Fatal(err)
 				}
-				if err := os.Chmod(sub, 0o555); err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = os.Chmod(sub, 0o755) })
+				refuseDurableWritesInto19049(t, sub)
 				return p
 			},
 			wantOwed: true,
@@ -228,6 +227,9 @@ func TestSenderLoopDrivesTheRetry_6724(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(sub, "ha-boot-epoch")
+	// Fail the first persist. Installed before the manager so the seam is
+	// restored only after the manager's own cleanup has joined its worker.
+	clearFault := refuseDurableWritesInto19049(t, sub)
 	m := keyedEpochManager(t, path)
 
 	// One tick, one retry — otherwise the production cadence is 150 ticks and
@@ -236,10 +238,6 @@ func TestSenderLoopDrivesTheRetry_6724(t *testing.T) {
 	bootEpochPersistRetryInterval = time.Nanosecond
 	t.Cleanup(func() { bootEpochPersistRetryInterval = origInterval })
 
-	// Fail the first persist.
-	if err := os.Chmod(sub, 0o555); err != nil {
-		t.Fatal(err)
-	}
 	m.initHeartbeatEpochState()
 	awaitFirstRefine(t, m, "the failing refine")
 	waitBootEpochIdle(t, m)
@@ -249,9 +247,7 @@ func TestSenderLoopDrivesTheRetry_6724(t *testing.T) {
 	published := m.bootEpoch.Load()
 
 	// The fault clears, and from here ONLY the send loop can drive the retry.
-	if err := os.Chmod(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	clearFault()
 
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -297,12 +293,11 @@ func TestRetryPersistsWhatTheFailedPassCouldNot_6724(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(sub, "ha-boot-epoch")
+	// Fail the write: a store that refuses writes cannot take the atomic
+	// rename. Installed before the manager so the seam outlives its worker.
+	clearFault := refuseDurableWritesInto19049(t, sub)
 	m := keyedEpochManager(t, path)
 
-	// Fail the write: an unwritable directory cannot take the atomic rename.
-	if err := os.Chmod(sub, 0o555); err != nil {
-		t.Fatal(err)
-	}
 	m.initHeartbeatEpochState()
 	awaitFirstRefine(t, m, "the failing refine")
 	waitBootEpochIdle(t, m)
@@ -320,9 +315,7 @@ func TestRetryPersistsWhatTheFailedPassCouldNot_6724(t *testing.T) {
 	}
 
 	// The fault clears (the operator frees the filesystem, remounts rw, ...).
-	if err := os.Chmod(sub, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	clearFault()
 	m.retryOwedBootEpochPersist()
 	waitBootEpochIdle(t, m)
 

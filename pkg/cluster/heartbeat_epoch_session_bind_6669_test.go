@@ -1161,17 +1161,15 @@ func TestRefineRecoveryNeedsTheRaisingEpochInTheFile_6669(t *testing.T) {
 		}
 
 		// A is older and delayed. Its write FAILS — but it has already read `b`,
-		// so it raises and emits `b+1` regardless.
-		if err := os.Chmod(dir, 0o555); err != nil {
-			t.Fatal(err)
-		}
+		// so it raises and emits `b+1` regardless. The store refuses the write
+		// through fsatomic's rename seam, not a 0555 chmod, which cannot refuse
+		// uid 0 (#19049).
+		clearFault := refuseDurableWritesInto19049(t, dir)
 		var pubA atomic.Uint64
 		pubA.Store(b - uint64(time.Second))
 		refineBootEpoch(path, &pubA, 0)
 		epochA := pubA.Load()
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
+		clearFault()
 		if epochA <= b {
 			t.Fatalf("A published %d, which does not exceed B's %d — the schedule this test "+
 				"describes did not happen, so the assertions below prove nothing", epochA, b)
