@@ -13608,10 +13608,8 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .map(str::trim)
         .filter(|line| !line.starts_with("//"))
         .collect();
-    // #19026 (Codex P2 #5): the chunked flush moved into
-    // `flush_overflow_chunks`, which also retires an earlier tick's deferred
-    // overflow before the ring; the bridge is the call on the extracted
-    // records.
+    // #19026: the chunked flush lives in `flush_overflow_chunks`; the bridge
+    // is its call on the extracted records (retried until it retires them).
     let extraction = executable_lines
         .iter()
         .position(|line| line.starts_with(".filter_map(|entry| entry.overflow_close)"))
@@ -13620,13 +13618,13 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .iter()
         .enumerate()
         .skip(extraction)
-        .find(|(_, line)| line.starts_with("if let Some(rest) = flush_overflow_chunks("))
+        .find(|(_, line)| line.starts_with("let Some(rest) = flush_overflow_chunks("))
         .map(|(index, _)| index)
         .expect("worker loop must hand the extracted records to the chunked flush");
     let bridged = executable_lines
         .iter()
-        .skip(bridge)
-        .take_while(|line| !line.starts_with(") {"))
+        .skip(bridge + 1)
+        .take_while(|line| !line.starts_with(')'))
         .any(|line| line.starts_with("&expiry_overflow_deltas,"));
     assert!(bridged, "the chunked flush must receive the extracted expiry records");
     let helper = executable_lines

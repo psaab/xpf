@@ -106,8 +106,8 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 | `loop_body/debug_report.rs` | #1776 cfg(debug-log)-only counters, per-second report, and stall dump; compiled out of release builds. |
 | `loop_body/export_slice.rs` | #13075 per-tick CommandExport slice and steady-state delta drain (`run_export_slice`, `#[inline(never)]`). |
 | `loop_body/gc_teardown.rs` | #13075 session-expiry/GC and control-plane delete teardown helpers, re-exported for worker call sites. |
-| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`); #19026 parked/overflow-first retries. |
-| `loop_body/close_barrier.rs` | #19026 bounded close-permit barrier: per-Close episodes, RX bound, park bound and side slot, head-blocked bit, zombie retirement, rate-limited episode log. |
+| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`); #19026 parked-first retries, bounded ring drain, ring-before-overflow order. |
+| `loop_body/close_barrier.rs` | #19026 bounded close-permit barrier: one RX bound per run of held ticks, park at the bound into a side slot, head-blocked bit, rate-limited park log. |
 | `loop_body/idle_poll.rs` | #6431 `#[inline]` classification of Interrupt-mode idle `poll(2)` returns and one-shot fault summary. |
 | `loop_body/mod.rs` | `worker_loop` steady-state orchestrator; retains per-tick call ordering while selected control slices are `#[inline(never)]` calls into sibling modules. |
 | `loop_body/pptp_drain.rs` | #13075 per-tick PPTP control-inbox drain (`run_pptp_control_drain`, `#[inline(never)]`). |
@@ -139,32 +139,46 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
   take its tuple install permits is a teardown barrier. `run_session_housekeeping`
   retries it before command/control work and before `poll_binding`, which
   keeps the #10419 teardown-before-poll order. `loop_body/close_barrier.rs`
-  bounds that barrier, per blocked Close (one episode per tuple + session id):
-  - **Inside `CLOSE_PERMIT_BARRIER_NS`** (1 ms, the idle path's
-    `INTERRUPT_POLL_TIMEOUT_MS`), the tick skips RX.
-  - **Past it**, every tick still retries the Close first and then polls RX.
-  - **Past `CLOSE_PARK_AFTER_NS`** (10 ms), the Close is parked out of the FIFO
-    into a side slot that is retried first on every tick. Every other delta
-    (HA sync, RT_FLOW, the RPC mirror) keeps flowing instead of filling the
-    4096 ring and latching delta-loss. A same-tuple reincarnation that
-    overtakes a parked Close is safe: the flush's stale-incarnation fence
-    makes the old Close's teardown and HA close id-conditional.
-  - Overflow Closes that an earlier tick deferred (#10309) are retired before
-    the ring, so events RX queued since cannot overtake them.
+  bounds that barrier:
+  - **One RX bound per run.** A run is the consecutive ticks that skipped RX
+    for blocked Closes, whichever Closes they were. Inside
+    `CLOSE_PERMIT_BARRIER_NS` (1 ms, the idle path's
+    `INTERRUPT_POLL_TIMEOUT_MS`) of the run's start the tick skips RX; only a
+    tick that polls RX ends the run. A Close that blocks after an RX tick
+    gets its own window again.
+  - **At the bound the blocked Close is parked** out of the FIFO into a side
+    slot, and the drain continues in the same tick: every delta behind it
+    (the other Closes, HA sync, RT_FLOW, the RPC mirror) retires before RX
+    polls. The parked Close is retried first on every tick and retires once
+    its permit frees. A same-tuple reincarnation that overtakes it is safe:
+    the flush's stale-incarnation fence makes the old Close's teardown and HA
+    close id-conditional.
+  - **One order for the ring and the deferred overflow suffix (#10309).** An
+    overflow Close that could not retire is kept in
+    `deferred_expiry_overflow_deltas` and retried on later ticks AFTER the
+    ring drains, never before it: the ring can hold an older Open/Update of
+    the same session, and a Close must not overtake its own session's older
+    delta (cycle 1 retired the suffix first and emitted Close before Open:
+    Codex R15 P1#3). Deltas queued since the deferral also drain first. For
+    the same session those are newer deltas of a re-materialized same-id row
+    (a Close after them is the correct order) or a new incarnation (the
+    Close is id-fenced at flush); different sessions carry no order.
   - `SessionTable::close_head_blocked` makes a blocked head cost one permit
     try per tick instead of a 256-delta drain and requeue. The post-RX
     export and loss-resync slices also leave a blocked head to housekeeping
     rather than re-draining it and `continue`ing past the loop bottom. The
     bit is set by whichever drain found the block (`drain_and_flush_all_impl`
     or the export slice); `ClosePermitBarrier::on_blocked` only asserts it.
-  - When a Close that waited while RX polled finally retires, a same-id local
-    row is queued for `DeleteSynced` on this worker. That row is the session
-    re-materialized from the still-published shared copy, and the flush fans
-    out to siblings only.
-  - An episode that outlives the RX bound logs one rate-limited `xpf-dp: wN:
-    #19026 session close waiting` line, at most one per 10 s process-wide.
-    The line names the tuple and a `TupleGate::probe()` of the holder class.
-    A logged episode also logs its park or drain.
+  - Each park logs one rate-limited `xpf-dp: wN: #19026 session close
+    parked after N us` line, at most one per 10 s process-wide. The line
+    names the tuple and a `TupleGate::probe()` of the holder class.
+  - **Residual: the parked tuple itself.** While a parked Close waits, RX
+    polls, so a packet of that one tuple can re-materialize a same-id row from
+    the still-published shared copy; that row outlives the Close and ages out
+    on its own idle timer (the #10419 hazard, for the parked tuple only;
+    #19047). Cycle 1 retired such a row with a bare
+    `DeleteSynced(key)`, which could delete a queued replacement incarnation
+    (Codex R15 P1#4), so that mechanism was removed.
   - Before #19026 the skip was unbounded. Because the heartbeat is stored
     before housekeeping, a worker whose Close never got its permit looked
     healthy while it polled no RX at all; #19032 tracks the detector gap.

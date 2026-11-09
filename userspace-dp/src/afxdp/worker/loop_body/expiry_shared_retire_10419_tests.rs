@@ -237,22 +237,38 @@ fn worker_loop_orders_expiry_teardown_before_poll_10419() {
         .iter()
         .position(|line| line.contains("= reap_expired_sessions("))
         .expect("worker loop must reap expiry resources");
-    // #19026: the overflow records are collected by a `filter_map` over the
-    // expired entries (the `extend` it replaced moved with the chunked flush).
-    let overflow = executable_lines
-        .iter()
-        .position(|line| line.starts_with(".filter_map(|entry| entry.overflow_close)"))
-        .expect("worker loop must retain expiry overflow records");
+    // #19026 (cycle 2): the ring drain is `drain_ring_bounded` (which runs
+    // `drain_and_flush_all_impl`, parking a blocked head at the RX bound), and
+    // the overflow suffix is flushed only after it.
     let drain = executable_lines
         .iter()
         .enumerate()
         .skip(reap)
-        .find(|(_, line)| line.starts_with("let _ = drain_and_flush_all_impl("))
+        .find(|(_, line)| line.starts_with("if drain_ring_bounded("))
         .map(|(index, _)| index)
         .expect("worker loop must drain expiry teardown");
+    let overflow = executable_lines
+        .iter()
+        .enumerate()
+        .skip(drain)
+        .find(|(_, line)| line.starts_with("let Some(rest) = flush_overflow_chunks("))
+        .map(|(index, _)| index)
+        .expect("worker loop must flush the retained expiry overflow records");
+    let helper = executable_lines
+        .iter()
+        .position(|line| line.starts_with("fn drain_ring_bounded("))
+        .expect("the bounded ring drain must exist");
+    assert!(
+        executable_lines
+            .iter()
+            .skip(helper)
+            .take_while(|line| !line.starts_with("fn flush_overflow_chunks("))
+            .any(|line| line.starts_with("let _ = drain_and_flush_all_impl(")),
+        "the bounded ring drain must drain and flush the ring"
+    );
     assert!(
         expiry < retire && retire < reap && reap < drain && drain < overflow,
-        "expiry must retire seeds, reap resources, drain Close deltas, then collect overflow"
+        "expiry must retire seeds, reap resources, drain Close deltas, then flush overflow"
     );
     // The poll half of the original pin: housekeeping must run before the
     // per-tick `poll_binding` sweep in the loop that calls it.

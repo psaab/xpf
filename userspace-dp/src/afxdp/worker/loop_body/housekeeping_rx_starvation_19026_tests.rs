@@ -99,7 +99,7 @@ struct Harness19026 {
     /// production flush does on a busy permit) for its first `n` calls.
     flush_requeues_remaining: Option<u64>,
     flush_calls: u64,
-    /// This worker's own command queue (R13 F4 zombie retirement lands here).
+    /// This worker's own command queue (`worker_commands_by_id`).
     own_queue: Arc<Mutex<VecDeque<WorkerCommand>>>,
 }
 
@@ -247,7 +247,10 @@ impl Harness19026 {
 const TICK_NS: u64 = 100_000;
 const BASE_NS: u64 = 10_000_000_000;
 const BARRIER_TICKS: u64 = super::close_barrier::CLOSE_PERMIT_BARRIER_NS / TICK_NS;
-const PARK_TICKS: u64 = super::close_barrier::CLOSE_PARK_AFTER_NS / TICK_NS;
+/// Ticks past which every head that has blocked since the run began is
+/// parked on any head (cycle 2 parks at the RX bound; 2e7dfd349b parked at
+/// 10 ms). A literal so these cells compile unchanged against both heads.
+const PARKED_BY_TICKS: u64 = 105;
 
 /// #19026 Part 1: while a requeued Close cannot take its tuple install
 /// permit, the worker must keep polling RX. Master returned "skip the tick"
@@ -309,8 +312,7 @@ fn requeued_close_without_permit_keeps_polling_rx_19026() {
         still_pending, 1,
         "the Close must be retained exactly once while its permit is unavailable"
     );
-    assert_eq!(h.close_barrier.expired_episodes, 1, "one blocked episode");
-    assert_eq!(parked, 1, "R13 F1: past the park bound the Close sits in the side slot");
+    assert_eq!(parked, 1, "R13 F1: past the bound the Close sits in the side slot");
 }
 
 /// #19026 (guard against over-correction): ordinary permit contention that
@@ -345,7 +347,7 @@ fn transient_close_contention_keeps_teardown_before_poll_19026() {
     );
     assert_eq!(h.flushed_closes_for(&busy), 1, "retired exactly once");
     assert!(!h.sessions.has_pending_deltas());
-    assert_eq!(h.close_barrier.expired_episodes, 0, "no episode outlived the bound");
+    assert!(h.close_barrier.parked.is_empty(), "nothing parked inside the bound");
 }
 
 /// #19026 Part 1 (companion): once the permit returns, the retained Close
@@ -469,7 +471,6 @@ fn barrier_rearms_for_each_blocked_episode_19026() {
         held_first_tick,
         "#19026: a new blocked episode re-arms the barrier (teardown first)"
     );
-    assert_eq!(h.close_barrier.expired_episodes, 1, "only the first episode expired");
 }
 
 // ---- #19026 R13 fold cells (F1-F5) and Codex P2 #5 ----
@@ -487,7 +488,7 @@ fn stuck_close_is_parked_and_later_deltas_flow_19026() {
         .try_acquire_installs([stuck.clone()])
         .expect("hold the stuck tuple");
     let mut now = BASE_NS;
-    for _ in 0..(PARK_TICKS + 5) {
+    for _ in 0..PARKED_BY_TICKS {
         h.tick(now);
         now += TICK_NS;
     }
@@ -547,7 +548,9 @@ fn export_slice_leaves_a_blocked_head_to_housekeeping_19026() {
         .try_acquire_installs([stuck.clone()])
         .expect("hold the stuck tuple");
     let mut now = BASE_NS;
-    for _ in 0..(BARRIER_TICKS + 2) {
+    // Inside the RX bound (past it, cycle 2 parks the head and clears the
+    // bit; the export slice then drains freely behind the parked Close).
+    for _ in 0..2 {
         h.tick(now);
         now += TICK_NS;
     }
@@ -589,100 +592,257 @@ fn export_slice_leaves_a_blocked_head_to_housekeeping_19026() {
     assert_eq!(h.sessions.delta_drained_for_test(), drained_before, "no re-drain");
 }
 
-/// R13 F4: while RX polled with the Close blocked, a packet re-materialized a
-/// same-id local row. When the Close retires, that zombie is queued for
-/// `DeleteSynced` on THIS worker (the flush fans out to siblings only).
+/// Codex R15 P1#4 (cycle 2): while RX polled with the Close blocked, a
+/// packet re-materialized a same-id local row, and an `UpsertSynced` of a
+/// REPLACEMENT incarnation is queued for this worker. When the old Close
+/// retires, the replacement must survive the command drain. 2e7dfd349b's
+/// zombie retirement appended a bare `DeleteSynced(key)` behind the queued
+/// upsert, so the drain installed the replacement and then deleted it.
 #[test]
-fn rx_exposed_zombie_is_retired_when_the_close_drains_19026() {
-    for park in [false, true] {
-        let mut h = Harness19026::new();
-        let key = key_19026(if park { 19_044 } else { 19_043 });
-        let id = 0x1902_6013;
-        h.queue_close(key.clone(), id);
-        let held = crate::afxdp::bpf_map::global_tuple_gate()
-            .try_acquire_installs([key.clone()])
-            .expect("hold the tuple");
-        let mut now = BASE_NS;
-        let ticks = if park { PARK_TICKS + 2 } else { BARRIER_TICKS + 2 };
-        for _ in 0..ticks {
-            h.tick(now);
-            now += TICK_NS;
-        }
-        // The re-materialized replica of the closing session (same id).
-        assert!(h.sessions.upsert_synced_with_origin(
-            crate::session::SessionInstall {
-                key: key.clone(),
-                decision: decision_19026(),
-                metadata: metadata_19026(),
-                source_nat_static: None,
-                origin: SessionOrigin::SharedMaterialize,
-                now_ns: now,
-                protocol: PROTO_TCP,
-                tcp_flags: crate::tcp_flags::TCP_ACK,
-                session_id: id,
-                tcp_close_class: 0,
-                tcp_handshake_state: 0,
-                persistent_lease_hold: None,
-                fwd_packets: 0,
-                rev_packets: 0,
-            },
-            true,
-        ));
-        drop(held);
+fn close_drain_preserves_a_queued_replacement_19026() {
+    let mut h = Harness19026::new();
+    let key = key_19026(19_043);
+    let old_id = 0x1902_6013;
+    let new_id = 0x1902_6913;
+    h.queue_close(key.clone(), old_id);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([key.clone()])
+        .expect("hold the tuple");
+    let mut now = BASE_NS;
+    for _ in 0..PARKED_BY_TICKS {
         h.tick(now);
         now += TICK_NS;
-        h.tick(now);
-        assert_eq!(h.flushed_closes_for(&key), 1, "park={park}: the Close retired");
-        let queued = h
-            .own_queue
-            .lock()
-            .expect("own queue")
-            .iter()
-            .filter(|c| matches!(c, WorkerCommand::DeleteSynced(k) if *k == key))
-            .count();
-        assert_eq!(
-            queued,
-            1,
-            "#19026 R13 F4 (park={park}): the same-id zombie is queued for DeleteSynced here"
-        );
     }
+    let install = |id: u64, origin: SessionOrigin, at: u64| crate::session::SessionInstall {
+        key: key.clone(),
+        decision: decision_19026(),
+        metadata: metadata_19026(),
+        source_nat_static: None,
+        origin,
+        now_ns: at,
+        protocol: PROTO_TCP,
+        tcp_flags: crate::tcp_flags::TCP_ACK,
+        session_id: id,
+        tcp_close_class: 0,
+        tcp_handshake_state: 0,
+        persistent_lease_hold: None,
+        fwd_packets: 0,
+        rev_packets: 0,
+    };
+    // The re-materialized replica of the closing session (same id) ...
+    assert!(h.sessions.upsert_synced_with_origin(
+        install(old_id, SessionOrigin::SharedMaterialize, now),
+        true
+    ));
+    // ... and a replacement incarnation already queued for this worker.
+    let req = crate::SessionSyncRequest {
+        operation: "upsert".to_string(),
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: "10.0.63.106".to_string(),
+        dst_ip: "172.16.80.211".to_string(),
+        src_port: key.src_port,
+        dst_port: key.dst_port,
+        owner_rg_id: 1,
+        session_id: new_id,
+        ..crate::SessionSyncRequest::default()
+    };
+    let mut replacement = crate::server::helpers::build_synced_session_entry(
+        &req,
+        &rustc_hash::FxHashMap::default(),
+        0,
+    )
+    .expect("FIXTURE: replacement entry");
+    replacement.key = key.clone();
+    replacement.decision = decision_19026();
+    replacement.metadata = metadata_19026();
+    replacement.origin = SessionOrigin::WorkerLocalImport;
+    replacement.session_id = new_id;
+    h.own_queue
+        .lock()
+        .expect("own queue")
+        .push_back(WorkerCommand::UpsertSynced(replacement));
+    drop(held);
+    for _ in 0..3 {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    assert_eq!(h.flushed_closes_for(&key), 1, "FIXTURE: the old Close retired");
+    crate::afxdp::session_glue::apply_worker_commands(
+        &h.own_queue,
+        &mut h.sessions,
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &ForwardingState::default(),
+        &BTreeMap::new(),
+        &Arc::new(ShardedNeighborMap::new()),
+        0,
+        &mut VecDeque::new(),
+    );
+    assert_eq!(
+        h.sessions.session_id_for(&key),
+        new_id,
+        "#19026 Codex R15 P1#4: the queued replacement must survive the old Close's retirement"
+    );
 }
 
-/// R13 F5: two different Closes blocked back to back are two episodes; the
-/// second gets its own teardown-before-poll window (master/bb9608f1a6 let it
-/// inherit the first's expired episode and poll RX at once).
+/// R13 F5 (cycle-2 form): a Close that blocks after a tick polled RX gets its
+/// own teardown-before-poll window, even right after an earlier Close was
+/// parked (master/bb9608f1a6 let it inherit the first's expired episode and
+/// poll RX at once).
 #[test]
 fn chained_blocked_closes_each_get_their_own_window_19026() {
     let mut h = Harness19026::new();
     let first = key_19026(19_045);
     let second = key_19026(19_046);
-    h.queue_close(first.clone(), 0x1902_6014);
-    h.queue_close(second.clone(), 0x1902_6015);
     let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    h.queue_close(first.clone(), 0x1902_6014);
     let hold_first = gate.try_acquire_installs([first.clone()]).expect("hold first");
-    let hold_second = gate.try_acquire_installs([second.clone()]).expect("hold second");
     let mut now = BASE_NS;
-    for _ in 0..(BARRIER_TICKS + 3) {
+    for _ in 0..PARKED_BY_TICKS {
         h.tick(now);
         now += TICK_NS;
     }
-    assert_eq!(h.close_barrier.expired_episodes, 1);
-    drop(hold_first);
+    assert_eq!(h.close_barrier.parked.len(), 1, "FIXTURE: the first Close parked");
+    assert!(!h.tick(now), "FIXTURE: this tick polls RX");
+    now += TICK_NS;
+    h.queue_close(second.clone(), 0x1902_6015);
+    let hold_second = gate.try_acquire_installs([second.clone()]).expect("hold second");
     assert!(
         h.tick(now),
         "#19026 R13 F5: the second blocked Close starts its own RX window"
     );
-    for _ in 0..(BARRIER_TICKS + 2) {
+    drop(hold_first);
+    drop(hold_second);
+}
+
+/// R13 N1 (cycle 2): ONE RX bound per run of held ticks, whichever Closes
+/// block in it. Five Closes, each blocked 0.9 ms and freed in order, kept
+/// 2e7dfd349b skipping RX for ~49 consecutive ticks (each Close opened a
+/// fresh window) with no log line.
+#[test]
+fn back_to_back_short_blocks_share_one_rx_bound_19026() {
+    let mut h = Harness19026::new();
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    let keys: Vec<SessionKey> = (0..5u16).map(|i| key_19026(19_060 + i)).collect();
+    let mut holds = Vec::new();
+    for (i, key) in keys.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1902_6060 + i as u64);
+        holds.push(Some(gate.try_acquire_installs([key.clone()]).expect("hold")));
+    }
+    let mut now = BASE_NS;
+    let mut run = 0u64;
+    let mut longest = 0u64;
+    for tick in 0..80u64 {
+        // Close i's holder lets go 0.9 ms after Close i-1's did.
+        for (i, hold) in holds.iter_mut().enumerate() {
+            if tick == 9 * (i as u64 + 1) {
+                hold.take();
+            }
+        }
+        if h.tick(now) {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+        now += TICK_NS;
+    }
+    holds.clear();
+    for _ in 0..3 {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    assert!(
+        longest <= BARRIER_TICKS,
+        "#19026 R13 N1: back-to-back blocked Closes withheld RX for {longest} consecutive \
+         ticks; the bound is {BARRIER_TICKS} per run"
+    );
+    for key in &keys {
+        assert_eq!(h.flushed_closes_for(key), 1, "every Close retires exactly once");
+    }
+}
+
+/// R13 R1(b) (cycle 2): when the RX bound expires, the Closes queued BEHIND the
+/// blocked one (their permits are free) retire before the first tick that
+/// polls RX, so only the blocked tuple is exposed to RX (#10419). On
+/// 2e7dfd349b they waited behind it while RX polled until the 10 ms park.
+#[test]
+fn closes_behind_a_blocked_head_retire_before_rx_polls_19026() {
+    let mut h = Harness19026::new();
+    let stuck = key_19026(19_070);
+    let behind = key_19026(19_071);
+    h.queue_close(stuck.clone(), 0x1902_6070);
+    h.queue_close(behind.clone(), 0x1902_6071);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([stuck.clone()])
+        .expect("hold the stuck tuple");
+    let mut now = BASE_NS;
+    let mut first_rx_tick = None;
+    for tick in 0..PARKED_BY_TICKS {
+        if !h.tick(now) {
+            first_rx_tick = Some(tick);
+            break;
+        }
+        now += TICK_NS;
+    }
+    let behind_flushed = h.flushed_closes_for(&behind);
+    drop(held);
+    assert!(first_rx_tick.is_some(), "FIXTURE: RX polls within the bound");
+    assert_eq!(
+        behind_flushed, 1,
+        "#19026 R13 R1(b): the free Close behind the blocked one must retire before RX polls"
+    );
+}
+
+/// Codex R15 P1#3 / R13 N2 (cycle 2): a deferred overflow Close must not
+/// overtake an OLDER Open of its own session still queued in the ring behind
+/// a blocked head. 2e7dfd349b retried the deferred suffix before the ring and
+/// emitted [Close(X), Open(X)].
+#[test]
+fn overflow_close_never_overtakes_its_own_older_open_19026() {
+    let mut h = Harness19026::new();
+    let stuck = key_19026(19_081);
+    let key = key_19026(19_082);
+    h.queue_close(stuck.clone(), 0x1902_6081);
+    h.queue_open(key.clone());
+    for p in 20_000..24_094u16 {
+        h.queue_open(key_19026(p));
+    }
+    assert_eq!(h.sessions.pending_delta_count(), 4096, "FIXTURE: the ring is full");
+    let mut overflow = Harness19026::new();
+    overflow.queue_close(key.clone(), 0x1902_6082);
+    h.deferred_expiry_overflow_deltas
+        .push(overflow.sessions.pop_front_delta().expect("overflow close"));
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([stuck.clone()])
+        .expect("hold the head");
+    let mut now = BASE_NS;
+    h.tick(now);
+    drop(held);
+    for _ in 0..PARKED_BY_TICKS {
         now += TICK_NS;
         h.tick(now);
     }
-    drop(hold_second);
-    assert_eq!(h.close_barrier.expired_episodes, 2, "two episodes, each counted");
-    assert_eq!(h.flushed_closes_for(&first), 1);
+    let order: Vec<bool> = h
+        .flushed
+        .iter()
+        .filter(|d| d.key == key)
+        .map(|d| d.kind == SessionDeltaKind::Close)
+        .collect();
+    assert_eq!(
+        order,
+        vec![false, true],
+        "#19026 Codex R15 P1#3: Open(X) must precede its own overflow Close(X)"
+    );
 }
 
-/// Codex P2 #5: overflow Closes deferred by an earlier tick are retired before
-/// newer ring events (RX-era opens) once their permit frees.
+/// Codex P2 #5: an overflow Close deferred by an earlier tick, blocked past
+/// the bound, is parked and retried first on every tick, so once its permit
+/// frees it flushes before newer ring events (RX-era opens) that housekeeping
+/// drains. (The post-RX export slice may drain such a newer delta first:
+/// different sessions carry no order; see the session README.)
 #[test]
 fn deferred_overflow_close_precedes_newer_ring_events_19026() {
     let mut h = Harness19026::new();

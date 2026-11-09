@@ -549,9 +549,9 @@ pub(crate) fn worker_loop(
     // session delta ring. This preserves the all-close guarantee for overflow
     // entries without competing with the ring's bounded capacity.
     let mut deferred_expiry_overflow_deltas: Vec<SessionDelta> = Vec::new();
-    // #19026: bounds how long a close waiting on its tuple permit may hold
-    // this worker's RX poll, and parks it past the park bound
-    // (close_barrier.rs `CLOSE_PERMIT_BARRIER_NS` / `CLOSE_PARK_AFTER_NS`).
+    // #19026: bounds how long closes waiting on their tuple permits may hold
+    // this worker's RX poll (one bound per run of held ticks), and parks a
+    // blocked close at that bound (close_barrier.rs `CLOSE_PERMIT_BARRIER_NS`).
     let mut close_permit_barrier = close_barrier::ClosePermitBarrier::default();
     while !stop.load(Ordering::Relaxed) {
         let loop_now_ns = monotonic_nanos();
