@@ -74,7 +74,7 @@ base="/work/${name}"
 # a filter it never matches and prints nothing, so the first version of this
 # loop (61e3e483e4) never saw FROZEN and never waited.
 runner_status() {
-	incus info "$runner" 2>/dev/null | awk '/^Status:/ {print $2; exit}'
+	incus info "$runner" 2>/dev/null | awk 'tolower($1) == "status:" {print toupper($2); exit}'
 }
 waited=0
 while [[ "$(runner_status)" == "FROZEN" ]]; do
@@ -88,7 +88,7 @@ while [[ "$(runner_status)" == "FROZEN" ]]; do
 	sleep 15
 	waited=$((waited + 15))
 done
-[[ "$waited" -gt 0 ]] && echo "vm-test-run: ${runner} resumed after ${waited}s" >&2
+[[ "$waited" -gt 0 ]] && echo "vm-test-run: ${runner} no longer FROZEN after ${waited}s (state: $(runner_status))" >&2
 
 # The runner must be a VM that was provisioned as a test runner.
 if ! incus exec "$runner" -- test -f /etc/xpf-testrunner 2>/dev/null; then
@@ -108,9 +108,19 @@ if [[ "$sync" -eq 1 ]]; then
 	# network, so a cold module cache fails there as "setup failed". Fetch the
 	# modules first, outside the guard. With a warm cache this is quick and
 	# fetches nothing.
+	# The download must not change the tree under test: `go mod download` can
+	# add missing go.sum entries, and a test would then pass on a tree that
+	# fails on the workstation. go.mod and go.sum are hashed before and after,
+	# and any change refuses the run (rc 3 from the remote shell).
 	if incus exec "$runner" -- test -f "${base}/src/go.mod"; then
-		incus exec "$runner" -- su - runner -c "cd '${base}/src' && GOFLAGS=-buildvcs=false go mod download" >&2 ||
-			echo "vm-test-run: warning: go mod download failed on ${runner}; Go legs under testguard may fail with [setup failed]" >&2
+		mod_rc=0
+		incus exec "$runner" -- su - runner -c "cd '${base}/src' || exit 2; before=\$(cat go.mod go.sum 2>/dev/null | sha256sum); GOFLAGS=-buildvcs=false go mod download >&2; rc=\$?; after=\$(cat go.mod go.sum 2>/dev/null | sha256sum); [ \"\$before\" = \"\$after\" ] || exit 3; exit \$rc" >&2 || mod_rc=$?
+		if [[ "$mod_rc" -eq 3 ]]; then
+			echo "vm-test-run: go mod download changed go.mod/go.sum; the tree under test is not tidy (run 'go mod tidy' and commit); refusing" >&2
+			exit 2
+		elif [[ "$mod_rc" -ne 0 ]]; then
+			echo "vm-test-run: warning: go mod download failed on ${runner} (rc ${mod_rc}); Go legs under testguard may fail with [setup failed]" >&2
+		fi
 	fi
 fi
 
@@ -129,9 +139,14 @@ fi
 # get their own cache so they never leave root-owned entries in runner's.
 gocache=/home/runner/.cache/go-build
 [[ "$as_root" -eq 1 ]] && gocache=/root/.cache/go-build
-env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOCACHE='${gocache}' GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src'"
+env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOCACHE='${gocache}' GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src' || { echo 'vm-test-run: no source tree at ${base}/src (sync it first)' >&2; exit 2; }"
+# A root leg keeps HOME=/home/runner (for the toolchains), so anything it
+# writes under runner's lane dir, module cache, cargo registry or cache is
+# root-owned and breaks later unprivileged runs. On exit, hand every such
+# file back to runner. The trap does not change the command's exit status.
+root_fixup="find '${base}' /home/runner/go /home/runner/.cargo /home/runner/.cache -xdev ! -user runner -exec chown -h runner:runner {} + 2>/dev/null"
 if [[ "$as_root" -eq 1 ]]; then
-	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}"
+	incus exec "$runner" -- bash -lc "trap \"${root_fixup}\" EXIT; export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}"
 else
 	incus exec "$runner" -- su - runner -c "${env_prefix}; ${cmd}"
 fi
