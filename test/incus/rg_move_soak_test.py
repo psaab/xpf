@@ -658,8 +658,21 @@ class FakeCluster:
     def __init__(self, clock, owner, skew_s=0.0, cli_rc_on_error=0, lag_polls=0, lan_off=3.0,
                  stuck_traffic=False, revert_after_s=None, dual_after_land=False, helper_lie=False,
                  busy_iperf=False, faults=None, dual_after_s=None, stale_iperf_ports=None,
-                 iperf_reset_fail=False, iperf_reset_timeout=False, untargeted_reply="transfer"):
+                 iperf_reset_fail=False, iperf_reset_timeout=False, untargeted_reply="transfer",
+                 routed_dead=(), host_route_lag_s=0.0, host_anchor_everywhere=False):
         self.clock_ = clock
+        # #19050: routed probes that never answer (their baseline control
+        # fails), the new WAN owner's host-originated routed-path lag after
+        # an RG1 landing, and an anchor both nodes reach (it cannot tell the
+        # WAN owner from the standby).
+        self.routed_dead = set(routed_dead)
+        self.host_route_lag_s = host_route_lag_s
+        self.host_anchor_everywhere = host_anchor_everywhere
+        self.route_files = {}  # name -> (path, interval_s)
+        self.route_seq = {}
+        self.host_files = {}  # (node, "anchor"|"routed") -> path
+        self.host_tick = {}
+        self.node_cmds = []
         # #18559: how the fake answers the UNTARGETED form issued on the owner.
         # "transfer": the fix (a make-before-break transfer, "transfer
         # committed"). "triggered": the pre-#18559 local resign, landing 0.5 s
@@ -834,6 +847,9 @@ class FakeCluster:
             self.events.append((lan_now + 0.3, lan_now + 2.8, "stall"))
         elif fault == "outage":
             self.events.append((lan_now + 0.3, lan_now + 3.8, "gap"))
+        elif fault == "rgap":
+            # #19050: routed destinations only, 3 s (the connected path is fine).
+            self.events.append((lan_now + 0.3, lan_now + 3.3, "rgap"))
         elif fault == "die":
             self.events.append((lan_now + 0.3, float("inf"), "stall"))
         elif fault == "udp-recreated-after-landing":
@@ -923,6 +939,13 @@ class FakeCluster:
     # -- LAN host traffic generators -----------------------------------
 
     def popen_lan(self, script, outfile):
+        m = re.search(r"\.route(\w+)\.pid", script)
+        if m:
+            interval = float(re.search(r" -i ([0-9.]+) ", script).group(1))
+            self.route_files[m.group(1)] = (outfile, interval)
+            if self.gen_start is None:
+                self.gen_start = self.last_emit = self.clock_.t
+            return Proc(), open(os.devnull, "w")
         kind = "iperf" if "iperf3" in script else "ping"
         fam = "v6" if " -6 " in script else "v4"
         self.files[(kind, fam)] = outfile
@@ -939,8 +962,58 @@ class FakeCluster:
         self.gen_start = None  # generators stopped
         return 0, ""
 
+    # -- node-side host-originated probes (#19050) ----------------------
+
+    def popen_node(self, node, script, outfile):
+        kind = re.search(r"\.host(anchor|routed)\.pid", script).group(1)
+        self.host_files[(node, kind)] = outfile
+        self.node_cmds.append((node, script))
+        return Proc(), open(os.devnull, "w")
+
+    def node_sh(self, node, script):
+        self.node_cmds.append((node, script))
+        self.host_files = {}
+        return 0, ""
+
+    def _host_reaches(self, node, kind, t):
+        """Does `node`'s own ping reach its target at fake time t? The WAN
+        RG (RG1) owner reaches the connected anchor at once and the routed
+        target host_route_lag_s after its landing; a standby reaches
+        neither (unless the anchor is reachable everywhere)."""
+        wan = 1
+        if self.forwarder(wan) != node:
+            return kind == "anchor" and self.host_anchor_everywhere
+        if kind == "anchor":
+            return True
+        landed = self.landed_at.get(wan)
+        return landed is None or t - landed >= self.host_route_lag_s
+
+    def _emit_routed(self, t):
+        for name, (path, interval) in list(self.route_files.items()):
+            seq = self.route_seq.get(name, 0)
+            with open(path, "a") as f:
+                while self.gen_start + (seq + 1) * interval <= t:
+                    seq += 1
+                    ts = self.gen_start + seq * interval + self.lan_off
+                    if name in self.routed_dead or self._in(ts, "gap") or self._in(ts, "rgap"):
+                        continue
+                    f.write(f"[{ts:.6f}] 64 bytes from r: icmp_seq={seq % 65536} ttl=60 time=1.0 ms\n")
+            self.route_seq[name] = seq
+        for (node, kind), path in list(self.host_files.items()):
+            k = self.host_tick.get((node, kind), 0)
+            with open(path, "a") as f:
+                while self.gen_start + (k + 1) * 0.01 <= t:
+                    k += 1
+                    ft = self.gen_start + k * 0.01
+                    ts = ft + (self.skew_s if node == 1 else 0.0)  # the node's own clock
+                    if self._host_reaches(node, kind, ft):
+                        f.write(f"[{ts:.6f}] 64 bytes from h: icmp_seq={k % 65536} ttl=62 time=0.5 ms\n")
+                    elif k % 5 == 0:
+                        f.write("ping: connect: Invalid argument\n")
+            self.host_tick[(node, kind)] = k
+
     def _in(self, lan_t, kind):
-        return any(a <= lan_t < b and (k == kind or k == "gap") for a, b, k in self.events)
+        return any(a <= lan_t < b and (k == kind or (k == "gap" and kind != "rgap")) for a, b, k in self.events)
 
     def _tick(self, t):
         self._advance_udp_probe(t)
@@ -952,6 +1025,7 @@ class FakeCluster:
                 self.counters[n][name] = self.counters[n].get(name, 0) + 500
         if self.gen_start is None:
             return
+        self._emit_routed(t)
         for (kind, fam), path in list(self.files.items()):
             if kind == "iperf" and self.busy_iperf:
                 continue
@@ -984,7 +1058,7 @@ class FakeCluster:
 
 def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
              v6=False, restore=True, files=None, strict_cost=False, managed_v6=None, form=soak.FORM_TARGETED,
-             expect_transfer=False):
+             expect_transfer=False, routed=None, host4=False):
     with tempfile.TemporaryDirectory() as d:
         cfg = soak.Config(moves=moves, sleep_s=sleep_s, rgs=rgs, issuer=issuer, traffic=traffic, form=form,
                           helper_check=helper_check, restore=restore, strict_cost=strict_cost,
@@ -992,7 +1066,9 @@ def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=Tr
                           iperf6_on_mouse_target=v6 if managed_v6 is None else managed_v6,
                           budget=soak.Budget(converge_s=sleep_s, expect_transfer=expect_transfer), outdir=d, run_id="t",
                           target4="172.16.80.200", target6="2001:db8::200" if v6 else "",
-                          lan_vip4="10.0.61.1")
+                          lan_vip4="10.0.61.1", routed=list(routed or []),
+                          host4_target="172.16.100.200" if host4 else "",
+                          host4_anchor="172.16.50.1" if host4 else "")
         logs = []
         rc = soak.Soak(cfg, cluster, now_fn=clock.now, sleep_fn=clock.sleep, log=logs.append).run()
         with open(os.path.join(d, "result.json")) as f:
@@ -2557,6 +2633,161 @@ class DualSampleReporting19041(unittest.TestCase):
         rc, res, logs = run_fake(c, clock, moves=2)
         self.assertEqual(res["summary"]["dual_samples"], 0)
         self.assertNotIn("dual_samples=", "\n".join(logs))
+
+
+
+R4 = soak.RoutedProbe("r4", "172.16.100.200", "v4", 0.01, True)
+R6 = soak.RoutedProbe("r6", "2001:4860:4860::8888", "v6", 0.1, False)
+
+
+class RoutedProbe19050Test(unittest.TestCase):
+    """#19050: routed-destination probes and the host-originated route lag.
+
+    The connected ping cannot see a routed-only outage, so each cell below
+    makes the routed and the connected paths DIFFER: a routed-only outage
+    ("rgap") with the connected path clean, a dead routed target with the
+    connected path clean, and a host route lag on the WAN owner only."""
+
+    def test_routed_probes_pass_when_routed_traffic_follows(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0})
+        rc, res, logs = run_fake(c, clock, moves=4, rgs="1", sleep_s=2.0, routed=[R4, R6])
+        self.assertEqual(rc, 0, "\n".join(logs[-6:]))
+        self.assertEqual(verdicts(res), ["PASS"] * 4)
+        for m in res["moves"]:
+            for name in ("r4", "r6"):
+                t = m["routed"][name]
+                self.assertTrue(t["ping_covered"], (name, t))
+                self.assertGreater(t["ping_tail_replies"], 0, (name, t))
+        self.assertIn("routed probes (#19050):", "\n".join(logs))
+        self.assertEqual(res["summary"]["routed"]["r4"]["moves"], 4)
+
+    def test_routed_only_outage_fails_the_lab_probe_though_the_connected_ping_is_clean(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, faults={2: "rgap"})
+        rc, res, _ = run_fake(c, clock, moves=3, rgs="1", sleep_s=5.0, routed=[R4])
+        self.assertEqual(rc, 1)
+        bad = res["moves"][1]
+        self.assertEqual(bad["verdict"], "FAIL")
+        self.assertTrue(any(r.startswith("routed r4 (172.16.100.200) ping gap") for r in bad["reasons"]), bad["reasons"])
+        # The control: the connected ping in the SAME window saw nothing.
+        self.assertLess(bad["traffic"]["v4"]["ping_max_gap_ms"], 100.0)
+        self.assertEqual(verdicts(res)[0], "PASS")
+        self.assertEqual(verdicts(res)[2], "PASS")
+
+    def test_routed_only_outage_on_an_off_lab_probe_is_a_cost(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, faults={2: "rgap"})
+        rc, res, _ = run_fake(c, clock, moves=3, rgs="1", sleep_s=5.0, v6=True, routed=[R6])
+        self.assertEqual(rc, 0)
+        bad = res["moves"][1]
+        self.assertEqual(bad["verdict"], "COST")
+        self.assertIn("off-lab path: COST", bad["reasons"][0])
+
+    def test_routed_traffic_that_never_resumes_in_the_window_fails_even_off_lab(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, faults={2: "rgap"})
+        # A 1 s window is shorter than the 3 s outage: no reply in its tail.
+        rc, res, _ = run_fake(c, clock, moves=3, rgs="1", sleep_s=1.0, v6=True, routed=[R6])
+        self.assertEqual(rc, 1)
+        self.assertTrue(any("routed traffic did not resume" in r for r in res["moves"][1]["reasons"]),
+                        res["moves"][1]["reasons"])
+
+    def test_a_routed_target_dead_at_baseline_is_void_never_pass(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, routed_dead={"r4"})
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=2.0, routed=[R4])
+        self.assertEqual(rc, 2)
+        self.assertEqual(verdicts(res), ["VOID", "VOID"])
+        for m in res["moves"]:
+            self.assertIn("void", m["routed"]["r4"])
+            self.assertTrue(any("routed probe r4 VOID" in r for r in m["reasons"]), m["reasons"])
+        self.assertTrue(any("routed probe r4 VOID" in d for d in res["summary"]["disabled_checks"]))
+
+    def test_host4_measures_the_new_wan_owners_route_lag_on_its_own_clock(self):
+        clock = FakeClock()
+        # node1's clock is 0.3 s off: the lag is read on ONE node's clock.
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_route_lag_s=2.0, skew_s=0.3)
+        rc, res, logs = run_fake(c, clock, moves=4, rgs="1", sleep_s=5.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 0, "\n".join(logs[-6:]))
+        for m in res["moves"]:
+            h = m["host4"]
+            self.assertEqual(h["status"], "MEASURED", h)
+            self.assertAlmostEqual(h["lag_ms"], 2000.0, delta=60.0)
+        self.assertEqual(res["summary"]["host4"]["measured"], 4)
+        self.assertAlmostEqual(res["summary"]["host4"]["lag_ms"]["median"], 2000.0, delta=60.0)
+
+    def test_host4_without_a_lag_measures_zero(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_route_lag_s=0.0)
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=3.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 0)
+        self.assertTrue(all(m["host4"]["lag_ms"] < 60.0 for m in res["moves"]), [m["host4"] for m in res["moves"]])
+
+    def test_host4_is_not_applicable_when_the_wan_rg_does_not_move(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_route_lag_s=2.0)
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="2", sleep_s=3.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 0)
+        h1, h2 = res["moves"][0]["host4"], res["moves"][1]["host4"]
+        self.assertEqual(h1["status"], "N/A")
+        self.assertIn("did not hand it the WAN RG", h1["detail"])
+        self.assertEqual(h2["status"], "N/A")
+        self.assertIn("already owned the WAN RG", h2["detail"])
+
+    def test_host4_anchor_that_cannot_tell_owner_from_standby_is_void(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_anchor_everywhere=True)
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=2.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 2)
+        self.assertTrue(all(m["host4"]["status"] == "VOID" for m in res["moves"]))
+        self.assertTrue(any("host4 probe VOID" in d for d in res["summary"]["disabled_checks"]))
+
+    def test_host4_probes_run_on_both_nodes_and_are_stopped(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0})
+        run_fake(c, clock, moves=1, rgs="1", sleep_s=2.0, routed=[R4], host4=True)
+        started = [(n, cmd) for n, cmd in c.node_cmds if "ping -4 -D -i 0.01" in cmd]
+        self.assertEqual(sorted({n for n, _ in started}), [0, 1])
+        self.assertTrue(any("172.16.50.1" in cmd for _, cmd in started))
+        self.assertTrue(any("172.16.100.200" in cmd for _, cmd in started))
+        self.assertEqual(sorted({n for n, cmd in c.node_cmds if "pkill -INT -P" in cmd}), [0, 1])
+
+
+class RoutedProbePure19050Test(unittest.TestCase):
+    def test_parse_host_ping_keeps_replies_across_restarts_and_errors(self):
+        text = ("ping: connect: Invalid argument\n"
+                "PING 172.16.100.200 (172.16.100.200) 56(84) bytes of data.\n"
+                "[100.250000] 64 bytes from 172.16.100.200: icmp_seq=1 ttl=62 time=0.5 ms\n"
+                "ping: connect: Invalid argument\n"
+                "[100.260000] 64 bytes from 172.16.100.200: icmp_seq=1 ttl=62 time=0.5 ms\n")
+        self.assertEqual(soak.parse_host_ping(text), [100.25, 100.26])
+
+    def test_host_route_lag_with_no_routed_reply_is_measured_as_none(self):
+        h = soak.host_route_lag([10.5, 10.51], [], 10.0, 15.0)
+        self.assertEqual(h["status"], "MEASURED")
+        self.assertIsNone(h["lag_ms"])
+        self.assertIn("no routed reply", h["detail"])
+
+    def test_host_route_lag_reads_both_first_replies(self):
+        h = soak.host_route_lag([10.2, 10.21], [12.7, 12.71], 10.0, 15.0)
+        self.assertAlmostEqual(h["lag_ms"], 2500.0, delta=0.5)
+        self.assertAlmostEqual(h["anchor_s"], 0.2, delta=1e-6)
+
+    def test_routed_probes_from_env(self):
+        ps = soak.routed_probes_from_env("172.16.100.200", "2001:4860:4860::8888", "2602:ffd3:0:2::7", True, env={})
+        self.assertEqual([(p.name, p.interval_s, p.gap_fails) for p in ps],
+                         [("r4", 0.01, True), ("r6", 0.1, False), ("s6", 0.1, False)])
+        self.assertEqual([p.name for p in soak.routed_probes_from_env("a", "b", "c", False, env={})], ["r4"])
+        self.assertEqual(soak.routed_probes_from_env("a", "b", "c", True, env={"SOAK_ROUTED": "0"}), [])
+        self.assertEqual(soak.routed_probes_from_env("", "", "", True, env={}), [])
+        ps = soak.routed_probes_from_env("a", "", "", True, env={"SOAK_ROUTED4": "192.0.2.9",
+                                                                  "SOAK_ROUTED4_GAP_FAILS": "0"})
+        self.assertEqual((ps[0].target, ps[0].gap_fails), ("192.0.2.9", False))
+
+    def test_routed_reasons_skip_void_probes(self):
+        r, c = soak.routed_reasons({"r4": {"void": "dead", "target": "x"}}, soak.Budget())
+        self.assertEqual((r, c), ([], []))
 
 
 if __name__ == "__main__":
