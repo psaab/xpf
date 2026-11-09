@@ -1184,8 +1184,8 @@ func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
 	if err != nil {
 		t.Skip("carrier-loss acceptance skipped: unshare is not available")
 	}
-	cmd := exec.Command(unshare, "-rn", os.Args[0], "-test.run",
-		"^TestProbePinCarrierLossTriggersIPMonFailover12088$", "-test.v")
+	cmd := exec.Command(unshare, append(probePinCarrierLossUnshareFlags12088(os.Geteuid()), os.Args[0], "-test.run",
+		"^TestProbePinCarrierLossTriggersIPMonFailover12088$", "-test.v")...)
 	cmd.Env = append(os.Environ(), probePinCarrierLoss12088InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("private-netns carrier-loss output:\n%s", out)
@@ -1196,6 +1196,27 @@ func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
 		}
 		t.Fatalf("private-netns carrier-loss acceptance failed: %v", err)
 	}
+}
+
+// probePinCarrierLossUnshareFlags12088 picks how the re-executed child gets
+// its private network namespace (#19058).
+//
+// The child is this package's test binary, so its TestMain runs
+// testguard.ExitIfUnsafe, which reads /proc/1/ns/net. A caller that is
+// already uid 0 (the suite under scripts/testguard-run.sh, which is uid 0
+// in a user namespace, or real root on a VM leg) holds the privilege for a
+// plain `unshare -n`. The child then stays in the caller's user namespace,
+// can read PID 1's namespace links, and passes the guard, because its
+// network namespace is new. `-r` would nest a fresh user namespace whose
+// root has no ptrace access to PID 1 ("readlink /proc/1/ns/net: permission
+// denied"). The guard refused that child on every testguard run, so the
+// acceptance never ran. A non-root caller still needs `-r` to gain the
+// privilege. Before testguard that was the suite's only shape.
+func probePinCarrierLossUnshareFlags12088(euid int) []string {
+	if euid == 0 {
+		return []string{"-n"}
+	}
+	return []string{"-rn"}
 }
 
 func runProbePinCarrierLossInPrivateNetns12088(t *testing.T) {
