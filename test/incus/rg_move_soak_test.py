@@ -2169,16 +2169,17 @@ def interleaving_schedule(schedule):
 
 
 class DualActiveSampling19041(unittest.TestCase):
-    """#19041: Soak.views() reads node0 and node1 with two independent
-    status commands. A clean handoff can be read as node0 primary (just
-    before) and node1 primary (just after), with no real overlap. The old
-    scorer recorded every such pair as a permanent dual-active FAIL; under
-    load, that failed Orchestration cells at random. A dual-active verdict
-    now needs the immediate re-sample to repeat it (or to be unreadable).
+    """#19041: the soak used to read node0 and node1 in parallel during a
+    move. A clean handoff could then be read as the old owner primary (just
+    before) and the target primary (just after), with no real overlap, and
+    the old scorer recorded that pair as a dual-active FAIL. Under load,
+    that failed Orchestration cells at random. During a move the soak now
+    reads the target first and the old owner second, an order that cannot
+    straddle a clean handoff.
 
     The cited cells run unmodified under SCHEDULES deterministic
-    interleavings of the two reads, against a fake whose reads are
-    independent like production's."""
+    interleavings of every remaining parallel read, against a fake whose
+    reads are independent like production's."""
 
     CELLS = ("test_landing_bound_is_from_the_cli_return",
              # The three below exist on #18559's branch; included when present.
@@ -2267,92 +2268,200 @@ class ScriptedIncus(soak.IncusCluster):
         return 1, f"unexpected {argv!r}"
 
 
-class DualActiveScoring19041(unittest.TestCase):
-    """The soak's dual-active scoring, through the real Soak.views(),
-    IncusCluster.status() and one_rg(), with scripted node reads (#19041,
-    the review seat's reproduction)."""
+class HandoffCluster:
+    """A clean break-before-make handoff between two status reads. After the
+    move CLI, ownership moves from the old owner to the target in one step,
+    once `flip_after` more status reads have been taken. Each read renders
+    the state at that read (#19041)."""
 
-    def one_rg(self, reads, target=1, converge_s=5.0, read_s=0.0):
-        clock = FakeClock()
-        c = ScriptedIncus(reads, clock, read_s)
+    def __init__(self, owner, flip_after):
+        self.owner = owner
+        self.flip_after = flip_after
+        self.pending = None
+        self.reads_since_cli = 0
+        self.order = []
+
+    def cli(self, node, cmd):
+        self.pending = int(cmd.rsplit(" ", 1)[1])
+        self.reads_since_cli = 0
+        if self.flip_after == 0:
+            self.owner, self.pending = self.pending, None
+        return 0, "Manual failover completed for redundancy group 2 (transfer committed)\n"
+
+    def status(self, node):
+        view = status_text({2: self.owner}, node)
+        self.order.append(node)
+        if self.pending is not None:
+            self.reads_since_cli += 1
+            if self.reads_since_cli >= self.flip_after:
+                self.owner, self.pending = self.pending, None
+        return view
+
+
+def peer_forwarding_view(me, owner):
+    """`me`'s view with NO Forwarding line under its own row, and one under
+    the PEER's row (Codex P1's shape, #19041)."""
+    lines = ["Cluster ID: 22", f"Node name: node{me}", "",
+             "Node   Priority Status         Preempt  Manual   Monitor-failures", "",
+             "Redundancy group: 2 , Failover count: 3"]
+    for node in (0, 1):
+        role = "primary" if owner == node else "secondary"
+        lines.append(f"node{node}  {200 - 100 * node}      {role:<14} no       no       None")
+        if node != me:
+            lines.append("  Forwarding: rg-active=inactive vrrp-master=none")
+    return "\n".join(lines) + "\n"
+
+
+class ProbeIncus(ScriptedIncus):
+    """ScriptedIncus plus the shapes the #19041 review seats used."""
+
+    def _exec(self, ref, argv, timeout=None):
+        node = {"fw0": 0, "fw1": 1}[ref]
+        if argv[-1] == "show chassis cluster status":
+            seq = self.reads[node]
+            shape = seq[0]
+            if shape == "div":  # R16 F2: secondary/inactive with a DIVERGENCE note
+                seq.pop(0) if len(seq) > 1 else None
+                self.status_reads[node] += 1
+                return 0, status_text({2: 1 - node}, node,
+                                      " -- DIVERGENCE: VRRP master on only some member interfaces")
+            if shape == "peerfwd":  # Codex P1: own Forwarding line missing, the peer row's present
+                seq.pop(0) if len(seq) > 1 else None
+                self.status_reads[node] += 1
+                return 0, peer_forwarding_view(node, 1 - node)
+            if shape == "unknownfwd":  # Codex P2: an unknown Forwarding value
+                seq.pop(0) if len(seq) > 1 else None
+                self.status_reads[node] += 1
+                return 0, status_text({2: node}, node).replace("rg-active=active", "rg-active=unknown")
+        return super()._exec(ref, argv, timeout)
+
+
+class DualActiveScoring19041(unittest.TestCase):
+    """The soak's dual-active scoring through the real Soak.views(),
+    IncusCluster.status(), one_rg() and watch_window() (#19041). During a
+    move, the target is read first and the old owner second, and every
+    dual-active sample FAILs."""
+
+    def soak_for(self, cluster, clock, converge_s=5.0, **kw):
         cfg = soak.Config(traffic=False, helper_check=False, budget=soak.Budget(converge_s=converge_s))
-        s = soak.Soak(cfg, c, now_fn=clock.now, sleep_fn=clock.sleep, log=lambda *_: None)
+        return soak.Soak(cfg, cluster, now_fn=clock.now, sleep_fn=clock.sleep, log=lambda *_: None, **kw)
+
+    def one_rg(self, reads, target=1, converge_s=5.0, read_s=0.0, cluster_cls=ScriptedIncus):
+        clock = FakeClock()
+        c = cluster_cls(reads, clock, read_s)
+        s = self.soak_for(c, clock, converge_s)
         pre = soak.Ownership(1 - target, False, "pre")
         res, _, _ = s.one_rg(2, target, pre)
         return res, c, s
 
-    def test_handoff_straddle_is_a_suspect_not_a_dual_active(self):
-        # node0 read just before the handoff, node1 just after: a dual PAIR,
-        # no real overlap. The immediate re-sample reads node1 owning it.
-        res, c, _ = self.one_rg({0: [0, 1], 1: [1]})
-        self.assertFalse(res.dual_active, res.last_detail)
-        self.assertEqual(res.dual_suspects, 1)
-        self.assertIsNotNone(res.landed_s)
-        self.assertEqual(c.status_reads, {0: 2, 1: 2})  # the suspect and its re-sample
-        rec = soak.MoveRecord(1, 1, 0, 0.0, 0.0, [res])
-        self.assertEqual(soak.move_verdict(rec, soak.Budget(), traffic_enabled=False)[0], soak.PASS)
+    def verdict(self, res, converge_s=5.0):
+        rec = soak.MoveRecord(1, res.target, 0, 0.0, 0.0, [res])
+        return soak.move_verdict(rec, soak.Budget(converge_s=converge_s), traffic_enabled=False)
 
-    def test_handoff_straddle_back_to_node0_is_a_suspect(self):
-        res, _, _ = self.one_rg({0: [0], 1: [1, 0]}, target=0)
-        self.assertFalse(res.dual_active, res.last_detail)
-        self.assertEqual(res.dual_suspects, 1)
-        self.assertIsNotNone(res.landed_s)
+    # -- the read order ---------------------------------------------------
+
+    def test_target_first_never_reads_a_clean_handoff_as_dual_and_old_first_does(self):
+        # The ownership flips between the two reads of one sample. Read the
+        # target first, and the sample shows the handoff in progress (nobody
+        # owns it yet) or done. Read the old owner first (the order parallel
+        # reads can take), and the same clean handoff shows both primary.
+        for target in (1, 0):
+            old = 1 - target
+            for first, want_dual in ((target, False), (old, True)):
+                with self.subTest(target=target, first=first):
+                    clock = FakeClock()
+                    c = HandoffCluster(owner=old, flip_after=1)
+                    c.cli(old, f"request chassis cluster failover redundancy-group 2 node {target}")
+                    s = self.soak_for(c, clock)
+                    v0, v1 = s.views(first=first)
+                    self.assertEqual(c.order, [first, 1 - first])
+                    self.assertEqual(soak.rg_ownership(2, v0, v1).dual_active, want_dual)
+
+    def test_a_move_reads_the_target_first_wherever_the_handoff_falls(self):
+        # one_rg over a clean handoff landing after 0..7 reads, both
+        # directions: never dual-active, always landed. The old parallel
+        # reads, made old-first by the executor patch, show a dual sample
+        # for some of these positions.
+        for target in (1, 0):
+            old = 1 - target
+            for flip_after in range(8):
+                with self.subTest(target=target, flip_after=flip_after):
+                    clock = FakeClock()
+                    c = HandoffCluster(owner=old, flip_after=flip_after)
+                    s = self.soak_for(c, clock)
+                    with mock.patch.object(soak.concurrent.futures, "ThreadPoolExecutor",
+                                           lambda max_workers=None: InterleavingExecutor(first=old, steps=0)):
+                        res, _, _ = s.one_rg(2, target, soak.Ownership(old, False, "pre"))
+                    self.assertEqual((res.dual_active, res.dual_samples), (False, 0), res.dual_detail)
+                    self.assertIsNotNone(res.landed_s)
+                    self.assertEqual(c.order[0], target)  # every sample starts with the target
+                    self.assertEqual(c.order[:2], [target, old])
+
+    def test_the_window_reads_the_move_target_first(self):
+        clock = FakeClock()
+        c = HandoffCluster(owner=1, flip_after=0)
+        s = self.soak_for(c, clock)
+        s._owners = {}
+        res = soak.RGMoveResult(2, 1, 0, "pre", soak.CLI_OK, "", 0, 0.5, 0.6, "", False)
+        s.watch_window([res], s.now() + 0.5, first=1)
+        self.assertEqual(c.order[:4], [1, 0, 1, 0])
+        self.assertFalse(res.dual_active)
+
+    # -- real overlaps still FAIL ------------------------------------------
 
     def test_overlapping_reads_of_a_real_dual_active_fail(self):
-        # Both nodes claim the RG in one sample (simultaneous reads) and the
-        # state is still there for the re-sample: a real dual-active.
         res, _, _ = self.one_rg({0: ["dual", "dual", 1], 1: ["dual", "dual", 1]})
         self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
-        rec = soak.MoveRecord(1, 1, 0, 0.0, 0.0, [res])
-        verdict, why = soak.move_verdict(rec, soak.Budget(), traffic_enabled=False)
+        self.assertEqual(res.dual_samples, 2)
+        verdict, why = self.verdict(res)
         self.assertEqual(verdict, soak.FAIL)
-        self.assertIn("dual-active", " ".join(why))
+        self.assertTrue(any("both nodes claimed it in one sample" in w and "node1 read first" in w for w in why), why)
 
     def test_sustained_dual_active_fails_and_never_lands(self):
         res, _, _ = self.one_rg({0: ["dual"], 1: ["dual"]})
         self.assertTrue(res.dual_active)
         self.assertIsNone(res.landed_s)
 
-    def test_unreadable_re_sample_keeps_the_dual_active(self):
-        # Fail closed: a suspect the re-sample cannot read is not cleared.
-        res, c, _ = self.one_rg({0: [0, 1], 1: [1, None, 1]})
+    def test_old_owner_still_primary_after_the_target_claimed_fails(self):
+        # The target (read first) claims the RG and the old owner (read
+        # second) still claims it: a real overlap, such as a make-before-break
+        # transfer whose old owner has not let go. It FAILs even when the
+        # next sample is clean.
+        res, _, _ = self.one_rg({0: [0, 1], 1: [1]})
         self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
-        self.assertIsNotNone(res.landed_s)  # it landed afterwards; the dual-active stands
+        self.assertEqual(self.verdict(res)[0], soak.FAIL)
 
-    def test_duplicate_row_re_sample_keeps_the_dual_active(self):
-        res, _, _ = self.one_rg({0: [0, "dup", 1], 1: [1]})
-        self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
-
-    def test_a_cleared_suspect_does_not_hide_a_later_real_dual_active(self):
-        # Suspect, cleared, landed; then the window sees a real dual-active.
-        res, c, s = self.one_rg({0: [0, 1, "dual", "dual", 1], 1: [1, 1, "dual", "dual", 1]})
-        self.assertFalse(res.dual_active)
-        self.assertEqual(res.dual_suspects, 1)
-        s._owners = {}
-        s.watch_window([res], s.now() + 1.0)
-        self.assertTrue(res.dual_active)
-
-    def verdict(self, res, converge_s=5.0):
-        rec = soak.MoveRecord(1, res.target, 0, 0.0, 0.0, [res])
-        return soak.move_verdict(rec, soak.Budget(converge_s=converge_s), traffic_enabled=False)
+    def test_review_probes_all_fail(self):
+        # Every shape the #19041 review seats used against the re-sample
+        # mechanism at 27c29482b4 starts with one dual-active sample. With
+        # the mechanism removed, each is a FAIL, whatever the next reads say.
+        probes = {
+            "R16 F1: target no longer holds it next": {0: [0, 9, 1], 1: [1, 9, 1]},
+            "R16 F2: old owner's DIVERGENCE note": {0: [0, "div", 1], 1: [1, 1, 1]},
+            "Codex P1: peer row's Forwarding line": {0: [0, "peerfwd", 1], 1: [1, 1, 1]},
+            "Codex P2: unknown Forwarding value": {0: [0, 1, 1], 1: [1, "unknownfwd", 1]},
+            "Codex P2: overlap through the target's next read": {0: [0, 1, 1], 1: [1, 1, 1]},
+            "R18 shape B: old owner still holding next": {0: [0, 0, 1], 1: [1, 0, 1]},
+            "header-only next read": {0: [0, 1], 1: [1, "header", 1]},
+            "duplicate-row next read": {0: [0, "dup", 1], 1: [1]},
+        }
+        for name, reads in probes.items():
+            with self.subTest(probe=name):
+                res, _, _ = self.one_rg(reads, cluster_cls=ProbeIncus)
+                self.assertTrue(res.dual_active, res.last_detail)
+                self.assertEqual(self.verdict(res)[0], soak.FAIL)
 
     def test_post_landing_dual_sample_is_dual_active_and_a_revert(self):
-        # R16/R18 F1 and Codex P1 (#19041 review at f51ca9d0b2). This cell
-        # was test_window_suspect_is_not_a_revert, with the opposite
-        # expectation. After landing no handoff is pending, so a window
-        # sample in which node0 claims the RG while node1 holds it is a
-        # dual-active RG, even when the next read is clean. The observation
-        # also stands for the revert check; no re-sample replaces it.
+        # R16/R18 F1 and Codex P1 (#19041 review at f51ca9d0b2). After landing
+        # no handoff is pending, so a window sample in which node0 claims the
+        # RG while node1 holds it is dual-active, and also a revert.
         res, c, s = self.one_rg({0: [1, 1, 0, 1], 1: [1, 1, 1, 1]})
         self.assertIsNotNone(res.landed_s)
         s._owners = {}
-        s.watch_window([res], s.now() + 0.5)
+        s.watch_window([res], s.now() + 0.5, first=1)
         self.assertTrue(res.dual_active)
         self.assertNotEqual(res.reverted, "")
-        self.assertEqual((res.dual_samples, res.dual_suspects), (1, 0))
+        self.assertEqual(res.dual_samples, 1)
         verdict, why = self.verdict(res)
         self.assertEqual(verdict, soak.FAIL)
         self.assertTrue(any("dual-active" in w for w in why), why)
@@ -2360,81 +2469,46 @@ class DualActiveScoring19041(unittest.TestCase):
 
     def test_post_landing_one_sample_overlap_fails(self):
         # R18 shape A: landed on node1, then ONE sample in which both nodes'
-        # own views claim RG2 (the pre-#19041 one-sample fixture), then clean.
+        # own views claim RG2, then clean.
         res, c, s = self.one_rg({0: [1, "dual", 1], 1: [1, "dual", 1]})
         s._owners = {}
-        s.watch_window([res], s.now() + 0.5)
+        s.watch_window([res], s.now() + 0.5, first=1)
         self.assertTrue(res.dual_active)
         self.assertEqual(self.verdict(res)[0], soak.FAIL)
 
-    def test_re_sample_showing_the_old_owner_still_holding_is_an_overlap(self):
-        # R18 shape B: pre=node0, target=node1. A dual pair, then a re-sample
-        # in which node0 still owns the RG: node1 claimed it while node0 held
-        # it. A straddle of 0->1 can only resolve toward node1.
-        res, _, _ = self.one_rg({0: [0, 0, 1], 1: [1, 0, 1]})
-        self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
-        self.assertEqual(self.verdict(res)[0], soak.FAIL)
+    # -- whose Forwarding line ---------------------------------------------
 
-    def test_re_sample_with_old_owner_forwarding_still_active_is_an_overlap(self):
-        # The old owner's role row says secondary, but its own Forwarding line
-        # is still active: it has not fully let go.
-        class HalfReleased(ScriptedIncus):
-            def _exec(self, ref, argv, timeout=None):
-                rc, out = super()._exec(ref, argv, timeout)
-                if argv[-1] == "show chassis cluster status":
-                    # The re-sample: node0 secondary but still forwarding,
-                    # node1 primary but not yet forwarding.
-                    if ref == "fw0" and self.status_reads[0] == 2:
-                        out = out.replace("rg-active=inactive", "rg-active=active")
-                    if ref == "fw1" and self.status_reads[1] == 2:
-                        out = out.replace("rg-active=active", "rg-active=inactive")
-                return rc, out
-        clock = FakeClock()
-        c = HalfReleased({0: [0, 1], 1: [1]})
-        s = soak.Soak(soak.Config(traffic=False, helper_check=False), c, now_fn=clock.now,
-                      sleep_fn=clock.sleep, log=lambda *_: None)
-        res, _, _ = s.one_rg(2, 1, soak.Ownership(0, False, "pre"))
-        self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
+    def test_a_peer_rows_forwarding_line_does_not_speak_for_the_node(self):
+        # Codex P1, parser part: node0's view has no Forwarding line under
+        # its own row, only one under node1's. That is not node0's Forwarding
+        # state, so node0 is not shown released and the move cannot land.
+        v0 = soak.parse_status(peer_forwarding_view(0, 1))
+        v1 = soak.parse_status(status_text({2: 1}, 1))
+        self.assertEqual(v0[2].forwarding_node, 1)
+        self.assertIsNone(soak.own_forwarding(v0[2], 0))
+        self.assertFalse(soak.views_readable(2, v0, v1))
+        own = soak.rg_ownership(2, v0, v1)
+        self.assertIsNone(own.owner)
+        self.assertIn("unreadable", own.detail)
+        res, _, _ = self.one_rg({0: ["peerfwd"], 1: [1]}, cluster_cls=ProbeIncus)
+        self.assertIsNone(res.landed_s)
 
-    def test_dual_after_the_old_owner_let_go_is_not_cleared(self):
-        # node0, the old owner, is seen fully released in sample 1, before
-        # node1 has claimed the RG. Sample 2 is dual: node0 took the RG back.
-        # A straddle of the handoff is no longer possible, so no re-sample
-        # clears it (R16 F1, item 6).
-        res, c, _ = self.one_rg({0: [1, 0, 1], 1: [0, 1, 1]})
-        self.assertTrue(res.dual_active)
-        self.assertEqual((res.dual_samples, res.dual_suspects), (1, 0))
-        self.assertEqual(c.status_reads, {0: 3, 1: 3})  # no re-sample: the third read is the landing
+    def test_an_unknown_forwarding_value_is_not_a_reading(self):
+        # Codex P2: a value that is neither active nor inactive.
+        v0 = soak.parse_status(status_text({2: 1}, 0))
+        v1 = soak.parse_status(status_text({2: 1}, 1).replace("rg-active=active", "rg-active=unknown"))
+        self.assertFalse(soak.views_readable(2, v0, v1))
+        own = soak.rg_ownership(2, v0, v1)
+        self.assertIsNone(own.owner)
+        self.assertIn("unreadable", own.detail)
+        self.assertTrue(soak.views_readable(2, v0, soak.parse_status(status_text({2: 1}, 1))))
 
-    def test_header_only_re_sample_is_unreadable(self):
-        # Codex P1: an RG header with no node row and no Forwarding line is
-        # not a reading, so it cannot clear a suspect.
-        res, _, _ = self.one_rg({0: [0, 1], 1: [1, "header", 1]})
-        self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
+    # -- the landing bound, on the monotonic clock --------------------------
 
-    def test_re_sample_without_forwarding_lines_is_unreadable(self):
-        res, _, _ = self.one_rg({0: [0, "noforward", 1], 1: [1, "noforward", 1]})
-        self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
-
-    def test_re_sample_missing_the_targets_forwarding_line_is_unreadable(self):
-        # node0, the old owner, reads fully released, but node1's own view
-        # has its role row and no Forwarding line: an incomplete reading,
-        # which cannot clear the suspect (Codex P1).
-        res, _, _ = self.one_rg({0: [0, 1], 1: [1, "noforward", 1]})
-        self.assertTrue(res.dual_active)
-        self.assertEqual(res.dual_suspects, 0)
-
-    def test_landing_seen_by_a_re_sample_past_the_bound_fails(self):
-        # Codex P2: a 1 s bound, reads that take time, a suspect at about
-        # 1.0 s and a clean re-sample after it. The landing is credited when
-        # the re-sample finishes, which is past the bound, so the move FAILs.
-        res, _, _ = self.one_rg({0: [0, 0, 0, 1], 1: [0, 0, 1, 1]}, converge_s=1.0, read_s=0.15)
-        self.assertFalse(res.dual_active)
-        self.assertEqual(res.dual_suspects, 1)
+    def test_landing_read_past_the_bound_fails(self):
+        # A 1 s bound, reads that take time. The first sample to see the RG
+        # landed finishes past the bound, so the move FAILs.
+        res, _, _ = self.one_rg({0: [0, 0, 1], 1: [0, 0, 1]}, converge_s=1.0, read_s=0.15)
         self.assertIsNotNone(res.landed_s)
         self.assertGreater(res.landed_s - res.cli_seconds, 1.0)
         verdict, why = self.verdict(res, converge_s=1.0)
@@ -2442,54 +2516,47 @@ class DualActiveScoring19041(unittest.TestCase):
         self.assertTrue(any("past the 1s bound" in w for w in why), why)
 
     def test_landing_within_the_bound_passes(self):
-        # Control for the bound: the same reads with a 5 s bound PASS.
-        res, _, _ = self.one_rg({0: [0, 0, 0, 1], 1: [0, 0, 1, 1]}, converge_s=5.0, read_s=0.15)
+        res, _, _ = self.one_rg({0: [0, 0, 1], 1: [0, 0, 1]}, converge_s=5.0, read_s=0.15)
         self.assertEqual(self.verdict(res, converge_s=5.0)[0], soak.PASS)
 
-
-class StraddleOnceCluster(FakeCluster):
-    """After each move command, the old owner's next status read renders the
-    pre-move owner once, so the first sample straddles a clean handoff."""
-
-    def cli(self, node, cmd):
-        before = dict(self.owner)
-        out = super().cli(node, cmd)
-        self.stale_next = {rg: o for rg, o in before.items() if self.owner.get(rg) != o}
-        return out
-
-    def status(self, node):
-        stale = getattr(self, "stale_next", {})
-        if stale and node in stale.values():
-            self.stale_next = {}
-            view = status_text({rg: stale.get(rg, o) for rg, o in self.owner.items()}, node)
-            self.clock_.sleep(self.STATUS_READ_S)
-            return view
-        return super().status(node)
-
-
-class DualSuspectReporting19041(unittest.TestCase):
-    """R16/R18 F2: cleared suspects are visible in the summary and on the
-    console, not only in result.json."""
-
-    def test_straddles_are_counted_in_the_summary_and_printed(self):
+    def test_a_wall_clock_step_cannot_shrink_the_landing_time(self):
+        # Codex P2: the wall clock steps back 1.5 s mid-move. Durations and
+        # deadlines run on the monotonic clock, so the landing still reads
+        # past the 1 s bound and the move FAILs.
         clock = FakeClock()
-        c = StraddleOnceCluster(clock, {2: 0})
-        rc, res, logs = run_fake(c, clock, moves=2)
-        self.assertEqual(rc, 0, res["summary"])
-        self.assertEqual(res["summary"]["dual_samples"], 2)
-        self.assertEqual(res["summary"]["dual_suspects_cleared"], 2)
-        text = "\n".join(logs)
-        self.assertIn("dual_samples=1 cleared=1", text)
-        self.assertIn("rg-move-soak: 2 dual-active sample(s) seen; 2 cleared as pre-landing handoff straddles", text)
-        # The adapter's headline is still the LAST "passed, failed" line.
-        self.assertTrue(logs[-1].startswith("rg-move-soak: 2 passed, 0 failed"), logs[-1])
+        start = clock.t
 
-    def test_a_clean_run_prints_no_dual_line(self):
+        def wall():
+            return clock.now() - (1.5 if clock.t - start > 0.5 else 0.0)
+        c = ScriptedIncus({0: [0, 0, 1], 1: [0, 0, 1]}, clock, 0.15)
+        cfg = soak.Config(traffic=False, helper_check=False, budget=soak.Budget(converge_s=1.0))
+        s = soak.Soak(cfg, c, now_fn=wall, sleep_fn=clock.sleep, log=lambda *_: None, mono_fn=clock.now)
+        res, _, _ = s.one_rg(2, 1, soak.Ownership(0, False, "pre"))
+        self.assertGreater(res.landed_s - res.cli_seconds, 1.0)
+        self.assertEqual(self.verdict(res, converge_s=1.0)[0], soak.FAIL)
+
+
+class DualSampleReporting19041(unittest.TestCase):
+    """The dual-active sample count reaches the summary and the per-move
+    console line (#19041)."""
+
+    def test_dual_samples_are_counted_and_printed(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0}, dual_after_land=True)
+        rc, res, logs = run_fake(c, clock, moves=2)
+        self.assertEqual(rc, 1)
+        n = sum(r["dual_samples"] for m in res["moves"] for r in m["rgs"])
+        self.assertGreater(n, 0)
+        self.assertEqual(res["summary"]["dual_samples"], n)
+        self.assertIn("dual_samples=", "\n".join(logs))
+        self.assertNotIn("dual_suspects_cleared", res["summary"])
+
+    def test_a_clean_run_has_none(self):
         clock = FakeClock()
         c = FakeCluster(clock, {2: 0})
         rc, res, logs = run_fake(c, clock, moves=2)
         self.assertEqual(res["summary"]["dual_samples"], 0)
-        self.assertNotIn("dual-active sample(s) seen", "\n".join(logs))
+        self.assertNotIn("dual_samples=", "\n".join(logs))
 
 
 if __name__ == "__main__":
