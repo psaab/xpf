@@ -31,15 +31,17 @@
 # mouse-iperf3@52xx as before. `socket` (tcp, udp) is for a target that serves
 # those ports itself through socket-activated iperf3@52xx.socket units, which
 # are hand-provisioned lab state (no script here installs them; the refusal
-# prints the restore command). There `up` installs no mouse-iperf3 unit. It
-# first REFUSES, changing nothing, unless every port has a listener on the
-# target's v4 address. It then stands down our own leftover units by exact
-# name (a failed disable of an existing unit refuses) and checks again. If a
-# port died, our unit was serving it, so it puts those units back as they were
-# and refuses. Two review rounds of a runtime port-ownership classifier kept
-# finding new edge cases (orphans, address coverage, enabled-runtime units),
-# so the provider is a per-cluster fact. The runtime checks are listener
-# presence and our own units' state.
+# prints the restore command). There `up` installs, enables, disables or
+# restores NO mouse-iperf3 unit:
+#   - before any change, it REFUSES if any of our mouse-iperf3@52xx units is
+#     enabled or active, or their state cannot be read. The refusal names
+#     them and prints the exact `systemctl disable --now` commands;
+#   - at the end it REFUSES unless every port has a listener on the target's
+#     v4 address.
+# A runtime port-ownership classifier (two review rounds) and then an
+# automatic stand-down/restore (three) each kept drawing new edge cases, so
+# both were removed. The provider is a per-cluster fact, and the runtime checks
+# are read-only.
 #
 # THE PRIMARY TARGET'S ADDRESS IS DECLARED HERE (#16213). On the
 # standing loss cluster, the elephant / iperf target that
@@ -301,8 +303,38 @@ claim_skip_markers() {
         "grep '^# claim-probe: SKIPPED' /etc/systemd/system/mouse-addr.service 2>/dev/null || true" 2>/dev/null
 }
 
+# socket_unit_precheck: under `socket`, `up` changes NO mouse-iperf3 unit
+# state. So BEFORE `up` changes anything, refuse if any of our
+# mouse-iperf3@52xx units is enabled or not inactive (a leftover from an
+# earlier `up`, or a target that really is units-served), or if their state
+# cannot be read. Standing them down is the operator's decision; the refusal
+# prints the exact commands (#19022).
+socket_unit_precheck() {
+    local p live=() cmds=""
+    mouse_unit_scan
+    if [[ ${#UNIT_UNKNOWN[@]} -gt 0 ]]; then
+        echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but the state of mouse-iperf3@<port>.service on ${ref} could not be read for port(s) ${UNIT_UNKNOWN[*]} (is the instance running?); nothing was changed (#19022)" >&2
+        return 1
+    fi
+    for p in "${IPERF_PORTS[@]}"; do
+        if [[ "${UNIT_FILE[$p]}" == enabled* || "${UNIT_ACTIVE[$p]}" != inactive ]]; then
+            live+=("mouse-iperf3@${p}(${UNIT_ACTIVE[$p]},${UNIT_FILE[$p]})")
+            cmds+="${cmds:+; }systemctl disable --now mouse-iperf3@${p}"
+        fi
+    done
+    if [[ ${#live[@]} -gt 0 ]]; then
+        echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but ${ref} has mouse-iperf3 unit(s) enabled or active: ${live[*]}. Under \`socket\`, \`up\` changes no mouse-iperf3 unit; nothing was changed. If they are leftovers competing with iperf3@<port>.socket, stand them down: incus exec ${ref} -- sh -c '${cmds}'. If they serve this target, declare MOUSE_TARGET_IPERF_PROVIDER=units in its cluster env file (#19022)" >&2
+        return 1
+    fi
+}
+
 do_up() {
     local echo_source_hash echo_installed_hash echo_content_changed=false
+    # #19022: under `socket`, refuse before ANY change while a mouse-iperf3
+    # unit is enabled or active (a new instance has none).
+    if [[ "$MOUSE_TARGET_IPERF_PROVIDER" == socket ]] && instance_exists; then
+        socket_unit_precheck || return 1
+    fi
     if ! instance_exists; then
         echo "creating ${ref} from ${MOUSE_TARGET_IMAGE}"
         inc init "$MOUSE_TARGET_IMAGE" "$ref" || return 1
@@ -445,58 +477,15 @@ UNIT"
             done ;;
         socket)
             # #19022: this target serves 5200-5211 itself (tcp/udp:
-            # iperf3@52xx.socket). A mouse-iperf3 unit there only
-            # crash-loops on the busy port. Order matters: VERIFY first and
-            # refuse with nothing changed; then stand down our leftovers;
-            # then verify AGAIN, because a port our own unit was serving
-            # (a units-served target declared `socket`) dies when it is
-            # stood down. In that case put back exactly what was stood down
-            # and refuse.
+            # iperf3@52xx.socket); socket_unit_precheck already refused
+            # while any mouse-iperf3 unit was enabled or active. Read-only
+            # from here: every port needs a listener on the target address.
             iperf_listener_scan
             if [[ ${#LISTEN_MISSING[@]} -gt 0 || ${#LISTEN_UNKNOWN[@]} -gt 0 ]]; then
-                echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but ${ref} has no TCP listener on $(target_v4_addrs) for port(s) ${LISTEN_MISSING[*]:-none}${LISTEN_UNKNOWN[*]:+; listeners could not be listed for port(s) ${LISTEN_UNKNOWN[*]}}; nothing was changed. $(socket_restore_hint)" >&2
+                echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but ${ref} has no TCP listener on $(target_v4_addrs) for port(s) ${LISTEN_MISSING[*]:-none}${LISTEN_UNKNOWN[*]:+; listeners could not be listed for port(s) ${LISTEN_UNKNOWN[*]}}; no mouse-iperf3 unit was changed. $(socket_restore_hint)" >&2
                 return 1
             fi
-            mouse_unit_scan
-            if [[ ${#UNIT_UNKNOWN[@]} -gt 0 ]]; then
-                echo "REFUSE: could not read the state of mouse-iperf3@<port>.service on ${ref} for port(s) ${UNIT_UNKNOWN[*]}; nothing was changed (#19022)" >&2
-                return 1
-            fi
-            local p stood=() cleanup_failed=()
-            for p in "${IPERF_PORTS[@]}"; do
-                # Stand down only a unit that is enabled or not inactive. An
-                # absent one (not-found: no file state, inactive) and one
-                # already stood down (disabled, inactive) need nothing, and
-                # `disable` on an absent unit fails, so it is never tried.
-                [[ "${UNIT_FILE[$p]}" == enabled* || "${UNIT_ACTIVE[$p]}" != inactive ]] || continue
-                if inc exec "$ref" -- systemctl disable --now "mouse-iperf3@${p}.service" >/dev/null 2>&1; then
-                    stood+=("$p")
-                    if [[ "${UNIT_ACTIVE[$p]}" == failed ]]; then
-                        inc exec "$ref" -- systemctl reset-failed "mouse-iperf3@${p}.service" >/dev/null 2>&1 || true
-                    fi
-                else
-                    cleanup_failed+=("mouse-iperf3@${p}.service")
-                fi
-            done
-            iperf_listener_scan
-            if [[ ${#LISTEN_MISSING[@]} -gt 0 || ${#LISTEN_UNKNOWN[@]} -gt 0 ]]; then
-                for p in "${stood[@]}"; do
-                    if [[ "${UNIT_FILE[$p]}" == enabled* ]]; then
-                        inc exec "$ref" -- systemctl enable "mouse-iperf3@${p}.service" >/dev/null 2>&1 || true
-                    fi
-                    case "${UNIT_ACTIVE[$p]}" in
-                        active|activating|reloading)
-                            inc exec "$ref" -- systemctl start "mouse-iperf3@${p}.service" >/dev/null 2>&1 || true ;;
-                    esac
-                done
-                echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but port(s) ${LISTEN_MISSING[*]:-}${LISTEN_UNKNOWN[*]:+ ${LISTEN_UNKNOWN[*]}} lost their listener on ${ref} when mouse-iperf3 was stood down: mouse-iperf3 units serve this target, not iperf3@<port>.socket. Put back what was stood down (${stood[*]/#/mouse-iperf3@}). $(socket_restore_hint)" >&2
-                return 1
-            fi
-            if [[ ${#cleanup_failed[@]} -gt 0 ]]; then
-                echo "REFUSE: could not stand down existing unit(s) ${cleanup_failed[*]} on ${ref} (systemctl disable --now failed); left as is, it would compete with iperf3@<port>.socket (#19022)" >&2
-                return 1
-            fi
-            echo "iperf3 provider socket: all ${#IPERF_PORTS[@]} ports have a listener on $(target_v4_addrs); no mouse-iperf3 installed${stood[*]:+, stood down: ${stood[*]/#/mouse-iperf3@}} (#19022)" ;;
+            echo "iperf3 provider socket: all ${#IPERF_PORTS[@]} ports have a listener on $(target_v4_addrs); no mouse-iperf3 unit installed or changed (#19022)" ;;
     esac
 
     do_status
@@ -556,7 +545,7 @@ do_status() {
             echo "iperf3:   mouse-iperf3 not active+enabled: ${off[*]}"
         fi
     elif [[ ${#off[@]} -gt 0 ]]; then
-        echo "iperf3:   leftover mouse-iperf3 units (enabled or not inactive; \`up\` stands them down): ${off[*]}"
+        echo "iperf3:   mouse-iperf3 units enabled or active under \`socket\` (\`up\` refuses until they are stood down): ${off[*]}"
     fi
     echo "echo:     $(inc exec "$ref" -- systemctl is-active mouse-echo 2>/dev/null)"
     # #18576: a claim probe skipped for a pinned address stays visible.

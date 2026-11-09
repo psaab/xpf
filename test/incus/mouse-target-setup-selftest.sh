@@ -48,9 +48,13 @@ case "$1" in
   config) exit 0 ;;                     # eth0 device already present
   file) exit 0 ;;
   exec)
+    exec_ref="${2:-}"
     shift; shift; [[ "${1:-}" == "--" ]] && shift
     cmd="$*"
     echo "$cmd" >> "${STUB_EXEC_LOG:?}"
+    # The same exec keyed by its target instance, first line only (#19022):
+    # with-cluster.sh also execs on the firewall VMs.
+    printf '%s :: %s\n' "$exec_ref" "${cmd%%$'\n'*}" >> "${STUB_EXEC_LOG}.ref"
     case "$cmd" in
       *"ip link show eth0"*) exit 0 ;;
       *"ip -br -4 addr show"*) echo "eth0 UP 172.16.80.201/24 172.16.80.202/24"; exit 0 ;;
@@ -91,32 +95,6 @@ case "$1" in
           *) printf '%s\n' "$STUB_UNIT_STATE" ;;
         esac
         exit 0 ;;
-      "systemctl disable --now mouse-iperf3@"*|"systemctl enable mouse-iperf3@"*|"systemctl enable --now mouse-iperf3@"*|"systemctl start mouse-iperf3@"*)
-        p="${cmd##*mouse-iperf3@}"; p="${p%%.*}"
-        # STUB_FAIL_DISABLE="<port>...": `disable --now` fails for those. As
-        # in real systemd, it also fails for a unit STUB_UNIT_STATE lists as
-        # not-found ("Unit ... does not exist").
-        if [[ "$cmd" == "systemctl disable --now "* ]]; then
-          [[ " ${STUB_FAIL_DISABLE:-} " == *" $p "* ]] && exit 1
-          grep -q "^$p not-found " <<<"${STUB_UNIT_STATE:-}" && exit 1
-        fi
-        # STUB_UNIT_LISTENERS=<dir>: the unit owns a REAL listener on its
-        # port (pid in <dir>/pid.<port>): stopping the unit closes it,
-        # enabling/starting it opens it again.
-        d="${STUB_UNIT_LISTENERS:-}"
-        [[ -n "$d" ]] || exit 0
-        if [[ "$cmd" == "systemctl disable --now "* ]]; then
-          if [[ -f "$d/pid.$p" ]]; then
-            pid="$(<"$d/pid.$p")"; kill "$pid" 2>/dev/null; rm -f "$d/pid.$p"
-            for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.05; done
-          fi
-        elif [[ ! -f "$d/pid.$p" && "$cmd" != "systemctl enable mouse-iperf3@"* ]]; then
-          rm -f "$d/ready.$p"
-          nohup python3 "$d/../listen.py" "$d/ready.$p" "6,::,$p" >/dev/null 2>&1 &
-          echo "$!" > "$d/pid.$p"
-          for _ in $(seq 50); do [[ -e "$d/ready.$p" ]] && break; sleep 0.1; done
-        fi
-        exit 0 ;;
       *systemctl*is-active*) echo active; exit 0 ;;
       *) exit 0 ;;
     esac ;;
@@ -133,7 +111,7 @@ LOCK_ENV=(XPF_CLUSTER_LOCK="${TMP}/lock/lock" XPF_CLUSTER_OWNER="${TMP}/lock/own
           XPF_CLUSTER_BUILD_PROBE=0)
 run_up() { # run_up [ENV=VAL ...] -> prints the recorded unit payload; rc in ${TMP}/rc
     local ilog="${TMP}/incus.log" elog="${TMP}/exec.log" rc
-    : > "$ilog"; : > "$elog"
+    : > "$ilog"; : > "$elog"; : > "${elog}.ref"
     env PATH="${TMP}/bin:${PATH}" STUB_INCUS_LOG="$ilog" STUB_EXEC_LOG="$elog" \
         "${LOCK_ENV[@]}" BPFRX_CLUSTER_ENV= "$@" bash "$SUBJECT" up > "${TMP}/up.out" 2>&1
     rc=$?
@@ -313,13 +291,12 @@ $(<"${TMP}/up.out")"
 # enables mouse-iperf3@52xx exactly as before. `socket` (tcp, udp) is a target
 # that serves those ports itself through iperf3@52xx.socket. There `up`
 # installed mouse-iperf3@52xx anyway and every one crash-looped on the busy
-# port. Now `up` installs none. It first REFUSES, touching nothing, unless
-# each port has a listener on the target v4 address. Then it stands down our
-# own leftover units by exact name (refusing on a failed disable) and checks
-# again. If a port died there, our unit was serving it: it puts those units
-# back and REFUSES. Two review rounds of a runtime ownership classifier kept
-# finding edge cases, so that mechanism is gone. The runtime checks are
-# listener presence and our own units' state.
+# port. Now `up` changes NO mouse-iperf3 unit there. Before any change it
+# REFUSES while one of ours is enabled or active, or their state is
+# unreadable, and prints the exact disable commands. At the end it REFUSES
+# unless each port has a listener on the target v4 address. A runtime
+# ownership classifier and then an automatic stand-down/restore each kept
+# drawing new edge cases, so both are gone; every runtime check is read-only.
 ALL_IPERF=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
 iperf_counts() { # -> "<enable> <disable> <reset>" mouse-iperf3 commands in the exec log
     printf '%s %s %s' "$(grep -c 'systemctl enable --now mouse-iperf3@' "${TMP}/exec.log")" \
@@ -346,15 +323,47 @@ else
     fail "#19022: provider 'sockets' was not refused up front (rc=$(<"${TMP}/rc")); output:
 $(<"${TMP}/up.out")"
 fi
-# 7c. socket, but the listeners cannot be listed: refuse BEFORE touching
-# anything, and say how to restore the socket units.
-run_up "${TCP_ENV[@]}" STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do echo "$p loaded enabled failed"; done)" > /dev/null
-if [[ "$(<"${TMP}/rc")" != 0 && "$(iperf_counts)" == "0 0 0" ]] && ! template_written \
-        && grep -q "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has no TCP listener on 172.16.80.210 for port(s) none; listeners could not be listed for port(s) ${ALL_IPERF[*]}; nothing was changed" "${TMP}/up.out" \
+changes_made() { # any state-changing exec ON THE TARGET, or the echo push
+    grep -E '^tcp:xpf-tcp-target :: ' "${TMP}/exec.log.ref" \
+        | grep -qE 'apt-get|cat > |chmod|systemctl (enable|disable|restart|start|stop|daemon-reload|reset-failed)' \
+        || grep -q 'mouse-echo.py' "${TMP}/incus.log"
+}
+# 7c. socket, our units all stood down, but the listeners cannot be listed:
+# REFUSE, no unit touched, with the socket-unit restore command.
+run_up "${TCP_ENV[@]}" > /dev/null
+# Positive control for changes_made (7g/7h): this `up` passed the unit
+# precheck and DID change the target (apt-get, unit files, echo push) before
+# the listener refusal, so changes_made must see it.
+if [[ "$(<"${TMP}/rc")" != 0 && "$(iperf_counts)" == "0 0 0" ]] && ! template_written && changes_made \
+        && grep -q "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has no TCP listener on 172.16.80.210 for port(s) none; listeners could not be listed for port(s) ${ALL_IPERF[*]}; no mouse-iperf3 unit was changed" "${TMP}/up.out" \
         && grep -qF "systemctl enable --now iperf3@\$p.socket" "${TMP}/up.out"; then
-    pass "provider socket, listeners unlistable: REFUSE before any unit is touched, with the socket-unit restore command"
+    pass "provider socket, listeners unlistable: REFUSE with no unit touched, and the socket-unit restore command"
 else
     fail "#19022: provider socket with an unlistable target: rc=$(<"${TMP}/rc") enable/disable/reset = $(iperf_counts) (want !0, 0 0 0, refusal + restore hint); output:
+$(<"${TMP}/up.out")"
+fi
+# 7g. socket on a target where some of OUR units are enabled or active
+# (5205 started by hand, 5210 enabled+active, 5211 a crash-looping
+# leftover): REFUSE before ANY change, naming exactly those units and
+# printing the exact disable commands. `up` stands nothing down itself.
+run_up "${TCP_ENV[@]}" STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do
+        case $p in 5205) echo "$p loaded disabled active" ;; 5210) echo "$p loaded enabled active" ;;
+                   5211) echo "$p loaded enabled failed" ;; *) echo "$p loaded disabled inactive" ;; esac; done)" > /dev/null
+if [[ "$(<"${TMP}/rc")" != 0 ]] && ! changes_made \
+        && grep -qF "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has mouse-iperf3 unit(s) enabled or active: mouse-iperf3@5205(active,disabled) mouse-iperf3@5210(active,enabled) mouse-iperf3@5211(failed,enabled). Under \`socket\`, \`up\` changes no mouse-iperf3 unit; nothing was changed." "${TMP}/up.out" \
+        && grep -qF "incus exec tcp:xpf-tcp-target -- sh -c 'systemctl disable --now mouse-iperf3@5205; systemctl disable --now mouse-iperf3@5210; systemctl disable --now mouse-iperf3@5211'" "${TMP}/up.out"; then
+    pass "provider socket with enabled/active mouse-iperf3 units: REFUSE before any change, naming them with the exact disable commands"
+else
+    fail "#19022: provider socket with live mouse-iperf3 units: rc=$(<"${TMP}/rc"), changes made: $(changes_made && echo yes || echo no); output:
+$(<"${TMP}/up.out")"
+fi
+# 7h. socket with our units' state unreadable: REFUSE before any change.
+run_up "${TCP_ENV[@]}" STUB_UNIT_STATE=FAIL > /dev/null
+if [[ "$(<"${TMP}/rc")" != 0 ]] && ! changes_made \
+        && grep -q "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but the state of mouse-iperf3@<port>.service on tcp:xpf-tcp-target could not be read for port(s) ${ALL_IPERF[*]} (is the instance running?); nothing was changed" "${TMP}/up.out"; then
+    pass "provider socket with unreadable unit state: REFUSE before any change"
+else
+    fail "#19022: unreadable unit state was not refused before any change (rc=$(<"${TMP}/rc")); output:
 $(<"${TMP}/up.out")"
 fi
 
@@ -408,29 +417,15 @@ if [[ -n "$specs" ]]; then
     for _ in $(seq 50); do [[ -e "$d/ready" ]] && break; sleep 0.1; done
     [[ -e "$d/ready" ]] || { echo "netns listeners never became ready" >&2; kill "$pid"; exit 91; }
 fi
-# NS_UNIT_PORTS: ports a mouse-iperf3 "unit" serves (one listener process
-# each, pid in units/pid.<port>, which the incus stub stops and starts).
-mkdir -p "$d/units"; rm -f "$d"/units/*
-for p in ${NS_UNIT_PORTS:-}; do
-    python3 "$d/listen.py" "$d/units/ready.$p" "6,::,$p" &
-    echo "$!" > "$d/units/pid.$p"
-    for _ in $(seq 50); do [[ -e "$d/units/ready.$p" ]] && break; sleep 0.1; done
-done
 "$@"; rc=$?
-# NS_POST_PORTS: report which ports still have a listener after the command.
-for p in ${NS_POST_PORTS:-}; do
-    if [[ -n "$(ss -Hltn "sport = :$p")" ]]; then echo "POST $p listening"; else echo "POST $p dead"; fi
-done
 [[ -n "$pid" ]] && kill "$pid" 2>/dev/null
-for f in "$d"/units/pid.*; do [[ -e "$f" ]] && kill "$(<"$f")" 2>/dev/null; done
 exit "$rc"
 NS
 run_ns() { # run_ns <listen-specs> <up|status> [ENV=VAL ...]: output ${TMP}/up.out, rc ${TMP}/rc
     local specs="$1" verb="$2"
     shift 2
-    : > "${TMP}/incus.log"; : > "${TMP}/exec.log"
-    timeout 90 env NS_UNIT_PORTS="${NS_UNIT_PORTS:-}" NS_POST_PORTS="${NS_POST_PORTS:-}" \
-        unshare -rn bash "${TMP}/ns/run.sh" "$specs" \
+    : > "${TMP}/incus.log"; : > "${TMP}/exec.log"; : > "${TMP}/exec.log.ref"
+    timeout 90 unshare -rn bash "${TMP}/ns/run.sh" "$specs" \
         env PATH="${TMP}/bin:/usr/sbin:/sbin:${PATH}" STUB_INCUS_LOG="${TMP}/incus.log" \
         STUB_EXEC_LOG="${TMP}/exec.log" STUB_REAL_LISTENERS=1 "${LOCK_ENV[@]}" BPFRX_CLUSTER_ENV= \
         "$@" bash "$SUBJECT" "$verb" > "${TMP}/up.out" 2>&1
@@ -445,21 +440,18 @@ if ! have_netns; then
 else
     # 7d. socket, every port served by a dual-stack `*` listener (the shape
     # systemd's iperf3@52xx.socket has on tcp/udp). Our units: 5200-5205
-    # absent (not-found: never disabled; the stub fails that like systemd),
-    # 5206-5210 already stood down (left alone), 5211 a crash-looping
-    # leftover (stood down by exact name, failed state reset).
+    # absent (not-found), 5206-5211 already stood down: `up` proceeds and
+    # changes no mouse-iperf3 unit.
     UNITS_7D="$(for p in 5200 5201 5202 5203 5204 5205; do echo "$p not-found - inactive"; done
-                for p in 5206 5207 5208 5209 5210; do echo "$p loaded disabled inactive"; done
-                echo "5211 loaded enabled failed")"
+                for p in 5206 5207 5208 5209 5210 5211; do echo "$p loaded disabled inactive"; done)"
     run_ns "$(specs_for 6,:: "${ALL_IPERF[@]}")" up "${TCP_ENV[@]}" STUB_UNIT_STATE="$UNITS_7D"
-    if [[ "$(<"${TMP}/rc")" == 0 && "$(iperf_counts)" == "0 1 1" ]] && ! template_written \
-            && grep -qx 'systemctl disable --now mouse-iperf3@5211.service' "${TMP}/exec.log" \
-            && grep -qx 'systemctl reset-failed mouse-iperf3@5211.service' "${TMP}/exec.log" \
-            && grep -q 'iperf3 provider socket: all 12 ports have a listener on 172.16.80.210; no mouse-iperf3 installed, stood down: mouse-iperf3@5211' "${TMP}/up.out" \
+    if [[ "$(<"${TMP}/rc")" == 0 && "$(iperf_counts)" == "0 0 0" ]] && ! template_written \
+            && ! grep -q 'mouse-iperf3@' <(grep -E '^systemctl ' "${TMP}/exec.log") \
+            && grep -q 'iperf3 provider socket: all 12 ports have a listener on 172.16.80.210; no mouse-iperf3 unit installed or changed' "${TMP}/up.out" \
             && grep -q 'iperf3:   provider socket; 12 / 12 per-class ports have a listener on 172.16.80.210' "${TMP}/up.out"; then
-        pass "provider socket, all 12 listening: absent units skipped, stood-down units left, the one leftover stood down by exact name"
+        pass "provider socket, all 12 listening, our units absent or stood down: proceeds, no mouse-iperf3 unit touched"
     else
-        fail "#19022: provider socket, all listening: rc=$(<"${TMP}/rc") enable/disable/reset = $(iperf_counts) (want 0, 0 1 1 on 5211); output:
+        fail "#19022: provider socket, all listening: rc=$(<"${TMP}/rc") enable/disable/reset = $(iperf_counts) (want 0, 0 0 0); output:
 $(<"${TMP}/up.out")"
     fi
     # 7e. socket, three ports not reachable on .210: 5203 has no listener
@@ -467,9 +459,9 @@ $(<"${TMP}/up.out")"
     # 5205 is 127.0.0.1 only, 5206 is IPv6-only. 5207 bound to .210 itself
     # counts. The refusal names exactly 5203 5205 5206 and touches nothing.
     run_ns "$(specs_for 6,:: 5200 5201 5202 5204 5208 5209 5210 5211) 4,0.0.0.0,52030 4,127.0.0.1,5205 6only,::,5206 4,172.16.80.210,5207" \
-        up "${TCP_ENV[@]}" STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do echo "$p loaded enabled failed"; done)"
+        up "${TCP_ENV[@]}"
     if [[ "$(<"${TMP}/rc")" != 0 && "$(iperf_counts)" == "0 0 0" ]] \
-            && grep -q 'REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has no TCP listener on 172.16.80.210 for port(s) 5203 5205 5206; nothing was changed' "${TMP}/up.out"; then
+            && grep -q 'REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but tcp:xpf-tcp-target has no TCP listener on 172.16.80.210 for port(s) 5203 5205 5206; no mouse-iperf3 unit was changed' "${TMP}/up.out"; then
         pass "provider socket, missing/decoy/127.0.0.1-only/IPv6-only: REFUSE naming exactly 5203 5205 5206, nothing touched"
     else
         fail "#19022: provider socket did not refuse exactly 5203 5205 5206 untouched (rc=$(<"${TMP}/rc"), enable/disable/reset = $(iperf_counts)); output:
@@ -488,53 +480,6 @@ $(<"${TMP}/up.out")"
         pass "units status: per-address listener coverage AND the active mouse-iperf3 count (5201 failed is shown)"
     else
         fail "#19022: units status (coverage + unit count); output:
-$(<"${TMP}/up.out")"
-    fi
-    # 7g. a units-served target declared `socket` (R12 R1): every port's
-    # listener belongs to an enabled, active mouse-iperf3 unit. The first
-    # scan passes, the stand-down kills every listener, the second scan
-    # sees that: put back exactly what was stood down, then REFUSE. Every
-    # port must be served again afterwards.
-    NS_UNIT_PORTS="${ALL_IPERF[*]}" NS_POST_PORTS="${ALL_IPERF[*]}" \
-        run_ns "" up "${TCP_ENV[@]}" STUB_UNIT_LISTENERS="${TMP}/ns/units" \
-        STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do echo "$p loaded enabled active"; done)"
-    restored=0
-    for p in "${ALL_IPERF[@]}"; do
-        # The property, not one spelling of it: re-ENABLED after the
-        # stand-down (boot persistence; `enable` or `enable --now`) and
-        # serving again (the stub's listener only returns on a start).
-        d_line="$(grep -nx "systemctl disable --now mouse-iperf3@${p}.service" "${TMP}/exec.log" | head -n 1 | cut -d: -f1)"
-        e_line="$(grep -nxE "systemctl enable (--now )?mouse-iperf3@${p}(\.service)?" "${TMP}/exec.log" | tail -n 1 | cut -d: -f1)"
-        [[ -n "$d_line" && -n "$e_line" && "$e_line" -gt "$d_line" ]] \
-            && grep -qx "POST ${p} listening" "${TMP}/up.out" && restored=$((restored + 1))
-    done
-    if [[ "$(<"${TMP}/rc")" != 0 && "$restored" == 12 ]] \
-            && grep -q "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but port(s) ${ALL_IPERF[*]} lost their listener on tcp:xpf-tcp-target when mouse-iperf3 was stood down" "${TMP}/up.out"; then
-        pass "a units-served target declared socket: REFUSE, every stood-down unit enabled and started again, all 12 ports served after"
-    else
-        fail "#19022: units-served target declared socket: rc=$(<"${TMP}/rc"), ${restored}/12 restored and listening; output:
-$(<"${TMP}/up.out")"
-    fi
-    # 7h. a failed stand-down of an EXISTING unit refuses with its name
-    # (Codex P2): 5203 is a crash-looping leftover whose `disable` fails;
-    # the ports are all served, so only the cleanup failure can refuse.
-    run_ns "$(specs_for 6,:: "${ALL_IPERF[@]}")" up "${TCP_ENV[@]}" STUB_FAIL_DISABLE=5203 \
-        STUB_UNIT_STATE="$(for p in "${ALL_IPERF[@]}"; do if [[ $p == 5203 ]]; then echo "$p loaded enabled failed"; else echo "$p loaded disabled inactive"; fi; done)"
-    if [[ "$(<"${TMP}/rc")" != 0 ]] \
-            && grep -q 'REFUSE: could not stand down existing unit(s) mouse-iperf3@5203.service on tcp:xpf-tcp-target (systemctl disable --now failed)' "${TMP}/up.out"; then
-        pass "a failed disable of an existing leftover unit REFUSES naming mouse-iperf3@5203.service"
-    else
-        fail "#19022: a failed disable of an existing unit was swallowed (rc=$(<"${TMP}/rc")); output:
-$(<"${TMP}/up.out")"
-    fi
-    # 7i. socket with every port served but our units' state unreadable:
-    # refuse before standing anything down.
-    run_ns "$(specs_for 6,:: "${ALL_IPERF[@]}")" up "${TCP_ENV[@]}" STUB_UNIT_STATE=FAIL
-    if [[ "$(<"${TMP}/rc")" != 0 && "$(iperf_counts)" == "0 0 0" ]] \
-            && grep -q "REFUSE: could not read the state of mouse-iperf3@<port>.service on tcp:xpf-tcp-target for port(s) ${ALL_IPERF[*]}; nothing was changed" "${TMP}/up.out"; then
-        pass "provider socket with unreadable unit state: REFUSE, nothing stood down"
-    else
-        fail "#19022: unreadable unit state was not refused untouched (rc=$(<"${TMP}/rc"), enable/disable/reset = $(iperf_counts)); output:
 $(<"${TMP}/up.out")"
     fi
 fi
