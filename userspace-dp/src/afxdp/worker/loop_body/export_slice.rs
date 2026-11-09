@@ -228,7 +228,13 @@ pub(super) fn run_export_slice(
         if export_done {
             *worker_export = None;
         }
-    } else if sessions.has_pending_deltas() {
+    } else if sessions.has_pending_deltas()
+        // #19026 (R13 F2): a head Close that housekeeping found blocked is
+        // housekeeping's to retry (it keeps first claim before RX). Re-draining
+        // it here only re-requeued it and `continue`d past the loop bottom
+        // (telemetry, idle accounting) on every tick of the episode.
+        && !super::close_barrier::front_close_still_blocked(sessions)
+    {
         let deltas = sessions.drain_deltas(256);
         let handled = purge_queued_flows_for_closed_deltas(
             bindings,
@@ -251,6 +257,7 @@ pub(super) fn run_export_slice(
                 &deltas[..handled],
             );
             sessions.requeue_deltas_front(&deltas[handled..]);
+            sessions.set_close_head_blocked(true);
             return (true, did_work);
         }
         // #2669: flush unconditionally — see flush_drained_session_deltas!.

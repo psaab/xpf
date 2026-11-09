@@ -225,7 +225,14 @@ pub(super) fn run_delta_recovery(
     // #9856: defer while a CommandExport window is open — the export
     // slice owns this pass's drain/emit budget, and the short-circuit
     // leaves the latch armed so the resync runs once it completes.
-    if worker_export_is_none && sessions.take_delta_loss() {
+    // #19026 (R13 F2): while the ring's head Close is blocked on its tuple
+    // permit the drain-first below cannot complete; leave the latch armed for
+    // the tick after housekeeping parks or retires it instead of failing here
+    // and skipping the rest of every tick.
+    if worker_export_is_none
+        && !super::close_barrier::front_close_still_blocked(sessions)
+        && sessions.take_delta_loss()
+    {
         // #2442 loss-of-sync resync. If `push_delta` dropped any delta
         // since the last drain, the in-worker session-delta ring
         // overflowed and the downstream session-sync consumer missed

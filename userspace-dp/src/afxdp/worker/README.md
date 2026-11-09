@@ -106,7 +106,8 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 | `loop_body/debug_report.rs` | #1776 cfg(debug-log)-only counters, per-second report, and stall dump; compiled out of release builds. |
 | `loop_body/export_slice.rs` | #13075 per-tick CommandExport slice and steady-state delta drain (`run_export_slice`, `#[inline(never)]`). |
 | `loop_body/gc_teardown.rs` | #13075 session-expiry/GC and control-plane delete teardown helpers, re-exported for worker call sites. |
-| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`); #19026 bounded close-permit barrier (`ClosePermitBarrier`, `CLOSE_PERMIT_BARRIER_NS`). |
+| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`); #19026 parked/overflow-first retries. |
+| `loop_body/close_barrier.rs` | #19026 bounded close-permit barrier: per-Close episodes, RX bound, park bound and side slot, head-blocked bit, zombie retirement, rate-limited episode log. |
 | `loop_body/idle_poll.rs` | #6431 `#[inline]` classification of Interrupt-mode idle `poll(2)` returns and one-shot fault summary. |
 | `loop_body/mod.rs` | `worker_loop` steady-state orchestrator; retains per-tick call ordering while selected control slices are `#[inline(never)]` calls into sibling modules. |
 | `loop_body/pptp_drain.rs` | #13075 per-tick PPTP control-inbox drain (`run_pptp_control_drain`, `#[inline(never)]`). |
@@ -135,23 +136,42 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 ## Notable invariants
 
 - **Housekeeping never starves RX (#19026).** A Close delta that cannot
-  take its tuple install permits is requeued and is a teardown barrier:
-  `run_session_housekeeping` retries it before command/control work and
-  before `poll_binding`, which keeps the #10419 teardown-before-poll
-  order. That barrier is BOUNDED by `CLOSE_PERMIT_BARRIER_NS` (1 ms, the
-  idle path's `INTERRUPT_POLL_TIMEOUT_MS`). Inside the bound the tick
-  skips RX. Past it, every tick still retries the close first and then
-  polls RX. Before #19026 the skip was unbounded. Because the heartbeat is
-  stored before housekeeping, a worker whose close never got its permit
-  looked healthy while it polled no RX at all. `drain_and_flush_all_impl`
-  likewise yields after a drain+flush pass that leaves the queue no
-  shorter: the flush re-takes the permits, and losing that race must not
-  re-drain the same close inside one call. An episode that outlives the
-  bound logs one rate-limited `xpf-dp: wN: #19026 session close waiting`
-  line, at most one per 10 s process-wide. It names the tuple and a
-  `TupleGate::probe()` of the holder class. Its end is logged too. Do not
-  re-introduce an unbounded `return true` from housekeeping. Cells:
-  `loop_body/housekeeping_rx_starvation_19026_tests.rs`.
+  take its tuple install permits is a teardown barrier. `run_session_housekeeping`
+  retries it before command/control work and before `poll_binding`, which
+  keeps the #10419 teardown-before-poll order. `loop_body/close_barrier.rs`
+  bounds that barrier, per blocked Close (one episode per tuple + session id):
+  - **Inside `CLOSE_PERMIT_BARRIER_NS`** (1 ms, the idle path's
+    `INTERRUPT_POLL_TIMEOUT_MS`), the tick skips RX.
+  - **Past it**, every tick still retries the Close first and then polls RX.
+  - **Past `CLOSE_PARK_AFTER_NS`** (10 ms), the Close is parked out of the FIFO
+    into a side slot that is retried first on every tick. Every other delta
+    (HA sync, RT_FLOW, the RPC mirror) keeps flowing instead of filling the
+    4096 ring and latching delta-loss. A same-tuple reincarnation that
+    overtakes a parked Close is safe: the flush's stale-incarnation fence
+    makes the old Close's teardown and HA close id-conditional.
+  - Overflow Closes that an earlier tick deferred (#10309) are retired before
+    the ring, so events RX queued since cannot overtake them.
+  - `SessionTable::close_head_blocked` makes a blocked head cost one permit
+    try per tick instead of a 256-delta drain and requeue. The post-RX
+    export and loss-resync slices also leave a blocked head to housekeeping
+    rather than re-draining it and `continue`ing past the loop bottom. The
+    bit is set by whichever drain found the block (`drain_and_flush_all_impl`
+    or the export slice); `ClosePermitBarrier::on_blocked` only asserts it.
+  - When a Close that waited while RX polled finally retires, a same-id local
+    row is queued for `DeleteSynced` on this worker. That row is the session
+    re-materialized from the still-published shared copy, and the flush fans
+    out to siblings only.
+  - An episode that outlives the RX bound logs one rate-limited `xpf-dp: wN:
+    #19026 session close waiting` line, at most one per 10 s process-wide.
+    The line names the tuple and a `TupleGate::probe()` of the holder class.
+    A logged episode also logs its park or drain.
+  - Before #19026 the skip was unbounded. Because the heartbeat is stored
+    before housekeeping, a worker whose Close never got its permit looked
+    healthy while it polled no RX at all; #19032 tracks the detector gap.
+  - `drain_and_flush_all_impl` also yields after a drain+flush pass that
+    leaves the queue no shorter, instead of re-draining in-call.
+  - Do not re-introduce an unbounded `return true` from housekeeping.
+  - Cells: `loop_body/housekeeping_rx_starvation_19026_tests.rs`.
 - CPU pinning honors the inherited systemd `CPUAffinity=` mask. Worker
   N pins to the N-th *allowed* CPU in that mask, so
   `CPUAffinity=2 3 4 5` puts workers 0..3 on CPUs 2..5. Don't revert

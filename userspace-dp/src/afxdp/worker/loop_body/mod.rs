@@ -105,6 +105,7 @@ pub(in crate::afxdp) use gc_teardown::*;
 
 // #13075 (D4-12): per-tick session expiry/GC housekeeping extracted from
 // `worker_loop` (housekeeping.rs). Loop-local; no re-export needed.
+mod close_barrier;
 mod housekeeping;
 use housekeeping::run_session_housekeeping;
 
@@ -546,8 +547,9 @@ pub(crate) fn worker_loop(
     // entries without competing with the ring's bounded capacity.
     let mut deferred_expiry_overflow_deltas: Vec<SessionDelta> = Vec::new();
     // #19026: bounds how long a close waiting on its tuple permit may hold
-    // this worker's RX poll (see housekeeping.rs `CLOSE_PERMIT_BARRIER_NS`).
-    let mut close_permit_barrier = housekeeping::ClosePermitBarrier::default();
+    // this worker's RX poll, and parks it past the park bound
+    // (close_barrier.rs `CLOSE_PERMIT_BARRIER_NS` / `CLOSE_PARK_AFTER_NS`).
+    let mut close_permit_barrier = close_barrier::ClosePermitBarrier::default();
     while !stop.load(Ordering::Relaxed) {
         let loop_now_ns = monotonic_nanos();
         // #5468: reset the per-drain-cycle aggregate lossless-wedge latch. It is

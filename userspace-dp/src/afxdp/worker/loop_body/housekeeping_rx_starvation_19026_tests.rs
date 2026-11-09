@@ -92,13 +92,15 @@ struct Harness19026 {
     shared_recycles: Vec<(u32, u64)>,
     deferred_expiry_overflow_deltas: Vec<SessionDelta>,
     wedged: bool,
-    close_barrier: super::housekeeping::ClosePermitBarrier,
+    close_barrier: super::close_barrier::ClosePermitBarrier,
     flushed: Vec<SessionDelta>,
     /// When `Some(n)`, the flush closure models `flush_session_deltas`
     /// losing the close permit race: it requeues what it was handed (as the
     /// production flush does on a busy permit) for its first `n` calls.
     flush_requeues_remaining: Option<u64>,
     flush_calls: u64,
+    /// This worker's own command queue (R13 F4 zombie retirement lands here).
+    own_queue: Arc<Mutex<VecDeque<WorkerCommand>>>,
 }
 
 impl Harness19026 {
@@ -122,6 +124,7 @@ impl Harness19026 {
             flushed: Vec::new(),
             flush_requeues_remaining: None,
             flush_calls: 0,
+            own_queue: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
@@ -175,7 +178,7 @@ impl Harness19026 {
             0,
             &self.worker_command_queues,
             &self.pptp_control,
-            None,
+            Some(&self.own_queue),
             &peer_worker_commands,
             &self.shared_sessions,
             &self.shared_nat_sessions,
@@ -200,6 +203,36 @@ impl Harness19026 {
         count
     }
 
+    /// Retained anywhere the worker keeps a Close it still owes: the ring,
+    /// the deferred overflow suffix, or the parked side slot.
+    fn retained_closes_for(&mut self, key: &SessionKey) -> usize {
+        let in_ring = self.pending_closes_for(key);
+        let elsewhere = self
+            .deferred_expiry_overflow_deltas
+            .iter()
+            .chain(self.close_barrier.parked.iter())
+            .filter(|delta| delta.kind == SessionDeltaKind::Close && delta.key == *key)
+            .count();
+        in_ring + elsewhere
+    }
+
+    fn queue_open(&mut self, key: SessionKey) {
+        self.sessions.emit_open_delta_with_origin(
+            key,
+            decision_19026(),
+            metadata_19026(),
+            SessionOrigin::ForwardFlow,
+            false,
+        );
+    }
+
+    fn flushed_opens(&self) -> usize {
+        self.flushed
+            .iter()
+            .filter(|delta| delta.kind == SessionDeltaKind::Open)
+            .count()
+    }
+
     fn flushed_closes_for(&self, key: &SessionKey) -> usize {
         self.flushed
             .iter()
@@ -213,7 +246,8 @@ impl Harness19026 {
 /// stuck close would starve.
 const TICK_NS: u64 = 100_000;
 const BASE_NS: u64 = 10_000_000_000;
-const BARRIER_TICKS: u64 = super::housekeeping::CLOSE_PERMIT_BARRIER_NS / TICK_NS;
+const BARRIER_TICKS: u64 = super::close_barrier::CLOSE_PERMIT_BARRIER_NS / TICK_NS;
+const PARK_TICKS: u64 = super::close_barrier::CLOSE_PARK_AFTER_NS / TICK_NS;
 
 /// #19026 Part 1: while a requeued Close cannot take its tuple install
 /// permit, the worker must keep polling RX. Master returned "skip the tick"
@@ -245,8 +279,9 @@ fn requeued_close_without_permit_keeps_polling_rx_19026() {
             skip_run = 0;
         }
     }
-    let still_pending = h.pending_closes_for(&stuck);
+    let still_pending = h.retained_closes_for(&stuck);
     let flushed_while_held = h.flushed_closes_for(&stuck);
+    let parked = h.close_barrier.parked.len();
     drop(held);
 
     assert!(
@@ -275,6 +310,7 @@ fn requeued_close_without_permit_keeps_polling_rx_19026() {
         "the Close must be retained exactly once while its permit is unavailable"
     );
     assert_eq!(h.close_barrier.expired_episodes, 1, "one blocked episode");
+    assert_eq!(parked, 1, "R13 F1: past the park bound the Close sits in the side slot");
 }
 
 /// #19026 (guard against over-correction): ordinary permit contention that
@@ -292,7 +328,7 @@ fn transient_close_contention_keeps_teardown_before_poll_19026() {
     // Five ticks = 500 us of contention, inside the 1 ms bound.
     let short = 5u64;
     assert!(
-        short * TICK_NS < super::housekeeping::CLOSE_PERMIT_BARRIER_NS,
+        short * TICK_NS < super::close_barrier::CLOSE_PERMIT_BARRIER_NS,
         "FIXTURE: the contention must clear inside the bound"
     );
     for _ in 0..short {
@@ -333,6 +369,11 @@ fn requeued_close_completes_once_after_permit_returns_19026() {
         now += TICK_NS;
     }
     assert_eq!(h.flushed_closes_for(&stuck), 0, "no flush without the permit");
+    assert_eq!(
+        h.flushed_closes_for(&unrelated),
+        1,
+        "R13 F1: once the stuck Close is parked the Close queued behind it flows"
+    );
     drop(held);
 
     for _ in 0..500 {
@@ -419,7 +460,7 @@ fn barrier_rearms_for_each_blocked_episode_19026() {
     assert!(!h.tick(now), "first episode retires");
     assert_eq!(h.flushed_closes_for(&first), 1);
 
-    now += 10 * super::housekeeping::CLOSE_PERMIT_BARRIER_NS;
+    now += 10 * super::close_barrier::CLOSE_PERMIT_BARRIER_NS;
     h.queue_close(second.clone(), 0x1902_6007);
     let held = gate.try_acquire_installs([second.clone()]).expect("hold second");
     let held_first_tick = h.tick(now);
@@ -429,4 +470,299 @@ fn barrier_rearms_for_each_blocked_episode_19026() {
         "#19026: a new blocked episode re-arms the barrier (teardown first)"
     );
     assert_eq!(h.close_barrier.expired_episodes, 1, "only the first episode expired");
+}
+
+// ---- #19026 R13 fold cells (F1-F5) and Codex P2 #5 ----
+
+/// R13 F1: a Close stuck past the park bound leaves the FIFO, so every other
+/// delta this worker produces keeps flowing (HA sync, RT_FLOW) instead of
+/// filling the 4096 ring and latching delta-loss. On b57a950e21..bb9608f1a6 the
+/// opens queued behind the stuck Close never flushed and the ring overflowed.
+#[test]
+fn stuck_close_is_parked_and_later_deltas_flow_19026() {
+    let mut h = Harness19026::new();
+    let stuck = key_19026(19_040);
+    h.queue_close(stuck.clone(), 0x1902_6010);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([stuck.clone()])
+        .expect("hold the stuck tuple");
+    let mut now = BASE_NS;
+    for _ in 0..(PARK_TICKS + 5) {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    assert_eq!(h.close_barrier.parked.len(), 1, "parked past the bound");
+    // "RX" now produces 5000 opens across 100 ticks.
+    for tick in 0..100u16 {
+        for i in 0..50u16 {
+            h.queue_open(key_19026(20_000 + tick * 50 + i));
+        }
+        h.tick(now);
+        now += TICK_NS;
+    }
+    assert_eq!(h.flushed_opens(), 5000, "R13 F1: deltas behind a parked Close flow");
+    assert_eq!(h.sessions.delta_drops(), 0, "R13 F1: the ring never overflows");
+    assert_eq!(h.flushed_closes_for(&stuck), 0, "the stuck Close waits for its permit");
+    assert_eq!(h.retained_closes_for(&stuck), 1, "and is retained exactly once");
+    drop(held);
+    h.tick(now);
+    assert_eq!(h.flushed_closes_for(&stuck), 1, "it retires once the permit returns");
+    assert!(h.close_barrier.parked.is_empty());
+}
+
+/// R13 F3: a blocked head is re-tested with one permit try per tick; a
+/// blocked tick moves no delta (master drained 256 and requeued them, twice
+/// per tick, while the permit was held).
+#[test]
+fn blocked_tick_moves_no_delta_19026() {
+    let mut h = Harness19026::new();
+    let stuck = key_19026(19_041);
+    h.queue_close(stuck.clone(), 0x1902_6011);
+    for i in 0..4000u16 {
+        h.queue_open(key_19026(30_000 + i));
+    }
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([stuck.clone()])
+        .expect("hold the stuck tuple");
+    let mut now = BASE_NS;
+    h.tick(now); // discovers the block
+    let drained_before = h.sessions.delta_drained_for_test();
+    for _ in 0..5 {
+        now += TICK_NS;
+        assert!(h.tick(now), "inside the RX bound");
+    }
+    let drained = h.sessions.delta_drained_for_test() - drained_before;
+    drop(held);
+    assert_eq!(drained, 0, "R13 F3: blocked ticks drained {drained} deltas");
+}
+
+/// R13 F2: the post-RX export slice leaves a blocked head to housekeeping
+/// instead of re-draining it and `continue`ing past the loop bottom.
+#[test]
+fn export_slice_leaves_a_blocked_head_to_housekeeping_19026() {
+    let mut h = Harness19026::new();
+    let stuck = key_19026(19_042);
+    h.queue_close(stuck.clone(), 0x1902_6012);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([stuck.clone()])
+        .expect("hold the stuck tuple");
+    let mut now = BASE_NS;
+    for _ in 0..(BARRIER_TICKS + 2) {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    assert!(h.sessions.close_head_blocked(), "housekeeping marked the head");
+    let drained_before = h.sessions.delta_drained_for_test();
+    let shared_runtime = h.runtime.reader();
+    let export_buffer = ExportBufferState::new();
+    let session_export_ack = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let mut worker_export: Option<WorkerExportState> = None;
+    let mut echo: Vec<(SessionKey, SessionDecision, SessionMetadata, SessionOrigin)> = Vec::new();
+    let mut flushes = 0;
+    let mut flush =
+        |_: &mut SessionTable, _: &mut [BindingWorker], _: &mut bool, _: &[SessionDelta]| {
+            flushes += 1;
+        };
+    let (skip_tick, _) = run_export_slice(
+        &mut h.sessions,
+        &mut Vec::new(),
+        &WorkerBindingLookup::default(),
+        &ForwardingState::default(),
+        &mut worker_export,
+        Vec::new(),
+        Vec::new(),
+        None,
+        &export_buffer,
+        &mut echo,
+        &mut h.shared_recycles,
+        &shared_runtime,
+        &h.shared_sessions,
+        &h.shared_owner_rg_indexes,
+        &session_export_ack,
+        0,
+        &mut flush,
+        &mut h.wedged,
+    );
+    drop(held);
+    assert!(!skip_tick, "R13 F2: the export slice must not skip the rest of the tick");
+    assert_eq!(flushes, 0);
+    assert_eq!(h.sessions.delta_drained_for_test(), drained_before, "no re-drain");
+}
+
+/// R13 F4: while RX polled with the Close blocked, a packet re-materialized a
+/// same-id local row. When the Close retires, that zombie is queued for
+/// `DeleteSynced` on THIS worker (the flush fans out to siblings only).
+#[test]
+fn rx_exposed_zombie_is_retired_when_the_close_drains_19026() {
+    for park in [false, true] {
+        let mut h = Harness19026::new();
+        let key = key_19026(if park { 19_044 } else { 19_043 });
+        let id = 0x1902_6013;
+        h.queue_close(key.clone(), id);
+        let held = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([key.clone()])
+            .expect("hold the tuple");
+        let mut now = BASE_NS;
+        let ticks = if park { PARK_TICKS + 2 } else { BARRIER_TICKS + 2 };
+        for _ in 0..ticks {
+            h.tick(now);
+            now += TICK_NS;
+        }
+        // The re-materialized replica of the closing session (same id).
+        assert!(h.sessions.upsert_synced_with_origin(
+            crate::session::SessionInstall {
+                key: key.clone(),
+                decision: decision_19026(),
+                metadata: metadata_19026(),
+                source_nat_static: None,
+                origin: SessionOrigin::SharedMaterialize,
+                now_ns: now,
+                protocol: PROTO_TCP,
+                tcp_flags: crate::tcp_flags::TCP_ACK,
+                session_id: id,
+                tcp_close_class: 0,
+                tcp_handshake_state: 0,
+                persistent_lease_hold: None,
+                fwd_packets: 0,
+                rev_packets: 0,
+            },
+            true,
+        ));
+        drop(held);
+        h.tick(now);
+        now += TICK_NS;
+        h.tick(now);
+        assert_eq!(h.flushed_closes_for(&key), 1, "park={park}: the Close retired");
+        let queued = h
+            .own_queue
+            .lock()
+            .expect("own queue")
+            .iter()
+            .filter(|c| matches!(c, WorkerCommand::DeleteSynced(k) if *k == key))
+            .count();
+        assert_eq!(
+            queued,
+            1,
+            "#19026 R13 F4 (park={park}): the same-id zombie is queued for DeleteSynced here"
+        );
+    }
+}
+
+/// R13 F5: two different Closes blocked back to back are two episodes; the
+/// second gets its own teardown-before-poll window (master/bb9608f1a6 let it
+/// inherit the first's expired episode and poll RX at once).
+#[test]
+fn chained_blocked_closes_each_get_their_own_window_19026() {
+    let mut h = Harness19026::new();
+    let first = key_19026(19_045);
+    let second = key_19026(19_046);
+    h.queue_close(first.clone(), 0x1902_6014);
+    h.queue_close(second.clone(), 0x1902_6015);
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    let hold_first = gate.try_acquire_installs([first.clone()]).expect("hold first");
+    let hold_second = gate.try_acquire_installs([second.clone()]).expect("hold second");
+    let mut now = BASE_NS;
+    for _ in 0..(BARRIER_TICKS + 3) {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    assert_eq!(h.close_barrier.expired_episodes, 1);
+    drop(hold_first);
+    assert!(
+        h.tick(now),
+        "#19026 R13 F5: the second blocked Close starts its own RX window"
+    );
+    for _ in 0..(BARRIER_TICKS + 2) {
+        now += TICK_NS;
+        h.tick(now);
+    }
+    drop(hold_second);
+    assert_eq!(h.close_barrier.expired_episodes, 2, "two episodes, each counted");
+    assert_eq!(h.flushed_closes_for(&first), 1);
+}
+
+/// Codex P2 #5: overflow Closes deferred by an earlier tick are retired before
+/// newer ring events (RX-era opens) once their permit frees.
+#[test]
+fn deferred_overflow_close_precedes_newer_ring_events_19026() {
+    let mut h = Harness19026::new();
+    let old = key_19026(19_047);
+    let newer = key_19026(19_048);
+    let mut close = None;
+    h.sessions.emit_close_delta_with_origin(
+        old.clone(),
+        decision_19026(),
+        metadata_19026(),
+        SessionOrigin::ForwardFlow,
+        false,
+        0x1902_6016,
+    );
+    if let Some(delta) = h.sessions.pop_front_delta() {
+        close = Some(delta);
+    }
+    h.deferred_expiry_overflow_deltas.push(close.expect("FIXTURE: overflow close"));
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([old.clone()])
+        .expect("hold the overflow close's tuple");
+    let mut now = BASE_NS;
+    for _ in 0..(BARRIER_TICKS + 2) {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    h.queue_open(newer.clone()); // produced by RX after the bound
+    drop(held);
+    h.tick(now);
+    let order: Vec<_> = h
+        .flushed
+        .iter()
+        .map(|d| (d.kind == SessionDeltaKind::Close, d.key.clone()))
+        .collect();
+    assert_eq!(
+        order,
+        vec![(true, old), (false, newer)],
+        "#19026 Codex P2 #5: the older overflow Close flushes before the newer open"
+    );
+}
+
+// ---- R13 F6: the diagnostic's pure pieces ----
+
+#[test]
+fn barrier_warn_throttle_is_one_line_per_interval_19026() {
+    use super::close_barrier::{CLOSE_PERMIT_BARRIER_WARN_INTERVAL_NS as I, close_barrier_warn_due};
+    assert!(close_barrier_warn_due(0, 5), "never emitted: due");
+    assert!(!close_barrier_warn_due(1_000, 1_000 + I - 1), "inside the interval: suppressed");
+    assert!(close_barrier_warn_due(1_000, 1_000 + I), "at the interval: due");
+}
+
+#[test]
+fn barrier_line_names_the_tuple_and_the_holder_class_19026() {
+    let key = key_19026(19_049);
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    let held = gate.try_acquire_installs([key.clone()]).expect("hold");
+    let mut h = Harness19026::new();
+    h.queue_close(key.clone(), 0x1902_6017);
+    let delta = h.sessions.front_pending_delta().expect("queued close").clone();
+    let [fwd, rev] = crate::afxdp::session_delta::close_install_keys(&delta);
+    let line = super::close_barrier::format_close_barrier_line(
+        3,
+        "waiting",
+        2_500_000,
+        &delta,
+        gate.probe(&fwd),
+        gate.probe(&rev),
+        7,
+        4,
+    );
+    drop(held);
+    for needle in [
+        "w3: #19026 session close waiting 2500 us",
+        "10.0.63.106:19049 -> 172.16.80.211:443",
+        "id=0x19026017",
+        "state: \"publishing\"",
+        "installs: 1",
+        "queued=7",
+        "since last line: 4",
+    ] {
+        assert!(line.contains(needle), "missing {needle:?} in {line}");
+    }
 }

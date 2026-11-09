@@ -8,9 +8,10 @@
 // close deltas (including the #10309 overflow suffix) before any packet
 // or control work runs. Returns `true` when the old in-loop `continue`
 // sites fired (deferred cleanup): the caller skips the rest of the tick.
-// #19026: that skip is bounded by `ClosePermitBarrier` — a close that cannot
-// take its tuple permit holds RX for at most `CLOSE_PERMIT_BARRIER_NS`, then
-// the tick polls RX while the close keeps retrying first on every tick.
+// #19026: that skip is bounded by `close_barrier::ClosePermitBarrier` — a
+// Close that cannot take its tuple permit holds RX for at most
+// `CLOSE_PERMIT_BARRIER_NS`, keeps first claim on every tick, and is parked
+// out of the FIFO past `CLOSE_PARK_AFTER_NS` so the other deltas flow.
 //
 // This is an ordinary out-of-line fn, NOT a hot-path call boundary in the
 // #1776 sense: the per-tick packet path is `poll_binding`
@@ -26,141 +27,10 @@
 
 use super::*;
 
-/// #19026: the longest one worker may withhold its RX poll while a requeued
-/// Close waits for its tuple install permit. Before #19026 that barrier was
-/// unbounded: `run_session_housekeeping` returned "skip the tick" on every
-/// pass, the loop `continue`d before `poll_binding`, and because the
-/// heartbeat is stored before housekeeping the worker stayed "healthy" while
-/// it black-holed every flow it serves. (#19026's 111 s single-flow black-hole
-/// on udp fits that shape — the outage began before any Close was logged —
-/// but was not reproduced live; the starvation itself is pinned hermetically
-/// in `housekeeping_rx_starvation_19026_tests.rs`.) 1 ms matches the idle path's own `INTERRUPT_POLL_TIMEOUT_MS` block: a
-/// barrier this short keeps the #10419/#10512 teardown-before-poll ordering
-/// for ordinary permit contention (permits are held for microseconds), while
-/// a permit that does not come back can cost one tuple's ordering, never the
-/// worker's RX.
-pub(super) const CLOSE_PERMIT_BARRIER_NS: u64 = 1_000_000;
-
-/// #19026: process-wide rate limit for the expired-barrier journal line (one
-/// line per interval across ALL workers, the #1760 CAS-throttle pattern), so a
-/// recurring permit stall cannot flood journald. Suppressed episodes are
-/// counted and reported on the next emitted line.
-const CLOSE_PERMIT_BARRIER_WARN_INTERVAL_NS: u64 = 10_000_000_000;
-static CLOSE_PERMIT_BARRIER_WARN_LAST_NS: AtomicU64 = AtomicU64::new(0);
-static CLOSE_PERMIT_BARRIER_WARN_SUPPRESSED: AtomicU64 = AtomicU64::new(0);
-
-fn try_claim_close_permit_barrier_warn(now_ns: u64) -> bool {
-    let last = CLOSE_PERMIT_BARRIER_WARN_LAST_NS.load(Ordering::Acquire);
-    if last != 0 && now_ns.saturating_sub(last) < CLOSE_PERMIT_BARRIER_WARN_INTERVAL_NS {
-        return false;
-    }
-    CLOSE_PERMIT_BARRIER_WARN_LAST_NS
-        .compare_exchange(last, now_ns.max(1), Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-}
-
-/// #19026: per-worker state of the close-permit barrier (worker-loop local).
-#[derive(Debug, Default)]
-pub(super) struct ClosePermitBarrier {
-    /// Loop time the current blocked episode began; 0 = no blocked close.
-    since_ns: u64,
-    /// The episode outlived `CLOSE_PERMIT_BARRIER_NS`; RX polls resumed.
-    expired: bool,
-    /// This episode's expiry line was emitted (so its end is logged too).
-    logged: bool,
-    /// Episodes that outlived the barrier (diagnostic).
-    pub(super) expired_episodes: u64,
-}
-
-impl ClosePermitBarrier {
-    /// A queued Close is waiting for its permit at `now_ns`. Returns whether
-    /// this tick may still withhold RX (`true` = skip the rest of the tick).
-    /// The Close itself stays queued and is retried before RX on every tick;
-    /// only the RX hold is bounded.
-    pub(super) fn hold_rx(
-        &mut self,
-        sessions: &crate::session::SessionTable,
-        worker_id: u32,
-        now_ns: u64,
-    ) -> bool {
-        if self.since_ns == 0 {
-            self.since_ns = now_ns.max(1);
-        }
-        if now_ns.saturating_sub(self.since_ns) < CLOSE_PERMIT_BARRIER_NS {
-            return true;
-        }
-        if !self.expired {
-            self.expired = true;
-            self.expired_episodes = self.expired_episodes.saturating_add(1);
-            if try_claim_close_permit_barrier_warn(now_ns) {
-                self.logged = true;
-                log_close_permit_barrier_expired(
-                    sessions,
-                    worker_id,
-                    now_ns.saturating_sub(self.since_ns),
-                    CLOSE_PERMIT_BARRIER_WARN_SUPPRESSED.swap(0, Ordering::Relaxed),
-                );
-            } else {
-                CLOSE_PERMIT_BARRIER_WARN_SUPPRESSED.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        false
-    }
-
-    /// No queued Close is waiting: end the episode, if any.
-    pub(super) fn clear(&mut self, worker_id: u32, now_ns: u64) {
-        if self.since_ns == 0 {
-            return;
-        }
-        if self.logged {
-            eprintln!(
-                "xpf-dp: w{worker_id}: #19026 blocked session close drained after {} ms",
-                now_ns.saturating_sub(self.since_ns) / 1_000_000
-            );
-        }
-        self.since_ns = 0;
-        self.expired = false;
-        self.logged = false;
-    }
-}
-
-/// #19026: once per expired episode, rate-limited process-wide (cold): name
-/// the blocked Close's tuple and the tuple gate's holder class, so a permit
-/// that never returns has an owner in the journal instead of an anonymous
-/// black-hole.
-#[cold]
-#[inline(never)]
-fn log_close_permit_barrier_expired(
-    sessions: &crate::session::SessionTable,
-    worker_id: u32,
-    held_ns: u64,
-    suppressed: u64,
-) {
-    let Some(delta) = sessions.front_pending_delta() else {
-        return;
-    };
-    let gate = crate::afxdp::bpf_map::global_tuple_gate();
-    let [forward, reverse] = crate::afxdp::session_delta::close_install_keys(delta);
-    let probe_forward = gate.probe(&forward);
-    let probe_reverse = gate.probe(&reverse);
-    eprintln!(
-        "xpf-dp: w{worker_id}: #19026 session close waiting {} us for its tuple permit; \
-         RX polling continues. close proto={} {}:{} -> {}:{} id={:#x} origin={} \
-         gate fwd={:?} rev={:?} queued={} (other episodes since last line: {})",
-        held_ns / 1_000,
-        delta.key.protocol,
-        delta.key.src_ip,
-        delta.key.src_port,
-        delta.key.dst_ip,
-        delta.key.dst_port,
-        delta.session_id,
-        delta.origin.as_str(),
-        probe_forward,
-        probe_reverse,
-        sessions.pending_delta_count(),
-        suppressed,
-    );
-}
+use super::close_barrier::{
+    BlockedAt, BlockedVerdict, ClosePermitBarrier, close_permits_available,
+    front_close_still_blocked, retire_rx_exposed_zombie,
+};
 
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 #[inline(never)]
@@ -187,7 +57,7 @@ pub(super) fn run_session_housekeeping(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     shared_runtime: &RuntimeViewReader,
     worker_lossless_wedged: &mut bool,
-    mut shared_recycles: &mut Vec<(u32, u64)>,
+    shared_recycles: &mut Vec<(u32, u64)>,
     deferred_expiry_overflow_deltas: &mut Vec<SessionDelta>,
     close_barrier: &mut ClosePermitBarrier,
     flush_deltas: &mut dyn FnMut(
@@ -290,6 +160,49 @@ pub(super) fn run_session_housekeeping(
         shared_sessions,
         shared_owner_rg_indexes,
     );
+    // #19026 (R13 F1): parked Closes are the oldest pending work; retry
+    // them first, every tick, before anything RX produced since.
+    retry_parked_closes(
+        sessions,
+        bindings,
+        binding_lookup,
+        shared_recycles,
+        shared_runtime,
+        shared_sessions,
+        shared_owner_rg_indexes,
+        worker_lossless_wedged,
+        close_barrier,
+        worker_commands_by_id,
+        flush_deltas,
+    );
+    // #19026 (Codex P2 #5): overflow Closes deferred by an earlier tick are
+    // older than every delta RX has queued since; retire them before the
+    // ring so RX-era events cannot overtake them.
+    if !deferred_expiry_overflow_deltas.is_empty() {
+        let pending = std::mem::take(deferred_expiry_overflow_deltas);
+        if let Some(rest) = flush_overflow_chunks(
+            sessions,
+            bindings,
+            binding_lookup,
+            shared_recycles,
+            shared_runtime,
+            shared_sessions,
+            shared_owner_rg_indexes,
+            worker_lossless_wedged,
+            flush_deltas,
+            &pending,
+        ) {
+            *deferred_expiry_overflow_deltas = rest;
+            return hold_this_tick(close_barrier.on_blocked(
+                sessions,
+                deferred_expiry_overflow_deltas,
+                BlockedAt::Overflow,
+                worker_id,
+                worker_commands_by_id,
+                loop_now_ns,
+            ));
+        }
+    }
     let expired_entries = sessions.expire_stale_entries_ha(loop_now_ns, Some(&ha_ctx));
     // #11053: if the control TCP session idles out, forget its PPTP calls
     // and replicate the exact control tuple to peer workers. The delete
@@ -381,15 +294,20 @@ pub(super) fn run_session_housekeeping(
     // flush the returned suffix in fixed-size chunks before processing
     // another packet or control event. No shared entry can remain
     // honoured merely because its Close missed the 4096-slot ring.
-    let mut expiry_overflow_deltas = std::mem::take(deferred_expiry_overflow_deltas);
-    expiry_overflow_deltas.extend(
-        expired_entries
-            .into_iter()
-            .filter_map(|entry| entry.overflow_close),
-    );
+    let expiry_overflow_deltas: Vec<SessionDelta> = expired_entries
+        .into_iter()
+        .filter_map(|entry| entry.overflow_close)
+        .collect();
     if deferred_delta_cleanup {
-        deferred_expiry_overflow_deltas.extend(expiry_overflow_deltas.iter().cloned());
-        return close_barrier.hold_rx(sessions, worker_id, loop_now_ns);
+        deferred_expiry_overflow_deltas.extend(expiry_overflow_deltas);
+        return hold_this_tick(close_barrier.on_blocked(
+            sessions,
+            deferred_expiry_overflow_deltas,
+            BlockedAt::Ring,
+            worker_id,
+            worker_commands_by_id,
+            loop_now_ns,
+        ));
     }
     if !expiry_overflow_deltas.is_empty() {
         let _ = drain_and_flush_all_impl(
@@ -405,38 +323,37 @@ pub(super) fn run_session_housekeeping(
             &mut *flush_deltas,
         );
         if deferred_delta_cleanup {
-            deferred_expiry_overflow_deltas.extend(expiry_overflow_deltas.iter().cloned());
-            return close_barrier.hold_rx(sessions, worker_id, loop_now_ns);
-        }
-        let mut overflow_chunks = expiry_overflow_deltas.chunks(256);
-        while let Some(deltas) = overflow_chunks.next() {
-            let handled = purge_queued_flows_for_closed_deltas(
-                bindings,
-                &binding_lookup,
-                &mut shared_recycles,
-                &shared_runtime,
-                &shared_sessions,
-                &shared_owner_rg_indexes,
-                deltas,
-                Some(&mut sessions),
-            );
-            flush_deltas(
+            deferred_expiry_overflow_deltas.extend(expiry_overflow_deltas);
+            return hold_this_tick(close_barrier.on_blocked(
                 sessions,
-                bindings,
-                worker_lossless_wedged,
-                &deltas[..handled],
-            );
-            if handled < deltas.len() {
-                deferred_expiry_overflow_deltas.extend_from_slice(&deltas[handled..]);
-                for suffix in overflow_chunks {
-                    deferred_expiry_overflow_deltas.extend_from_slice(suffix);
-                }
-                deferred_delta_cleanup = true;
-                break;
-            }
+                deferred_expiry_overflow_deltas,
+                BlockedAt::Ring,
+                worker_id,
+                worker_commands_by_id,
+                loop_now_ns,
+            ));
         }
-        if deferred_delta_cleanup {
-            return close_barrier.hold_rx(sessions, worker_id, loop_now_ns);
+        if let Some(rest) = flush_overflow_chunks(
+            sessions,
+            bindings,
+            binding_lookup,
+            shared_recycles,
+            shared_runtime,
+            shared_sessions,
+            shared_owner_rg_indexes,
+            worker_lossless_wedged,
+            flush_deltas,
+            &expiry_overflow_deltas,
+        ) {
+            *deferred_expiry_overflow_deltas = rest;
+            return hold_this_tick(close_barrier.on_blocked(
+                sessions,
+                deferred_expiry_overflow_deltas,
+                BlockedAt::Overflow,
+                worker_id,
+                worker_commands_by_id,
+                loop_now_ns,
+            ));
         }
     }
     // A requeued close from an earlier drain is a teardown barrier: retry
@@ -445,7 +362,8 @@ pub(super) fn run_session_housekeeping(
     // the tuple permit. #19026: the barrier is BOUNDED
     // (`CLOSE_PERMIT_BARRIER_NS`): the close is retried here before RX on
     // every tick, but once it has waited past the bound the tick goes on to
-    // poll RX instead of starving every flow this worker serves.
+    // poll RX instead of starving every flow this worker serves, and past
+    // `CLOSE_PARK_AFTER_NS` it is parked so the deltas behind it flow.
     if sessions.has_pending_deltas() {
         let _ = drain_and_flush_all_impl(
             &mut *sessions,
@@ -460,11 +378,136 @@ pub(super) fn run_session_housekeeping(
             &mut *flush_deltas,
         );
         if deferred_delta_cleanup {
-            return close_barrier.hold_rx(sessions, worker_id, loop_now_ns);
+            return hold_this_tick(close_barrier.on_blocked(
+                sessions,
+                deferred_expiry_overflow_deltas,
+                BlockedAt::Ring,
+                worker_id,
+                worker_commands_by_id,
+                loop_now_ns,
+            ));
         }
     }
-    close_barrier.clear(worker_id, loop_now_ns);
+    close_barrier.clear(sessions, worker_id, worker_commands_by_id, loop_now_ns);
     false
+}
+
+/// `true` = skip the rest of this tick (inside the RX bound).
+fn hold_this_tick(verdict: BlockedVerdict) -> bool {
+    verdict == BlockedVerdict::HoldRx
+}
+
+/// #10309 overflow suffix, in fixed-size chunks. Returns the unretired
+/// suffix (its head is the blocked Close) when a Close cannot take its tuple
+/// permit, `None` when everything retired.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+fn flush_overflow_chunks(
+    sessions: &mut crate::session::SessionTable,
+    bindings: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    shared_runtime: &RuntimeViewReader,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    worker_lossless_wedged: &mut bool,
+    flush_deltas: &mut dyn FnMut(
+        &mut crate::session::SessionTable,
+        &mut [BindingWorker],
+        &mut bool,
+        &[SessionDelta],
+    ),
+    overflow: &[SessionDelta],
+) -> Option<Vec<SessionDelta>> {
+    let mut start = 0;
+    while start < overflow.len() {
+        let end = (start + 256).min(overflow.len());
+        let deltas = &overflow[start..end];
+        // #19026 (R13 F3): a blocked head moves nothing.
+        if !close_permits_available(&deltas[0]) {
+            return Some(overflow[start..].to_vec());
+        }
+        let handled = purge_queued_flows_for_closed_deltas(
+            bindings,
+            binding_lookup,
+            shared_recycles,
+            shared_runtime,
+            shared_sessions,
+            shared_owner_rg_indexes,
+            deltas,
+            Some(&mut *sessions),
+        );
+        flush_deltas(sessions, bindings, worker_lossless_wedged, &deltas[..handled]);
+        if handled < deltas.len() {
+            return Some(overflow[start + handled..].to_vec());
+        }
+        start = end;
+    }
+    None
+}
+
+/// #19026 (R13 F1/F4): retry every parked Close (oldest first). One whose
+/// permit is free retires through the ordinary purge + flush; its same-id
+/// re-materialized local row, if any, is queued for `DeleteSynced` here.
+/// One the flush requeued (it lost the permit race) goes back to the slot.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+fn retry_parked_closes(
+    sessions: &mut crate::session::SessionTable,
+    bindings: &mut [BindingWorker],
+    binding_lookup: &WorkerBindingLookup,
+    shared_recycles: &mut Vec<(u32, u64)>,
+    shared_runtime: &RuntimeViewReader,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    worker_lossless_wedged: &mut bool,
+    close_barrier: &mut ClosePermitBarrier,
+    own_queue: Option<&Arc<Mutex<VecDeque<WorkerCommand>>>>,
+    flush_deltas: &mut dyn FnMut(
+        &mut crate::session::SessionTable,
+        &mut [BindingWorker],
+        &mut bool,
+        &[SessionDelta],
+    ),
+) {
+    if close_barrier.parked.is_empty() {
+        return;
+    }
+    let parked = std::mem::take(&mut close_barrier.parked);
+    let mut still_parked = Vec::new();
+    for delta in parked {
+        if !close_permits_available(&delta) {
+            still_parked.push(delta);
+            continue;
+        }
+        let one = std::slice::from_ref(&delta);
+        let handled = purge_queued_flows_for_closed_deltas(
+            bindings,
+            binding_lookup,
+            shared_recycles,
+            shared_runtime,
+            shared_sessions,
+            shared_owner_rg_indexes,
+            one,
+            Some(&mut *sessions),
+        );
+        if handled == 0 {
+            still_parked.push(delta);
+            continue;
+        }
+        let queued_before = sessions.pending_delta_count();
+        flush_deltas(sessions, bindings, worker_lossless_wedged, one);
+        let requeued = sessions.pending_delta_count() > queued_before
+            && sessions.front_pending_delta().is_some_and(|front| {
+                front.kind == delta.kind && front.key == delta.key && front.session_id == delta.session_id
+            });
+        if requeued {
+            if let Some(back) = sessions.pop_front_delta() {
+                still_parked.push(back);
+            }
+            continue;
+        }
+        retire_rx_exposed_zombie(sessions, &delta.key, delta.session_id, own_queue);
+    }
+    close_barrier.parked = still_parked;
 }
 
 // #13075: the loop's `drain_and_flush_all!` macro as a fn (shared with
@@ -489,6 +532,12 @@ pub(super) fn drain_and_flush_all_impl(
     ),
 ) -> bool {
     while sessions.has_pending_deltas() {
+        // #19026 (R13 F3): a head Close already known to be blocked is
+        // re-tested with one permit try; it moves nothing while blocked.
+        if front_close_still_blocked(sessions) {
+            *deferred_delta_cleanup = true;
+            break;
+        }
         let queued_before = sessions.pending_delta_count();
         let deltas = sessions.drain_deltas(256);
         let handled = purge_queued_flows_for_closed_deltas(
@@ -509,6 +558,7 @@ pub(super) fn drain_and_flush_all_impl(
                 &deltas[..handled],
             );
             sessions.requeue_deltas_front(&deltas[handled..]);
+            sessions.set_close_head_blocked(true);
             *deferred_delta_cleanup = true;
             break;
         }
@@ -520,6 +570,7 @@ pub(super) fn drain_and_flush_all_impl(
         // barrier instead of re-draining the same busy close in this loop,
         // which spun with neither RX nor a heartbeat until the permit freed.
         if sessions.pending_delta_count() >= queued_before {
+            sessions.set_close_head_blocked(true);
             *deferred_delta_cleanup = true;
             break;
         }

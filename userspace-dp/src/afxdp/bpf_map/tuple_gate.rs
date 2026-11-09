@@ -959,4 +959,36 @@ mod tests {
             "clean acquisitions after cleared recoveries must not recount"
         );
     }
+
+    /// #19026 (R13 F6): `probe` names the holder class the close-permit
+    /// barrier log reports — every state a blocked Close can meet.
+    #[test]
+    fn probe_names_each_holder_class_19026() {
+        let gate = Arc::new(TupleGate::new());
+        let k = key(1900, 0);
+        let idle = gate.probe(&k);
+        assert_eq!((idle.state, idle.publishers, idle.installs), ("absent", 0, 0));
+        assert_eq!(idle.shard_cap, SHARD_CAP);
+        assert!(!idle.clear_pending && !idle.clear_active);
+
+        let install = gate.try_acquire_install(&k).unwrap();
+        let held = gate.probe(&key(1900, 9)); // canonical: domain is ignored
+        assert_eq!((held.state, held.installs, held.publishers), ("publishing", 1, 0));
+        assert_eq!(held.shard_len, 1);
+        assert_eq!(held.admitted, 1);
+        drop(install);
+        assert_eq!(gate.probe(&k).state, "absent", "an idle entry is removed");
+
+        let lease = gate.acquire_lease([k.clone()]).unwrap();
+        assert_eq!(gate.probe(&k).state, "held");
+        lease.begin_finalizing().unwrap();
+        assert_eq!(gate.probe(&k).state, "finalizing");
+        drop(lease);
+
+        let fence = gate.begin_clear().unwrap();
+        let fenced = gate.probe(&k);
+        assert!(fenced.clear_active, "a map-wide clear fence is visible");
+        drop(fence);
+        assert!(!gate.probe(&k).clear_active);
+    }
 }

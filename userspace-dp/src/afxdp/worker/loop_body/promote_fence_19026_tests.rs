@@ -99,7 +99,7 @@ fn run_restored_copy(shared_packets: u64, closer: bool) -> (usize, bool, bool) {
     let mut shared_recycles = Vec::new();
     let mut overflow = Vec::new();
     let mut wedged = false;
-    let mut barrier = super::housekeeping::ClosePermitBarrier::default();
+    let mut barrier = super::close_barrier::ClosePermitBarrier::default();
     let mut flushed: Vec<SessionDelta> = Vec::new();
     let mut flush_deltas =
         |_: &mut SessionTable, _: &mut [BindingWorker], _: &mut bool, deltas: &[SessionDelta]| {

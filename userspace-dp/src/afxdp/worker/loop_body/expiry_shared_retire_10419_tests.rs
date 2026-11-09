@@ -237,9 +237,11 @@ fn worker_loop_orders_expiry_teardown_before_poll_10419() {
         .iter()
         .position(|line| line.contains("= reap_expired_sessions("))
         .expect("worker loop must reap expiry resources");
+    // #19026: the overflow records are collected by a `filter_map` over the
+    // expired entries (the `extend` it replaced moved with the chunked flush).
     let overflow = executable_lines
         .iter()
-        .position(|line| line.starts_with("expiry_overflow_deltas.extend("))
+        .position(|line| line.starts_with(".filter_map(|entry| entry.overflow_close)"))
         .expect("worker loop must retain expiry overflow records");
     let drain = executable_lines
         .iter()
