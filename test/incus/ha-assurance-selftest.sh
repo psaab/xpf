@@ -2262,6 +2262,89 @@ CLI
 assert_helper_status 0 python3 "${ROOT}/test/incus/udp_session_probe.py" session-id \
 	"$UDP_PROBE_CHECKPOINT" "$UDP_PROBE_SESSIONS"
 assert_contains "$(<"${OUT}")" '71' 'session-id parser selects the local header row, not the peer copy'
+# #19038: the remote `cli` answers a bare `show security flow session` with at
+# most 100 rows per node, in BPF hash order (cmd/cli/show_flow.go Limit: 100;
+# pkg/grpcapi getSessionsLegacy), while Total still counts every match. The
+# stub models that over a 151-session table, with the probe at row 121 on the
+# queried node and at row 5 on the peer. ha_udp_probe_session_id must name the
+# probe's tuple and an explicit limit. Before the fix the bare query showed
+# rows 1-100 only, and the helper printed NONE: "UDP flow was not present on
+# synced standby".
+UDP_PROBE_CAP_QUERIES="${RG1_DIR}/udp-cap-queries.txt"
+UDP_PROBE_CAP_CLI="${RG1_DIR}/udp-cap-cli.py"
+cat >"$UDP_PROBE_CAP_CLI" <<'PY'
+import ipaddress
+import sys
+
+PROBE = ("10.33.0.5", 39000, "172.16.80.202", 6201, "udp")
+
+
+def table(probe_row):
+    rows = []
+    for k in range(150):
+        if k % 10 == 0:  # earlier probe sockets: same client/target/port
+            rows.append((1000 + k, "10.33.0.5", 30000 + k, "172.16.80.202", 6201, "udp"))
+        else:
+            rows.append((1000 + k, f"10.33.0.{10 + k % 200}", 40000 + k, "172.16.80.202", 5211, "tcp"))
+    rows.insert(probe_row, (71,) + PROBE)
+    return rows
+
+
+words = sys.argv[1].split()
+if words[:4] != ["show", "security", "flow", "session"]:
+    sys.exit(f"error: unexpected command {sys.argv[1]!r}")
+limit, preds, args = 100, [], words[4:]
+if len(args) % 2:
+    sys.exit(f'error: missing value for "{args[-1]}"')
+for key, val in zip(args[::2], args[1::2]):
+    if key == "limit":
+        limit = int(val)
+    elif key in ("source-prefix", "destination-prefix"):
+        net, col = ipaddress.ip_network(val if "/" in val else val + "/32"), 1 if key[0] == "s" else 3
+        preds.append(lambda r, net=net, col=col: ipaddress.ip_address(r[col]) in net)
+    elif key in ("source-port", "destination-port"):
+        port, col = int(val), 2 if key[0] == "s" else 4
+        preds.append(lambda r, port=port, col=col: r[col] == port)
+    elif key == "protocol":
+        preds.append(lambda r, proto=val.lower(): r[5] == proto)
+    else:
+        sys.exit(f'error: unknown session filter "{key}"')
+for node, probe_row in ((0, 120), (1, 4)):  # queried node first, then its peer
+    matched = [r for r in table(probe_row) if all(pred(r) for pred in preds)]
+    print(f"node{node}:\n" + "-" * 74)
+    for sid, src, sport, dst, dport, proto in matched[:limit]:
+        print(f"Session ID: {sid}, Policy name: allow/1, HA State: Backup, Timeout: 60, "
+              "Session State: Unknown (validity not tracked)")
+        print(f"  In: {src}/{sport} --> {dst}/{dport};{proto}, Conn Tag: 0x0, If: reth1.0, Zone: trust,")
+        print(f"  Out: {dst}/{dport} --> 172.16.80.7/{sport};{proto}, Conn Tag: 0x0, If: reth0.80, Zone: untrust,")
+        print()
+    print(f"Total sessions: {len(matched)}")
+    if node == 0:
+        print()
+PY
+: >"$UDP_PROBE_CAP_QUERIES"
+if ! (
+	incus() { # incus exec <node> -- cli -c <command>
+		[[ "$#" -eq 6 && "$1" == exec && "$3" == -- && "$4" == cli && "$5" == -c ]] || return 1
+		printf '%s\t%s\n' "$2" "$6" >>"$UDP_PROBE_CAP_QUERIES"
+		python3 "$UDP_PROBE_CAP_CLI" "$6"
+	}
+	ha_udp_probe_session_id loss:xpf-userspace-fw0 "$UDP_PROBE_CHECKPOINT" "${RG1_DIR}/udp-cap-capture.txt"
+) >"${OUT}" 2>"${ERR}"; then
+	fail_test "#19038 capped listing: ha_udp_probe_session_id failed: stdout=$(<"${OUT}") stderr=$(<"${ERR}")"
+fi
+assert_eq "$(<"${OUT}")" '71' '#19038 ha_udp_probe_session_id finds the probe beyond row 100 of the bare listing'
+assert_eq "$(<"$UDP_PROBE_CAP_QUERIES")" \
+	"$(printf 'loss:xpf-userspace-fw0\tshow security flow session source-prefix 10.33.0.5/32 source-port 39000 destination-prefix 172.16.80.202/32 destination-port 6201 protocol udp limit 10000')" \
+	'#19038 ha_udp_probe_session_id queries the probe tuple with an explicit limit'
+# The bare listing the old helper read: 100 rows, Total 151, probe absent. The
+# parser must call that unreadable (exit 2), not absent (NONE, exit 0).
+python3 "$UDP_PROBE_CAP_CLI" 'show security flow session' >"${RG1_DIR}/udp-cap-bare.txt"
+assert_contains "$(<"${RG1_DIR}/udp-cap-bare.txt")" 'Total sessions: 151' '#19038 bare listing model counts every session'
+assert_helper_status 2 python3 "${ROOT}/test/incus/udp_session_probe.py" session-id \
+	"$UDP_PROBE_CHECKPOINT" "${RG1_DIR}/udp-cap-bare.txt"
+assert_contains "$(<"${ERR}")" "shows 100 rows but reports 'Total sessions: 151'" \
+	'#19038 a truncated local listing cannot prove the probe flow absent'
 UDP_PROBE_RESET="${RG1_DIR}/udp-reset.log"
 cat >"$UDP_PROBE_RESET" <<'UDP'
 BOOT fedcba9876543210fedcba9876543210

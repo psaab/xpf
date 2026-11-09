@@ -496,7 +496,16 @@ the group fails if either check fails.
   next packet (one miss, one or two creates, no drop).
   - Neither check reports it unless the misses reach the 1b floor.
   - The stream cells (iperf3 per-stream continuity and zero intervals)
-    cover TCP only. A UDP/ICMP continuity observable is open (#18679).
+    cover TCP only. Group 1c (#18679) is the UDP observable: a one-socket
+    sequence probe whose firewall Session ID is read on fw0 before the
+    move and again at the end of the window.
+  - That Session ID query names the probe's exact tuple and passes
+    `limit 10000` (`udp_session_probe.py session-query`, #19038). A bare
+    `show security flow session` from the remote CLI stops at 100 rows per
+    node, in hash order (#19039), so it found the probe on one node and
+    missed it on the other, depending on the run. A local section that is
+    truncated, or that has no `Total sessions:` line, is unreadable (a VOID
+    that names the cause), never "not present on synced standby".
   - A moved session whose local row is lost but whose peer-synced copy
     survives is rebuilt on the hit path. That is the designed recovery,
     not a miss.

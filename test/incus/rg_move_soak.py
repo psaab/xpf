@@ -1010,8 +1010,18 @@ class IncusCluster:
         return out if rc == 0 and out.strip() else None
 
     def udp_probe_session_id(self, node: int, probe_snapshot: str) -> Tuple[Optional[str], Optional[str]]:
-        """Read the exact local UDP flow's stable dataplane Session ID."""
-        rc, out = self._exec(self.fw[node], ["cli", "-c", "show security flow session"], timeout=20)
+        """Read the exact local UDP flow's stable dataplane Session ID.
+
+        The query names the probe's tuple and an explicit limit (#19038). The
+        bare `show security flow session` stops at 100 rows per node, in hash
+        order, which hid the probe on whichever node hashed it late; the soak
+        reported that as "absent on synced standby".
+        """
+        try:
+            query = udp_session_probe.session_query_for_probe(probe_snapshot)
+        except ValueError as exc:
+            return None, f"could not build the flow-session query for node{node}: {exc}"
+        rc, out = self._exec(self.fw[node], ["cli", "-c", query], timeout=20)
         if rc != 0:
             return None, f"could not capture flow sessions on node{node}: {out.strip()}"
         try:

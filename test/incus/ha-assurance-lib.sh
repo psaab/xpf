@@ -2237,9 +2237,15 @@ ha_udp_probe_session_id() {
 		printf 'UDP probe session ID: expected <node> <probe-snapshot> <session-capture>\n' >&2
 		return 2
 	fi
-	local node="$1" probe_snapshot="$2" capture="$3" lib_dir
+	local node="$1" probe_snapshot="$2" capture="$3" lib_dir query
 	lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || return 2
-	if ! incus exec "$node" -- cli -c 'show security flow session' >"$capture" 2>/dev/null; then
+	# #19038: name the probe's tuple and an explicit limit. The bare listing
+	# stops at 100 rows per node in hash order and can omit the probe's flow.
+	if ! query=$(python3 "${lib_dir}/udp_session_probe.py" session-query "$probe_snapshot"); then
+		printf 'UDP probe session ID: could not build the flow-session query for %s\n' "$node" >&2
+		return 2
+	fi
+	if ! incus exec "$node" -- cli -c "$query" >"$capture" 2>/dev/null; then
 		printf 'UDP probe session ID: could not capture flow sessions on %s\n' "$node" >&2
 		return 2
 	fi

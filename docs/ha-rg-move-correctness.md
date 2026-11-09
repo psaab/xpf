@@ -527,6 +527,19 @@ judged by hand from the recorded rows. Under `SOAK_STRICT_COST=1` the COST moves
 end the soak puts node0 back as primary for every RG it moved (a local pull
 on node0, reported as `restore:`; never folded into the moves' verdicts).
 
+With traffic on, a one-socket UDP sequence probe (#18679,
+`udp_session_probe.py`) also runs from the LAN host. Before each move the
+soak reads the probe flow's firewall Session ID on the target (the synced
+standby), and at the end of the window it reads it again there (now the
+primary). Each read is
+`show security flow session source-prefix <client>/32 source-port <p>
+destination-prefix <target>/32 destination-port 6201 protocol udp limit 10000`
+on that node, and the soak parses only that node's own section. The tuple
+filter and the explicit limit are required (#19038). The bare command stops
+at 100 rows per node in BPF hash order (#19039), so on a busy node it showed
+the probe on one node and not the other, by run rather than by issuer or
+direction. The four loss runs at #18559's head took all four combinations.
+
 The first move takes each RG away from its current owner. After that the
 directions alternate strictly, whatever happened, exactly like the operator's
 loop. After landing, the soak keeps sampling both views until the window
@@ -620,6 +633,8 @@ a late dual-active sample and a revert), are in
 | `FATAL: harness error: ...` / `harness terminated by signal` | The harness itself failed; the generators were stopped | Fix the harness; the run measured nothing |
 | `ping/iperf3 did not cover the move window` | A traffic generator stopped (all streams died, or the client exited) | `iperf.jsonl` shows the error event. Streams dying is a FAIL of the move that killed them |
 | `precondition: RGg was on nodeX before a move to nodeX` (VOID) | The previous move did not happen | Read the previous move's FAIL |
+| `UDP sequence probe flow was absent on synced standby nodeN` (VOID) | The tuple-filtered listing on nodeN was complete (its `Total sessions:` equals the rows shown) and did not contain the probe flow: the standby really has no synced row for it | Check session sync (row H7) and the standby's `show security flow session destination-port 6201 limit 10000`. Before #19038 this line also came from the 100-row cap |
+| `UDP sequence probe pre-move Session ID query failed: could not parse ... shows R rows but reports 'Total sessions: N'` / `no 'Total sessions:' terminator` (VOID) | The listing was cut short, or the CLI printed an error, so absence could not be judged | Check the CLI output on that node. A cut listing under the tuple filter means the CLI ignored the filter |
 
 ## Measured
 

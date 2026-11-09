@@ -6,6 +6,7 @@ shape the operator hit on 2026-10-31: every move to the peer fails fabric auth
 on clock skew, every move back prints "already primary".
 """
 
+import ipaddress
 import json
 import os
 import re
@@ -971,6 +972,180 @@ def verdicts(res):
     return [m["verdict"] for m in res["moves"]]
 
 
+
+
+class CappedFlowSessionCLI:
+    """The remote `cli`'s `show security flow session` (#19038).
+
+    cmd/cli/show_flow.go parseFlowSessionArgs defaults Limit to 100, and
+    pkg/grpcapi getSessionsLegacy returns the first `limit` matching forward
+    sessions in BPF hash order while counting every match into Total. The
+    hash order depends on each node's map seed, so `probe_row[node]` is
+    where the probe falls in that node's walk. Each new probe socket gets a
+    new tuple, and with it a new row.
+    """
+
+    FILLERS = 150
+    PROBE = ("10.0.61.2", 39000, "203.0.113.9", 6201, "udp")  # FakeCluster's SOCKET line
+
+    def __init__(self, probe_row, probe_id):
+        self.probe_row = dict(probe_row)
+        self.probe_id = probe_id
+        self.queries = []
+
+    def table(self, node):
+        rows = []
+        for k in range(self.FILLERS):
+            if k % 10 == 0:
+                # Earlier probe sockets' lingering flows: same client, target
+                # and port, different source port.
+                rows.append((1000 + k, "10.0.61.2", 30000 + k, "203.0.113.9", 6201, "udp"))
+            else:
+                rows.append((1000 + k, f"10.0.61.{10 + k % 200}", 40000 + k, "172.16.80.202", 5211, "tcp"))
+        rows.insert(self.probe_row[node], (self.probe_id(),) + self.PROBE)
+        return rows
+
+    def run(self, node, cmd):
+        self.queries.append((node, cmd))
+        words = cmd.split()
+        if words[:4] != ["show", "security", "flow", "session"]:
+            return 1, f"error: unexpected command {cmd!r}\n"
+        limit, preds, args = 100, [], words[4:]
+        if len(args) % 2:
+            return 1, f'error: missing value for "{args[-1]}"\n'
+        for key, val in zip(args[::2], args[1::2]):
+            if key == "limit":
+                limit = int(val)
+            elif key in ("source-prefix", "destination-prefix"):
+                net, col = ipaddress.ip_network(val if "/" in val else val + "/32"), 1 if key[0] == "s" else 3
+                preds.append(lambda r, net=net, col=col: ipaddress.ip_address(r[col]) in net)
+            elif key in ("source-port", "destination-port"):
+                port, col = int(val), 2 if key[0] == "s" else 4
+                preds.append(lambda r, port=port, col=col: r[col] == port)
+            elif key == "protocol":
+                preds.append(lambda r, proto=val.lower(): r[5] == proto)
+            else:
+                return 1, f'error: unknown session filter "{key}"\n'
+        out = []
+        for n in (node, 1 - node):  # the queried node's own section first
+            matched = [r for r in self.table(n) if all(pred(r) for pred in preds)]
+            out += [f"node{n}:", "-" * 74]
+            for sid, src, sport, dst, dport, proto in matched[:limit]:
+                out += [f"Session ID: {sid}, Policy name: allow/1, HA State: Active, Timeout: 60, "
+                        "Session State: Unknown (validity not tracked)",
+                        f"  In: {src}/{sport} --> {dst}/{dport};{proto}, Conn Tag: 0x0, If: reth1.0, "
+                        "Zone: trust, Pkts: 9, Bytes: 900,",
+                        f"  Out: {dst}/{dport} --> 172.16.80.8/{sport};{proto}, Conn Tag: 0x0, If: reth0.80, "
+                        "Zone: untrust, Pkts: 9, Bytes: 900,", ""]
+            out.append(f"Total sessions: {len(matched)}")
+            if n == node:
+                out.append("")
+        return 0, "\n".join(out) + "\n"
+
+
+class CappedCLICluster(FakeCluster):
+    """FakeCluster whose Session ID query is the REAL IncusCluster method,
+    with `incus exec <fw> -- cli -c <cmd>` answered by CappedFlowSessionCLI."""
+
+    def __init__(self, clock, owner, probe_row, **kw):
+        super().__init__(clock, owner, **kw)
+        self.cli_model = CappedFlowSessionCLI(probe_row, lambda: self.udp_probe_session_value)
+
+    def _exec(self, ref, argv, timeout=None):
+        node = {name: n for n, name in self.fw.items()}[ref]
+        if argv[:2] != ["cli", "-c"] or len(argv) != 3:
+            return 1, f"unexpected argv {argv!r}"
+        return self.cli_model.run(node, argv[2])
+
+    def udp_probe_session_id(self, node, probe_snapshot):
+        self.udp_probe_session_queries.append(node)
+        return soak.IncusCluster.udp_probe_session_id(self, node, probe_snapshot)
+
+
+# The four H11 runs on loss at #18559 head 3380701f5f
+# (gate-18559-logs/loss-pr-1794194752/h11-untargeted-away-*): run -> (issuer,
+# sleep, probe row in node0's and node1's walk). A row >= 100 is the node
+# whose 20 moves VOIDed "UDP sequence probe flow was absent on synced
+# standby"; a row < 100 is the node whose 20 moves SURVIVED. Each run is
+# constant, and all four combinations appear, so the issuer is not the cause.
+H11_ARTEFACT_SHAPES_19038 = {
+    "s5-from0": (0, 5.0, {0: 120, 1: 130}),  # to node0 VOID, to node1 VOID
+    "s5-from1": (1, 5.0, {0: 10, 1: 20}),    # to node0 SURVIVED, to node1 SURVIVED
+    "s2-from0": (0, 2.0, {0: 120, 1: 20}),   # to node0 VOID, to node1 SURVIVED
+    "s2-from1": (1, 2.0, {0: 10, 1: 130}),   # to node0 SURVIVED, to node1 VOID
+}
+
+
+class SessionListingCap19038(unittest.TestCase):
+    """#19038: the probe's Session ID query must not depend on hash position."""
+
+    PROBE = ("BOOT 0123456789abcdef0123456789abcdef\n"
+             "SOCKET 10.0.61.2 39000 203.0.113.9 6201\nSENT 0\nREPLY 0 203.0.113.9 41000\n")
+    QUERY = ("show security flow session source-prefix 10.0.61.2/32 source-port 39000 "
+             "destination-prefix 203.0.113.9/32 destination-port 6201 protocol udp limit 10000")
+
+    def test_artefact_shapes_survive_for_both_issuers_and_directions(self):
+        for run, (issuer, sleep_s, probe_row) in H11_ARTEFACT_SHAPES_19038.items():
+            with self.subTest(run=run):
+                clock = FakeClock()
+                c = CappedCLICluster(clock, {2: 0}, probe_row)
+                rc, res, _ = run_fake(c, clock, moves=4, issuer=issuer, sleep_s=sleep_s)
+                by_direction = {}
+                for m in res["moves"]:
+                    by_direction.setdefault(f"to node{m['target']}", set()).add(
+                        (m["udp_probe"]["status"], m["udp_probe"]["detail"].split(";")[0]))
+                self.assertEqual({d: {s for s, _ in v} for d, v in by_direction.items()},
+                                 {"to node0": {"SURVIVED"}, "to node1": {"SURVIVED"}}, by_direction)
+                self.assertEqual(rc, 0, res["summary"])
+                self.assertEqual(verdicts(res), ["PASS"] * 4)
+                # Pre-move query on the target (standby) and the final query
+                # on the target (now primary), each with the tuple filter.
+                self.assertEqual(len(c.cli_model.queries), 8)
+                self.assertEqual({cmd for _, cmd in c.cli_model.queries}, {self.QUERY})
+
+    def test_query_names_the_probe_tuple_and_an_explicit_limit(self):
+        self.assertEqual(soak.udp_session_probe.session_query_for_probe(self.PROBE), self.QUERY)
+        with self.assertRaisesRegex(ValueError, "no client SOCKET tuple"):
+            soak.udp_session_probe.session_query_for_probe("BOOT 0123456789abcdef0123456789abcdef\n")
+
+    def test_bare_listing_beyond_row_100_is_unreadable_not_absent(self):
+        # The model reproduces the artefacts under the pre-fix bare query:
+        # found when the probe's row is < 100, missing otherwise. A missing
+        # probe in a listing whose Total exceeds its rows is not absence.
+        for row in (0, 99, 100, 120):
+            with self.subTest(row=row):
+                model = CappedFlowSessionCLI({0: row, 1: 0}, lambda: 71)
+                rc, out = model.run(0, "show security flow session")
+                self.assertEqual(rc, 0)
+                self.assertIn("Total sessions: 151", out)
+                if row < 100:
+                    self.assertEqual(soak.udp_session_probe.session_id_for_probe(self.PROBE, out), "71")
+                else:
+                    with self.assertRaisesRegex(ValueError, r"shows 100 rows but reports 'Total sessions: 151'"):
+                        soak.udp_session_probe.session_id_for_probe(self.PROBE, out)
+
+    def test_absence_needs_a_complete_local_section(self):
+        model = CappedFlowSessionCLI({0: 0, 1: 0}, lambda: 71)
+        other_port = self.QUERY.replace("source-port 39000", "source-port 39001")
+        rc, complete = model.run(0, other_port)
+        self.assertEqual(rc, 0)
+        self.assertIn("Total sessions: 0\n", complete)
+        # A complete, empty local section proves absence.
+        self.assertIsNone(soak.udp_session_probe.session_id_for_probe(self.PROBE, complete))
+        # The same section without its terminator (a CLI error, a cut-off
+        # capture) proves nothing.
+        cut = complete.replace("Total sessions: 0\n", "", 1)
+        with self.assertRaisesRegex(ValueError, "no 'Total sessions:' terminator"):
+            soak.udp_session_probe.session_id_for_probe(self.PROBE, cut)
+        # The PEER section's terminator does not complete the local one.
+        self.assertIn("node1:", cut)
+        # Via the real IncusCluster method, an unreadable listing is an error
+        # (the soak's "Session ID query failed" VOID), never "absent".
+        cluster = soak.IncusCluster({0: "fw0", 1: "fw1"}, "lan", "target")
+        cluster._exec = lambda ref, argv, timeout=None: (0, cut)
+        session_id, error = cluster.udp_probe_session_id(1, self.PROBE)
+        self.assertIsNone(session_id)
+        self.assertRegex(error, r"could not parse flow-session capture on node1: .*no 'Total sessions:' terminator")
 
 
 class IperfTargetManagedness(unittest.TestCase):

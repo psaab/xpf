@@ -101,8 +101,37 @@ def same_client_identity(before_text: str, after_text: str) -> Tuple[bool, str]:
     return True, "UDP probe client identity persisted"
 
 
+# #19038: the remote `cli` lists at most 100 rows per node section unless the
+# command passes `limit` (cmd/cli/show_flow.go; the product side is #19039).
+# The rows come in BPF hash order, which depends on each node's map seed, so
+# on a busy node an unfiltered listing omitted the probe's flow on one node
+# and showed it on the other, and that changed with every new probe socket.
+# The query therefore names the probe's exact tuple and an explicit limit.
+SESSION_QUERY_LIMIT = 10000
+
+_TOTAL_SESSIONS_RE = re.compile(r"^\s*Total sessions(?:\s*\([^)]*\))?:\s*([0-9]+)\s*$")
+
+
+def session_query_for_probe(probe_text: str) -> str:
+    """The `show security flow session` command listing exactly this probe's flow."""
+    probe = parse_log(probe_text)
+    if probe.socket_tuple is None:
+        raise ValueError("probe log has no client SOCKET tuple")
+    source_ip, source_port, target_ip, target_port = probe.socket_tuple
+    return (f"show security flow session source-prefix {source_ip}/32 source-port {source_port} "
+            f"destination-prefix {target_ip}/32 destination-port {target_port} "
+            f"protocol udp limit {SESSION_QUERY_LIMIT}")
+
+
 def session_id_for_probe(probe_text: str, session_text: str) -> Optional[str]:
-    """Return the local firewall Session ID for this exact UDP flow tuple."""
+    """Return the local firewall Session ID for this exact UDP flow tuple.
+
+    None ("absent") comes only from a COMPLETE local section: its
+    `Total sessions: N` terminator is present and N equals the rows shown.
+    A listing that is truncated or has no terminator cannot prove absence
+    (#19038), so it raises ValueError and the caller reports it as
+    unreadable, never as "absent on the synced standby".
+    """
     probe = parse_log(probe_text)
     if probe.socket_tuple is None:
         raise ValueError("probe log has no client SOCKET tuple")
@@ -113,6 +142,8 @@ def session_id_for_probe(probe_text: str, session_text: str) -> Optional[str]:
     current_id = None
     matches = []
     node_headers = 0
+    rows = 0
+    total = None
     for line_number, line in enumerate((session_text or "").splitlines(), 1):
         if re.match(r"^node[0-9]+:", line):
             node_headers += 1
@@ -121,14 +152,29 @@ def session_id_for_probe(probe_text: str, session_text: str) -> Optional[str]:
             continue
         match = re.match(r"^\s*Session ID:\s*([0-9]+)(?:,|\s|$)", line)
         if match:
+            rows += 1
             current_id = match.group(1)
+            continue
+        total_match = _TOTAL_SESSIONS_RE.match(line)
+        if total_match:
+            if total is not None:
+                raise ValueError(f"local session listing has a second 'Total sessions:' line at line {line_number}")
+            total = int(total_match.group(1))
             continue
         if current_id is not None and flow.search(line):
             matches.append(current_id)
             current_id = None
     if len(matches) > 1:
         raise ValueError(f"probe tuple matched multiple local firewall sessions: {matches}")
-    return matches[0] if matches else None
+    if matches:
+        return matches[0]
+    if total is None:
+        raise ValueError("local session listing has no 'Total sessions:' terminator; "
+                         "the probe flow's absence is unreadable")
+    if total != rows:
+        raise ValueError(f"local session listing shows {rows} rows but reports 'Total sessions: {total}' "
+                         "(truncated); the probe flow's absence is unreadable")
+    return None
 
 
 def classify_snapshots(before_text: str, checkpoint_text: str, after_text: str,
@@ -399,6 +445,18 @@ def session_id_file(probe_path: str, session_path: str) -> int:
     print(session_id)
     return 0
 
+def session_query_file(probe_path: str) -> int:
+    """Print the tuple-filtered session query for the shell caller (#19038)."""
+    try:
+        probe_text = pathlib.Path(probe_path).read_text(encoding="utf-8")
+        query = session_query_for_probe(probe_text)
+    except (OSError, UnicodeError, ValueError) as exc:
+        print(f"UDP probe session query unbuildable: {exc}", file=sys.stderr)
+        return 2
+    print(query)
+    return 0
+
+
 def same_client_files(before: str, after: str) -> int:
     try:
         before_text = pathlib.Path(before).read_text(encoding="utf-8")
@@ -457,6 +515,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     session_id = sub.add_parser("session-id")
     session_id.add_argument("probe_log")
     session_id.add_argument("session_capture")
+    session_query = sub.add_parser("session-query")
+    session_query.add_argument("probe_log")
     baseline = sub.add_parser("baseline")
     same_client = sub.add_parser("same-client")
     same_client.add_argument("before")
@@ -473,6 +533,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         return baseline_file(args.file)
     if args.command == "session-id":
         return session_id_file(args.probe_log, args.session_capture)
+    if args.command == "session-query":
+        return session_query_file(args.probe_log)
     if args.command == "same-client":
         return same_client_files(args.before, args.after)
     return classify_files(args.before, args.checkpoint, args.after,
