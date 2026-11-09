@@ -518,7 +518,12 @@ Knobs:
 | `SOAK_RESTORE` | 1 | `0`: do not put node0 back as primary at the end (matrix row D3) |
 | `SOAK_IPERF_PORT` | 5211 | the unshaped CoS class on the loss path |
 | `SOAK_IPERF6_PORT` | 5210 | IPv6 iperf3 server port |
-| `SOAK_OUT` | `/var/tmp/rg-move-soak-<utc>` | artefacts: `soak.log`, `result.json`, `ping.log`, `iperf.jsonl`, `ping6.log`, `iperf6.jsonl` |
+| `SOAK_OUT` | `/var/tmp/rg-move-soak-<utc>` | artefacts: `soak.log`, `result.json`, `ping.log`, `iperf.jsonl`, `ping6.log`, `iperf6.jsonl`; with the #19050 probes also `route-<name>.log` and `host-<node>-<anchor\|routed>.log` |
+| `SOAK_ROUTED` | 1 | `0`: no routed-destination probes (#19050) |
+| `SOAK_ROUTED4` | env `ROUTED_TARGET4` | IPv4 destination reached only through the default route (`r4`, 10 ms; a gap over `SOAK_MAX_GAP_MS` FAILs the move) |
+| `SOAK_ROUTED6` | env `ROUTED_TARGET6` | IPv6 destination reached only through `::/0` (`r6`). Probed at 100 ms (`SOAK_ROUTED6_INTERVAL`), not 10 ms, to stay under public ICMP rate limits; its path leaves the lab, so a gap is a COST |
+| `SOAK_STATIC6` | env `STATIC_TARGET6` | a host behind a non-default static route (`s6`, 100 ms; a gap is a COST) |
+| `SOAK_HOST4` | 1 | `0`: no host-originated probe. With `r4` set, both nodes ping `r4` and the connected WAN gateway (`WAN_GW4`, or `SOAK_HOST4_ANCHOR`) from their own default instance |
 
 `make test-rg-move-soak` runs it through `harness-result.sh` (`smoke-cells`,
 `--require-helper-attestation`), so a run writes a ledger row with build
@@ -543,6 +548,44 @@ filter and the explicit limit are required (#19038). The bare command stops
 at 100 rows per node in BPF hash order (#19039), so on a busy node it showed
 the probe on one node and not the other, by run rather than by issuer or
 direction. The four loss runs at #18559's head took all four combinations.
+
+### Routed destinations (#19050)
+
+The connected-target ping and iperf3 measure the path to a subnet the
+firewall is attached to. Most real traffic is routed: it leaves through the
+default route to a next hop. On a standby the RETH statics are left out of
+the FRR render (#15734), so its kernel default is the cluster Null0. After
+an RG move, the new WAN owner's kernel default stays that Null0 until the
+next FRR render installs the static, 1.4-4.8 s after promotion in lane G's
+loss FIB dumps (#19050). So the soak also probes destinations that no
+connected subnet covers:
+
+- `r4`, `r6`, `s6` (LAN host): scored per move like the connected ping.
+  The probe must cover the window, and a window with no reply in its tail
+  FAILs ("routed traffic did not resume"). A gap over `SOAK_MAX_GAP_MS`
+  FAILs `r4`, a lab destination. For `r6` (the public resolver) and `s6`
+  (an external router) a gap is a COST, judged master-relative, because
+  their paths have losses the cluster did not cause.
+- `host4` (each node): the delay between the new WAN owner's first reply
+  from its connected WAN gateway and its first reply from `r4`, both on
+  that node's own clock. It is the routed window host-originated traffic
+  (probes, syslog, IKE) sees. A standby reaches neither target; a move
+  that does not hand the target the WAN RG is `N/A`. It is recorded per move
+  (`host4` in `result.json`, the `routed probes` table, `summary.host4`) and
+  does not change a verdict.
+- **Same-run positive control.** Before any move, every routed probe must
+  answer. For `host4`, exactly one node must reach the anchor, and that node
+  must also reach `r4`. A probe that fails its control is VOID for the whole
+  run: each move's cell is VOID (the move is VOID unless it FAILs for
+  another reason), and the run exits 2. It is never a PASS.
+
+Measuring it is acceptance 1 of #19050. The code reading in
+`docs/log/19050.md` predicts that the helper's own transit is unaffected: the
+config static default, at preference 5, shadows the preference-200
+cluster-terminal row (`select_v4_route`). It also predicts that
+host-originated traffic is affected. The cluster env files carry no routed
+targets until each one is verified to answer from the LAN host. Until then,
+set `SOAK_ROUTED4`/`SOAK_ROUTED6`/`SOAK_STATIC6` for a run.
 
 The first move takes each RG away from its current owner. After that the
 directions alternate strictly, whatever happened, exactly like the operator's

@@ -89,6 +89,8 @@ python3 -u "${SCRIPT_DIR}/rg_move_soak.py" \
 	--target4 "$IPERF_TARGET4" --target6 "${IPERF_TARGET6:-}" \
 	--lan-vip4 "${LAN_VIP4:-}" \
 	--mouse-target "${MOUSE_TARGET_REF:-}" \
+	--routed4 "${ROUTED_TARGET4:-}" --routed6 "${ROUTED_TARGET6:-}" \
+	--static6 "${STATIC_TARGET6:-}" --wan-gw4 "${WAN_GW4:-}" \
 	--outdir "$OUT" 2>&1 | tee "$OUT/soak.log"
 rc=${PIPESTATUS[0]}
 set -e
