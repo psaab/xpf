@@ -502,10 +502,16 @@ the group fails if either check fails.
   - That Session ID query names the probe's exact tuple and passes
     `limit 10000` (`udp_session_probe.py session-query`, #19038). A bare
     `show security flow session` from the remote CLI stops at 100 rows per
-    node, in hash order (#19039), so it found the probe on one node and
-    missed it on the other, depending on the run. A local section that is
-    truncated, or that has no `Total sessions:` line, is unreadable (a VOID
-    that names the cause), never "not present on synced standby".
+    node, in hash order (#19039), so fw0 could list the probe's flow in one
+    run and leave it out in the next. Master's H1 VOIDed with "not present
+    on synced standby/fw0" for that reason.
+  - A local section that is truncated, or that has no `Total sessions:`
+    line, is unreadable and never "not present". The Group 1c VOID then
+    reads `pre-move UDP Session ID query on standby/fw0 failed: <cause>` (or
+    `final post-window ... on primary/fw0 failed: <cause>`). `<cause>` is
+    the helper's own message, for example `UDP probe session identity
+    unreadable: local session listing shows 100 rows but reports 'Total
+    sessions: 151' ...` or `could not capture flow sessions on <node>`.
   - A moved session whose local row is lost but whose peer-synced copy
     survives is rebuilt on the hit path. That is the designed recovery,
     not a miss.

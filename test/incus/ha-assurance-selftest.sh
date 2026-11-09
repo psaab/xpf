@@ -2345,6 +2345,62 @@ assert_helper_status 2 python3 "${ROOT}/test/incus/udp_session_probe.py" session
 	"$UDP_PROBE_CHECKPOINT" "${RG1_DIR}/udp-cap-bare.txt"
 assert_contains "$(<"${ERR}")" "shows 100 rows but reports 'Total sessions: 151'" \
 	'#19038 a truncated local listing cannot prove the probe flow absent'
+# #19038 (R18 F1): Group 1c's VOID reason must carry the session query's
+# cause, not only a fixed "query failed". Run the actual
+# ha_rg1_udp_before_move and ha_rg1_udp_finish from test-failover.sh, with a
+# CLI stub that answers every query with the bare 100-row listing (as a
+# filter-dropping CLI would), and require the reason to name the truncation.
+UDP_REASON_FNS="${RG1_DIR}/udp-reason-fns.sh"
+python3 - "${ROOT}/test/incus/test-failover.sh" "$UDP_REASON_FNS" <<'PY'
+import pathlib
+import re
+import sys
+
+text = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8")
+blocks = []
+for name in ("ha_rg1_udp_before_move", "ha_rg1_udp_finish"):
+    match = re.search(rf"^{name}\(\) \{{\n.*?^\}}\n", text, re.M | re.S)
+    if not match:
+        raise SystemExit(f"cannot extract {name} for the #19038 reason cell")
+    blocks.append(match.group(0))
+pathlib.Path(sys.argv[2]).write_text("".join(blocks), encoding="utf-8")
+PY
+for UDP_REASON_STEP in before finish; do
+	(
+		incus() { # incus exec <node> -- cli -c <query>: the bare capped listing, whatever the query
+			[[ "$#" -eq 6 && "$1" == exec && "$3" == -- && "$4" == cli && "$5" == -c ]] || return 1
+			python3 "$UDP_PROBE_CAP_CLI" 'show security flow session'
+		}
+		ha_udp_probe_snapshot() { cp "$UDP_PROBE_CHECKPOINT" "$3"; }
+		ha_udp_probe_stop() { :; }
+		# shellcheck source=/dev/null
+		source "$UDP_REASON_FNS"
+		FW0=loss:xpf-userspace-fw0
+		CLUSTER_LAN_HOST=loss:cluster-userspace-host
+		RG1_UDP_REMOTE_DIR=/tmp/r-soak-selftest.udp
+		HA_CAPTURE_DIR="${RG1_DIR}/udp-reason-${UDP_REASON_STEP}"
+		mkdir -p "$HA_CAPTURE_DIR"
+		RG1_UDP_STARTED=true
+		RG1_UDP_READY=true
+		RG1_UDP_REASON=
+		RG1_UDP_SESSION_PROBE="${HA_CAPTURE_DIR}/probe.log"
+		RG1_UDP_BEFORE="${HA_CAPTURE_DIR}/before.log"
+		RG1_UDP_AFTER="${HA_CAPTURE_DIR}/after.log"
+		if [[ "$UDP_REASON_STEP" == before ]]; then
+			if ha_rg1_udp_before_move; then step_rc=0; else step_rc=$?; fi
+		else
+			if ha_rg1_udp_finish; then step_rc=0; else step_rc=$?; fi
+		fi
+		printf 'rc=%s ready=%s reason=%s\n' "$step_rc" "$RG1_UDP_READY" "$RG1_UDP_REASON"
+	) >"${OUT}" 2>"${ERR}" || fail_test "#19038 ${UDP_REASON_STEP} reason cell did not run: $(<"${ERR}")"
+	case "$UDP_REASON_STEP" in
+	before) UDP_REASON_WANT="rc=2 ready=false reason=pre-move UDP Session ID query on standby/fw0 failed: " ;;
+	finish) UDP_REASON_WANT="rc=1 ready=false reason=final post-window UDP Session ID query on primary/fw0 failed: " ;;
+	esac
+	assert_contains "$(<"${OUT}")" "$UDP_REASON_WANT" "#19038 ${UDP_REASON_STEP}: Group 1c VOID prefix"
+	assert_contains "$(<"${OUT}")" "shows 100 rows but reports 'Total sessions: 151'" \
+		"#19038 ${UDP_REASON_STEP}: Group 1c VOID reason names the truncated listing"
+done
 UDP_PROBE_RESET="${RG1_DIR}/udp-reset.log"
 cat >"$UDP_PROBE_RESET" <<'UDP'
 BOOT fedcba9876543210fedcba9876543210

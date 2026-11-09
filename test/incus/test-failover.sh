@@ -295,10 +295,16 @@ ha_rg1_udp_before_move() {
 		RG1_UDP_REASON="UDP probe snapshot for the synced Session ID query was unavailable"
 		return 2
 	fi
+	# #19038: the helper's stderr names the cause (a truncated or
+	# unterminated listing, a capture failure, an unbuildable query), and the
+	# VOID reason carries it.
+	local query_err="${HA_CAPTURE_DIR}/rg1-udp-session-before.err" why
 	if ! RG1_UDP_SESSION_BEFORE=$(ha_udp_probe_session_id "$FW0" "$RG1_UDP_SESSION_PROBE" \
-		"${HA_CAPTURE_DIR}/rg1-udp-session-before.txt"); then
+		"${HA_CAPTURE_DIR}/rg1-udp-session-before.txt" 2>"$query_err"); then
+		why="$(tr -s '\n' ' ' <"$query_err" 2>/dev/null)"
+		why="${why% }"
 		RG1_UDP_READY=false
-		RG1_UDP_REASON="pre-move UDP Session ID query on standby/fw0 failed"
+		RG1_UDP_REASON="pre-move UDP Session ID query on standby/fw0 failed${why:+: $why}"
 		return 2
 	fi
 	if [[ "$RG1_UDP_SESSION_BEFORE" == NONE ]]; then
@@ -344,11 +350,14 @@ ha_rg1_udp_finish() {
 		RG1_UDP_REASON="post-window UDP probe snapshot was unavailable"
 	fi
 	if [[ "$captured" == true && "$RG1_UDP_READY" == true ]]; then
+		local query_err="${HA_CAPTURE_DIR}/rg1-udp-session-final.err" why
 		if ! RG1_UDP_SESSION_AFTER=$(ha_udp_probe_session_id "$FW0" "$RG1_UDP_AFTER" \
-			"${HA_CAPTURE_DIR}/rg1-udp-session-final.txt"); then
+			"${HA_CAPTURE_DIR}/rg1-udp-session-final.txt" 2>"$query_err"); then
+			why="$(tr -s '\n' ' ' <"$query_err" 2>/dev/null)"
+			why="${why% }"
 			captured=false
 			RG1_UDP_READY=false
-			RG1_UDP_REASON="final post-window UDP Session ID query on primary/fw0 failed"
+			RG1_UDP_REASON="final post-window UDP Session ID query on primary/fw0 failed${why:+: $why}"
 		fi
 	fi
 	ha_udp_probe_stop "$CLUSTER_LAN_HOST" "$RG1_UDP_REMOTE_DIR"
