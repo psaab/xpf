@@ -194,10 +194,11 @@ func TestFRRConfRootRoot0644MigratesToServiceGroup(t *testing.T) {
 	t.Run("group resolves: migrate and tighten", func(t *testing.T) {
 		frrGID, ok := migrationServiceGID19058(t)
 		if !ok {
-			t.Skipf("no gid this process can chown to besides its egid %d: euid %d cannot chown to "+
-				"%d (a user namespace that maps only gid 0, as testguard-run.sh's unshare -Urp does) "+
-				"and it has no supplementary group; the migration runs under real root or as a "+
-				"non-root member of a supplementary group", os.Getegid(), os.Geteuid(), rootServiceGID19058)
+			t.Skipf("no candidate gid passed a chown probe (euid %d, egid %d, groups %v; candidates: %d "+
+				"when root, then each supplementary group): a user namespace that maps only gid 0, as "+
+				"testguard-run.sh's unshare -Urp does, rejects every other gid. The migration runs "+
+				"under real root, or for a caller with a chown-able supplementary group",
+				os.Geteuid(), os.Getegid(), mustGetgroups19058(t), rootServiceGID19058)
 		}
 		resolveFRRGroup = func() (int, bool) { return frrGID, true }
 		conf, _ := seedLegacy(t)
@@ -253,32 +254,56 @@ func TestFRRConfRootRoot0644MigratesToServiceGroup(t *testing.T) {
 // rootServiceGID19058 is the synthetic frr gid Case 1 migrates to as root.
 const rootServiceGID19058 = 4242
 
-// migrationServiceGID19058 returns a gid this process can fchown a file it
-// owns to, other than its egid: rootServiceGID19058 when a probe chown to it
-// succeeds (real root, or a user namespace that maps it), else a
-// supplementary group (permitted for any user). ok is false when neither
-// exists. The probe is the capability itself, not a euid guess (#19058).
+// migrationServiceGID19058 returns a gid this process can actually fchown a
+// file it owns to, other than the gid a freshly created file gets (the
+// seed's gid), so the migration stays observable. Candidates are
+// rootServiceGID19058 when euid is 0, then every supplementary group. EACH
+// candidate is proven by a chown on a disposable probe file; ok is false only
+// after all of them failed (#19058).
+//
+// Membership is not the capability. Under `unshare -Ur` (testguard-run.sh)
+// unmapped supplementary memberships surface as the overflow gid 65534, and
+// fchown to 65534 or to 4242 is EINVAL while gid 0 works (Codex review of
+// 8c501eba12). An unprobed fallback returned 65534 and Case 1 failed for an
+// environment reason again.
 func migrationServiceGID19058(t *testing.T) (int, bool) {
 	t.Helper()
-	if os.Geteuid() == 0 {
-		probe := filepath.Join(t.TempDir(), "chown-probe")
-		if err := os.WriteFile(probe, nil, 0o600); err != nil {
-			t.Fatalf("chown probe: %v", err)
-		}
-		if err := os.Chown(probe, -1, rootServiceGID19058); err == nil {
-			return rootServiceGID19058, true
-		}
+	probe := filepath.Join(t.TempDir(), "chown-probe")
+	if err := os.WriteFile(probe, nil, 0o600); err != nil {
+		t.Fatalf("chown probe: %v", err)
 	}
-	groups, err := os.Getgroups()
+	fi, err := os.Stat(probe)
 	if err != nil {
-		t.Fatalf("getgroups: %v", err)
+		t.Fatalf("stat chown probe: %v", err)
 	}
-	for _, gid := range groups {
-		if gid != os.Getegid() {
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		t.Fatalf("stat chown probe: no Stat_t")
+	}
+	seedGID := int(st.Gid)
+	var candidates []int
+	if os.Geteuid() == 0 {
+		candidates = append(candidates, rootServiceGID19058)
+	}
+	candidates = append(candidates, mustGetgroups19058(t)...)
+	for _, gid := range candidates {
+		if gid == seedGID {
+			continue
+		}
+		if err := os.Chown(probe, -1, gid); err == nil {
 			return gid, true
 		}
 	}
 	return 0, false
+}
+
+func mustGetgroups19058(t *testing.T) []int {
+	t.Helper()
+	groups, err := os.Getgroups()
+	if err != nil {
+		t.Fatalf("getgroups: %v", err)
+	}
+	return groups
 }
 
 // TestFRRWritePlanDecision pins the single-decision table (fold-2 claim
