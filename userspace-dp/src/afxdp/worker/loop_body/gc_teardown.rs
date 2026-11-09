@@ -76,11 +76,15 @@ pub(super) fn retire_expired_missing_neighbor_seeds(
 /// least one candidate still reads the whole shared map under the node-global
 /// lock, so a cohort of C replicas costs `ceil(C / EXPIRY_PASS_MAX_REAPS)` full
 /// passes on each worker; `session/README.md` records the measured hold per
-/// call. It is not keyed because a keyed form would not be the same predicate:
-/// the direct arm could use `bare_tuple_sessions` exactly (the #16491 index,
+/// call. It is not keyed because no EXISTING index keys it exactly: the direct
+/// arm could use `bare_tuple_sessions` (the #16491 index,
 /// `retry_deferred_conntrack_deletes`), but the reverse arm matches the bare
 /// tuple of each row's DERIVED reverse key across routing domains, and the only
-/// reverse index (`served_aliases`, #18663) is keyed on the scoped alias.
+/// reverse index (`served_aliases`, #18663) is keyed on the scoped alias. An
+/// exact keyed form would need a new `session_id -> shared keys` index (the
+/// predicate requires equal non-zero ids), re-checked against this predicate
+/// per candidate and hooked into every publish/remove/id-mutation path of
+/// `shared_sessions` — not built in #18780.
 ///
 /// The lock is taken with `lock_shared_recover` (engineering-style: a poisoned
 /// shared-session map is recovered, never read as "no rows").
