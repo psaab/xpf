@@ -1160,6 +1160,11 @@ class Soak:
         self.sleep = sleep_fn
         self.log = log
         self.lan_offset = 0.0  # LAN clock minus this host's clock
+        # #19056: (monotonic, wall) taken together when the LAN offset is
+        # measured. Every LAN-clock moment is derived from the monotonic
+        # clock through it, so a controller wall-clock step cannot move a
+        # move's traffic window.
+        self._anchor = (self.now(), self.wall())
         self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
         # #19055: the RGs this run moves, and dual-active samples seen for an
         # RG of this move that has no result yet (its own move comes later).
@@ -1227,8 +1232,11 @@ class Soak:
             return sorted(v0)
         return [int(x) for x in re.split(r"[ ,]+", spec) if x]
 
-    def lan_time(self, t_local: float) -> float:
-        return t_local + self.lan_offset
+    def lan_time(self, t_mono: float) -> float:
+        """A monotonic-clock moment (Soak.now) on the LAN host's clock: the
+        wall time it had at the anchor, plus the measured offset (#19056)."""
+        m0, w0 = self._anchor
+        return t_mono - m0 + w0 + self.lan_offset
 
     def families(self) -> List[Tuple[str, str, int, int]]:
         out = [("v4", self.cfg.target4, self.cfg.iperf_port, self.cfg.iperf_streams)]
@@ -1264,6 +1272,7 @@ class Soak:
         if offs["lan"] is None:
             return "cannot read the LAN host clock", info
         self.lan_offset = offs["lan"][0]
+        self._anchor = (self.now(), self.wall())
         if offs["node0"] and offs["node1"]:
             info["node1_minus_node0_s"] = round(offs["node1"][0] - offs["node0"][0], 2)
         info["chrony"] = {n: self.c.chrony(n) for n in (0, 1)}
@@ -1696,7 +1705,7 @@ class Soak:
                 # the generators until the soak stops them, with a cap.
                 duration = cfg.traffic_s or int(cfg.moves * len(rgs) * TRAFFIC_S_PER_MOVE_CAP + TRAFFIC_S_SLACK)
                 info["traffic_s"] = duration
-                self.traffic_end_lan = self.lan_time(self.wall()) + duration
+                self.traffic_end_lan = self.lan_time(self.now()) + duration
                 self.start_traffic(duration)
                 self.sleep(cfg.warmup_s)
                 bad = self.traffic_preflight()
@@ -1707,7 +1716,7 @@ class Soak:
                     self.log(f"UDP sequence probe unavailable; each move's UDP cell will be VOID: {bad}")
             for i in range(1, cfg.moves + 1):
                 target = targets[rgs[0]]
-                t_issue = self.wall()
+                t_issue = self.now()
                 udp_probe_checks = []
                 udp_probe_pending = None
                 results: List[RGMoveResult] = []
@@ -1779,7 +1788,7 @@ class Soak:
                 for rg in rgs:
                     targets[rg] = 1 - targets[rg]
             if moves:
-                moves[-1].t_next_lan = self.lan_time(self.wall())
+                moves[-1].t_next_lan = self.lan_time(self.now())
         except VoidRun as e:
             void_reason = str(e)
             self.log(f"FATAL: {void_reason}")

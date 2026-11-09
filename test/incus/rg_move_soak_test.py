@@ -2694,5 +2694,55 @@ class OtherRgsDuringLandingPoll19055(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class LateGapCluster(FakeCluster):
+    """Codex's #19056 reproduction. The move's traffic has a 1.51 s outage
+    (ping and every stream) late in the window, and the controller's wall
+    clock steps back 3 s one second after the move CLI returns. The LAN
+    host's clock does not step."""
+
+    def cli(self, node, cmd):
+        out = super().cli(node, cmd)
+        lan_now = self.clock_.t + self.lan_off
+        self.events.append((lan_now + 3.4, lan_now + 4.91, "gap"))
+        self.step_at = self.clock_.t + 1.0
+        return out
+
+
+class WallClockStep19056(unittest.TestCase):
+    """#19056: traffic windows are anchored on the monotonic clock."""
+
+    def run_step(self, step_s):
+        clock = FakeClock()
+        c = LateGapCluster(clock, {2: 0})
+
+        def wall():
+            stepped = getattr(c, "step_at", None) is not None and clock.t >= c.step_at
+            return clock.now() - (step_s if stepped else 0.0)
+        return run_fake(c, clock, moves=1, now_fn=wall)
+
+    def test_a_backward_wall_step_cannot_hide_a_late_outage(self):
+        rc, res, _ = self.run_step(3.0)
+        move = res["moves"][0]
+        self.assertEqual(move["verdict"], "FAIL", move["reasons"])
+        self.assertTrue(any("ping gap" in r for r in move["reasons"]), move["reasons"])
+        self.assertTrue(any("aggregate outage" in r for r in move["reasons"]), move["reasons"])
+        self.assertEqual(rc, 1)
+
+    def test_control_without_a_step_also_fails(self):
+        rc, res, _ = self.run_step(0.0)
+        self.assertEqual(res["moves"][0]["verdict"], "FAIL")
+
+    def test_lan_time_maps_the_monotonic_clock_through_the_anchor(self):
+        # In production the monotonic clock is nowhere near the wall clock.
+        # A monotonic moment must still land at wall time + LAN offset.
+        clock = FakeClock()
+        s = soak.Soak(soak.Config(), None, now_fn=clock.now, sleep_fn=clock.sleep,
+                      log=lambda *_: None, mono_fn=lambda: clock.t + 1000.0)
+        s._anchor = (s.now(), s.wall())
+        s.lan_offset = 3.0
+        clock.sleep(2.0)
+        self.assertAlmostEqual(s.lan_time(s.now()), clock.t + 3.0, places=2)
+
+
 if __name__ == "__main__":
     unittest.main()

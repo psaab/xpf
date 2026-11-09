@@ -676,10 +676,11 @@ then the old owner (T2 > T1).
   a dual-active overlap in an RG that had already landed earlier in the
   same move was missed until the window. Every landing-poll sample now
   scores every RG the run moves (see "Several RGs per move" below).
-- [#19056](https://github.com/psaab/xpf/issues/19056): the LAN traffic
-  windows are mapped from the controller's wall clock. A wall-clock step on
-  the controller can move a late ping gap or outage outside its move's
-  window.
+- [#19056](https://github.com/psaab/xpf/issues/19056), fixed: the LAN
+  traffic windows were mapped from the controller's wall clock, so a
+  wall-clock step on the controller could move a late ping gap or outage
+  outside its move's window. They now come from the monotonic clock through
+  an anchor taken at the offset measurement (see "Timing").
 
 **Several RGs per move** (#19055). With `SOAK_RG` naming several RGs, each
 move moves them one after the other. Every sample of every landing poll
@@ -707,8 +708,18 @@ missing, whose own Forwarding line is missing, or whose value is not
 detail says "unreadable".
 
 **Timing.** Deadlines and durations use a monotonic clock, so a wall-clock
-step cannot stretch or shrink the landing bound. Wall time only maps
-moments onto the LAN host's traffic logs. A landing first seen by a read
+step cannot stretch or shrink the landing bound. The move windows on the LAN
+host's clock are monotonic too (#19056).
+- When the preflight measures the LAN host's offset, the soak takes a
+  (monotonic, wall) pair at the same moment.
+- Every window edge is the monotonic moment mapped through that pair, plus
+  the offset.
+- A controller wall-clock step therefore cannot move a window. Before
+  #19056, a 3 s backward step shortened the last window, and a late 1.5 s
+  outage escaped it.
+- A step of the LAN host's own clock is not detected.
+
+A landing first seen by a read
 that finished more than `SOAK_CONVERGE_S` after the CLI returned FAILs. A
 sample is now two serial reads, so this is about one read later than with
 parallel reads. In the #18559 gate's artefacts, landings were seen
