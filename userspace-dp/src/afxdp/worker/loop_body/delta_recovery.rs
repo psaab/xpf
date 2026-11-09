@@ -76,6 +76,13 @@ pub(super) fn run_delta_recovery(
     // overflows mid-chunk. Shared by the #2442 loss-of-sync resync and the
     // #2653 single-shot `ExportOwnerRGSessions` command path.
     const RESYNC_EXPORT_CHUNK: usize = 2048;
+    // #18780 (review cycle 3): how long an export the stream refused waits
+    // before its owed retry probes again. The probe is a zero-wait push, so
+    // this only bounds how often a stalled consumer is asked, not how long a
+    // worker blocks; 10 ms keeps a busy-polling worker from probing the shared
+    // producer lock every iteration, and delays delivery after recovery by at
+    // most that much.
+    const LOSS_RESYNC_RETRY_INTERVAL_NS: u64 = 10_000_000;
     // Chunked drain-as-you-export: collect the owned forward candidates
     // for `$owner_rgs` once, then emit them in ring-sized chunks, draining
     // and flushing each chunk to the peer before emitting the next. The
@@ -89,46 +96,80 @@ pub(super) fn run_delta_recovery(
     macro_rules! chunked_drain_as_you_export {
         ($owner_rgs:expr, $flag:ident) => {{
             let owner_rgs = $owner_rgs;
+            let mut refused = false;
             if !owner_rgs.is_empty() {
                 // #9856 M2c: LossResync keeps this unfiltered full-rescan
                 // (`u64::MAX` preserves today's re-announce-everything
                 // behavior); CommandExport moved to the accept-captured
                 // kick_epoch + multi-pass cursor in the branch below. M4
                 // forks the two legs (provenance) properly.
-                let candidates = crate::afxdp::forward_export_candidates_for_owner_rgs(
-                    &sessions,
-                    &owner_rgs,
-                    u64::MAX,
-                );
-                for chunk in candidates.chunks(RESYNC_EXPORT_CHUNK) {
-                    // #18780: a bulk push the CONNECTED stream refused while
-                    // the previous chunk drained has re-armed this resync
-                    // (`owe_resync_after_refused_export`). The next iteration
-                    // re-exports the whole owned set, so stop here: the rest
-                    // would only fill the bounded RPC fallback, whose bulk
-                    // overflow drops without arming (#8593).
-                    if sessions.take_resync_export_refused() {
-                        break;
+                //
+                // #18780 (review cycle 3): DURABLE progress. The walk is
+                // paged (`forward_export_candidates_page`) and starts where a
+                // refused export of this episode stopped
+                // (`begin_loss_resync_export`), at the refused row's own slab
+                // slot; a fresh loss episode restarts it at slot 0. Rows are
+                // read live per page, so a removed or replaced row is never
+                // re-exported from a stale copy. An owed retry first PROBES
+                // the stream with a single zero-wait push
+                // (`arm_loss_resync_probe`); a still-stalled consumer then
+                // costs no budget, and the export only proceeds once the
+                // probe gets through.
+                let resume = sessions.begin_loss_resync_export();
+                let mut cursor = resume.unwrap_or(0);
+                let mut probing = resume.is_some();
+                let mut chunk = Vec::with_capacity(RESYNC_EXPORT_CHUNK);
+                loop {
+                    chunk.clear();
+                    let limit = if probing { 1 } else { RESYNC_EXPORT_CHUNK };
+                    let outcome = crate::afxdp::forward_export_candidates_page(
+                        &sessions,
+                        &owner_rgs,
+                        u64::MAX,
+                        cursor,
+                        limit,
+                        &mut chunk,
+                    );
+                    if !chunk.is_empty() {
+                        if probing {
+                            sessions.arm_loss_resync_probe();
+                        }
+                        for (key, decision, metadata, origin) in chunk.drain(..) {
+                            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+                        }
+                        if !crate::afxdp::worker::loop_body::housekeeping::drain_and_flush_all_impl(
+                            sessions,
+                            bindings,
+                            binding_lookup,
+                            shared_recycles,
+                            shared_runtime,
+                            shared_sessions,
+                            shared_owner_rg_indexes,
+                            &mut $flag,
+                            worker_lossless_wedged,
+                            flush_deltas,
+                        ) {
+                            break;
+                        }
+                        // #18780: the CONNECTED stream refused a push of this
+                        // page (`owe_resync_after_refused_export` re-armed the
+                        // resync and recorded the refused row's slot). Stop:
+                        // the rest would only fill the bounded RPC fallback,
+                        // whose bulk overflow drops without arming (#8593).
+                        if sessions.take_resync_export_refused() {
+                            refused = true;
+                            break;
+                        }
+                        probing = false;
                     }
-                    for (key, decision, metadata, origin) in chunk.iter().cloned() {
-                        sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
-                    }
-                    if !crate::afxdp::worker::loop_body::housekeeping::drain_and_flush_all_impl(
-                        sessions,
-                        bindings,
-                        binding_lookup,
-                        shared_recycles,
-                        shared_runtime,
-                        shared_sessions,
-                        shared_owner_rg_indexes,
-                        &mut $flag,
-                        worker_lossless_wedged,
-                        flush_deltas,
-                    ) {
-                        break;
+                    match outcome {
+                        crate::session::ExportWalkOutcome::ResumeAt(next) => cursor = next,
+                        crate::session::ExportWalkOutcome::Complete => break,
                     }
                 }
+                sessions.end_loss_resync_export();
             }
+            refused
         }};
     }
     // #5290: fold the per-binding RPC-fallback loss-of-sync latch into the
@@ -234,7 +275,14 @@ pub(super) fn run_delta_recovery(
     // #9856: defer while a CommandExport window is open — the export
     // slice owns this pass's drain/emit budget, and the short-circuit
     // leaves the latch armed so the resync runs once it completes.
-    if worker_export_is_none && sessions.take_delta_loss() {
+    // #18780 (review cycle 3): an export the stream refused defers its owed
+    // retry by `LOSS_RESYNC_RETRY_INTERVAL_NS` (`loss_resync_ready`), so a
+    // stalled consumer is probed at a bounded rate rather than every loop
+    // iteration; the latch stays armed meanwhile.
+    if worker_export_is_none
+        && sessions.loss_resync_ready(loop_now_ns)
+        && sessions.take_delta_loss()
+    {
         // #2442 loss-of-sync resync. If `push_delta` dropped any delta
         // since the last drain, the in-worker session-delta ring
         // overflowed and the downstream session-sync consumer missed
@@ -244,8 +292,6 @@ pub(super) fn run_delta_recovery(
         //
         // Drain the existing backlog so the ring starts empty.
         let mut deferred_delta_cleanup = false;
-        // #18780: a refusal is per export; start this one clean.
-        let _ = sessions.take_resync_export_refused();
         if !crate::afxdp::worker::loop_body::housekeeping::drain_and_flush_all_impl(
             sessions,
             bindings,
@@ -261,7 +307,12 @@ pub(super) fn run_delta_recovery(
             sessions.set_delta_loss();
             return true;
         }
-        chunked_drain_as_you_export!(sessions.all_owner_rg_ids(), deferred_delta_cleanup);
+        // (#18780: `begin_loss_resync_export` inside starts the refusal flag
+        // clean for this export.)
+        let refused = chunked_drain_as_you_export!(sessions.all_owner_rg_ids(), deferred_delta_cleanup);
+        if refused {
+            sessions.defer_loss_resync_until(loop_now_ns.saturating_add(LOSS_RESYNC_RETRY_INTERVAL_NS));
+        }
         if deferred_delta_cleanup {
             sessions.set_delta_loss();
             return true;
@@ -300,9 +351,10 @@ pub(super) fn run_delta_recovery(
         // latch set from here on is a genuinely-new incremental drop — or,
         // since #18780, this export's own bulk push timing out on a CONNECTED
         // stream (`owe_resync_after_refused_export`). That re-arm is
-        // deliberate and rate-bounded: the next export pays its own single
-        // bulk budget before it can be refused again, and a disconnected
-        // stream never re-arms (#14646).
+        // deliberate and rate-bounded: the owed retry waits
+        // `LOSS_RESYNC_RETRY_INTERVAL_NS`, then probes with one zero-wait push
+        // and resumes at the refused row, and a disconnected stream never
+        // re-arms (#14646).
     }
     false
 }

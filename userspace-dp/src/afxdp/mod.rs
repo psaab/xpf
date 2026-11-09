@@ -143,7 +143,10 @@ pub(in crate::afxdp) use session_delta::{export_close_direct, export_open_direct
 // #2442: re-export the owner-RG export walk + its chunkable candidate collector
 // so the worker loop's loss-of-sync resync path and the session-module resync
 // test can reach them without naming the private `session_glue` module.
+#[cfg(test)]
 pub(crate) use session_glue::revalidation::forward_export_candidates_for_owner_rgs;
+// #18780: the paged walk the LossResync resumes with.
+pub(crate) use session_glue::revalidation::forward_export_candidates_page;
 /// #8586: the DELETE-specific split of `WORKER_COMMAND_QUEUE_DROPS`, re-exported
 /// so the coordinator status accessors and their wiring cell can name it
 /// without reaching into a private module.

@@ -532,6 +532,44 @@ pub(crate) fn test_worker_handle_connected(
     (handle, rx)
 }
 
+/// #18780: why a lossless enqueue gave up. Callers that must tell a stalled
+/// CONNECTED reader (`TimedOut`: the channel stayed full for the whole budget,
+/// which only happens while connected) from a stream that is not there at all
+/// match on this instead of on the message or on elapsed time. A zero budget
+/// against a full connected channel is also `TimedOut`, at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LosslessSendError {
+    /// The stream was not connected when the send began.
+    NotConnected,
+    /// The consumer disconnected while the frame waited for capacity.
+    Disconnected { seq: u64 },
+    /// The producer's receiving end is gone.
+    ChannelClosed { seq: u64 },
+    /// The channel stayed full for the whole budget while connected.
+    TimedOut { seq: u64 },
+}
+
+impl LosslessSendError {
+    pub(crate) fn is_timeout(self) -> bool {
+        matches!(self, Self::TimedOut { .. })
+    }
+}
+
+impl std::fmt::Display for LosslessSendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotConnected => write!(f, "event stream not connected"),
+            Self::Disconnected { seq } => {
+                write!(f, "event stream disconnected while queuing seq {seq}")
+            }
+            Self::ChannelClosed { seq } => {
+                write!(f, "event stream channel disconnected while queuing seq {seq}")
+            }
+            Self::TimedOut { seq } => write!(f, "timed out queuing event stream frame seq {seq}"),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // EventStreamWorkerHandle -- lightweight clone for worker threads
 // ---------------------------------------------------------------------------
@@ -689,12 +727,16 @@ impl EventStreamWorkerHandle {
     /// #16627: on success returns the sequence of the frame that was
     /// actually enqueued (the allocated seq for session deltas), so the
     /// caller can stamp it onto the fallback-leg copy.
-    fn send_lossless_encoded<F>(&self, timeout: Duration, mut encode: F) -> Result<u64, String>
+    fn send_lossless_encoded<F>(
+        &self,
+        timeout: Duration,
+        mut encode: F,
+    ) -> Result<u64, LosslessSendError>
     where
         F: FnMut() -> (EventFrame, Option<u64>),
     {
         if !self.shared.connected.load(Ordering::Acquire) {
-            return Err("event stream not connected".to_string());
+            return Err(LosslessSendError::NotConnected);
         }
         let deadline = Instant::now() + timeout;
         loop {
@@ -742,21 +784,15 @@ impl EventStreamWorkerHandle {
                 }
                 Err((EventStreamSendError::Full, reported_seq)) => {
                     if !self.shared.connected.load(Ordering::Acquire) {
-                        return Err(format!(
-                            "event stream disconnected while queuing seq {reported_seq}"
-                        ));
+                        return Err(LosslessSendError::Disconnected { seq: reported_seq });
                     }
                     if Instant::now() >= deadline {
-                        return Err(format!(
-                            "timed out queuing event stream frame seq {reported_seq}"
-                        ));
+                        return Err(LosslessSendError::TimedOut { seq: reported_seq });
                     }
                     thread::sleep(LOSSLESS_QUEUE_RETRY_DELAY);
                 }
                 Err((EventStreamSendError::Disconnected, reported_seq)) => {
-                    return Err(format!(
-                        "event stream channel disconnected while queuing seq {reported_seq}"
-                    ));
+                    return Err(LosslessSendError::ChannelClosed { seq: reported_seq });
                 }
             }
         }
@@ -771,6 +807,7 @@ impl EventStreamWorkerHandle {
     fn send_frame_lossless(&self, frame: EventFrame) -> Result<(), String> {
         self.send_lossless_encoded(LOSSLESS_QUEUE_TIMEOUT, move || (frame.clone(), None))
             .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 
     fn encode_delta_frame(
@@ -872,6 +909,7 @@ impl EventStreamWorkerHandle {
     ) -> Result<(), String> {
         self.push_delta_lossless_within_seq(delta, zone_name_to_id, budget)
             .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 
     /// #16627: like [`push_delta_lossless_within`] but returns the wire
@@ -883,7 +921,7 @@ impl EventStreamWorkerHandle {
         delta: &SessionDelta,
         zone_name_to_id: &FxHashMap<String, u32>,
         budget: Duration,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, LosslessSendError> {
         let result = self.send_lossless_encoded(budget, || {
             let seq = self.next_seq();
             (

@@ -910,11 +910,19 @@ The rest of the contract:
     ends without a reconnect brings no FullResync. A bulk push that times
     out (waits its whole budget, which only a connected stream does)
     therefore keeps the resync owed
-    (`owe_resync_after_refused_export`) and the export stops at its next
-    chunk; the next iteration re-exports everything
-    (`transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780`).
+    (`owe_resync_after_refused_export`) and the export stops after the current
+    page (`transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780`).
     A disconnected stream does not re-arm (#14646;
     `bulk_refusal_on_a_disconnected_stream_does_not_owe_the_resync_18780`).
+  - Review cycle 3: the owed retry RESUMES at the refused row's slot (a fresh
+    loss episode restarts it at slot 0) and first PROBES the stream with one
+    zero-wait push, deferring 10 ms between refused probes. So recurring
+    stalls cannot starve the suffix
+    (`recurring_stalls_cannot_starve_the_resync_suffix_18780`), and a worker
+    with no churn of its own no longer blocks one full budget per iteration
+    while its resync is owed
+    (`owed_retry_probes_a_stalled_consumer_without_waiting_18780`). Details in
+    `event_stream/README.md`.
   - The residual: while the stream stays unread, a cohort drains at 256 reaps
     per iteration of up to ~2 s (two budgets), and its rows keep their NAT
     ports and session-limit slots until reaped. Pressure-shed admission
@@ -987,6 +995,7 @@ short-circuited.
     remove and id-mutation path of `shared_sessions`, which is a change of
     its own (R7 N2).
   - Not exercised live: the udp lab bounce left fw0 all peer-synced.
+    Tracked with the other #18780 residuals in #19045.
 
 **Not covered.** `RefreshOwnerRGS` is still one O(table) worker command, with a
 session-map publish per row, at T0 itself (#19027).

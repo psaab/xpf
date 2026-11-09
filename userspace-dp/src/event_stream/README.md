@@ -557,9 +557,37 @@ cluster-scoped.
       re-arms (#14646). Pinned by
       `transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780`
       and `bulk_refusal_on_a_disconnected_stream_does_not_owe_the_resync_18780`.
-      An owed export restarts from the beginning: a consumer that stalls for a
-      full budget more often than one export takes keeps it owed, though each
-      attempt still delivers its prefix.
+    - **#18780 (review cycle 3): owed retries are durable and do not wait.**
+      - *Durable progress.* A refusal inside an export records the refused
+        row's slab slot (`owe_resync_after_refused_export(key)`); the owed
+        retry resumes there through the paged walk
+        (`forward_export_candidates_page`) instead of restarting at slot 0, so
+        a consumer whose stalls recur within one export window can no longer
+        starve the suffix (Codex F1). Rows are read live per page, so a row
+        removed or replaced meanwhile is exported as the table holds it. A
+        FRESH loss episode (any `set_delta_loss`, a ring overflow, a requeue
+        drop) clears the resume point: the peer's view may then be wrong
+        anywhere, so the next resync is a full export.
+      - *No per-retry budget.* The owed retry's first push is a ZERO-wait
+        probe (`arm_loss_resync_probe`); against a still-full channel it
+        times out at once, the resync stays owed, the probe is neither
+        mirrored into the fallback nor counted as a drop, and the next retry
+        waits `LOSS_RESYNC_RETRY_INTERVAL_NS` (10 ms). Only a fresh export,
+        or one whose probe got through, waits a full budget. Before this, a
+        worker with no churn of its own blocked one full budget every
+        iteration for the whole stall (R8 H1, R7 R1).
+      - The failure kind is now typed (`LosslessSendError`), so "a connected
+        stream stayed full" is `TimedOut` for both a full-budget wait and a
+        zero-wait probe, and a not-connected stream or dead producer is never
+        mistaken for it.
+      - Pinned by `recurring_stalls_cannot_starve_the_resync_suffix_18780`,
+        `owed_retry_probes_a_stalled_consumer_without_waiting_18780` and the
+        decoded-identity `transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780`.
+      - Residuals, filed together: a refused page's remainder is still
+        mirrored into the fallback as seq-0 copies, which a later fallback
+        drain can apply after a newer streamed Close (#16627 class); and a
+        slow consumer that frees a slot just before each deadline can still
+        stretch one iteration past one budget per kind (#19045).
     - Only the off-worker-loop paths (bulk export on connect
       `AllSessionsExport::push`, tunnel-remap purge `push_purge_close_deltas`)
       keep the longer 5 s `LOSSLESS_QUEUE_TIMEOUT` via `push_delta_lossless`,
