@@ -2937,5 +2937,95 @@ class GeneratorLifetime19054(unittest.TestCase):
         self.assertEqual(rc, 1)
 
 
+class VoidNeverOverridesFail19062(unittest.TestCase):
+    """#19062 review: VOID means "cannot judge". Any evidence that proves a
+    FAIL, on any stream or probe, gives FAIL whatever VOID reasons the move
+    also has."""
+
+    B = soak.Budget()
+
+    def test_a_cut_stall_does_not_suppress_another_streams_proven_failure(self):
+        # Codex finding 4: window [0, 18), traffic through 20 s. Stream 5 is
+        # stalled from 1 s on (19 s, past the cap), stream 7 from 15 s on
+        # (cut at 5 s), stream 9 and ping healthy throughout.
+        ivs = []
+        for i in range(200):
+            ts = i / 10
+            streams = {5: 0.0 if ts >= 1 else 2e9, 7: 0.0 if ts >= 15 else 2e9, 9: 2e9}
+            ivs.append((ts, ts + 0.1, streams, sum(streams.values())))
+        replies = [(i / 100, i) for i in range(2001)]
+        stalls, agg = soak.stream_stalls(ivs, self.B.low_bps)
+        facts = soak.traffic_for_window(0, 18, soak.ping_gaps(replies), replies, stalls, agg, ivs, self.B)
+        self.assertTrue(facts["ping_covered"] and facts["iperf_covered"])
+        self.assertEqual((facts["died_streams"], facts["cut_streams"]), ([5], [7]))
+        verdict, why = soak.move_verdict(rec([rgres()], facts), self.B, True)
+        self.assertEqual(verdict, soak.FAIL, why)
+        self.assertTrue(any("[5]" in w and "never recovered" in w for w in why), why)
+        self.assertTrue(any(w.startswith("VOID evidence:") and "[7]" in w for w in why), why)
+
+    def test_any_fail_evidence_beats_any_void_reason(self):
+        # Property: every pairing of one FAIL evidence with one VOID reason
+        # is a FAIL.
+        fails = {
+            "died stream": lambda r, t: t.update(died_streams=[7], worst_stall_ms=12000.0, worst_stall_stream=7),
+            "closed ping gap": lambda r, t: t.update(ping_max_gap_ms=1500.0),
+            "aggregate outage": lambda r, t: t.update(agg_worst_ms=1500.0),
+            "several streams stalled": lambda r, t: t.update(stalled_streams=[5, 9], worst_stall_ms=3000.0),
+            "dual-active": lambda r, t: setattr(r, "dual_active", True),
+            "CLI error": lambda r, t: setattr(r, "cli_class", soak.CLI_ERROR),
+            "did not land": lambda r, t: setattr(r, "landed_s", None),
+            "UDP LOST": "LOST",
+        }
+        voids = {
+            "ping uncovered": lambda r, t, m: t.update(ping_covered=False),
+            "iperf uncovered": lambda r, t, m: t.update(iperf_covered=False),
+            "cut stream": lambda r, t, m: t.update(cut_streams=[9]),
+            "UDP VOID": "VOID",
+            "fallback": lambda r, t, m: setattr(r, "cli_class", soak.CLI_FALLBACK),
+        }
+        for fname, fail in fails.items():
+            for vname, void in voids.items():
+                if fname == "CLI error" and vname == "fallback":
+                    continue  # one CLI reply cannot be both
+                if fname == "UDP LOST" and vname == "UDP VOID":
+                    continue  # one probe verdict cannot be both
+                with self.subTest(fail=fname, void=vname):
+                    r = rgres()
+                    t = dict(GOOD_TRAFFIC)
+                    m = rec([r], t)
+                    status = None
+                    if callable(fail):
+                        fail(r, t)
+                    else:
+                        status = fail
+                    if callable(void):
+                        void(r, t, m)
+                    else:
+                        status = void
+                    if status:
+                        m.udp_probe = {"status": status, "detail": f"UDP probe {status}: test", "metrics": {}}
+                    verdict, why = soak.move_verdict(m, self.B, True)
+                    self.assertEqual(verdict, soak.FAIL, why)
+
+    def test_follow_counters_are_not_judged_without_traffic(self):
+        # An uncovered window carried no generated traffic, so RETH-member
+        # counters that did not move are not evidence: VOID, not FAIL.
+        r = rgres()
+        r.follow_expected = True
+        r.member_delta = {0: 0, 1: 0}
+        verdict, why = soak.move_verdict(rec([r], dict(GOOD_TRAFFIC, iperf_covered=False)), self.B, True)
+        self.assertEqual(verdict, soak.VOID, why)
+        # Control: with the traffic covering the window, the same counters FAIL.
+        verdict, why = soak.move_verdict(rec([r], dict(GOOD_TRAFFIC)), self.B, True)
+        self.assertEqual(verdict, soak.FAIL, why)
+
+    def test_void_reasons_alone_stay_void(self):
+        for name, change in (("ping uncovered", {"ping_covered": False}),
+                             ("cut stream", {"cut_streams": [9]})):
+            with self.subTest(void=name):
+                verdict, why = soak.move_verdict(rec([rgres()], dict(GOOD_TRAFFIC, **change)), self.B, True)
+                self.assertEqual(verdict, soak.VOID, why)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -598,6 +598,12 @@ One verdict per move:
   move therefore costs one FAIL, and the next move, back to where the RG
   still is, is VOID, not a second FAIL. The operator's "already primary"
   line is that cascade.
+- **FAIL beats VOID** (#19062 review). VOID means "cannot judge", and it
+  never overrides evidence that proves a FAIL. Each stream and each probe is
+  judged on its own, and the move takes the worst result: FAIL, then VOID,
+  then COST, then PASS. A stream cut short does not hide another stream's
+  19 s stall. A VOID reason that sits beside a FAIL is listed as "VOID
+  evidence".
 - **VOID, recovery not observable** (#19062): a stream was still stalled
   when the traffic stopped, but for no longer than `SOAK_MAX_COST_STALL_MS`,
   so the soak could not see whether it would recover.
@@ -620,7 +626,12 @@ One verdict per move:
   - The reason names the cause: the traffic run's planned end came first
     (`SOAK_TRAFFIC_S`), or a generator stopped early, with iperf3's error
     text when it has one.
-  - Any other check that fired is listed as "unscored evidence".
+  - The checks that need traffic through the window's END are skipped for
+    the uncovered family: no ping replies in the tail, a low tail rate, an
+    open ping gap. So are the traffic-follow counters.
+  - Everything that was actually observed still counts: a closed ping gap,
+    a stall's measured length, an aggregate outage, the UDP probe, and the
+    status, helper and CLI checks. Any of them can still FAIL the move.
   - Before #19054 the run length was estimated at sleep + converge + 4 s per
     move, plus 60 s. A 200-move run outlived it after about 182 moves, and
     the last 18 moves were scored FAIL on no traffic. Moves also took longer

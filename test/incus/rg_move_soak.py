@@ -687,6 +687,8 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
             return VOID, [f"unknown UDP probe status {probe_status!r}: {probe_detail}"]
     costs: List[str] = []
     fallback_void: List[str] = []
+    all_covered = all(t.get("ping_covered", False) and t.get("iperf_covered", False)
+                      for t in (rec.traffic or {}).values())
     for r in rec.rgs:
         if r.cli_class == CLI_FALLBACK:
             fallback_void.append(f"RG{r.rg} untargeted move did not run the transfer ('{r.cli_first}'); "
@@ -723,7 +725,9 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                    for n in (0, 1) if r.helper.get(n) is not want[n]]
             if bad:
                 reasons.append(f"RG{r.rg} helper ha_groups[].forwarding_active disagrees with status (want node{r.target}=True): {' '.join(bad)}")
-        if traffic_enabled:
+        if traffic_enabled and all_covered:
+            # The follow counters need traffic through the window: without
+            # it they are not evidence (#19062 review).
             reasons.extend(follow_reasons(r, budget))
     uncovered: List[str] = []
     if traffic_enabled:
@@ -734,11 +738,13 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                                              ("iperf3", t.get("iperf_covered", False))) if not ok]
             if missing:
                 uncovered.append(f"{fam} {' and '.join(missing)} did not cover the move window: "
-                                 f"{t.get('uncovered_cause', 'cause unknown')}; the move is unscored (#19054)")
+                                 f"{t.get('uncovered_cause', 'cause unknown')}; the checks that need traffic "
+                                 "through the window's end are skipped, and the move is unscored unless "
+                                 "other evidence FAILs it (#19054)")
             if t.get("cut_streams"):
                 uncovered.append(f"{fam} stream(s) {t['cut_streams']} were still stalled when the traffic stopped, "
-                                 f"before the {budget.max_cost_stall_ms:g} ms COST cap; recovery was not observable, "
-                                 "so the move is unscored (#19062)")
+                                 f"before the {budget.max_cost_stall_ms:g} ms COST cap; their recovery was not "
+                                 "observable, so the move is unscored unless other evidence FAILs it (#19062)")
             if t.get("died_streams"):
                 reasons.append(f"{fam} stream(s) {t['died_streams']} stalled in this window and never recovered")
             if t.get("ping_covered") and t.get("ping_tail_replies", 0) == 0:
@@ -761,17 +767,20 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 reasons.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_cost_stall_ms:g} ms (past the COST cap)")
             elif stall > budget.max_stall_ms and not t.get("died_streams"):
                 costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered; ping and aggregate within budget)")
-    if uncovered:
-        # Never PASS, COST or FAIL a move the traffic did not cover. What the
-        # other checks saw is kept as unscored evidence.
-        return VOID, uncovered + [f"unscored evidence: {r}" for r in reasons + costs]
+    # #19062 review: VOID is "cannot judge", and it never overrides evidence
+    # that proves a FAIL. FAIL > VOID > COST > PASS, each stream and probe
+    # judged on its own. Absence-of-traffic checks (no ping replies in the
+    # tail, a low tail rate, an open ping gap, the follow counters) run only
+    # where the generators covered the window, so a FAIL reason here is
+    # always evidence about traffic that was really sent.
     if reasons:
         if udp_void_reason:
             reasons.append(f"UDP probe evidence VOID: {udp_void_reason}")
-        reasons.extend(f"VOID evidence: {f}" for f in fallback_void)
+        reasons.extend(f"VOID evidence: {f}" for f in fallback_void + uncovered)
         return FAIL, reasons + costs
-    if udp_void_reason or fallback_void:
-        return VOID, fallback_void + ([udp_void_reason] if udp_void_reason else [])
+    if udp_void_reason or fallback_void or uncovered:
+        return VOID, (fallback_void + ([udp_void_reason] if udp_void_reason else []) + uncovered
+                      + [f"unscored cost: {c}" for c in costs])
     if costs:
         return COST, costs
     return PASS, []
