@@ -83,6 +83,12 @@ mod pending_timer_16217_tests;
 #[cfg(test)]
 #[path = "fabric_swap_epoch_18534_tests.rs"]
 mod fabric_swap_epoch_18534_tests;
+#[cfg(test)]
+#[path = "housekeeping_rx_starvation_19026_tests.rs"]
+mod housekeeping_rx_starvation_19026_tests;
+#[cfg(test)]
+#[path = "superseded_close_ha_leg_19026_tests.rs"]
+mod superseded_close_ha_leg_19026_tests;
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,
@@ -99,6 +105,7 @@ pub(in crate::afxdp) use gc_teardown::*;
 
 // #13075 (D4-12): per-tick session expiry/GC housekeeping extracted from
 // `worker_loop` (housekeeping.rs). Loop-local; no re-export needed.
+mod close_barrier;
 mod housekeeping;
 use housekeeping::run_session_housekeeping;
 
@@ -539,6 +546,10 @@ pub(crate) fn worker_loop(
     // session delta ring. This preserves the all-close guarantee for overflow
     // entries without competing with the ring's bounded capacity.
     let mut deferred_expiry_overflow_deltas: Vec<SessionDelta> = Vec::new();
+    // #19026: bounds how long closes waiting on their tuple permits may hold
+    // this worker's RX poll (one bound per run of held ticks), and parks a
+    // blocked close at that bound (close_barrier.rs `CLOSE_PERMIT_BARRIER_NS`).
+    let mut close_permit_barrier = close_barrier::ClosePermitBarrier::default();
     while !stop.load(Ordering::Relaxed) {
         let loop_now_ns = monotonic_nanos();
         // #5468: reset the per-drain-cycle aggregate lossless-wedge latch. It is
@@ -1268,7 +1279,9 @@ pub(crate) fn worker_loop(
         // #13075: expiry/GC housekeeping (HA retention ctx, expiry walk,
         // PPTP forget, seed retirement, reap, close-delta drain) lives in
         // housekeeping.rs. `true` = deferred cleanup: skip the rest of
-        // this tick (the old in-block `continue` sites).
+        // this tick (the old in-block `continue` sites). #19026: `true` is
+        // returned only inside the bounded close-permit barrier; past it the
+        // tick falls through to RX while the close keeps retrying here.
         if run_session_housekeeping(
             &mut sessions,
             &mut bindings,
@@ -1294,6 +1307,7 @@ pub(crate) fn worker_loop(
             &mut worker_lossless_wedged,
             &mut shared_recycles,
             &mut deferred_expiry_overflow_deltas,
+            &mut close_permit_barrier,
             &mut flush_deltas,
         ) {
             continue;

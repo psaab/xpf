@@ -2638,6 +2638,47 @@ Every other origin keeps the sessionless arm:
 A reply with no shared companion also keeps the sessionless arm. With no
 local row, a failed judgment drops only the packet.
 
+## A superseded stale Close sends no HA close (#19026)
+
+`session_delta.rs::flush_session_deltas` already treats a Close whose tuple
+now holds a different incarnation as STALE
+(`close_delta_is_stale_incarnation`): it still owes scoped, id-conditional
+teardown, but skips the bare-keyed BPF/conntrack deletes. #19026 adds one
+narrower case on top of it. A stale Close is SUPERSEDED when its EXACT key
+(routing domain and discriminator included) holds a different nonzero
+incarnation, in the flushing worker's table or in the shared primary map
+(`close_delta_is_superseded_on_exact_key`). For a superseded Close the flush
+skips only the HA session-sync legs: the binary event-stream frame and the
+RPC fallback. The id-conditional local teardown and the RT_FLOW
+SESSION_CLOSE still run.
+
+- **Why.** The binary HA Close (type 2) carries no session id, and the
+  daemon's id-conditional peer delete exists only for a stated routing
+  domain (`pkg/daemon/daemon_ha_userspace_stream.go`,
+  `queueDeltaSink.deleteV4/V6`). In routing domain 0 it is a bare delete.
+  Arriving after the replacement's Open, it deleted the replacement on the
+  peer (Codex R16 F1). The close-permit barrier made that order reachable on
+  ONE worker: a Close parked at the RX bound (`worker/loop_body/close_barrier.rs`)
+  lets RX admit a replacement on the exact key, and the post-RX export
+  flushes Open(B) before the next tick retries Close(A).
+- **Why skipping is safe.** The replacement's own Open overwrites the peer's
+  row for that exact key, and the replacement's own Close later retracts it.
+- **Other-scope staleness** (the same bare tuple under another routing domain
+  or discriminator, #10512) is not superseded: the peer keys that session
+  differently, so the old key keeps its HA Close.
+- **Residual.** A different local or shared id is not proof that the peer
+  received Open(B). If Open(B) is lost (stream loss), the peer keeps A until
+  the loss latch's LossResync re-exports table truth, B's own Close retracts
+  the key, or the peer's own idle or HOLD expiry removes it.
+- **Not claimed: RT_FLOW exactly-once.** The gate removes only the HA legs of
+  a superseded Close. A restored `SharedPromote` session still has a copy on
+  every worker, and each copy closes at its own idle deadline, as on master.
+  Its RT_FLOW Close is therefore emitted once per copy (3 on the three-worker
+  restore fixture). One Close per restored session is #19063.
+- Cells: `worker/loop_body/superseded_close_ha_leg_19026_tests.rs` (the
+  same-worker schedule through the real flush and a connected event stream,
+  its non-superseded twin, the other-scope flush, and the exact-key gate).
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`

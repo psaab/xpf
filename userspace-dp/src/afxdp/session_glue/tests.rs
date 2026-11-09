@@ -13605,15 +13605,35 @@ fn worker_loop_routes_expiry_overflow_to_close_flush_10309() {
         .map(str::trim)
         .filter(|line| !line.starts_with("//"))
         .collect();
+    // #19026: the chunked flush lives in `flush_overflow_chunks`; the bridge
+    // is its call on the extracted records (retried until it retires them).
     let extraction = executable_lines
         .iter()
-        .position(|line| line.starts_with("expiry_overflow_deltas.extend("))
+        .position(|line| line.starts_with(".filter_map(|entry| entry.overflow_close)"))
         .expect("worker loop must extract returned expiry Close records");
+    let bridge = executable_lines
+        .iter()
+        .enumerate()
+        .skip(extraction)
+        .find(|(_, line)| line.starts_with("let Some(rest) = flush_overflow_chunks("))
+        .map(|(index, _)| index)
+        .expect("worker loop must hand the extracted records to the chunked flush");
+    let bridged = executable_lines
+        .iter()
+        .skip(bridge + 1)
+        .take_while(|line| !line.starts_with(')'))
+        .any(|line| line.starts_with("&expiry_overflow_deltas,"));
+    assert!(bridged, "the chunked flush must receive the extracted expiry records");
+    let helper = executable_lines
+        .iter()
+        .position(|line| line.starts_with("fn flush_overflow_chunks("))
+        .expect("the chunked overflow flush must exist");
     let chunk_loop = executable_lines
         .iter()
-        .position(|line| {
-            line.starts_with("let mut overflow_chunks = expiry_overflow_deltas.chunks(256)")
-        })
+        .enumerate()
+        .skip(helper)
+        .find(|(_, line)| line.starts_with("let end = (start + 256).min(overflow.len());"))
+        .map(|(index, _)| index)
         .expect("worker loop must flush expiry overflow in bounded chunks");
     let flush = executable_lines
         .iter()

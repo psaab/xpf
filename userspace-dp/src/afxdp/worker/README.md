@@ -106,7 +106,8 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 | `loop_body/debug_report.rs` | #1776 cfg(debug-log)-only counters, per-second report, and stall dump; compiled out of release builds. |
 | `loop_body/export_slice.rs` | #13075 per-tick CommandExport slice and steady-state delta drain (`run_export_slice`, `#[inline(never)]`). |
 | `loop_body/gc_teardown.rs` | #13075 session-expiry/GC and control-plane delete teardown helpers, re-exported for worker call sites. |
-| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`). |
+| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`); #19026 parked-first retries, bounded ring drain, ring-before-overflow order. |
+| `loop_body/close_barrier.rs` | #19026 bounded close-permit barrier: one RX bound per run of held ticks, park at the bound into a side slot, head-blocked bit, rate-limited park log. |
 | `loop_body/idle_poll.rs` | #6431 `#[inline]` classification of Interrupt-mode idle `poll(2)` returns and one-shot fault summary. |
 | `loop_body/mod.rs` | `worker_loop` steady-state orchestrator; retains per-tick call ordering while selected control slices are `#[inline(never)]` calls into sibling modules. |
 | `loop_body/pptp_drain.rs` | #13075 per-tick PPTP control-inbox drain (`run_pptp_control_drain`, `#[inline(never)]`). |
@@ -134,6 +135,68 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 
 ## Notable invariants
 
+- **Housekeeping never starves RX (#19026).** A Close delta that cannot
+  take its tuple install permits is a teardown barrier. `run_session_housekeeping`
+  retries it before command/control work and before `poll_binding`, which
+  keeps the #10419 teardown-before-poll order. `loop_body/close_barrier.rs`
+  bounds that barrier:
+  - **One RX bound per run.** A run is the consecutive ticks that skipped RX
+    for blocked Closes, whichever Closes they were. Inside
+    `CLOSE_PERMIT_BARRIER_NS` (1 ms, the idle path's
+    `INTERRUPT_POLL_TIMEOUT_MS`) of the run's start the tick skips RX; only a
+    tick that polls RX ends the run. A Close that blocks after an RX tick
+    gets its own window again.
+  - **At the bound the blocked Close is parked** out of the FIFO into a side
+    slot, and the drain continues in the same tick: every delta behind it
+    (the other Closes, HA sync, RT_FLOW, the RPC mirror) retires before RX
+    polls. The parked Close is retried first on every tick and retires once
+    its permit frees. A same-tuple reincarnation that overtakes it is safe:
+    the flush's stale-incarnation fence makes the old Close's local teardown
+    id-conditional, and when the EXACT key (scope included) now holds the
+    reincarnation the old Close's HA legs are skipped altogether. The binary
+    HA Close carries no id, so in routing domain 0 it would be a bare delete
+    of the reincarnation on the peer (Codex R16 F1; see `afxdp/README.md`
+    "A superseded stale Close sends no HA close").
+  - **One order for the ring and the deferred overflow suffix (#10309).** An
+    overflow Close that could not retire is kept in
+    `deferred_expiry_overflow_deltas` and retried on later ticks AFTER the
+    ring drains, never before it: the ring can hold an older Open/Update of
+    the same session, and a Close must not overtake its own session's older
+    delta (cycle 1 retired the suffix first and emitted Close before Open:
+    Codex R15 P1#3). Deltas queued since the deferral also drain first. For
+    the same session those are newer deltas of a re-materialized same-id row
+    (a Close after them is the correct order) or a new incarnation (the
+    Close is id-fenced at flush); different sessions carry no order.
+  - `SessionTable::close_head_blocked` makes a blocked head cost one permit
+    try per tick instead of a 256-delta drain and requeue. The post-RX
+    export and loss-resync slices also leave a blocked head to housekeeping
+    rather than re-draining it and `continue`ing past the loop bottom. The
+    bit is set by whichever drain found the block (`drain_and_flush_all_impl`
+    or the export slice); `ClosePermitBarrier::on_blocked` only asserts it.
+  - Each park logs one rate-limited `xpf-dp: wN: #19026 session close
+    parked after N us` line, at most one per 10 s process-wide. The line
+    names the tuple and a `TupleGate::probe()` of the holder class.
+  - **Residual: the parked tuple itself.** While a parked Close waits, RX
+    polls, so a packet of that one tuple can re-materialize a same-id row from
+    the still-published shared copy; that row outlives the Close and ages out
+    on its own idle timer (the #10419 hazard, for the parked tuple only;
+    #19047). Cycle 1 retired such a row with a bare
+    `DeleteSynced(key)`, which could delete a queued replacement incarnation
+    (Codex R15 P1#4), so that mechanism was removed.
+  - Before #19026 the skip was unbounded. Because the heartbeat is stored
+    before housekeeping, a worker whose Close never got its permit looked
+    healthy while it polled no RX at all; #19032 tracks the detector gap.
+  - `drain_and_flush_all_impl` also yields after a drain+flush pass that
+    leaves the queue no shorter, instead of re-draining in-call.
+  - Do not re-introduce an unbounded `return true` from housekeeping.
+  - Cells: `loop_body/housekeeping_rx_starvation_19026_tests.rs`; the
+    superseded-Close HA leg: `loop_body/superseded_close_ha_leg_19026_tests.rs`.
+  - Not in this change (#19063): restored `SharedPromote` copies on several
+    workers still each close at their own idle deadline, as on master. So a
+    restored session's RT_FLOW Close is emitted once per copy, not exactly
+    once, and nothing here claims otherwise. The restore close fence, the
+    one-owner close obligation and the restart/RG-departure lifecycle are
+    designed separately there.
 - CPU pinning honors the inherited systemd `CPUAffinity=` mask. Worker
   N pins to the N-th *allowed* CPU in that mask, so
   `CPUAffinity=2 3 4 5` puts workers 0..3 on CPUs 2..5. Don't revert

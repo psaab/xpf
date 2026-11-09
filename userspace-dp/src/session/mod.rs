@@ -2484,6 +2484,12 @@ pub(crate) struct SessionTable {
     /// Tombstones refused by the bounded log. The active export transfers
     /// this count to its dedicated buffer's fail-closed drop metric.
     tombstone_drops: u64,
+    /// #19026 (F2/F3): the delta ring's head is a Close that could not take
+    /// its tuple install permits on the last attempt. While set, drains first
+    /// re-test the head's permits (one try, no 256-delta drain/requeue) and
+    /// the post-RX export/recovery slices leave the ring alone instead of
+    /// re-draining it and skipping the rest of the tick. Worker-local.
+    close_head_blocked: bool,
 }
 
 /// #17083: the caller-specific half of an in-place refresh, handed to
@@ -2675,6 +2681,7 @@ impl SessionTable {
             session_id_worker_hi: 0,
             tombstone_log: Vec::new(),
             tombstone_drops: 0,
+            close_head_blocked: false,
         }
     }
 
@@ -7575,6 +7582,43 @@ impl SessionTable {
     }
     pub fn has_pending_deltas(&self) -> bool {
         !self.deltas.is_empty()
+    }
+
+    /// #19026: queued delta count. The worker's close-drain loop compares it
+    /// across one drain+flush pass: a pass that requeued everything it drained
+    /// made no progress, so the loop must yield instead of spinning on a tuple
+    /// permit it cannot take.
+    pub(crate) fn pending_delta_count(&self) -> usize {
+        self.deltas.len()
+    }
+
+    /// #19026: the oldest queued delta (the one a blocked close drain retries
+    /// first).
+    pub(crate) fn front_pending_delta(&self) -> Option<&SessionDelta> {
+        self.deltas.front()
+    }
+
+    /// #19026 (F1): take the ring's head out of FIFO order — the worker parks
+    /// a Close whose tuple permit stayed busy past the park bound so the
+    /// deltas behind it can flow.
+    pub(crate) fn pop_front_delta(&mut self) -> Option<SessionDelta> {
+        self.deltas.pop_front()
+    }
+
+    /// #19026 (R13 F3) cell seam: deltas ever drained from the ring.
+    #[cfg(test)]
+    pub(crate) fn delta_drained_for_test(&self) -> u64 {
+        self.delta_drained
+    }
+
+    /// #19026 (F2/F3): see the `close_head_blocked` field.
+    pub(crate) fn close_head_blocked(&self) -> bool {
+        self.close_head_blocked
+    }
+
+    /// #19026 (F2/F3): see the `close_head_blocked` field.
+    pub(crate) fn set_close_head_blocked(&mut self, blocked: bool) {
+        self.close_head_blocked = blocked;
     }
 
     /// #2442: read-and-clear the loss-of-sync latch. Returns true iff

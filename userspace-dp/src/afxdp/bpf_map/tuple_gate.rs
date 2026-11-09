@@ -381,6 +381,48 @@ impl TupleGate {
     }
 
 
+    /// #19026: read-only, cold-path view of who holds `key`, for the worker's
+    /// close-permit barrier diagnostic (a requeued Close that could not take
+    /// its install permit for longer than the barrier). Takes the shard and
+    /// admission locks briefly; never called on the packet path.
+    pub(crate) fn probe(&self, key: &SessionKey) -> TupleGateProbe {
+        let canonical = Self::canonical(key);
+        let index = Self::shard_index(&canonical);
+        let (shard_len, entry) = {
+            let entries = lock_tolerant_counted(
+                &self.shards.shard_at(index).get().entries,
+                Some(&TUPLE_GATE_POISON_RECOVERIES),
+            );
+            (entries.len(), entries.get(&canonical).cloned())
+        };
+        let (state, publishers, installs) = match entry {
+            Some(entry) => {
+                let state = lock_tolerant_counted(&entry, Some(&TUPLE_GATE_POISON_RECOVERIES));
+                let name = match state.state {
+                    GateState::Idle => "idle",
+                    GateState::Publishing => "publishing",
+                    GateState::Draining => "draining",
+                    GateState::Held => "held",
+                    GateState::Finalizing => "finalizing",
+                    GateState::Aborting => "aborting",
+                };
+                (name, state.publishers, state.installs)
+            }
+            None => ("absent", 0, 0),
+        };
+        let admission = lock_tolerant_counted(&self.admission, Some(&TUPLE_GATE_POISON_RECOVERIES));
+        TupleGateProbe {
+            state,
+            publishers,
+            installs,
+            shard_len,
+            shard_cap: SHARD_CAP,
+            admitted: admission.active,
+            clear_pending: admission.clear_pending,
+            clear_active: admission.clear_active,
+        }
+    }
+
     pub(crate) fn shard_count(&self) -> usize {
         SHARD_COUNT
     }
@@ -388,6 +430,23 @@ impl TupleGate {
     pub(crate) fn shard_capacity(&self) -> usize {
         SHARD_CAP
     }
+}
+
+/// #19026: snapshot returned by [`TupleGate::probe`]. `state` names the
+/// holder class: `publishing` with `installs > 0` is a worker install/close
+/// permit, `publishers > 0` a `with_publish` BPF write, `draining`/`held`/
+/// `finalizing` a coordinator lease; `clear_*` is a map-wide clear fence, and
+/// `shard_len == shard_cap` means new tuples in this shard are refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TupleGateProbe {
+    pub(crate) state: &'static str,
+    pub(crate) publishers: usize,
+    pub(crate) installs: usize,
+    pub(crate) shard_len: usize,
+    pub(crate) shard_cap: usize,
+    pub(crate) admitted: usize,
+    pub(crate) clear_pending: bool,
+    pub(crate) clear_active: bool,
 }
 
 struct TupleAdmission {
@@ -899,5 +958,37 @@ mod tests {
             after,
             "clean acquisitions after cleared recoveries must not recount"
         );
+    }
+
+    /// #19026 (R13 F6): `probe` names the holder class the close-permit
+    /// barrier log reports — every state a blocked Close can meet.
+    #[test]
+    fn probe_names_each_holder_class_19026() {
+        let gate = Arc::new(TupleGate::new());
+        let k = key(1900, 0);
+        let idle = gate.probe(&k);
+        assert_eq!((idle.state, idle.publishers, idle.installs), ("absent", 0, 0));
+        assert_eq!(idle.shard_cap, SHARD_CAP);
+        assert!(!idle.clear_pending && !idle.clear_active);
+
+        let install = gate.try_acquire_install(&k).unwrap();
+        let held = gate.probe(&key(1900, 9)); // canonical: domain is ignored
+        assert_eq!((held.state, held.installs, held.publishers), ("publishing", 1, 0));
+        assert_eq!(held.shard_len, 1);
+        assert_eq!(held.admitted, 1);
+        drop(install);
+        assert_eq!(gate.probe(&k).state, "absent", "an idle entry is removed");
+
+        let lease = gate.acquire_lease([k.clone()]).unwrap();
+        assert_eq!(gate.probe(&k).state, "held");
+        lease.begin_finalizing().unwrap();
+        assert_eq!(gate.probe(&k).state, "finalizing");
+        drop(lease);
+
+        let fence = gate.begin_clear().unwrap();
+        let fenced = gate.probe(&k);
+        assert!(fenced.clear_active, "a map-wide clear fence is visible");
+        drop(fence);
+        assert!(!gate.probe(&k).clear_active);
     }
 }
