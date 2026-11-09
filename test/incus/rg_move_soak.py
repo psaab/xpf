@@ -27,8 +27,10 @@ What this harness does, per move:
     primary and the other node secondary/secondary-hold in both views, and the
     target's `Forwarding: rg-active=` line is active and the other's inactive;
   * keeps sampling both views for the rest of the window, recording a
-    dual-active RG (both nodes claim it in a sample AND again in an immediate
-    re-sample, #19041) or the RG leaving the target after landing;
+    dual-active RG or the RG leaving the target after landing. After landing
+    every dual-active sample counts. Before landing, a dual-active sample is
+    cleared only as a straddle of the commanded handoff: the immediate
+    re-sample must show the old owner fully released (#19041);
   * reads each helper's own `ha_groups[].forwarding_active` (active AND an
     unexpired lease) once the views converged;
   * proves the TRAFFIC moved: the target node's RETH members (from the
@@ -201,9 +203,22 @@ def rg_ownership(rg: int, view0: Dict[int, RGView], view1: Dict[int, RGView]) ->
 
 
 def views_readable(rg: int, view0: Dict[int, RGView], view1: Dict[int, RGView]) -> bool:
-    """Both nodes' own views carry `rg` exactly once."""
+    """Both nodes' own views carry `rg` exactly once, each with that node's
+    OWN role row and its own `Forwarding: rg-active=` value (#19041). An RG
+    header alone is not a reading."""
     v0, v1 = view0.get(rg), view1.get(rg)
-    return v0 is not None and v1 is not None and not v0.duplicate and not v1.duplicate
+    if v0 is None or v1 is None or v0.duplicate or v1.duplicate:
+        return False
+    return (v0.roles.get(0) is not None and v1.roles.get(1) is not None
+            and bool(v0.forwarding) and bool(v1.forwarding))
+
+
+def node_released(rg: int, node: int, view: Dict[int, RGView]) -> bool:
+    """`node`'s OWN view shows it has fully let go of `rg`: its own role row
+    is secondary/secondary-hold AND its own Forwarding line is inactive."""
+    v = view.get(rg)
+    return (v is not None and not v.duplicate and v.roles.get(node) in NON_OWNER_ROLES
+            and v.forwarding == "inactive")
 
 
 # ---------------------------------------------------------------------------
@@ -507,9 +522,12 @@ class RGMoveResult:
     member_delta: Optional[Dict[int, Optional[int]]] = None
     neigh_node: Optional[Dict[str, Optional[int]]] = None
     follow_expected: bool = False  # the RG has RETH members to measure
-    # Dual-active samples that an immediate re-sample did not repeat: two
-    # non-simultaneous reads straddling a clean handoff (#19041). Recorded,
-    # not scored.
+    # #19041: every dual-active sample seen in the move's window, and those
+    # of them cleared as a straddle of the commanded handoff (pre-landing,
+    # with the immediate re-sample showing the old owner fully released).
+    # Printed per move and totalled in the summary; a cleared one is not
+    # scored.
+    dual_samples: int = 0
     dual_suspects: int = 0
 
 
@@ -645,6 +663,12 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
         if r.landed_s is None:
             reasons.append(f"RG{r.rg} did not land on node{r.target} within {budget.converge_s:g}s of the CLI returning (last: {r.last_detail})")
             continue
+        # The landing is credited when the sample (or re-sample) that saw it
+        # finished, which can be past the bound (#19041).
+        after_cli = r.landed_s - r.cli_seconds
+        if after_cli > budget.converge_s + 1e-3:
+            reasons.append(f"RG{r.rg} landed on node{r.target} {after_cli:.2f}s after the CLI returned, "
+                           f"past the {budget.converge_s:g}s bound")
         if r.reverted:
             reasons.append(f"RG{r.rg} left node{r.target} after landing, inside the window ({r.reverted})")
         if r.helper is not None:
@@ -736,6 +760,9 @@ def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str
             key = re.sub(r"\d+(\.\d+)?", "N", r.split(":")[0] if r.startswith("precondition") else r)[:110]
             reasons[key] = reasons.get(key, 0) + 1
     out["reason_classes"] = dict(sorted(reasons.items(), key=lambda kv: -kv[1]))
+    # #19041: dual-active samples seen, and those cleared as handoff straddles.
+    out["dual_samples"] = sum(r.dual_samples for m in moves for r in m.rgs)
+    out["dual_suspects_cleared"] = sum(r.dual_suspects for m in moves for r in m.rgs)
     if counts[FAIL] or (strict_cost and counts[COST]):
         out["exit"] = 1
     elif counts[VOID] or disabled:
@@ -1375,7 +1402,9 @@ class Soak:
                     udp_probe = {"status": "VOID",
                                  "detail": "UDP sequence probe post-commit checkpoint became unavailable",
                                  "metrics": {}}
-        landed, dual, last, suspects = None, False, pre.detail, 0
+        landed, dual, last, suspects, samples = None, False, pre.detail, 0, 0
+        old = 1 - target  # the commanded handoff's source
+        released = False  # node{old}'s own view has shown it fully let go
         # Bound: the RG must have landed before the operator's next command,
         # which their loop issues `sleep S` after this one returns.
         deadline = t_ret + self.cfg.budget.converge_s
@@ -1383,9 +1412,19 @@ class Soak:
             v0, v1 = self.views()
             own = rg_ownership(rg, v0, v1)
             if own.dual_active:
-                own, confirmed = self.resolve_dual_suspect(rg, own)
-                dual = dual or confirmed
-                suspects += 0 if confirmed else 1
+                samples += 1
+                if released:
+                    # node{old} already let go earlier in this move, so a
+                    # straddle of the handoff is no longer possible: it took
+                    # the RG back (#19041).
+                    dual = True
+                else:
+                    own, confirmed = self.resolve_dual_suspect(rg, own, old)
+                    dual = dual or confirmed
+                    suspects += 0 if confirmed else 1
+                    released = released or not confirmed
+            else:
+                released = released or node_released(rg, old, v0 if old == 0 else v1)
             last = own.detail
             if own.owner == target:
                 landed = self.now() - t0
@@ -1417,33 +1456,41 @@ class Soak:
         # watch_window at the END of the window, not here at landing.
         res = RGMoveResult(rg, target, pre.owner, pre.detail, cls, first, rc, round(t_ret - t0, 3),
                            None if landed is None else round(landed, 3), last, dual)
+        res.dual_samples = samples
         res.dual_suspects = suspects
         res.follow_expected = self.cfg.traffic and self.cfg.helper_check and bool(self.members.get(rg))
         return res, t_ret, udp_probe
 
-    def resolve_dual_suspect(self, rg: int, suspect: Ownership) -> Tuple[Ownership, bool]:
-        """A dual-active sample is a SUSPECT until an immediate re-sample
-        repeats it (#19041). Returns (the reading to use, dual-active?).
+    def resolve_dual_suspect(self, rg: int, suspect: Ownership, old: int) -> Tuple[Ownership, bool]:
+        """A dual-active sample taken BEFORE landing may be a straddle of the
+        commanded handoff from node{old} (#19041). Returns (the reading to
+        use, dual-active?).
 
         views() reads node0 and node1 with two independent `show chassis
         cluster status` commands. They run in parallel but do not read one
-        instant, so a clean handoff can be read as node0 primary (just
-        before) and node1 primary (just after) with no real overlap. Timing
-        the reads cannot rule that out: parallel reads always overlap, and
-        neither command says when inside its run it read the state. A real
-        dual-active is a STATE: it is still there one sample later. The
-        straddle cannot recur in the next sample, because both of that
-        sample's reads come after the handoff.
+        instant, so a clean handoff can be read as node{old} primary (just
+        before) and the target primary (just after) with no real overlap.
+        Timing the reads cannot rule that out: parallel reads always overlap,
+        and neither command says when inside its run it read the state.
 
-        Fail closed. If the re-sample is unreadable, the suspicion cannot be
-        cleared and the pair counts as dual-active. If the re-sample is
-        readable and not dual-active, its reading replaces the suspect's."""
+        The immediate re-sample clears the suspect only when it shows the
+        handoff's after-state on the old owner. Its re-sample must be
+        readable (each node's own role row and Forwarding line), not
+        dual-active, and node{old}'s own view must show it fully released:
+        role secondary or secondary-hold AND Forwarding inactive. A re-sample
+        that still shows node{old} holding the RG means the target claimed
+        it while node{old} held it. That is an overlap, and it counts.
+        Anything else counts too (fail closed). Callers never use this after
+        landing: no handoff is pending then, so there is nothing to
+        straddle."""
         v0, v1 = self.views()
         again = rg_ownership(rg, v0, v1)
         if again.dual_active:
             return again, True
         if not views_readable(rg, v0, v1):
             return Ownership(None, True, f"{suspect.detail} (re-sample unreadable: {again.detail})"), True
+        if not node_released(rg, old, v0 if old == 0 else v1):
+            return Ownership(None, True, f"{suspect.detail} (re-sample: node{old} has not let go: {again.detail})"), True
         return again, False
 
     def watch_window(self, results: List[RGMoveResult], until: float):
@@ -1454,9 +1501,16 @@ class Soak:
             for r in results:
                 own = rg_ownership(r.rg, v0, v1)
                 if own.dual_active:
-                    own, confirmed = self.resolve_dual_suspect(r.rg, own)
-                    r.dual_active = r.dual_active or confirmed
-                    r.dual_suspects += 0 if confirmed else 1
+                    r.dual_samples += 1
+                    if r.landed_s is not None:
+                        # After landing no handoff is pending, so no straddle
+                        # exists: the sample is a dual-active RG, and it is
+                        # judged as observed, revert check included (#19041).
+                        r.dual_active = True
+                    else:
+                        own, confirmed = self.resolve_dual_suspect(r.rg, own, 1 - r.target)
+                        r.dual_active = r.dual_active or confirmed
+                        r.dual_suspects += 0 if confirmed else 1
                 if r.landed_s is not None and own.owner != r.target and not r.reverted:
                     r.reverted = own.detail
                 self._owners[r.rg] = own
@@ -1652,9 +1706,11 @@ class Soak:
                 c = results[-1]
                 probe_status = (udp_probe or {}).get("status", "-")
                 probe_detail = (udp_probe or {}).get("detail", "")
+                dual_note = "".join(f" dual_samples={r.dual_samples} cleared={r.dual_suspects}"
+                                    for r in results if r.dual_samples)
                 self.log(f"move {i:>4} -> node{target}: cli={','.join(r.cli_class for r in results)}"
                          f" landed={','.join('-' if r.landed_s is None else f'{r.landed_s:.2f}' for r in results)}"
-                         f" udp={probe_status} {probe_detail} {c.cli_first[:120]}")
+                         f"{dual_note} udp={probe_status} {probe_detail} {c.cli_first[:120]}")
                 for rg in rgs:
                     targets[rg] = 1 - targets[rg]
             if moves:
@@ -1746,6 +1802,10 @@ class Soak:
         # judged by hand from the recorded rows. Strict mode counts COST as
         # failed.
         cost_failed = c[COST] if cfg.strict_cost else 0
+        if summary["dual_samples"]:
+            self.log(f"rg-move-soak: {summary['dual_samples']} dual-active sample(s) seen; "
+                     f"{summary['dual_suspects_cleared']} cleared as pre-landing handoff straddles "
+                     "(the re-sample showed the old owner released), the rest scored dual-active")
         self.log(f"rg-move-soak: {c[PASS] + c[COST] - cost_failed} passed, {c[FAIL] + cost_failed} failed, "
                  f"{c[COST]} cost ({c[VOID]} void)")
         self._write({"preflight": info, "config": asdict(cfg), "summary": summary,
