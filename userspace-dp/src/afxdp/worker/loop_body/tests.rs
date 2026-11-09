@@ -1867,6 +1867,252 @@ mod flow_cache_invalidation_tests {
             );
         }
     }
+
+    /// #18780 (R8 F1): the batched fence's MULTI-ROW accounting. In
+    /// production both halves of a WorkerLocalImport replica carry the
+    /// serving session's id and expire in the same tick, and
+    /// `restamp_shared_handshakes_established` stamps BOTH shared rows
+    /// Established. So one session id has two candidates, and each candidate
+    /// is matched by two shared rows (directly, and through the other row's
+    /// derived reverse key). Every replica must stay fenced:
+    /// - both rows Established: the `fenced[idx]` skip keeps a candidate's
+    ///   second match from decrementing `unresolved` again. Without it the
+    ///   pass breaks once half the rows are visited and leaves the remaining
+    ///   sessions' replicas to the full teardown (#16223). The candidate count
+    ///   is EVEN on purpose: with an odd count the double decrement wraps
+    ///   past zero (release has no overflow checks) and hides the defect.
+    /// - forward row only: the reverse replica is matched only through the
+    ///   forward row's derived reverse key, so every same-id candidate must
+    ///   be considered, not only the first.
+    /// Sessions are many (32) so FxHash visit order cannot happen to cover
+    /// every session before an early break. A replica with no serving row is
+    /// torn down in a separate call (its candidate would make the count odd).
+    #[test]
+    fn batched_fence_keeps_every_replica_of_paired_sessions_18780() {
+        let rg_epochs = reap_rg_epochs();
+        let forwarding = ForwardingState::default();
+        let established = crate::session::TcpHandshakeState::Established.to_wire();
+        const SESSIONS: u32 = 32;
+        for both_rows_established in [true, false] {
+            let mut map = FastMap::default();
+            let mut batch = Vec::new();
+            let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
+            for s in 0..SESSIONS {
+                let id = 50_000 + u64::from(s);
+                let forward = udp_replica_key(20_000 + s);
+                let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+                map.insert(forward.clone(), shared_row(&forward, id, established));
+                let mut reverse_row = shared_row(
+                    &reverse,
+                    id,
+                    if both_rows_established { established } else { 0 },
+                );
+                reverse_row.metadata.is_reverse = true;
+                map.insert(reverse.clone(), reverse_row);
+                for key in [&forward, &reverse] {
+                    insert_cache_entry(&mut binding, key, None);
+                    batch.push(expired_replica(key.clone(), id));
+                }
+            }
+            assert_eq!(batch.len() % 2, 0, "premise: an even candidate count");
+            let shared = std::sync::Arc::new(std::sync::Mutex::new(map));
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &batch,
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                1_000_000_000,
+                0,
+                &shared,
+            );
+            let unfenced: Vec<String> = batch
+                .iter()
+                .filter(|e| !cache_hits(&mut binding, &e.key, &rg_epochs))
+                .map(|e| format!("id {} {}", e.session_id, if e.key.src_port == 9 { "rev" } else { "fwd" }))
+                .collect();
+            assert!(
+                unfenced.is_empty(),
+                "#18780 (R8 F1, both rows Established = {both_rows_established}): {} of {} served \
+                 replicas lost the #16223 fence and were torn down: {unfenced:?}",
+                unfenced.len(),
+                batch.len()
+            );
+            // Control, same shared map: a replica with no serving row is torn down.
+            let orphan = udp_replica_key(29_999);
+            insert_cache_entry(&mut binding, &orphan, None);
+            reap_expired_sessions(
+                std::slice::from_mut(&mut binding),
+                &[expired_replica(orphan.clone(), 49_999)],
+                &forwarding,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                1_000_000_000,
+                0,
+                &shared,
+            );
+            assert!(
+                !cache_hits(&mut binding, &orphan, &rg_epochs),
+                "#18780 control: an unserved replica is still torn down"
+            );
+        }
+    }
+
+    /// #18780 (R7 F1): a budget cut must never split a forward/reverse pair
+    /// whose halves are both due in the pass. A reverse row owes no Close: its
+    /// shared copy and steering rows are retired by the FORWARD's Close
+    /// (`session_delta.rs`). Were the cut to fall between the halves, the
+    /// reaped reverse would miss locally as `Absent` (not `IdleCrossed`) and
+    /// `lookup_session_across_scopes_with_shared_and_payload` would resolve a
+    /// reply through its still-published shared copy for the inter-call window,
+    /// against #10419 (`housekeeping.rs`). Two hint orders, both legal
+    /// (bucket order follows handle/touch order):
+    /// - R7's: one lone row, then pairs with the reverse hint first, so the
+    ///   256th reap lands on a reverse;
+    /// - every reverse first, then every forward: a cut there strands 144
+    ///   pairs at once.
+    /// After EVERY call: no pair is left reverse-reaped / forward-present, every
+    /// reaped reverse's forward was reaped and Closed in the SAME call, and one
+    /// call reaps at most `2 * EXPIRY_PASS_MAX_REAPS` rows. The control: a
+    /// split pair (the RED shape) resolves the reaped reverse through shared.
+    /// RED at 956417850a (R7: exactly one split pair in the first order).
+    #[test]
+    fn budget_cut_never_splits_a_due_pair_18780() {
+        use crate::session::SessionExpiryProbe as P;
+        const SEC: u64 = 1_000_000_000;
+        const PAIRS: u32 = 200;
+        let t0 = 1_000 * SEC;
+        let udp = crate::ip_proto::PROTO_UDP;
+        for reverses_first in [false, true] {
+            let mut table = crate::session::SessionTable::new();
+            let mut reverse_md = reap_metadata();
+            reverse_md.is_reverse = true;
+            let pairs: Vec<(SessionKey, SessionKey)> = (0..PAIRS)
+                .map(|i| {
+                    let forward = udp_replica_key(i);
+                    let reverse =
+                        crate::session::reverse_session_key(&forward, NatDecision::default());
+                    (forward, reverse)
+                })
+                .collect();
+            let install = |table: &mut crate::session::SessionTable, key: &SessionKey, md| {
+                assert!(table.install_with_protocol(key.clone(), reap_decision(None), md, t0, udp, 0));
+            };
+            if reverses_first {
+                for (_, reverse) in &pairs {
+                    install(&mut table, reverse, reverse_md.clone());
+                }
+                for (forward, _) in &pairs {
+                    install(&mut table, forward, reap_metadata());
+                }
+            } else {
+                install(&mut table, &udp_replica_key(900_000), reap_metadata());
+                for (forward, reverse) in &pairs {
+                    install(&mut table, reverse, reverse_md.clone());
+                    install(&mut table, forward, reap_metadata());
+                }
+            }
+            let _ = table.drain_deltas(usize::MAX);
+            let _ = table.expire_stale_entries(t0);
+            let now = t0 + 61 * SEC;
+            let state = |t: &crate::session::SessionTable, k: &SessionKey| match t
+                .probe_with_origin_expiry(k, now)
+            {
+                P::Live(_) => 'L',
+                P::IdleCrossed => 'X',
+                P::Absent => 'A',
+            };
+            let mut calls = 0u64;
+            let mut cut_calls = 0usize;
+            let mut completions = 0usize;
+            loop {
+                calls += 1;
+                assert!(calls <= 16, "drain bound (order reverses_first={reverses_first})");
+                let reaped = table.expire_stale_entries(now + calls * 1_000);
+                let stats = table.last_pop_stats();
+                cut_calls += stats.budget_cuts;
+                completions += stats.pair_completions;
+                assert!(
+                    reaped.len() <= 2 * crate::session::EXPIRY_PASS_MAX_REAPS,
+                    "#18780: call {calls} reaped {} rows (bound 2 x cap)",
+                    reaped.len()
+                );
+                let closed: Vec<SessionKey> = table
+                    .drain_deltas(usize::MAX)
+                    .into_iter()
+                    .filter(|d| d.kind == crate::session::SessionDeltaKind::Close)
+                    .map(|d| d.key)
+                    .collect();
+                for (forward, reverse) in &pairs {
+                    let pair_state = (state(&table, reverse), state(&table, forward));
+                    assert_ne!(
+                        pair_state,
+                        ('A', 'X'),
+                        "#18780 (R7 F1, reverses_first={reverses_first}): after call {calls} the \
+                         reverse half is reaped while its forward is still crossed and un-Closed"
+                    );
+                    if reaped.iter().any(|e| e.key == *reverse) {
+                        assert!(
+                            closed.contains(forward),
+                            "#18780 (R7 F1): a reverse reaped in call {calls} must have its \
+                             forward Closed in the SAME call (that Close retires its shared copy)"
+                        );
+                    }
+                }
+                if !table.expiry_backlog() {
+                    break;
+                }
+            }
+            assert_eq!(table.len(), 0, "premise: the whole cohort drained");
+            assert_eq!(cut_calls, 1, "premise: exactly one call was cut by the budget");
+            assert!(
+                completions > 0,
+                "premise: the cut fell mid-pair, so pair completion ran (order reverses_first={reverses_first})"
+            );
+        }
+        // Control, the RED shape: a reverse reaped while its forward is only
+        // crossed resolves through the still-published shared copy, which is
+        // exactly what pair completion prevents.
+        let mut table = crate::session::SessionTable::new();
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_nat = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let shared_wire = std::sync::Arc::new(std::sync::Mutex::new(FastMap::default()));
+        let indexes = SharedSessionOwnerRgIndexes::default();
+        let forward = udp_replica_key(7);
+        let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+        let mut reverse_md = reap_metadata();
+        reverse_md.is_reverse = true;
+        // The forward half is local and crossed; the reverse half is gone
+        // locally (as a reap leaves it) and still published in shared.
+        assert!(table.install_with_protocol(forward.clone(), reap_decision(None), reap_metadata(), t0, udp, 0));
+        let mut reverse_row = shared_row(&reverse, 0, 0);
+        reverse_row.metadata = reverse_md;
+        shared.lock().unwrap().insert(reverse.clone(), reverse_row);
+        let now = t0 + 61 * SEC;
+        assert!(
+            matches!(table.probe_with_origin_expiry(&reverse, now), P::Absent)
+                && matches!(table.probe_with_origin_expiry(&forward, now), P::IdleCrossed),
+            "control premise: the split shape (reverse Absent, forward crossed)"
+        );
+        let resolves = crate::afxdp::shared_ops::lookup_session_across_scopes_with_shared_and_payload(
+            &mut table,
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            &indexes,
+            &reverse,
+            now,
+            0,
+            0,
+        )
+        .is_some();
+        assert!(
+            resolves,
+            "#18780 control: a split pair's reaped reverse resolves through its shared copy"
+        );
+    }
 }
 
 mod expiry_count_tests {

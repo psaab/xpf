@@ -1,18 +1,23 @@
 //! #18780: one expiry call must do bounded work, however large the cohort
 //! that crosses in one wheel tick.
 //!
-//! The live failure: RG activation (`RefreshOwnerRGS` ->
+//! The shape: RG activation (`RefreshOwnerRGS` ->
 //! `refresh_for_ha_transition`) re-stamps every HA-managed row to the
 //! activation instant T0. With UDP's 60 s window the whole table therefore
 //! crosses in ONE tick at T0+60 (SELF-HEAL) and again at T0+120 (AGE).
 //! `expire_stale_entries_ha` drained every due bucket in a single call, so
 //! one `worker_loop` iteration did the whole table's classification, reap
-//! and teardown, the worker heartbeat froze for ~11 s, the #18704 watchdog
-//! moved the RGs, and the peer repeated it 120 s later (a ~135 s RG loop).
+//! and teardown. On this base (`b57a950e21`) the udp lab measured that as a
+//! 0.27-0.37 s stall of every worker at the T0+120 wave with 34k-48k rows per
+//! worker (`docs/log/18780.md`). The issue's ~11 s heartbeat freeze and
+//! ~135 s RG loop were seen on `d199fe64b6`, before #18663, with ~600k-row
+//! tables; they were not reproduced here and these cells do not claim them.
 //!
 //! The contract these cells pin:
-//! 1. Per call, at most `EXPIRY_PASS_MAX_REAPS` rows are reaped and at most
-//!    `EXPIRY_PASS_MAX_POPS` wheel hints are examined, independent of N.
+//! 1. Per call, at most `EXPIRY_PASS_MAX_POPS` wheel hints are popped
+//!    (future-hint rotations included) and at most `EXPIRY_PASS_MAX_REAPS`
+//!    rows are reaped before the cut, plus the cut's pair completions
+//!    (`2 * EXPIRY_PASS_MAX_REAPS` in all), independent of N.
 //! 2. A budget-cut pass sets the backlog flag; the NEXT call (the next loop
 //!    iteration, not the next 1 s GC tick) resumes the cursor, so the last
 //!    row of a cohort of C rows due in one tick is reaped within
@@ -384,6 +389,13 @@ fn pop_budget_drains_stale_hints_without_stalling_18780() {
 /// `EXPIRY_PASS_MAX_POPS` of them, never leave the bucket — the cursor would
 /// stop and nothing after it would ever expire. Row E, due one tick later,
 /// must still be reaped on the next fresh pass.
+///
+/// R7 F2: a rotation SPENDS a pop. Every call must satisfy
+/// `scanned + rotated_future <= EXPIRY_PASS_MAX_POPS`, the first call must be
+/// cut, and the bucket must take exactly `ceil(popped / MAX_POPS)` calls. A
+/// refactor that refunds the pop for a rotation ("a rotation is not an
+/// examination") lets one call rotate every long-timeout hint in the bucket —
+/// unbounded by the per-call budget — and passes the upper-bound-only checks.
 #[test]
 fn pop_budget_never_livelocks_on_future_hints_18780() {
     let t0 = 1_000 * SEC;
@@ -424,6 +436,28 @@ fn pop_budget_never_livelocks_on_future_hints_18780() {
     let pass_ns = x + SEC + 200 * MS;
     let first = table.expire_stale_entries(pass_ns);
     assert_eq!(first.len(), 2, "premise: D reaps on the first pass");
+    let pops_bounded = |table: &SessionTable, call: u64| {
+        let stats = table.last_pop_stats();
+        assert!(
+            stats.scanned + stats.rotated_future <= EXPIRY_PASS_MAX_POPS,
+            "#18780 (R7 F2): call {call} popped {} + rotated {} hints (cap {})",
+            stats.scanned,
+            stats.rotated_future,
+            EXPIRY_PASS_MAX_POPS
+        );
+    };
+    pops_bounded(&table, 0);
+    assert!(
+        table.last_pop_stats().rotated_future > 0,
+        "premise: the first call rotated future hints"
+    );
+    assert!(
+        table.expiry_backlog(),
+        "#18780 (R7 F2): rotations spend the pop budget, so the first call over \
+         {hints} future hints must be cut"
+    );
+    // D's two hints plus every future hint, each popped exactly once.
+    let calls = (u64::from(hints) + 2).div_ceil(EXPIRY_PASS_MAX_POPS as u64);
     let mut continuations = 0u64;
     while table.expiry_backlog() {
         continuations += 1;
@@ -432,7 +466,13 @@ fn pop_budget_never_livelocks_on_future_hints_18780() {
             "#18780: the cursor never left a bucket of {hints} future hints (livelock)"
         );
         let _ = table.expire_stale_entries(pass_ns + continuations * US);
+        pops_bounded(&table, continuations);
     }
+    assert_eq!(
+        continuations + 1,
+        calls,
+        "#18780 (R7 F2): the bucket must take exactly ceil(popped / MAX_POPS) calls"
+    );
     let next = table.expire_stale_entries(x + 2 * SEC + 200 * MS);
     let mut reaped = next.len();
     let mut more = 0;
@@ -445,6 +485,57 @@ fn pop_budget_never_livelocks_on_future_hints_18780() {
         "#18780: row E (due one tick after the future-hint bucket) was not reaped; reaped {reaped}"
     );
     assert_eq!(table.len(), hints as usize, "only the live long-timeout rows remain");
+}
+
+/// R8 F6: the #7699 placement contract survives the continuation. The PPTP
+/// association sweep is per-pass work over the whole association map; it
+/// runs on a FRESH pass only, never on a budget continuation (which bypasses
+/// the 1 s gate and runs every loop iteration). An association whose idle
+/// deadline falls between a cut fresh pass and its continuation must survive
+/// the continuation and be swept by the next fresh pass. A sweep on every
+/// continuation would scan the map once per loop iteration during a drain and
+/// age associations out up to one interval early.
+#[test]
+fn pptp_association_sweep_runs_only_on_fresh_passes_18780() {
+    let t0 = 1_000 * SEC;
+    let mut table = SessionTable::new();
+    let cohort = (EXPIRY_PASS_MAX_REAPS / 2 + 1) as u32;
+    for i in 0..cohort {
+        install_udp_pair(&mut table, i, t0, SessionOrigin::ForwardFlow);
+    }
+    let _ = table.expire_stale_entries(t0);
+    let fresh = t0 + 61 * SEC;
+    let continuation = fresh + 500 * MS;
+    let timeout = crate::session::pptp::ASSOCIATION_IDLE_TIMEOUT_NS;
+    // Idle for timeout - 250 ms at the fresh pass, timeout + 250 ms at the
+    // continuation.
+    let learned = fresh + 250 * MS - timeout;
+    let call = crate::session::pptp::PptpCall::new(
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
+        0x1111,
+        IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9)),
+        0x2222,
+    );
+    let handle = table
+        .pptp_mut()
+        .install_synced_association(call, learned)
+        .expect("register the PPTP call pair");
+    let _ = table.expire_stale_entries(fresh);
+    assert!(table.expiry_backlog(), "premise: the fresh pass was cut by the budget");
+    assert!(table.pptp().has_handle(handle), "premise: not idle yet at the fresh pass");
+    let _ = table.expire_stale_entries(continuation);
+    assert!(!table.expiry_backlog(), "premise: the continuation finished the cohort");
+    assert_eq!(table.len(), 0, "premise: the continuation ran (it reaped the tail)");
+    assert!(
+        table.pptp().has_handle(handle),
+        "#18780 (R8 F6): a budget continuation ran the PPTP association sweep (#7699 placement)"
+    );
+    assert_eq!(table.pptp().counters().expired_idle, 0);
+    let _ = table.expire_stale_entries(fresh + SEC);
+    assert!(
+        !table.pptp().has_handle(handle),
+        "control: the next fresh pass sweeps the idle association"
+    );
 }
 
 /// Lazy evidence, negative half: crossed UDP rows AGE (the activation edge is

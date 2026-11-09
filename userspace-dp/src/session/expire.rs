@@ -187,17 +187,27 @@ impl SessionTable {
     /// When `ha` is `None` (standalone / tests), behavior is identical to
     /// the pre-#2120 unconditional wheel: every idle-crossed entry ages.
     ///
-    /// #18780: one call is BOUNDED — it reaps at most
-    /// `EXPIRY_PASS_MAX_REAPS` rows and examines at most
-    /// `EXPIRY_PASS_MAX_POPS` wheel hints. When it stops with due work left it
-    /// sets `expiry_backlog`, and the next call skips the 1 s interval gate and
-    /// resumes at the same cursor/bucket position, so the worker loop (which
-    /// calls this once per iteration) drains a cohort of C rows due in one
-    /// tick in `ceil(C / EXPIRY_PASS_MAX_REAPS)` consecutive iterations
-    /// instead of one iteration that freezes the heartbeat. The interval gate,
+    /// #18780: one call is BOUNDED — it pops at most `EXPIRY_PASS_MAX_POPS`
+    /// wheel hints (future-hint rotations included) and stops once it has
+    /// reaped `EXPIRY_PASS_MAX_REAPS` rows. At that cut it first visits the
+    /// companions of the rows it reaped whose own hint is due in this pass
+    /// (`cut_pair_companions`, R7 F1), so a cut never splits a pair and one
+    /// call reaps at most `2 * EXPIRY_PASS_MAX_REAPS` rows. A cut call sets
+    /// `expiry_backlog`; the next call skips the 1 s interval gate and resumes
+    /// at the same cursor/bucket position. The worker loop calls this once per
+    /// iteration, so a cohort of C rows whose drain pops P hints (stale, gone,
+    /// rotated or reaped) finishes within
+    /// `floor(C / EXPIRY_PASS_MAX_REAPS) + floor(P / EXPIRY_PASS_MAX_POPS) + 1`
+    /// consecutive iterations: a call cut by the reap cap reaped at least
+    /// `EXPIRY_PASS_MAX_REAPS` of the C rows, one cut by the pop cap popped
+    /// `EXPIRY_PASS_MAX_POPS` of the P hints. That delay is ADDED to the up-to-1 s gate wait
+    /// before the tick is first processed, and each iteration also pays the
+    /// caller's per-call reap teardown and replica fence. The interval gate,
     /// `last_gc_ns` and the PPTP association sweep advance only on a fresh
     /// (non-continuation) pass, so the 1 s cadence is unchanged when there is
-    /// no backlog.
+    /// no backlog. If due work arrives faster than one budget per iteration,
+    /// every call is a continuation: the cursor lags, and `last_gc_ns` and the
+    /// PPTP sweep do not advance until it catches up.
     pub fn expire_stale_entries_ha(
         &mut self,
         now_ns: u64,
@@ -244,6 +254,9 @@ impl SessionTable {
         let now_tick = now_ns / WHEEL_TICK_NS;
         let mut expired_entries = Vec::new();
         let mut pops_left = EXPIRY_PASS_MAX_POPS;
+        // #18780 (R7 F1): set when a cap is reached — the companions this call
+        // still owes before the cut takes effect (`cut_pair_companions`).
+        let mut owed: Option<std::vec::IntoIter<(SessionKey, u64)>> = None;
         'ticks: while self.wheel.cursor_tick < now_tick {
             let bucket_idx = bucket_for_tick(self.wheel.cursor_tick);
             // #18780: a continuation resumes the snapshot its cut pass took
@@ -256,37 +269,61 @@ impl SessionTable {
                 .take()
                 .map_or(bucket_len, |left| left.min(bucket_len));
             while due_count > 0 {
-                // #18780: stop BEFORE popping once either cap is spent. The
-                // cursor stays on this tick and the unvisited snapshot hints
-                // stay at the front of its bucket, so the next call resumes
-                // exactly here.
-                if pops_left == 0 || expired_entries.len() >= EXPIRY_PASS_MAX_REAPS {
-                    self.wheel.resume_due = Some(due_count);
-                    self.expiry_backlog = true;
-                    break 'ticks;
-                }
-                pops_left -= 1;
-                due_count -= 1;
-                // The modulo bucket can be visited before a future absolute
-                // tick when this call catches up after a long GC pause. Keep
-                // that hint queued until the cursor reaches its scheduled tick.
-                if self.wheel.buckets[bucket_idx]
-                    .front()
-                    .is_some_and(|entry| entry.scheduled_tick > self.wheel.cursor_tick)
-                {
-                    let future = self.wheel.buckets[bucket_idx]
+                let (key, scheduled_tick) = if let Some(pending) = owed.as_mut() {
+                    // #18780 (R7 F1): pair completion. Each owed companion
+                    // goes through the SAME classification below (its own HA
+                    // gate, retention arms, reap and Close) exactly as its own
+                    // hint would have later in this pass; then the cut takes
+                    // effect. The companion's hint stays queued and drops as
+                    // gone/stale when a continuation reaches it.
+                    let Some(next) = pending.next() else {
+                        self.wheel.resume_due = Some(due_count);
+                        self.expiry_backlog = true;
+                        break 'ticks;
+                    };
+                    self.last_pop_stats.pair_completions += 1;
+                    next
+                } else {
+                    // #18780: stop BEFORE popping once either cap is spent.
+                    // The cursor stays on this tick and the unvisited snapshot
+                    // hints stay at the front of its bucket, so the next call
+                    // resumes exactly here — after the owed companions above.
+                    if pops_left == 0 || expired_entries.len() >= EXPIRY_PASS_MAX_REAPS {
+                        self.last_pop_stats.budget_cuts += 1;
+                        owed = Some(
+                            self.cut_pair_companions(&expired_entries, now_tick)
+                                .into_iter(),
+                        );
+                        continue;
+                    }
+                    // #18780: every pop spends the budget, a rotation included
+                    // (R7 F2): refunding it would let one call rotate an
+                    // unbounded number of long-timeout hints.
+                    pops_left -= 1;
+                    due_count -= 1;
+                    // The modulo bucket can be visited before a future absolute
+                    // tick when this call catches up after a long GC pause. Keep
+                    // that hint queued until the cursor reaches its scheduled tick.
+                    if self.wheel.buckets[bucket_idx]
+                        .front()
+                        .is_some_and(|entry| entry.scheduled_tick > self.wheel.cursor_tick)
+                    {
+                        let future = self.wheel.buckets[bucket_idx]
+                            .pop_front()
+                            .expect("bucket length snapshot bounds the iteration");
+                        self.wheel.buckets[bucket_idx].push_back(future);
+                        self.last_pop_stats.rotated_future += 1;
+                        continue;
+                    }
+                    let WheelEntry {
+                        key,
+                        scheduled_tick,
+                    } = self.wheel.buckets[bucket_idx]
                         .pop_front()
                         .expect("bucket length snapshot bounds the iteration");
-                    self.wheel.buckets[bucket_idx].push_back(future);
-                    continue;
-                }
-                let WheelEntry {
-                    key,
-                    scheduled_tick,
-                } = self.wheel.buckets[bucket_idx]
-                    .pop_front()
-                    .expect("bucket length snapshot bounds the iteration");
-                self.last_pop_stats.scanned += 1;
+                    self.last_pop_stats.scanned += 1;
+                    (key, scheduled_tick)
+                };
                 // Case 1: entry already removed elsewhere — drop hint.
                 let Some(entry) = self.entry_by_key(&key) else {
                     self.last_pop_stats.dropped_gone += 1;
@@ -749,6 +786,50 @@ impl SessionTable {
     /// activity, a companion keepalive, or SELF-HEAL. Leaving the held world
     /// clears its horizon marker; ordinary AGE/Close deadlines use the main
     /// timer-wheel target.
+    /// #18780 (R7 F1): the companions a budget cut owes before it takes
+    /// effect, as `(key, canonical hint tick)`.
+    ///
+    /// Forward and reverse halves are separate rows with separate wheel hints,
+    /// in an arbitrary order inside a bucket. Without the budget one pass
+    /// visited every due hint, so a pair whose halves were both due was reaped
+    /// in one call and the forward's Close (`session_delta.rs`, which also
+    /// retires the reverse half's shared copy and steering rows) flushed before
+    /// the worker polled another packet (#10419). A cut between the two hints
+    /// would leave the reverse half reaped — a later reply misses it as
+    /// `Absent`, not `IdleCrossed`, and resolves through its still-published
+    /// shared copy — while the forward waits, crossed and Close-less, for the
+    /// next call.
+    ///
+    /// Owed: the companion of every row this call reaped, if it is still in
+    /// the table and its canonical hint is due in THIS pass (tick below
+    /// `now_tick`, i.e. a bucket this pass would still have visited). A
+    /// companion due in a later tick is not owed: one unbudgeted pass would not
+    /// have visited it either. (That straddling shape splits a pair for up to
+    /// one pass on the base too, without any cut: #19037. Fixing it there would
+    /// let this tick filter go.) At most one companion per reaped row, so a
+    /// call reaps at most `2 * EXPIRY_PASS_MAX_REAPS` rows.
+    fn cut_pair_companions(
+        &self,
+        reaped: &[ExpiredSession],
+        now_tick: u64,
+    ) -> Vec<(SessionKey, u64)> {
+        let mut owed = Vec::new();
+        for row in reaped {
+            // The same derivation the retention probe uses: a row's own NAT
+            // decision recovers its companion in both directions.
+            let companion = reverse_session_key(&row.key, row.decision.nat);
+            let Some(entry) = self.entry_by_key(&companion) else {
+                continue;
+            };
+            let tick = entry.wheel_tick;
+            let canonical = entry.held_wheel_tick == 0 || entry.held_wheel_tick == tick;
+            if canonical && tick < now_tick {
+                owed.push((companion, tick));
+            }
+        }
+        owed
+    }
+
     fn rebucket_alive_entry(&mut self, key: &SessionKey, now_ns: u64) {
         let Some(entry) = self.entry_by_key(key) else {
             return;
