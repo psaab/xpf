@@ -38,13 +38,15 @@ The script also prepares the runner environment:
   module cache every package there fails as `[setup failed]`. The download
   must not change the tree under test. `go mod download` restores a missing
   `/go.mod` hash line in `go.sum`, so the script hashes `go.mod` and
-  `go.sum` (and `go.work`/`go.work.sum` if present) before and after and
-  refuses the run if they changed.
+  `go.sum` (and `go.work`/`go.work.sum` if present) before and after. The
+  run proceeds only on an explicit "unchanged" verdict. It is refused if the
+  files changed, or if the check did not complete.
 - The command runs only if `cd` into the lane's source tree succeeds.
 - A `--root` leg keeps `HOME=/home/runner` for the toolchains. After the
   command, a separate step hands every file it created under the lane dir,
   `~runner/go`, `~runner/.cargo` and `~runner/.cache` back to `runner`.
   The command's exit status is recorded first, so this step cannot change it.
+  Ctrl-C or TERM runs the same step before exiting 130/143.
 - Lane names are `[A-Za-z0-9._-]+` and must not be all dots.
 - It exports a runner-local `GOCACHE`, because the Makefile's default
   (`/var/worktrees/.cache/go-build`) exists only on the workstation. Root

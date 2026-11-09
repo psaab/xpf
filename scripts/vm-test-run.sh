@@ -111,15 +111,20 @@ if [[ "$sync" -eq 1 ]]; then
 	# The download must not change the tree under test: `go mod download`
 	# restores a missing /go.mod hash line in go.sum, and a test would then
 	# pass on a tree that fails on the workstation. The module files are hashed
-	# before and after; a change prints a marker on stdout (the download's own
-	# output goes to stderr), and the run is refused. The marker, not an exit
-	# code, carries the verdict, so the download's own status cannot be
-	# mistaken for it.
+	# before and after, and the comparison prints exactly one verdict line on
+	# stdout (the download's own output goes to stderr). The run proceeds only
+	# on an explicit UNCHANGED line: a CHANGED line, or no verdict at all (the
+	# remote shell was killed between the download and the comparison), is
+	# refused. Fail closed, never open.
 	if incus exec "$runner" -- test -f "${base}/src/go.mod"; then
 		mod_rc=0
-		mod_out=$(incus exec "$runner" -- su - runner -c "cd '${base}/src' || exit 2; h() { cat go.mod go.sum go.work go.work.sum 2>/dev/null | sha256sum; }; before=\$(h); GOFLAGS=-buildvcs=false go mod download >&2; rc=\$?; [ \"\$before\" = \"\$(h)\" ] || echo VMTR_MODULE_FILES_CHANGED; exit \$rc") || mod_rc=$?
-		if [[ "$mod_out" == *VMTR_MODULE_FILES_CHANGED* ]]; then
+		mod_out=$(incus exec "$runner" -- su - runner -c "cd '${base}/src' || exit 2; h() { cat go.mod go.sum go.work go.work.sum 2>/dev/null | sha256sum; }; before=\$(h); GOFLAGS=-buildvcs=false go mod download >&2; rc=\$?; if [ \"\$before\" = \"\$(h)\" ]; then echo VMTR_MODULE_FILES_UNCHANGED; else echo VMTR_MODULE_FILES_CHANGED; fi; exit \$rc") || mod_rc=$?
+		mod_verdict=$(printf '%s\n' "$mod_out" | grep -xE 'VMTR_MODULE_FILES_(UN)?CHANGED' | tail -n 1 || true)
+		if [[ "$mod_verdict" == VMTR_MODULE_FILES_CHANGED ]]; then
 			echo "vm-test-run: go mod download changed go.mod/go.sum/go.work; the tree under test is not tidy (run 'go mod tidy' and commit); refusing" >&2
+			exit 2
+		elif [[ "$mod_verdict" != VMTR_MODULE_FILES_UNCHANGED ]]; then
+			echo "vm-test-run: the module-file check did not complete on ${runner} (rc ${mod_rc}); refusing rather than testing a tree that may have changed" >&2
 			exit 2
 		elif [[ "$mod_rc" -ne 0 ]]; then
 			echo "vm-test-run: warning: go mod download failed on ${runner} (rc ${mod_rc}); Go legs under testguard may fail with [setup failed]" >&2
@@ -144,16 +149,23 @@ gocache=/home/runner/.cache/go-build
 [[ "$as_root" -eq 1 ]] && gocache=/root/.cache/go-build
 env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOCACHE='${gocache}' GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src' || { echo 'vm-test-run: no source tree at ${base}/src (sync it first)' >&2; exit 2; }"
 rc=0
-if [[ "$as_root" -eq 1 ]]; then
-	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}" || rc=$?
-	# A root leg keeps HOME=/home/runner (for the toolchains), so whatever it
-	# wrote under runner's lane dir, module cache, cargo dir or cache is
-	# root-owned and breaks later unprivileged runs. Hand it back in a
-	# SEPARATE exec after the command: a trap in the command's own shell is
-	# skipped by `exec`, and its status can leak into the result. The
-	# command's status is already recorded in rc; this step cannot change it.
+# A root leg keeps HOME=/home/runner (for the toolchains), so whatever it
+# wrote under runner's lane dir, module cache, cargo dir or cache is
+# root-owned and breaks later unprivileged runs. Hand it back in a SEPARATE
+# exec after the command: a trap in the command's own shell is skipped by
+# `exec`, and its status can leak into the result. The command's status is
+# already recorded in rc; this step cannot change it. A Ctrl-C or TERM to
+# this script runs the same step before exiting 130/143.
+root_handback() {
 	incus exec "$runner" -- find "${base}" /home/runner/go /home/runner/.cargo /home/runner/.cache \
 		-xdev ! -user runner -exec chown -h runner:runner {} + >/dev/null 2>&1 || true
+}
+if [[ "$as_root" -eq 1 ]]; then
+	trap 'trap - INT TERM; root_handback; exit 130' INT
+	trap 'trap - INT TERM; root_handback; exit 143' TERM
+	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}" || rc=$?
+	trap - INT TERM
+	root_handback
 else
 	incus exec "$runner" -- su - runner -c "${env_prefix}; ${cmd}" || rc=$?
 fi
