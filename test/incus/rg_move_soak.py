@@ -536,6 +536,10 @@ class RGMoveResult:
     # the move), and the first one's reading, with the read order.
     dual_samples: int = 0
     dual_detail: str = ""
+    # #19061: post-landing window samples taken, and whether the window had
+    # already ended when it started, so its one sample ran past it.
+    window_samples: int = 0
+    window_extended: bool = False
 
 
 @dataclass
@@ -1569,10 +1573,22 @@ class Soak:
         pending, so every dual-active sample is a real overlap or a second
         handoff, and either one FAILs. With several RGs moved to different
         targets, one order serves all of them; that is safe for the same
-        reason. An RG that never landed already FAILs "did not land"."""
-        while self.now() < until:
+        reason. An RG that never landed already FAILs "did not land".
+
+        At least ONE sample is always taken (#19061). At SOAK_SLEEP=2, the
+        landing poll, the UDP checkpoint and the helper reads could use up
+        the whole window. With no sample, the next move's precondition came
+        from an older move, and this move's revert and post-landing checks
+        never ran. A window that had already ended gets its one sample
+        anyway, and is marked `window_extended`."""
+        samples = 0
+        while self.now() < until or samples == 0:
+            extended = self.now() >= until
             v0, v1 = self.views(first=first)
+            samples += 1
             for r in results:
+                r.window_samples += 1
+                r.window_extended = r.window_extended or extended
                 own = rg_ownership(r.rg, v0, v1)
                 if own.dual_active:
                     r.dual_active = True

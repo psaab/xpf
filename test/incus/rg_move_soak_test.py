@@ -2744,5 +2744,40 @@ class WallClockStep19056(unittest.TestCase):
         self.assertAlmostEqual(s.lan_time(s.now()), clock.t + 3.0, places=2)
 
 
+class SlowHelperCluster(FakeCluster):
+    """Each helper read takes 1 fake second, so at SOAK_SLEEP=2 the landing
+    poll plus the helper reads use up the whole post-landing window
+    (#19061)."""
+
+    def helper(self, node):
+        self.clock_.sleep(1.0)
+        return super().helper(node)
+
+
+class ZeroSampleWindow19061(unittest.TestCase):
+    """#19061: every post-landing window takes at least one sample, so the
+    next move's precondition is never an older move's reading."""
+
+    def test_a_used_up_window_still_samples_and_the_next_move_is_not_void(self):
+        clock = FakeClock()
+        c = SlowHelperCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=4, sleep_s=2.0)
+        self.assertEqual(res["summary"]["counts"]["VOID"], 0, [m["reasons"] for m in res["moves"]])
+        for m in res["moves"]:
+            r = m["rgs"][0]
+            self.assertGreaterEqual(r["window_samples"], 1, m)
+            self.assertTrue(r["window_extended"], m)  # the fixture uses the window up every time
+            self.assertEqual(r["pre_owner"], 1 - r["target"], m)
+        self.assertEqual(rc, 0, res["summary"])
+
+    def test_a_normal_window_samples_several_times_without_extension(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=2)
+        for m in res["moves"]:
+            self.assertGreater(m["rgs"][0]["window_samples"], 1)
+            self.assertFalse(m["rgs"][0]["window_extended"])
+
+
 if __name__ == "__main__":
     unittest.main()

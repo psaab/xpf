@@ -551,6 +551,15 @@ loop. After landing, the soak keeps sampling both views until the window
 ends (the operator's `sleep S`), so a move that goes dual-active or reverts
 two seconds after landing is caught.
 
+The window always takes at least ONE sample (#19061). At `SOAK_SLEEP=2` the
+landing poll, the UDP checkpoint and the helper reads could use up the whole
+window. With no sample, the move's revert and post-landing dual-active
+checks never ran, and the NEXT move's precondition came from an older move.
+That gave a false VOID ("RG2 was on node0 before a move to node0") while the
+journals showed RG2 on node1 the whole time. A window that has already
+ended still gets its one sample, which delays the next move by one sample.
+`result.json` records each RG's `window_samples` and `window_extended`.
+
 ## Pass criteria
 
 One verdict per move:
