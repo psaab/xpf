@@ -170,6 +170,9 @@ fn flush_session_deltas_loop(
     forwarding: &ForwardingState,
     shared_runtime: &RuntimeViewReader,
     worker_lossless_wedged: &mut bool,
+    // #18780: the per-drain-cycle bulk (LossResync) latch; see
+    // `flush_session_deltas`.
+    bulk_lossless_wedged: &mut bool,
     worker_id: u32,
     deltas: &[SessionDelta],
 ) {
@@ -194,6 +197,7 @@ fn flush_session_deltas_loop(
                 forwarding,
                 shared_runtime,
                 &mut *worker_lossless_wedged,
+                &mut *bulk_lossless_wedged,
                 Some(&mut *sessions),
             )
         }
@@ -223,6 +227,7 @@ fn flush_session_deltas_loop(
                 forwarding,
                 shared_runtime,
                 &mut *worker_lossless_wedged,
+                &mut *bulk_lossless_wedged,
                 Some(&mut *sessions),
             )
         }
@@ -551,6 +556,12 @@ pub(crate) fn worker_loop(
         // cursor instead of wedging) and its echo deltas are
         // bulk_resync-marked (non-arming), so no cross-pass extension.
         worker_lossless_wedged = false;
+        // #18780: the same per-drain-cycle reset for the bulk (LossResync)
+        // kind. Without it the #2442 resync paid one lossless budget per
+        // 256-delta export batch against a connected-but-unread stream (~K/256
+        // budgets in one iteration). Captured only by `flush_deltas` below,
+        // which every flush of this iteration goes through.
+        let mut worker_bulk_lossless_wedged = false;
         // #869: attribute elapsed delta to the previous loop's state.
         {
             let delta = loop_now_ns.saturating_sub(wr_last_loop_ns);
@@ -1261,6 +1272,7 @@ pub(crate) fn worker_loop(
                 forwarding_for_flush.as_ref(),
                 &shared_runtime,
                 wedged,
+                &mut worker_bulk_lossless_wedged,
                 worker_id,
                 deltas,
             );

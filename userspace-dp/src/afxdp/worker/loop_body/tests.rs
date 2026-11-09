@@ -2756,3 +2756,362 @@ mod gc_reap_nat64_release_tests_7740 {
         }
     }
 }
+
+mod expiry_resync_lossless_wait_18780_tests {
+    //! #18780 (R9 P1): an expiry continuation, a connected-but-unread event
+    //! stream and the #2442 loss-of-sync resync, in ONE worker-loop iteration,
+    //! driven through the production pieces in production order:
+    //! `run_session_housekeeping` (expire, reap, Close flush) then
+    //! `run_delta_recovery` (resync), both flushing through
+    //! `flush_session_deltas_loop` with the per-iteration latches
+    //! `worker_loop` resets.
+    //!
+    //! The Close flush times out once (one `WORKER_LOSSLESS_QUEUE_BUDGET`),
+    //! latches loss-of-sync, and the same iteration's resync re-exports every
+    //! owned forward row in 256-delta batches. #14646 gated the bulk kind per
+    //! CALL, so each batch paid its own budget. With a budget cut the
+    //! not-yet-reaped tail of an expiring cohort is still in the table and is
+    //! re-exported too (on the base an expiry-only cohort was gone first), so
+    //! the branch made the shape reachable from expiry alone; the per-call
+    //! gate itself predates it and stalls a resync of LIVE rows the same way
+    //! (second cell).
+    //!
+    //! The observable is the number of failed lossless pushes per kind
+    //! (`LOSSLESS_FAILURES_18780`): against a connected-but-full stream each
+    //! is exactly one budget wait, so the count is the stall in budgets
+    //! without timing it (#8218). The elapsed time is reported, not asserted.
+    use super::*;
+    use crate::nat::NatDecision;
+    use crate::session::{SessionDecision, SessionKey, SessionMetadata, SessionTable};
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::AtomicU32;
+
+    const SEC: u64 = 1_000_000_000;
+    // Out of range of every per-worker global (delete-drop epoch, purge flag),
+    // so no other cell's state can reach this one.
+    const WORKER: u32 = 18_780;
+
+    fn key(i: u32) -> SessionKey {
+        SessionKey {
+            addr_family: libc::AF_INET as u8,
+            protocol: crate::ip_proto::PROTO_UDP,
+            src_ip: IpAddr::V4(Ipv4Addr::from(0x0a46_0000u32 + i)),
+            dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 211)),
+            src_port: 40_000,
+            dst_port: 9,
+            discriminator: Default::default(),
+            routing_domain: 0,
+        }
+    }
+
+    fn metadata(is_reverse: bool) -> SessionMetadata {
+        SessionMetadata {
+            forward_wire_alias_origin: false,
+            ingress_zone: 1,
+            egress_zone: 2,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 1,
+            fabric_ingress: false,
+            is_reverse,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        }
+    }
+
+    fn decision() -> SessionDecision {
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 12,
+                tx_ifindex: 12,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1))),
+                neighbor_mac: Some([0, 1, 2, 3, 4, 5]),
+                src_mac: Some([6, 7, 8, 9, 10, 11]),
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision::default(),
+            install_table_domain: 0,
+            install_table_check: 0,
+        }
+    }
+
+    /// A locally authored UDP pair (ForwardFlow), forward hint first.
+    fn install_pair(table: &mut SessionTable, i: u32, now_ns: u64) {
+        let forward = key(i);
+        let reverse = crate::session::reverse_session_key(&forward, NatDecision::default());
+        let udp = crate::ip_proto::PROTO_UDP;
+        assert!(table.install_with_protocol(forward, decision(), metadata(false), now_ns, udp, 0));
+        assert!(table.install_with_protocol(reverse, decision(), metadata(true), now_ns, udp, 0));
+    }
+
+    /// A connected event stream whose reader never reads, already full.
+    fn unread_full_stream() -> (
+        Option<crate::event_stream::EventStreamWorkerHandle>,
+        std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
+    ) {
+        let capacity = 4usize;
+        let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+            capacity,
+            crate::event_stream::DataplaneEventRateLimitConfig::default(),
+        );
+        let mut scratch = SessionTable::new();
+        install_pair(&mut scratch, 999_999, SEC);
+        let filler = scratch
+            .drain_deltas(1)
+            .into_iter()
+            .next()
+            .expect("an install emits an Open delta");
+        let zones = ForwardingState::default().zone_name_to_id;
+        for _ in 0..capacity {
+            handle.push_delta(&filler, &zones);
+        }
+        (Some(handle), rx)
+    }
+
+    struct Iteration {
+        incremental_waits: u64,
+        bulk_waits: u64,
+        reaped: usize,
+        elapsed: std::time::Duration,
+    }
+
+    /// One worker-loop iteration's housekeeping + delta recovery.
+    fn run_iteration(
+        sessions: &mut SessionTable,
+        now_ns: u64,
+        event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
+    ) -> Iteration {
+        let forwarding = ForwardingState::default();
+        let shared = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat = Arc::new(Mutex::new(FastMap::default()));
+        let shared_wire = Arc::new(Mutex::new(FastMap::default()));
+        let indexes = SharedSessionOwnerRgIndexes::default();
+        let recent = Arc::new(Mutex::new(VecDeque::new()));
+        let channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let reader = channel.reader();
+        let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
+        let lookup = WorkerBindingLookup::default();
+        let commands = crate::afxdp::empty_worker_commands_by_id();
+        let pptp_control = crate::session::pptp_control::PptpControlInbox::default();
+        // The per-iteration latches `worker_loop` resets at the loop top.
+        let mut worker_lossless_wedged = false;
+        let mut worker_bulk_lossless_wedged = false;
+        let mut flush_deltas = |sessions: &mut SessionTable,
+                                bindings: &mut [BindingWorker],
+                                wedged: &mut bool,
+                                deltas: &[SessionDelta]| {
+            flush_session_deltas_loop(
+                sessions,
+                bindings,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &shared,
+                &shared_nat,
+                &shared_wire,
+                &indexes,
+                &recent,
+                &[],
+                commands,
+                event_stream,
+                &forwarding,
+                &reader,
+                wedged,
+                &mut worker_bulk_lossless_wedged,
+                WORKER,
+                deltas,
+            );
+        };
+        let before = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
+        let rows_before = sessions.len();
+        let start = std::time::Instant::now();
+        let skipped = run_session_housekeeping(
+            sessions,
+            &mut [],
+            &lookup,
+            &forwarding,
+            &BTreeMap::new(),
+            now_ns,
+            now_ns / SEC,
+            &rg_epochs,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            WORKER,
+            commands,
+            &pptp_control,
+            None,
+            &[],
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            &indexes,
+            &reader,
+            &mut worker_lossless_wedged,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut flush_deltas,
+        );
+        assert!(!skipped, "premise: no deferred cleanup (no bindings, no gate contention)");
+        let reaped = rows_before - sessions.len();
+        let skipped = run_delta_recovery(
+            sessions,
+            &mut [],
+            &lookup,
+            &forwarding,
+            0,
+            WORKER,
+            now_ns,
+            -1,
+            -1,
+            &[],
+            true,
+            SteeringMap::unshared_for_test(-1),
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            &indexes,
+            &mut 0,
+            &mut crate::afxdp::session_glue::DeleteDropSweep::default(),
+            &mut crate::afxdp::session_glue::InstallTablePurge::default(),
+            &mut Vec::new(),
+            &reader,
+            &mut worker_lossless_wedged,
+            &mut flush_deltas,
+        );
+        assert!(!skipped, "premise: the resync ran to completion");
+        let elapsed = start.elapsed();
+        let after = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
+        Iteration {
+            incremental_waits: after.0 - before.0,
+            bulk_waits: after.1 - before.1,
+            reaped,
+            elapsed,
+        }
+    }
+
+    /// THE R9 SHAPE. 1,280 idle locally authored UDP pairs cross in one tick
+    /// while the event stream is connected but unread. Each iteration reaps
+    /// one budget slice, its Close flush times out once and latches
+    /// loss-of-sync, and the same iteration's resync re-exports the overdue
+    /// forward tail (1,152 rows after the first slice, 5 batches). The
+    /// iteration must wait at most ONE budget per kind; two iterations show
+    /// the bulk latch is per cycle (the second still attempts once, #14646).
+    /// RED at 956417850a: 5 then 4 bulk waits (~6 s, then ~5 s, of worker loop
+    /// in one iteration; `HEARTBEAT_STALE_AFTER` is 5 s).
+    #[test]
+    fn expiry_continuation_resync_waits_one_budget_per_kind_18780() {
+        let t0 = 1_000 * SEC;
+        let pairs = 1_280u32;
+        let mut sessions = SessionTable::new();
+        for i in 0..pairs {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        let _ = sessions.expire_stale_entries(t0);
+        let (event_stream, _unread) = unread_full_stream();
+        let now = t0 + 61 * SEC;
+        let mut reports = Vec::new();
+        for iteration in 0..2u64 {
+            let it = run_iteration(&mut sessions, now + iteration * 1_000, &event_stream);
+            assert_eq!(
+                it.reaped,
+                crate::session::EXPIRY_PASS_MAX_REAPS,
+                "premise: one budget slice per iteration"
+            );
+            assert!(sessions.expiry_backlog(), "premise: an expiry continuation is pending");
+            reports.push(format!(
+                "iteration {iteration}: {} incremental + {} bulk lossless waits, {:?}",
+                it.incremental_waits, it.bulk_waits, it.elapsed
+            ));
+            assert_eq!(
+                it.incremental_waits, 1,
+                "premise: the Close flush hit the unread stream once ({reports:?})"
+            );
+            assert_eq!(
+                it.bulk_waits, 1,
+                "#18780 (R9 P1): one iteration's resync must wait at most ONE lossless budget for \
+                 the bulk kind, and still attempt once per cycle (#14646): {reports:?}"
+            );
+        }
+    }
+
+    /// SOURCE PIN for the cycle scope of the bulk latch. `worker_loop` is
+    /// spawned only against real AF_XDP sockets, so no cell drives it (the
+    /// #6971 precedent); the cells above construct the latch per iteration
+    /// themselves. What makes it per CYCLE in production is that it is
+    /// declared INSIDE the `while !stop` body, next to the #5468
+    /// `worker_lossless_wedged = false` reset, and captured only by that
+    /// iteration's `flush_deltas` closure. Hoisted above the loop it would
+    /// close the bulk gate for the worker's lifetime after one failure.
+    #[test]
+    fn worker_loop_resets_the_bulk_lossless_latch_per_iteration_18780() {
+        let src = include_str!("mod.rs");
+        let find_once = |needle: &str| {
+            let at = src.find(needle).unwrap_or_else(|| panic!("#18780: `{needle}` is gone"));
+            assert_eq!(src.matches(needle).count(), 1, "#18780: `{needle}` must appear once");
+            at
+        };
+        let loop_top = find_once("while !stop.load(Ordering::Relaxed) {");
+        let incremental_reset = find_once("        worker_lossless_wedged = false;\n");
+        let bulk_decl = find_once("let mut worker_bulk_lossless_wedged = false;");
+        let closure = find_once("let mut flush_deltas = |");
+        let capture = find_once("&mut worker_bulk_lossless_wedged,");
+        assert!(
+            loop_top < incremental_reset && incremental_reset < bulk_decl,
+            "#18780: the bulk latch must be declared inside the worker loop, after the \
+             #5468 per-iteration reset"
+        );
+        assert!(
+            bulk_decl - incremental_reset < 1_000,
+            "#18780: the bulk latch drifted away from the #5468 reset it mirrors"
+        );
+        assert!(
+            bulk_decl < closure && closure < capture,
+            "#18780: the per-iteration flush closure must be what captures the bulk latch"
+        );
+    }
+
+    /// The same per-cycle bound for a resync of LIVE rows: one idle pair
+    /// produces the Close that times out, and the resync re-exports 1,280
+    /// live forward rows (5 batches). This predates #18780 (#14646's per-call
+    /// bulk gate) and is RED on b57a950e21 as well; it pins that the fix is
+    /// the cycle-scoped bulk latch, not anything about expiry.
+    #[test]
+    fn loss_resync_of_live_rows_waits_one_bulk_budget_per_cycle_18780() {
+        let t0 = 1_000 * SEC;
+        let mut sessions = SessionTable::new();
+        install_pair(&mut sessions, 0, t0);
+        for i in 1..=1_280u32 {
+            install_pair(&mut sessions, i, t0 + 30 * SEC);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        let _ = sessions.expire_stale_entries(t0);
+        let (event_stream, _unread) = unread_full_stream();
+        let it = run_iteration(&mut sessions, t0 + 61 * SEC, &event_stream);
+        assert_eq!(it.reaped, 2, "premise: only the idle pair reaps");
+        assert!(!sessions.expiry_backlog(), "premise: no expiry continuation here");
+        assert_eq!(it.incremental_waits, 1, "premise: its Close hit the unread stream once");
+        assert_eq!(
+            it.bulk_waits, 1,
+            "#18780: a resync of 1,280 live rows waited {} bulk lossless budgets in one \
+             iteration ({:?}); the bulk gate must be per cycle",
+            it.bulk_waits, it.elapsed
+        );
+    }
+}

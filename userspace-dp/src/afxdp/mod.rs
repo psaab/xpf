@@ -499,6 +499,9 @@ const WORKER_LOSSLESS_QUEUE_BUDGET: Duration =
     Duration::from_nanos((HEARTBEAT_STALE_AFTER.as_nanos() / 5) as u64);
 // Compile-time invariant: the worker-side lossless budget must stay well below
 // the heartbeat-stale threshold, or the fix regresses into the #5468 stall.
+// One drain cycle (worker-loop iteration) can wait at most one budget per
+// delta kind — incremental (#5468 `worker_lossless_wedged`) and bulk LossResync
+// (#18780 `bulk_lossless_wedged`) — so the factor 2 below is that worst case.
 const _: () = assert!(
     WORKER_LOSSLESS_QUEUE_BUDGET.as_nanos() * 2 <= HEARTBEAT_STALE_AFTER.as_nanos(),
     "WORKER_LOSSLESS_QUEUE_BUDGET must be well below HEARTBEAT_STALE_AFTER (#5468)"

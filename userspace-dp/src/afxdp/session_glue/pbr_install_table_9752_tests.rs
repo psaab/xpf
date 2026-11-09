@@ -1605,6 +1605,7 @@ fn flush_deltas_for_test(
         forwarding,
         shared_runtime,
         &mut worker_lossless_wedged,
+        &mut false,
         current_sessions,
     );
 }
