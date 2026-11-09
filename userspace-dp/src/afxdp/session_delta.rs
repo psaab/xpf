@@ -624,13 +624,15 @@ pub(in crate::afxdp) fn export_close_direct(
 // compile-time assert beside `WORKER_LOSSLESS_QUEUE_BUDGET`). A bulk failure
 // still never sets `worker_lossless_wedged` or the return value (#14646).
 // What happens to the rest of the export depends on the failure: a TIMEOUT
-// (the push waited the whole budget, so the stream was connected) keeps the
-// resync owed
-// (`SessionTable::owe_resync_after_refused_export`) and the export stops at
-// its next chunk, so the next iteration re-exports everything and pays its own
-// single bulk budget; only the deltas already in the ring take the non-arming
-// RPC-fallback route. An immediate failure (a DISCONNECTED stream) re-arms
-// nothing (#14646: the reconnect FullResync covers it).
+// (`LosslessSendError::TimedOut`: a CONNECTED stream stayed full) keeps the
+// resync owed (`SessionTable::owe_resync_after_refused_export`) and records the
+// refused row's slot, and the export stops after the current page; only the
+// deltas already in the ring take the non-arming RPC-fallback route. The owed
+// retry (review cycle 3) resumes at that slot and first PROBES with one
+// zero-wait push, so a consumer that is still stalled costs no budget and
+// recurring stalls cannot starve the suffix. An immediate failure (a
+// DISCONNECTED stream) re-arms nothing (#14646: the reconnect FullResync
+// covers it).
 pub(super) fn flush_session_deltas(
     ident: &BindingIdentity,
     live: Option<&BindingLiveState>,
@@ -1012,17 +1014,18 @@ pub(super) fn flush_session_deltas(
                 // re-export its whole owned table on every pass for the
                 // whole event-stream outage. A genuinely new incremental
                 // drop (bulk_resync=false) still arms.
-                // #18780: a bulk push that TIMED OUT (waited the whole
-                // budget, which only a connected stream can make it do) is
-                // different: no reconnect follows a stall that simply
-                // ends, so no FullResync covers the rest of the export. It
-                // keeps the resync owed (`owe_resync_after_refused_export`:
-                // re-armed for the next iteration, which pays its own
-                // single bulk budget, so the retry rate is at most one per
-                // budget) and the export stops instead of filling the
-                // bounded fallback. An immediate failure (not connected, or
-                // a dead producer) does not re-arm. It still never sets the
-                // return value or the #5468 incremental wedge.
+                // #18780: a bulk push that TIMED OUT (a CONNECTED stream
+                // stayed full: `LosslessSendError::TimedOut`) is different:
+                // no reconnect follows a stall that simply ends, so no
+                // FullResync covers the rest of the export. It keeps the
+                // resync owed (`owe_resync_after_refused_export`, resuming at
+                // the refused row) and the export stops instead of filling
+                // the bounded fallback; the owed retry probes at zero wait
+                // and is deferred between attempts, so a stalled consumer
+                // costs no further budget. An immediate failure (not
+                // connected, or a dead producer) does not re-arm. It still
+                // never sets the return value or the #5468 incremental
+                // wedge.
                 // The event-stream gate therefore cannot be the shared
                 // `event_stream_out_of_sync` flag: a still-unfired prior
                 // wedge (this cycle) must not mask the first bulk attempt,
@@ -1046,14 +1049,28 @@ pub(super) fn flush_session_deltas(
                     !event_stream_out_of_sync
                 };
                 if gate_open && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed {
-                    // #18780: a bulk attempt's start, to tell a TIMEOUT (it
-                    // waited the whole budget) from an immediate failure.
-                    let bulk_attempt_started = delta.bulk_resync.then(std::time::Instant::now);
-                    match es.push_delta_lossless_within_seq(
-                        delta,
-                        zone_name_to_id,
-                        WORKER_LOSSLESS_QUEUE_BUDGET,
-                    ) {
+                    // #18780 (review cycle 3): an OWED LossResync retry first
+                    // PROBES the stream with this one push at a ZERO wait. A
+                    // consumer that is still stalled then costs the worker
+                    // nothing, instead of one full budget per retry; only a
+                    // fresh export, or one whose probe got through, waits.
+                    let probe = delta.bulk_resync
+                        && current_sessions
+                            .as_deref_mut()
+                            .is_some_and(|table| table.take_loss_resync_probe());
+                    let budget = if probe {
+                        std::time::Duration::ZERO
+                    } else {
+                        WORKER_LOSSLESS_QUEUE_BUDGET
+                    };
+                    #[cfg(test)]
+                    if probe {
+                        LOSS_RESYNC_PROBES_18780.with(|c| {
+                            let (attempts, refused) = c.get();
+                            c.set((attempts + 1, refused));
+                        });
+                    }
+                    match es.push_delta_lossless_within_seq(delta, zone_name_to_id, budget) {
                         Ok(seq) => {
                             // #16627: the stream now carries this delta;
                             // stamp its sequence and skip the fallback
@@ -1062,33 +1079,46 @@ pub(super) fn flush_session_deltas(
                         }
                         Err(err) => {
                             #[cfg(test)]
-                            LOSSLESS_FAILURES_18780.with(|c| {
-                                let (incremental, bulk) = c.get();
-                                c.set(if delta.bulk_resync {
-                                    (incremental, bulk + 1)
-                                } else {
-                                    (incremental + 1, bulk)
+                            if probe {
+                                LOSS_RESYNC_PROBES_18780.with(|c| {
+                                    let (attempts, refused) = c.get();
+                                    c.set((attempts, refused + 1));
                                 });
-                            });
+                            } else {
+                                LOSSLESS_FAILURES_18780.with(|c| {
+                                    let (incremental, bulk) = c.get();
+                                    c.set(if delta.bulk_resync {
+                                        (incremental, bulk + 1)
+                                    } else {
+                                        (incremental + 1, bulk)
+                                    });
+                                });
+                            }
                             if delta.bulk_resync {
                                 bulk_loss_this_batch = true;
-                                es.record_dropped_frames(1);
-                                // #18780: the push waited the WHOLE budget,
-                                // i.e. it timed out on a connected stream
-                                // (`send_lossless_encoded` returns at once
-                                // when the stream is not connected, and
-                                // early on a disconnect mid-wait) — keep the
-                                // resync owed (see above). Keyed on the
-                                // timeout, not on a connected flag, so the
-                                // re-arm can never outpace one per budget.
-                                let timed_out = bulk_attempt_started.is_some_and(|started| {
-                                    started.elapsed() >= WORKER_LOSSLESS_QUEUE_BUDGET
-                                });
+                                // #18780: a TIMEOUT means a CONNECTED stream
+                                // stayed full (`LosslessSendError::TimedOut`;
+                                // a not-connected stream or a dead producer
+                                // fails with another kind). Keep the resync
+                                // owed and record this row as where the owed
+                                // retry resumes (see above). A full-budget
+                                // timeout re-arms at most once per budget,
+                                // and a refused probe costs no wait.
+                                let timed_out = err.is_timeout();
                                 if timed_out
                                     && let Some(table) = current_sessions.as_deref_mut()
                                 {
-                                    table.owe_resync_after_refused_export();
+                                    table.owe_resync_after_refused_export(&delta.key);
                                 }
+                                if probe && timed_out {
+                                    // A refused PROBE is not a lost delta: the
+                                    // owed resync still covers this row, from
+                                    // this row's slot. Mirroring it into the
+                                    // fallback, or counting it as a drop, would
+                                    // repeat on every retry of the stall.
+                                    continue;
+                                }
+                                es.record_dropped_frames(1);
                             } else {
                                 event_stream_out_of_sync = true;
                                 eprintln!(
@@ -1258,6 +1288,15 @@ pub(super) fn flush_session_deltas(
         *bulk_lossless_wedged = true;
     }
     event_stream_out_of_sync
+}
+
+// #18780 (review cycle 3): owed-retry probes on this thread, as
+// (attempted, refused). A probe is a zero-wait push, so it is not a budget
+// wait and is not counted in `LOSSLESS_FAILURES_18780` (test-only).
+#[cfg(test)]
+thread_local! {
+    pub(in crate::afxdp) static LOSS_RESYNC_PROBES_18780: std::cell::Cell<(u64, u64)> =
+        const { std::cell::Cell::new((0, 0)) };
 }
 
 // #18780: failed lossless event-stream pushes on this thread, as

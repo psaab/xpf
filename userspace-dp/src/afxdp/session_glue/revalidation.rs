@@ -704,28 +704,43 @@ const FORWARD_EXPORT_CANDIDATE_SLICE: usize = 2048;
 /// #2442: the filter half of `export_forward_sessions_for_owner_rgs`. Walks the
 /// table via the #9856 budgeted export cursor (epoch ≤ kick + owner-RG set)
 /// and returns the export candidates (forward, locally-held,
-/// forwarding-disposition sessions) WITHOUT pushing any delta. Both callers
-/// re-emit through the SAME `chunked_drain_as_you_export!` macro in
-/// `worker::loop_body` (#2653): the `ExportOwnerRGSessions` command path (now
-/// recorded in `WorkerCommandResults.export_owner_rgs`, not emitted inline) and
-/// the loss-of-sync resync path both emit in `RESYNC_EXPORT_CHUNK`-sized chunks,
-/// draining the ring to empty between chunks so a worker owning up to
-/// `DEFAULT_MAX_SESSIONS` (32× the delta ring) never re-overflows the ring it is
-/// trying to recover, and ship a complete snapshot.
+/// forwarding-disposition sessions) WITHOUT pushing any delta.
+///
+/// #18780 (review cycle 3): the production LossResync no longer collects the
+/// whole set up front. It walks it a page at a time with
+/// [`forward_export_candidates_page`], so a refused export can resume from the
+/// row it stopped at; this full walk is that page walk run to the end, kept for
+/// the cells that pin the candidate SET.
+#[cfg(test)]
 pub(crate) fn forward_export_candidates_for_owner_rgs(
     sessions: &SessionTable,
     owner_rgs: &[i32],
     kick_epoch: u64,
 ) -> Vec<(SessionKey, SessionDecision, SessionMetadata, SessionOrigin)> {
-    if owner_rgs.is_empty() {
-        return Vec::new();
-    }
-    // #9856: collect via the budgeted export cursor (epoch ≤ kick + owner-RG
-    // set + candidate gates) instead of the owner-RG index walk. Same set
-    // for kick_epoch = u64::MAX; a real kick epoch excludes post-kick
-    // installs and reused-key new incarnations by construction.
     let mut export = Vec::new();
-    let mut cursor = 0;
+    if owner_rgs.is_empty() {
+        return export;
+    }
+    let _ = forward_export_candidates_page(sessions, owner_rgs, kick_epoch, 0, usize::MAX, &mut export);
+    export
+}
+
+/// #18780: one PAGE of the owner-RG export candidates, starting at slab slot
+/// `cursor`: at most `limit` candidates are appended to `out` (forward,
+/// locally-held, forwarding-disposition, epoch ≤ `kick_epoch`, the same
+/// predicate as `SessionTable::iter_export_budgeted`). Returns `ResumeAt(slot)`
+/// — the first slot NOT consumed, where the next page starts — or `Complete`.
+/// Rows are read live at visit time, so a page started at a remembered slot
+/// never re-exports a removed row or a replaced row's old copy.
+pub(crate) fn forward_export_candidates_page(
+    sessions: &SessionTable,
+    owner_rgs: &[i32],
+    kick_epoch: u64,
+    mut cursor: usize,
+    limit: usize,
+    out: &mut Vec<(SessionKey, SessionDecision, SessionMetadata, SessionOrigin)>,
+) -> crate::session::ExportWalkOutcome {
+    let start_len = out.len();
     loop {
         match sessions.iter_export_budgeted(
             cursor,
@@ -733,15 +748,24 @@ pub(crate) fn forward_export_candidates_for_owner_rgs(
             kick_epoch,
             owner_rgs,
             |key, decision, metadata, origin| {
-                export.push((key.clone(), decision, metadata.clone(), origin));
+                if out.len() - start_len >= limit {
+                    return false;
+                }
+                out.push((key.clone(), decision, metadata.clone(), origin));
                 true
             },
         ) {
-            crate::session::ExportWalkOutcome::ResumeAt(next) => cursor = next,
-            crate::session::ExportWalkOutcome::Complete => break,
+            crate::session::ExportWalkOutcome::ResumeAt(next) => {
+                if out.len() - start_len >= limit {
+                    return crate::session::ExportWalkOutcome::ResumeAt(next);
+                }
+                cursor = next;
+            }
+            crate::session::ExportWalkOutcome::Complete => {
+                return crate::session::ExportWalkOutcome::Complete;
+            }
         }
     }
-    export
 }
 
 // #2442: widened from `pub(in crate::afxdp::session_glue)` to `pub(crate)` so

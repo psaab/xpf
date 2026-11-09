@@ -2376,6 +2376,19 @@ pub(crate) struct SessionTable {
     /// while CONNECTED, so the resync was re-armed and the running export
     /// should stop (`owe_resync_after_refused_export`).
     resync_export_refused: bool,
+    /// #18780: a LossResync export is running; a refusal inside it records a
+    /// resume point (`loss_resync_resume_slot`).
+    loss_resync_exporting: bool,
+    /// #18780: durable LossResync progress. The slab slot of the first row a
+    /// refused export did NOT deliver; the owed retry resumes there instead of
+    /// at slot 0, so recurring consumer stalls cannot starve the suffix. Every
+    /// FRESH loss episode clears it (a full re-export), see
+    /// `note_fresh_delta_loss`.
+    loss_resync_resume_slot: Option<usize>,
+    /// #18780: the next bulk push is an owed retry's zero-wait probe.
+    loss_resync_probe: bool,
+    /// #18780: a refused export defers its retry until this instant.
+    loss_resync_not_before_ns: u64,
     delta_drained: u64,
     /// #1760: cumulative count of NAT reverse-key displacement events on
     /// `nat_reverse_index`. Incremented whenever the per-flow secondary-
@@ -2720,6 +2733,10 @@ impl SessionTable {
             delta_drops: 0,
             delta_loss_pending: false,
             resync_export_refused: false,
+            loss_resync_exporting: false,
+            loss_resync_resume_slot: None,
+            loss_resync_probe: false,
+            loss_resync_not_before_ns: 0,
             delta_drained: 0,
             nat_reverse_key_collisions: 0,
             nat_reverse_key_collisions_distinct_src: 0,
@@ -7605,7 +7622,7 @@ impl SessionTable {
         let dropped = deltas.len() - retained;
         if dropped > 0 {
             self.delta_drops = self.delta_drops.saturating_add(dropped as u64);
-            self.delta_loss_pending = true;
+            self.note_fresh_delta_loss();
         }
         for delta in deltas[..retained].iter().rev() {
             self.deltas.push_front(delta.clone());
@@ -7687,7 +7704,17 @@ impl SessionTable {
     /// burst raises exactly one resync (debounced by `take_delta_loss`).
     #[inline]
     pub fn set_delta_loss(&mut self) {
+        self.note_fresh_delta_loss();
+    }
+
+    /// #18780: a FRESH loss episode — a delta the peer never saw, from any
+    /// source but this resync's own refusal. The peer's view may now be wrong
+    /// anywhere, including rows an interrupted export already delivered, so
+    /// the resume point is dropped and the next resync is a full export.
+    #[inline]
+    fn note_fresh_delta_loss(&mut self) {
         self.delta_loss_pending = true;
+        self.loss_resync_resume_slot = None;
     }
 
     /// #18780: a LossResync bulk push timed out on a CONNECTED event stream —
@@ -7701,10 +7728,73 @@ impl SessionTable {
     /// budget comes here, so this re-arms at most once per budget. An
     /// immediate failure (a DISCONNECTED stream) does not: reconnect runs a
     /// FullResync, and re-arming per pass would be the #14646 outage storm.
-    #[inline]
-    pub fn owe_resync_after_refused_export(&mut self) {
+    ///
+    /// Progress is DURABLE (review cycle 3): when the refusal happens inside a
+    /// running export, the refused row's own slab slot becomes the resume
+    /// point, so the owed retry continues from the first row that was not
+    /// delivered instead of from slot 0 (a consumer whose stalls recur within
+    /// one export window would otherwise refuse the same prefix forever). The
+    /// retry re-walks LIVE rows from that slot, so a row removed or replaced
+    /// meanwhile is exported as the table holds it, never from a stale copy.
+    /// Rows before the slot were delivered after the episode began; a change
+    /// to one of them since then is a fresh loss episode (an incremental delta
+    /// that failed) and resets the resume point.
+    pub fn owe_resync_after_refused_export(&mut self, refused: &SessionKey) {
         self.delta_loss_pending = true;
         self.resync_export_refused = true;
+        self.loss_resync_resume_slot = if self.loss_resync_exporting {
+            self.slot_of_key(refused)
+        } else {
+            None
+        };
+    }
+
+    /// #18780: the slab slot of `key`'s own record, if it is live.
+    fn slot_of_key(&self, key: &SessionKey) -> Option<usize> {
+        let slot = *self.key_to_handle.get(key)? as usize;
+        self.entries
+            .get(slot)
+            .is_some_and(|record| record.key == *key)
+            .then_some(slot)
+    }
+
+    /// #18780: start a LossResync export. Returns where it starts: the resume
+    /// slot an earlier refused export of this episode recorded, or `None` for
+    /// a full export from slot 0.
+    pub fn begin_loss_resync_export(&mut self) -> Option<usize> {
+        self.loss_resync_exporting = true;
+        self.resync_export_refused = false;
+        self.loss_resync_probe = false;
+        self.loss_resync_resume_slot.take()
+    }
+
+    /// #18780: the LossResync export ended (completed, refused or interrupted).
+    pub fn end_loss_resync_export(&mut self) {
+        self.loss_resync_exporting = false;
+        self.loss_resync_probe = false;
+    }
+
+    /// #18780: the next bulk push is an owed retry's PROBE: `flush_session_deltas`
+    /// sends it with a zero wait, so a still-stalled consumer costs the worker
+    /// no budget (R8 H1 / R7 R1, review cycle 3).
+    pub fn arm_loss_resync_probe(&mut self) {
+        self.loss_resync_probe = true;
+    }
+
+    /// #18780: read-and-clear the probe flag (one push).
+    pub fn take_loss_resync_probe(&mut self) -> bool {
+        std::mem::take(&mut self.loss_resync_probe)
+    }
+
+    /// #18780: defer the owed retry of a refused export until `not_before_ns`,
+    /// so a stalled consumer is probed at a bounded rate, not per iteration.
+    pub fn defer_loss_resync_until(&mut self, not_before_ns: u64) {
+        self.loss_resync_not_before_ns = not_before_ns;
+    }
+
+    /// #18780: whether a LossResync may run at `now_ns`.
+    pub fn loss_resync_ready(&self, now_ns: u64) -> bool {
+        now_ns >= self.loss_resync_not_before_ns
     }
 
     /// #18780: read-and-clear the "export refused" flag set by
@@ -7738,7 +7828,8 @@ impl SessionTable {
             // Single bool: a burst that overflows repeatedly before the worker
             // reads it raises exactly one resync (see `take_delta_loss`). Hot
             // path: a plain branch + bool store, no allocation, no syscall.
-            self.delta_loss_pending = true;
+            // #18780: a fresh episode, so the next resync is a full export.
+            self.note_fresh_delta_loss();
             return;
         }
         self.deltas.push_back(delta);

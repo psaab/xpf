@@ -3284,7 +3284,10 @@ mod expiry_resync_lossless_wait_18780_tests {
         let now = t0 + 61 * SEC;
         let mut reports = Vec::new();
         for iteration in 0..2u64 {
-            let it = run_iteration(&mut sessions, now + iteration * 1_000, &event_stream);
+            // Two seconds apart: a stalled iteration takes at least its one
+            // incremental budget, and a refused export defers its owed retry
+            // by `LOSS_RESYNC_RETRY_INTERVAL_NS` (#18780 review cycle 3).
+            let it = run_iteration(&mut sessions, now + iteration * 2 * SEC, &event_stream);
             assert_eq!(
                 it.reaped,
                 crate::session::EXPIRY_PASS_MAX_REAPS,
@@ -3394,21 +3397,139 @@ mod expiry_resync_lossless_wait_18780_tests {
         }
     }
 
-    /// #18780 cycle 2 (R9 P1, R7 N1): a TRANSIENT consumer stall must not lose
-    /// the resync. 6,000 owned rows, loss armed without any incremental failure
-    /// this cycle (the ring- or fallback-overflow trigger), a connected stream
-    /// that is full at the first bulk push.
-    /// - Iteration 1 (stalled): one bulk budget, then the resync stays OWED and
-    ///   the export stops, so the bounded fallback takes at most one chunk and
-    ///   drops nothing.
-    /// - The consumer resumes WITHOUT a reconnect (so no FullResync).
-    /// - Iteration 2: the owed resync delivers every owned row on the stream.
+    /// The EXACT session-open payload (wire bytes after the per-send header)
+    /// the LossResync export sends for every owned forward row the table holds
+    /// now, built with the production emit and encoder. Comparing payloads, not
+    /// counting frames, makes a duplicate unable to stand in for an omission
+    /// and a stale copy unable to stand in for the row (#18780 cycle 3, Codex F4).
+    fn expected_open_payloads(sessions: &mut SessionTable) -> std::collections::HashSet<Vec<u8>> {
+        assert!(!sessions.has_pending_deltas(), "premise: an empty ring to borrow");
+        let owner_rgs = sessions.all_owner_rg_ids();
+        let candidates =
+            crate::afxdp::forward_export_candidates_for_owner_rgs(sessions, &owner_rgs, u64::MAX);
+        let mut payloads = std::collections::HashSet::new();
+        // In ring-sized chunks, as the export itself does (the ring holds 4096).
+        for chunk in candidates.chunks(2048) {
+            for (key, decision, metadata, origin) in chunk.iter().cloned() {
+                sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+            }
+            payloads.extend(sessions.drain_deltas(usize::MAX).iter().map(open_payload));
+        }
+        assert!(!sessions.delta_loss_pending(), "premise: the helper did not overflow the ring");
+        payloads
+    }
+
+    fn open_payload(delta: &SessionDelta) -> Vec<u8> {
+        let zones = ForwardingState::default().zone_name_to_id;
+        let frame = crate::event_stream::EventFrame::encode_session_open_with_handshake_state(
+            0,
+            &delta.key,
+            &delta.decision,
+            &delta.metadata,
+            &zones,
+            delta.fabric_redirect_sync,
+            delta.session_id,
+            delta.tcp_close_class,
+            delta.tcp_handshake_state,
+            delta.source_nat_static,
+            delta.pptp_call_ids,
+            delta.counters.fwd_packets,
+            delta.counters.rev_packets,
+        );
+        frame.as_bytes()[crate::event_stream::codec::FRAME_HEADER_SIZE..].to_vec()
+    }
+
+    /// Session-open payloads among `frames`, with how often each arrived.
+    fn received_open_payloads(
+        frames: &[crate::event_stream::EventFrame],
+    ) -> std::collections::HashMap<Vec<u8>, usize> {
+        let mut seen = std::collections::HashMap::new();
+        for frame in frames {
+            let bytes = frame.as_bytes();
+            if bytes.len() > crate::event_stream::codec::FRAME_HEADER_SIZE
+                && bytes[4] == crate::event_stream::codec::MSG_SESSION_OPEN
+            {
+                *seen
+                    .entry(bytes[crate::event_stream::codec::FRAME_HEADER_SIZE..].to_vec())
+                    .or_insert(0) += 1;
+            }
+        }
+        seen
+    }
+
+    fn take_frames(
+        rx: &std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
+        into: &mut Vec<crate::event_stream::EventFrame>,
+    ) {
+        while let Ok(frame) = rx.try_recv() {
+            into.push(frame);
+        }
+    }
+
+    /// A reader thread that keeps reading `rx` until told to stop, returning
+    /// every frame it read.
+    fn spawn_reader(
+        rx: std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<Vec<crate::event_stream::EventFrame>> {
+        std::thread::spawn(move || {
+            let mut frames = Vec::new();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(frame) => frames.push(frame),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(_) => break,
+                }
+            }
+            take_frames(&rx, &mut frames);
+            frames
+        })
+    }
+
+    /// Drive owed-resync iterations (simulated time 20 ms apart, past the retry
+    /// deferral) until the resync is no longer owed.
+    fn run_until_delivered(
+        sessions: &mut SessionTable,
+        bindings: &mut [BindingWorker],
+        mut now_ns: u64,
+        event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
+    ) {
+        let mut rounds = 0u32;
+        while sessions.delta_loss_pending() {
+            rounds += 1;
+            assert!(rounds <= 500, "#18780: the owed resync was never delivered");
+            now_ns += 20 * 1_000_000;
+            let _ = run_resync(sessions, bindings, now_ns, event_stream);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    fn owned_forward_tuples(sessions: &SessionTable) -> std::collections::HashSet<(String, u16, String, u16)> {
+        let owner_rgs = sessions.all_owner_rg_ids();
+        crate::afxdp::forward_export_candidates_for_owner_rgs(sessions, &owner_rgs, u64::MAX)
+            .into_iter()
+            .map(|(key, ..)| (key.src_ip.to_string(), key.src_port, key.dst_ip.to_string(), key.dst_port))
+            .collect()
+    }
+
+    /// #18780 cycle 2 (R9 P1, R7 N1), strengthened in cycle 3 (Codex F4): a
+    /// TRANSIENT consumer stall must not lose the resync. 6,000 owned rows,
+    /// loss armed without any incremental failure this cycle (the ring- or
+    /// fallback-overflow trigger), a connected stream that is full at the first
+    /// bulk push.
+    /// - Stalled iteration: one bulk budget, then the resync stays OWED and the
+    ///   export stops, so the bounded fallback takes at most one page and drops
+    ///   nothing.
+    /// - The consumer resumes WITHOUT a reconnect (so no FullResync), and the
+    ///   owed retries run until delivered.
+    /// - EXACT identity: every owned row's export payload, as the table holds
+    ///   it, arrives on the stream (decoded, not counted). The fallback, drained
+    ///   as the RPC poll would, holds only copies of owned rows and dropped none.
     /// RED at 40c98be80e: the per-cycle latch routed the rest of the export to
     /// the fallback (R7 measured 0 rows streamed, 1,904 dropped) and nothing
     /// re-armed it.
     #[test]
     fn transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780() {
-        use std::sync::atomic::AtomicBool;
         let t0 = 1_000 * SEC;
         let owned = 6_000u32;
         let fillers = 64usize;
@@ -3435,34 +3556,251 @@ mod expiry_resync_lossless_wait_18780_tests {
              ({} pending)",
             after_stall.session_delta_pending
         );
-        let stop = Arc::new(AtomicBool::new(false));
-        let reader_stop = stop.clone();
-        let reader = std::thread::spawn(move || {
-            let mut frames = 0u64;
-            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
-                match rx.recv_timeout(std::time::Duration::from_millis(20)) {
-                    Ok(_) => frames += 1,
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                    Err(_) => break,
-                }
-            }
-            while rx.try_recv().is_ok() {
-                frames += 1;
-            }
-            frames
-        });
-        let resumed = run_resync(&mut sessions, &mut bindings, t0 + 10 * SEC + 1_000, &event_stream);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = spawn_reader(rx, stop.clone());
+        run_until_delivered(&mut sessions, &mut bindings, t0 + 10 * SEC, &event_stream);
         stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let frames = reader.join().expect("reader thread");
-        assert_eq!(resumed.bulk_waits, 0, "the resumed consumer took the owed export");
-        assert!(!sessions.delta_loss_pending(), "a delivered resync is no longer owed");
+        let received = received_open_payloads(&frames);
+        let expected = expected_open_payloads(&mut sessions);
+        assert_eq!(expected.len(), owned as usize, "premise: one export payload per owned row");
+        let missing = expected.iter().filter(|p| !received.contains_key(*p)).count();
+        assert_eq!(
+            missing, 0,
+            "#18780 (Codex F4): {missing} of {owned} owned rows never reached the stream as the \
+             table holds them ({} frames read)",
+            frames.len()
+        );
+        let owned_tuples = owned_forward_tuples(&sessions);
+        let fallback = bindings[0].live.drain_session_deltas(usize::MAX);
+        for info in &fallback {
+            assert!(
+                owned_tuples.contains(&(info.src_ip.clone(), info.src_port, info.dst_ip.clone(), info.dst_port)),
+                "#18780: the fallback held a delta for a row the table does not own: {}:{} -> {}:{}",
+                info.src_ip,
+                info.src_port,
+                info.dst_ip,
+                info.dst_port
+            );
+        }
         let after = bindings[0].live.snapshot();
         assert_eq!(after.session_delta_dropped, 0, "#18780: no resync delta was dropped");
-        assert!(
-            frames >= u64::from(owned) + fillers as u64,
-            "#18780: every owned row reached the stream once the consumer resumed \
-             ({frames} frames for {owned} rows + {fillers} fillers)"
+        assert_eq!(after.session_delta_pending, 0, "the fallback was drained");
+    }
+
+    /// #18780 review cycle 3 (Codex F1, R7 R2): export progress is DURABLE.
+    /// A consumer that keeps stalling for more than a budget within one export
+    /// window (here: a 64-frame channel the test empties between rounds, with
+    /// nothing reading in between) must not keep the resync's suffix away from
+    /// the stream: each owed retry resumes at the first row that was refused,
+    /// not at slot 0. Rows are re-read live: a row deleted before it was
+    /// delivered is never exported, and a row replaced before it was delivered
+    /// is exported as the table now holds it, never from a stale copy.
+    /// Asserts EVERY owned row's exact payload arrives. RED at f5f0fd40d8: each
+    /// retry restarted at slot 0 and re-sent the same 64-row prefix.
+    #[test]
+    fn recurring_stalls_cannot_starve_the_resync_suffix_18780() {
+        let t0 = 1_000 * SEC;
+        let owned = 300u32;
+        let mut sessions = SessionTable::new();
+        for i in 0..owned {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        sessions.set_delta_loss();
+        let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+            64,
+            crate::event_stream::DataplaneEventRateLimitConfig::default(),
         );
+        let event_stream = Some(handle);
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
+        let mut frames = Vec::new();
+        let mut now = t0 + 10 * SEC;
+        // Round 0: the channel fills after 64 rows and the 65th push times out.
+        let first = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+        assert_eq!(first.bulk_waits, 1, "premise: the first round stalls");
+        assert!(sessions.delta_loss_pending(), "premise: the refused export stays owed");
+        take_frames(&rx, &mut frames);
+        // Between rounds, before they are delivered: delete one row and replace
+        // another with a different decision (a new incarnation of the same key).
+        let deleted = key(owned - 1);
+        let replaced = key(owned - 2);
+        let stale_payloads: Vec<Vec<u8>> = [&deleted, &replaced]
+            .into_iter()
+            .map(|k| {
+                let md = metadata(false);
+                sessions.emit_open_delta_with_origin(
+                    (*k).clone(),
+                    decision(),
+                    md,
+                    crate::session::SessionOrigin::ForwardFlow,
+                    true,
+                );
+                open_payload(&sessions.drain_deltas(1)[0])
+            })
+            .collect();
+        sessions.delete(&deleted);
+        sessions.delete(&replaced);
+        let mut new_decision = decision();
+        new_decision.resolution.egress_ifindex = 13;
+        new_decision.resolution.tx_ifindex = 13;
+        assert!(sessions.install_with_protocol(
+            replaced.clone(),
+            new_decision,
+            metadata(false),
+            t0 + SEC,
+            crate::ip_proto::PROTO_UDP,
+            0,
+        ));
+        let mut rounds = 1u32;
+        while sessions.delta_loss_pending() {
+            rounds += 1;
+            assert!(
+                rounds <= owned.div_ceil(63) + 2,
+                "#18780 (Codex F1): the owed resync made no progress across {rounds} stalls \
+                 ({} frames read) — every retry restarts at the same prefix",
+                frames.len()
+            );
+            now += 2 * SEC;
+            let _ = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+            take_frames(&rx, &mut frames);
+        }
+        let received = received_open_payloads(&frames);
+        let expected = expected_open_payloads(&mut sessions);
+        assert_eq!(expected.len(), owned as usize - 1, "premise: one row deleted");
+        let missing = expected.iter().filter(|p| !received.contains_key(*p)).count();
+        assert_eq!(
+            missing, 0,
+            "#18780 (Codex F1): {missing} owned rows never reached the stream as the table holds them"
+        );
+        for (stale, what) in stale_payloads.iter().zip(["deleted", "replaced"]) {
+            assert!(
+                !received.contains_key(stale),
+                "#18780: the {what} row was exported from a stale copy after it changed"
+            );
+        }
+    }
+
+    /// #18780 review cycle 3: a FRESH loss episode discards the resume point.
+    /// After a refused export has delivered a prefix and recorded where to
+    /// resume, a new loss (here `set_delta_loss`, standing for a failed
+    /// incremental delta or a ring overflow) means the peer may now be wrong
+    /// about rows in that prefix too, so the next export starts again at slot 0
+    /// and re-sends the first row, rather than resuming after it.
+    #[test]
+    fn fresh_loss_restarts_the_resync_from_the_beginning_18780() {
+        let t0 = 1_000 * SEC;
+        let owned = 300u32;
+        let mut sessions = SessionTable::new();
+        for i in 0..owned {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        let first_row = {
+            let owner_rgs = sessions.all_owner_rg_ids();
+            let (key, decision, metadata, origin) =
+                crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &owner_rgs, u64::MAX)
+                    .into_iter()
+                    .next()
+                    .expect("an owned row");
+            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+            open_payload(&sessions.drain_deltas(1)[0])
+        };
+        sessions.set_delta_loss();
+        let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+            64,
+            crate::event_stream::DataplaneEventRateLimitConfig::default(),
+        );
+        let event_stream = Some(handle);
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
+        let now = t0 + 10 * SEC;
+        let first = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+        assert_eq!(first.bulk_waits, 1, "premise: the first export stalls after a prefix");
+        let mut frames = Vec::new();
+        take_frames(&rx, &mut frames);
+        assert!(
+            received_open_payloads(&frames).contains_key(&first_row),
+            "premise: the first row was in the delivered prefix"
+        );
+        // A fresh loss episode, then the consumer reads again.
+        sessions.set_delta_loss();
+        let _ = run_resync(&mut sessions, &mut bindings, now + 2 * SEC, &event_stream);
+        let mut again = Vec::new();
+        take_frames(&rx, &mut again);
+        assert!(
+            received_open_payloads(&again).contains_key(&first_row),
+            "#18780: after a fresh loss the resync must restart at slot 0, not resume after the \
+             previously delivered prefix"
+        );
+    }
+
+    /// #18780 review cycle 3 (R8 H1, R7 R1): an OWED retry must not cost a
+    /// quiet worker a full budget per iteration while the consumer stays
+    /// stalled. 600 owned rows, no churn, a connected stream that is never read.
+    /// The first (fresh) export waits one budget and is refused; every owed
+    /// retry after that is a single zero-wait PROBE: no budget wait, no fallback
+    /// copy, still owed. Once the consumer reads again the next retry delivers
+    /// every row exactly. RED at f5f0fd40d8: every retry waited a full budget.
+    #[test]
+    fn owed_retry_probes_a_stalled_consumer_without_waiting_18780() {
+        let t0 = 1_000 * SEC;
+        let owned = 600u32;
+        let mut sessions = SessionTable::new();
+        for i in 0..owned {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        sessions.set_delta_loss();
+        let (event_stream, rx) = unread_full_stream_with(4);
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
+        let mut now = t0 + 10 * SEC;
+        let fresh = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+        assert_eq!(fresh.bulk_waits, 1, "premise: the fresh export waited one budget");
+        assert!(sessions.delta_loss_pending(), "premise: refused and owed");
+        let after_fresh = bindings[0].live.snapshot();
+        // Inside the retry deferral nothing is attempted at all.
+        let probes_before = crate::afxdp::session_delta::LOSS_RESYNC_PROBES_18780.with(|c| c.get());
+        let early = run_resync(&mut sessions, &mut bindings, now + 1_000_000, &event_stream);
+        let probes_after = crate::afxdp::session_delta::LOSS_RESYNC_PROBES_18780.with(|c| c.get());
+        assert_eq!(
+            (early.bulk_waits, probes_after.0 - probes_before.0),
+            (0, 0),
+            "#18780: an owed retry inside LOSS_RESYNC_RETRY_INTERVAL_NS must not probe yet"
+        );
+        assert!(sessions.delta_loss_pending(), "the deferred resync stays owed");
+        for retry in 1..=5u32 {
+            now += 20 * 1_000_000;
+            let probes_before =
+                crate::afxdp::session_delta::LOSS_RESYNC_PROBES_18780.with(|c| c.get());
+            let it = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+            let probes_after =
+                crate::afxdp::session_delta::LOSS_RESYNC_PROBES_18780.with(|c| c.get());
+            assert_eq!(
+                it.bulk_waits, 0,
+                "#18780 (R8 H1): owed retry {retry} against a stalled consumer waited a full budget"
+            );
+            assert_eq!(
+                (probes_after.0 - probes_before.0, probes_after.1 - probes_before.1),
+                (1, 1),
+                "#18780: owed retry {retry} must be exactly one refused zero-wait probe"
+            );
+            assert!(sessions.delta_loss_pending(), "retry {retry}: still owed");
+        }
+        let after_probes = bindings[0].live.snapshot();
+        assert_eq!(
+            (after_probes.session_delta_pending, after_probes.session_delta_dropped),
+            (after_fresh.session_delta_pending, after_fresh.session_delta_dropped),
+            "#18780: a refused probe must not copy into the fallback (it would repeat per retry)"
+        );
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = spawn_reader(rx, stop.clone());
+        run_until_delivered(&mut sessions, &mut bindings, now, &event_stream);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let frames = reader.join().expect("reader thread");
+        let received = received_open_payloads(&frames);
+        let expected = expected_open_payloads(&mut sessions);
+        let missing = expected.iter().filter(|p| !received.contains_key(*p)).count();
+        assert_eq!(missing, 0, "#18780: {missing} of {owned} rows not delivered after recovery");
     }
 
     /// #14646 kept (the other half of the cycle-2 fix): a bulk push refused by
