@@ -364,13 +364,22 @@ func TestCandidateReadingRPCsCostConfigure_9889(t *testing.T) {
 // Show render family, or COMPILE the candidate (a compiled config — and the
 // commit-check error/warning text derived from it — carries candidate
 // identifiers, so diagnostic readers are candidate readers too).
+//
+// "Compiles the candidate" is a call that passes the receiver's candidate field
+// to a member of the configstore COMPILE FAMILY (compileFamily9889), which is
+// derived from the code rather than listed. It used to be three names
+// (compileTree, compileTreeLenient, compileTreeStrict), and that list rotted
+// silently twice: compileTreeAs(s.candidate) was never on it, and #18771 moved
+// every candidate compile behind compileTree*WithPackedTailGate18771, so the
+// census lost CommitCheckAs and CompileCandidate and the guard below fired on
+// every run from then on (#19049).
 func candidateReadingStoreMethods9889(t *testing.T) map[string]bool {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join("..", "configstore", "*.go"))
 	if err != nil {
 		t.Fatalf("glob configstore: %v", err)
 	}
-	out := map[string]bool{}
+	var decls []*ast.FuncDecl
 	for _, path := range files {
 		if strings.HasSuffix(path, "_test.go") {
 			continue
@@ -381,53 +390,63 @@ func candidateReadingStoreMethods9889(t *testing.T) map[string]bool {
 			t.Fatalf("parse %s: %v", path, err)
 		}
 		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil {
-				continue
+			if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+				decls = append(decls, fn)
 			}
-			recv, ok := receiverNamed9889(fn.Recv, "Store")
-			if !ok {
-				continue
-			}
-			touchesCandidate := false
-			callsForDisplay := false
-			compilesCandidate := false
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				switch e := n.(type) {
-				case *ast.SelectorExpr:
-					// The candidate FIELD, not any .candidate: the base must
-					// be the receiver.
-					if e.Sel.Name == "candidate" {
-						if id, ok := e.X.(*ast.Ident); ok && id.Name == recv {
-							touchesCandidate = true
-						}
+		}
+	}
+	family := compileFamily9889(decls)
+	// Guard the family itself: the wrappers the candidate compiles go through
+	// today, and the name the old three-name list matched. If the derivation
+	// stops reaching them, the compile arm below is vacuous.
+	for _, want := range []string{"Store.compileTree", "Store.compileTreeWithPackedTailGate18771", "compileTreeStrict"} {
+		if !family[want] {
+			t.Fatalf("compile family %v is missing %s: the derivation from config.CompileConfig* "+
+				"no longer reaches the store's compile wrappers", sortedKeys9889(storeSetKeys9889(family)), want)
+		}
+	}
+
+	out := map[string]bool{}
+	for _, fn := range decls {
+		recv, ok := receiverNamed9889(fn.Recv, "Store")
+		if !ok {
+			continue
+		}
+		touchesCandidate := false
+		callsForDisplay := false
+		compilesCandidate := false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch e := n.(type) {
+			case *ast.SelectorExpr:
+				// The candidate FIELD, not any .candidate: the base must
+				// be the receiver.
+				if e.Sel.Name == "candidate" {
+					if id, ok := e.X.(*ast.Ident); ok && id.Name == recv {
+						touchesCandidate = true
 					}
-				case *ast.CallExpr:
-					if id, ok := e.Fun.(*ast.Ident); ok && id.Name == "forDisplay" {
-						callsForDisplay = true
-					}
-					// s.compileTree(s.candidate) and its lenient/strict
-					// siblings: compiling the candidate derives a
-					// candidate-content value (or identifier-carrying
-					// diagnostics). The argument MUST be the candidate field
-					// — compiling any other tree (a peer push, rescue text)
-					// is not a candidate read.
-					if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
-						if base, ok := sel.X.(*ast.Ident); ok && base.Name == recv &&
-							(sel.Sel.Name == "compileTree" || sel.Sel.Name == "compileTreeLenient" || sel.Sel.Name == "compileTreeStrict") {
-							for _, arg := range e.Args {
-								if isCandidateField9889(arg, recv) {
-									compilesCandidate = true
-								}
-							}
+				}
+			case *ast.CallExpr:
+				if id, ok := e.Fun.(*ast.Ident); ok && id.Name == "forDisplay" {
+					callsForDisplay = true
+				}
+				// s.compileTree(s.candidate), its wrappers, and any other
+				// compile-family member: compiling the candidate derives a
+				// candidate-content value (or identifier-carrying
+				// diagnostics). The argument MUST be the candidate field —
+				// compiling any other tree (a peer push, rescue text) is not
+				// a candidate read.
+				if family[compileFamilyCallee9889(e, recv)] {
+					for _, arg := range e.Args {
+						if isCandidateField9889(arg, recv) {
+							compilesCandidate = true
 						}
 					}
 				}
-				return true
-			})
-			if touchesCandidate && (callsForDisplay || compilesCandidate || strings.HasPrefix(fn.Name.Name, "Show")) {
-				out[fn.Name.Name] = true
 			}
+			return true
+		})
+		if touchesCandidate && (callsForDisplay || compilesCandidate || strings.HasPrefix(fn.Name.Name, "Show")) {
+			out[fn.Name.Name] = true
 		}
 	}
 	// Guard the guard: one member per RPC arm family, plus the diagnostic and
@@ -447,6 +466,82 @@ func candidateReadingStoreMethods9889(t *testing.T) map[string]bool {
 		}
 	}
 	return out
+}
+
+// compileFamily9889 derives the configstore functions that COMPILE a tree:
+// every package function or *Store method whose body calls a
+// config.CompileConfig* entry point (the tree compilers; not, say,
+// config.CompileLoginRegexes), closed transitively over same-package calls (a bare f(...) to a
+// package function, recv.m(...) to a method on the receiver). Keys are
+// "Store.<method>" or "<func>". Deriving it means a new wrapper — whatever it
+// is named — is in the family the moment it reaches the compiler.
+func compileFamily9889(decls []*ast.FuncDecl) map[string]bool {
+	key := func(fn *ast.FuncDecl) (string, string, bool) {
+		if fn.Recv == nil {
+			return fn.Name.Name, "", true
+		}
+		if recv, ok := receiverNamed9889(fn.Recv, "Store"); ok {
+			return "Store." + fn.Name.Name, recv, true
+		}
+		return "", "", false
+	}
+	family := map[string]bool{}
+	callees := map[string]map[string]bool{}
+	for _, fn := range decls {
+		k, recv, ok := key(fn)
+		if !ok {
+			continue
+		}
+		calls := map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "config" &&
+					strings.HasPrefix(sel.Sel.Name, "CompileConfig") {
+					family[k] = true
+				}
+			}
+			if c := compileFamilyCallee9889(call, recv); c != "" {
+				calls[c] = true
+			}
+			return true
+		})
+		callees[k] = calls
+	}
+	for changed := true; changed; {
+		changed = false
+		for k, calls := range callees {
+			if family[k] {
+				continue
+			}
+			for c := range calls {
+				if family[c] {
+					family[k] = true
+					changed = true
+					break
+				}
+			}
+		}
+	}
+	return family
+}
+
+// compileFamilyCallee9889 names a call's same-package callee in
+// compileFamily9889's key space: "Store.<m>" for recv.m(...), "<f>" for a bare
+// f(...), "" for anything else.
+func compileFamilyCallee9889(call *ast.CallExpr, recv string) string {
+	switch fun := call.Fun.(type) {
+	case *ast.Ident:
+		return fun.Name
+	case *ast.SelectorExpr:
+		if base, ok := fun.X.(*ast.Ident); ok && recv != "" && base.Name == recv {
+			return "Store." + fun.Sel.Name
+		}
+	}
+	return ""
 }
 
 func sortedKeys9889(m map[string][]string) []string {
