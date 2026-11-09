@@ -1202,12 +1202,13 @@ class Soak:
         self.now = mono_fn or (time.monotonic if now_fn is time.time else now_fn)
         self.sleep = sleep_fn
         self.log = log
-        self.lan_offset = 0.0  # LAN clock minus this host's clock
-        # #19056: (monotonic, wall) taken together when the LAN offset is
-        # measured. Every LAN-clock moment is derived from the monotonic
-        # clock through it, so a controller wall-clock step cannot move a
-        # move's traffic window.
-        self._anchor = (self.now(), self.wall())
+        self.lan_offset = 0.0  # LAN clock minus this host's WALL clock (reported)
+        # #19056: LAN clock minus this host's MONOTONIC clock, measured with
+        # monotonic stamps only. Every LAN-clock moment is derived from it,
+        # so a controller wall-clock step, before, during or after the
+        # measurement, cannot move a traffic window. The default maps the
+        # monotonic clock onto this host's wall clock.
+        self.lan_mono_offset = self.wall() - self.now()
         self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
         self.gen_alive_until: Dict[Tuple[str, str], float] = {}  # #19054 review: last seen alive, LAN clock
         # #19055: the RGs this run moves, and dual-active samples seen for an
@@ -1277,10 +1278,9 @@ class Soak:
         return [int(x) for x in re.split(r"[ ,]+", spec) if x]
 
     def lan_time(self, t_mono: float) -> float:
-        """A monotonic-clock moment (Soak.now) on the LAN host's clock: the
-        wall time it had at the anchor, plus the measured offset (#19056)."""
-        m0, w0 = self._anchor
-        return t_mono - m0 + w0 + self.lan_offset
+        """A monotonic-clock moment (Soak.now) on the LAN host's clock
+        (#19056)."""
+        return t_mono + self.lan_mono_offset
 
     def families(self) -> List[Tuple[str, str, int, int]]:
         out = [("v4", self.cfg.target4, self.cfg.iperf_port, self.cfg.iperf_streams)]
@@ -1316,7 +1316,13 @@ class Soak:
         if offs["lan"] is None:
             return "cannot read the LAN host clock", info
         self.lan_offset = offs["lan"][0]
-        self._anchor = (self.now(), self.wall())
+        # #19056 review: an anchor taken after the wall-clock samples could
+        # pair a pre-step offset with a post-step anchor. Measure the LAN
+        # clock against the monotonic clock directly instead.
+        lan_map = measure_offset(self.c.clock, self.c.lan, self.now)
+        if lan_map is None:
+            return "cannot read the LAN host clock", info
+        self.lan_mono_offset = lan_map[0]
         if offs["node0"] and offs["node1"]:
             info["node1_minus_node0_s"] = round(offs["node1"][0] - offs["node0"][0], 2)
         info["chrony"] = {n: self.c.chrony(n) for n in (0, 1)}

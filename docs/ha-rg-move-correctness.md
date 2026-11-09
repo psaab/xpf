@@ -736,13 +736,18 @@ detail says "unreadable".
 **Timing.** Deadlines and durations use a monotonic clock, so a wall-clock
 step cannot stretch or shrink the landing bound. The move windows on the LAN
 host's clock are monotonic too (#19056).
-- When the preflight measures the LAN host's offset, the soak takes a
-  (monotonic, wall) pair at the same moment.
-- Every window edge is the monotonic moment mapped through that pair, plus
-  the offset.
-- A controller wall-clock step therefore cannot move a window. Before
-  #19056, a 3 s backward step shortened the last window, and a late 1.5 s
-  outage escaped it.
+- The preflight measures the LAN host's clock directly against the
+  controller's MONOTONIC clock: the minimum-RTT sample of five, with every
+  local stamp monotonic.
+- Every window edge is a monotonic moment plus that offset.
+- A controller wall-clock step therefore cannot move a window, whether it
+  happens before, during or after the measurement:
+  - Before #19056, a 3 s backward step after the CLI shortened the last
+    window, and a late 1.5 s outage escaped it.
+  - The first fix took a (monotonic, wall) anchor after five wall-clock
+    samples. A step between the chosen sample and the anchor still hid the
+    outage (Codex review).
+- The wall-clock offset is still measured, but it is only reported.
 - A step of the LAN host's own clock is not detected.
 
 A landing first seen by a read

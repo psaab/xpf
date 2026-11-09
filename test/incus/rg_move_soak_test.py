@@ -2746,16 +2746,50 @@ class WallClockStep19056(unittest.TestCase):
         rc, res, _ = self.run_step(0.0)
         self.assertEqual(res["moves"][0]["verdict"], "FAIL")
 
-    def test_lan_time_maps_the_monotonic_clock_through_the_anchor(self):
+    def test_lan_time_maps_the_monotonic_clock_onto_the_lan_clock(self):
         # In production the monotonic clock is nowhere near the wall clock.
-        # A monotonic moment must still land at wall time + LAN offset.
+        # After the preflight, a monotonic moment must land on the LAN
+        # host's clock.
         clock = FakeClock()
-        s = soak.Soak(soak.Config(), None, now_fn=clock.now, sleep_fn=clock.sleep,
+        c = FakeCluster(clock, {2: 0})
+        cfg = soak.Config(rgs="2", traffic=False, helper_check=False)
+        s = soak.Soak(cfg, c, now_fn=clock.now, sleep_fn=clock.sleep,
                       log=lambda *_: None, mono_fn=lambda: clock.t + 1000.0)
-        s._anchor = (s.now(), s.wall())
-        s.lan_offset = 3.0
+        why, _ = s.preflight()
+        self.assertIsNone(why)
         clock.sleep(2.0)
-        self.assertAlmostEqual(s.lan_time(s.now()), clock.t + 3.0, places=2)
+        self.assertAlmostEqual(s.lan_time(s.now()), clock.t + c.lan_off, places=2)
+
+    def test_a_wall_step_during_the_preflight_offset_cannot_hide_an_outage(self):
+        # Codex's #19056 review finding 3: the controller wall clock steps
+        # back 3 s right after the first LAN-clock sample, and the later
+        # samples are slower, so the first (pre-step) sample stays the
+        # minimum-RTT one. The late outage must FAIL either way.
+        class PreflightStep(LateGapCluster):
+            lan_reads = 0
+            step = 0.0
+            stepped = False
+
+            def clock(self, ref):
+                if ref == self.lan:
+                    self.lan_reads += 1
+                    if self.lan_reads > 1:
+                        self.clock_.sleep(0.02)
+                return super().clock(ref)
+
+        for jump in (0.0, -3.0):
+            with self.subTest(jump=jump):
+                clock = FakeClock()
+                c = PreflightStep(clock, {2: 0})
+
+                def wall():
+                    result = clock.now() + c.step
+                    if c.lan_reads == 1 and not c.stepped:
+                        c.stepped = True
+                        c.step = jump
+                    return result
+                rc, res, _ = run_fake(c, clock, moves=1, now_fn=wall, restore=False)
+                self.assertEqual(res["moves"][0]["verdict"], "FAIL", res["moves"][0]["reasons"])
 
 
 class SlowHelperCluster(FakeCluster):
