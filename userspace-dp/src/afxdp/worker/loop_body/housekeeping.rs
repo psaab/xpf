@@ -231,11 +231,16 @@ pub(super) fn run_session_housekeeping(
     // another packet or control event. No shared entry can remain
     // honoured merely because its Close missed the 4096-slot ring.
     // #18780: the wheel walk itself is no longer all-in-one-call — one call
-    // reaps at most `EXPIRY_PASS_MAX_REAPS` (< the ring) and a cut walk
+    // reaps at most `2 * EXPIRY_PASS_MAX_REAPS` (< the ring) and a cut walk
     // resumes on the next loop iteration (`SessionTable::expiry_backlog`).
     // Rows not yet visited are idle-crossed and fail-closed at lookup
     // (`SessionExpiryProbe::IdleCrossed`), exactly as between two 1 s GC
-    // ticks today; what must hold per call is the close of what it reaped.
+    // ticks; what must hold per call is the close of what it reaped. The
+    // cut is pair-atomic (`cut_pair_companions`, R7 F1): a reverse half it
+    // reaped has its forward reaped and Closed in the same call, so the
+    // #10419 contract above holds for the reverse's shared copy too. (A pair
+    // whose halves are due in DIFFERENT ticks can still straddle two passes,
+    // as before #18780: #19037.)
     let mut expiry_overflow_deltas = std::mem::take(deferred_expiry_overflow_deltas);
     expiry_overflow_deltas.extend(
         expired_entries

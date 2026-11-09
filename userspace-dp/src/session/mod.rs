@@ -479,6 +479,22 @@ pub(crate) struct WheelPopStats {
     /// instead of removed; counted so the asymmetric-flow retention is
     /// observable rather than a silent divergence from the raw wheel.
     pub(crate) kept_alive_by_companion: usize,
+    /// #18780: hints popped from the cursor's bucket and pushed back because
+    /// they are scheduled for a later absolute tick (a long-timeout hint at
+    /// cursor+256, or a catch-up visit). Each one spends one
+    /// `EXPIRY_PASS_MAX_POPS` pop exactly like a `scanned` hint, so per call
+    /// `scanned + rotated_future <= EXPIRY_PASS_MAX_POPS`.
+    pub(crate) rotated_future: usize,
+    /// #18780: calls that stopped at `EXPIRY_PASS_MAX_REAPS` /
+    /// `EXPIRY_PASS_MAX_POPS` with due work left (the next call is a
+    /// continuation). A call cuts at most once.
+    pub(crate) budget_cuts: usize,
+    /// #18780 (R7 F1): companions of rows this call reaped, visited out of
+    /// wheel order at a budget cut because their own hint was due in the same
+    /// pass. The cut is pair-atomic: without this, the reaped reverse half of a
+    /// locally authored pair could resolve through its still-published shared
+    /// copy until a later call reaped (and Closed) its forward.
+    pub(crate) pair_completions: usize,
 }
 
 impl WheelPopStats {
@@ -501,6 +517,9 @@ impl WheelPopStats {
         self.kept_alive_by_companion = self
             .kept_alive_by_companion
             .saturating_add(other.kept_alive_by_companion);
+        self.rotated_future = self.rotated_future.saturating_add(other.rotated_future);
+        self.budget_cuts = self.budget_cuts.saturating_add(other.budget_cuts);
+        self.pair_completions = self.pair_completions.saturating_add(other.pair_completions);
     }
 }
 
@@ -1030,37 +1049,57 @@ pub(crate) fn tcp_close_window_ns_with_app(
 }
 const MAX_SESSION_DELTAS: usize = 4096;
 
-/// #18780: the most rows one `expire_stale_entries_ha` call may REAP.
+/// #18780: the most rows one `expire_stale_entries_ha` call may REAP before it
+/// cuts (plus the pair completions described below).
 ///
 /// An RG activation re-stamps every HA-managed row to the activation instant
 /// (`refresh_for_ha_transition`), so a whole table can cross its window in one
-/// wheel tick. Before #18780 the pass drained every due bucket in one call, and
-/// each reaped row then costs its teardown in the same `worker_loop` iteration
-/// (BPF steering/conntrack deletes, SNAT release, flow-cache eviction, the
-/// Close flush and its sibling fan-out) — a ~100k-row cohort froze one worker
-/// for ~11 s and the #18704 watchdog moved the RGs (an RG loop between the
-/// nodes every ~135 s).
+/// wheel tick (SELF-HEAL at T0+60, AGE at T0+120 for UDP). Before #18780 the
+/// pass drained every due bucket in one call, and each reaped row then cost its
+/// teardown in the same `worker_loop` iteration (BPF steering/conntrack
+/// deletes, SNAT release, flow-cache eviction, the Close flush and its sibling
+/// fan-out).
+///
+/// What that cost on THIS base (`b57a950e21`, measured on the udp lab, see
+/// `docs/log/18780.md`): the T0+120 AGE wave stalled the workers for one
+/// iteration of about 0.27-0.37 s at 34k-48k rows per worker (expiry-wave ping
+/// max RTT 268-369 ms; 3-7 ms with this budget). The ~11 s heartbeat freeze and
+/// the ~135 s RG loop in the issue were observed on `d199fe64b6`, before
+/// #18663 removed the per-row O(N) shared-map scan, at ~600k-row tables. They
+/// were NOT reproduced on this base, and this budget is not claimed to fix
+/// them.
 ///
 /// 256 is the `WORKER_COMMAND_DRAIN_BUDGET` slice for the same class of work
 /// (map syscalls per item; `worker_queue.rs` sizes it against the ~2 ms fill
 /// time of a 4096-slot RX ring at 25 Gb/s) and the `drain_deltas(256)` batch
 /// this loop already flushes in, so one iteration's reap is one flush batch.
+///
+/// Pair completion (R7 F1): a call that cuts also visits, out of wheel order,
+/// the companion of each row it reaped whose own hint is due in the same pass
+/// (`WheelPopStats::pair_completions`). A cut therefore never splits a
+/// forward/reverse pair that one unbudgeted pass would have reaped together,
+/// and one call reaps at most `2 * EXPIRY_PASS_MAX_REAPS` rows.
 pub(crate) const EXPIRY_PASS_MAX_REAPS: usize = 256;
 
-/// #18780: the most wheel hints one `expire_stale_entries_ha` call may EXAMINE
-/// (stale/gone drops, re-buckets, SELF-HEAL, HOLD, companion keeps and reaps).
-/// Classification without a reap is O(1) and ~0.1-0.3 us, so 4096 bounds the
-/// non-reaping share of an iteration to about a millisecond while still letting
-/// the steady-state stale-hint stream (one per active flow per second) drain in
-/// a handful of iterations.
+/// #18780: the most wheel hints one `expire_stale_entries_ha` call may POP:
+/// stale/gone drops, future-hint rotations (`WheelPopStats::rotated_future`,
+/// a long-timeout hint at cursor+256 popped and pushed back), re-buckets,
+/// SELF-HEAL, HOLD, companion keeps and reaps. Per call
+/// `scanned + rotated_future <= EXPIRY_PASS_MAX_POPS`. Classification without
+/// a reap is O(1), estimated at ~0.1-0.3 us, so 4096 bounds the non-reaping
+/// share of an iteration to about a millisecond while still letting the
+/// steady-state stale-hint stream (one per active flow per second) drain in a
+/// handful of iterations. Pair completions are not pops; they are bounded by
+/// the rows the call reaped.
 pub(crate) const EXPIRY_PASS_MAX_POPS: usize = 4096;
 
 // A reap is also a pop, so the reap cap can bind only below the pop cap.
 const _: () = assert!(EXPIRY_PASS_MAX_REAPS <= EXPIRY_PASS_MAX_POPS);
-// One call's Close deltas fit an EMPTY delta ring (#10309): the overflow
-// suffix path is then reachable from an expiry call only when other producers
-// already filled the ring, never from the expiry cohort alone.
-const _: () = assert!(EXPIRY_PASS_MAX_REAPS < MAX_SESSION_DELTAS);
+// One call's Close deltas, pair completions included, fit an EMPTY delta ring
+// (#10309): the overflow suffix path is then reachable from an expiry call only
+// when other producers already filled the ring, never from the expiry cohort
+// alone.
+const _: () = assert!(2 * EXPIRY_PASS_MAX_REAPS < MAX_SESSION_DELTAS);
 
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_OSPF, PROTO_TCP, PROTO_UDP};
 // #2151: TCP flag bits from the shared crate::tcp_flags SSOT. Re-exported

@@ -420,6 +420,25 @@ flawed knob — at 5K/tick when due-rate is ≥5K/s the backlog grows
 unbounded. We pay the bucket cost. Multi-level wheels and active
 deletion are deferred to follow-ups (see Out of scope).
 
+> **Superseded in part by #18780 (2026-11-08).** One
+> `expire_stale_entries_ha` CALL is now budgeted (`EXPIRY_PASS_MAX_POPS`
+> 4096 pops, `EXPIRY_PASS_MAX_REAPS` 256 reaps plus pair completions; see
+> `userspace-dp/src/session/README.md`, "Per-call budget"). The objection
+> above is to a cap per TICK: a tick is 1 s, so a 5K/tick cap drains at most
+> 5K rows/s and falls behind any faster due rate. #18780's cap is per CALL,
+> and a cut call sets `expiry_backlog` so the NEXT worker-loop iteration
+> resumes at the same cursor without waiting for the 1 s gate. The sustained
+> drain ceiling is therefore 256 reaps per loop iteration (the loop runs
+> thousands of iterations per second), not per tick. What happens above that
+> ceiling, which this plan's objection still describes correctly: the cursor
+> lags, every call is a continuation, and `last_gc_ns` and the PPTP
+> association sweep do not advance until it catches up.
+> `WheelPopStats::budget_cuts` counts cut calls (in `cumulative_pop_stats`; not
+> yet exported to the Go status). The reason for the change is an RG
+> activation that re-stamps a whole table into one tick: one unbudgeted call
+> then did the whole table's reap and teardown in one iteration (0.27-0.37 s
+> per worker measured at 34k-48k rows, `docs/log/18780.md`).
+
 #### Per-tick cost model (corrected per Codex round-5 #1)
 
 Per-tick work = `O(K)` where `K` is the number of `WheelEntry`s
@@ -806,6 +825,9 @@ buffers grow to fit avg load × geometric headroom. For typical
   sessions all with same expiration; advance time past expiration;
   verify expire_stale_entries returns all 50K in a single call
   (no per-tick cap; one tick = one bucket = O(B) work, not capped).
+  **Changed by #18780:** the cell now asserts all N drain in exactly
+  `ceil(N / EXPIRY_PASS_MAX_REAPS)` consecutive calls (per-call budget
+  with continuation; see the supersession note under "Per-tick GC work").
 - `wheel_per_second_touch_bounds_K_per_bucket` (Codex round-5 #2,
   hardened per round-6 #5, classifications corrected per round-7
   #2): install N=10K sessions, then touch every session once per

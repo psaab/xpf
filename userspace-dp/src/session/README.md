@@ -793,19 +793,28 @@ reject idle-crossed entries but leave physical removal to the wheel.
 
 ### Per-call budget (#18780)
 
-One `expire_stale_entries_ha` call is bounded. It reaps at most
-`EXPIRY_PASS_MAX_REAPS` (256) rows and examines at most `EXPIRY_PASS_MAX_POPS`
-(4096) wheel hints, counting stale/gone drops, re-buckets, SELF-HEAL, HOLD,
-companion keeps and reaps.
+One `expire_stale_entries_ha` call is bounded:
+
+- It pops at most `EXPIRY_PASS_MAX_POPS` (4096) wheel hints. Every pop
+  counts: stale/gone drops, future-hint rotations
+  (`WheelPopStats::rotated_future`), re-buckets, SELF-HEAL, HOLD, companion
+  keeps and reaps. Per call `scanned + rotated_future <= 4096`
+  (`pop_budget_never_livelocks_on_future_hints_18780`).
+- It stops once it has reaped `EXPIRY_PASS_MAX_REAPS` (256) rows, after
+  completing pairs (below). One call reaps at most 512 rows.
+
+The rest of the contract:
 
 - **Continuation.** A call that stops with due work left sets the table's
-  `expiry_backlog` flag. The next call bypasses the 1 s interval gate and
-  resumes at the same cursor tick and bucket position.
+  `expiry_backlog` flag (`WheelPopStats::budget_cuts` counts these calls).
+  The next call bypasses the 1 s interval gate and resumes at the same
+  cursor tick and bucket position.
   - The worker loop calls the pass once per iteration, so a backlog drains
     over consecutive loop iterations, not over seconds.
   - `last_gc_ns` and the PPTP association sweep advance only on a fresh pass,
     so the 1 s cadence is unchanged when there is no backlog
-    (`continuation_does_not_shift_the_gc_cadence_18780`).
+    (`continuation_does_not_shift_the_gc_cadence_18780`,
+    `pptp_association_sweep_runs_only_on_fresh_passes_18780`).
   - A continuation resumes the snapshot that the cut pass took of the
     cursor's bucket (`SessionWheel::resume_due`), not the bucket's current
     length.
@@ -816,40 +825,101 @@ companion keeps and reaps.
     - If a continuation re-counted them, every call would re-rotate them. With
       more than 4096 such hints the cursor would never leave the bucket, and
       GC would stop (`pop_budget_never_livelocks_on_future_hints_18780`).
+- **The cut is pair-atomic (R7 F1).** Forward and reverse halves are separate
+  rows with separate hints, in arbitrary order inside a bucket.
+  - A reverse row owes no Close. Its shared copy and steering rows are
+    retired by the FORWARD's Close (`afxdp/session_delta.rs`), which
+    housekeeping flushes before the worker polls another packet (#10419).
+  - A cut between the two hints would leave the reverse reaped while the
+    forward waits, crossed and un-Closed, for the next call. A reply would
+    then miss the reverse as `Absent` (not `IdleCrossed`) and resolve
+    through its still-published shared copy.
+  - So a call that cuts first visits, out of wheel order and through the same
+    classification, the companion of each row it reaped whose own hint is due
+    in this pass (`cut_pair_companions`, `WheelPopStats::pair_completions`;
+    `budget_cut_never_splits_a_due_pair_18780`). The companion's hint stays
+    queued and later drops as gone or stale.
+  - A companion due in a LATER tick is not completed, because one unbudgeted
+    pass would not have visited it either. A pair whose halves' deadlines
+    fall in different ticks can therefore still be split for up to one GC
+    interval, as it could before #18780 (#19037).
 - **Why 256 and 4096.**
   - 256 is the `WORKER_COMMAND_DRAIN_BUDGET` slice for the same class of
     work: map syscalls per item, sized against the ~2 ms fill time of a
     4096-slot RX ring at 25 Gb/s. It is also the `drain_deltas(256)` flush
     batch.
   - 4096 bounds the classify-only share of an iteration to about a
-    millisecond.
-  - Compile-time asserts keep reaps ≤ pops and reaps < `MAX_SESSION_DELTAS`.
-    So one call's Close deltas always fit an empty ring, and the #10309
-    overflow suffix is reachable from an expiry call only when other
-    producers have already filled the ring.
+    millisecond (estimated at ~0.1-0.3 us per classification).
+  - Compile-time asserts keep reaps ≤ pops and `2 × reaps` <
+    `MAX_SESSION_DELTAS`. So one call's Close deltas, pair completions
+    included, always fit an empty ring, and the #10309 overflow suffix is
+    reachable from an expiry call only when other producers have already
+    filled the ring.
 - **Lag bound** (`reap_budget_lag_for_the_last_row_is_bounded_18780`,
   `pop_budget_drains_stale_hints_without_stalling_18780`).
-  - A cohort of C rows due in one tick reaps in `ceil(C / 256)` consecutive
-    calls.
-  - H stale hints queued ahead of a row add at most `ceil((H + 1) / 4096)`
-    calls.
-  - The last row's extra delay is therefore `(calls - 1)` worker-loop
-    iterations after the first call that sees it crossed. That is
-    sub-second even for a 100k-row cohort (~400 iterations of ≤ 256 reaps).
+  - A cohort of C rows whose drain pops P hints (stale, gone, rotated or
+    reaped) finishes within `floor(C / 256) + floor(P / 4096) + 1`
+    consecutive calls. A call cut by the reap cap reaped at least 256 of the C
+    rows; a call cut by the pop cap popped 4096 of the P hints.
+  - That delay is ADDED to the up-to-1 s wait before a gated pass first
+    processes the tick.
+  - In wall time it is `calls × T_iter`. Each iteration also pays the
+    caller's teardown for its reaps (about 8-9 µs per row, from the master
+    lab stall: 268-309 ms for 34k rows per worker), the replica fence pass
+    (below), and in interrupt mode up to 1 ms of idle poll.
+  - On those estimates a 100k-row cohort (~400 iterations) adds about
+    1-1.3 s. That is an extrapolation: the lab measured at most 48k rows per
+    worker.
+- **Above the ceiling.** The sustained drain ceiling is 256 reaps per loop
+  iteration. If due work arrives faster than that for long, every call is a
+  continuation: the cursor lags further behind, and `last_gc_ns` and the PPTP
+  association sweep do not advance until it catches up.
+  - `budget_cuts` is visible in `cumulative_pop_stats` only. It is not yet
+    exported to the Go status or Prometheus.
+  - The #965 plan rejected a per-TICK cap because a capped 1 s tick drains
+    slower than a high due rate fills it
+    (`docs/pr/965-session-gc-timer-wheel/plan.md`, superseded in part). This
+    cap is per CALL, and the continuation runs at loop rate, not at 1 Hz.
 - **During the drain**, rows not yet visited are idle-crossed. Lookups treat
   them as fail-closed (`SessionExpiryProbe::IdleCrossed`), the same state a
-  row has today between crossing and the next 1 s GC tick. The window is
-  only longer, by the lag above.
+  row has between crossing and the next 1 s GC tick. The window is only
+  longer, by the lag above.
+- **With an unread event stream (R9 P1).** Each continuation iteration's
+  Close flush can wait one `WORKER_LOSSLESS_QUEUE_BUDGET` (1 s) against a
+  connected-but-unread stream. That latches loss-of-sync, and the same
+  iteration's #2442 resync re-exports every owned forward row, including the
+  not-yet-reaped tail of the cohort.
+  - #14646 gated bulk (LossResync) sends per flush CALL, so that resync paid
+    one budget per 256-delta batch. The 1,280-pair cell at `956417850a`
+    measured 1 incremental + 5 bulk waits, 6.0 s of worker loop in ONE
+    iteration, past the 5 s `HEARTBEAT_STALE_AFTER`. The per-call gate
+    predates #18780 and stalls a resync of live rows the same way (also
+    5 waits, 6.0 s; the flush and resync code is identical on `b57a950e21`).
+  - `flush_session_deltas` now carries a per-iteration bulk latch beside the
+    #5468 incremental one, so one iteration waits at most one budget per kind
+    (`expiry_continuation_resync_waits_one_budget_per_kind_18780`,
+    `loss_resync_of_live_rows_waits_one_bulk_budget_per_cycle_18780`).
+  - The residual: while the stream stays unread, a cohort drains at 256 reaps
+    per iteration of up to ~2 s (two budgets), and its rows keep their NAT
+    ports and session-limit slots until reaped. Pressure-shed admission
+    (`can_admit_new_flow`) still applies.
 
 **Why it exists.** RG activation (`RefreshOwnerRGS` → `refresh_for_ha_transition`)
 re-stamps every HA-managed row to the activation instant T0. With UDP's 60 s
 window the whole table crosses in ONE tick at T0+60 (SELF-HEAL) and again at
 T0+120 (AGE). The unbounded pass did that cohort's classification, reap,
-teardown and Close flush in one `worker_loop` iteration, so the worker
-heartbeat froze for ~11 s and the #18704 watchdog moved the RGs. The peer then
-repeated the stall 120 s later, an RG loop of about 135 s. The activation
-re-stamp itself is unchanged: it is the #2120 promotion contract, and spreading
-it was considered and not adopted.
+teardown and Close flush in one `worker_loop` iteration.
+
+- **Measured on this base** (`b57a950e21`, udp lab, `docs/log/18780.md`): the
+  T0+120 AGE wave stalled every worker for one iteration of about
+  0.27-0.37 s at 34k-48k rows per worker. The expiry-wave ping max RTT was
+  268-369 ms on master and 3-7 ms with the budget.
+- **Not reproduced.** The issue's ~11 s heartbeat freeze and ~135 s RG loop
+  were observed on `d199fe64b6`, before #18663 removed the per-row O(N)
+  shared-map scan, with ~600k-row tables. The quadratic hypothesis was
+  refuted at 17k/24k flows on this base. The loop is not claimed fixed.
+- The activation re-stamp itself is unchanged. It is the #2120 promotion
+  contract, and spreading it was considered and not adopted.
 
 **Lazy node-served evidence.** In the expire pass, node-level served evidence
 (the `ExpireHaContext::node_served` closure plus the local
@@ -864,19 +934,40 @@ for evidence nothing read.
 (`afxdp/worker/loop_body/gc_teardown.rs::replica_fence_marks`) evaluates the
 #16223 fence for the whole call in one pass over `shared_sessions`. That is
 O(N + C log C) under one lock hold, instead of a `values().any()` scan per
-replica (O(N × C)). That per-replica scan was the quadratic term left after
-#18663: the authoring node's T0+120 cohort is ~5/6 replicas, and a UDP row is
-never Established, so no scan short-circuited.
+replica (O(N × C)). The per-replica scan was a C × N term left after #18663:
+the authoring node's T0+120 cohort is ~5/6 replicas, and an unanswered UDP row
+(the one-packet burst shape) is never stamped Established, so its scan never
+short-circuited.
 
 - The predicate is unchanged, including its protocol-blindness. The ct-slice
   collector (`established_forward_slice`) takes any answered forward row, UDP
   included, and `restamp_shared_handshakes_established` stamps that row's
   shared rows Established. So an answered UDP flow's same-id replica is still
   fenced. A "TCP only" shortcut would change that decision.
+- Several candidates can share one session id (both halves of a replica
+  adopt the serving id), and one candidate can be matched by two Established
+  rows. All of them are resolved
+  (`batched_fence_keeps_every_replica_of_paired_sessions_18780`).
 - The lock is taken with `lock_shared_recover`.
+- **Residual (R7 F3).** It is still one full shared-map read per reap call,
+  under the node-global lock, and the budget does not bound N. A cohort of C
+  replicas costs `ceil(C / 256)` such reads on each worker.
+  - Measured hold per call (release, one 256-replica call, best of 5, two
+    runs, 8-vCPU runner VM at load ~6): 0.24-0.28 ms at 34k shared rows,
+    1.5-2.3 ms at 131k, 3.7-4.7 ms at 262k. R7 measured 1.5 / 4.4 / 8.4 ms
+    for the same cell on the workstation at load 13-17. At 131k+ rows one
+    call's hold exceeds the ~2 ms RX-ring fill the 256 slice is sized
+    against, and other workers' shared lookups wait behind it.
+  - Keying it was considered and not adopted, because a keyed fence would not
+    be the same predicate. The direct arm could use `bare_tuple_sessions`
+    exactly (the #16491 index). The reverse arm, however, matches the bare
+    tuple of each row's derived reverse key across routing domains, and the
+    only reverse index (`served_aliases`, #18663) is keyed on the scoped
+    alias.
+  - Not exercised live: the udp lab bounce left fw0 all peer-synced.
 
 **Not covered.** `RefreshOwnerRGS` is still one O(table) worker command, with a
-session-map publish per row, at T0 itself.
+session-map publish per row, at T0 itself (#19027).
 
 ## Flow-cache keepalive (#2220)
 
