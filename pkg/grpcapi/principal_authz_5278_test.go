@@ -688,8 +688,21 @@ func TestProductionServerEnforcesRealPeerIdentity_5278(t *testing.T) {
 
 		// The production resolver ran and reported uid 0: a superuser principal
 		// is admitted. If LookupPeer were NOT wired, the connection would carry
-		// no identity at all and this would be PermissionDenied.
-		_, err := client.Commit(ctx, &pb.CommitRequest{})
+		// no identity at all and both calls would be PermissionDenied.
+		//
+		// The session enters configure mode FIRST, as every real committer
+		// does. Since #14990 (530d56a0e4) the store refuses a Commit from a
+		// session that does not hold the configuration lock, and the gRPC
+		// handler reports that refusal as PermissionDenied too ("configuration
+		// candidate is held by another session"). A bare Commit therefore read
+		// as an authz denial of uid 0 although the gate had admitted it; this
+		// arm went red the day that landed and stayed red, because the suite
+		// runs as uid 0 under scripts/testguard-run.sh (#19049). Holding the
+		// lock removes the store's refusal and leaves the gate's verdict as the
+		// only source of PermissionDenied, which is what this arm measures.
+		_, err := client.EnterConfigure(ctx, &pb.EnterConfigureRequest{})
+		assertNotDenied(t, "root real-identity EnterConfigure", err)
+		_, err = client.Commit(ctx, &pb.CommitRequest{})
 		assertNotDenied(t, "root real-identity Commit", err)
 
 		// And the class machinery is still asserted, so the root arm is not a
