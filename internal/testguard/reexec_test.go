@@ -78,6 +78,12 @@ func TestNetnsUnavailableFailsUnderRequire19066(t *testing.T) {
 // a user namespace nor skip silently.
 // ---------------------------------------------------------------------------
 
+// guardedTestMain19066 marks a guarded package: a TestMain whose first action
+// is testguard.ExitIfUnsafe. A plain substring search for the call matched
+// THIS file's own source (the census names the call) and wrongly marked
+// internal/testguard, whose canaries run unshare on purpose, as guarded.
+var guardedTestMain19066 = regexp.MustCompile(`func TestMain\(m \*testing\.M\)\s*\{\s*testguard\.ExitIfUnsafe\(\)`)
+
 var userNSFlag19066 = regexp.MustCompile(`^(-[A-Za-z]*[rU][A-Za-z]*|--user|--map-root-user|--map-current-user)$`)
 
 // netnsReexecViolations19066 reports, for one parsed _test.go file, every
@@ -231,7 +237,7 @@ func TestNetnsReexecCensus19066(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		if strings.Contains(string(b), "testguard.ExitIfUnsafe()") {
+		if guardedTestMain19066.Match(b) {
 			guarded[filepath.Dir(p)] = true
 		}
 		return nil

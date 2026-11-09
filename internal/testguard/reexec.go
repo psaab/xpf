@@ -82,6 +82,7 @@ func NetnsUnavailable(t testing.TB, format string, args ...any) {
 	t.Helper()
 	if os.Getenv(RequireNetnsEnv) != "" {
 		t.Fatalf("namespace required ("+RequireNetnsEnv+" is set, as scripts/testguard-run.sh does) but unavailable: "+format, args...)
+		return // a real testing.T never returns from Fatalf; a recording TB does
 	}
 	t.Skipf(format, args...)
 }
