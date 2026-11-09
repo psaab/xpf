@@ -131,7 +131,7 @@ pub(in crate::afxdp) fn row(
         nat_scope_ifindex: None,
     };
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0, last_served_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
         key: key.clone(),
         decision: crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {

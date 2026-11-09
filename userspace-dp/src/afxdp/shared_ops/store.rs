@@ -1111,7 +1111,7 @@ mod handshake_monotonic_16223_tests {
             nat_scope_ifindex: None,
         };
         metadata.is_reverse = reverse;
-        SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+        SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
         decision: crate::session::SessionDecision {
             resolution: crate::afxdp::ForwardingResolution {
                 disposition: crate::afxdp::ForwardingDisposition::ForwardCandidate,

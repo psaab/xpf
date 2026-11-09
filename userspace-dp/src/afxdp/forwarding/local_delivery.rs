@@ -109,7 +109,7 @@ pub(in crate::afxdp) fn install_helper_local_session_on_miss(
     ) {
         return false;
     }
-    let local_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+    let local_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
     decision,
     metadata,
     leak_incarnation: 0,

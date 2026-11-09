@@ -1722,7 +1722,7 @@ fn icmp_reverse_key_keeps_identifier_position() {
 
 #[test]
 fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: SessionKey {
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
@@ -1782,7 +1782,7 @@ fn synced_replica_entry_keeps_peer_synced_entries_promotable() {
 
 #[test]
 fn synced_replica_entry_marks_local_entries_worker_local() {
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: SessionKey {
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
@@ -1844,7 +1844,7 @@ fn synced_replica_entry_marks_local_entries_worker_local() {
 #[test]
 fn reconcile_stop_preserves_shared_synced_sessions() {
     let mut coordinator = Coordinator::new();
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: SessionKey {
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
@@ -1917,7 +1917,7 @@ fn reconcile_stop_preserves_shared_synced_sessions() {
 #[test]
 fn replay_synced_sessions_requeues_preserved_entries_for_new_workers() {
     let coordinator = Coordinator::new();
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: SessionKey {
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: SessionKey {
         addr_family: libc::AF_INET as u8,
         protocol: PROTO_TCP,
         src_ip: IpAddr::V4(Ipv4Addr::new(10, 0, 61, 100)),
@@ -2020,7 +2020,7 @@ fn replay_synced_sessions_publishes_kernel_local_for_local_delivery_13675() {
         discriminator: Default::default(),
         routing_domain: 0,
     };
-    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+    let entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
     decision: SessionDecision {
         resolution: ForwardingResolution {
             disposition: ForwardingDisposition::LocalDelivery,
@@ -3091,7 +3091,7 @@ fn a_sibling_workers_replica_carries_zero_counters_for_a_live_session_7919() {
     }
 
     // ---- a SIBLING worker: the same session, through the REAL replica path ----
-    let replicated = synced_replica_entry(&SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+    let replicated = synced_replica_entry(&SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
     decision,
     metadata: metadata.clone(),
     leak_incarnation: 0,

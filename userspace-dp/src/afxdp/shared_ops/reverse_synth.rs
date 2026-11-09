@@ -347,7 +347,7 @@ pub(in crate::afxdp) fn synthesized_synced_reverse_entry_in_table(
     );
     let metadata = reverse.metadata;
     Some(SyncedSessionEntry {
-        sibling_last_seen_ns: 0, last_served_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
         key: reverse_key,
         decision: reverse.decision,
         metadata,
@@ -756,7 +756,7 @@ pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
         {
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
-        let reverse_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: reverse_key.clone(),
+        let reverse_entry = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: reverse_key.clone(),
         decision: reverse.decision,
         metadata: reverse.metadata.clone(),
         leak_incarnation: reverse_leak_incarnation,

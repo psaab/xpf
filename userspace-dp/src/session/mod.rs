@@ -3642,7 +3642,7 @@ impl SessionTable {
         Some(crate::afxdp::SyncedSessionEntry {
             // This local snapshot has no sibling-owned packet timestamp;
             // publish_shared_session preserves the prior same-ID value.
-            sibling_last_seen_ns: 0, last_served_ns: 0,
+            sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0,
             key: key.clone(),
             decision: entry.decision,
             metadata: entry.metadata.clone(),

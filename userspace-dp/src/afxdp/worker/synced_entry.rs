@@ -81,6 +81,13 @@ pub(crate) struct SyncedSessionEntry {
     /// `sibling_last_seen_ns`. Node-local shared evidence only; never part of
     /// SessionDelta / HA wire data.
     pub(crate) last_served_ns: u64,
+    /// #19026: the restore close fence's pending retirement. 0 = none. Set,
+    /// under the shared-map lock, by the copy whose claim won: it owes the
+    /// session's Close, and the row stays published until that Close's flush
+    /// removes it, so the row's absence means the Close was flushed. A copy
+    /// that finds the mark older than this deadline takes the obligation over
+    /// (its claimant never flushed). Node-local; never on the HA wire.
+    pub(crate) close_claim_until_ns: u64,
     /// #14303: the PPTP call-id pair (`PptpCall::to_wire_call_ids`) for a
     /// `Pptp(handle)` forward session, `PPTP_CALL_IDS_ABSENT` (0) otherwise.
     /// Carried on the shared entry so the coordinator bulk export and the

@@ -223,7 +223,7 @@ mod flow_cache_invalidation_tests {
     }
 
     fn serving_shared_entry(key: &SessionKey, session_id: u64) -> SyncedSessionEntry {
-        SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+        SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
         decision: reap_decision(None),
         metadata: reap_metadata(),
         persistent_lease_hold: None,
@@ -1311,7 +1311,7 @@ mod flow_cache_invalidation_tests {
             let mut shared_sessions_map = FastMap::default();
             shared_sessions_map.insert(
                 key.clone(),
-                SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+                SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
                 decision: reap_decision(None),
                 metadata: reap_metadata(),
                 persistent_lease_hold: None,
@@ -1477,7 +1477,7 @@ mod flow_cache_invalidation_tests {
             let mut map = FastMap::default();
             map.insert(
                 other_scope_key.clone(),
-                SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: other_scope_key.clone(),
+                SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: other_scope_key.clone(),
                 decision: reap_decision(None),
                 metadata: reap_metadata(),
                 persistent_lease_hold: None,
@@ -1577,7 +1577,7 @@ mod flow_cache_invalidation_tests {
                 let filler = reap_key(40000u16.wrapping_add(i));
                 map.insert(
                     filler.clone(),
-                    SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: filler.clone(),
+                    SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: filler.clone(),
                     decision: reap_decision(None),
                     metadata: reap_metadata(),
                     persistent_lease_hold: None,
@@ -1593,7 +1593,7 @@ mod flow_cache_invalidation_tests {
             }
             map.insert(
                 key.clone(),
-                SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: key.clone(),
+                SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, close_claim_until_ns: 0, key: key.clone(),
                 decision: reap_decision(None),
                 metadata: reap_metadata(),
                 persistent_lease_hold: None,
