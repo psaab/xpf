@@ -2140,6 +2140,18 @@ Each carries a RED-on-revert unit test.
     root rate (zero residual) and a small interface burst, idle peers'
     primed credit reached the lease's outstanding cap (`burst / 4`) and the
     exact worker sent 0.00 Gb/s.
+  - Review cycle 2 (Codex, #18748): that release still exempted a worker
+    with exact backlog, and with small root and exact-lease bursts the
+    credit crossed (B held all root and could not get exact-lease credit, E
+    held all exact-lease credit and waited on root): nothing moved. Instead
+    of another predicate, root credit held unspent for one root-lease
+    interval (`COS_ROOT_RECLAIM_NS`, 200 us) is reclaimed at the next prime
+    whatever the backlog, with one interval of cooldown
+    (`reclaim_idle_root_credit`); a property cell varies root burst, exact
+    rate, exact-lease burst and class mix and requires progress in every
+    2 ms. A parked queue whose own tokens were returned by a live lease-set
+    replacement no longer counts as demand (own tokens are checked before
+    the cached park decision).
 
   Cells: `cos/queue_service/tests/exact_starvation_18748.rs` over the
   multi-worker simulation in `cos_drain_sim.rs` (production `drain_shaped_tx`,

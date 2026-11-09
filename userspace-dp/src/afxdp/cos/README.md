@@ -292,6 +292,11 @@ mod.rs for further file-level breakdown.
     of an MQFQ head search over up to 4,096 flow buckets, and a head change
     while parked (a short packet in a lower-finish bucket) cannot flip it.
     Runnable queues still compare their own tokens with the current head.
+    A queue with no own tokens never demands, and that is checked BEFORE the
+    cached bit: a live lease-set replacement (`release_all_cos_queue_leases`)
+    returns a parked queue's tokens and leaves it parked, so the recorded
+    decision would otherwise outlive the credit it was made on (up to its
+    wake tick, 1.5 s at an 8 kb/s root).
   - The published mask is refreshed after a drain pass that selected
     nothing (`republish_cos_exact_demand_if_changed`): a selector top-up can
     turn a queue into demand and park it on root with no enqueue, service or
@@ -304,6 +309,19 @@ mod.rs for further file-level breakdown.
     it, a reservation equal to the shaping rate (zero residual) let idle
     peers' primed credit reach the lease's outstanding cap (`burst / 4`) and
     the worker the reservation exists for could never acquire root.
+  - Bounded root reclamation: root credit a worker has held for
+    `COS_ROOT_RECLAIM_NS` (one 200 us root-lease interval) without spending
+    any goes back to the shared root lease at the next prime, whatever the
+    worker's backlog, and the worker takes none for one more interval
+    (`tx_completion::reclaim_idle_root_credit`, `cos_root_may_top_up`).
+    Retaining a root-starved queue's reservation means credit can sit with
+    a worker that cannot spend it; the predicate above cannot see every such
+    cycle. Codex's crossed-lease case: a 16,000-byte root burst and a
+    4,096-byte exact-lease burst, worker B holding all root credit and
+    unable to get exact-lease credit, worker E holding all exact-lease
+    credit and parked on root: nothing moved before the reclamation. Root
+    spend is counted at every send settle (`root_spent_bytes`), so a worker
+    that is spending is never reclaimed from.
   - The reserved AMOUNT is still the configured rate. An exact class held
     below it by its worker's TX capacity over-reserves (#19023). Exact
     classes whose demanding rates sum to the shaping rate or more leave a

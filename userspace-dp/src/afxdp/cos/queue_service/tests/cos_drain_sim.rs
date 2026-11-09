@@ -172,6 +172,9 @@ pub(super) struct ExactClass {
     pub(super) offered_bytes: Vec<u64>,
     /// Distinct flows per worker the arrivals are spread over.
     pub(super) flows: Vec<u16>,
+    /// The class's buffer (and so its v8 lease burst) when it differs from
+    /// the production default of 1% of its rate.
+    pub(super) buffer_bytes: Option<u64>,
 }
 
 /// One simulated traffic shape.
@@ -203,6 +206,7 @@ impl Arm {
                 rate_bytes: cfg_gbit * GBIT,
                 offered_bytes,
                 flows: vec![1; workers],
+                buffer_bytes: None,
             }],
             nonexact_backlogged: vec![true; workers],
             worker_tx_cap_bytes: cap_gbit * GBIT,
@@ -230,6 +234,9 @@ pub(super) struct Outcome {
     pub(super) nonexact_bytes: Vec<u64>,
     /// Longest stretch, per backlogged non-exact instance, that sent nothing.
     pub(super) longest_unserved_ns: Vec<u64>,
+    /// #18748 review cycle 2: longest stretch in the window in which no
+    /// worker sent anything while some queue held work.
+    pub(super) longest_global_stall_ns: u64,
     exact_root_parks: u64,
     exact_queue_parks: u64,
 }
@@ -257,7 +264,7 @@ impl Outcome {
         let round = |b: &u64| (Self::gbps(*b) * 100.0).round() / 100.0;
         format!(
             "{label}: total {:.2}; exact {:.2} per class {:?} per worker {:?}; non-exact {:.2} per worker {:?}; \
-             longest unserved ms {:?}; exact parks root/queue {}/{}",
+             longest unserved ms {:?}; longest global stall us {}; exact parks root/queue {}/{}",
             self.total_gbps(),
             self.exact_gbps(),
             self.exact_class_bytes.iter().map(round).collect::<Vec<_>>(),
@@ -268,6 +275,7 @@ impl Outcome {
                 .iter()
                 .map(|ns| ns / 1_000_000)
                 .collect::<Vec<_>>(),
+            self.longest_global_stall_ns / 1_000,
             self.exact_root_parks,
             self.exact_queue_parks,
         )
@@ -302,7 +310,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         .map(|class| {
             Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode_and_policy(
                 class.rate_bytes,
-                class.rate_bytes / 100,
+                class.buffer_bytes.unwrap_or(class.rate_bytes / 100),
                 workers,
                 workers - 1,
                 V8RateMode::CstructDefault,
@@ -340,6 +348,11 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
             // worker. Without it the v8 exact lease sees no active buckets
             // on any worker and never grants.
             let mut runtime = lab_runtime(&exact_rates, arm.root_burst_bytes);
+            for (c, class) in arm.exact.iter().enumerate() {
+                if let Some(buffer) = class.buffer_bytes {
+                    runtime.queues[c].config.buffer_bytes = buffer;
+                }
+            }
             runtime.shared_root_lease = fast_path.shared_root_lease.clone();
             apply_cos_queue_flow_fair_promotion(&mut runtime, &fast_path.queue_fast_path, w as u32);
             BindingWorker::new_for_cos_drain_test(w as u32, w as u32, IFX, runtime, fast_path)
@@ -356,6 +369,9 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
     let mut last_progress = vec![0u64; workers];
     let mut last_sent = vec![0u64; workers];
     let mut longest = vec![0u64; workers];
+    let mut global_last_sent = 0u64;
+    let mut global_last_progress = 0u64;
+    let mut longest_global_stall = 0u64;
     let mut order: Vec<usize> = (0..workers).collect();
     let cap_per_step = (arm.worker_tx_cap_bytes * STEP_NS / 1_000_000_000) as i64;
     let mut tx_credit = vec![0i64; workers];
@@ -449,6 +465,22 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                 }
             }
         }
+        if now >= measure_ns {
+            let sent: u64 = bindings.iter().map(tx_total).sum();
+            let queued = bindings.iter().any(|binding| {
+                binding
+                    .cos
+                    .cos_interfaces
+                    .get(&IFX)
+                    .is_some_and(|root| root.nonempty_queues > 0)
+            });
+            if now == measure_ns || sent > global_last_sent || !queued {
+                global_last_sent = sent;
+                global_last_progress = now;
+            } else {
+                longest_global_stall = longest_global_stall.max(now - global_last_progress);
+            }
+        }
         now += STEP_NS;
     }
     let nonexact_bytes: Vec<u64> = bindings
@@ -478,6 +510,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         exact_class_bytes,
         nonexact_bytes,
         longest_unserved_ns: longest,
+        longest_global_stall_ns: longest_global_stall,
         exact_root_parks,
         exact_queue_parks,
     }

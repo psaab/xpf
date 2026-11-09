@@ -120,7 +120,7 @@ use waterfill::apply_phase1_waterfill_honor_refund;
 use super::tx_completion::{
     apply_cos_prepared_result, apply_cos_send_result, apply_direct_exact_send_result_fields,
     count_park_reason, count_tx_ring_full_submit_stall,
-    cos_root_can_service_after_prime, cos_tick_for_ns,
+    cos_root_can_service_after_prime, cos_root_may_top_up, cos_tick_for_ns,
     count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
     publish_cos_exact_backlog_on_cos, record_exact_park_demand, refresh_cos_interface_activity,
     refresh_cos_interface_activity_on_cos, republish_cos_exact_demand_if_changed,
@@ -482,7 +482,7 @@ fn hold_root_only_for_spendable_surplus(
         if held > 0 {
             shared_root_lease.release_unused(held);
         }
-    } else {
+    } else if cos_root_may_top_up(root, now_ns) {
         maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
     }
 }

@@ -460,6 +460,54 @@ pub(in crate::afxdp) fn cos_root_can_service_after_prime(
 // TX-completion cluster
 // ============================================================================
 
+/// #18748 review cycle 2: how long root credit may sit in a worker's bucket
+/// with nothing spent before it is returned to the shared root lease. One
+/// root-lease interval (`SharedCoSRootLease` sizes its top-up for 200 us of
+/// the shaping rate).
+pub(in crate::afxdp) const COS_ROOT_RECLAIM_NS: u64 = 200_000;
+
+/// #18748 review cycle 2 (Codex F1): return root credit that has sat unspent
+/// in this worker's bucket for `COS_ROOT_RECLAIM_NS`, and hold off taking
+/// more for the same interval so the workers it was held from get it first.
+/// Returns whether credit was returned. O(1); one CAS on the shared root
+/// lease when it returns credit.
+#[inline]
+pub(in crate::afxdp) fn reclaim_idle_root_credit(
+    root: &mut CoSInterfaceRuntime,
+    shared_root_lease: &crate::afxdp::types::SharedCoSRootLease,
+    now_ns: u64,
+) -> bool {
+    let spent_since_last_prime = root.root_spent_bytes != root.root_spent_at_last_prime;
+    root.root_spent_at_last_prime = root.root_spent_bytes;
+    // A transparent root (no shaping) fills its bucket locally; there is no
+    // shared credit to hold.
+    // A first look (`root_idle_since_ns == 0`) only starts the clock:
+    // credit is reclaimed only after it was SEEN idle for the interval.
+    if root.shaping_rate_bytes == 0
+        || root.tokens == 0
+        || spent_since_last_prime
+        || root.root_idle_since_ns == 0
+    {
+        root.root_idle_since_ns = now_ns;
+        return false;
+    }
+    if now_ns.saturating_sub(root.root_idle_since_ns) < COS_ROOT_RECLAIM_NS {
+        return false;
+    }
+    let held = core::mem::take(&mut root.tokens);
+    shared_root_lease.release_unused(held);
+    root.root_idle_since_ns = now_ns;
+    root.root_reclaim_cooldown_until_ns = now_ns.saturating_add(COS_ROOT_RECLAIM_NS);
+    true
+}
+
+/// #18748 review cycle 2: whether this worker may take root credit now (it
+/// is not in the cooldown after a reclamation).
+#[inline]
+pub(in crate::afxdp) fn cos_root_may_top_up(root: &CoSInterfaceRuntime, now_ns: u64) -> bool {
+    now_ns >= root.root_reclaim_cooldown_until_ns
+}
+
 #[inline]
 pub(in crate::afxdp) fn prime_cos_root_for_service(
     binding: &mut BindingWorker,
@@ -481,14 +529,24 @@ pub(in crate::afxdp) fn prime_cos_root_for_service(
             return false;
         };
         ticks_advanced = advance_cos_timer_wheel(root, now_ns);
-        // #18748 review (R6 P1): a worker that gave its root credit back
-        // because it cannot spend it does not take more until the non-exact
-        // batch build finds the residual budget, or exact or guarantee
-        // backlog, back (`hold_root_only_for_spendable_surplus`).
-        if let Some(shared_root_lease) = shared_root_lease
-            && !root.surplus_root_released
-        {
-            maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
+        if let Some(shared_root_lease) = shared_root_lease {
+            // #18748 review cycle 2 (Codex F1): root credit this worker has
+            // held without spending for a lease interval goes back, whatever
+            // its backlog says. #18748 retains an exact queue's reservation
+            // while it waits on root, so credit can now be held by a worker
+            // that cannot spend it (its own exact queue starved of queue-lease
+            // credit, its surplus held to a zero residual) while the worker
+            // whose exact queue holds that lease credit waits on root: a
+            // cycle no predicate on local backlog reliably sees. Bounding how
+            // long credit may sit unspent breaks every cycle of this class.
+            let reclaimed = reclaim_idle_root_credit(root, shared_root_lease, now_ns);
+            // #18748 review (R6 P1): a worker that gave its root credit back
+            // because it cannot spend it does not take more until the
+            // non-exact batch build finds the residual budget, or exact or
+            // guarantee backlog, back (`hold_root_only_for_spendable_surplus`).
+            if !reclaimed && !root.surplus_root_released && cos_root_may_top_up(root, now_ns) {
+                maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
+            }
         }
     }
     // #1782 Step-1 (§5.2 mechanism (i)): accumulate the wheel
@@ -714,6 +772,7 @@ pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
         account_queue_drain_sent_bytes(queue, CoSServicePhase::Guarantee, sent_bytes, false);
     }
     root.tokens = root.tokens.saturating_sub(sent_bytes);
+    root.root_spent_bytes = root.root_spent_bytes.wrapping_add(sent_bytes);
 }
 
 #[inline]
@@ -999,6 +1058,7 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             }
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
+        root.root_spent_bytes = root.root_spent_bytes.wrapping_add(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
         .cos
@@ -1122,6 +1182,7 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             }
         }
         root.tokens = root.tokens.saturating_sub(sent_bytes);
+        root.root_spent_bytes = root.root_spent_bytes.wrapping_add(sent_bytes);
     }
     if let Some(shared_root_lease) = binding
         .cos

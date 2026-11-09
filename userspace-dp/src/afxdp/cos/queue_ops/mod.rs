@@ -435,8 +435,9 @@ pub(in crate::afxdp) fn cos_item_len(item: &CoSPendingTxItem) -> u64 {
 /// recorded decision keeps the check O(1): re-deciding would run the MQFQ
 /// head search, which walks every active flow bucket, on each publish
 /// (every exact enqueue) and each surplus build and settle (#18748 review
-/// R4 F1, R6 P3). A runnable queue with no own tokens cannot cover any
-/// head; otherwise the head is searched, as the selector itself does.
+/// R4 F1, R6 P3). A queue with no own tokens cannot cover any head, parked
+/// or not, and is checked before the cached decision; otherwise a runnable
+/// queue's head is searched, as the selector itself does.
 #[inline]
 pub(in crate::afxdp) fn cos_exact_queue_demands_reservation(
     parked_demand: ExactDemandQueueMask,
@@ -446,11 +447,16 @@ pub(in crate::afxdp) fn cos_exact_queue_demands_reservation(
     if cos_queue_is_empty(queue) {
         return false;
     }
-    if queue.hot.parked {
-        return parked_demand.counts(queue_idx);
-    }
+    // Own tokens first, before the cached park decision (#18748 review cycle
+    // 2, Codex F2): a live lease-set replacement returns a parked queue's
+    // tokens to its lease (`release_all_cos_queue_leases`) and leaves the
+    // queue parked with its wake tick, so the demand recorded at the park
+    // was decided on credit the queue no longer holds.
     if queue.hot.tokens == 0 {
         return false;
+    }
+    if queue.hot.parked {
+        return parked_demand.counts(queue_idx);
     }
     cos_queue_front(queue).is_some_and(|head| queue.hot.tokens >= cos_item_len(head))
 }

@@ -146,6 +146,7 @@ fn exact_classes_held_by_their_own_rate_release_the_rest_18748() {
         rate_bytes: 3 * GBIT,
         offered_bytes: vec![0, 6 * GBIT, 0, 0],
         flows: vec![1; 4],
+        buffer_bytes: None,
     });
     arm.nonexact_backlogged = vec![false, false, true, true];
     let guarantee = exact_guarantee(&arm);
@@ -220,6 +221,7 @@ fn exact_classes_summing_past_the_root_leave_best_effort_nothing_18748() {
             rate_bytes: rate * GBIT,
             offered_bytes,
             flows: vec![1; 6],
+            buffer_bytes: None,
         });
     }
     arm.nonexact_backlogged = vec![false, false, false, false, true, true];
@@ -659,4 +661,253 @@ fn own_root_parked_exact_queue_meters_this_workers_surplus_18748() {
         build(0, 0),
         "twin: no exact backlog, so surplus is selected"
     );
+}
+
+/// #18748 review cycle 2 (Codex F1): crossed root and exact-lease credit.
+/// Two workers, a 25 Gb/s root with a 16,000-byte burst (a 4,000-byte
+/// aggregate outstanding cap), one 25 Gb/s exact class whose lease burst is
+/// 4,096 bytes; each worker queues two 1,500-byte exact packets, worker 1
+/// two best-effort packets too. Worker 1 primes all 4,000 root bytes before
+/// worker 0's exact pass takes all 4,096 exact-lease bytes and parks on
+/// root. Worker 1 cannot get exact-lease credit, its best-effort residual is
+/// zero, and its exact backlog kept it from returning the root it held: at
+/// 6d41c6e911 nothing was sent in 20,000 50-us steps. Root credit held
+/// unspent for a lease interval is now reclaimed, so all 9,000 bytes drain,
+/// under every pass order tried, including worker 1 draining twice per
+/// worker 0 pass (it must not take the returned credit straight back).
+#[test]
+fn crossed_root_and_exact_lease_credit_cannot_deadlock_18748() {
+    for order in [&[0usize, 1][..], &[1, 0], &[1, 1, 0]] {
+        let sent = crossed_credit_run(order);
+        assert_eq!(
+            sent, 9_000,
+            "pass order {order:?}: {sent} of the 9,000 queued bytes sent after a second of \
+             drain passes with crossed root and exact-lease credit"
+        );
+    }
+}
+
+fn crossed_credit_run(order: &[usize]) -> u64 {
+    use crate::afxdp::cos::tx_completion::prime_cos_root_for_service;
+    let start = 2_000_000_000u64;
+    let root_lease = Arc::new(SharedCoSRootLease::new(SHAPING_BYTES, 16_000, 2));
+    let exact_lease = Arc::new(SharedCoSQueueLease::new_v8_with_rate_mode_and_policy(
+        SHAPING_BYTES,
+        4_096,
+        2,
+        1,
+        V8RateMode::CstructDefault,
+        EqualFlowTargetPolicy::Slowest,
+    ));
+    let backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut bindings: Vec<_> = (0..2u32)
+        .map(|w| {
+            let mut fast = test_cos_fast_interfaces(
+                IFX,
+                IFX,
+                NONEXACT_QUEUE,
+                vec![
+                    (
+                        EXACT_QUEUE,
+                        test_queue_fast_path(true, 0, None, Some(exact_lease.clone())),
+                    ),
+                    (NONEXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
+                ],
+                None,
+                Some(root_lease.clone()),
+            );
+            fast.get_mut(&IFX).expect("fast path").shared_exact_backlog = Some(backlog.clone());
+            let fast = fast.get(&IFX).expect("fast path").clone();
+            let mut root = lab_runtime(&[SHAPING_BYTES], 16_000);
+            root.queues[EXACT_IDX].config.buffer_bytes = 4_096;
+            root.shared_root_lease = Some(root_lease.clone());
+            apply_cos_queue_flow_fair_promotion(&mut root, &fast.queue_fast_path, w);
+            BindingWorker::new_for_cos_drain_test(w, w, IFX, root, fast)
+        })
+        .collect();
+    for (w, binding) in bindings.iter_mut().enumerate() {
+        for _ in 0..2 {
+            assert!(sim_enqueue(
+                binding,
+                EXACT_QUEUE,
+                sim_item(EXACT_QUEUE, 30_000 + w as u16, start)
+            ));
+        }
+    }
+    for _ in 0..2 {
+        assert!(sim_enqueue(
+            &mut bindings[1],
+            NONEXACT_QUEUE,
+            sim_item(NONEXACT_QUEUE, 40_000, start)
+        ));
+    }
+    // Worker 1 primes root; worker 0 reaches its exact-lease acquire first.
+    assert!(prime_cos_root_for_service(&mut bindings[1], IFX, start));
+    assert_eq!(
+        bindings[1].cos.cos_interfaces[&IFX].tokens, 4_000,
+        "premise: worker 1 holds the root's whole outstanding allowance"
+    );
+    let mut recycles = Vec::new();
+    let mut descs: Vec<crate::xsk_ffi::XdpDesc> = Vec::new();
+    let mut now = start;
+    for _ in 0..100 {
+        let _ = drain_shaped_tx(&mut bindings[0], now, &mut recycles);
+        if bindings[0].cos.cos_interfaces[&IFX].queues[EXACT_IDX]
+            .hot
+            .tokens
+            == 4_096
+        {
+            break;
+        }
+        now += 50_000;
+    }
+    assert_eq!(
+        bindings[0].cos.cos_interfaces[&IFX].queues[EXACT_IDX]
+            .hot
+            .tokens,
+        4_096,
+        "premise: worker 0 holds the exact lease's whole outstanding allowance"
+    );
+    for _ in 0..20_000 {
+        now += 50_000;
+        for &w in order {
+            let binding = &mut bindings[w];
+            let _ = drain_shaped_tx(binding, now, &mut recycles);
+            descs.clear();
+            binding.xsk.tx.take_submitted_for_test(&mut descs);
+            for desc in &descs {
+                binding.xsk.device.push_comp_for_test(desc.addr);
+            }
+            let _ = crate::afxdp::tx::reap_tx_completions(binding, &mut recycles);
+            recycles.clear();
+        }
+    }
+    bindings
+        .iter()
+        .map(|b| b.live.tx_bytes.load(std::sync::atomic::Ordering::Relaxed))
+        .sum()
+}
+
+/// #18748 review cycle 2 (Codex F2): a live lease-set replacement returns a
+/// parked exact queue's own tokens to its lease
+/// (`release_all_cos_queue_leases`) and leaves the queue parked with its
+/// wake tick (1.5 s away at this 8 kb/s root). The demand recorded at the
+/// park was decided on credit the queue no longer holds, so neither the local
+/// mask nor the republished slot may still count it.
+#[test]
+fn returning_a_parked_queues_own_tokens_withdraws_its_demand_18748() {
+    let now = 2_000_000_000u64;
+    let root_lease = Arc::new(SharedCoSRootLease::new(1_000, 96_000, 2));
+    while root_lease.acquire(now, u64::MAX) > 0 {}
+    let exact_lease = Arc::new(SharedCoSQueueLease::new(1_000, 96_000, 2));
+    let backlog = Arc::new(SharedCoSExactBacklog::new(1));
+    let mut fast = test_cos_fast_interfaces(
+        IFX,
+        IFX,
+        NONEXACT_QUEUE,
+        vec![
+            (
+                EXACT_QUEUE,
+                test_queue_fast_path(true, 0, None, Some(exact_lease)),
+            ),
+            (NONEXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
+        ],
+        None,
+        Some(root_lease),
+    );
+    fast.get_mut(&IFX).expect("fast path").shared_exact_backlog = Some(backlog.clone());
+    let fast = fast.get(&IFX).expect("fast path").clone();
+    let mut runtime = lab_runtime(&[1_000], 96_000);
+    runtime.shaping_rate_bytes = 1_000;
+    runtime.tokens = 0;
+    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFX, runtime, fast);
+    assert!(sim_enqueue(
+        &mut binding,
+        EXACT_QUEUE,
+        sim_item(EXACT_QUEUE, 30_000, now)
+    ));
+    let _ = drain_shaped_tx(&mut binding, now, &mut Vec::new());
+    assert!(
+        binding.cos.cos_interfaces[&IFX].queues[EXACT_IDX]
+            .hot
+            .parked
+            && backlog.peer_exact_demand_queue_mask(1).counts(EXACT_IDX),
+        "premise: parked on root with its own tokens, published as demand"
+    );
+    crate::afxdp::cos::token_bucket::release_all_cos_queue_leases(&mut binding);
+    crate::afxdp::cos::publish_cos_exact_backlog(&binding, IFX);
+    let root = &binding.cos.cos_interfaces[&IFX];
+    assert!(
+        root.queues[EXACT_IDX].hot.parked && root.queues[EXACT_IDX].hot.tokens == 0,
+        "premise: still parked, own tokens returned"
+    );
+    assert!(
+        !local_exact_demand_mask(root).counts(EXACT_IDX),
+        "a parked queue whose own tokens were returned must not count as demand"
+    );
+    assert!(
+        !backlog.peer_exact_demand_queue_mask(1).counts(EXACT_IDX),
+        "the republished slot must not count it either"
+    );
+}
+
+/// #18748 review cycle 2: the drain makes progress in every shape of root
+/// burst, exact rate, exact-lease burst and class mix, and every worker
+/// interleaving the committed seeds produce: no stretch of more than 2 ms in
+/// which no worker sends while work is queued. Two workers, each with exact
+/// and best-effort traffic. The retained exact reservation can leave root
+/// credit with a worker that cannot spend it (Codex F1); a fix for one shape
+/// at a time is not enough, so the shapes are varied.
+#[test]
+fn drain_makes_progress_across_burst_lease_and_class_shapes_18748() {
+    let class = |rate_gbit: u64, buffer: Option<u64>| ExactClass {
+        rate_bytes: rate_gbit * GBIT,
+        offered_bytes: vec![rate_gbit * GBIT / 2; 2],
+        flows: vec![1; 2],
+        buffer_bytes: buffer,
+    };
+    let shapes: Vec<(&str, u64, Vec<ExactClass>)> = vec![
+        (
+            "root 16k, exact 25 lease 4k",
+            16_000,
+            vec![class(25, Some(4_096))],
+        ),
+        (
+            "root 96k, exact 25 lease 4k",
+            96_000,
+            vec![class(25, Some(4_096))],
+        ),
+        (
+            "root 16k, exact 12 lease default",
+            16_000,
+            vec![class(12, None)],
+        ),
+        (
+            "root default, exact 25 lease 4k",
+            SHAPING_BYTES / 100,
+            vec![class(25, Some(4_096))],
+        ),
+        (
+            "root 16k, exact 15 + 10 lease 4k",
+            16_000,
+            vec![class(15, Some(4_096)), class(10, Some(4_096))],
+        ),
+    ];
+    for (label, root_burst, exact) in shapes {
+        let mut arm = Arm::new(2, 15, 25, &[]);
+        arm.exact = exact;
+        arm.root_burst_bytes = root_burst;
+        assert_every_seed(label, &arm, |o| {
+            if o.longest_global_stall_ns > 2_000_000 {
+                return Err(format!(
+                    "no worker sent anything for {} us while work was queued",
+                    o.longest_global_stall_ns / 1_000
+                ));
+            }
+            if o.total_gbps() == 0.0 {
+                return Err("nothing sent in the window".into());
+            }
+            Ok(())
+        });
+    }
 }
