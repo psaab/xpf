@@ -20,7 +20,9 @@
 //   retires once its permit frees. A same-tuple reincarnation that overtakes
 //   it is safe: the flush's stale-incarnation fence
 //   (`session_delta.rs::close_delta_is_stale_incarnation`) makes the old
-//   Close's teardown and HA close id-conditional.
+//   Close's local teardown id-conditional, and an old Close whose EXACT key
+//   now holds the reincarnation skips its HA legs (the binary HA Close
+//   carries no id; Codex R16 F1, `close_delta_is_superseded_on_exact_key`).
 // - Head-blocked bit (R13 F2/F3): `SessionTable::close_head_blocked` makes
 //   the next drain re-test the head's permits with one try instead of a
 //   256-delta drain/requeue, and makes the post-RX export/recovery slices
@@ -121,6 +123,8 @@ pub(super) struct ClosePermitBarrier {
     pub(super) parked: Vec<SessionDelta>,
     /// Closes ever parked (diagnostic).
     pub(super) parked_total: u64,
+    /// #19026: loop time of this worker's last close-retirement sweep.
+    pub(super) retirement_swept_ns: u64,
 }
 
 impl ClosePermitBarrier {

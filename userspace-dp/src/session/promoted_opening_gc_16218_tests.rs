@@ -65,7 +65,7 @@ fn expire_with(
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
     node_served: &|_| NodeServedEvidence::default(),
     shared_row: &|_| None,
-    claim_close: &|_, _| false,
+    claim_close: &|_, _, _| false,
     fence_evidence_cadence_ns: 0,
     };
     table.last_gc_ns = 0;

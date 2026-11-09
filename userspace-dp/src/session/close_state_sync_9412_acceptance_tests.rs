@@ -122,7 +122,7 @@ fn gc_as_forwarder(table: &mut SessionTable, now: u64) -> Vec<ExpiredSession> {
         ceiling_abs_ns: u64::MAX,
     node_served: &|_| NodeServedEvidence::default(),
     shared_row: &|_| None,
-    claim_close: &|_, _| false,
+    claim_close: &|_, _, _| false,
     fence_evidence_cadence_ns: 0,
     };
     table.last_gc_ns = 0;

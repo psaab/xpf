@@ -639,20 +639,21 @@ impl SessionTable {
         // proceed to insert the new record — the guard already
         // restored the prior mapping; the subsequent
         // self.key_to_handle.insert(...) overwrites it cleanly.
-        let fence_held = self.promote_fence_held(&key);
         let previous = self.remove_entry(&key, RemovalKind::Replace);
-        // #19026 (R14 G1): a new local session that replaces a restored copy
-        // the close fence is HOLDING (idle-crossed, its lookups fail closed)
-        // ends the old session: emit the Close the fence would have claimed.
-        // Every other copy then finds the shared row replaced by this
-        // session's id and stays silent, so the old session gets exactly one
-        // Close; its flush is id-fenced (`close_delta_is_stale_incarnation`)
-        // against the new incarnation. A copy that is only waiting on another
-        // copy's claim is not held: that copy owes the Close.
+        // #19026 (R14 G1, Codex R16 F3/F4): a new local session that replaces
+        // an idle-crossed restored copy (its lookups fail closed) ends the
+        // old session. Its Close goes through the node's close-retirement
+        // directory like every other producer: only the first producer for
+        // the old session id emits it (a claimant, or another worker's
+        // replacement, may own it already), the entry keeps it pending until
+        // its flush (a full ring makes it due for the next sweep instead of
+        // dropping it), and at the directory's cap it is emitted anyway.
+        // Its flush is id-fenced (`close_delta_is_stale_incarnation`) against
+        // the new incarnation, whose own Open supersedes the peer's row.
         if let Some(previous) = previous.as_ref()
-            && fence_held
             && previous.origin == SessionOrigin::SharedPromote
             && !previous.metadata.is_reverse
+            && previous.session_id != 0
             && now_ns.saturating_sub(previous.last_seen_ns) > previous.expires_after_ns
         {
             let close = self.expiry_close_delta(
@@ -662,8 +663,19 @@ impl SessionTable {
                 &previous.metadata,
                 previous.tcp_close_class_wire(),
             );
-            if !self.push_expiry_close_delta(close) {
-                self.note_install_close_delta_drop();
+            let directory = std::sync::Arc::clone(&self.close_retirements);
+            let created = directory.try_create(
+                previous.session_id,
+                u32::from(self.session_id_namespace()),
+                now_ns.saturating_add(directory.hold_ns()),
+                &close,
+            );
+            if created.emits() && !self.push_expiry_close_delta(close) {
+                if created == CreateOutcome::Created {
+                    directory.retry_now(previous.session_id, now_ns);
+                } else {
+                    self.note_install_close_delta_drop();
+                }
             }
         }
         let epoch = self.next_epoch();

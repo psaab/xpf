@@ -685,6 +685,12 @@ pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     /// mirrors live worker TABLES, not the shared maps, so `clear` below
     /// leaves it alone: each table retires its own rows (remove/refresh/drop).
     pub(in crate::afxdp) punt_seeds: Arc<crate::session::PuntSeedDirectory>,
+    /// #19026: the node's ONE close-retirement directory (restored sessions'
+    /// Close obligations, keyed by the old session id), handed to every
+    /// worker's `SessionTable` in `worker_loop`
+    /// (`set_close_retirement_directory`). Like `punt_seeds`, `clear` leaves
+    /// it alone: entries end by their own flush, takeover or tombstone expiry.
+    pub(in crate::afxdp) close_retirements: Arc<crate::session::CloseRetirementDirectory>,
 }
 
 impl Default for SharedSessionOwnerRgIndexes {
@@ -700,6 +706,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             served_aliases: Arc::new(Mutex::new(SharedServedAliasIndex::default())),
             stage_counts_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             punt_seeds: Arc::new(crate::session::PuntSeedDirectory::new()),
+            close_retirements: Arc::new(crate::session::CloseRetirementDirectory::default()),
         }
     }
 }

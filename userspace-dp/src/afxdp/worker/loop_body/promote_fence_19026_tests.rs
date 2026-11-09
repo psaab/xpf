@@ -243,13 +243,13 @@ fn shared_maps_with(row: &SyncedSessionEntry) -> (SharedMap, SharedMap, SharedMa
     (sessions, nat, wire, indexes)
 }
 
-/// The claim is a compare-and-MARK (Codex R15 P1#2): a stale expectation (the
-/// row was restamped after the fence read it) neither marks the row nor
-/// wins; the exact current identity marks it pending retirement (the row
-/// stays published until the winner's Close flush removes it), and a second
-/// claim on the now-marked row fails until a taker presents that mark.
+/// The claim compares under the shared-primary lock and only then runs the
+/// directory create (lock order: shared primary, then the directory leaf): a
+/// stale expectation (the row was restamped after the fence read it) never
+/// reaches the create; the exact identity does, and the row is left as it is
+/// (the winner's Close flush removes it like any Close).
 #[test]
-fn claim_shared_close_is_compare_and_mark_19026() {
+fn claim_shared_close_compares_then_creates_19026() {
     let row = promoted_row();
     let (sessions, _nat, wire, _indexes) = shared_maps_with(&row);
     let key = row.key.clone();
@@ -260,25 +260,85 @@ fn claim_shared_close_is_compare_and_mark_19026() {
         1,
         &[(key.clone(), crate::nat::NatDecision::default(), SEEDED + 1, SEEDED, 77 * SEC)],
     );
-    let claim = |expected, until| {
-        crate::afxdp::shared_ops::claim_shared_close(&sessions, &key, expected, until)
+    let mut creates = 0;
+    let mut create = || {
+        creates += 1;
+        true
     };
-    assert!(!claim(read, 100 * SEC), "a stale identity must not win the claim");
-    let current = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
-    assert_eq!(current.close_claim_until_ns, 0, "a failed claim leaves no mark");
-    assert_eq!(current.last_served_ns, 77 * SEC);
-    assert!(claim(current, 100 * SEC), "the exact identity wins");
-    let marked = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key)
-        .expect("the claim keeps the row until the Close's flush");
-    assert_eq!(marked.close_claim_until_ns, 100 * SEC, "pending retirement until the deadline");
-    assert!(!claim(current, 200 * SEC), "exactly one winner: the row now carries the mark");
-    assert!(claim(marked, 200 * SEC), "a taker presenting the expired mark takes it over");
-    assert_eq!(
-        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key)
-            .expect("row")
-            .close_claim_until_ns,
-        200 * SEC
+    assert!(
+        !crate::afxdp::shared_ops::claim_shared_close(&sessions, &key, read, &mut create),
+        "a stale identity must not win"
     );
+    let current = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
+    assert!(crate::afxdp::shared_ops::claim_shared_close(&sessions, &key, current, &mut create));
+    assert_eq!(creates, 1, "only the matching claim reached the directory create");
+    assert_eq!(
+        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key),
+        Some(current),
+        "the claim does not touch the shared row"
+    );
+    let mut refuse = || false;
+    assert!(
+        !crate::afxdp::shared_ops::claim_shared_close(&sessions, &key, current, &mut refuse),
+        "a directory that refuses (the entry exists) loses the claim"
+    );
+}
+
+/// Conditions 3 (real threads): two claimants race the production claim on
+/// the same shared row and one node directory: exactly one wins, every time,
+/// and no lock-order inversion deadlocks them.
+#[test]
+fn racing_claimants_produce_exactly_one_winner_19026() {
+    let row = promoted_row();
+    for round in 0..200u32 {
+        let (sessions, _nat, _wire, indexes) = shared_maps_with(&row);
+        let key = row.key.clone();
+        let expected = crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row");
+        let close = {
+            let mut table = SessionTable::new();
+            table.emit_close_delta_with_origin(
+                key.clone(),
+                row.decision,
+                row.metadata.clone(),
+                SessionOrigin::SharedPromote,
+                false,
+                SESSION_ID,
+            );
+            table.drain_deltas(1).pop().expect("close")
+        };
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let handles: Vec<_> = (0..2u32)
+            .map(|worker| {
+                let (sessions, directory, barrier, key, close) = (
+                    sessions.clone(),
+                    indexes.close_retirements.clone(),
+                    barrier.clone(),
+                    key.clone(),
+                    close.clone(),
+                );
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let mut create = || {
+                        directory
+                            .try_create(SESSION_ID, worker, 100 * SEC, &close)
+                            .emits()
+                    };
+                    crate::afxdp::shared_ops::claim_shared_close(
+                        &sessions,
+                        &key,
+                        expected,
+                        &mut create,
+                    )
+                })
+            })
+            .collect();
+        let wins = handles
+            .into_iter()
+            .map(|h| h.join().expect("join"))
+            .filter(|won| *won)
+            .count();
+        assert_eq!(wins, 1, "round {round}");
+    }
 }
 
 /// `last_served_ns` is stamped by EVERY worker's restamp, the minting
@@ -323,23 +383,64 @@ fn last_served_is_stamped_by_every_worker_and_kept_per_incarnation_19026() {
         SEEDED,
     );
     assert_eq!(read(), (65 * SEC, 60 * SEC), "single-pair restamp, minting worker");
-    assert!(crate::afxdp::shared_ops::claim_shared_close(
-        &sessions,
-        &key,
-        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key).expect("row"),
-        90 * SEC,
-    ));
     crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, &row);
     assert_eq!(read().0, 65 * SEC, "same-incarnation republication keeps it");
-    assert_eq!(
-        crate::afxdp::shared_ops::shared_row_identity(&sessions, &key)
-            .expect("row")
-            .close_claim_until_ns,
-        90 * SEC,
-        "and keeps a pending close claim"
-    );
     let mut next = row.clone();
     next.session_id += 1;
     crate::afxdp::shared_ops::publish_shared_session(&sessions, &nat, &wire, &indexes, &next);
     assert_eq!(read().0, 0, "a new incarnation starts from its own");
+}
+
+/// Codex R16 F1 gate, scope-exact: a Close is superseded only when its EXACT
+/// key (routing domain included) holds a different nonzero incarnation, in
+/// this worker's table or in the shared map. The same bare tuple under
+/// another routing domain is a different peer key and does not supersede it.
+#[test]
+fn superseded_gate_is_exact_key_including_scope_19026() {
+    let row = promoted_row();
+    let close_id = SESSION_ID;
+    let close = {
+        let mut table = SessionTable::new();
+        table.emit_close_delta_with_origin(
+            row.key.clone(),
+            row.decision,
+            row.metadata.clone(),
+            SessionOrigin::SharedPromote,
+            false,
+            close_id,
+        );
+        table.drain_deltas(1).pop().expect("close")
+    };
+    let mut other_scope = row.key.clone();
+    other_scope.routing_domain = row.key.routing_domain.wrapping_add(7);
+    let replacement = |key: &SessionKey| {
+        let mut entry = row.clone();
+        entry.key = key.clone();
+        entry.session_id = close_id + 1;
+        entry
+    };
+    let superseded = |shared: &SyncedSessionEntry| {
+        let (sessions, _nat, _wire, _indexes) = shared_maps_with(shared);
+        crate::afxdp::session_delta::close_delta_is_superseded_on_exact_key(
+            &close, None, &sessions,
+        )
+    };
+    assert!(superseded(&replacement(&row.key)), "shared row: same key, other id");
+    assert!(!superseded(&replacement(&other_scope)), "shared row: other scope");
+    assert!(!superseded(&row), "shared row: the same incarnation");
+    let local = |key: &SessionKey| {
+        let mut table = SessionTable::new();
+        assert!(table.upsert_synced_with_origin(
+            replacement(key).into_session_install(1_000 * SEC),
+            true
+        ));
+        let (sessions, _nat, _wire, _indexes) = shared_maps_with(&row);
+        crate::afxdp::session_delta::close_delta_is_superseded_on_exact_key(
+            &close,
+            Some(&table),
+            &sessions,
+        )
+    };
+    assert!(local(&row.key), "local table: same key, other id");
+    assert!(!local(&other_scope), "local table: other scope");
 }

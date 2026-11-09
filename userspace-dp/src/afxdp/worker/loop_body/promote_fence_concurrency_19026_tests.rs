@@ -133,10 +133,14 @@ impl Fixture {
         } else {
             0
         };
+        // One node: every worker table shares the node's close-retirement
+        // directory, as `worker_loop` hands it over in production.
+        let indexes = SharedSessionOwnerRgIndexes::default();
         let workers = (0..WORKERS)
             .map(|w| {
                 let mut table = SessionTable::new();
                 table.set_session_id_namespace(0, w as u32);
+                table.set_close_retirement_directory(indexes.close_retirements.clone());
                 Worker {
                     table,
                     queue: Arc::new(Mutex::new(VecDeque::new())),
@@ -166,7 +170,7 @@ impl Fixture {
             shared_sessions: Arc::new(Mutex::new(FastMap::default())),
             shared_nat: Arc::new(Mutex::new(FastMap::default())),
             shared_wire: Arc::new(Mutex::new(FastMap::default())),
-            indexes: SharedSessionOwnerRgIndexes::default(),
+            indexes,
             recent: Arc::new(Mutex::new(VecDeque::new())),
             event_stream: Some(event_handle),
             event_rx,
@@ -1082,6 +1086,412 @@ fn r14b_forward_resume_after(secs_past_window: u64) {
         "R14 G1: the idled-out old incarnation got {old_closes} Closes after a resume \
          {secs_past_window} s past its window"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fold cycle 3: Codex R16 (d18ff5b1f3) F1-F4, ported onto this fixture. Each
+// of F1-F4 is RED at d18ff5b1f3 in Codex's own probes
+// (`/var/worktrees/.cache/tmpdir/rev-codex-19026c/review-probes/probes.patch`).
+// The ports replace the cycle-2 mark premises with the close-retirement
+// directory's (the mark no longer exists).
+// ---------------------------------------------------------------------------
+
+/// The first-packet path on worker `w`: a new local session for the tuple
+/// (replacing the crossed copy, if any), published and replicated as the
+/// production install does. Returns the new session id.
+fn replace_with_new_local_session(f: &mut Fixture, w: usize, now: u64) -> u64 {
+    let key = f.row.key.clone();
+    assert!(
+        f.workers[w].table.install_with_protocol_with_origin(
+            key.clone(),
+            f.row.decision,
+            f.row.metadata.clone(),
+            SessionOrigin::ForwardFlow,
+            now,
+            PROTO_UDP,
+            0,
+        ),
+        "FIXTURE: the new session installs"
+    );
+    let fresh = f.workers[w].table.synced_entry_for(&key).expect("new row");
+    assert_ne!(fresh.session_id, f.row.session_id, "FIXTURE: a new incarnation");
+    crate::afxdp::shared_ops::publish_shared_session(
+        &f.shared_sessions,
+        &f.shared_nat,
+        &f.shared_wire,
+        &f.indexes,
+        &fresh,
+    );
+    for (p, q) in f.queues().iter().enumerate() {
+        if p != w {
+            q.lock().expect("queue").push_back(WorkerCommand::UpsertSynced(
+                crate::afxdp::shared_ops::synced_replica_entry(&fresh),
+            ));
+        }
+    }
+    fresh.session_id
+}
+
+fn pending_retirement(f: &Fixture, id: u64) -> Option<(u32, u64)> {
+    match f.indexes.close_retirements.entry_for_test(id) {
+        Some(crate::session::Retirement::Pending {
+            owner_worker,
+            retry_at_ns,
+            ..
+        }) => Some((owner_worker, retry_at_ns)),
+        _ => None,
+    }
+}
+
+/// The claimant parks its Close behind a held permit; a forward packet then
+/// replaces the old session on another worker BEFORE any takeover is due.
+/// Returns (old-id RT_FLOW Closes, new-id RT_FLOW Closes, HA closes) after
+/// 240 s.
+fn claimed_then_replaced(kill_claimant: bool) -> (usize, usize, usize) {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let old_id = f.row.session_id;
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([f.row.key.clone()])
+        .expect("hold the close permit");
+    let (winner, now) = run_until_a_close_parks(&mut f);
+    let winner = winner.expect("FIXTURE: the claimant parked its Close");
+    let (_, retry_at) = pending_retirement(&f, old_id).expect("FIXTURE: the claim's entry");
+    assert!(now < retry_at, "FIXTURE: the replacement comes before any takeover is due");
+    if kill_claimant {
+        f.alive[winner] = false;
+        f.workers[winner].barrier = Default::default();
+        f.workers[winner].table = SessionTable::new();
+    }
+    drop(held);
+    let survivor = (winner + 1) % WORKERS;
+    assert!(f.workers[survivor].table.lookup_with_origin(&f.row.key, now, 0).is_none());
+    let fresh_id = replace_with_new_local_session(&mut f, survivor, now);
+    assert!(
+        pending_retirement(&f, old_id).is_some(),
+        "the obligation outlives the replacement of the forwarding row"
+    );
+    f.rounds(now, now + 240 * SEC);
+    (f.rt_flow_closes(old_id), f.rt_flow_closes(fresh_id), f.ha_closes())
+}
+
+/// Codex R16 F2: a dead claimant's pending Close survives a forward
+/// replacement and is taken over exactly once. d18ff5b1f3: 0.
+#[test]
+fn dead_claimant_then_forward_replacement_still_closes_old_id_once_19026() {
+    let (old, fresh, _) = claimed_then_replaced(true);
+    assert!(fresh > 0, "FIXTURE: the real flush and stream remain operational");
+    assert_eq!(old, 1, "#19026 Codex R16 F2: exactly one Close for the old incarnation");
+}
+
+/// Control: the same schedule with the claimant alive.
+#[test]
+fn live_claimant_then_forward_replacement_closes_old_id_once_19026() {
+    let (old, fresh, _) = claimed_then_replaced(false);
+    assert!(fresh > 0);
+    assert_eq!(old, 1);
+}
+
+/// Replace a fence-held copy on worker 2, optionally with its delta ring full.
+fn held_copy_replaced(fill: bool) -> (usize, Fixture) {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let resume = t0 + f.window_ns() + 4 * SEC;
+    f.rounds(t0, resume);
+    let w = 2usize;
+    assert!(f.workers[w].table.promote_fence_hold_count() > 0, "FIXTURE: held");
+    assert_eq!(f.ha_closes(), 0);
+    if fill {
+        for p in 20_000..24_096u16 {
+            let mut k = f.row.key.clone();
+            k.src_port = p;
+            f.workers[w].table.emit_open_delta_with_origin(
+                k,
+                f.row.decision,
+                f.row.metadata.clone(),
+                SessionOrigin::ForwardFlow,
+                false,
+            );
+        }
+        assert_eq!(f.workers[w].table.pending_delta_count(), 4096, "FIXTURE: ring full");
+    }
+    replace_with_new_local_session(&mut f, w, resume);
+    if fill {
+        let (_, retry_at) = pending_retirement(&f, f.row.session_id)
+            .expect("the refused Close stays owed in the directory");
+        assert!(retry_at <= resume, "and is due for the next sweep");
+    }
+    f.rounds(resume, resume + 40 * SEC);
+    let old = f.rt_flow_closes(f.row.session_id);
+    (old, f)
+}
+
+/// Codex R16 F3: the replacement's Close refused by a full ring is kept
+/// owed and retried, not dropped. d18ff5b1f3: 0.
+#[test]
+fn held_replacement_with_a_full_ring_keeps_the_old_close_19026() {
+    let (old, _) = held_copy_replaced(true);
+    assert_eq!(old, 1, "#19026 Codex R16 F3: the old Close is retried and delivered once");
+}
+
+/// Control: room in the ring.
+#[test]
+fn held_replacement_with_room_in_the_ring_closes_old_id_once_19026() {
+    let (old, _) = held_copy_replaced(false);
+    assert_eq!(old, 1);
+}
+
+/// Codex R16 F4: two workers' held copies are both replaced (both lookups
+/// fail closed before either commit): the old incarnation still gets ONE
+/// Close. d18ff5b1f3: 2.
+#[test]
+fn two_held_copies_replaced_close_old_id_once_19026() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let resume = t0 + f.window_ns() + 4 * SEC;
+    f.rounds(t0, resume);
+    for w in [1usize, 2] {
+        assert!(f.workers[w].table.promote_fence_hold_count() > 0, "FIXTURE: held");
+        assert!(f.workers[w].table.lookup_with_origin(&f.row.key, resume, 0).is_none());
+    }
+    for w in [1usize, 2] {
+        let permit = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([f.row.key.clone()])
+            .expect("permit");
+        replace_with_new_local_session(&mut f, w, resume);
+        drop(permit);
+    }
+    f.rounds(resume, resume + 20 * SEC);
+    assert_eq!(
+        f.rt_flow_closes(f.row.session_id),
+        1,
+        "#19026 Codex R16 F4: replacement retirement is arbitrated by the directory"
+    );
+}
+
+/// Codex R16 at-least-once demonstration, inverted: a LIVE claimant whose
+/// permit is held across two takeover deadlines keeps renewing its entry, so
+/// no other copy takes over: exactly one HA Close and one RT_FLOW Close once
+/// the permit returns. d18ff5b1f3: one per worker.
+#[test]
+fn live_claimant_past_two_holds_closes_exactly_once_19026() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([f.row.key.clone()])
+        .expect("hold the close permit");
+    let (winner, now) = run_until_a_close_parks(&mut f);
+    assert!(winner.is_some());
+    f.rounds(now, now + 50 * SEC);
+    let parks: usize = f.workers.iter().map(|w| w.barrier.parked.len()).sum();
+    assert_eq!(parks, 1, "only the claimant holds a Close: nobody took it over");
+    assert_eq!(f.ha_closes(), 0);
+    drop(held);
+    f.rounds(now + 50 * SEC, now + 60 * SEC);
+    assert_eq!(f.ha_closes(), 1, "#19026: exactly one HA Close while the claimant lives");
+    assert_eq!(f.rt_flow_closes(f.row.session_id), 1, "and one RT_FLOW Close");
+    assert!(!f.shared_present());
+}
+
+/// Codex R16 F1 (and its twin). The claimant parks Close(A); its permit
+/// frees; RX on that SAME worker admits replacement B and the post-RX export
+/// sends Open(B) before the next tick retries Close(A). The binary HA Close
+/// carries no id and the peer's delete for routing domain 0 is bare, so an
+/// HA Close for this key after Open(B) would delete B on the peer. Returns
+/// the HA frame types for the key (1 = Open, 2 = Close), A's RT_FLOW Closes,
+/// and the shared row's id.
+fn parked_close_then_same_worker_replacement(replace: bool) -> (Vec<u8>, usize, Option<u64>) {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let t0 = f.t0;
+    f.activate(t0);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([f.row.key.clone()])
+        .expect("hold the close permit");
+    let (winner, now) = run_until_a_close_parks(&mut f);
+    let w = winner.expect("FIXTURE: parked");
+    let old_id = f.row.session_id;
+    f.drain_frames();
+    f.frames.clear();
+    drop(held);
+    if replace {
+        let permits = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([f.row.key.clone()])
+            .expect("permit");
+        let new_id = replace_with_new_local_session(&mut f, w, now);
+        drop(permits);
+        let queues = f.queues();
+        let peers: Vec<_> = queues
+            .iter()
+            .enumerate()
+            .filter(|(p, _)| *p != w)
+            .map(|(_, q)| q.clone())
+            .collect();
+        let by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = queues
+            .iter()
+            .enumerate()
+            .map(|(p, q)| (p as u32, q.clone()))
+            .collect();
+        let deltas = f.workers[w].table.drain_deltas(256);
+        assert!(
+            deltas.iter().any(|d| d.kind == SessionDeltaKind::Open && d.session_id == new_id),
+            "FIXTURE: the replacement's Open is queued"
+        );
+        let runtime = f.runtime.reader();
+        let worker = &mut f.workers[w];
+        // The post-RX export's ordinary ring flush (it does not see parked work).
+        super::flush_session_deltas_loop(
+            &mut worker.table,
+            &[],
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            &f.shared_sessions,
+            &f.shared_nat,
+            &f.shared_wire,
+            &f.indexes,
+            &f.recent,
+            &peers,
+            &by_id,
+            &f.event_stream,
+            &f.forwarding,
+            &runtime,
+            &mut worker.wedged,
+            w as u32,
+            &deltas,
+        );
+    }
+    f.round(now + SEC);
+    f.drain_frames();
+    let key = f.row.key.clone();
+    let header = crate::event_stream::codec::FRAME_HEADER_SIZE;
+    let ha: Vec<u8> = f
+        .frames
+        .iter()
+        .map(|frame| frame.as_bytes())
+        .filter(|b| {
+            (b[4] == crate::event_stream::codec::MSG_SESSION_OPEN
+                || b[4] == crate::event_stream::codec::MSG_SESSION_CLOSE)
+                && b.len() >= header + 6
+                && u16::from_le_bytes([b[header + 2], b[header + 3]]) == key.src_port
+        })
+        .map(|b| b[4])
+        .collect();
+    let shared_id = crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions)
+        .get(&key)
+        .map(|e| e.session_id);
+    (ha, f.rt_flow_closes(old_id), shared_id)
+}
+
+/// Codex R16 F1: after the same-worker replacement, the stream carries
+/// Open(B) and NO HA Close for that key (it would be a bare delete of B on
+/// the peer); A's RT_FLOW Close is still delivered; B survives locally.
+/// d18ff5b1f3: [Open(B), Close(A)].
+#[test]
+fn superseded_parked_close_sends_no_ha_close_after_the_replacements_open_19026() {
+    let (ha, old_rt_flow, shared_id) = parked_close_then_same_worker_replacement(true);
+    assert_eq!(
+        ha,
+        vec![crate::event_stream::codec::MSG_SESSION_OPEN],
+        "#19026 Codex R16 F1: no HA Close for the exact key after the replacement's Open"
+    );
+    assert_eq!(old_rt_flow, 1, "the old session's RT_FLOW Close is still delivered");
+    assert!(shared_id.is_some_and(|id| id != 0), "the replacement survives locally");
+}
+
+/// Twin: the same parked Close with NO replacement is not superseded and
+/// still sends its HA Close (plus its RT_FLOW Close).
+#[test]
+fn a_parked_close_that_is_not_superseded_still_sends_its_ha_close_19026() {
+    let (ha, old_rt_flow, shared_id) = parked_close_then_same_worker_replacement(false);
+    assert_eq!(
+        ha,
+        vec![crate::event_stream::codec::MSG_SESSION_CLOSE],
+        "an ordinary Close keeps its HA leg"
+    );
+    assert_eq!(old_rt_flow, 1);
+    assert_eq!(shared_id, None, "the Close's flush retired the shared row");
+}
+
+/// Codex R16 F1 gate, through the real flush: a Close that is stale only
+/// because the same bare tuple is published under ANOTHER routing domain is
+/// not superseded (the peer keys that other session differently), so it
+/// keeps its HA Close frame. Only an exact-key replacement suppresses it.
+#[test]
+fn an_other_scope_stale_close_keeps_its_ha_close_19026() {
+    let mut f = Fixture::with_protocol(0, PROTO_UDP);
+    let mut other = f.row.clone();
+    other.key.routing_domain = f.row.key.routing_domain.wrapping_add(7);
+    other.session_id = f.row.session_id + 1;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &f.shared_sessions,
+        &f.shared_nat,
+        &f.shared_wire,
+        &f.indexes,
+        &other,
+    );
+    let close = {
+        let mut table = SessionTable::new();
+        table.emit_close_delta_with_origin(
+            f.row.key.clone(),
+            f.row.decision,
+            f.row.metadata.clone(),
+            SessionOrigin::SharedPromote,
+            false,
+            f.row.session_id,
+        );
+        table.drain_deltas(1).pop().expect("close")
+    };
+    assert!(
+        crate::afxdp::session_delta::close_delta_is_stale_incarnation(
+            &close,
+            None,
+            &f.shared_sessions,
+            &f.indexes,
+        ),
+        "FIXTURE: the Close is stale (another scope holds the bare tuple)"
+    );
+    assert!(
+        !crate::afxdp::session_delta::close_delta_is_superseded_on_exact_key(
+            &close,
+            None,
+            &f.shared_sessions,
+        ),
+        "FIXTURE: but not superseded on its exact key"
+    );
+    let queues = f.queues();
+    let by_id: BTreeMap<u32, Arc<Mutex<VecDeque<WorkerCommand>>>> = queues
+        .iter()
+        .enumerate()
+        .map(|(p, q)| (p as u32, q.clone()))
+        .collect();
+    let peers: Vec<_> = queues.iter().skip(1).cloned().collect();
+    let runtime = f.runtime.reader();
+    let worker = &mut f.workers[0];
+    super::flush_session_deltas_loop(
+        &mut worker.table,
+        &[],
+        SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        &f.shared_sessions,
+        &f.shared_nat,
+        &f.shared_wire,
+        &f.indexes,
+        &f.recent,
+        &peers,
+        &by_id,
+        &f.event_stream,
+        &f.forwarding,
+        &runtime,
+        &mut worker.wedged,
+        0,
+        &[close],
+    );
+    assert_eq!(f.ha_closes(), 1, "#19026 R16 F1: an other-scope stale Close keeps its HA leg");
 }
 
 /// Codex R15 P1#1 (RESIDUAL, also on master; not fixed by #19026). A copy

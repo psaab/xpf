@@ -196,6 +196,28 @@ pub(super) fn close_delta_is_stale_incarnation(
         .is_some_and(|entry| entry.session_id != 0 && entry.session_id != delta.session_id)
 }
 
+/// #19026 (Codex R16 F1): the Close's EXACT key (routing domain and
+/// discriminator included) now holds a different nonzero incarnation, in this
+/// worker's table or in the shared primary map. A replacement under another
+/// scope of the same bare tuple does NOT count: the peer keys that one
+/// differently, so the old key still needs its delete.
+pub(super) fn close_delta_is_superseded_on_exact_key(
+    delta: &SessionDelta,
+    current_sessions: Option<&crate::session::SessionTable>,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+) -> bool {
+    let other = |id: u64| id != 0 && id != delta.session_id;
+    if delta.session_id == 0 {
+        return false;
+    }
+    if current_sessions.is_some_and(|sessions| other(sessions.session_id_for(&delta.key))) {
+        return true;
+    }
+    super::shared_ops::lock_shared_recover(shared_sessions)
+        .get(&delta.key)
+        .is_some_and(|entry| other(entry.session_id))
+}
+
 pub(super) fn purge_retirement_close_is_stale(
     shared_runtime: &RuntimeViewReader,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -712,6 +734,23 @@ pub(super) fn flush_session_deltas(
             shared_sessions,
             shared_owner_rg_indexes,
         );
+        // #19026 (Codex R16 F1): a stale Close whose EXACT key (scope included)
+        // now holds a different incarnation is SUPERSEDED. Its HA session-sync
+        // close would be a bare delete on the peer (the binary close carries no
+        // id, and the peer's id-conditional delete exists only for stated
+        // routing domains), so it would delete the replacement when it arrives
+        // after the replacement's Open, and it is redundant before it: that
+        // Open overwrites the peer's row for this exact key, and the
+        // replacement's own Close retracts it. Skip only the HA legs (stream
+        // and RPC fallback); the id-conditional local teardown and the RT_FLOW
+        // close still run.
+        let ha_superseded = stale
+            && delta.kind == SessionDeltaKind::Close
+            && close_delta_is_superseded_on_exact_key(
+                delta,
+                current_sessions.as_deref(),
+                shared_sessions,
+            );
         if stale && delta.purge_retirement {
             drop(_close_install_permits);
             event_stream_out_of_sync = true;
@@ -1004,7 +1043,10 @@ pub(super) fn flush_session_deltas(
                 } else {
                     !event_stream_out_of_sync
                 };
-                if gate_open && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed {
+                if gate_open
+                    && !ha_superseded
+                    && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed
+                {
                     match es.push_delta_lossless_within_seq(
                         delta,
                         zone_name_to_id,
@@ -1152,6 +1194,7 @@ pub(super) fn flush_session_deltas(
             info.stream_seq = streamed_seq;
         }
         if !telemetry_only_seed
+            && !ha_superseded
             && streamed_seq == 0
             && !matches!(
                 delta.provenance,
@@ -1173,6 +1216,19 @@ pub(super) fn flush_session_deltas(
             push_recent_session_delta(
                 &mut crate::sync_util::lock_tolerant(recent_session_deltas),
                 info,
+            );
+        }
+        // #19026: a restored session's Close has now run its emit legs: its
+        // close-retirement entry (if any) becomes a tombstone. A Close that
+        // was requeued or parked never reaches here and stays Pending.
+        if delta.kind == SessionDeltaKind::Close
+            && delta.origin == crate::session::SessionOrigin::SharedPromote
+            && delta.session_id != 0
+        {
+            shared_owner_rg_indexes.close_retirements.mark_flushed(
+                delta.session_id,
+                &delta.key,
+                crate::afxdp::neighbor::monotonic_nanos(),
             );
         }
     }

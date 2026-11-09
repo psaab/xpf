@@ -1844,12 +1844,12 @@ copy; no copy is designated:
 
 | step | condition | result |
 |---|---|---|
-| R1 | the shared primary row (`ExpireHaContext::shared_row`) is gone, or names another session id | silent: the session's Close was flushed (only that flush removes a claimed row) or a new incarnation replaced it |
+| R1 | the shared primary row (`ExpireHaContext::shared_row`) is gone, or names another session id | silent: the session was closed or replaced elsewhere |
 | served | this copy served inside its window in EITHER direction (`packet_counts_and_last_packet_seen_for`: the newer of the forward copy's and its reverse half's packet time), or ANY worker did (the shared row's `last_served_ns`) | keep: re-stamp `last_seen_ns` to that packet time and re-bucket |
-| claimed | another copy holds the claim (the row's `close_claim_until_ns` mark) | wait for that copy's Close flush, re-checking every GC interval (R1 within one interval of the flush); once the mark expires without one, claim again on the expired mark and take the obligation over |
+| retired | the node's close-retirement directory has an entry for this session id | silent: the entry owns the Close (and carries it; no copy is needed) |
 | hold | the node looks idle | hold for `fence_evidence_cadence_ns` + one GC interval, remembering the evidence |
 | after hold | the evidence changed but holds no packet inside the window (a stale max-merge) | hold again on the new evidence |
-| claim | the evidence is unchanged: `ExpireHaContext::claim_close` marks the shared row pending retirement iff it still reads exactly that evidence | winner: ordinary AGE + Close; its flush removes the row. A copy that loses waits on the mark (then R1 after the flush); a claim lost to a concurrent restamp holds again |
+| claim | the evidence is unchanged: `ExpireHaContext::claim_close`, under the shared-primary lock, creates the directory entry iff the row still reads exactly that evidence | winner: ordinary AGE + Close (its flush removes the row). A loser finds the entry: silent; evidence changed by a concurrent restamp: hold again |
 
 **Why keep, not drop.** A copy is never removed while the session is served
 on this node. A reverse hit stamps only the reverse half (its count folds
@@ -1879,63 +1879,99 @@ cadence + one GC interval + up to one wheel tick: about 14 s at the default
 slab. It grows with `ct_refresh_slab_len` the way the #18742 evidence cadence
 does. Each evidence change without fresh service re-arms the hold once more.
 
-**The claim, and why the row survives it (fold cycle 2).**
-`afxdp/shared_ops/restamp.rs::claim_shared_close` is a compare-and-MARK
-under the shared-map lock. It sets `SyncedSessionEntry::close_claim_until_ns`
-(one hold from now) iff the row still reads exactly the evidence the
-claimant held. It does not remove the row:
-- **Exactly once.** No designation can be lost to a dead or refused worker
-  or duplicated by a second prewarm. Two copies cannot both win the same
-  row. A loser sees the live mark and waits.
-- **Absence means "flushed".** The row leaves only through the winner's
-  Close flush, which also runs the rest of the teardown: BPF rows, conntrack
-  mirror, sibling `DeleteSynced`, HA close. Cycle 1 removed the row at the
-  claim. A winner that then exited with its Close parked, or lost it,
-  silenced every survivor: zero Closes, a leaked mirror row (Codex R15
-  P1#2).
-- **Takeover.** If the mark expires and the row is still there, the
-  claimant never flushed. A surviving copy claims again with the expired
-  mark as its expected identity (one taker wins) and closes normally,
-  including the mirror delete. This is exactly-once when the claimant has
-  died. When the claimant is alive but its Close stays parked longer than
-  one hold (its tuple permit is held that long), the taker's Close joins it
-  on the same permit, and both flush when it frees: at-least-once, never
-  zero.
-- Same-incarnation republication keeps a pending mark; a new incarnation
-  starts without one.
+**The close-retirement directory: one owner per old incarnation (fold
+cycle 3).** `session/close_retirement.rs::CloseRetirementDirectory` is one
+node-wide map. It lives in `SharedSessionOwnerRgIndexes`, and `worker_loop`
+hands it to every worker's `SessionTable`, as with `punt_seeds`. It is keyed
+by the OLD session id. An entry is either `Pending { key, owner_worker,
+owner_rg, retry_at_ns, close }`, which carries the Close delta itself, or a
+`Flushed` tombstone.
+
+Every producer of a restored session's Close goes through it:
+- the fence claim;
+- a local install that replaces an idle-crossed copy (below);
+- a takeover.
+
+Cycle 2 kept the obligation on a mark on the replaceable shared row and on
+local flags. A replacement erased it, a full ring dropped it, and two
+installers duplicated it (Codex R16 F2–F4). The directory removes all of
+that:
+- **Create is a compare-and-insert.** The first producer for an id wins and
+  emits; any later producer finds the entry (Pending or Flushed) and emits
+  nothing.
+- **The entry outlives the forwarding row.** It is keyed by id, not by
+  tuple, so replacing or removing the shared row cannot touch it.
+- **It turns Flushed only when the flush loop has run that Close's emit
+  legs** (`afxdp/session_delta.rs`, for `SharedPromote`-origin Closes only).
+  A full ring, a requeue or a park leaves it Pending. A producer whose ring
+  refused the Close makes the entry due at once.
+- **Tombstones last two fence holds.** That is longer than a lingering
+  crossed copy can still be claimed or replaced, so a late producer still
+  loses.
+- **Takeover and renewal.** Each worker sweeps once per GC interval; an
+  empty directory costs one atomic load. The sweep first renews the entries
+  whose Close this worker still holds (parked or deferred). It then takes
+  over every other Pending entry past `retry_at_ns`, one hold after
+  creation or renewal, and pushes its stored Close.
+- **Guarantee: exactly once while the owner lives**, however long its
+  permit is held. At least once only if the owner dies or wedges mid-flush.
+- **A Pending entry whose owner RG this node no longer forwards is
+  dropped.** That RG's new owner, the peer, closes the session through its
+  own synced copy: its idle expiry, or its own restore fence after it
+  activates. This node keeps its standby copy under the HOLD gate as for
+  any synced session.
+- **Bounded at `CLOSE_RETIREMENT_CAP` = 65,536 entries**, about 20 MiB at
+  the cap: two 24k-session bursts plus tombstones. At the cap a producer gets
+  `Full` and emits its Close anyway. That fails safe (at-least-once); only
+  duplicate suppression is lost, never the Close.
+- **Lock order: the shared-primary map lock, then the directory's lock** (a
+  leaf: nothing is taken while it is held). The claim compares the shared
+  row and creates the entry under both, keeping cycle 2's
+  compare-and-mark atomicity.
+- **Lost on a helper restart**, like every worker's ring, overflow suffix
+  and parked Closes. What covers that:
+  - the event-stream reconnect's FullResync re-exports this node's table
+    truth to the peer;
+  - the peer ages anything it no longer receives by its idle timeout or HOLD
+    ceiling;
+  - locally the bring-up replay rebuilds copies (#19030), and they age by
+    their own timers.
 
 **A forward resume inside the hold (R14 G1).** While a copy is held, its
 lookups fail closed (it is idle-crossed), so a forward packet takes the
 first-packet path. A new local session then REPLACES the crossed copy, and
 every other copy finds the shared row replaced and stays silent. The local
-install therefore emits the old session's Close when it replaces a forward
-`SharedPromote` copy the fence is HOLDING (`session/install.rs`): exactly one
-Close for the old incarnation. A copy only waiting on another copy's claim
-is not held (that copy owes the Close), so a resume landing on it adds no
-second Close. Its flush is id-fenced
-(`close_delta_is_stale_incarnation`) against the new one. A REVERSE resume in
-the same window instead re-materializes from the still-published shared
-reverse row and revives the old session: inbound packets are admitted up to
-one hold past the idle timeout.
+install therefore produces the old session's Close when it replaces an
+idle-crossed forward `SharedPromote` copy, held or not yet visited
+(`session/install.rs`). It does this through the directory, so it emits
+only if it creates the entry: a claimant or another worker's replacement
+may own it already. Its flush is id-fenced
+(`close_delta_is_stale_incarnation`) against the new incarnation, and its HA
+leg is suppressed as superseded (below). A REVERSE resume in the same window
+instead re-materializes from the still-published shared reverse row and
+revives the old session: inbound packets are admitted up to one hold past
+the idle timeout.
 
-A hold is valid only for the idle anchor it was armed under, so a re-stamped
-row re-arms. Holds live in a side map dropped with the row; `SessionEntry`
-stays at the 648 B pin.
-
-**What "silent" does.** Silent applies only under R1.
-- No Close delta is emitted, so there is no HA delete and no RT_FLOW close.
-- The row is removed as a `Transfer`, so no export tombstone is left.
-- `ExpiredSession::close_fenced` is set. The reap
-  (`afxdp/worker/loop_body/gc_teardown.rs`) skips only the session-id-gated
-  conntrack mirror delete, which would delete the live incarnation's kernel
-  row.
-- The reap still releases the copy's own per-worker resources:
-  - this worker's NAT/NAT64 holder bit and hold, which the copy reserved at
-    restore (#15966r);
-  - its steering claims;
-  - its flow-cache slots.
-- Housekeeping does not forget a TCP/1723 PPTP control channel for a fenced
-  copy.
+**A superseded old Close sends no HA close (Codex R16 F1).** A Close is
+superseded when it is stale because its EXACT key (routing domain and
+discriminator included) now holds a different incarnation, in the flushing
+worker's table or in the shared map. The flush then skips only its HA
+session-sync legs: the binary stream frame and the RPC fallback. The
+id-conditional local teardown and the RT_FLOW close still run.
+- **Why.** The binary Close carries no session id, and the daemon's
+  id-conditional peer delete exists only for stated routing domains
+  (`daemon_ha_userspace_stream.go`, `queueDeltaSink.deleteV4/V6`). In
+  domain 0 it is a bare delete. Arriving after the replacement's Open, it
+  deleted the replacement on the peer. That ordering became reachable on
+  the same worker once a parked Close lets RX run.
+- **Why skipping is safe.** The replacement's own Open overwrites the
+  peer's row for that exact key, and the replacement's own Close later
+  retracts it.
+- **Other-scope staleness** (another routing domain or discriminator) keeps
+  today's behaviour (#10512).
+- **Residual.** If the replacement's Open never reaches the peer (stream
+  loss), the peer keeps the old session until the loss latch's LossResync
+  re-exports table truth, or until the peer's own idle or HOLD expiry.
 
 **Residual: a packet in the last publication interval (#19046).** The
 claim synchronizes with PUBLICATION, not packet admission. It authorizes a
@@ -2004,7 +2040,25 @@ Cells:
   - fold cycle 2: a claimant that exits with its Close parked (Codex R15
     P1#2) and its surviving-claimant twin; reverse-only service for three
     windows, and a forward resume inside the hold with its after-hold twin
-    (R14 G1); the #19046 residual (ignored).
+    (R14 G1); the #19046 residual (ignored);
+  - fold cycle 3 (Codex R16): a dead claimant then a forward replacement
+    (F2) and its live-claimant control; a held replacement with a full ring
+    (F3) and with room; two held copies replaced (F4); a live claimant past
+    two holds closes exactly once; a superseded parked Close sends no HA
+    close after the replacement's Open (F1), its non-superseded twin still
+    does, and so does a Close that is stale only through ANOTHER routing
+    domain (the gate is exact-key).
+- `session/close_retirement_19026_tests.rs`: the directory itself:
+  - compare-and-insert;
+  - tombstones;
+  - the cap (fail safe);
+  - takeover and retry;
+  - renewal;
+  - dropping an entry of an RG this node no longer forwards;
+  - racing creators, and a takeover racing a renewal, under real threads.
+- `afxdp/worker/loop_body/promote_fence_19026_tests.rs` also races two
+  claimants through the production claim and one node directory under real
+  threads.
 
   Its "HA closes" are type-2 session-sync CLOSE frames actually delivered on
   a connected event stream, and its RT_FLOW closes are type-14 frames

@@ -368,6 +368,10 @@ pub(crate) fn worker_loop(
     // node's ONE directory, which the embedded-ICMP matcher reads when an
     // error for a punted flow lands on a worker other than the seed's.
     sessions.set_punt_seed_directory(std::sync::Arc::clone(&shared_owner_rg_indexes.punt_seeds));
+    // #19026: every worker shares the node's close-retirement directory.
+    sessions.set_close_retirement_directory(std::sync::Arc::clone(
+        &shared_owner_rg_indexes.close_retirements,
+    ));
     // #5143: STARTUP READINESS report. The in-thread XSK/UMEM binds are now
     // done — `bindings` holds ONLY the planned bindings that actually bound
     // (setup's Err arm records a bind failure by leaving the failed binding

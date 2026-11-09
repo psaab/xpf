@@ -130,20 +130,16 @@ pub(super) fn run_session_housekeeping(
     let shared_row = |key: &crate::session::SessionKey| {
         crate::afxdp::shared_ops::shared_row_identity(shared_sessions, key)
     };
-    // The claim's pending-retirement mark lasts one fence hold: if the
-    // winner's Close has not flushed (and removed the row) by then, another
-    // copy takes the obligation over.
-    let close_claim_takeover_ns =
-        shared_evidence_max_cadence_ns.saturating_add(crate::session::SESSION_GC_INTERVAL_NS);
-    let claim_close =
-        |key: &crate::session::SessionKey, expected: crate::session::SharedRowIdentity| {
-            crate::afxdp::shared_ops::claim_shared_close(
-                shared_sessions,
-                key,
-                expected,
-                loop_now_ns.saturating_add(close_claim_takeover_ns),
-            )
-        };
+    // #19026: the close-retirement directory's takeover deadline (and its
+    // tombstone length) is one fence hold, published for every producer.
+    sessions.close_retirement_directory().set_hold_ns(
+        shared_evidence_max_cadence_ns.saturating_add(crate::session::SESSION_GC_INTERVAL_NS),
+    );
+    let claim_close = |key: &crate::session::SessionKey,
+                       expected: crate::session::SharedRowIdentity,
+                       create: &mut dyn FnMut() -> bool| {
+        crate::afxdp::shared_ops::claim_shared_close(shared_sessions, key, expected, create)
+    };
     let ha_ctx = crate::session::ExpireHaContext {
         node_active,
         forwards_rg: &forwards_rg,
@@ -251,6 +247,33 @@ pub(super) fn run_session_housekeeping(
         shared_sessions,
     );
     sessions.defer_conntrack_deletes(deferred_conntrack_deletes);
+    // #19026: once per GC interval, renew the close-retirement entries this
+    // worker still holds a Close for (parked or deferred), take over every
+    // other expired one of a forwarded RG, and queue the taken Closes.
+    if loop_now_ns.saturating_sub(close_barrier.retirement_swept_ns)
+        >= crate::session::SESSION_GC_INTERVAL_NS
+    {
+        close_barrier.retirement_swept_ns = loop_now_ns;
+        let directory = std::sync::Arc::clone(sessions.close_retirement_directory());
+        if directory.len() != 0 {
+            let held: Vec<u64> = close_barrier
+                .parked
+                .iter()
+                .chain(deferred_expiry_overflow_deltas.iter())
+                .filter(|delta| delta.kind == SessionDeltaKind::Close && delta.session_id != 0)
+                .map(|delta| delta.session_id)
+                .collect();
+            // Owners are named by the table's session-id namespace (node bit +
+            // worker), the same identity the claim and G1 producers record.
+            let owner = u32::from(sessions.session_id_namespace());
+            for close in directory.sweep(owner, loop_now_ns, &held, &forwards_rg) {
+                let session_id = close.session_id;
+                if !sessions.push_retirement_close(close) {
+                    directory.retry_now(session_id, loop_now_ns);
+                }
+            }
+        }
+    }
     if local_expired > 0 {
         if let Some(binding) = bindings.first() {
             binding

@@ -1416,31 +1416,26 @@ impl SessionTable {
     /// copy runs the same rule; no copy is designated.
     ///
     /// 1. The shared primary row is gone or names another session id: the
-    ///    session's Close was flushed (only that flush removes a claimed row)
-    ///    or a new incarnation replaced it → Silent.
+    ///    session was closed or replaced elsewhere → Silent.
     /// 2. The session is served on this node inside the idle window: by this
     ///    copy in EITHER direction (`own_packet_seen_ns`, the newest packet
     ///    time of the forward copy and its reverse companion; R14 F2), or by
     ///    ANY worker (the shared row's `last_served_ns`, stamped by every
     ///    worker's restamp from the same either-direction value, minting
     ///    worker included; Codex P1 #1, R14 F1) → KeepAlive: the copy stays
-    ///    and is re-stamped to that packet time, so the copy that closes the
-    ///    session exists whichever worker the flow ends on.
-    /// 3. Another copy holds the claim (`close_claim_until_ns`): it owes the
-    ///    Close; wait for its flush, re-checking every GC interval (R1 once
-    ///    the flush removed the row). Once the mark expires without a flush
-    ///    (the claimant exited or lost its Close), CLAIM again with the
-    ///    expired mark as the expected identity and take the obligation over
-    ///    (Codex R15 P1#2). Exactly one taker wins.
+    ///    and is re-stamped to that packet time.
+    /// 3. The node's close-retirement directory already has an entry for this
+    ///    session id: another producer owns (or flushed) the Close → Silent.
+    ///    The entry carries the Close itself, so no copy has to stay for it.
     /// 4. The node looks idle, but the evidence lags by up to one restamp
     ///    cadence (Codex P1 #2, R14 F4): hold for `fence_evidence_cadence_ns`
     ///    + one GC interval, remembering the evidence.
-    /// 5. After the hold, evidence unchanged → CLAIM: atomically mark the
-    ///    shared row pending retirement iff it still reads exactly the
-    ///    remembered evidence. Exactly one copy wins and closes (Codex P1
-    ///    #3/#4, R14 F3); its Close flush removes the row. Evidence changed
-    ///    without fresh service, or the claim lost to a concurrent change →
-    ///    hold again.
+    /// 5. After the hold, evidence unchanged → CLAIM: under the shared-primary
+    ///    lock, iff the row still reads exactly the held evidence, create the
+    ///    directory entry (compare-and-insert, carrying this copy's Close).
+    ///    The one winner closes; a loser finds the entry → Silent. Evidence
+    ///    changed without fresh service → hold again. At the directory's cap
+    ///    the claimant closes anyway (fail safe: at-least-once).
     #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub(crate) fn promote_fence_step(
         &mut self,
@@ -1464,17 +1459,9 @@ impl SessionTable {
                 last_seen_ns: served_ns,
             };
         }
-        if shared.close_claim_until_ns != 0 {
+        if self.close_retirements.contains(session_id) {
             self.promote_fence_holds.remove(key);
-            if now_ns >= shared.close_claim_until_ns && (ha.claim_close)(key, shared) {
-                return PromoteFence::Close;
-            }
-            // Re-check every GC interval: once the claimant's flush removes
-            // the row this copy leaves (R1) within one interval instead of
-            // lingering, idle-crossed, until the mark's deadline.
-            return PromoteFence::Defer {
-                until_ns: now_ns.saturating_add(SESSION_GC_INTERVAL_NS),
-            };
+            return PromoteFence::Silent;
         }
         let hold = self.promote_fence_holds.get(key).copied();
         match hold {
@@ -1483,13 +1470,24 @@ impl SessionTable {
                     until_ns: hold.until_ns,
                 };
             }
-            Some(hold)
-                if hold.armed_last_seen_ns == last_seen_ns
-                    && hold.seen == shared
-                    && (ha.claim_close)(key, shared) =>
-            {
+            Some(hold) if hold.armed_last_seen_ns == last_seen_ns && hold.seen == shared => {
                 self.promote_fence_holds.remove(key);
-                return PromoteFence::Close;
+                let close = self.close_delta_for_live_entry(key);
+                let directory = std::sync::Arc::clone(&self.close_retirements);
+                let retry_at_ns = now_ns.saturating_add(directory.hold_ns());
+                let owner = u32::from(self.session_id_namespace());
+                let mut outcome = None;
+                let mut create = || {
+                    let created = directory.try_create(session_id, owner, retry_at_ns, &close);
+                    outcome = Some(created);
+                    created.emits()
+                };
+                if (ha.claim_close)(key, shared, &mut create) {
+                    return PromoteFence::Close;
+                }
+                if outcome == Some(CreateOutcome::Exists) {
+                    return PromoteFence::Silent;
+                }
             }
             _ => {}
         }
@@ -1507,9 +1505,19 @@ impl SessionTable {
         PromoteFence::Defer { until_ns }
     }
 
-    /// #19026 (R14 G1): whether the restore close fence holds `key`'s copy.
-    pub(in crate::session) fn promote_fence_held(&self, key: &SessionKey) -> bool {
-        self.promote_fence_holds.contains_key(key)
+    /// The Close delta this table would emit for the live entry under `key`
+    /// (built BEFORE removal so the claim can store it in the directory).
+    fn close_delta_for_live_entry(&self, key: &SessionKey) -> SessionDelta {
+        let entry = self
+            .entry_by_key(key)
+            .expect("fence claim: the expiring entry is still in the table");
+        self.expiry_close_delta(
+            key,
+            entry,
+            entry.decision,
+            &entry.metadata,
+            entry.tcp_close_class_wire(),
+        )
     }
 
     /// #19026 cell seam: the fence holds currently armed.

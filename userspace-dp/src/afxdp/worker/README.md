@@ -151,8 +151,12 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     (the other Closes, HA sync, RT_FLOW, the RPC mirror) retires before RX
     polls. The parked Close is retried first on every tick and retires once
     its permit frees. A same-tuple reincarnation that overtakes it is safe:
-    the flush's stale-incarnation fence makes the old Close's teardown and HA
-    close id-conditional.
+    the flush's stale-incarnation fence makes the old Close's local teardown
+    id-conditional, and when the EXACT key (scope included) now holds the
+    reincarnation the old Close's HA legs are skipped altogether. The binary
+    HA Close carries no id, so in routing domain 0 it would be a bare delete
+    of the reincarnation on the peer (Codex R16 F1; see the session README
+    "A superseded old Close sends no HA close").
   - **One order for the ring and the deferred overflow suffix (#10309).** An
     overflow Close that could not retire is kept in
     `deferred_expiry_overflow_deltas` and retried on later ticks AFTER the

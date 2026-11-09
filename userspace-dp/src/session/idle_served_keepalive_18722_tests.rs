@@ -42,7 +42,7 @@ fn ha_with<'a>(
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served,
         shared_row: &|_| None,
-        claim_close: &|_, _| false,
+        claim_close: &|_, _, _| false,
         fence_evidence_cadence_ns: 0,
     }
 }

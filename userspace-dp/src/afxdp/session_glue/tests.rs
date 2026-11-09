@@ -9864,7 +9864,7 @@ fn sync_liveness_refresh_renews_both_session_halves_until_refreshes_stop_16880()
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
             shared_row: &|_| None,
-            claim_close: &|_, _| false,
+            claim_close: &|_, _, _| false,
             fence_evidence_cadence_ns: 0,
         };
         table.expire_stale_entries_ha(now_ns, Some(&ha))
@@ -16527,7 +16527,7 @@ fn arm_standby_hold_clock_5152(table: &mut SessionTable, now_ns: u64) {
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
     node_served: &|_| crate::session::NodeServedEvidence::default(),
     shared_row: &|_| None,
-    claim_close: &|_, _| false,
+    claim_close: &|_, _, _| false,
     fence_evidence_cadence_ns: 0,
     };
     let expired = table.expire_stale_entries_ha(now_ns, Some(&ctx));

@@ -250,6 +250,11 @@ mod pmech_directory;
 // #18562: node-wide read-only view of live #7770 punt seeds (embedded-ICMP
 // matcher only); maintained at this table's insert/remove choke points.
 mod punt_seed_directory;
+// #19026: the node's one owner of a restored session's Close obligation.
+mod close_retirement;
+pub(crate) use close_retirement::{CloseRetirementDirectory, CreateOutcome};
+#[cfg(test)]
+pub(crate) use close_retirement::Retirement;
 pub(crate) mod pptp;
 pub(crate) mod pptp_control;
 // #7188: `WireDiscriminator` is exported alongside the class enum because the
@@ -2044,6 +2049,9 @@ pub(crate) struct SessionTable {
     /// in `SharedSessionOwnerRgIndexes::punt_seeds`. Written only by
     /// `insert_record` / `remove_entry` / `refresh_in_place` / `Drop` below.
     punt_seeds: std::sync::Arc<PuntSeedDirectory>,
+    /// #19026: the node's close-retirement directory (`set_close_retirement_directory`;
+    /// a private one until the worker hands over the node's).
+    close_retirements: std::sync::Arc<CloseRetirementDirectory>,
     /// #18562: this table's identity in `punt_seeds` (retire fence).
     punt_seed_table_token: u64,
     /// #7699: the PPTP call associations THIS worker can resolve.
@@ -2584,6 +2592,7 @@ impl SessionTable {
         Self {
             rg_epoch_reader: None,
             punt_seeds: std::sync::Arc::new(PuntSeedDirectory::new()),
+            close_retirements: std::sync::Arc::new(CloseRetirementDirectory::default()),
             punt_seed_table_token: punt_seed_directory::next_punt_seed_table_token(),
             pptp: crate::session::pptp::PptpAssociations::default(),
             // Start with an empty slab and let it grow on demand.
@@ -2789,6 +2798,25 @@ impl SessionTable {
     /// #18562: share the node's punt-seed directory with this table. Called
     /// once from `worker_loop`, on an empty table (any row this table had
     /// published to its previous directory is retired first).
+    /// #19026: share the node's close-retirement directory with this table.
+    pub(crate) fn set_close_retirement_directory(
+        &mut self,
+        directory: std::sync::Arc<CloseRetirementDirectory>,
+    ) {
+        self.close_retirements = directory;
+    }
+
+    /// #19026: the node's close-retirement directory.
+    pub(crate) fn close_retirement_directory(&self) -> &std::sync::Arc<CloseRetirementDirectory> {
+        &self.close_retirements
+    }
+
+    /// #19026: queue a Close owed by the close-retirement directory (a
+    /// takeover). `false` = the ring is full; the entry stays due.
+    pub(crate) fn push_retirement_close(&mut self, delta: SessionDelta) -> bool {
+        self.push_expiry_close_delta(delta)
+    }
+
     pub(crate) fn set_punt_seed_directory(&mut self, directory: std::sync::Arc<PuntSeedDirectory>) {
         self.punt_seeds.retire_table(self.punt_seed_table_token);
         self.punt_seeds = directory;

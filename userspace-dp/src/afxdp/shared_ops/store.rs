@@ -423,17 +423,7 @@ pub(in crate::afxdp) fn publish_shared_session(
             // #19026: the node-level serving evidence is monotonic per
             // incarnation too (the restore close fence reads it).
             let keep_last_served = same && entry.last_served_ns < previous.last_served_ns;
-            // #19026: a same-incarnation republication must not erase a
-            // pending close claim (the claimant still owes the Close).
-            let keep_close_claim =
-                same && entry.close_claim_until_ns < previous.close_claim_until_ns;
-            if keep_stage
-                || keep_rev
-                || keep_fwd
-                || keep_sibling_last_seen
-                || keep_last_served
-                || keep_close_claim
-            {
+            if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen || keep_last_served {
                 entry_owned = entry.clone();
                 if keep_stage {
                     entry_owned.tcp_handshake_state = previous.tcp_handshake_state;
@@ -449,9 +439,6 @@ pub(in crate::afxdp) fn publish_shared_session(
                 }
                 if keep_last_served {
                     entry_owned.last_served_ns = previous.last_served_ns;
-                }
-                if keep_close_claim {
-                    entry_owned.close_claim_until_ns = previous.close_claim_until_ns;
                 }
                 &entry_owned
             } else {
@@ -1784,7 +1771,7 @@ mod handshake_monotonic_16223_tests {
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
             shared_row: &|_| None,
-            claim_close: &|_, _| false,
+            claim_close: &|_, _, _| false,
             fence_evidence_cadence_ns: 0,
         };
         let _ = table.expire_stale_entries_ha(t0 + 12 * SEC, Some(&ha));
