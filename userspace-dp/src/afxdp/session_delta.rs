@@ -621,10 +621,16 @@ pub(in crate::afxdp) fn export_close_direct(
 // passes ~1000. The first bulk failure of a cycle now sets this latch and every
 // later call this cycle seeds `bulk_loss_this_batch` from it, so the cycle's
 // lossless wait is at most one budget per kind (two in all, pinned by the
-// compile-time assert beside `WORKER_LOSSLESS_QUEUE_BUDGET`). Skipped bulk
-// deltas take the non-arming RPC-fallback route, exactly like the rest of a
-// batch after its first bulk failure, and a bulk failure still never sets
-// `worker_lossless_wedged` or the return value (#14646).
+// compile-time assert beside `WORKER_LOSSLESS_QUEUE_BUDGET`). A bulk failure
+// still never sets `worker_lossless_wedged` or the return value (#14646).
+// What happens to the rest of the export depends on the failure: a TIMEOUT
+// (the push waited the whole budget, so the stream was connected) keeps the
+// resync owed
+// (`SessionTable::owe_resync_after_refused_export`) and the export stops at
+// its next chunk, so the next iteration re-exports everything and pays its own
+// single bulk budget; only the deltas already in the ring take the non-arming
+// RPC-fallback route. An immediate failure (a DISCONNECTED stream) re-arms
+// nothing (#14646: the reconnect FullResync covers it).
 pub(super) fn flush_session_deltas(
     ident: &BindingIdentity,
     live: Option<&BindingLiveState>,
@@ -997,14 +1003,26 @@ pub(super) fn flush_session_deltas(
                 // out of the lossless session-sync stream while letting the
                 // best-effort telemetry frames below run normally.
                 // #14646: a bulk_resync (LossResync) delta that cannot be
-                // queued does NOT re-arm the latch — the same non-arming
-                // contract as the RPC fallback leg above (#8593). During
-                // this very resync the caller has already consumed the
-                // latch (`take_delta_loss`), and reconnect already
-                // triggers a FullResync, so re-arming here would make
-                // every worker re-export its whole owned table on every
-                // pass for the whole event-stream outage. A genuinely
-                // new incremental drop (bulk_resync=false) still arms.
+                // queued while the stream is DISCONNECTED does NOT re-arm
+                // the latch — the same non-arming contract as the RPC
+                // fallback leg above (#8593). During this very resync the
+                // caller has already consumed the latch
+                // (`take_delta_loss`), and reconnect triggers a
+                // FullResync, so re-arming here would make every worker
+                // re-export its whole owned table on every pass for the
+                // whole event-stream outage. A genuinely new incremental
+                // drop (bulk_resync=false) still arms.
+                // #18780: a bulk push that TIMED OUT (waited the whole
+                // budget, which only a connected stream can make it do) is
+                // different: no reconnect follows a stall that simply
+                // ends, so no FullResync covers the rest of the export. It
+                // keeps the resync owed (`owe_resync_after_refused_export`:
+                // re-armed for the next iteration, which pays its own
+                // single bulk budget, so the retry rate is at most one per
+                // budget) and the export stops instead of filling the
+                // bounded fallback. An immediate failure (not connected, or
+                // a dead producer) does not re-arm. It still never sets the
+                // return value or the #5468 incremental wedge.
                 // The event-stream gate therefore cannot be the shared
                 // `event_stream_out_of_sync` flag: a still-unfired prior
                 // wedge (this cycle) must not mask the first bulk attempt,
@@ -1013,8 +1031,10 @@ pub(super) fn flush_session_deltas(
                 // return value, and the #5468 wedge, stay attributable to
                 // non-bulk failures only). Attempts stop at the first
                 // failure of EITHER kind this drain — the remainder is
-                // superseded by the resync the genuine drop schedules,
-                // or by the reconnect FullResync for bulk-only loss — and
+                // superseded by the resync the genuine drop schedules, by
+                // the owed resync a connected bulk timeout re-arms
+                // (#18780), or by the reconnect FullResync for bulk loss
+                // on a disconnected stream — and
                 // BOTH gates are seeded from per-drain-cycle latches
                 // (#5468 incremental, #18780 bulk), so the per-cycle
                 // lossless wait is at most one budget per kind:
@@ -1026,6 +1046,9 @@ pub(super) fn flush_session_deltas(
                     !event_stream_out_of_sync
                 };
                 if gate_open && delta.origin != crate::session::SessionOrigin::MissingNeighborSeed {
+                    // #18780: a bulk attempt's start, to tell a TIMEOUT (it
+                    // waited the whole budget) from an immediate failure.
+                    let bulk_attempt_started = delta.bulk_resync.then(std::time::Instant::now);
                     match es.push_delta_lossless_within_seq(
                         delta,
                         zone_name_to_id,
@@ -1050,6 +1073,22 @@ pub(super) fn flush_session_deltas(
                             if delta.bulk_resync {
                                 bulk_loss_this_batch = true;
                                 es.record_dropped_frames(1);
+                                // #18780: the push waited the WHOLE budget,
+                                // i.e. it timed out on a connected stream
+                                // (`send_lossless_encoded` returns at once
+                                // when the stream is not connected, and
+                                // early on a disconnect mid-wait) — keep the
+                                // resync owed (see above). Keyed on the
+                                // timeout, not on a connected flag, so the
+                                // re-arm can never outpace one per budget.
+                                let timed_out = bulk_attempt_started.is_some_and(|started| {
+                                    started.elapsed() >= WORKER_LOSSLESS_QUEUE_BUDGET
+                                });
+                                if timed_out
+                                    && let Some(table) = current_sessions.as_deref_mut()
+                                {
+                                    table.owe_resync_after_refused_export();
+                                }
                             } else {
                                 event_stream_out_of_sync = true;
                                 eprintln!(

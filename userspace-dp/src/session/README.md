@@ -899,6 +899,17 @@ The rest of the contract:
     #5468 incremental one, so one iteration waits at most one budget per kind
     (`expiry_continuation_resync_waits_one_budget_per_kind_18780`,
     `loss_resync_of_live_rows_waits_one_bulk_budget_per_cycle_18780`).
+  - Closing the bulk gate must not drop the resync (review cycle 2, R9 P1 /
+    R7 N1): the rest of the export would land in the binding's 4,096-slot
+    RPC fallback, whose bulk overflow drops without arming, and a stall that
+    ends without a reconnect brings no FullResync. A bulk push that times
+    out (waits its whole budget, which only a connected stream does)
+    therefore keeps the resync owed
+    (`owe_resync_after_refused_export`) and the export stops at its next
+    chunk; the next iteration re-exports everything
+    (`transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780`).
+    A disconnected stream does not re-arm (#14646;
+    `bulk_refusal_on_a_disconnected_stream_does_not_owe_the_resync_18780`).
   - The residual: while the stream stays unread, a cohort drains at 256 reaps
     per iteration of up to ~2 s (two budgets), and its rows keep their NAT
     ports and session-limit slots until reaped. Pressure-shed admission

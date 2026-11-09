@@ -2372,6 +2372,10 @@ pub(crate) struct SessionTable {
     /// deltas before the worker reads it raises EXACTLY ONE resync (debounce by
     /// construction — see `take_delta_loss`).
     delta_loss_pending: bool,
+    /// #18780: the event stream refused a bulk (LossResync) push this cycle
+    /// while CONNECTED, so the resync was re-armed and the running export
+    /// should stop (`owe_resync_after_refused_export`).
+    resync_export_refused: bool,
     delta_drained: u64,
     /// #1760: cumulative count of NAT reverse-key displacement events on
     /// `nat_reverse_index`. Incremented whenever the per-flow secondary-
@@ -2715,6 +2719,7 @@ impl SessionTable {
             policy_revalidation_loud_declines: 0,
             delta_drops: 0,
             delta_loss_pending: false,
+            resync_export_refused: false,
             delta_drained: 0,
             nat_reverse_key_collisions: 0,
             nat_reverse_key_collisions_distinct_src: 0,
@@ -7683,6 +7688,37 @@ impl SessionTable {
     #[inline]
     pub fn set_delta_loss(&mut self) {
         self.delta_loss_pending = true;
+    }
+
+    /// #18780: a LossResync bulk push timed out on a CONNECTED event stream —
+    /// the consumer stalled mid-export. The rest of this cycle's bulk sends
+    /// skip the stream (one budget per kind per cycle), and a stall that ends
+    /// without a reconnect triggers no FullResync, so the resync must stay
+    /// OWED: re-arm the latch for the next iteration and tell the running
+    /// export to stop (`take_resync_export_refused`) instead of routing the
+    /// rest of the owned set into the bounded RPC fallback, whose bulk
+    /// overflow drops without arming (#8593). Only a push that waited its WHOLE
+    /// budget comes here, so this re-arms at most once per budget. An
+    /// immediate failure (a DISCONNECTED stream) does not: reconnect runs a
+    /// FullResync, and re-arming per pass would be the #14646 outage storm.
+    #[inline]
+    pub fn owe_resync_after_refused_export(&mut self) {
+        self.delta_loss_pending = true;
+        self.resync_export_refused = true;
+    }
+
+    /// #18780: read-and-clear the "export refused" flag set by
+    /// `owe_resync_after_refused_export`. The resync export checks it between
+    /// chunks and stops; the loss latch it set stays armed.
+    #[inline]
+    pub fn take_resync_export_refused(&mut self) -> bool {
+        std::mem::take(&mut self.resync_export_refused)
+    }
+
+    /// #18780: peek the loss-of-sync latch without clearing it (tests).
+    #[cfg(test)]
+    pub fn delta_loss_pending(&self) -> bool {
+        self.delta_loss_pending
     }
 
     /// #2442: cumulative count of deltas dropped on ring overflow. Surfaced for

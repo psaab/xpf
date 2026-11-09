@@ -101,6 +101,15 @@ pub(super) fn run_delta_recovery(
                     u64::MAX,
                 );
                 for chunk in candidates.chunks(RESYNC_EXPORT_CHUNK) {
+                    // #18780: a bulk push the CONNECTED stream refused while
+                    // the previous chunk drained has re-armed this resync
+                    // (`owe_resync_after_refused_export`). The next iteration
+                    // re-exports the whole owned set, so stop here: the rest
+                    // would only fill the bounded RPC fallback, whose bulk
+                    // overflow drops without arming (#8593).
+                    if sessions.take_resync_export_refused() {
+                        break;
+                    }
                     for (key, decision, metadata, origin) in chunk.iter().cloned() {
                         sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
                     }
@@ -235,6 +244,8 @@ pub(super) fn run_delta_recovery(
         //
         // Drain the existing backlog so the ring starts empty.
         let mut deferred_delta_cleanup = false;
+        // #18780: a refusal is per export; start this one clean.
+        let _ = sessions.take_resync_export_refused();
         if !crate::afxdp::worker::loop_body::housekeeping::drain_and_flush_all_impl(
             sessions,
             bindings,
@@ -286,7 +297,12 @@ pub(super) fn run_delta_recovery(
         // site on purpose: a future drain site that passed the flag wrongly
         // would SUPPRESS a genuine arm, silently, and here it does not
         // choose. So the claim above is true again, and for both rings: any
-        // latch set from here on is a genuinely-new incremental drop.
+        // latch set from here on is a genuinely-new incremental drop — or,
+        // since #18780, this export's own bulk push timing out on a CONNECTED
+        // stream (`owe_resync_after_refused_export`). That re-arm is
+        // deliberate and rate-bounded: the next export pays its own single
+        // bulk budget before it can be refused again, and a disconnected
+        // stream never re-arms (#14646).
     }
     false
 }

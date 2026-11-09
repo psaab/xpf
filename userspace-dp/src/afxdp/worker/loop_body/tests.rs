@@ -3110,7 +3110,17 @@ mod expiry_resync_lossless_wait_18780_tests {
         Option<crate::event_stream::EventStreamWorkerHandle>,
         std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
     ) {
-        let capacity = 4usize;
+        unread_full_stream_with(4)
+    }
+
+    /// A connected event stream of `capacity` frames, already full, with the
+    /// receiver handed back so a cell can start reading it later.
+    fn unread_full_stream_with(
+        capacity: usize,
+    ) -> (
+        Option<crate::event_stream::EventStreamWorkerHandle>,
+        std::sync::mpsc::Receiver<crate::event_stream::EventFrame>,
+    ) {
         let (handle, rx) = crate::event_stream::test_worker_handle_connected(
             capacity,
             crate::event_stream::DataplaneEventRateLimitConfig::default(),
@@ -3295,6 +3305,200 @@ mod expiry_resync_lossless_wait_18780_tests {
                  the bulk kind, and still attempt once per cycle (#14646): {reports:?}"
             );
         }
+    }
+
+    struct Resync {
+        incremental_waits: u64,
+        bulk_waits: u64,
+    }
+
+    /// One iteration's `run_delta_recovery` alone (the resync), flushing
+    /// through `flush_session_deltas_loop` with fresh per-iteration latches and
+    /// a REAL binding, so stream-refused deltas land in its bounded RPC
+    /// fallback (`MAX_PENDING_SESSION_DELTAS`) exactly as in production.
+    fn run_resync(
+        sessions: &mut SessionTable,
+        bindings: &mut [BindingWorker],
+        now_ns: u64,
+        event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
+    ) -> Resync {
+        let forwarding = ForwardingState::default();
+        let shared = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat = Arc::new(Mutex::new(FastMap::default()));
+        let shared_wire = Arc::new(Mutex::new(FastMap::default()));
+        let indexes = SharedSessionOwnerRgIndexes::default();
+        let recent = Arc::new(Mutex::new(VecDeque::new()));
+        let channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let reader = channel.reader();
+        let lookup = WorkerBindingLookup::default();
+        let commands = crate::afxdp::empty_worker_commands_by_id();
+        let mut worker_lossless_wedged = false;
+        let mut worker_bulk_lossless_wedged = false;
+        let mut flush_deltas = |sessions: &mut SessionTable,
+                                bindings: &mut [BindingWorker],
+                                wedged: &mut bool,
+                                deltas: &[SessionDelta]| {
+            flush_session_deltas_loop(
+                sessions,
+                bindings,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &shared,
+                &shared_nat,
+                &shared_wire,
+                &indexes,
+                &recent,
+                &[],
+                commands,
+                event_stream,
+                &forwarding,
+                &reader,
+                wedged,
+                &mut worker_bulk_lossless_wedged,
+                WORKER,
+                deltas,
+            );
+        };
+        let before = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
+        let skipped = run_delta_recovery(
+            sessions,
+            bindings,
+            &lookup,
+            &forwarding,
+            0,
+            WORKER,
+            now_ns,
+            -1,
+            -1,
+            &[],
+            true,
+            SteeringMap::unshared_for_test(-1),
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            &indexes,
+            &mut 0,
+            &mut crate::afxdp::session_glue::DeleteDropSweep::default(),
+            &mut crate::afxdp::session_glue::InstallTablePurge::default(),
+            &mut Vec::new(),
+            &reader,
+            &mut worker_lossless_wedged,
+            &mut flush_deltas,
+        );
+        assert!(!skipped, "premise: no deferred cleanup");
+        let after = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
+        Resync {
+            incremental_waits: after.0 - before.0,
+            bulk_waits: after.1 - before.1,
+        }
+    }
+
+    /// #18780 cycle 2 (R9 P1, R7 N1): a TRANSIENT consumer stall must not lose
+    /// the resync. 6,000 owned rows, loss armed without any incremental failure
+    /// this cycle (the ring- or fallback-overflow trigger), a connected stream
+    /// that is full at the first bulk push.
+    /// - Iteration 1 (stalled): one bulk budget, then the resync stays OWED and
+    ///   the export stops, so the bounded fallback takes at most one chunk and
+    ///   drops nothing.
+    /// - The consumer resumes WITHOUT a reconnect (so no FullResync).
+    /// - Iteration 2: the owed resync delivers every owned row on the stream.
+    /// RED at 40c98be80e: the per-cycle latch routed the rest of the export to
+    /// the fallback (R7 measured 0 rows streamed, 1,904 dropped) and nothing
+    /// re-armed it.
+    #[test]
+    fn transient_consumer_stall_keeps_the_resync_owed_and_delivers_it_18780() {
+        use std::sync::atomic::AtomicBool;
+        let t0 = 1_000 * SEC;
+        let owned = 6_000u32;
+        let fillers = 64usize;
+        let mut sessions = SessionTable::new();
+        for i in 0..owned {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        sessions.set_delta_loss();
+        let (event_stream, rx) = unread_full_stream_with(fillers);
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
+        let stalled = run_resync(&mut sessions, &mut bindings, t0 + 10 * SEC, &event_stream);
+        assert_eq!(stalled.incremental_waits, 0, "premise: no incremental send this cycle");
+        assert_eq!(stalled.bulk_waits, 1, "premise: the stalled export waited one bulk budget");
+        assert!(
+            sessions.delta_loss_pending(),
+            "#18780 (R9 P1 cycle 2): a bulk push the CONNECTED stream refused must keep the \
+             resync owed; no reconnect FullResync follows a stall that just ends"
+        );
+        let after_stall = bindings[0].live.snapshot();
+        assert_eq!(
+            after_stall.session_delta_dropped, 0,
+            "#18780 (R7 N1): the refused export must stop, not overflow the 4,096-slot fallback \
+             ({} pending)",
+            after_stall.session_delta_pending
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let reader_stop = stop.clone();
+        let reader = std::thread::spawn(move || {
+            let mut frames = 0u64;
+            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                match rx.recv_timeout(std::time::Duration::from_millis(20)) {
+                    Ok(_) => frames += 1,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                    Err(_) => break,
+                }
+            }
+            while rx.try_recv().is_ok() {
+                frames += 1;
+            }
+            frames
+        });
+        let resumed = run_resync(&mut sessions, &mut bindings, t0 + 10 * SEC + 1_000, &event_stream);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let frames = reader.join().expect("reader thread");
+        assert_eq!(resumed.bulk_waits, 0, "the resumed consumer took the owed export");
+        assert!(!sessions.delta_loss_pending(), "a delivered resync is no longer owed");
+        let after = bindings[0].live.snapshot();
+        assert_eq!(after.session_delta_dropped, 0, "#18780: no resync delta was dropped");
+        assert!(
+            frames >= u64::from(owned) + fillers as u64,
+            "#18780: every owned row reached the stream once the consumer resumed \
+             ({frames} frames for {owned} rows + {fillers} fillers)"
+        );
+    }
+
+    /// #14646 kept (the other half of the cycle-2 fix): a bulk push refused by
+    /// a DISCONNECTED stream does not re-arm and does not stop the export —
+    /// the reconnect FullResync covers it, and re-arming per pass would be the
+    /// outage-long re-export storm #14646 removed. The export runs to the end
+    /// into the fallback (600 rows, under its capacity).
+    #[test]
+    fn bulk_refusal_on_a_disconnected_stream_does_not_owe_the_resync_18780() {
+        let t0 = 1_000 * SEC;
+        let owned = 600u32;
+        let mut sessions = SessionTable::new();
+        for i in 0..owned {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        sessions.set_delta_loss();
+        let (handle, _rx) = crate::event_stream::test_worker_handle(
+            4,
+            crate::event_stream::DataplaneEventRateLimitConfig::default(),
+        );
+        let event_stream = Some(handle);
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
+        let it = run_resync(&mut sessions, &mut bindings, t0 + 10 * SEC, &event_stream);
+        assert_eq!(it.bulk_waits, 1, "premise: the first bulk push failed (instantly)");
+        assert!(
+            !sessions.delta_loss_pending(),
+            "#14646: a disconnected stream's bulk refusal must not re-arm the resync"
+        );
+        let snap = bindings[0].live.snapshot();
+        assert_eq!(
+            snap.session_delta_pending,
+            u64::from(owned),
+            "#14646: the export is not stopped on a disconnected stream; every row reaches the fallback"
+        );
+        assert_eq!(snap.session_delta_dropped, 0);
     }
 
     /// SOURCE PIN for the cycle scope of the bulk latch. `worker_loop` is
