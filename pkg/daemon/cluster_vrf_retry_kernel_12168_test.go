@@ -64,12 +64,37 @@ func isolatedVRFRetryChild12168(t *testing.T) bool {
 	return false
 }
 
+// isolateXPFStateDir12168 makes /var/lib/xpf resolve to dir inside this
+// child's private mount namespace, so the cluster's keyed state (boot epoch,
+// peer epoch, fabric-auth grace: unexported paths under /var/lib/xpf in
+// pkg/cluster) starts empty and never touches the host's.
+//
+// The bind needs a mount point. A host with xpf installed has /var/lib/xpf; a
+// fresh test-runner VM does not (#19066). The bind then failed with ENOENT,
+// which the package guard's refusal of this cell's child had masked since
+// testguard. With no /var/lib/xpf, a tmpfs on /var/lib inside the namespace
+// supplies the mount point, and nothing is created on the host.
+func isolateXPFStateDir12168(dir string) error {
+	const xpfState = "/var/lib/xpf"
+	if _, err := os.Stat(xpfState); errors.Is(err, os.ErrNotExist) {
+		if err := unix.Mount("tmpfs", "/var/lib", "tmpfs", 0, "size=1m,mode=0755"); err != nil {
+			return fmt.Errorf("mount a private tmpfs on /var/lib for the missing %s mount point: %w", xpfState, err)
+		}
+		if err := os.Mkdir(xpfState, 0o755); err != nil {
+			return fmt.Errorf("create the %s mount point on the private tmpfs: %w", xpfState, err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("stat %s: %w", xpfState, err)
+	}
+	return unix.Mount(dir, xpfState, "", unix.MS_BIND, "")
+}
+
 func newKernelVRFRetryFixture12168(t *testing.T) (*Daemon, *config.Config, netlink.Link, netlink.Link) {
 	t.Helper()
 	installFakeNetworkctl(t)
 	useTemporaryDNSReconciler12168(t)
 	stateDir := t.TempDir()
-	if err := unix.Mount(stateDir, "/var/lib/xpf", "", unix.MS_BIND, ""); err != nil {
+	if err := isolateXPFStateDir12168(stateDir); err != nil {
 		t.Fatalf("cannot isolate keyed heartbeat epoch state: %v", err)
 	}
 	t.Cleanup(func() {
@@ -660,7 +685,7 @@ func newDualFabricVRFFixture12168(t *testing.T, includeFab1 bool) *Daemon {
 	t.Helper()
 	installFakeNetworkctl(t)
 	stateDir := t.TempDir()
-	if err := unix.Mount(stateDir, "/var/lib/xpf", "", unix.MS_BIND, ""); err != nil {
+	if err := isolateXPFStateDir12168(stateDir); err != nil {
 		t.Fatalf("cannot isolate keyed heartbeat epoch state: %v", err)
 	}
 	t.Cleanup(func() {
