@@ -62,9 +62,11 @@ fi
 # namespace. A fresh network namespace starts with net.ipv4.ping_group_range
 # at the kernel default "1 0" (no group), so icmp.ListenPacket("udp4"/"udp6")
 # fails with EACCES for every caller, uid 0 included — the check is by group,
-# not capability. Every host the product runs on has the systemd default
-# "0 2147483647". The product's ICMP prober (pkg/cluster ip-monitoring) and
-# tunnel keepalive (pkg/routing) open exactly these sockets, so under the old
+# not capability. A systemd host gets "0 2147483647" from systemd's own
+# 50-default.conf (the Ubuntu appliance image is one); xpf itself pins no
+# value (it ships no sysctl.d file for it). The product's ICMP prober
+# (pkg/cluster ip-monitoring) and tunnel keepalive (pkg/routing) open
+# exactly these sockets, so under the old
 # namespace the real prober could not open a socket at all and its cells read
 # "probe not completed": TestIPMonitorPrimaryDualStackDemotes16425 was red on
 # every testguard run. The sysctl is per network namespace, so the host's

@@ -17,53 +17,57 @@ const admissionSwapConfig11675 = `system {
     login {
         class planter { permissions [ view configure ]; }
         user opuser { class planter; }
+        user plantop { class planter; }
         user superop { class super-user; }
     }
 }`
 
 // TestGRPCAdmissionSwapKeepsJournalAndEventStampClass11675 drives the exact
 // admission-to-handler window: Set and Commit are each admitted as planter,
-// and the live login model then resolves the same peer as super-user before
-// the admitted handler runs. The deferred event-options payload and durable
-// commit journal must retain the admitted class rather than resolving
-// separate live snapshots.
+// and the peer's class is changed to super-user before the admitted handler
+// runs. The deferred event-options payload and durable commit journal must
+// retain the admitted class rather than resolving separate live snapshots.
 //
-// HOW THE PEER IS RECLASSED, and why it changed (#19049). This test used to
-// admit BOTH RPCs, then reclass by loading and committing a new login model
-// (LoadOverride + Commit), then run both handlers. Since #16611 (a246314472)
-// a Commit is bound to the candidate generation its admission priced, and
-// promotion refuses it when the candidate moved — which that sequence did
-// twice (the reload, then the admitted Set). The commit was refused, re-priced
-// against the planter class, and the test went red on every run from then on
-// for a reason unrelated to the property below.
+// The peer's class resolves uid -> account (passwd) -> class (the ACTIVE login
+// model). A handler that re-resolved it could go wrong through either link,
+// so the two legs reclass through different links (#19049):
 //
-// The reclass therefore must not move the candidate. The peer's class is
-// resolved uid -> account (passwd) -> class (active login model), so the
-// reclass rewrites the account side: uid authzUIDOperator resolves to opuser
-// (class planter) at admission and to superop (class super-user, in the same
-// active config) when the handler runs. The pre-#11675 handlers re-resolved
-// the principal from that same live chain, so they stamp super-user here
-// exactly as they did under the config reclass.
+//   - SET leg: through the LOGIN MODEL. After admission, opuser's class is
+//     changed in the active config (LoadOverride + Commit) and the handler
+//     runs. A handler that re-reads the class from the live config, by uid or
+//     by the admitted username, stamps super-user. Set is not bound to a
+//     candidate generation, so moving the candidate here is allowed.
+//   - COMMIT leg: through the ACCOUNT. Since #16611 (a246314472) a Commit is
+//     bound to the candidate generation its admission priced, and promotion
+//     refuses it when the candidate moved, so a login-model reload between
+//     admission and handling is no longer possible there. (This test used to
+//     reload for both legs after admitting both, and was red on every run
+//     from #16611 on.) Instead uid authzUIDOperator resolves to plantop
+//     (planter) at admission and to superop (super-user, same active config)
+//     when the handler runs, with the candidate untouched.
 //
-// Each RPC is admitted on planter and handled on super-user, in the order
-// #16611 permits: Set is admitted and handled first; then Commit is admitted
-// on the candidate the Set produced, so its priced generation is the one it
-// promotes.
+// Each leg asserts its premise (the live class really changed) before the
+// handler runs.
 func TestGRPCAdmissionSwapKeepsJournalAndEventStampClass11675(t *testing.T) {
 	passwdPath := filepath.Join(t.TempDir(), "passwd")
-	asPlanter := authzPasswd5278
-	asSuperUser := strings.Replace(authzPasswd5278,
-		"opuser:x:4243:4243::/home/opuser:", "superop:x:4243:4243::/home/superop:", 1)
-	if asSuperUser == asPlanter {
-		t.Fatal("fixture: the passwd remap did not change uid 4243's account")
+	accountFor := func(name string) string {
+		if name == "opuser" {
+			return authzPasswd5278
+		}
+		return strings.Replace(authzPasswd5278,
+			"opuser:x:4243:4243::/home/opuser:", name+":x:4243:4243::/home/"+name+":", 1)
 	}
-	resolveAs := func(what, passwd string) {
+	resolveAs := func(name string) {
 		t.Helper()
+		passwd := accountFor(name)
+		if name != "opuser" && passwd == authzPasswd5278 {
+			t.Fatalf("fixture: the passwd remap to %s did not change uid 4243's account", name)
+		}
 		if err := os.WriteFile(passwdPath, []byte(passwd), 0o600); err != nil {
-			t.Fatalf("%s: %v", what, err)
+			t.Fatalf("resolve uid 4243 as %s: %v", name, err)
 		}
 	}
-	resolveAs("resolve the peer as opuser (planter)", asPlanter)
+	resolveAs("opuser")
 	t.Cleanup(authz.SetPasswdPathForTest(passwdPath))
 
 	store := authzStore5278(t, admissionSwapConfig11675)
@@ -91,31 +95,42 @@ func TestGRPCAdmissionSwapKeepsJournalAndEventStampClass11675(t *testing.T) {
 		t.Fatalf("premise: the peer resolves to class %q before any reclass, want planter", got)
 	}
 
+	// SET leg: admitted as opuser/planter, reclassed in the LOGIN MODEL.
 	setReq := &pb.SetRequest{Input: `event-options policy p then change-configuration commands "set system host-name grpc-stamped"`}
 	setCtx, err := s.authorizeRPCContext(ctxWithPeerUID(authzUIDOperator), pb.BpfrxService_Set_FullMethodName, setReq)
 	if err != nil {
 		t.Fatalf("admit Set as planter: %v", err)
 	}
-	// The reclassification lands after Set was admitted but before its
-	// handler runs. The old handler re-resolves this peer as super-user here.
-	resolveAs("reclass the peer to superop (super-user) before the Set handler", asSuperUser)
+	reclassed := strings.Replace(admissionSwapConfig11675, "user opuser { class planter; }", "user opuser { class super-user; }", 1)
+	if reclassed == admissionSwapConfig11675 {
+		t.Fatal("fixture: the login-model reclass did not change opuser's class")
+	}
+	if err := store.LoadOverride(reclassed); err != nil {
+		t.Fatalf("LoadOverride reclassed login model: %v", err)
+	}
+	if _, err := store.Commit(); err != nil {
+		t.Fatalf("Commit reclassed login model: %v", err)
+	}
 	if got := liveClass(); got != "super-user" {
-		t.Fatalf("premise: the reclass left the live class at %q, want super-user", got)
+		t.Fatalf("premise: the login-model reclass left the live class at %q, want super-user", got)
 	}
 	if _, err := s.Set(setCtx, setReq); err != nil {
 		t.Fatalf("Set admitted before reclassification: %v", err)
 	}
 
-	// Commit is admitted as planter on the candidate the Set produced, then
-	// the same reclassification lands before its handler runs.
-	resolveAs("restore the peer to opuser (planter) for the Commit admission", asPlanter)
+	// COMMIT leg: admitted as plantop/planter on the candidate the Set
+	// produced, reclassed through the ACCOUNT so that candidate stays put.
+	resolveAs("plantop")
+	if got := liveClass(); got != "planter" {
+		t.Fatalf("premise: uid 4243 as plantop resolves to %q, want planter", got)
+	}
 	commitCtx, err := s.authorizeRPCContext(ctxWithPeerUID(authzUIDOperator), pb.BpfrxService_Commit_FullMethodName, &pb.CommitRequest{})
 	if err != nil {
 		t.Fatalf("admit Commit as planter: %v", err)
 	}
-	resolveAs("reclass the peer to superop (super-user) before the Commit handler", asSuperUser)
+	resolveAs("superop")
 	if got := liveClass(); got != "super-user" {
-		t.Fatalf("premise: the reclass left the live class at %q, want super-user", got)
+		t.Fatalf("premise: the account reclass left the live class at %q, want super-user", got)
 	}
 
 	const journalDetail = "admission-swap-11675"
