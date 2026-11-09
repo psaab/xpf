@@ -130,6 +130,11 @@ eq "udp TARGET_ALIAS_V4"  "$(resolve TARGET_ALIAS_V4 BPFRX_CLUSTER_ENV=test/incu
 # #18576: an EMPTY alias means "no alias" (mouse-target-setup.sh), so it
 # must stay empty rather than be re-derived from IPERF_TARGET4.
 eq "loss empty TARGET_ALIAS_V4 stays empty" "$(resolve TARGET_ALIAS_V4 TARGET_ALIAS_V4=)" ""
+# #19022: who serves iperf3 5200-5211 on the target is declared per cluster.
+eq "loss MOUSE_TARGET_IPERF_PROVIDER" "$(resolve MOUSE_TARGET_IPERF_PROVIDER)" "units"
+eq "tcp MOUSE_TARGET_IPERF_PROVIDER"  "$(resolve MOUSE_TARGET_IPERF_PROVIDER BPFRX_CLUSTER_ENV=test/incus/tcp-userspace-cluster.env)" "socket"
+eq "udp MOUSE_TARGET_IPERF_PROVIDER"  "$(resolve MOUSE_TARGET_IPERF_PROVIDER BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env)" "socket"
+eq "legacy env MOUSE_TARGET_IPERF_PROVIDER" "$(resolve MOUSE_TARGET_IPERF_PROVIDER BPFRX_CLUSTER_ENV=)" "units"
 # Legacy (no remote): names stay bare, refs unqualified (#16328).
 eq "legacy MOUSE_TARGET_REF" "$(resolve MOUSE_TARGET_REF BPFRX_CLUSTER_ENV=)" "xpf-mouse-target"
 eq "legacy DMZ_TARGET_REF"   "$(resolve DMZ_TARGET_REF BPFRX_CLUSTER_ENV=)"   "xpf-zone-matrix-dmz"
@@ -230,6 +235,10 @@ for mode in shell child; do
 	eq "tcp then loss (${mode}) FW0"              "$(seq_resolve "$mode" FW0 "$TCP_ENV" "$LOSS_ENV")"              "loss:xpf-userspace-fw0"
 	eq "loss then tcp (${mode}) MOUSE_TARGET_V4"  "$(seq_resolve "$mode" MOUSE_TARGET_V4 "$LOSS_ENV" "$TCP_ENV")"  "172.16.80.210"
 	eq "loss then tcp (${mode}) MOUSE_TARGET_REF" "$(seq_resolve "$mode" MOUSE_TARGET_REF "$LOSS_ENV" "$TCP_ENV")" "tcp:xpf-tcp-target"
+	# #19022: tcp's `socket` must not survive into loss (whose target is
+	# served by mouse-iperf3 units), and loss's `units` not into tcp.
+	eq "tcp then loss (${mode}) MOUSE_TARGET_IPERF_PROVIDER" "$(seq_resolve "$mode" MOUSE_TARGET_IPERF_PROVIDER "$TCP_ENV" "$LOSS_ENV")" "units"
+	eq "loss then tcp (${mode}) MOUSE_TARGET_IPERF_PROVIDER" "$(seq_resolve "$mode" MOUSE_TARGET_IPERF_PROVIDER "$LOSS_ENV" "$TCP_ENV")" "socket"
 done
 # loss-only names (and arrays) must not stay set when tcp is loaded next:
 # Group12 would judge tcp in split mode against loss's external box.
@@ -242,6 +251,8 @@ eq "tcp, override, loss: override wins" \
 	"$(seq_resolve shell MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" "export MOUSE_TARGET_V4=172.16.80.99")" "172.16.80.99"
 eq "tcp, override, loss (child): override wins" \
 	"$(seq_resolve child MOUSE_TARGET_V4 "$TCP_ENV" "$LOSS_ENV" "export MOUSE_TARGET_V4=172.16.80.99")" "172.16.80.99"
+eq "tcp, provider override, udp: override wins (#19022)" \
+	"$(seq_resolve shell MOUSE_TARGET_IPERF_PROVIDER "$TCP_ENV" test/incus/udp-userspace-cluster.env "export MOUSE_TARGET_IPERF_PROVIDER=units")" "units"
 # An array is compared WHOLE: changing only a later element is an override.
 eq "loss, VF_WAN_PCI[1] override, tcp: array kept" \
 	"$(seq_resolve shell 'VF_WAN_PCI[*]' "$LOSS_ENV" "$TCP_ENV" "VF_WAN_PCI=(0000:65:00.4 0000:65:00.9)")" "0000:65:00.4 0000:65:00.9"

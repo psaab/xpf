@@ -25,14 +25,17 @@
 # identity echo on port 6201. Harnesses may use it as either target; different
 # addresses on this container do not create distinct target hosts.
 # #19022: the UDP echo answers from the address each datagram arrived on
-# (IP_PKTINFO), so a probe to the .202 alias is not answered from .201. A port
-# in 5200-5211 that ANOTHER systemd unit already serves on this host's v4
-# address keeps that unit: the tcp/udp targets' socket-activated
-# iperf3@52xx.socket, or another enabled service. There `up` installs no
-# mouse-iperf3 unit and disables any left from an earlier run. An orphan
-# process or a listener on no target v4 address does not count: `up` keeps
-# mouse-iperf3 enabled there, names the holder, and `status` reports the port
-# NOT served (see IPERF_PORT_OWNER_SCRIPT).
+# (IP_PKTINFO), so a probe to the .202 alias is not answered from .201.
+# WHO SERVES 5200-5211 IS DECLARED, NOT INFERRED: MOUSE_TARGET_IPERF_PROVIDER
+# (cluster env; default `units`). `units` (loss) installs and enables
+# mouse-iperf3@52xx as before. `socket` (tcp, udp) is for a target that serves
+# those ports itself through socket-activated iperf3@52xx.socket units: `up`
+# installs no mouse-iperf3 unit, stands down any an earlier run left (by exact
+# name), and REFUSES unless every port has a listener on the target's v4
+# address. Two review rounds of a runtime port-ownership classifier kept
+# finding new edge cases (orphans, address coverage, enabled-runtime units),
+# so the provider is a per-cluster fact, and the only runtime check is a
+# listener's presence.
 #
 # THE PRIMARY TARGET'S ADDRESS IS DECLARED HERE (#16213). On the
 # standing loss cluster, the elephant / iperf target that
@@ -62,9 +65,9 @@
 # table alongside the existing target rather than behind another hop.
 #
 # IDEMPOTENT. Re-running reconciles: it will not recreate an existing
-# instance. Every unit is `enable --now`, except a mouse-iperf3@<port> whose
-# port another systemd unit serves, which stays disabled (#19022). So this is
-# safe to run against a half-built host.
+# instance, and every unit it owns is `enable --now` (with the `socket`
+# provider it owns no mouse-iperf3 units, #19022), so this is safe to run
+# against a half-built host.
 #
 # CAPACITY, checked before this was written rather than assumed: the WAN PF
 # exposes 32 VFs and the two firewalls use two. Taking a third does not
@@ -95,6 +98,9 @@ MOUSE_TARGET_IMAGE="${MOUSE_TARGET_IMAGE:-images:debian/trixie}"
 # disables the alias everywhere, so the default uses `-`, not `:-`
 # (cluster-env.sh does the same, #18576).
 TARGET_ALIAS_V4="${TARGET_ALIAS_V4-172.16.80.202}"
+# #19022: who serves iperf3 5200-5211 on this target, declared per cluster
+# (cluster-env.sh; tcp/udp env files set `socket`). See the header.
+MOUSE_TARGET_IPERF_PROVIDER="${MOUSE_TARGET_IPERF_PROVIDER:-units}"
 
 IPERF_PORTS=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
 
@@ -112,6 +118,9 @@ ${0##*/} — provision the #8259 mouse-probe target container
 Environment: MOUSE_TARGET_NAME MOUSE_TARGET_V4 MOUSE_TARGET_V6
              MOUSE_TARGET_PF MOUSE_TARGET_VLAN MOUSE_TARGET_IMAGE INCUS_REMOTE
              TARGET_ALIAS_V4 (default 172.16.80.202; empty disables)
+             MOUSE_TARGET_IPERF_PROVIDER=units|socket (default units; who
+             serves 5200-5211: mouse-iperf3 units, or the target's own
+             iperf3@<port>.socket units, which \`up\` only verifies)
              MOUSE_TARGET_CLAIM_PROBE=skip (skip the #18576 claim probe;
              use only when no control address can answer, and say why;
              recorded in mouse-addr.service and shown by \`status\`)
@@ -194,96 +203,45 @@ target_v4_addrs() {
     printf '%s\n' "${addrs[*]}"
 }
 
-# IPERF_PORT_OWNER_SCRIPT runs on the target (POSIX sh) and prints one line per
-# iperf3 port (#19022):
-#   <port> mine                 mouse-iperf3@<port>.service holds the listener
-#   <port> free                 no TCP listener at all
-#   <port> other <unit>         ANOTHER systemd unit serves it on the target's
-#                               v4 address: a socket unit on that port whose
-#                               listener systemd (init.scope) holds, or an
-#                               enabled service whose cgroup holds the listener
-#   <port> orphan <holder>      a reachable listener no persistent unit owns
-#                               (the pre-#16213 detached `iperf3 -D` shape)
-#   <port> unreachable <rows>   listeners, none on a target v4 address (127.0.0.1
-#                               only, IPv6-only, another address)
-# Only `other` makes `up` stand our unit down. The tcp/udp targets serve
-# 5200-5211 through socket-activated iperf3@52xx.socket units; `up` used to
-# install mouse-iperf3@52xx there too, and every one of them crash-looped on the
-# busy port. Ownership comes from the LISTENER (`systemctl whoami <pid>`, else
-# /proc/<pid>/cgroup), not from `is-active`, which also reads true in the brief
-# active moment of a crash loop. "mine" is decided before any other owner, so
-# our own enabled unit is never taken for "another enabled unit". A port the
-# script cannot classify, because `ss` is missing or failed, gets NO line, and
-# `up` and `status` name it.
-IPERF_PORT_OWNER_SCRIPT="$(cat <<'OWNER'
-# iperf-port-owner (#19022). Args: "<target v4 addresses>" <port>...
-want="$1"; shift
-command -v ss >/dev/null 2>&1 || { echo "iperf-port-owner: ss not found" >&2; exit 3; }
-sockets="$(systemctl list-sockets --no-legend 2>/dev/null)"
+# IPERF_LISTENER_SCRIPT runs on the target (POSIX sh). For each port it
+# prints "<port> <local address>" per listening TCP socket, then
+# "<port> queried". A port without the "queried" line could not be listed
+# (`ss` missing or failed). No ownership is inferred (#19022).
+IPERF_LISTENER_SCRIPT="$(cat <<'LISTENERS'
+# iperf-listeners (#19022)
+command -v ss >/dev/null 2>&1 || exit 3
 for p in "$@"; do
-    rows="$(ss -Hltnp "sport = :$p" 2>/dev/null)" || continue
-    if [ -z "$rows" ]; then echo "$p free"; continue; fi
-    wild=""; seen=""; procs=""; all=""
-    while read -r _state _recvq _sendq laddr _peer proc; do
-        [ -n "$laddr" ] || continue
-        all="$all $laddr${proc:+ $proc}"
-        addr="${laddr%:*}"
-        case "$addr" in
-            # 0.0.0.0 is the v4 wildcard; ss prints a dual-stack [::] as `*`.
-            0.0.0.0|'*') wild=1 ;;
-            *) case " $want " in
-                   *" $addr "*) seen="$seen $addr" ;;
-                   *) continue ;;
-               esac ;;
-        esac
-        procs="$procs $proc"
-    done <<ROWS
-$rows
-ROWS
-    covered="$wild"
-    if [ -z "$covered" ] && [ -n "$want" ]; then
-        covered=1
-        for a in $want; do
-            case " $seen " in *" $a "*) ;; *) covered="" ;; esac
-        done
-    fi
-    if [ -z "$covered" ]; then echo "$p unreachable$all"; continue; fi
-    mine=""; init=""; enabled=""; holder=""
-    for pid in $(printf '%s\n' "$procs" | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -un); do
-        unit="$(systemctl whoami "$pid" 2>/dev/null | head -n 1)"
-        [ -n "$unit" ] || unit="$(sed -n 's|^0::.*/||p' "/proc/$pid/cgroup" 2>/dev/null | head -n 1)"
-        holder="${holder:+$holder,}pid=$pid(${unit:-no-unit})"
-        case "$unit" in
-            "mouse-iperf3@$p.service") mine=1 ;;
-            init.scope) init=1 ;;
-            *.service)
-                case "$(systemctl is-enabled "$unit" 2>/dev/null)" in
-                    enabled|enabled-runtime) enabled="${enabled:-$unit}" ;;
-                esac ;;
-        esac
+    rows="$(ss -Hltn "sport = :$p" 2>/dev/null)" || continue
+    printf '%s\n' "$rows" | while read -r _state _recvq _sendq laddr _rest; do
+        [ -n "$laddr" ] && echo "$p ${laddr%:*}"
     done
-    if [ -n "$mine" ]; then echo "$p mine"; continue; fi
-    sock=""
-    if [ -n "$init" ]; then
-        sock="$(printf '%s\n' "$sockets" | awk -v p="$p" '{ n = split($1, a, ":"); if (a[n] == p) { print $2; exit } }')"
-    fi
-    if [ -n "$sock" ]; then echo "$p other $sock"; continue; fi
-    if [ -n "$enabled" ]; then echo "$p other $enabled"; continue; fi
-    echo "$p orphan ${holder:-no-process-info}"
+    echo "$p queried"
 done
-OWNER
+LISTENERS
 )"
-iperf_port_owners() {
-    inc exec "$ref" -- sh -c "$IPERF_PORT_OWNER_SCRIPT" sh "$(target_v4_addrs)" "${IPERF_PORTS[@]}" 2>/dev/null
-}
 
-# owner_line <owners-table> <port> -> sets OWNER_CLASS and OWNER_DETAIL; an
-# unclassified port leaves OWNER_CLASS empty.
-owner_line() {
-    local line
-    line="$(awk -v p="$2" '$1 == p { print; exit }' <<<"$1")"
-    OWNER_CLASS="$(awk '{ print $2 }' <<<"$line")"
-    OWNER_DETAIL="$(awk '{ $1 = ""; $2 = ""; sub(/^ +/, ""); print }' <<<"$line")"
+# iperf_listener_scan: sorts IPERF_PORTS into LISTEN_OK (a listener on every
+# target v4 address: 0.0.0.0, the dual-stack `*`, or each address itself),
+# LISTEN_MISSING (listed, no such listener) and LISTEN_UNKNOWN (not listed).
+iperf_listener_scan() {
+    local table p addrs a ok want
+    LISTEN_OK=() LISTEN_MISSING=() LISTEN_UNKNOWN=()
+    table="$(inc exec "$ref" -- sh -c "$IPERF_LISTENER_SCRIPT" sh "${IPERF_PORTS[@]}" 2>/dev/null)"
+    read -r -a want <<<"$(target_v4_addrs)"
+    for p in "${IPERF_PORTS[@]}"; do
+        if ! grep -qx "${p} queried" <<<"$table"; then
+            LISTEN_UNKNOWN+=("$p")
+            continue
+        fi
+        addrs=" $(awk -v p="$p" '$1 == p && $2 != "queried" { printf "%s ", $2 }' <<<"$table")"
+        ok=1
+        if [[ "$addrs" != *" 0.0.0.0 "* && "$addrs" != *" * "* ]]; then
+            for a in "${want[@]}"; do
+                [[ "$addrs" == *" ${a} "* ]] || ok=0
+            done
+        fi
+        if [[ "$ok" == 1 ]]; then LISTEN_OK+=("$p"); else LISTEN_MISSING+=("$p"); fi
+    done
 }
 
 # claim_skip_markers: the "# claim-probe: SKIPPED ..." lines of the
@@ -394,6 +352,7 @@ RestartSec=1
 WantedBy=multi-user.target
 UNIT"
 
+    if [[ "$MOUSE_TARGET_IPERF_PROVIDER" == units ]]; then
     echo "installing the per-class iperf3 template"
     inc exec "$ref" -- sh -c "cat > '/etc/systemd/system/mouse-iperf3@.service' <<'UNIT'
 [Unit]
@@ -408,6 +367,7 @@ RestartSec=1
 [Install]
 WantedBy=multi-user.target
 UNIT"
+    fi
 
     inc exec "$ref" -- systemctl daemon-reload
     inc exec "$ref" -- systemctl enable --now mouse-addr.service >/dev/null 2>&1
@@ -428,36 +388,28 @@ UNIT"
     # idempotent and never removes an address, so the restart is safe on a
     # live target.
     inc exec "$ref" -- systemctl restart mouse-addr.service >/dev/null 2>&1 || return 1
-    # #19022: stand our unit down ONLY where another systemd unit serves the
-    # port on the target's v4 address (tcp/udp's iperf3@52xx.socket): a
-    # mouse-iperf3 unit there only crash-loops, so disable and reset any one a
-    # previous `up` left behind. An orphan or unreachable holder does NOT
-    # count. Disabling our unit behind a detached process would leave the port
-    # dead once that process exits or the target reboots, so we keep it
-    # enabled (a visible failed unit, the pre-#19022 floor) and name the
-    # holder. An unclassified port installs as before and is named too.
-    local owners p unclassified=()
-    owners="$(iperf_port_owners)"
-    for p in "${IPERF_PORTS[@]}"; do
-        owner_line "$owners" "$p"
-        case "$OWNER_CLASS" in
-            other)
-                echo "iperf3 ${p}: served by ${OWNER_DETAIL}; not installing mouse-iperf3@${p} (#19022)"
-                inc exec "$ref" -- systemctl disable --now "mouse-iperf3@${p}" >/dev/null 2>&1 || true
-                inc exec "$ref" -- systemctl reset-failed "mouse-iperf3@${p}" >/dev/null 2>&1 || true
-                continue ;;
-            orphan)
-                echo "WARNING: iperf3 ${p}: held by ${OWNER_DETAIL}, which no persistent unit owns; keeping mouse-iperf3@${p} enabled so the port is served after that holder exits or the target reboots (#19022)" >&2 ;;
-            unreachable)
-                echo "WARNING: iperf3 ${p}: listener(s) ${OWNER_DETAIL} not on a target v4 address ($(target_v4_addrs)); keeping mouse-iperf3@${p} enabled (#19022)" >&2 ;;
-            mine|free) ;;
-            *) unclassified+=("$p") ;;
-        esac
-        inc exec "$ref" -- systemctl enable --now "mouse-iperf3@${p}" >/dev/null 2>&1
-    done
-    if [[ ${#unclassified[@]} -gt 0 ]]; then
-        echo "WARNING: iperf3 owner classifier gave no answer for port(s) ${unclassified[*]} on ${ref}; installed mouse-iperf3 there as before #19022 (a port another unit serves will crash-loop)" >&2
-    fi
+    case "$MOUSE_TARGET_IPERF_PROVIDER" in
+        units)
+            for p in "${IPERF_PORTS[@]}"; do
+                inc exec "$ref" -- systemctl enable --now "mouse-iperf3@${p}" >/dev/null 2>&1
+            done ;;
+        socket)
+            # #19022: this target serves 5200-5211 itself (tcp/udp:
+            # iperf3@52xx.socket). A mouse-iperf3 unit there only crash-loops
+            # on the busy port, so stand down any an earlier `up` left, by
+            # exact name, then require a listener for every port.
+            local p
+            for p in "${IPERF_PORTS[@]}"; do
+                inc exec "$ref" -- systemctl disable --now "mouse-iperf3@${p}.service" >/dev/null 2>&1 || true
+                inc exec "$ref" -- systemctl reset-failed "mouse-iperf3@${p}.service" >/dev/null 2>&1 || true
+            done
+            iperf_listener_scan
+            if [[ ${#LISTEN_MISSING[@]} -gt 0 || ${#LISTEN_UNKNOWN[@]} -gt 0 ]]; then
+                echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER=socket, but ${ref} has no TCP listener on $(target_v4_addrs) for port(s) ${LISTEN_MISSING[*]:-none}${LISTEN_UNKNOWN[*]:+; listeners could not be listed for port(s) ${LISTEN_UNKNOWN[*]}}. A socket-provider target must serve 5200-5211 itself (iperf3@<port>.socket); restore that, or declare MOUSE_TARGET_IPERF_PROVIDER=units (#19022)" >&2
+                return 1
+            fi
+            echo "iperf3 provider socket: all ${#IPERF_PORTS[@]} ports have a listener on $(target_v4_addrs); no mouse-iperf3 installed (#19022)" ;;
+    esac
 
     do_status
 }
@@ -483,29 +435,17 @@ do_status() {
             echo "alias:    ${TARGET_ALIAS_V4} MISSING — run '${0##*/} up' to re-pin it (mouse-addr.service, #16213)"
         fi
     fi
-    # #19022: count SERVED ports: our own unit, or another systemd unit on
-    # the target's v4 address (tcp/udp socket units; counting mouse-iperf3
-    # units alone reported 0 / 12 there). An orphan- or unreachable-held port
-    # is NOT served, and an unclassified port makes the count unknown.
-    local owners p mine=0 other=0 missing=() notes=()
-    owners="$(iperf_port_owners)"
-    for p in "${IPERF_PORTS[@]}"; do
-        owner_line "$owners" "$p"
-        case "$OWNER_CLASS" in
-            mine) mine=$((mine + 1)) ;;
-            other) other=$((other + 1)) ;;
-            free) notes+=("${p} NOT served: no listener") ;;
-            orphan) notes+=("${p} NOT served: held by orphan ${OWNER_DETAIL}") ;;
-            unreachable) notes+=("${p} NOT served: held by unreachable listener(s) ${OWNER_DETAIL}") ;;
-            *) missing+=("$p") ;;
-        esac
-    done
-    if [[ ${#missing[@]} -gt 0 ]]; then
-        echo "iperf3:   unknown / ${#IPERF_PORTS[@]} per-class ports served (no classification for port(s) ${missing[*]}: the owner exec failed or was partial)"
+    # #19022: report the DECLARED provider and, per port, whether a listener
+    # exists on the target's v4 address. No ownership is inferred.
+    iperf_listener_scan
+    if [[ ${#LISTEN_UNKNOWN[@]} -gt 0 ]]; then
+        echo "iperf3:   provider ${MOUSE_TARGET_IPERF_PROVIDER}; listeners unknown for port(s) ${LISTEN_UNKNOWN[*]} (could not list them on ${ref})"
     else
-        echo "iperf3:   $((mine + other)) / ${#IPERF_PORTS[@]} per-class ports served (${mine} mouse-iperf3, ${other} by another unit)"
+        echo "iperf3:   provider ${MOUSE_TARGET_IPERF_PROVIDER}; ${#LISTEN_OK[@]} / ${#IPERF_PORTS[@]} per-class ports have a listener on $(target_v4_addrs)"
     fi
-    for p in "${notes[@]}"; do echo "iperf3:   ${p}"; done
+    if [[ ${#LISTEN_MISSING[@]} -gt 0 ]]; then
+        echo "iperf3:   NO listener on $(target_v4_addrs) for port(s) ${LISTEN_MISSING[*]}"
+    fi
     echo "echo:     $(inc exec "$ref" -- systemctl is-active mouse-echo 2>/dev/null)"
     # #18576: a claim probe skipped for a pinned address stays visible.
     local skips
@@ -533,8 +473,11 @@ do_destroy() {
     echo "${ref}: deleted"
 }
 
-# Sourced (the selftest reads IPERF_PORT_OWNER_SCRIPT): define only.
-[[ "${BASH_SOURCE[0]}" != "$0" ]] && return 0
+case "$MOUSE_TARGET_IPERF_PROVIDER" in
+    units|socket) ;;
+    *) echo "REFUSE: MOUSE_TARGET_IPERF_PROVIDER must be units or socket, got '${MOUSE_TARGET_IPERF_PROVIDER}' (#19022)" >&2
+       exit 2 ;;
+esac
 
 case "${1:-status}" in
     up|destroy)

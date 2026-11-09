@@ -709,8 +709,12 @@ if grep -q "$POLICY_PREFIX\|$APP_NAME\|$BROKEN_POLICY" <<<"$POLICY_SNAP$APP_SNAP
 # cluster-env.sh exports it, but the inline prefix alone left the child
 # defaulting to loss, so on tcp/udp the DMZ prober was created/checked on
 # the wrong remote. Setup output is preserved on failure, not discarded.
+# The prober is a container this setup builds, so it serves its own iperf3
+# ports: `units`, whatever the cluster declares for its VLAN-80 target
+# (tcp/udp declare `socket`, which would refuse here; #19022).
 DMZ_SETUP_LOG="$(mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-wire-zone-matrix-dmz-setup.XXXXXX")" || fail_void harness-void
 if ! INCUS_REMOTE="$INCUS_REMOTE" MOUSE_TARGET_NAME="$DMZ_HOST" MOUSE_TARGET_V4="$DMZ_ADDR" \
+MOUSE_TARGET_IPERF_PROVIDER=units \
 MOUSE_TARGET_V6="$DMZ_TARGET_V6" MOUSE_TARGET_PF="$DMZ_TARGET_PF" MOUSE_TARGET_VLAN="$DMZ_TARGET_VLAN" \
 $SG "bash ${SCRIPT_DIR}/mouse-target-setup.sh up" >"$DMZ_SETUP_LOG" 2>&1; then
     echo "REFUSE: DMZ prober setup failed on ${INCUS_REMOTE}:${DMZ_HOST}; setup output follows" >&2

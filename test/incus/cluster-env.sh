@@ -52,7 +52,7 @@ _xpf_cluster_env_names=(
 	WAN_PREFIX4 DMZ_PREFIX4 LAN_PREFIX4 DMZ_ADDR DMZ_TARGET_V6 DMZ_TARGET_PF
 	DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF MOUSE_TARGET_NAME
 	MOUSE_TARGET_REF MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4
-	WAN_GW80_4 TARGET_ALIAS_V4
+	WAN_GW80_4 TARGET_ALIAS_V4 MOUSE_TARGET_IPERF_PROVIDER
 	IPERF_TARGET_V4_V6_SAME_HOST IPERF_TARGET6_SPLIT_HOLDER
 	POOL_SRC POOL_NAT_ADDR SRIOV_PARENT SRIOV_FABRIC_PARENT VF_FABRIC_VLAN VF_WAN_PCI VF_LAN_PCI
 )
@@ -182,6 +182,12 @@ MOUSE_TARGET_REF="${MOUSE_TARGET_REF:-$(_xpf_cluster_ref "$MOUSE_TARGET_NAME")}"
 # `-`, not `:-` (#18576): an EMPTY TARGET_ALIAS_V4 is a request for no alias
 # (mouse-target-setup.sh "empty disables"), so only an UNSET one is derived.
 TARGET_ALIAS_V4="${TARGET_ALIAS_V4-$IPERF_TARGET4}"
+# #19022: who serves iperf3 5200-5211 on the VLAN-80 target, DECLARED per
+# cluster (mouse-target-setup.sh). `units`: mouse-iperf3@52xx (loss, and the
+# default). `socket`: the target's own iperf3@52xx.socket units (the tcp/udp
+# env files), which `up` only verifies. It is in the leak guard: a tcp load
+# followed by a loss load must not keep `socket`.
+MOUSE_TARGET_IPERF_PROVIDER="${MOUSE_TARGET_IPERF_PROVIDER:-units}"
 unset _xpf_iperf_host
 
 export PROJECT_ROOT BPFRX_CLUSTER_ENV CLUSTER_CONF INCUS_REMOTE
@@ -194,6 +200,7 @@ export DMZ_TARGET_PF DMZ_TARGET_VLAN DMZ_TARGET_NAME DMZ_TARGET_REF
 export MOUSE_TARGET_NAME MOUSE_TARGET_REF
 export MOUSE_TARGET_V4 MOUSE_TARGET_V6 MOUSE_TARGET_PF DMZ_GW4 WAN_GW80_4
 export TARGET_ALIAS_V4 IPERF_TARGET_V4_V6_SAME_HOST IPERF_TARGET6_SPLIT_HOLDER
+export MOUSE_TARGET_IPERF_PROVIDER
 # #18576 cross-env leak guard: record this load (see the guard above).
 _XPF_CLUSTER_ENV_FILE="$_xpf_cluster_env"
 _XPF_CLUSTER_ENV_STATE=""
