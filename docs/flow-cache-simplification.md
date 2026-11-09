@@ -454,9 +454,29 @@ Actual deletions use the same targeted invalidation:
   through `remove_dynamic_neighbor` → `remove_if_present`; only a present
   entry advances its shard. The resolver's authoritative `RevokeAndProbe`
   path uses `remove`, which shares that epoch-bumping implementation.
-- Coordinator snapshot refresh removes stale manager keys through
-  `bulk_replace_neighbors(..., &[])`; each actually removed shard advances
-  once, while absent keys do not.
+- Coordinator snapshot refresh moves the previous snapshot's manager keys
+  out of the dynamic map. The new snapshot's rows live in the static table,
+  which `lookup_neighbor_entry` reads first. Since #19034 a removal advances
+  its shard only when the key's resolution changes:
+  - "Before" is `lookup_neighbor_entry` over the old static table and the
+    dynamic map. "After" is the new static table.
+    (`snapshot_refresh::refresh_unchanged_manager_neighbors`,
+    `ShardedNeighborMap::bulk_remove_manager_keys`.)
+  - A vanished key, or a different MAC, still advances.
+  - Absent keys do not.
+  - The old path, `bulk_replace_neighbors(&old_manager_keys, &[])`,
+    counted every removal as a change. It advanced the shard of every
+    manager-owned neighbor on every routes-only apply_snapshot, i.e. twice per
+    RG move per node, although nothing about those neighbors changed. Each
+    bump cost every flow through those shards a slow-path trip. In a #18560
+    held pass, which cannot re-resolve, it cost the flow's whole queued
+    backlog: about 90% of the packets a planned move lost on loss
+    (`docs/log/19034.md`).
+  - The comparison deliberately covers the old static table, not just the
+    removed dynamic row. A monitor-observed MAC change leaves the static
+    table on the old MAC until the next snapshot, and flows seeded in
+    between still resolved the old MAC (static first). The snapshot that
+    finally installs the new MAC is therefore still a change.
 
 `FlowCacheEntry` carries a `neighbor_mac_epoch` PLUS (per #5147) a
 `neighbor_shard` — the index of the shard holding this flow's resolved

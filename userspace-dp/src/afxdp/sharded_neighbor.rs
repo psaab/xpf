@@ -1013,6 +1013,12 @@ impl ShardedNeighborMap {
     /// VRRP-failover RTM_NEWNEIGH burst when the in-process monitor's
     /// bounded rcvbuf overflows and the Go neighbor listener pushes the
     /// new gateway MAC through this path.
+    ///
+    /// Note for the full-snapshot refresh: there the caller removes the
+    /// previous snapshot's manager rows WITHOUT reinserting them (the new
+    /// snapshot's rows live in the static table), which this function
+    /// would count as removals and bump. That path uses
+    /// [`Self::bulk_remove_manager_keys`] instead (#19034).
     pub(crate) fn bulk_replace_neighbors(
         &self,
         remove_keys: &[(i32, IpAddr)],
@@ -1087,6 +1093,48 @@ impl ShardedNeighborMap {
         // invalidate, but is still a fresh resolution the poll loop may be
         // waiting for.
         self.bump_insert_generation_9071(!insert_entries.is_empty());
+    }
+
+    /// #19034: the full-snapshot refresh's manager-row rotation.
+    ///
+    /// `refresh_runtime_snapshot_inner` moves the previous snapshot's
+    /// manager rows out of this map: the new snapshot's rows live in the
+    /// forwarding state's static table, which `lookup_neighbor_entry` reads
+    /// first. Every key in `remove_keys` is removed, under one all-shard lock
+    /// like [`Self::bulk_replace_neighbors`]. A shard's epoch advances only
+    /// for a removed key that is NOT in `unchanged`: the caller puts a key
+    /// there when its resolution after the refresh is the same MAC it was
+    /// before (`coordinator::snapshot_refresh::refresh_unchanged_manager_neighbors`).
+    ///
+    /// The #3048/#5147 epoch means "a neighbor's resolution changed". This
+    /// path used `bulk_replace_neighbors(&old_manager_keys, &[])` instead,
+    /// which counts every removal as a change. It therefore advanced the
+    /// shard of every manager-owned neighbor on every routes-only apply_snapshot
+    /// of an RG move, although the new snapshot named the same MACs. Each
+    /// such bump made every flow-cache entry resolved through those shards
+    /// stale. An ordinary pass pays one slow-path trip for that. A #18560
+    /// held pass cannot re-resolve, and it dropped each flow's whole queued
+    /// backlog.
+    ///
+    /// Inserts nothing, so the #9071 insert generation does not move.
+    pub(crate) fn bulk_remove_manager_keys(
+        &self,
+        remove_keys: &[(i32, IpAddr)],
+        unchanged: &FastSet<(i32, IpAddr)>,
+    ) {
+        self.with_all_shards(|bulk| {
+            let mut changed_shards = [false; NUM_SHARDS];
+            for key in remove_keys {
+                if bulk.remove_if_present(key).is_some() && !unchanged.contains(key) {
+                    changed_shards[shard_idx(key)] = true;
+                }
+            }
+            for (shard, &changed) in changed_shards.iter().enumerate() {
+                if changed {
+                    self.bump_shard_epoch(shard);
+                }
+            }
+        });
     }
 
     /// #3169: bump-aware atomic multi-key insert for the #1787 RX
