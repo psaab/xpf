@@ -7,6 +7,11 @@
 # Usage:
 #   scripts/vm-test-run.sh [--runner <remote:instance>] [--name <lane>] [--root]
 #                          [--no-sync] -- <command ...>
+#   scripts/vm-test-run.sh [opts] -- '<shell command string>'
+#
+#   With several arguments after --, they are a command and its words, quoted
+#   one by one. A single argument is run as a shell command string, so
+#   'XPF_REQUIRE_NETNS=1 make test-target-services-lib' works as written.
 #
 #   --runner   test-runner instance (default: $XPF_TEST_RUNNER, else
 #              udp:xpf-testrunner). The provisioned runners are
@@ -73,9 +78,16 @@ if [[ "$sync" -eq 1 ]]; then
 		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src'"
 fi
 
-# Quote the command for bash -lc on the runner.
-cmd=""
-for a in "$@"; do cmd+="$(printf '%q ' "$a")"; done
+# One argument is a shell command string ('VAR=1 make test' works as
+# written); several arguments are a command plus words, each quoted.
+# Quoting a lone string as one word made 'VAR=1 make ...' an assignment
+# with no command: it ran nothing and exited 0 (#19035, seat R10 on #19022).
+if [[ $# -eq 1 ]]; then
+	cmd="$1"
+else
+	cmd=""
+	for a in "$@"; do cmd+="$(printf '%q ' "$a")"; done
+fi
 env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src'"
 if [[ "$as_root" -eq 1 ]]; then
 	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}"
