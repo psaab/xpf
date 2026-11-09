@@ -719,7 +719,7 @@ mod tests_support;
 #[cfg(test)]
 #[path = "tests_matched_view_18560.rs"]
 mod tests_matched_view_18560;
-// #19034: a refresh advances a neighbor epoch only on a resolution change.
+// #19034: a neighbor epoch advances exactly on a resolution change.
 #[cfg(test)]
 #[path = "tests_neighbor_epoch_refresh_19034.rs"]
 mod tests_neighbor_epoch_refresh_19034;

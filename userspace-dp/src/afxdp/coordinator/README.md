@@ -298,12 +298,27 @@ Differences that matter (#1881):
   the observable mutations — `self.validation` bump (H2), neighbor-
   manager key rotation + stale-key delete (H3), forwarding swap, and the
   `RuntimeView` publish — AFTER the build
-  succeeds. The rotation removes the previous snapshot's manager rows from
-  the dynamic map. Since #19034 it advances a neighbor shard's epoch only
-  for a key whose resolution (static table first) the new snapshot changes:
-  `refresh_unchanged_manager_neighbors` +
-  `ShardedNeighborMap::bulk_remove_manager_keys`. It used to advance every
-  manager key's shard on every apply. A non-policy integrity fault (invalid interface address,
+  succeeds. Since #19034 the rotation:
+  - advances the neighbor shard epochs of exactly the keys whose
+    resolution (static table first, then dynamic) the refresh changes,
+    including a key only the static table carried
+    (`refresh_changed_neighbor_keys`);
+  - removes from the dynamic map only the previous manager rows of changed
+    keys and of keys that are no longer manager keys, and bumps every row
+    it removes (`ShardedNeighborMap::bulk_remove_manager_keys`);
+  - keeps the row of a manager key resolved the same way, so a later
+    monitor replacement or DELNEIGH finds it and bumps;
+  - bumps the `(parent_ifindex, peer_addr)` shard of every fabric link
+    whose resolution changed, after the publish
+    (`fabric_changed_neighbor_keys`). `refresh_fabric_links` does the
+    same.
+
+  It used to remove every previous manager row, advancing every present
+  manager key's shard on every apply and never a static-only key's. Go's neighbor push (`apply_manager_neighbors`) bumps by the same
+  rule (`ShardedNeighborMap::bump_resolution_changed`). The refresh's
+  "before" side is sound only because every static-table writer bumps on
+  a resolution change: a cached flow whose shard epoch is current then
+  holds the current resolution. A non-policy integrity fault (invalid interface address,
   CoS queue, NAT64 / NPTv6 rule) that only the full build catches now
   returns `Err(SnapshotIntegrityError)`; the handler reports `ok=false`,
   restores the bumped status generation, and does NOT persist the

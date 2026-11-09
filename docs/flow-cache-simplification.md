@@ -426,7 +426,13 @@ FIVE neighbor write paths remain covered below, each bumping its shard(s):
   bump it once (a pure same-MAC refresh and brand-new keys with no prior do
   NOT bump). A removed existing key not reinserted also bumps its shard;
   absent keys and same-MAC reinsertions do not. HA peer-promoted session
-  closes remain out of scope;
+  closes remain out of scope. The same push also rewrites the static
+  table, which lookups read first. Since #19034 it advances the shard of
+  every key whose resolution it changed, judged on both tables
+  (`ShardedNeighborMap::bump_resolution_changed`, after the publish).
+  Before that, a static MAC change behind a fresh dynamic row (the
+  dynamic-confirmed fence case right after a refresh) or a withdrawn
+  static-only key bumped nothing;
 - the #1787 RX source-MAC data-path learn (`learn_dynamic_neighbor` in
   `neighbor_dispatch.rs`), now routed through
   `ShardedNeighborMap::learn_pair_if_changed` (#3169). This learn snoops the
@@ -456,27 +462,67 @@ Actual deletions use the same targeted invalidation:
   path uses `remove`, which shares that epoch-bumping implementation.
 - Coordinator snapshot refresh moves the previous snapshot's manager keys
   out of the dynamic map. The new snapshot's rows live in the static table,
-  which `lookup_neighbor_entry` reads first. Since #19034 a removal advances
-  its shard only when the key's resolution changes:
-  - "Before" is `lookup_neighbor_entry` over the old static table and the
-    dynamic map. "After" is the new static table.
-    (`snapshot_refresh::refresh_unchanged_manager_neighbors`,
-    `ShardedNeighborMap::bulk_remove_manager_keys`.)
-  - A vanished key, or a different MAC, still advances.
-  - Absent keys do not.
-  - The old path, `bulk_replace_neighbors(&old_manager_keys, &[])`,
-    counted every removal as a change. It advanced the shard of every
-    manager-owned neighbor on every routes-only apply_snapshot, i.e. twice per
-    RG move per node, although nothing about those neighbors changed. Each
-    bump cost every flow through those shards a slow-path trip. In a #18560
-    held pass, which cannot re-resolve, it cost the flow's whole queued
-    backlog: about 90% of the packets a planned move lost on loss
+  which `lookup_neighbor_entry` reads first. Since #19034 the refresh
+  advances exactly the shards of keys whose resolution it changes, judged
+  key by key over both tables and every previous manager key:
+  - before: `lookup_neighbor_entry` over the old static table and the
+    current dynamic map;
+  - after: the new static table, plus the dynamic map without the removed
+    manager rows;
+  - code: `snapshot_refresh::refresh_changed_neighbor_keys` and
+    `ShardedNeighborMap::bulk_remove_manager_keys`.
+
+  Rows: only previous manager rows of changed keys, and of keys that are
+  no longer manager keys, leave the dynamic map, and each removal bumps.
+  A manager key resolved the same way keeps its row. A dynamic row must
+  never leave silently, because the next learn of that key is a first
+  insert, which does not bump, and a DELNEIGH would find nothing. A
+  retained #18560 view with no static row for the key resolves it
+  through the dynamic map, so after a silent removal a learn of another
+  MAC, or a withdrawal, would leave that view's cached flows on the old
+  MAC (Codex review of 1f6c9fa7f1).
+
+  Fabric links are a second source: a cached FabricRedirect takes its
+  next-hop and source MACs from `FabricLink` and stamps the
+  `(parent_ifindex, peer_addr)` shard. The neighbor tables cannot see a
+  fabric peer MAC change. So the refresh and `refresh_fabric_links` bump
+  that shard for every old link with no identical new link (same parent,
+  peer address, peer MAC, local MAC and `up`), after their publish
+  (`snapshot_refresh::fabric_changed_neighbor_keys`).
+
+  What counts:
+  - A key that resolved to a MAC and now resolves to another MAC or to
+    nothing advances. That holds whether or not the dynamic map held it,
+    so a neighbor only the static table carried still counts when the
+    snapshot withdraws it.
+  - A key that resolved to nothing before does not advance, since no cached
+    flow can hold a MAC for it.
+
+  Why it changed: the old path, `bulk_replace_neighbors(&old_manager_keys,
+  &[])`, counted every removal of a present row as a change and never saw
+  a static-only key.
+  - It advanced the shard of every manager-owned neighbor on every
+    routes-only apply_snapshot, i.e. twice per RG move per node, although
+    nothing about those neighbors changed.
+  - Each bump cost every flow through those shards a slow-path trip. In a
+    #18560 held pass, which cannot re-resolve, it cost the flow's whole
+    queued backlog: about 90% of the packets a planned move lost on loss
     (`docs/log/19034.md`).
-  - The comparison deliberately covers the old static table, not just the
-    removed dynamic row. A monitor-observed MAC change leaves the static
-    table on the old MAC until the next snapshot, and flows seeded in
-    between still resolved the old MAC (static first). The snapshot that
-    finally installs the new MAC is therefore still a change.
+
+  Why the "before" side reads the old static table: a monitor-observed MAC
+  change leaves the static table on the old MAC until the next snapshot,
+  and flows seeded in between still resolved the old MAC (static first).
+  So the snapshot that finally installs the new MAC is still a change.
+
+  Why comparing against the current tables is enough: every writer that
+  changes a key's resolution advances that key's shard, including Go's
+  neighbor push for the static-table changes it makes (above). So a cached
+  flow whose stamped epoch is current holds the current resolution, and a
+  refresh that leaves the resolution alone has nothing to invalidate. The
+  refresh's old blanket bump had been hiding the push's missing static-table
+  bump. Without the push fix, a gateway moving A→B through the push and
+  then a refresh naming B would leave flows on MAC A
+  (`held_pass_drops_after_a_genuine_mac_change_and_a_refresh_19034`).
 
 `FlowCacheEntry` carries a `neighbor_mac_epoch` PLUS (per #5147) a
 `neighbor_shard` — the index of the shard holding this flow's resolved

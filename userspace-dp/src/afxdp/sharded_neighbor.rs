@@ -1097,37 +1097,46 @@ impl ShardedNeighborMap {
 
     /// #19034: the full-snapshot refresh's manager-row rotation.
     ///
-    /// `refresh_runtime_snapshot_inner` moves the previous snapshot's
-    /// manager rows out of this map: the new snapshot's rows live in the
-    /// forwarding state's static table, which `lookup_neighbor_entry` reads
-    /// first. Every key in `remove_keys` is removed, under one all-shard lock
-    /// like [`Self::bulk_replace_neighbors`]. A shard's epoch advances only
-    /// for a removed key that is NOT in `unchanged`: the caller puts a key
-    /// there when its resolution after the refresh is the same MAC it was
-    /// before (`coordinator::snapshot_refresh::refresh_unchanged_manager_neighbors`).
+    /// `refresh_runtime_snapshot_inner` removes `remove_keys` from this map:
+    /// previous-snapshot manager rows whose resolution the refresh changes,
+    /// or that are no longer manager keys. A manager key the new snapshot
+    /// resolves the same way keeps its row. Every removal that finds a row
+    /// advances that row's shard, and so does every key in `changed`, whether
+    /// or not this map held it. All of this happens under one all-shard
+    /// lock, like [`Self::bulk_replace_neighbors`], and each shard advances at
+    /// most once.
     ///
-    /// The #3048/#5147 epoch means "a neighbor's resolution changed". This
-    /// path used `bulk_replace_neighbors(&old_manager_keys, &[])` instead,
-    /// which counts every removal as a change. It therefore advanced the
-    /// shard of every manager-owned neighbor on every routes-only apply_snapshot
-    /// of an RG move, although the new snapshot named the same MACs. Each
-    /// such bump made every flow-cache entry resolved through those shards
-    /// stale. An ordinary pass pays one slow-path trip for that. A #18560
-    /// held pass cannot re-resolve, and it dropped each flow's whole queued
-    /// backlog.
+    /// Why a removal always bumps (Codex review of 1f6c9fa7f1): a later learn
+    /// for the key is then a first insert, which never bumps (no cached flow
+    /// can hold a MAC for a neighbor that did not exist), and a later
+    /// DELNEIGH finds nothing to remove. Both rules assume the removal
+    /// itself already advanced the shard. A retained view with no static row
+    /// for the key resolves it through this map, so a silent removal followed
+    /// by a learn of another MAC, or by nothing, would leave that view's
+    /// cached flows on the old MAC. Keeping unchanged rows is what lets the
+    /// steady state of an RG move bump nothing.
+    ///
+    /// The old path, `bulk_replace_neighbors(&old_manager_keys, &[])`,
+    /// removed every previous manager row. So every routes-only apply_snapshot
+    /// advanced the shard of every manager-owned neighbor although nothing
+    /// about it changed. A #18560 held pass cannot re-resolve, and it dropped
+    /// each such flow's whole queued backlog.
     ///
     /// Inserts nothing, so the #9071 insert generation does not move.
     pub(crate) fn bulk_remove_manager_keys(
         &self,
         remove_keys: &[(i32, IpAddr)],
-        unchanged: &FastSet<(i32, IpAddr)>,
+        changed: &FastSet<(i32, IpAddr)>,
     ) {
         self.with_all_shards(|bulk| {
             let mut changed_shards = [false; NUM_SHARDS];
             for key in remove_keys {
-                if bulk.remove_if_present(key).is_some() && !unchanged.contains(key) {
+                if bulk.remove_if_present(key).is_some() {
                     changed_shards[shard_idx(key)] = true;
                 }
+            }
+            for key in changed {
+                changed_shards[shard_idx(key)] = true;
             }
             for (shard, &changed) in changed_shards.iter().enumerate() {
                 if changed {
@@ -1135,6 +1144,31 @@ impl ShardedNeighborMap {
                 }
             }
         });
+    }
+
+    /// #19034: advance the shard epoch of every key in `changed`, once per
+    /// shard, without touching the map. This is for writers that change what
+    /// a cached flow resolved through state outside this map:
+    /// - `Coordinator::apply_manager_neighbors` rewrites the forwarding
+    ///   state's static table, which `lookup_neighbor_entry` reads first. A
+    ///   static MAC change or removal is a resolution change even when no
+    ///   dynamic row moves.
+    /// - The snapshot refresh and `refresh_fabric_links` replace fabric
+    ///   links. A cached FabricRedirect takes its MACs from the link and
+    ///   stamps the `(parent_ifindex, peer_addr)` shard.
+    ///
+    /// Before #19034 neither bumped for these, and the next snapshot
+    /// refresh's bump of every present manager key hid part of the gap.
+    pub(crate) fn bump_resolution_changed(&self, changed: &FastSet<(i32, IpAddr)>) {
+        let mut changed_shards = [false; NUM_SHARDS];
+        for key in changed {
+            changed_shards[shard_idx(key)] = true;
+        }
+        for (shard, &changed) in changed_shards.iter().enumerate() {
+            if changed {
+                self.bump_shard_epoch(shard);
+            }
+        }
     }
 
     /// #3169: bump-aware atomic multi-key insert for the #1787 RX

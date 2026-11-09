@@ -1480,8 +1480,9 @@ queued with the left view then evicted each flow's flow-cache entry on its
 first packet and dropped the rest of that flow's queue, up to about 4k
 segments of one TCP stream at once. The refresh now advances a neighbor's
 epoch only when that neighbor's resolution changes, so the held pass keeps
-serving those flows; a genuine MAC change still bumps and fails closed. The
-publish sequence, the
+serving those flows; a genuine MAC change still bumps and fails closed,
+including one Go's neighbor push makes in the static table, which only the
+old blanket bump used to cover, and a fabric peer MAC change. The publish sequence, the
 measured split and the residual (AHEAD and in-batch reseeds) are in
 `docs/ha-rg-move-correctness.md` ("Publishes during a move").
 

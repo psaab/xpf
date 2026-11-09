@@ -1653,6 +1653,17 @@ data-path learn, and the on-demand resolver are the others).
   safety regeneration re-diffs and retries with a strictly higher generation.
   The retry piggybacks the existing regeneration cadence — it adds NO new
   control-socket caller.
+- **#19034 resolution-change epochs:** the push rewrites the forwarding
+  state's static table as well as the dynamic map, and lookups read the
+  static table first. So `bulk_replace_neighbors`, which judges only dynamic
+  rows, cannot see every change the push makes. The push therefore records
+  the resolved MAC of every key it writes or withdraws before its writes,
+  and after its publish advances the shard of each key whose resolution
+  changed (`ShardedNeighborMap::bump_resolution_changed`). Two cases moved
+  no epoch before #19034:
+  - a dynamic-confirmed or NUD_PERMANENT MAC change whose dynamic row was a
+    fresh insert (the state right after any snapshot refresh);
+  - a replace that withdraws a key only the static table carried.
 
 ## Worker command-queue poison policy (#1790 → #1807)
 
@@ -2484,10 +2495,26 @@ own view's flow-cache entry:
     - On loss that was about 90% of the packets a planned move lost
       (`docs/log/19034.md`): one iperf3 stream's backlog of up to about 4k
       segments at a time, and a 0.3-0.6 s stall of that stream.
-    - The refresh now advances a shard only when a removed key's resolution
-      changes (`coordinator/snapshot_refresh.rs`,
-      `refresh_unchanged_manager_neighbors`; see
+    - The refresh now advances exactly the shards of keys whose resolution
+      it changes (`coordinator/snapshot_refresh.rs`,
+      `refresh_changed_neighbor_keys`; see
       `docs/flow-cache-simplification.md`).
+      - A manager key it resolves the same way keeps its dynamic row.
+      - Every row it does remove bumps. A later learn of the key is a first
+        insert, which never bumps, and a later DELNEIGH must find the row.
+        A retained view with no static row resolves the key through the
+        dynamic map, so a silent removal would leave its flows on the old
+        MAC.
+      - A cached FabricRedirect takes its MACs from the fabric link. So the
+        refresh and `refresh_fabric_links` also bump the
+        `(parent_ifindex, peer_addr)` shard of every link whose peer MAC,
+        local MAC or `up` state changed, or which went away.
+    - Go's neighbor push (`apply_manager_neighbors`) applies the same rule to
+      the keys it writes or withdraws. Before #19034 it bumped only for a
+      dynamic-row change, so a static-table MAC change behind a fresh dynamic
+      row, or a withdrawn static-only key, moved no epoch. Only the
+      refresh's bump of every manager key hid that, and #19034 removed that
+      bump.
     - A genuine MAC change or removal still bumps, and a held pass still
       drops the backlog of a flow whose next hop really moved.
   - This describes the ordinary flow-cache route, not every pre-cache arm.

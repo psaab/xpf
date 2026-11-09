@@ -1336,26 +1336,138 @@ fn held_pass_wiring_is_present_18560() {
     }
 }
 
-/// #19034, end to end: a routes-only republish (a same-plan
-/// `refresh_runtime_snapshot` naming the same neighbors) lands while a
-/// flow's packets are queued with the view the worker is leaving. The
-/// coordinator's own dynamic map is the one the worker reads. Its manager
-/// row for the flow's gateway leaves the map, but the gateway resolves to
-/// the same MAC, so the held pass must serve all three queued packets from
-/// the 7/9 entry. At cd9adfaca4 the refresh advanced the gateway's shard
-/// epoch: the first held packet evicted the entry as `PostHitNeighborMac`
-/// and the other two found nothing (0 hits, 3 misses).
-#[test]
-fn held_pass_survives_a_same_neighbor_snapshot_refresh_19034() {
-    let mut fx = udp_flow_fixture();
-    let fwd = Arc::clone(&fx.forwarding);
+/// #19034: the WAN gateway the UDP flow fixture sends to, and its static
+/// neighbor entry in `nat_snapshot_with_fabric`.
+fn gateway_19034(fx: &GreFixture) -> ((i32, IpAddr), NeighborEntry) {
     let gateway_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1));
-    let (gateway, entry) = fwd
+    fx.forwarding
         .neighbors
         .iter()
         .find(|(key, _)| key.1 == gateway_ip)
         .map(|(key, entry)| (*key, *entry))
-        .expect("premise: the fixture carries a static neighbor for the WAN gateway");
+        .expect("premise: the fixture carries a static neighbor for the WAN gateway")
+}
+
+/// #19034: seed the flow under 7/9 against `view` (two ordinary passes),
+/// then park three 7/9 packets behind an 8/9 worker. `dynamic` is the
+/// neighbor map the worker reads, normally a coordinator's.
+fn seed_and_park_19034(
+    fx: &mut GreFixture,
+    view: &Arc<ForwardingState>,
+    dynamic: &Arc<ShardedNeighborMap>,
+) -> PrevViews {
+    let ha = txn_ha_state();
+    let batch = run_pass_neigh(fx, view, STAMPED, PassView::current(), true, &ha, dynamic);
+    assert!(batch.session_creates >= 1, "premise: the flow is established under 7/9");
+    run_pass_neigh(fx, view, STAMPED, PassView::current(), true, &ha, dynamic);
+    assert!(
+        txn_flow_cache_entries(&fx.binding) > 0,
+        "premise: the flow's second packet seeds the flow cache under 7/9"
+    );
+    let views = views_with(STAMPED, view, NEWER);
+    for _ in 0..3 {
+        run_pass_neigh(
+            fx,
+            view,
+            NEWER,
+            PassView {
+                prev_views: Some(&views),
+                held_pass: false,
+                view: None,
+            },
+            true,
+            &ha,
+            dynamic,
+        );
+    }
+    assert_eq!(fx.binding.view_held.len(), 3, "premise: three 7/9 packets are parked");
+    views
+}
+
+/// #19034: run the held pass for the retained 7/9 view. The forward
+/// requests earlier passes left are cleared first, so the caller reads only
+/// what the held pass sent.
+fn run_held_19034(fx: &mut GreFixture, views: &PrevViews, dynamic: &Arc<ShardedNeighborMap>) {
+    fx.binding.scratch.scratch_forwards.clear();
+    let view = views.find(7, 9, NOW_NS);
+    let prev = views.get(view.expect("retained 7/9")).expect("retained view");
+    let held_forwarding = Arc::clone(&prev.forwarding);
+    run_pass_neigh(
+        fx,
+        &held_forwarding,
+        prev.validation,
+        PassView {
+            prev_views: Some(views),
+            held_pass: true,
+            view,
+        },
+        false,
+        &txn_ha_state(),
+        dynamic,
+    );
+}
+
+/// #19034: what the held pass actually sent. A held "hit" counts every
+/// packet the flow cache consumed, so the cells read the forward requests:
+/// the total, and those addressed to `mac`.
+fn held_forwards_19034(fx: &GreFixture, mac: [u8; 6]) -> (usize, usize) {
+    let forwards = &fx.binding.scratch.scratch_forwards;
+    (
+        forwards.len(),
+        forwards
+            .iter()
+            .filter(|request| request.decision.resolution.neighbor_mac == Some(mac))
+            .count(),
+    )
+}
+
+fn neighbor_evictions_19034(fx: &GreFixture) -> u64 {
+    fx.binding
+        .flow
+        .flow_cache
+        .evictions_for(crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac)
+}
+
+/// #19034: every held packet was dropped on the neighbor epoch and none was
+/// sent anywhere, in particular not to `stale`.
+fn assert_held_backlog_dropped_19034(fx: &GreFixture, stale: [u8; 6], what: &str) {
+    assert_eq!(
+        held_forwards_19034(fx, stale),
+        (0, 0),
+        "{what}: no held packet may be sent, least of all to the MAC the neighbor left"
+    );
+    assert_eq!(
+        fx.binding.live.generation_held_misses.load(Ordering::Relaxed),
+        3,
+        "{what}: the whole backlog is dropped, as on master"
+    );
+    assert!(
+        neighbor_evictions_19034(fx) >= 1,
+        "{what}: the stale entry is evicted on the neighbor epoch"
+    );
+}
+
+fn mac_text_19034(mac: [u8; 6]) -> String {
+    mac.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+/// #19034, end to end: a routes-only republish (a same-plan
+/// `refresh_runtime_snapshot` naming the same neighbors) lands while a
+/// flow's packets are queued with the view the worker is leaving. The
+/// coordinator's own dynamic map is the one the worker reads. The gateway
+/// resolves to the same MAC, so its manager row stays and its shard keeps
+/// its epoch: the held pass must SEND all three queued packets to the
+/// gateway's MAC from the 7/9 entry. At cd9adfaca4 the refresh removed the
+/// row and advanced the shard. The first held packet evicted the entry as
+/// `PostHitNeighborMac` and the other two found nothing (0 sent, 3 dropped).
+#[test]
+fn held_pass_survives_a_same_neighbor_snapshot_refresh_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = gateway_19034(&fx);
     let mut snapshot = nat_snapshot_with_fabric();
     let mut coordinator = Coordinator::new();
     coordinator
@@ -1367,62 +1479,23 @@ fn held_pass_survives_a_same_neighbor_snapshot_refresh_19034() {
     );
     let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
     assert!(dynamic.get(&gateway).is_some(), "premise: the manager row is in the dynamic map");
-
-    let ha = txn_ha_state();
-    let batch = run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
-    assert!(batch.session_creates >= 1, "premise: the flow is established under 7/9");
-    run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
-    assert!(
-        txn_flow_cache_entries(&fx.binding) > 0,
-        "premise: the flow's second packet seeds the flow cache under 7/9"
-    );
-    let views = views_with(STAMPED, &fwd, NEWER);
-    for _ in 0..3 {
-        run_pass_neigh(
-            &mut fx,
-            &fwd,
-            NEWER,
-            PassView {
-                prev_views: Some(&views),
-                held_pass: false,
-                view: None,
-            },
-            true,
-            &ha,
-            &dynamic,
-        );
-    }
-    assert_eq!(fx.binding.view_held.len(), 3, "premise: three 7/9 packets are parked");
+    let views = seed_and_park_19034(&mut fx, &fwd, &dynamic);
 
     snapshot.generation += 1;
     coordinator
         .refresh_runtime_snapshot(&snapshot)
         .expect("routes-only republish with the same neighbors");
-    assert!(
-        dynamic.get(&gateway).is_none(),
-        "premise: the manager row left the dynamic map, as the refresh always did"
+    assert_eq!(
+        dynamic.get(&gateway).map(|row| row.mac),
+        Some(entry.mac),
+        "premise: the unchanged manager row stays"
     );
 
-    let view = views.find(7, 9, NOW_NS);
-    let prev = views.get(view.expect("retained 7/9")).expect("retained view");
-    let held_forwarding = Arc::clone(&prev.forwarding);
-    run_pass_neigh(
-        &mut fx,
-        &held_forwarding,
-        prev.validation,
-        PassView {
-            prev_views: Some(&views),
-            held_pass: true,
-            view,
-        },
-        false,
-        &ha,
-        &dynamic,
-    );
+    run_held_19034(&mut fx, &views, &dynamic);
     assert_eq!(
-        fx.binding.live.generation_held_hits.load(Ordering::Relaxed),
-        3,
-        "every queued packet must be served under its own view"
+        held_forwards_19034(&fx, entry.mac),
+        (3, 3),
+        "every queued packet must be sent to the gateway under its own view"
     );
     assert_eq!(
         fx.binding.live.generation_held_misses.load(Ordering::Relaxed),
@@ -1430,11 +1503,243 @@ fn held_pass_survives_a_same_neighbor_snapshot_refresh_19034() {
         "nothing of the backlog may be dropped"
     );
     assert_eq!(
-        fx.binding
-            .flow
-            .flow_cache
-            .evictions_for(crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac),
+        neighbor_evictions_19034(&fx),
         0,
         "an unchanged neighbor must not evict the held view's entry"
     );
+}
+
+/// #19034, Codex scenario 1 (review of the withdrawn F1, ea1187b017), end to
+/// end. The gateway genuinely moves A→B while a flow's packets are parked
+/// with the view the worker is leaving, and a refresh naming B follows.
+/// Every held packet must be DROPPED, none sent to MAC A. A held pass cannot
+/// re-resolve, so the shard epoch is its only evidence.
+///
+/// The A→B change takes the path that moves no dynamic row:
+/// - the monitor learns B while the dynamic map holds no row for the
+///   gateway, which correctly bumps nothing, since lookups still read A from
+///   the static table;
+/// - Go's push names B, the fence accepts it (the dynamic map confirms it),
+///   and the static table, so the resolution, moves A→B;
+/// - the refresh then names B too.
+///
+/// On master the drop came only from the refresh bumping every manager key.
+/// The first F2 shape bumped nothing here, so this cell sent all three
+/// packets to MAC A. F2 now bumps at the push, where the resolution moved.
+#[test]
+fn held_pass_drops_after_a_genuine_mac_change_and_a_refresh_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = gateway_19034(&fx);
+    let mut mac_b = entry.mac;
+    mac_b[5] ^= 0x01;
+    let mut snapshot = nat_snapshot_with_fabric();
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("first apply");
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    assert!(
+        dynamic.get(&gateway).is_none(),
+        "premise: the dynamic map holds no row for the gateway"
+    );
+    let views = seed_and_park_19034(&mut fx, &fwd, &dynamic);
+
+    let epoch_before = dynamic.mac_change_epoch_for(&gateway);
+    assert!(
+        dynamic.insert_if_changed(gateway, NeighborEntry { mac: mac_b }),
+        "premise: the monitor learns B"
+    );
+    assert_eq!(
+        dynamic.mac_change_epoch_for(&gateway),
+        epoch_before,
+        "premise: a fresh dynamic row behind the static A does not bump"
+    );
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(gateway.0, gateway.1, NeighborEntry { mac: mac_b })]),
+        "premise: Go's push naming B is accepted"
+    );
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(gateway.0, gateway.1),
+        Some(mac_b),
+        "premise: the dynamic-confirmed B replaced the static A"
+    );
+    let row = snapshot
+        .neighbors
+        .iter_mut()
+        .find(|row| row.ifindex == gateway.0 && row.ip.parse::<IpAddr>().ok() == Some(gateway.1))
+        .expect("premise: the snapshot names the gateway");
+    row.mac = mac_text_19034(mac_b);
+    snapshot.generation += 1;
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("refresh naming B");
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(gateway.0, gateway.1),
+        Some(mac_b),
+        "premise: the static table resolves B"
+    );
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, entry.mac, "genuine A→B, then a refresh");
+}
+
+/// #19034, Codex P1 (review of 1f6c9fa7f1), re-learn arm, end to end. The
+/// held view has NO static row for the gateway, so it resolves it through
+/// the dynamic map, where the monitor learned MAC A. The flow is cached on A.
+/// Two refreshes then name the gateway with A (the first adds the static
+/// row, the second is a same-MAC republish), and the monitor sees the
+/// gateway move to B. The held view now resolves B, so its packets must not
+/// go to A. At 1f6c9fa7f1 the second refresh removed the row without a
+/// bump, B was a first insert, and all three packets went to A. Master's
+/// refresh bumped, so it dropped them.
+#[test]
+fn held_pass_drops_when_the_monitor_relearns_after_a_same_neighbor_refresh_19034() {
+    let mut fx = udp_flow_fixture();
+    let (gateway, entry) = gateway_19034(&fx);
+    let mut mac_b = entry.mac;
+    mac_b[5] ^= 0x01;
+    let no_static = Arc::new({
+        let mut forwarding = (*fx.forwarding).clone();
+        forwarding.neighbors.remove(&gateway);
+        forwarding
+    });
+    let mut coordinator = Coordinator::new();
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    assert!(
+        dynamic.insert_if_changed(gateway, entry),
+        "premise: the monitor learned the gateway's MAC A"
+    );
+    let views = seed_and_park_19034(&mut fx, &no_static, &dynamic);
+
+    let mut snapshot = nat_snapshot_with_fabric();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("refresh adding the static row");
+    snapshot.generation += 1;
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("same-MAC republish");
+    assert!(
+        dynamic.insert_if_changed(gateway, NeighborEntry { mac: mac_b }),
+        "premise: the monitor learns B"
+    );
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, entry.mac, "re-learn after a same-MAC refresh");
+}
+
+/// #19034, Codex P1, DELNEIGH arm, end to end: the same no-static held view,
+/// then the kernel withdraws the gateway after the same-MAC republish. The
+/// held view now resolves nothing for it. At 1f6c9fa7f1 the DELNEIGH found
+/// no row to remove (the refresh had removed it without a bump), and all
+/// three packets went to A.
+#[test]
+fn held_pass_drops_on_delneigh_after_a_same_neighbor_refresh_19034() {
+    let mut fx = udp_flow_fixture();
+    let (gateway, entry) = gateway_19034(&fx);
+    let no_static = Arc::new({
+        let mut forwarding = (*fx.forwarding).clone();
+        forwarding.neighbors.remove(&gateway);
+        forwarding
+    });
+    let mut coordinator = Coordinator::new();
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    assert!(
+        dynamic.insert_if_changed(gateway, entry),
+        "premise: the monitor learned the gateway's MAC A"
+    );
+    let views = seed_and_park_19034(&mut fx, &no_static, &dynamic);
+
+    let mut snapshot = nat_snapshot_with_fabric();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("refresh adding the static row");
+    snapshot.generation += 1;
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("same-MAC republish");
+    let _ = dynamic.remove_if_present(&gateway);
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, entry.mac, "DELNEIGH after a same-MAC refresh");
+}
+
+/// #19034, from R7's review of 1f6c9fa7f1 (Codex's F1 P1 #1(a)): a real
+/// DELNEIGH while packets wait, with the retained view unchanged (it still
+/// names the cached MAC). The monitor's removal bumps the shard. F2 leaves the
+/// hit-stage check as master has it.
+#[test]
+fn held_pass_drops_after_a_delneigh_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = gateway_19034(&fx);
+    let snapshot = nat_snapshot_with_fabric();
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("first apply");
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(gateway.0, gateway.1, entry)]),
+        "premise: the gateway is a manager row"
+    );
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    let views = seed_and_park_19034(&mut fx, &fwd, &dynamic);
+
+    assert!(
+        dynamic.remove_if_present(&gateway),
+        "premise: the DELNEIGH removes the live row"
+    );
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, entry.mac, "DELNEIGH");
+}
+
+/// #19034, from R7's review of 1f6c9fa7f1: the variant that relies on the
+/// refresh comparison itself. The monitor saw A→B BEFORE the flow was
+/// seeded, so its bump is already in the entry's stamp. The flow still
+/// resolved A, static first. The refresh then installs B in the static
+/// table, and only the refresh's bump (old static A vs new static B) can
+/// invalidate the entry.
+#[test]
+fn held_pass_drops_when_a_refresh_installs_the_monitor_confirmed_mac_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = gateway_19034(&fx);
+    let mut mac_b = entry.mac;
+    mac_b[5] ^= 0x5a;
+    let mut snapshot = nat_snapshot_with_fabric();
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("first apply");
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(gateway.0, gateway.1, entry)]),
+        "premise: the gateway is a manager row"
+    );
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    assert!(
+        dynamic.insert_if_changed(gateway, NeighborEntry { mac: mac_b }),
+        "premise: the monitor's MAC change lands before the seed"
+    );
+    let views = seed_and_park_19034(&mut fx, &fwd, &dynamic);
+
+    let row = snapshot
+        .neighbors
+        .iter_mut()
+        .find(|row| row.ifindex == gateway.0 && row.ip.parse::<IpAddr>().ok() == Some(gateway.1))
+        .expect("premise: the snapshot names the gateway");
+    row.mac = mac_text_19034(mac_b);
+    snapshot.generation += 1;
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("refresh naming B");
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(gateway.0, gateway.1),
+        Some(mac_b),
+        "premise: the dynamic-confirmed B replaced the static row"
+    );
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, entry.mac, "refresh installing the monitor-confirmed MAC");
 }
