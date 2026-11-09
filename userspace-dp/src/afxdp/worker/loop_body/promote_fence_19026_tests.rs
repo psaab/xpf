@@ -19,7 +19,7 @@ fn promoted_row() -> SyncedSessionEntry {
     metadata.fabric_ingress = false;
     metadata.is_reverse = false;
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: test_key(),
         decision: SessionDecision {
             resolution: test_resolution(),

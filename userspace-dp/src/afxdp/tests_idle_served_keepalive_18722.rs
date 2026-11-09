@@ -40,7 +40,7 @@ fn decision() -> SessionDecision {
 /// ct-slice last restamped them (0 until the first restamp).
 fn serving_row(key: &SessionKey) -> SyncedSessionEntry {
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: key.clone(),
         decision: decision(),
         metadata: test_metadata(),

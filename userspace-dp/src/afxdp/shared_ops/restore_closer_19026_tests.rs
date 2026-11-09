@@ -42,7 +42,7 @@ fn promoted_row(origin: SessionOrigin) -> SyncedSessionEntry {
     metadata.fabric_ingress = false;
     metadata.owner_rg_id = 1;
     SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: test_key(),
         decision: SessionDecision {
             resolution: test_resolution(),

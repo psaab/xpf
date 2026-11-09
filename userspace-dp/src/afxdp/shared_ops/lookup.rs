@@ -487,7 +487,7 @@ fn adoption_candidate_for_wire(
     let canonical = sessions.local_established_for_wire_at(wire_key, now_ns)?;
     let (decision, metadata, origin) = sessions.entry_with_origin(&canonical)?;
     Some(SyncedSessionEntry {
-        sibling_last_seen_ns: 0,
+        sibling_last_seen_ns: 0, last_served_ns: 0,
         key: canonical.clone(),
         decision,
         metadata,
