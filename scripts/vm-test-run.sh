@@ -118,7 +118,7 @@ if [[ "$sync" -eq 1 ]]; then
 	# refused. Fail closed, never open.
 	if incus exec "$runner" -- test -f "${base}/src/go.mod"; then
 		mod_rc=0
-		mod_out=$(incus exec "$runner" -- su - runner -c "cd '${base}/src' || exit 2; h() { cat go.mod go.sum go.work go.work.sum 2>/dev/null | sha256sum; }; before=\$(h); GOFLAGS=-buildvcs=false go mod download >&2; rc=\$?; if [ \"\$before\" = \"\$(h)\" ]; then echo VMTR_MODULE_FILES_UNCHANGED; else echo VMTR_MODULE_FILES_CHANGED; fi; exit \$rc") || mod_rc=$?
+		mod_out=$(incus exec "$runner" -- su - runner -c "cd '${base}/src' || exit 2; h() { cat go.mod go.sum go.work go.work.sum 2>/dev/null | sha256sum; }; before=\$(h); GOFLAGS=-buildvcs=false go mod download >&2; rc=\$?; echo; if [ \"\$before\" = \"\$(h)\" ]; then echo VMTR_MODULE_FILES_UNCHANGED; else echo VMTR_MODULE_FILES_CHANGED; fi; exit \$rc") || mod_rc=$?
 		mod_verdict=$(printf '%s\n' "$mod_out" | grep -xE 'VMTR_MODULE_FILES_(UN)?CHANGED' | tail -n 1 || true)
 		if [[ "$mod_verdict" == VMTR_MODULE_FILES_CHANGED ]]; then
 			echo "vm-test-run: go mod download changed go.mod/go.sum/go.work; the tree under test is not tidy (run 'go mod tidy' and commit); refusing" >&2
@@ -157,12 +157,15 @@ rc=0
 # already recorded in rc; this step cannot change it. A Ctrl-C or TERM to
 # this script runs the same step before exiting 130/143.
 root_handback() {
+	# Not interruptible: a second Ctrl-C must not leave the repair half-done.
+	trap '' INT TERM
 	incus exec "$runner" -- find "${base}" /home/runner/go /home/runner/.cargo /home/runner/.cache \
 		-xdev ! -user runner -exec chown -h runner:runner {} + >/dev/null 2>&1 || true
+	trap - INT TERM
 }
 if [[ "$as_root" -eq 1 ]]; then
-	trap 'trap - INT TERM; root_handback; exit 130' INT
-	trap 'trap - INT TERM; root_handback; exit 143' TERM
+	trap 'root_handback; exit 130' INT
+	trap 'root_handback; exit 143' TERM
 	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}" || rc=$?
 	trap - INT TERM
 	root_handback
