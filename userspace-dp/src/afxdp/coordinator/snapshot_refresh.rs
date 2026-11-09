@@ -381,11 +381,21 @@ impl super::Coordinator {
             &snapshot.interfaces,
             new_forwarding.neighbors.keys().map(|(ifindex, _)| *ifindex),
         );
-        // #949: bulk-remove stale manager keys atomically vs readers, and
-        // advance the affected shard epochs so cached flows re-resolve (#11375).
+        // #949: bulk-remove the previous snapshot's manager keys atomically
+        // vs readers. #11375/#19034: advance a shard's epoch only for a key
+        // whose resolution this refresh changes. A key the new snapshot
+        // resolves to the same MAC (the steady state of every routes-only
+        // republish) keeps its cached flows valid; bumping it dropped every
+        // packet a #18560 held pass had queued for those flows.
+        let unchanged = refresh_unchanged_manager_neighbors(
+            &self.forwarding,
+            &new_forwarding,
+            &self.neighbors.dynamic,
+            &old_manager_keys,
+        );
         self.neighbors
             .dynamic
-            .bulk_replace_neighbors(&old_manager_keys, &[]);
+            .bulk_remove_manager_keys(&old_manager_keys, &unchanged);
         // #1873 R-D (Codex code r3): captured BEFORE the overwrite —
         // gates the new-appearance purge arm below. False only when no
         // coordinator apply has ever installed a snapshot (disarmed
@@ -671,6 +681,38 @@ impl super::Coordinator {
         self.queue_warm_pass(false);
         Ok(())
     }
+}
+
+/// #19034: the previous snapshot's manager keys whose resolution a refresh
+/// leaves unchanged. That means the same MAC before and after, as
+/// `lookup_neighbor_entry` (the forwarding path's own reader) resolves it:
+///
+/// - before: `old_forwarding`'s static table first, then the dynamic map,
+///   which still holds the manager row;
+/// - after: `new_forwarding`'s static table only, because the caller is
+///   about to remove the row from the dynamic map.
+///
+/// A key resolved by neither side, or a MAC that differs, or one missing on
+/// either side, is a change and keeps its epoch bump (#3048). A concurrent
+/// monitor update cannot be lost by this read: a MAC replacement in the
+/// dynamic map bumps its own shard (#5147).
+pub(super) fn refresh_unchanged_manager_neighbors(
+    old_forwarding: &ForwardingState,
+    new_forwarding: &ForwardingState,
+    dynamic: &Arc<crate::afxdp::ShardedNeighborMap>,
+    old_manager_keys: &[(i32, IpAddr)],
+) -> FastSet<(i32, IpAddr)> {
+    old_manager_keys
+        .iter()
+        .copied()
+        .filter(|&(ifindex, ip)| {
+            let before =
+                crate::afxdp::forwarding::lookup_neighbor_entry(old_forwarding, Some(dynamic), ifindex, ip);
+            let after =
+                crate::afxdp::forwarding::lookup_neighbor_entry(new_forwarding, None, ifindex, ip);
+            matches!((before, after), (Some(before), Some(after)) if before.mac == after.mac)
+        })
+        .collect()
 }
 
 #[cfg(test)]

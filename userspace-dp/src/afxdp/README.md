@@ -2464,11 +2464,32 @@ own view's flow-cache entry:
     (`FlowCache::held_compare_only`). The cache keeps one entry per key, and a
     lookup with other generations leaves the current entry in place.
   - A miss, or any hit-stage fall-through (an epoch or lease fence,
-    egress/owner departed, stale neighbor MAC, a superseded decision), is
+    egress/owner departed, a changed neighbor MAC, a superseded decision), is
     dropped as a held-view miss. It is not a metadata-generation mismatch:
     the packet is valid against the retained view, so this drop does not
     increment `config_gen_mismatches`, `fib_gen_mismatches`, or the
     AHEAD/BEHIND mismatch witnesses.
+  - **Neighbor epochs and held passes (#19034).** The #3048/#5147 neighbor
+    check is a per-SHARD epoch: a MAC change or removal of any neighbor in
+    the shard marks every entry resolved through it stale. An ordinary pass
+    pays one slow-path trip for that. A held pass cannot re-resolve. The hit
+    stage evicts the first stale packet's entry, and every later queued
+    packet of that flow finds no entry at all, so the flow's whole ring
+    backlog is dropped.
+    - Until #19034 that happened on every routes-only republish of an RG
+      move. `refresh_runtime_snapshot_inner` removed every manager-owned
+      neighbor from the dynamic map with nothing reinserted, which bumped
+      the shard of each, although the new snapshot carried the same
+      neighbors.
+    - On loss that was about 90% of the packets a planned move lost
+      (`docs/log/19034.md`): one iperf3 stream's backlog of up to about 4k
+      segments at a time, and a 0.3-0.6 s stall of that stream.
+    - The refresh now advances a shard only when a removed key's resolution
+      changes (`coordinator/snapshot_refresh.rs`,
+      `refresh_unchanged_manager_neighbors`; see
+      `docs/flow-cache-simplification.md`).
+    - A genuine MAC change or removal still bumps, and a held pass still
+      drops the backlog of a flow whose next hop really moved.
   - This describes the ordinary flow-cache route, not every pre-cache arm.
     An admitted IPsec passthrough can reinject before the cache, and a
     pending reverse PMech packet can be deferred before it; those paths are

@@ -466,6 +466,61 @@ past `SOAK_MAX_COST_STALL_MS` (10 s), a stream that never recovers. So "the
 traffic stopped for a few seconds and came back" is never a pass.
 `SOAK_STRICT_COST=1` scores COST as FAIL for a hitless-target run.
 
+## Publishes during a move, and what they cost (#19034)
+
+Sessions are on both nodes, so no packet needs to be lost to a move. What a
+move still costs is in the userspace helper's view publishes. On loss, 2026-11-09,
+every planned move published on each node:
+
+| When | What | What it changes in the helper FIB |
+|---|---|---|
+| at the RG edge (pre-activation on the gaining node, after `rg_active=false` on the losing node, #18620) | routes-only `apply_snapshot` (new config generation), then a FIB bump 30-100 ms later | the moving RG's connected prefixes (e.g. `172.16.80.0/24` on `reth0.80`) appear or go; the FIB bump changes nothing (same forwarding tables) |
+| +1.7 to +5 s, on the node that became primary for an RG | the ip-monitoring publish gate flips (`IsLocalPrimaryAny`), its actuator re-renders FRR (two `frr-reload.py` runs, about 1 s), then a routes-only `apply_snapshot` and a FIB bump | only `0.0.0.0/0` and `::/0`: from a cluster-terminal discard (pref 200) to the real next hop, which FRR installs only on the primary. This is the "+2.2 s route republish" |
+
+The shim stamps each packet with the current config/FIB generation pair, and
+a worker serves a packet stamped with a pair it has left only from that view's
+flow-cache entry (the #18560 held pass, which cannot re-resolve). What each
+publish dropped, measured with a diag build (counts per 10 moves, both
+nodes):
+
+- **Whole backlogs at every config publish, about 90% (fixed by #19034).**
+  - The same-plan apply bumped the neighbor-MAC epoch of every shard holding
+    a manager-owned neighbor, although nothing about those neighbors changed.
+  - The held pass then evicted each flow's entry on its first queued packet
+    and dropped the rest: 15-32k packets per 10 moves, one iperf3 stream's
+    queue of up to about 4k segments at a time, and a 0.3-0.6 s stall of
+    that stream.
+  - The refresh now bumps only a neighbor whose resolution changed
+    (`docs/flow-cache-simplification.md`, "Neighbor mapping-change
+    invalidation"; `userspace-dp/src/afxdp/README.md`, "Neighbor epochs
+    and held passes").
+- **AHEAD, about 6%.** The helper advances the stamp right after its view store
+  (#18598); a worker reads its view once per loop tick, so for a few ms it
+  drops packets already stamped with the view it has not adopted yet.
+  About 65% of these are at FIB-only bumps, whose views are identical in
+  content.
+- **NEWER, about 8%.** In the batch that straddles a publish, a flow's
+  current-stamped packet re-seeds its entry before the held pass runs the
+  same flow's older packets, which then miss. At most one batch (63
+  packets) per flow per publish on a native ring.
+
+Neither residual is a forwarding change: both are fail-closed drops of
+packets whose result the publish did not change.
+
+Measured on loss on 2026-11-09, same session, against master cd9adfaca4.
+These numbers are for the first form of the fix: a held-pass re-check of each
+flow's own neighbor, which was replaced by the source fix above before
+landing. The source-fix lab run is in `docs/log/19034.md`.
+
+- 10 per-move captures: held misses fell from 14.7k / 12.1k (fw0 / fw1) to
+  1.1k / 0.4k. Moves with a stream stall of 200 ms or more fell from 3 of 10
+  to 0 of 10.
+- H11 (RG2, 160 moves per arm): moves with a v4 stream stall over 200 ms
+  fell from 40 to 6, and the stall p95 from 600 ms to 104 ms. The longest
+  ping gap stayed under 140 ms on both arms.
+
+Details are in `docs/log/19034.md`.
+
 ## Running the soak
 
 ```sh
@@ -768,3 +823,4 @@ LAN neighbour entry.
 | 2026-10-31, loss, 0.0.26140+gacf27bc2bc3b (master plus #18587, #18589, #18590), clocks 0.2 s apart | 200 moves of RG2 from node0, 5 s | 195 PASS, 5 FAIL. Every move landed (CLI 0.9–1.4 s, landed ≤ 1.98 s, no dual-active, helpers agreed). Each FAIL is one iperf3 stream stalled 2.2–6.6 s (TCP backoff after loss at the activation point; #18559). Ping: longest gap ≤ 115 ms, but up to 66 pings lost per window while RG2 sat on node1, spread across the window. That loss is fabric congestion: RG2 alone on node1 carries every flow over the copy-mode fabric, with a tail of about 2.7 Gbit/s against 11.5 Gbit/s on node0 |
 | same | 200 moves of RG2 from node0, 2 s | 200 PASS. CLI ≤ 1.41 s, landed ≤ 1.82 s, 5.5 pings lost per move (median; max 18), longest gap ≤ 95 ms, worst stall ≤ 1.5 s |
 | 2026-10-31, udp, 0.0.26120+gcce3fb49443a, clocks within about 1 s (no NTP) | 40 moves of every RG (0, 1, 2; three commands per move) from node1, 2 s | 40 PASS. CLI 0.56–1.28 s per command, landed ≤ 1.72 s, 1–11 pings lost per move, longest gap 23–65 ms, worst stream stall 0–1.4 s |
+| 2026-11-09, loss, 0.0.30439+g3b8e42eead7a (#19034, first form: held-pass re-check) and master control 0.0.30444+gcd9adfaca4d1, NTP-synced | 40 moves of RG2 per run, targeted, `SOAK_SLEEP` 5 and 2 × `SOAK_FROM` 0 and 1, 160 per arm | fix 160 PASS; control 120 PASS + 40 VOID (UDP-probe precondition at sleep 2). Moves with a v4 stream stall over 200 ms: fix 6, control 40; stall p95 104 vs 600 ms, max 600 vs 800 ms. Longest ping gap at most 132 vs 82 ms |

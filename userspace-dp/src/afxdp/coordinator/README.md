@@ -298,7 +298,12 @@ Differences that matter (#1881):
   the observable mutations — `self.validation` bump (H2), neighbor-
   manager key rotation + stale-key delete (H3), forwarding swap, and the
   `RuntimeView` publish — AFTER the build
-  succeeds. A non-policy integrity fault (invalid interface address,
+  succeeds. The rotation removes the previous snapshot's manager rows from
+  the dynamic map. Since #19034 it advances a neighbor shard's epoch only
+  for a key whose resolution (static table first) the new snapshot changes:
+  `refresh_unchanged_manager_neighbors` +
+  `ShardedNeighborMap::bulk_remove_manager_keys`. It used to advance every
+  manager key's shard on every apply. A non-policy integrity fault (invalid interface address,
   CoS queue, NAT64 / NPTv6 rule) that only the full build catches now
   returns `Err(SnapshotIntegrityError)`; the handler reports `ok=false`,
   restores the bumped status generation, and does NOT persist the

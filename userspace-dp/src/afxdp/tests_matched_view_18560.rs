@@ -265,6 +265,22 @@ fn run_pass_ha(
     push: bool,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
 ) -> BatchCounters {
+    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
+    run_pass_neigh(fx, forwarding, validation, pass, push, ha_state, &dynamic_neighbors)
+}
+
+/// #19034: `run_pass_ha` against a caller-owned dynamic neighbor map (for
+/// example a coordinator's), so a cell can let a refresh act on it between
+/// passes.
+fn run_pass_neigh(
+    fx: &mut GreFixture,
+    forwarding: &ForwardingState,
+    validation: ValidationState,
+    pass: PassView<'_>,
+    push: bool,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+) -> BatchCounters {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128;
     if push {
@@ -294,7 +310,6 @@ fn run_pass_ha(
     let ident = fx.binding.identity();
     let binding_lookup = WorkerBindingLookup::from_bindings(std::slice::from_ref(&fx.binding));
     let mirror_targets = MirrorTargetMap::default();
-    let dynamic_neighbors = Arc::new(ShardedNeighborMap::default());
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
@@ -313,7 +328,7 @@ fn run_pass_ha(
         forwarding,
         ha_state,
         forwarding_active_rgs: &*EMPTY_FWD_ACTIVE_RGS_16217,
-        dynamic_neighbors: &dynamic_neighbors,
+        dynamic_neighbors,
         neighbor_resolver: None,
         shared_sessions: &shared_sessions,
         shared_nat_sessions: &shared_nat_sessions,
@@ -1319,4 +1334,107 @@ fn held_pass_wiring_is_present_18560() {
             "poll_binding must use `{needle}`"
         );
     }
+}
+
+/// #19034, end to end: a routes-only republish (a same-plan
+/// `refresh_runtime_snapshot` naming the same neighbors) lands while a
+/// flow's packets are queued with the view the worker is leaving. The
+/// coordinator's own dynamic map is the one the worker reads. Its manager
+/// row for the flow's gateway leaves the map, but the gateway resolves to
+/// the same MAC, so the held pass must serve all three queued packets from
+/// the 7/9 entry. At cd9adfaca4 the refresh advanced the gateway's shard
+/// epoch: the first held packet evicted the entry as `PostHitNeighborMac`
+/// and the other two found nothing (0 hits, 3 misses).
+#[test]
+fn held_pass_survives_a_same_neighbor_snapshot_refresh_19034() {
+    let mut fx = udp_flow_fixture();
+    let fwd = Arc::clone(&fx.forwarding);
+    let gateway_ip = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1));
+    let (gateway, entry) = fwd
+        .neighbors
+        .iter()
+        .find(|(key, _)| key.1 == gateway_ip)
+        .map(|(key, entry)| (*key, *entry))
+        .expect("premise: the fixture carries a static neighbor for the WAN gateway");
+    let mut snapshot = nat_snapshot_with_fabric();
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("first apply");
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(gateway.0, gateway.1, entry)]),
+        "premise: Go's neighbor push makes the gateway a manager row"
+    );
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    assert!(dynamic.get(&gateway).is_some(), "premise: the manager row is in the dynamic map");
+
+    let ha = txn_ha_state();
+    let batch = run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(batch.session_creates >= 1, "premise: the flow is established under 7/9");
+    run_pass_neigh(&mut fx, &fwd, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(
+        txn_flow_cache_entries(&fx.binding) > 0,
+        "premise: the flow's second packet seeds the flow cache under 7/9"
+    );
+    let views = views_with(STAMPED, &fwd, NEWER);
+    for _ in 0..3 {
+        run_pass_neigh(
+            &mut fx,
+            &fwd,
+            NEWER,
+            PassView {
+                prev_views: Some(&views),
+                held_pass: false,
+                view: None,
+            },
+            true,
+            &ha,
+            &dynamic,
+        );
+    }
+    assert_eq!(fx.binding.view_held.len(), 3, "premise: three 7/9 packets are parked");
+
+    snapshot.generation += 1;
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("routes-only republish with the same neighbors");
+    assert!(
+        dynamic.get(&gateway).is_none(),
+        "premise: the manager row left the dynamic map, as the refresh always did"
+    );
+
+    let view = views.find(7, 9, NOW_NS);
+    let prev = views.get(view.expect("retained 7/9")).expect("retained view");
+    let held_forwarding = Arc::clone(&prev.forwarding);
+    run_pass_neigh(
+        &mut fx,
+        &held_forwarding,
+        prev.validation,
+        PassView {
+            prev_views: Some(&views),
+            held_pass: true,
+            view,
+        },
+        false,
+        &ha,
+        &dynamic,
+    );
+    assert_eq!(
+        fx.binding.live.generation_held_hits.load(Ordering::Relaxed),
+        3,
+        "every queued packet must be served under its own view"
+    );
+    assert_eq!(
+        fx.binding.live.generation_held_misses.load(Ordering::Relaxed),
+        0,
+        "nothing of the backlog may be dropped"
+    );
+    assert_eq!(
+        fx.binding
+            .flow
+            .flow_cache
+            .evictions_for(crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitNeighborMac),
+        0,
+        "an unchanged neighbor must not evict the held view's entry"
+    );
 }
