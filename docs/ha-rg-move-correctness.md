@@ -72,7 +72,9 @@ A move of RG *g* to node *t* is correct when all of these hold:
 6. **Traffic follows.** Sessions are already on both nodes (session sync), so
    established flows keep running through the new owner:
    - ping loss and the longest ping gap stay within budget;
-   - no iperf3 stream stalls past budget, and none dies;
+   - no iperf3 stream stalls past budget, and none dies. A traffic
+     generator that stops by itself during the move counts as dying
+     (#19054);
    - traffic is flowing again in the tail of the move's window.
 7. **Within the operator's cadence.** The RG has landed before the operator's
    next command, which their loop issues `sleep S` after this one returns.
@@ -422,11 +424,15 @@ transition cost. The soak attributes every ping gap and iperf3 stall to the
 move whose window it starts in. A window runs from the moment a move is issued
 to the moment the next one is issued, on the LAN host's clock.
 
-- **Ping** (`ping -D -i 0.01`, 100 pps, IPv4 to `$IPERF_TARGET4` and IPv6 to
-  `$IPERF_TARGET6`). The soak reports lost replies and the longest gap per
+- **Ping** (`ping -D -O -i 0.01`, 100 pps, IPv4 to `$IPERF_TARGET4` and IPv6
+  to `$IPERF_TARGET6`). The soak reports lost replies and the longest gap per
   window, per family. Under `-P8` load the loss path drops a few pings with
   no move at all: on 2026-10-31, 20 windows in which nothing moved lost 0–4
-  pings each, with the longest gap 21–39 ms.
+  pings each, with the longest gap 21–39 ms. Only `bytes from` lines are
+  replies. With `-O`, ping also writes `no answer yet for icmp_seq=N` for
+  each unanswered probe. Those lines, and ICMP errors such as `Destination
+  Host Unreachable`, show that ping is still running; they are not replies
+  (#19054 review).
 - **iperf3** (IPv4 `-P8 -p 5211`, IPv6 `-P2 -p 5210`, `-i 0.1 --json-stream`).
   The worst per-stream stall is the longest run of 100 ms intervals under
   1 Mbit/s. A stream that disappears from the output counts as stalled from
@@ -513,7 +519,7 @@ Knobs:
 | `SOAK_STRICT_COST` | 0 | `1`: a COST (over-budget but recovered) scores FAIL |
 | `SOAK_MAX_COST_STALL_MS` | 10000 | a recovered single-stream stall longer than this is a FAIL, not COST |
 | `SOAK_TRAFFIC` | 1 | `0`: control plane only (the run exits 2) |
-| `SOAK_TRAFFIC_S` | 120 per RG move + 600 | iperf3/ping run length. The soak stops the generators itself after the last window, so this is a cap for a controller that dies (#19054) |
+| `SOAK_TRAFFIC_S` | 120 per RG move + 600 | iperf3/ping run length. The soak stops the generators itself after the last window, so this is only a cap. A controller that dies is covered by the LAN-host traffic watchdog, not by this cap (#19054; see "Traffic watchdog" below) |
 | `SOAK_HELPER_CHECK` | 1 | `0`: skip the helper reads (the run exits 2) |
 | `SOAK_IPV6` | 1 | `0`: IPv4 only. IPv6 traffic-follow reads the LAN host's RA default router (a RETH link-local), which is what its IPv6 traffic uses; no default route, or an unmappable router MAC, voids the run |
 | `SOAK_RESTORE` | 1 | `0`: do not put node0 back as primary at the end (matrix row D3) |
@@ -593,6 +599,12 @@ One verdict per move:
   - a LAN neighbour entry (IPv4 VIP or IPv6 RA router) that resolves to no
     RETH MAC on a move, after the preflight proved it resolvable
     ("traffic-follow unmeasured");
+  - a traffic generator (ping or iperf3) that stopped by itself before the
+    window closed: before the run's planned end, and not stopped by the
+    soak's watchdog (#19054 review). Streams dying is a FAIL, whether the
+    stream stalls to the end or the generator exits (a reset connection,
+    for example). The moves after it FAIL the same way, as a blackhole does
+    in every window it lasts;
 - **VOID**: the precondition failed. Before a move to node *t*, the RG was not
   cleanly owned by the other node at the end of the previous window. A failed
   move therefore costs one FAIL, and the next move, back to where the RG
@@ -613,25 +625,35 @@ One verdict per move:
   - Before #19062 the soak stopped the traffic 1 s after the last window.
     A 5 s stall that the same stream recovered from on every other move was
     then scored "never recovered" on the last one.
-- **VOID, uncovered** (#19054): ping or iperf3 did not cover the move's
-  window. Whatever the traffic checks say about a window with no traffic,
-  they say it about nothing, so the move is never PASS or COST.
-  - "Covered" means the generator PROCESS was seen still running at or
-    after the window's END. The soak polls the processes right after each
-    move is issued and after the last window.
+- **VOID, uncovered** (#19054): the HARNESS ended the traffic before the
+  move's window closed, so the window could not be observed. VOID means
+  only "the harness could not observe"; it is never PASS or COST.
+  - "Covered" means the generator was still running at or after the
+    window's END. The soak reads that from the generator's own output,
+    after its stop has flushed it. A line proves the generator ran until
+    about 0.2 s after its stamp. With `-O`, a live ping writes a line every
+    10 ms, reply or not; iperf3 writes an interval every 100 ms, outage or
+    not. (The first fold also polled the generator processes. That gave
+    the same answer on every shape the cells could build, so it was
+    removed.)
   - Replies cannot prove coverage. A live ping behind a blackhole gets
     none; that window is covered, and its silence FAILs as a ping gap. A
     generator that exited 0.4 s before the window closed still had replies
     in the window's last second, and that once passed as covered.
-  - The reason names the cause: the traffic run's planned end came first
-    (`SOAK_TRAFFIC_S`), or a generator stopped early, with iperf3's error
-    text when it has one.
-  - The checks that need traffic through the window's END are skipped for
-    the uncovered family: no ping replies in the tail, a low tail rate, an
-    open ping gap. So are the traffic-follow counters.
+  - Who ended it decides the verdict. The harness ended it when the
+    generator was last seen within 2 s of the run's planned end
+    (`SOAK_TRAFFIC_S`), or of the moment the soak's watchdog stopped it.
+    That window is VOID, with the cause. Anything else is a generator that
+    stopped by itself, and FAILs (see the FAIL list above).
+  - In a harness-ended window, the checks that need traffic through the
+    window's END are skipped for that family: no ping replies in the tail,
+    a low tail rate, an open ping gap. So are the traffic-follow counters.
   - Everything that was actually observed still counts: a closed ping gap,
     a stall's measured length, an aggregate outage, the UDP probe, and the
-    status, helper and CLI checks. Any of them can still FAIL the move.
+    status, helper and CLI checks. Any of them FAILs the move. So do a
+    dual-active sample, an RG that did not land or landed past the bound, a
+    revert, a CLI error and helper disagreement: they are read from status,
+    not traffic (#19054 review).
   - Before #19054 the run length was estimated at sleep + converge + 4 s per
     move, plus 60 s. A 200-move run outlived it after about 182 moves, and
     the last 18 moves were scored FAIL on no traffic. Moves also took longer
@@ -639,10 +661,38 @@ One verdict per move:
 
 A **void run** (exit 2, `FATAL:` line, no moves scored) when the soak cannot
 measure what it claims to: no RG with a single clean owner at preflight; the
-LAN host clock unreadable; a traffic generator not streaming after the
-warmup — a busy iperf3 server ("the server is busy running a test"), a dead
-target; a Python error in the harness; SIGTERM (the LAN-host generators are
-stopped first). None of these is a FAIL.
+LAN host clock unreadable; the LAN-host traffic watchdog could not be
+started (no traffic is started without it); a traffic generator not
+streaming after the warmup — a busy iperf3 server ("the server is busy
+running a test"), a dead target; a Python error in the harness; SIGTERM (the
+LAN-host generators are stopped first). None of these is a FAIL.
+
+### Traffic watchdog
+
+The generators run until the soak stops them, capped at `SOAK_TRAFFIC_S`
+(by default 120 s per RG move plus 600 s: hours for a long run). A soak
+controller that is SIGKILLed, or whose host hangs, cannot stop them, and
+they would keep full-rate iperf3 running on a shared cluster until the cap
+(#19054 review). So before it starts any generator, the soak starts a
+detached watchdog on the LAN host:
+
+- The soak touches `/tmp/r-soak-<run>.alive` after every move. The
+  watchdog checks it every 10 s. If it is older than the limit, the
+  watchdog SIGINTs every generator pid file and stops the UDP probe. It
+  writes `/tmp/r-soak-<run>.watchdog` (the LAN time and the heartbeat's
+  age), and exits.
+- The limit is 4 × (`SOAK_SLEEP` + RGs per move × `SOAK_CONVERGE_S`) + 120 s,
+  and at least 300 s. That is far longer than any normal move, and far
+  shorter than the cap.
+- The soak's own stop removes the `.alive` file, and the watchdog then
+  exits without firing. If the watchdog cannot be started (its process is
+  not alive half a second later), the run is void and no traffic starts.
+- If it did fire, the soak logs `WARNING: the LAN-host traffic watchdog
+  stopped the generators`. Windows the generators did not cover because of
+  it are VOID ("the soak's LAN-host watchdog stopped the traffic"): the
+  harness ended them.
+- The cells run the real watchdog script and the real starter on the test
+  runner, with stand-in generators.
 
 The run exits 0 when every move was PASS or COST, 1 on any FAIL, and 2 when
 there was no FAIL but a VOID move, a void run, or a disabled check
@@ -827,7 +877,10 @@ production; its clock and shared state are locked for the parallel reads.
 | `FATAL: preflight VOID: RGg has no single clean owner ...` / `cannot read the LAN host clock` | The cluster was not in a state a move can be judged from | Restore node0 primary (`SOAK_RESTORE`, row D3) and rerun |
 | `FATAL: traffic preflight: v4 iperf3 to ... failed before any move: ... the server is busy running a test` / `not streaming` / `ping ... is not answering` | The traffic target is busy (another lane's iperf3) or unreachable | Check the target and the lock; rerun |
 | `FATAL: harness error: ...` / `harness terminated by signal` | The harness itself failed; the generators were stopped | Fix the harness; the run measured nothing |
-| `v4/v6 ping/iperf3 did not cover the move window: <cause>; the move is unscored (#19054)` (VOID) | The generators were not running for the whole window. `<cause>` is the planned end of the traffic run, or a generator that stopped early (with iperf3's error) | For the planned end, raise `SOAK_TRAFFIC_S`. For an early stop, read `iperf.jsonl`'s error event and `ping.log`. The move is VOID, not FAIL |
+| `v4/v6 ping/iperf3 did not cover the move window: the traffic run's planned end came before this window closed ...; ... unscored unless other evidence FAILs it (#19054)` (VOID) | The run's planned end came first | Raise `SOAK_TRAFFIC_S` |
+| `v4/v6 ping/iperf3 did not cover the move window: the soak's LAN-host watchdog stopped the traffic ...` (VOID) | The controller did not feed the watchdog within its limit (it hung or was stopped), and the watchdog stopped the generators | Find out why the controller stalled; the run did not measure those windows |
+| `v4/v6 ping/iperf3 did not cover the move window: <generator> was last seen running N s before this window closed, before its planned end and not stopped by the soak (iperf3: <error>); a generator that stopped by itself is a failure of this move (#19054)` (FAIL) | The generator exited by itself: a reset or refused connection, or ping exiting | Treat as a dying stream. Read `iperf.jsonl`'s error event and `ping.log`. The first such move is where it died |
+| `WARNING: the LAN-host traffic watchdog stopped the generators (LAN epoch, heartbeat age s): ...` | The watchdog fired | As above |
 | `precondition: RGg was on nodeX before a move to nodeX` (VOID) | The previous move did not happen | Read the previous move's FAIL |
 | `UDP sequence probe flow was absent on synced standby nodeN` (VOID) | The tuple-filtered listing on nodeN was complete (its `Total sessions:` equals the rows shown) and did not contain the probe flow: the standby really has no synced row for it | Check session sync (row H7) and the standby's `show security flow session destination-port 6201 limit 10000`. Before #19038 this line also came from the 100-row cap |
 | `UDP sequence probe pre-move Session ID query failed: could not parse flow-session capture on nodeN: ...` or `UDP sequence probe final-window Session ID query failed: could not parse ...`, followed by `shows R rows but reports 'Total sessions: N'` or `no 'Total sessions:' terminator` (VOID) | The local listing was cut short, or has no `Total sessions:` terminator, so it cannot show the flow absent (#19038) | Under the tuple filter a cut listing means the CLI ignored the filter. Compare the CLI build with the query the soak sent |

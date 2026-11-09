@@ -101,6 +101,20 @@ TRAFFIC_S_SLACK = 600
 # plus this margin, so a stall that began in the last window can show it
 # recovered.
 FINAL_TAIL_MARGIN_S = 2.0
+# #19054 review (R16): when a generator was last alive, from its own output.
+# With -O, ping prints a line per probe (a reply or "no answer yet"), so a
+# live ping behind a blackhole still writes every 10 ms; iperf3 writes an
+# interval every 100 ms, outage or not. A line proves the process was
+# running until about this long after its stamp.
+GEN_OUTPUT_TOL_S = 0.2
+# The planned end is computed on the controller just before the generators
+# start: a generator last alive within this of it ran to its plan.
+PLAN_TOL_S = 2.0
+# #19054 review (R16): a LAN-host watchdog stops the generators when the
+# controller has not touched its heartbeat for this long, so a SIGKILLed
+# controller cannot leave full-rate traffic running until the -t/-w cap.
+WATCHDOG_MIN_S = 300
+WATCHDOG_POLL_S = 10
 
 # ---------------------------------------------------------------------------
 # `show chassis cluster status` parsing
@@ -332,7 +346,41 @@ def cli_error_hint(text: str) -> str:
 # Traffic parsing (LAN host clock)
 # ---------------------------------------------------------------------------
 
-_PING = re.compile(r"^\[(\d+\.\d+)\].*icmp_seq=(\d+)")
+# A reply ("64 bytes from ...: icmp_seq=N"). Not "no answer yet for
+# icmp_seq=N" (-O) and not an ICMP error ("From ... icmp_seq=N Destination
+# Host Unreachable"): those prove ping ran, not that the target answered.
+_PING = re.compile(r"^\[(\d+\.\d+)\].* bytes from .*icmp_seq=(\d+)")
+_PING_ANY = re.compile(r"^\[(\d+\.\d+)\]")
+
+
+def ping_last_seen(text: str) -> Optional[float]:
+    """The LAN time of ping's last stamped line, a reply or not: when the
+    ping process was last known to be running (#19054 review)."""
+    last = None
+    for line in (text or "").splitlines():
+        m = _PING_ANY.match(line)
+        if m:
+            last = float(m.group(1))
+    return last
+
+
+def traffic_watchdog_script(run_id: str, limit_s: int, poll_s: float = WATCHDOG_POLL_S,
+                            root: str = "/tmp") -> str:
+    """A POSIX-sh dead-man for the soak's LAN-host generators (#19054 review).
+
+    The controller touches `<base>.alive` once per move. If that file is
+    older than `limit_s`, the watchdog SIGINTs every generator pid file and
+    the UDP probe, writes `<base>.watchdog` ("<LAN epoch> <age s>") and
+    exits. When the file is gone (the soak's own stop), it exits quietly."""
+    base = f"{root}/r-soak-{run_id}"
+    return (f'echo $$ > {base}.wdpid; alive={base}.alive; touch "$alive"; '
+            f'while sleep {poll_s}; do '
+            f'm=$(stat -c %Y "$alive" 2>/dev/null) || exit 0; '
+            f'age=$(( $(date +%s) - m )); '
+            f'[ "$age" -le {int(limit_s)} ] && continue; '
+            f'for p in {base}.*.pid; do [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null; done; '
+            f'[ -f {base}.udp/probe.pid ] && kill "$(cat {base}.udp/probe.pid)" 2>/dev/null; '
+            f'echo "$(date +%s) $age" > {base}.watchdog; exit 0; done')
 
 
 def parse_ping(text: str) -> List[Tuple[float, int]]:
@@ -566,12 +614,12 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
                        iperf_alive_until: Optional[float] = None) -> Dict:
     """The traffic facts for one family in one move window [t0, t1) on the LAN clock.
 
-    #19054 review: a window is covered only if each GENERATOR process was
-    seen alive at or after the window's end (`*_alive_until`, LAN clock,
-    from the soak's own process polls). Successful replies cannot prove
+    #19054 review: a window is covered only if each GENERATOR was alive at
+    or after the window's end (`*_alive_until`, LAN clock, from the
+    generator's own output: Soak.finish). Successful replies cannot prove
     that: a live ping behind a blackhole gets none, and a generator that
     exited 0.4 s before the window ended left its last reply inside the
-    window's final second. Without process evidence (direct callers), the
+    window's final second. Without liveness evidence (direct callers), the
     old reply/interval-based test is used."""
     win_gaps = [g for g in gaps if t0 <= g.start < t1]
     lost = sum(g.lost for g in win_gaps)
@@ -732,15 +780,22 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
     uncovered: List[str] = []
     if traffic_enabled:
         for fam, t in sorted((rec.traffic or {}).items()):
-            # #19054: a window the generators did not cover cannot be scored:
-            # whatever the traffic checks say, they say it about no traffic.
-            missing = [what for what, ok in (("ping", t.get("ping_covered", False)),
-                                             ("iperf3", t.get("iperf_covered", False))) if not ok]
-            if missing:
-                uncovered.append(f"{fam} {' and '.join(missing)} did not cover the move window: "
-                                 f"{t.get('uncovered_cause', 'cause unknown')}; the checks that need traffic "
-                                 "through the window's end are skipped, and the move is unscored unless "
-                                 "other evidence FAILs it (#19054)")
+            # #19054: a generator that did not run through the window's end.
+            # If the HARNESS ended it (its planned end, its watchdog), the
+            # window could not be observed: VOID. A generator that stopped
+            # by itself, or for a cause the soak did not record, is evidence
+            # that the move broke the traffic: FAIL (#19054 review).
+            for kind, label in (("ping", "ping"), ("iperf", "iperf3")):
+                if t.get(f"{kind}_covered", False):
+                    continue
+                cause = t.get(f"{kind}_uncovered_cause", "cause not recorded")
+                if t.get(f"{kind}_uncovered_by") == "harness":
+                    uncovered.append(f"{fam} {label} did not cover the move window: {cause}; the checks that "
+                                     "need traffic through the window's end are skipped, and the move is "
+                                     "unscored unless other evidence FAILs it (#19054)")
+                else:
+                    reasons.append(f"{fam} {label} did not cover the move window: {cause}; a generator that "
+                                   "stopped by itself is a failure of this move (#19054)")
             if t.get("cut_streams"):
                 uncovered.append(f"{fam} stream(s) {t['cut_streams']} were still stalled when the traffic stopped, "
                                  f"before the {budget.max_cost_stall_ms:g} ms COST cap; their recovery was not "
@@ -1079,6 +1134,28 @@ class IncusCluster:
     def lan_sh(self, script: str) -> Tuple[int, str]:
         return self._exec(self.lan, ["sh", "-c", script], timeout=20)
 
+    def start_traffic_watchdog(self, run_id: str, limit_s: int) -> Tuple[int, str]:
+        """Start the detached LAN-host watchdog; "watchdog-running" in the
+        output means its process was alive half a second later."""
+        base = f"/tmp/r-soak-{run_id}"
+        script = traffic_watchdog_script(run_id, limit_s)
+        return self._exec(self.lan, ["sh", "-c",
+                                     f"rm -f {base}.watchdog {base}.wdpid; touch {base}.alive; "
+                                     f"setsid sh -c {shlex.quote(script)} </dev/null >/dev/null 2>&1 & "
+                                     f"sleep 0.5; kill -0 \"$(cat {base}.wdpid 2>/dev/null)\" 2>/dev/null "
+                                     f"&& echo watchdog-running"], timeout=20)
+
+    def traffic_heartbeat(self, run_id: str) -> None:
+        self._exec(self.lan, ["touch", f"/tmp/r-soak-{run_id}.alive"], timeout=10)
+
+    def traffic_watchdog_fired(self, run_id: str) -> Optional[str]:
+        """The watchdog's marker ("<LAN epoch> <age s>"), consumed; None if
+        it never fired."""
+        base = f"/tmp/r-soak-{run_id}"
+        rc, out = self._exec(self.lan, ["sh", "-c", f"cat {base}.watchdog 2>/dev/null; rm -f {base}.watchdog"],
+                             timeout=10)
+        return out.strip() or None
+
     def _udp_probe_paths(self, run_id: str) -> Tuple[str, str, str]:
         root = f"/tmp/r-soak-{run_id}.udp"
         return root, f"{root}/udp_session_probe.py", f"{root}/probe.log"
@@ -1219,7 +1296,7 @@ class Soak:
         # monotonic clock onto this host's wall clock.
         self.lan_mono_offset = self.wall() - self.now()
         self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
-        self.gen_alive_until: Dict[Tuple[str, str], float] = {}  # #19054 review: last seen alive, LAN clock
+        self.watchdog_fired_at: Optional[float] = None  # LAN epoch the watchdog stopped the traffic at
         # #19055: the RGs this run moves, and dual-active samples seen for an
         # RG of this move that has no result yet (its own move comes later).
         self._scope_rgs: List[int] = []
@@ -1368,29 +1445,16 @@ class Soak:
                  "for l in sys.stdin:\n"
                  "    sys.stdout.write('%.6f %s' % (time.time(), l)); sys.stdout.flush()\n")
         self.procs = []
-        self.gens = {}  # (kind, fam) -> generator process (#19054 review)
         for fam, target, port, streams in self.families():
             t = shlex.quote(target)
             v = "-6" if fam == "v6" else "-4"
             iperf = (f"sh -c 'echo $$ > /tmp/r-soak-{rid}.iperf{fam}.pid; exec iperf3 {v} -c {t} -p {port}"
                      f" -P {streams} -t {duration_s} -i 0.1 --json-stream --forceflush'"
                      f" | python3 -u -c {shlex.quote(stamp)}")
-            ping = f"echo $$ > /tmp/r-soak-{rid}.ping{fam}.pid; exec ping {v} -D -i 0.01 -W 1 -w {duration_s} {t}"
+            ping = f"echo $$ > /tmp/r-soak-{rid}.ping{fam}.pid; exec ping {v} -D -O -i 0.01 -W 1 -w {duration_s} {t}"
             self.procs.append(self.c.popen_lan(ping, self._path("ping", fam)))
-            self.gens[("ping", fam)] = self.procs[-1][0]
             self.procs.append(self.c.popen_lan(iperf, self._path("iperf", fam)))
-            self.gens[("iperf", fam)] = self.procs[-1][0]
         self.traffic_started = True
-
-    def poll_generators(self):
-        """Stamp, on the LAN clock, every generator process still running
-        now (#19054 review). A window is covered only by a generator seen
-        alive at or after its end. Called right after each move's issue
-        (the previous window's end) and after the last window."""
-        lan = self.lan_time(self.now())
-        for key, p in getattr(self, "gens", {}).items():
-            if p.poll() is None:
-                self.gen_alive_until[key] = lan
 
     def stop_traffic(self):
         if not self.traffic_started:
@@ -1399,7 +1463,7 @@ class Soak:
         rid = self.cfg.run_id
         self.c.lan_sh(f"for p in /tmp/r-soak-{rid}.*.pid; do"
                       f" [ -f $p ] && kill -INT $(cat $p) 2>/dev/null; done; sleep 2;"
-                      f" rm -f /tmp/r-soak-{rid}.*.pid")
+                      f" rm -f /tmp/r-soak-{rid}.*.pid /tmp/r-soak-{rid}.alive /tmp/r-soak-{rid}.wdpid")
         for p, f in self.procs:
             try:
                 p.wait(timeout=20)
@@ -1789,6 +1853,18 @@ class Soak:
                 # the generators until the soak stops them, with a cap.
                 duration = cfg.traffic_s or int(cfg.moves * len(rgs) * TRAFFIC_S_PER_MOVE_CAP + TRAFFIC_S_SLACK)
                 info["traffic_s"] = duration
+                # #19054 review: the generators run until the soak stops
+                # them, capped at `duration`. If this controller dies
+                # (SIGKILL, a hung host), a LAN-host watchdog keyed to its
+                # per-move heartbeat stops them instead. No watchdog, no
+                # traffic.
+                self.watchdog_limit_s = max(WATCHDOG_MIN_S, int(
+                    4 * (cfg.sleep_s + len(rgs) * cfg.budget.converge_s) + 120))
+                rc_wd, out_wd = self.c.start_traffic_watchdog(cfg.run_id, self.watchdog_limit_s)
+                if "watchdog-running" not in (out_wd or ""):
+                    raise VoidRun("could not start the LAN-host traffic watchdog: "
+                                  + ((out_wd or "").strip()[:200] or f"rc={rc_wd}"))
+                info["traffic_watchdog_s"] = self.watchdog_limit_s
                 self.traffic_end_lan = self.lan_time(self.now()) + duration
                 self.start_traffic(duration)
                 self.sleep(cfg.warmup_s)
@@ -1801,7 +1877,6 @@ class Soak:
             for i in range(1, cfg.moves + 1):
                 target = targets[rgs[0]]
                 t_issue = self.now()
-                self.poll_generators()
                 udp_probe_checks = []
                 udp_probe_pending = None
                 results: List[RGMoveResult] = []
@@ -1872,9 +1947,10 @@ class Soak:
                          f"{dual_note} udp={probe_status} {probe_detail} {c.cli_first[:120]}")
                 for rg in rgs:
                     targets[rg] = 1 - targets[rg]
+                if cfg.traffic:
+                    self.c.traffic_heartbeat(cfg.run_id)  # feeds the LAN-host watchdog
             if moves:
                 moves[-1].t_next_lan = self.lan_time(self.now())
-                self.poll_generators()
         except VoidRun as e:
             void_reason = str(e)
             self.log(f"FATAL: {void_reason}")
@@ -1899,6 +1975,15 @@ class Soak:
                     # plus a margin first.
                     self.sleep(cfg.budget.max_cost_stall_ms / 1000.0 + FINAL_TAIL_MARGIN_S if moves else 1.0)
                 self.stop_traffic()
+                if not self.terminated:
+                    fired = self.c.traffic_watchdog_fired(cfg.run_id)
+                    if fired:
+                        self.log(f"WARNING: the LAN-host traffic watchdog stopped the generators "
+                                 f"(LAN epoch, heartbeat age s): {fired}")
+                        try:
+                            self.watchdog_fired_at = float(fired.split()[0])
+                        except (ValueError, IndexError):
+                            self.watchdog_fired_at = float("-inf")
             if cfg.restore and not self.terminated:
                 def read_current_owners():
                     try:
@@ -1947,20 +2032,40 @@ class Soak:
                 gaps = ping_gaps(replies)
                 stalls, agg = stream_stalls(intervals, cfg.budget.low_bps)
                 err = iperf_error(self._read(self._path("iperf", fam)))
+                # #19054 review: when each generator was last known to run,
+                # from its own output, read after the soak's stop flushed it:
+                # ping -O writes a line per probe, answered or not; iperf3 an
+                # interval per 100 ms, outage or not. Replies are not
+                # liveness. (The Codex fold's process polls agreed with this
+                # on every shape the cells could build, so they were removed:
+                # one source for one fact.)
+                seen = {"ping": ping_last_seen(self._read(self._path("ping", fam))),
+                        "iperf": intervals[-1][1] if intervals else None}
+                alive = {k: (seen[k] + GEN_OUTPUT_TOL_S) if seen[k] is not None else float("-inf")
+                         for k in ("ping", "iperf")}
                 for m in moves:
                     m.traffic = m.traffic or {}
                     t = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
                                            intervals, cfg.budget,
-                                           ping_alive_until=self.gen_alive_until.get(("ping", fam), float("-inf")),
-                                           iperf_alive_until=self.gen_alive_until.get(("iperf", fam), float("-inf")))
-                    if not (t["ping_covered"] and t["iperf_covered"]):
-                        # #19054: say WHY the generators were not there.
-                        t["uncovered_cause"] = (
-                            f"the traffic run's planned end came before this window closed "
-                            f"(SOAK_TRAFFIC_S={info.get('traffic_s')})"
-                            if m.t_next_lan > self.traffic_end_lan else
-                            "a generator process exited before this window closed"
-                            + (f" (iperf3: {err})" if err else ""))
+                                           ping_alive_until=alive["ping"], iperf_alive_until=alive["iperf"])
+                    for kind, label in (("ping", "ping"), ("iperf", "iperf3")):
+                        if t[f"{kind}_covered"]:
+                            continue
+                        # VOID only when the HARNESS ended the traffic (its
+                        # planned end, or its watchdog); a generator that
+                        # stopped by itself is evidence about the move.
+                        if alive[kind] >= self.traffic_end_lan - PLAN_TOL_S:
+                            by, cause = "harness", (f"the traffic run's planned end came before this window closed "
+                                                    f"(SOAK_TRAFFIC_S={info.get('traffic_s')})")
+                        elif self.watchdog_fired_at is not None and alive[kind] >= self.watchdog_fired_at - PLAN_TOL_S:
+                            by, cause = "harness", ("the soak's LAN-host watchdog stopped the traffic (no controller "
+                                                    "heartbeat within its limit)")
+                        else:
+                            by, cause = "early", (f"{label} was last seen running "
+                                                  f"{max(0.0, m.t_next_lan - alive[kind]):.1f} s before this window "
+                                                  "closed, before its planned end and not stopped by the soak"
+                                                  + (f" (iperf3: {err})" if kind == "iperf" and err else ""))
+                        t[f"{kind}_uncovered_by"], t[f"{kind}_uncovered_cause"] = by, cause
                     m.traffic[fam] = t
         for m in moves:
             m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)

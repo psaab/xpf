@@ -4,7 +4,7 @@
 # The operator's loop, made rigorous: from ONE node, alternate
 #   request chassis cluster failover redundancy-group <rg> node 0|1
 # every SOAK_SLEEP seconds (after the CLI returns) for SOAK_MOVES moves, with
-# iperf3 (-P8 IPv4, -P2 IPv6) and ping -D -i 0.01 (IPv4 + IPv6) running from
+# iperf3 (-P8 IPv4, -P2 IPv6) and ping -D -O -i 0.01 (IPv4 + IPv6) running from
 # the LAN host, and score every move: the CLI text, ownership in BOTH nodes'
 # own status within the bound and for the rest of the window, each node's
 # `Forwarding: rg-active=` line, each helper's own ha_groups[].forwarding_active, no
