@@ -499,6 +499,17 @@ nodes):
 Neither residual is a forwarding change: both are fail-closed drops of
 packets whose result the publish did not change.
 
+Measured on loss on 2026-11-09, same session, the fix against master
+cd9adfaca4:
+- 10 per-move captures: held misses fell from 14.7k / 12.1k (fw0 / fw1) to
+  1.1k / 0.4k. Moves with a stream stall of 200 ms or more fell from 3 of 10
+  to 0 of 10.
+- H11 (RG2, 160 moves per arm): moves with a v4 stream stall over 200 ms
+  fell from 40 to 6, and the stall p95 from 600 ms to 104 ms. The longest
+  ping gap stayed under 140 ms on both arms.
+
+Details are in `docs/log/19034.md`.
+
 ## Running the soak
 
 ```sh
@@ -672,3 +683,4 @@ LAN neighbour entry.
 | 2026-10-31, loss, 0.0.26140+gacf27bc2bc3b (master plus #18587, #18589, #18590), clocks 0.2 s apart | 200 moves of RG2 from node0, 5 s | 195 PASS, 5 FAIL. Every move landed (CLI 0.9–1.4 s, landed ≤ 1.98 s, no dual-active, helpers agreed). Each FAIL is one iperf3 stream stalled 2.2–6.6 s (TCP backoff after loss at the activation point; #18559). Ping: longest gap ≤ 115 ms, but up to 66 pings lost per window while RG2 sat on node1, spread across the window. That loss is fabric congestion: RG2 alone on node1 carries every flow over the copy-mode fabric, with a tail of about 2.7 Gbit/s against 11.5 Gbit/s on node0 |
 | same | 200 moves of RG2 from node0, 2 s | 200 PASS. CLI ≤ 1.41 s, landed ≤ 1.82 s, 5.5 pings lost per move (median; max 18), longest gap ≤ 95 ms, worst stall ≤ 1.5 s |
 | 2026-10-31, udp, 0.0.26120+gcce3fb49443a, clocks within about 1 s (no NTP) | 40 moves of every RG (0, 1, 2; three commands per move) from node1, 2 s | 40 PASS. CLI 0.56–1.28 s per command, landed ≤ 1.72 s, 1–11 pings lost per move, longest gap 23–65 ms, worst stream stall 0–1.4 s |
+| 2026-11-09, loss, 0.0.30439+g3b8e42eead7a (#19034) and master control 0.0.30444+gcd9adfaca4d1, NTP-synced | 40 moves of RG2 per run, targeted, `SOAK_SLEEP` 5 and 2 × `SOAK_FROM` 0 and 1, 160 per arm | fix 160 PASS; control 120 PASS + 40 VOID (UDP-probe precondition at sleep 2). Moves with a v4 stream stall over 200 ms: fix 6, control 40; stall p95 104 vs 600 ms, max 600 vs 800 ms. Longest ping gap at most 132 vs 82 ms |
