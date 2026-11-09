@@ -1767,6 +1767,11 @@ test-v6-na-recovery-lib:
 # `up` claim-probes it and refuses if another MAC answers. `status` stays
 # lock-free. They nest inside a with-cluster.sh cell; never wrap them in a raw
 # `flock` on the lock path, which hangs (the inner acquire cannot see it).
+# The lock is whatever XPF_CLUSTER_LOCK/OWNER/EPOCH name, else LOSS's. For the
+# tcp or udp target (CLUSTER_ENV=test/incus/tcp-userspace-cluster.env, or
+# udp-), also export that cluster's tuple from CLAUDE.md's lock table
+# (xpf-cluster-tcp.lock/.owner, xpf-cluster-state/epoch-tcp; #19022), or `up`
+# queues on the loss lock while it restarts the other cluster's echo.
 mouse-target-up:
 	bash ./test/incus/mouse-target-setup.sh up
 

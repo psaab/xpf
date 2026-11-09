@@ -63,7 +63,10 @@
 # (mouse-iperf3@<port>, mouse-echo) so a listener survives reboot and a
 # failed unit is VISIBLE in `systemctl` instead of serving by accident
 # behind an orphan process (the pre-#16213 mouse-iperf3@5201 state:
-# unit failed "address in use", port held by a detached spawn). When no
+# unit failed "address in use", port held by a detached spawn). It keeps
+# mouse-iperf3@<port> enabled behind such an orphan and names it; only a
+# port ANOTHER systemd unit serves (the tcp/udp iperf3@<port>.socket) gets
+# no mouse-iperf3 unit (#19022). When no
 # instance holds the IP there is no handle to run a command on it from
 # here, and `up` prints exactly what is missing and where it must be
 # started. That is the honest boundary: this script cannot invent a

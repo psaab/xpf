@@ -48,8 +48,8 @@ a string, never just an exit code); `make harness-compare`,
 | Deploy + gate | `make CLUSTER_ENV=<env> cluster-deploy` / `cluster-deploy-and-gate` | Builds and rolls xpf onto both nodes; `-and-gate` adds the post-deploy smoke |
 | Deploy engine | `test/incus/cluster-setup.sh <subcommand>` (`BPFRX_CLUSTER_ENV=<env>`) | The script under the make targets: create/deploy/validate for the two-VM chassis cluster (fxp0/em0/fabric + LAN container) |
 | Inspect | `make CLUSTER_ENV=<env> cluster-status` / `cluster-ssh` / `cluster-logs` | Instance state, shell, journal access |
-| Target services | `test/incus/target-services.sh up|status` (`TARGET_V4=… INCUS_REMOTE=…`) | The one place that knows the WAN-target service grid: iperf3 `5200-5211` + TCP echo `6200-6211`, port→class map in `test/incus/cos-iperf-config.set`. **Known gap: grid not yet installed on the `tcp`/`udp` targets — ad-hoc one-off iperf servers were used in attempt 1** |
-| Mouse target | `make mouse-target-up` / `mouse-target-status` / `mouse-target-destroy` | Manages the `loss:` WAN target instance used by latency/CoS cells |
+| Target services | `test/incus/target-services.sh up|status` (`TARGET_V4=… INCUS_REMOTE=…`) | The one place that knows the WAN-target service grid: iperf3 `5200-5211` + TCP echo `6200-6211`, port→class map in `test/incus/cos-iperf-config.set`. On `loss` the iperf3 ports are `mouse-iperf3@52xx` units; on the `tcp`/`udp` targets they are socket-activated `iperf3@52xx.socket` units, which `mouse-target-setup.sh up` leaves in place (#19022) |
+| Mouse target | `make mouse-target-up` / `mouse-target-status` / `mouse-target-destroy` | Manages the WAN target container of the selected cluster env (`loss:xpf-mouse-target`, `tcp:xpf-tcp-target`, `udp:xpf-udp-target`): address unit, TCP echo, #18679 UDP sequence echo (replies from the receiving address, #19022), iperf3 ports. `up`/`destroy` take the cluster lock; for tcp/udp export that cluster's `XPF_CLUSTER_*` tuple |
 
 ## 2. Connectivity & forwarding behaviour (wire suite)
 

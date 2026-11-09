@@ -104,6 +104,7 @@ class UDPProbeEcho:
             raise
         self.family = family
         self.sock = sock
+        self.no_pktinfo = 0
 
     def reply_pktinfo(self, ancdata):
         """The send-side PKTINFO naming the datagram's local address."""
@@ -141,14 +142,26 @@ class UDPProbeEcho:
             pktinfo = self.reply_pktinfo(ancdata)
             try:
                 if pktinfo is None:
-                    # No PKTINFO (not expected on Linux): the pre-#19022
-                    # wildcard reply is still right on a one-address host.
+                    # No PKTINFO arrived (not expected on Linux once the
+                    # setsockopt succeeded). Still answer, from the
+                    # kernel-chosen source: right on a one-address host, the
+                    # #19022 defect on a multi-address one. So it is never
+                    # silent: the journal gets the first and every 1000th.
+                    self.no_pktinfo += 1
+                    if self.no_pktinfo == 1 or self.no_pktinfo % 1000 == 0:
+                        print(f"WARNING: UDP probe reply to {addr[0]} without PKTINFO "
+                              f"({self.no_pktinfo} so far): replying from the kernel-chosen "
+                              "source, wrong on a multi-address host (#19022)",
+                              file=sys.stderr, flush=True)
                     self.sock.sendto(response, addr)
                 else:
                     self.sock.sendmsg([response], pktinfo, 0, addr)
             except OSError:
-                # UDP: a full send buffer or a vanished address drops this
-                # one reply, as the asyncio transport's error path did.
+                # Drop this one reply: a full send buffer (BlockingIOError)
+                # or an address removed since the datagram arrived. The
+                # asyncio transport this replaced BUFFERED on
+                # BlockingIOError instead; at the probe's 10 datagrams/s the
+                # send buffer does not fill.
                 continue
 
     def close(self):

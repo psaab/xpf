@@ -81,7 +81,6 @@ case "$1" in
         [[ -n "${STUB_IPERF_OWNERS:-}" ]] && printf '%s\n' "$STUB_IPERF_OWNERS"
         exit 0 ;;
       *systemctl*is-active*) echo active; exit 0 ;;
-      *list-units*) echo "mouse-iperf3@5200.service loaded active running"; exit 0 ;;
       *) exit 0 ;;
     esac ;;
 esac
@@ -272,51 +271,206 @@ unit="$(run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_FORE
     || fail "#18576: a held address was probed (or the loss shape refused):
 $(<"${TMP}/up.out")"
 
-# --- 7. iperf3 ports another listener serves are left to it (#19022) -----
+# --- 7. iperf3 ports another UNIT serves are left to it (#19022) ----------
 # tcp and udp serve 5200-5211 through socket-activated iperf3@52xx.socket
 # units. `up` installed mouse-iperf3@52xx there anyway, and each one
 # crash-looped on the busy port ("start request repeated too quickly"), until
-# the units were disabled and reset by hand. The classifier runs on the
-# target; these cells pin what `up` does with each answer.
+# the units were disabled and reset by hand. Only a port ANOTHER systemd unit
+# serves may stand our unit down. An orphan (the pre-#16213 detached-spawn
+# shape) or an unreachable listener must not, since a disabled unit leaves the
+# port dead after that holder exits or the target reboots. The classifier runs
+# on the target (7b runs it for real); these cells pin what `up` and `status`
+# do with each answer.
 owner_table() { # <class> [port...]: one "<port> <class>" line per port
     local class="$1" p; shift
     for p in "$@"; do printf '%s %s\n' "$p" "$class"; done
 }
 ALL_IPERF=(5200 5201 5202 5203 5204 5205 5206 5207 5208 5209 5210 5211)
+SOCKET_TABLE="$(for p in "${ALL_IPERF[@]}"; do echo "$p other iperf3@$p.socket"; done)"
+ORPHAN_5200='5200 orphan pid=77(run-u7.service)'
 iperf_counts() { # -> "<enable> <disable> <reset>" mouse-iperf3 commands in the exec log
     printf '%s %s %s' "$(grep -c 'systemctl enable --now mouse-iperf3@' "${TMP}/exec.log")" \
         "$(grep -c 'systemctl disable --now mouse-iperf3@' "${TMP}/exec.log")" \
         "$(grep -c 'systemctl reset-failed mouse-iperf3@' "${TMP}/exec.log")"
 }
-run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-    STUB_IPERF_OWNERS="$(for p in "${ALL_IPERF[@]}"; do echo "$p other iperf3@$p.socket"; done)" > /dev/null
-if [[ "$(iperf_counts)" == "0 12 12" ]] && grep -q 'iperf3 5200: already served by iperf3@5200.socket; not installing mouse-iperf3@5200' "${TMP}/up.out"; then
+LOSS_ENV=BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env
+run_up "$LOSS_ENV" STUB_IPERF_OWNERS="$SOCKET_TABLE" > /dev/null
+if [[ "$(iperf_counts)" == "0 12 12" ]] && grep -q 'iperf3 5200: .*iperf3@5200.socket; not installing mouse-iperf3@5200' "${TMP}/up.out"; then
     pass "socket-unit ports (tcp/udp shape): no mouse-iperf3 enabled; 12 leftovers disabled and reset"
 else
     fail "#19022: socket-unit ports: enable/disable/reset = $(iperf_counts) (want 0 12 12); output:
 $(<"${TMP}/up.out")"
 fi
-run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_IPERF_OWNERS="$(owner_table mine "${ALL_IPERF[@]}")" > /dev/null
+run_up "$LOSS_ENV" STUB_IPERF_OWNERS="$(owner_table mine "${ALL_IPERF[@]}")" > /dev/null
 [[ "$(iperf_counts)" == "12 0 0" ]] \
-    && pass "our own active mouse-iperf3 ports (loss shape) are enabled, never disabled" \
+    && pass "our own mouse-iperf3 ports (loss shape) are enabled, never disabled" \
     || fail "#19022: loss shape enable/disable/reset = $(iperf_counts) (want 12 0 0)"
-run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env \
-    STUB_IPERF_OWNERS="5200 other users:((\"iperf3\",pid=77,fd=3))"$'\n'"$(owner_table free "${ALL_IPERF[@]:1}")" > /dev/null
-if [[ "$(iperf_counts)" == "11 1 1" ]] && ! grep -q 'enable --now mouse-iperf3@5200' "${TMP}/exec.log" \
-        && grep -q 'disable --now mouse-iperf3@5200' "${TMP}/exec.log"; then
-    pass "one foreign listener: only its port is skipped, the 11 free ports are installed"
+run_up "$LOSS_ENV" STUB_IPERF_OWNERS="${ORPHAN_5200}"$'\n'"$(owner_table free "${ALL_IPERF[@]:1}")" > /dev/null
+if [[ "$(iperf_counts)" == "12 0 0" ]] && grep -q 'enable --now mouse-iperf3@5200' "${TMP}/exec.log" \
+        && grep -q 'WARNING: iperf3 5200: held by pid=77(run-u7.service), which no persistent unit owns; keeping mouse-iperf3@5200 enabled' "${TMP}/up.out"; then
+    pass "an orphan-held port keeps mouse-iperf3 enabled and names the holder (never disabled behind it)"
 else
-    fail "#19022: mixed ports enable/disable/reset = $(iperf_counts) (want 11 1 1, 5200 skipped)"
+    fail "#19022: orphan port enable/disable/reset = $(iperf_counts) (want 12 0 0, 5200 kept, holder named); output:
+$(<"${TMP}/up.out")"
 fi
-run_up BPFRX_CLUSTER_ENV=test/incus/loss-userspace-cluster.env STUB_IPERF_OWNERS= > /dev/null
-[[ "$(iperf_counts)" == "12 0 0" ]] \
-    && pass "an empty owner table (exec or ss failed) installs all 12, as before #19022" \
-    || fail "#19022: empty owner table enable/disable/reset = $(iperf_counts) (want 12 0 0)"
-st="$(run_status STUB_IPERF_OWNERS="$(for p in "${ALL_IPERF[@]}"; do echo "$p other iperf3@$p.socket"; done)")"
-[[ "$st" == *"iperf3:   12 / 12 per-class ports served (0 mouse-iperf3, 12 by another listener)"* ]] \
+run_up "$LOSS_ENV" STUB_IPERF_OWNERS='5201 unreachable 127.0.0.1:5201 users:(("iperf3",pid=78,fd=3))'$'\n'"$(owner_table mine 5200 "${ALL_IPERF[@]:2}")" > /dev/null
+if [[ "$(iperf_counts)" == "12 0 0" ]] \
+        && grep -q 'WARNING: iperf3 5201: listener(s) 127.0.0.1:5201 .* not on a target v4 address (172.16.80.201 172.16.80.202); keeping mouse-iperf3@5201 enabled' "${TMP}/up.out"; then
+    pass "a listener on no target v4 address keeps mouse-iperf3 enabled and is named"
+else
+    fail "#19022: unreachable port enable/disable/reset = $(iperf_counts) (want 12 0 0, warning); output:
+$(<"${TMP}/up.out")"
+fi
+run_up "$LOSS_ENV" STUB_IPERF_OWNERS= > /dev/null
+if [[ "$(iperf_counts)" == "12 0 0" ]] \
+        && grep -q "WARNING: iperf3 owner classifier gave no answer for port(s) ${ALL_IPERF[*]} on" "${TMP}/up.out"; then
+    pass "an empty owner table installs all 12 as before AND names every unclassified port"
+else
+    fail "#19022: empty owner table enable/disable/reset = $(iperf_counts) (want 12 0 0, all 12 named); output:
+$(<"${TMP}/up.out")"
+fi
+run_up "$LOSS_ENV" STUB_IPERF_OWNERS="$(head -n 6 <<<"$SOCKET_TABLE")" > /dev/null
+if [[ "$(iperf_counts)" == "6 6 6" ]] \
+        && grep -q 'WARNING: iperf3 owner classifier gave no answer for port(s) 5206 5207 5208 5209 5210 5211 on' "${TMP}/up.out"; then
+    pass "a partial owner table names exactly the unclassified ports"
+else
+    fail "#19022: partial owner table enable/disable/reset = $(iperf_counts) (want 6 6 6, 5206-5211 named); output:
+$(<"${TMP}/up.out")"
+fi
+st="$(run_status STUB_IPERF_OWNERS="$SOCKET_TABLE")"
+[[ "$st" == *"iperf3:   12 / 12 per-class ports served (0 mouse-iperf3, 12 by another unit)"* ]] \
     && pass "status counts ports served by socket units (no false 0 / 12)" \
-    || fail "#19022: status iperf3 line wrong:
+    || fail "#19022: status iperf3 line wrong for the socket-unit shape:
 ${st}"
+st="$(run_status STUB_IPERF_OWNERS="${ORPHAN_5200}"$'\n'"$(owner_table mine "${ALL_IPERF[@]:1}")")"
+[[ "$st" == *"iperf3:   11 / 12 per-class ports served (11 mouse-iperf3, 0 by another unit)"* \
+   && "$st" == *"iperf3:   5200 NOT served: held by orphan pid=77(run-u7.service)"* ]] \
+    && pass "status does not count an orphan-held port as served, and names it" \
+    || fail "#19022: status counts or hides an orphan-held port:
+${st}"
+st="$(run_status STUB_IPERF_OWNERS="$(head -n 3 <<<"$SOCKET_TABLE")")"
+[[ "$st" == *"iperf3:   unknown / 12 per-class ports served (no classification for port(s) 5203 5204 5205 5206 5207 5208 5209 5210 5211"* ]] \
+    && pass "status prints unknown, not a count, when classification is partial" \
+    || fail "#19022: status prints a definite count for a partial classification:
+${st}"
+
+have_netns() {
+    command -v unshare >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 \
+        && command -v ss >/dev/null 2>&1 && unshare -rn true 2>/dev/null
+}
+netns_skip() { # <what>
+    if [[ "${XPF_REQUIRE_NETNS:-0}" == 1 ]]; then
+        fail "$1 need unshare, ip, ss and unprivileged user namespaces (XPF_REQUIRE_NETNS=1)"
+    else
+        echo "SKIP: $1 (no unshare/ip/ss or unprivileged user namespaces)"
+    fi
+}
+
+# --- 7b. the REAL on-target classifier, against real listeners (#19022) ----
+# IPERF_PORT_OWNER_SCRIPT is read from mouse-target-setup.sh (sourced: it
+# only defines) and run under `sh` in a private netns. The listeners are
+# real sockets that real `ss` reports; only `systemctl` is a stub
+# (whoami/is-enabled/list-sockets), mapping each listener's pid to a unit.
+# 127.0.0.3 plays the target's v4 address. The shapes:
+#   5200 own unit (enabled)                 -> mine
+#   5201 nothing                            -> free
+#   5202 dual-stack, held by systemd + socket unit -> other iperf3@5202.socket
+#   5203 wildcard, transient (not enabled)  -> orphan, pid named
+#   5204 nothing; 15204/52040 held + listed as sockets -> free (no suffix match)
+#   5205 127.0.0.1 only (enabled unit)      -> unreachable
+#   5206 IPv6-only [::] (enabled unit)      -> unreachable
+#   5207 wildcard, another enabled service  -> other iperf3-custom.service
+#   5208 own unit bound to 127.0.0.3 only   -> mine
+mkdir -p "${TMP}/sysbin" "${TMP}/cls"
+BPFRX_CLUSTER_ENV= bash -c 'source "$1" && printf "%s" "$IPERF_PORT_OWNER_SCRIPT"' _ "$SUBJECT" > "${TMP}/cls/owner.sh"
+cat > "${TMP}/sysbin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+case "$1" in
+  whoami) awk -v p="$2" '$1 == p { print $2; f = 1 } END { exit !f }' "${STUB_UNITS:?}" ;;
+  is-enabled) awk -v u="$2" '$1 == u { print $2; f = 1 } END { if (!f) print "disabled"; exit !f }' "${STUB_ENABLED:?}" ;;
+  list-sockets) cat "${STUB_SOCKETS:?}" ;;
+  *) exit 1 ;;
+esac
+STUB
+chmod +x "${TMP}/sysbin/systemctl"
+printf '%s\n' 'mouse-iperf3@5200.service enabled' 'mouse-iperf3@5208.service enabled' \
+    'run-u7.service transient' 'decoy.service enabled' 'lo-only.service enabled' \
+    'v6-only.service enabled' 'iperf3-custom.service enabled' > "${TMP}/cls/enabled"
+printf '%s\n' '[::]:5202 iperf3@5202.socket iperf3@5202.service' \
+    '[::]:15204 decoy@15204.socket decoy@15204.service' \
+    '[::]:52040 decoy@52040.socket decoy@52040.service' > "${TMP}/cls/sockets"
+cat > "${TMP}/cls/listen.py" <<'PY'
+import socket, sys, time
+# listen.py <ready-file> <family,addr,port>...; family 4 | 6 (dual-stack) | 6only
+ready, specs = sys.argv[1], sys.argv[2:]
+held = []
+for spec in specs:
+    fam, addr, port = spec.split(",")
+    s = socket.socket(socket.AF_INET if fam == "4" else socket.AF_INET6, socket.SOCK_STREAM)
+    if fam != "4":
+        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1 if fam == "6only" else 0)
+    s.bind((addr, int(port)))
+    s.listen()
+    held.append(s)
+open(ready, "w").close()
+time.sleep(120)
+PY
+if ! have_netns; then
+    netns_skip "#19022: real-classifier cells"
+elif ! head -n 1 "${TMP}/cls/owner.sh" | grep -q 'iperf-port-owner'; then
+    fail "#19022: could not read IPERF_PORT_OWNER_SCRIPT from ${SUBJECT} (sourcing it must only define); got: $(head -c 200 "${TMP}/cls/owner.sh")"
+else
+    cls_out="$(timeout 60 unshare -rn bash -c '
+        export PATH="$1:/usr/sbin:/sbin:$PATH"
+        d="$2"
+        ip link set lo up || exit 90
+        : > "$d/units"
+        start() { # <name> <unit> <spec>...
+            local name="$1" unit="$2" i
+            shift 2
+            python3 "$d/listen.py" "$d/ready.$name" "$@" &
+            echo "$! $unit" >> "$d/units"
+            for i in $(seq 50); do [ -e "$d/ready.$name" ] && return 0; sleep 0.1; done
+            echo "listener $name never became ready" >&2
+            return 1
+        }
+        start mine  mouse-iperf3@5200.service 4,0.0.0.0,5200 \
+          && start sysd init.scope 6,::,5202 \
+          && start orph run-u7.service 4,0.0.0.0,5203 \
+          && start decoy decoy.service 4,0.0.0.0,15204 4,0.0.0.0,52040 \
+          && start lo lo-only.service 4,127.0.0.1,5205 \
+          && start v6 v6-only.service 6only,::,5206 \
+          && start en iperf3-custom.service 4,0.0.0.0,5207 \
+          && start mine2 mouse-iperf3@5208.service 4,127.0.0.3,5208 || exit 91
+        STUB_UNITS="$d/units" STUB_ENABLED="$d/enabled" STUB_SOCKETS="$d/sockets" \
+            sh -c "$(cat "$d/owner.sh")" sh 127.0.0.3 5200 5201 5202 5203 5204 5205 5206 5207 5208
+        rc=$?
+        echo "ORPHAN_PID $(awk "\$2 == \"run-u7.service\" { print \$1 }" "$d/units")"
+        kill $(awk "{ print \$1 }" "$d/units") 2>/dev/null
+        exit "$rc"
+    ' _ "${TMP}/sysbin" "${TMP}/cls" 2>&1)"
+    cls_rc=$?
+    orphan_pid="$(awk '$1 == "ORPHAN_PID" { print $2 }' <<<"$cls_out")"
+    cls_want() { # <port> <class> [detail-glob]
+        local line
+        line="$(awk -v p="$1" '$1 == p { print; exit }' <<<"$cls_out")"
+        if [[ "$line" == "$1 $2"* && ( -z "${3:-}" || "$line" == $3 ) ]]; then
+            pass "classifier: $1 -> $2${3:+ (${3})}"
+        else
+            fail "#19022: real classifier: port $1 want '$2'${3:+ matching ${3}}, got '${line}' (rc=${cls_rc}); full output:
+${cls_out}"
+        fi
+    }
+    cls_want 5200 mine
+    cls_want 5201 free
+    cls_want 5202 "other iperf3@5202.socket"
+    cls_want 5203 orphan "*pid=${orphan_pid:-NONE}(run-u7.service)*"
+    cls_want 5204 free
+    cls_want 5205 unreachable '*127.0.0.1:5205*'
+    cls_want 5206 unreachable '*\[::\]:5206*'
+    cls_want 5207 "other iperf3-custom.service"
+    cls_want 5208 mine
+fi
 
 # --- 8. the UDP probe echo replies FROM the address it was sent to (#19022) -
 # The REAL mouse-target-echo.py, run in a private unprivileged netns (its
@@ -330,7 +484,7 @@ ${st}"
 # only 127.0.0.1 is the route's source. Cell C runs the harness's own
 # udp_session_probe.py (a connected socket) to the alias. Each control on the
 # primary address separates "wrong source" from "echo not running". SKIP
-# without unshare/ip or unprivileged user namespaces; XPF_REQUIRE_NETNS=1
+# without unshare/ip/ss or unprivileged user namespaces (have_netns); XPF_REQUIRE_NETNS=1
 # turns that SKIP into a failure.
 cat > "${TMP}/echo-client.py" <<'PY'
 import socket, subprocess, sys, time
@@ -383,13 +537,8 @@ report(data is not None and data.split()[3] == "6", "F: a wrong-magic datagram i
        f"first reply {data!r}")
 sys.exit(1 if fails else 0)
 PY
-if ! command -v unshare >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1 \
-        || ! unshare -rn true 2>/dev/null; then
-    if [[ "${XPF_REQUIRE_NETNS:-0}" == 1 ]]; then
-        fail "#19022: echo reply-source cells need unshare, ip and unprivileged user namespaces (XPF_REQUIRE_NETNS=1)"
-    else
-        echo "SKIP: #19022 echo reply-source cells (no unshare/ip or unprivileged user namespaces)"
-    fi
+if ! have_netns; then
+    netns_skip "#19022: echo reply-source cells"
 else
     echo_out="$(timeout 60 unshare -rn bash -c '
         export PATH=/usr/sbin:/sbin:$PATH
