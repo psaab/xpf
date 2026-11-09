@@ -234,6 +234,21 @@ fn refresh_withdrawing_a_static_only_neighbor_advances_its_epoch_19034() {
 /// (`held_pass_drops_after_a_genuine_mac_change_and_a_refresh_19034`).
 #[test]
 fn refresh_withdrawing_a_tunnel_outer_neighbor_advances_its_shard_19034() {
+    tunnel_outer_withdrawal_19034(true);
+}
+
+/// Cell (e) with the outer neighbors only in the static table (no Go push
+/// yet). The withdrawn key has no dynamic row to remove, so only the
+/// refresh's resolution comparison can advance its shard. An ifindex-blind
+/// comparison ("the same IP still resolves to the same MAC on the twin")
+/// passes the rows variant above, because removing a present row bumps by
+/// itself. It fails here.
+#[test]
+fn refresh_withdrawing_a_static_only_tunnel_outer_neighbor_advances_its_shard_19034() {
+    tunnel_outer_withdrawal_19034(false);
+}
+
+fn tunnel_outer_withdrawal_19034(manager_rows: bool) {
     use crate::afxdp::sharded_neighbor::ShardedNeighborMap;
     let outer_nh: IpAddr = "2001:559:8585:80::1".parse().expect("outer next hop");
     let outer_mac = MAC_A;
@@ -264,17 +279,24 @@ fn refresh_withdrawing_a_tunnel_outer_neighbor_advances_its_shard_19034() {
     coordinator
         .refresh_runtime_snapshot(&both)
         .expect("first apply");
-    assert!(
-        coordinator.apply_manager_neighbors(
-            true,
-            1,
-            &[
-                (withdrawn.0, outer_nh, NeighborEntry { mac: outer_mac }),
-                (twin_ifindex, outer_nh, NeighborEntry { mac: outer_mac }),
-            ],
-        ),
-        "premise: Go's push makes both outer neighbors manager rows"
-    );
+    if manager_rows {
+        assert!(
+            coordinator.apply_manager_neighbors(
+                true,
+                1,
+                &[
+                    (withdrawn.0, outer_nh, NeighborEntry { mac: outer_mac }),
+                    (twin_ifindex, outer_nh, NeighborEntry { mac: outer_mac }),
+                ],
+            ),
+            "premise: Go's push makes both outer neighbors manager rows"
+        );
+    } else {
+        assert!(
+            coordinator.dynamic_neighbors_ref().get(&withdrawn).is_none(),
+            "premise: the withdrawn key has no dynamic row"
+        );
+    }
     let resolution = crate::afxdp::forwarding::resolve_tunnel_forwarding_resolution(
         &coordinator.forwarding,
         Some(coordinator.dynamic_neighbors_ref()),
