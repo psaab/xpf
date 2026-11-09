@@ -549,6 +549,12 @@ skill. Work lands on `master` as ordinary commits:
     provisioning (`scripts/provision-testrunner.sh`: a Debian 14 VM, low `limits.cpu.priority` so the
     clusters' gate measurements keep priority). Do not fall back to the
     workstation.
+  - **Gate measurement cells pause the runner VM on the same lab host.**
+    Run `incus pause <machine>:xpf-testrunner` at the start of a
+    throughput/failover measurement cell and `incus start` it again at
+    the end, in a trap so it always resumes. Record the pause in the gate
+    record. A runner compiling on the same host inflated the LAN host's
+    loadavg from about 3 to 13-20 during the #18559 tcp gate (2026-11-09).
   - The bullets below still apply inside the runner VM.
 - Broad suites of network-reachable packages run in the VM legs or are
   recorded NOT-EXAMINED with the target.

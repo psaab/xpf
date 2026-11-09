@@ -32,6 +32,11 @@ incus orchestration, and runs hermetic shell censuses that touch no kernel
 state. If both runners are saturated, provision another one rather than
 running tests locally.
 
+The runners share their lab host's CPUs with that host's cluster. A gate
+measurement cell therefore pauses the same-host runner with
+`incus pause <machine>:xpf-testrunner` and resumes it with `incus start` in
+a trap. Paused jobs resume where they stopped.
+
 For current userspace validation, use
 [`userspace-ha-validation.md`](userspace-ha-validation.md) and the
 `loss:xpf-userspace-fw0/fw1` cluster.
