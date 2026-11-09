@@ -298,6 +298,8 @@ fn waterfill_phase1_select(
             .eligible_visits
             .wrapping_add(1);
         if root.tokens < head_len {
+            // #18748: whether this queue parks still demanding its reservation.
+            let parks_with_demand = queue.hot.tokens >= head_len;
             queue
                 .telemetry
                 .owner_profile
@@ -316,6 +318,7 @@ fn waterfill_phase1_select(
                 true,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                record_exact_park_demand(root, queue_idx, parks_with_demand);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -342,6 +345,7 @@ fn waterfill_phase1_select(
                 true,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::QueueTokenStarvation);
+                record_exact_park_demand(root, queue_idx, false);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;

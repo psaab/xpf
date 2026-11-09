@@ -73,6 +73,8 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
         };
         let head_len = cos_item_len(head);
         if root.tokens < head_len {
+            // #18748: whether this queue parks still demanding its reservation.
+            let parks_with_demand = queue.config.exact && queue.hot.tokens >= head_len;
             if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                 root.tokens,
                 root.shaping_rate_bytes,
@@ -83,6 +85,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
                 queue.config.exact,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                record_exact_park_demand(root, queue_idx, parks_with_demand);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -99,6 +102,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
                     true,
                 ) {
                     count_park_reason(root, queue_idx, ParkReason::QueueTokenStarvation);
+                    record_exact_park_demand(root, queue_idx, false);
                     park_cos_queue(root, queue_idx, wake_tick);
                 }
             }
@@ -207,6 +211,8 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
         };
         let head_len = cos_item_len(head);
         if root.tokens < head_len {
+            // #18748: whether this queue parks still demanding its reservation.
+            let parks_with_demand = queue.hot.tokens >= head_len;
             // #760 instrumentation: record the per-queue observation
             // that the interface shaper held it back. Written
             // regardless of whether the wakeup-tick estimator
@@ -244,6 +250,7 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
                 true,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                record_exact_park_demand(root, queue_idx, parks_with_demand);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -287,6 +294,7 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
                 true,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::QueueTokenStarvation);
+                record_exact_park_demand(root, queue_idx, false);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -498,6 +506,8 @@ pub(super) fn select_cos_surplus_batch_filtered(
             };
             let head_len = cos_item_len(head);
             if root.tokens < head_len {
+                // #18748: whether this queue parks still demanding its reservation.
+                let parks_with_demand = queue.config.exact && queue.hot.tokens >= head_len;
                 if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                     root.tokens,
                     root.shaping_rate_bytes,
@@ -508,6 +518,7 @@ pub(super) fn select_cos_surplus_batch_filtered(
                     false,
                 ) {
                     count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                    record_exact_park_demand(root, queue_idx, parks_with_demand);
                     park_cos_queue(root, queue_idx, wake_tick);
                 }
                 continue;

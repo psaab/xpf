@@ -21,8 +21,8 @@ use crate::afxdp::neighbor::monotonic_nanos;
 use crate::afxdp::types::{
     CoSInterfaceRuntime, CoSOversubscriptionPolicy, CoSPendingTxItem, CoSQueueRuntime,
     ExactDemandQueueMask, ExactLocalScratchTxRequest, ExactPreparedScratchTxRequest,
-    PreparedTxRecycle, PreparedTxRequest, SharedCoSExactBacklog, TxRequest, WorkerCoSQueueFastPath,
-    COS_PRIORITY_LEVELS,
+    PreparedTxRecycle, PreparedTxRequest, SharedCoSExactBacklog, SharedCoSRootLease, TxRequest,
+    WorkerCoSQueueFastPath, COS_PRIORITY_LEVELS,
 };
 use crate::afxdp::umem::MmapArea;
 use crate::afxdp::worker::BindingWorker;
@@ -41,6 +41,7 @@ use super::{
 use super::exact_demand::{exact_demand_rate_bytes_for_mask, local_exact_demand_mask};
 use super::fairness::account_flow_bucket_tx;
 use super::flow_hash::cos_flow_bucket_index;
+use super::token_bucket::maybe_top_up_cos_root_lease;
 
 // #1035 P2: drain stage of the queue service pipeline split into
 // a sibling submodule.
@@ -121,9 +122,9 @@ use super::tx_completion::{
     count_park_reason, count_tx_ring_full_submit_stall,
     cos_root_can_service_after_prime, cos_tick_for_ns,
     count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
-    publish_cos_exact_backlog_on_cos, refresh_cos_interface_activity,
-    refresh_cos_interface_activity_on_cos, restore_cos_local_items_inner,
-    restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
+    publish_cos_exact_backlog_on_cos, record_exact_park_demand, refresh_cos_interface_activity,
+    refresh_cos_interface_activity_on_cos, republish_cos_exact_demand_if_changed,
+    restore_cos_local_items_inner, restore_cos_prepared_items_inner, CoSServicePhase, ParkReason,
 };
 // Back-edges to crate::afxdp::tx are XSK-ring / worker-binding /
 // prepared-frame primitives — primitives that own the kernel ring
@@ -302,6 +303,10 @@ pub(in crate::afxdp) fn drain_shaped_tx(
             return serviced;
         }
         record_cos_queue_lease_acquire(binding, lease_telemetry);
+        // #18748 review (R6 P2): the exact pass made no progress, but its
+        // selector may have topped an exact queue up and parked it on root;
+        // peers must see that demand now, not at the next enqueue.
+        republish_cos_exact_demand_if_changed(&binding.cos, binding.slot, root_ifindex);
         let Some(batch) = build_nonexact_cos_batch(binding, root_ifindex, now_ns) else {
             continue;
         };
@@ -361,6 +366,11 @@ fn build_nonexact_cos_batch(
     let peer_exact_demand_mask = shared_exact_backlog
         .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
         .unwrap_or(ExactDemandQueueMask::EMPTY);
+    let shared_root_lease = binding
+        .cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_root_lease.as_ref());
     // #4265 (R-2): the non-exact guarantee refill now routes through the
     // shared queue lease (when the coordinator built one for a sharded
     // non-exact guaranteed queue) so admission is metered class-wide
@@ -412,6 +422,12 @@ fn build_nonexact_cos_batch(
                     exact_demand_rate,
                     shared_exact_backlog.map(|backlog| &**backlog),
                 );
+                hold_root_only_for_spendable_surplus(
+                    root,
+                    shared_root_lease.map(|lease| &**lease),
+                    now_ns,
+                    nonexact_budget,
+                );
                 select_cos_surplus_batch_filtered(
                     root,
                     now_ns,
@@ -427,6 +443,48 @@ fn build_nonexact_cos_batch(
         refresh_cos_interface_activity(binding, root_ifindex);
     }
     selected
+}
+
+/// #18748 review (R6 P1): a worker must not hold root credit it cannot
+/// spend. A retained exact reservation can leave a zero (or sub-frame)
+/// residual; a worker whose only pending work is that residual-bounded
+/// non-exact surplus would still prime root on every drain and hold it, and
+/// with a small interface burst (the lease's aggregate outstanding cap is
+/// `burst / 4`) two such workers exhaust the cap so the worker whose exact
+/// class the reservation exists for can never acquire root: no worker sends.
+/// So when the residual cannot cover a frame and nothing else here needs
+/// root (no exact backlog, no guarantee backlog on this worker), the worker
+/// gives its root credit back and stops topping up
+/// (`prime_cos_root_for_service`). Every drain that finds no exact or
+/// guarantee work reaches this check again before selecting surplus, so the
+/// first one that sees the budget, or exact or guarantee backlog, back tops
+/// up here and the work does not wait a wheel tick.
+#[inline]
+fn hold_root_only_for_spendable_surplus(
+    root: &mut CoSInterfaceRuntime,
+    shared_root_lease: Option<&SharedCoSRootLease>,
+    now_ns: u64,
+    nonexact_budget: Option<u64>,
+) {
+    let Some(shared_root_lease) = shared_root_lease else {
+        return;
+    };
+    let release = nonexact_budget.is_some_and(|budget| budget < tx_frame_capacity() as u64)
+        && !root.queues.iter().any(|queue| {
+            (queue.config.exact || queue.config.guarantee_enabled) && !cos_queue_is_empty(queue)
+        });
+    if release == root.surplus_root_released {
+        return;
+    }
+    root.surplus_root_released = release;
+    if release {
+        let held = core::mem::take(&mut root.tokens);
+        if held > 0 {
+            shared_root_lease.release_unused(held);
+        }
+    } else {
+        maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
+    }
 }
 
 #[inline]

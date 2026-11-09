@@ -19,8 +19,7 @@ use crate::afxdp::worker::BindingWorker;
 
 use super::exact_demand::{exact_demand_rate_bytes_for_mask, local_exact_demand_mask};
 use super::queue_ops::{
-    cos_exact_queue_demands_reservation, cos_queue_is_empty, cos_queue_push_front,
-    maybe_demote_drained_best_effort,
+    cos_queue_is_empty, cos_queue_push_front, maybe_demote_drained_best_effort,
 };
 use super::token_bucket::{maybe_top_up_cos_root_lease, release_cos_root_lease_on_cos};
 
@@ -482,7 +481,13 @@ pub(in crate::afxdp) fn prime_cos_root_for_service(
             return false;
         };
         ticks_advanced = advance_cos_timer_wheel(root, now_ns);
-        if let Some(shared_root_lease) = shared_root_lease {
+        // #18748 review (R6 P1): a worker that gave its root credit back
+        // because it cannot spend it does not take more until the non-exact
+        // batch build finds the residual budget, or exact or guarantee
+        // backlog, back (`hold_root_only_for_spendable_surplus`).
+        if let Some(shared_root_lease) = shared_root_lease
+            && !root.surplus_root_released
+        {
             maybe_top_up_cos_root_lease(root, shared_root_lease, now_ns);
         }
     }
@@ -551,24 +556,6 @@ fn exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
 }
 
 #[inline]
-fn demanding_exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
-    // #hb166 T-6(b): share the demand predicate with the demand masks
-    // (queue_ops::cos_exact_queue_demands_reservation, #18748) so the
-    // published serviceable-bytes signal and the demand mask agree
-    // byte-for-byte.
-    root.queues
-        .iter()
-        .filter(|queue| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && cos_exact_queue_demands_reservation(queue)
-        })
-        .fold(0u64, |acc, queue| {
-            acc.saturating_add(queue.hot.queued_bytes)
-        })
-}
-
-#[inline]
 pub(in crate::afxdp) fn publish_cos_exact_backlog(binding: &BindingWorker, root_ifindex: i32) {
     publish_cos_exact_backlog_on_cos(&binding.cos, binding.slot, root_ifindex);
 }
@@ -591,12 +578,59 @@ pub(in crate::afxdp) fn publish_cos_exact_backlog_on_cos(
         shared_exact_backlog.publish(slot, 0);
         return;
     };
-    shared_exact_backlog.publish_with_serviceable(
+    // #18748: one walk of the queues for the published demand mask (the
+    // write-only demand-bytes fold beside it had no production reader).
+    shared_exact_backlog.publish_demand(
         slot,
         exact_backlog_bytes(root),
-        demanding_exact_backlog_bytes(root),
         local_exact_demand_mask(root),
     );
+}
+
+/// #18748 review (R6 P2): republish this binding's exact demand when it no
+/// longer matches what peers see. A selector top-up can give an exact queue
+/// its own tokens and then park it on root without selecting anything; no
+/// service, settle or enqueue follows to publish that, so peers would keep
+/// the stale "no demand" from the enqueue and run unconstrained while the
+/// queue waits for exactly the root the reservation protects. Called after
+/// an exact selection pass that made no progress; the comparison is O(exact
+/// queues) with parked queues O(1), and the store happens only on a change.
+#[inline]
+pub(in crate::afxdp) fn republish_cos_exact_demand_if_changed(
+    cos: &crate::afxdp::worker::WorkerCos,
+    slot: u32,
+    root_ifindex: i32,
+) {
+    let Some(shared_exact_backlog) = cos
+        .cos_fast_interfaces
+        .get(&root_ifindex)
+        .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref())
+    else {
+        return;
+    };
+    let Some(root) = cos.cos_interfaces.get(&root_ifindex) else {
+        return;
+    };
+    if local_exact_demand_mask(root) != shared_exact_backlog.published_demand_queue_mask(slot) {
+        publish_cos_exact_backlog_on_cos(cos, slot, root_ifindex);
+    }
+}
+
+/// #18748: record, at an exact queue's park site, whether it parks still
+/// demanding its reservation (`cos_exact_queue_demands_reservation` reads
+/// this while the queue is parked). A root park with the queue's own tokens
+/// covering its head demands; an own-token park does not.
+#[inline]
+pub(in crate::afxdp) fn record_exact_park_demand(
+    root: &mut CoSInterfaceRuntime,
+    queue_idx: usize,
+    demand: bool,
+) {
+    root.parked_exact_demand = if demand {
+        root.parked_exact_demand.with_queue(queue_idx)
+    } else {
+        root.parked_exact_demand.without_queue(queue_idx)
+    };
 }
 
 #[inline]
@@ -840,6 +874,11 @@ pub(in crate::afxdp) fn refresh_cos_interface_activity_on_cos(
     } else if old_nonempty > 0 && new_nonempty == 0 {
         cos.cos_nonempty_interfaces = cos.cos_nonempty_interfaces.saturating_sub(1);
         release_cos_root_lease_on_cos(cos, root_ifindex);
+        // #18748: an idle interface has no residual-bounded surplus left to
+        // hold root back for; the next work tops up as usual.
+        if let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) {
+            root.surplus_root_released = false;
+        }
     }
     if let Some(iface_fast) = cos.cos_fast_interfaces.get(&root_ifindex) {
         for &(queue_idx, worker_id, released) in &released_queue_leases {

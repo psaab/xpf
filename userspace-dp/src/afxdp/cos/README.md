@@ -269,20 +269,50 @@ mod.rs for further file-level breakdown.
   non-exact residual budget.
 - **What counts as exact demand (#hb166 T-6(b), #18748).** An exact
   guarantee queue is in the demand mask (`exact_demand.rs`
-  `local_exact_demand_mask`, published by `publish_cos_exact_backlog`) while
-  it is backlogged and its OWN token bucket covers the head
+  `local_exact_demand_mask`, published by `publish_cos_exact_backlog` through
+  `SharedCoSExactBacklog::publish_demand`) while it is backlogged and its OWN
+  token bucket covers its head
   (`queue_ops::cos_exact_queue_demands_reservation`). A queue limited by
   itself (empty, parked on its own queue tokens, v8 lease not granting)
   releases its reservation so best-effort does not idle the link behind a
-  class that ships nothing. A queue short only of ROOT tokens, including one
-  parked on `RootTokenStarvation`, keeps it: every exact selector checks the
-  root before the queue tokens, so under the old "serviceable right now"
-  predicate a root-parked queue dropped out of both masks, peers' surplus
-  ran unconstrained, the greedy root lease gave its worker about 1/N of the
-  root, and the exact class (capped near one worker's share) starved the
-  non-exact queue on its own worker (#18748). The reserved AMOUNT is still
-  the configured rate; an exact class held below it by its worker's TX
-  capacity over-reserves (#19023).
+  class that ships nothing. A queue short only of ROOT tokens keeps it,
+  runnable or parked on `RootTokenStarvation`. Every exact selector checks
+  the root before the queue tokens (the guarantee selectors park a root-short
+  queue; waterfill phase 2 and surplus-sharing exact queues skip it without
+  parking), so under the old "serviceable right now" predicate a root-short
+  queue dropped out of both masks, peers' surplus ran unconstrained, the
+  greedy root lease gave its worker about 1/N of the root, and the exact
+  class (capped near one worker's share) starved the non-exact queue on its
+  own worker (#18748).
+  - A PARKED queue's demand is decided where it parks: every exact park site
+    calls `tx_completion::record_exact_park_demand` (a root park with the
+    queue's own tokens covering its head demands; an own-token park does
+    not) into `CoSInterfaceRuntime::parked_exact_demand`, and the predicate
+    reads that bit. The check is O(1) on the per-packet publish path instead
+    of an MQFQ head search over up to 4,096 flow buckets, and a head change
+    while parked (a short packet in a lower-finish bucket) cannot flip it.
+    Runnable queues still compare their own tokens with the current head.
+  - The published mask is refreshed after a drain pass that selected
+    nothing (`republish_cos_exact_demand_if_changed`): a selector top-up can
+    turn a queue into demand and park it on root with no enqueue, service or
+    settle to publish the change.
+  - A worker whose only work is residual-bounded non-exact surplus that
+    cannot cover a frame, with no exact or guarantee backlog of its own,
+    gives its root credit back to the shared lease and stops priming the
+    root until the budget returns (`queue_service`
+    `hold_root_only_for_spendable_surplus`, `surplus_root_released`). Without
+    it, a reservation equal to the shaping rate (zero residual) let idle
+    peers' primed credit reach the lease's outstanding cap (`burst / 4`) and
+    the worker the reservation exists for could never acquire root.
+  - The reserved AMOUNT is still the configured rate. An exact class held
+    below it by its worker's TX capacity over-reserves (#19023). Exact
+    classes whose demanding rates sum to the shaping rate or more leave a
+    zero residual, so best-effort surplus gets nothing while they all demand
+    (strict exact-over-surplus; `oversubscription-policy guarantee-rate`
+    splits the root between the exact classes, it reserves nothing for
+    best-effort). An exact class whose v8 lease under-grants one of its
+    workers still runs below its rate (#19031). `exact_starvation_18748.rs`
+    pins the oversubscribed and the under-grant shapes.
 - **Shared queue-lease conservation for non-exact lease-metered queues
   (#4265 / #5156).** A non-exact GUARANTEED queue whose configured rate
   trips `COS_SHARED_EXACT_MIN_RATE_BYTES` runs the sharded `shared_exact`

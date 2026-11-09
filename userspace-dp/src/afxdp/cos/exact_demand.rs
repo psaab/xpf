@@ -25,13 +25,14 @@ use super::queue_ops::cos_exact_queue_demands_reservation;
 pub(in crate::afxdp) fn local_exact_demand_mask(
     root: &CoSInterfaceRuntime,
 ) -> ExactDemandQueueMask {
+    let parked_demand = root.parked_exact_demand;
     root.queues
         .iter()
         .enumerate()
-        .filter(|(_, queue)| {
+        .filter(|(queue_idx, queue)| {
             queue.config.exact
                 && queue.config.guarantee_enabled
-                && cos_exact_queue_demands_reservation(queue)
+                && cos_exact_queue_demands_reservation(parked_demand, *queue_idx, queue)
         })
         .fold(ExactDemandQueueMask::EMPTY, |mask, (queue_idx, _)| {
             mask.with_queue(queue_idx)

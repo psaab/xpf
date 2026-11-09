@@ -1,11 +1,13 @@
 // #9365: the exact-demand queue mask past queue index 64.
 //
-// The mask reserves best-effort surplus for exact guarantee queues that are
-// serviceable (#hb166 T-6(b)). It is keyed by the index into `root.queues`,
-// which counts ALL of the interface's queues. As a `u64` it could not name
-// index 64: a serviceable queue there saturated the mask, and the consumers
-// counted every exact queue at index >= 64, so idle exact classes kept their
-// rate reserved and a pure best-effort class lost its only service path.
+// The mask reserves best-effort surplus for exact guarantee queues that
+// demand their reservation (#hb166 T-6(b), #18748:
+// `cos_exact_queue_demands_reservation`). It is keyed by the index into
+// `root.queues`, which counts ALL of the interface's queues. As a `u64` it
+// could not name index 64: a demanding queue there saturated the mask, and
+// the consumers counted every exact queue at index >= 64, so idle exact
+// classes kept their rate reserved and a pure best-effort class lost its
+// only service path.
 //
 // The issue's fixture: one interface shaped at 1 Gbit/s with 65 queues.
 // Indices 0..=62 are residual-only best-effort, 63 is a 100 Mbit/s exact
@@ -96,7 +98,7 @@ fn published_peer_demand_mask_names_each_exact_queue_past_index_63() {
         let mut peer_root = sixty_five_queue_root();
         make_serviceable(&mut peer_root, serviceable);
         let backlog = SharedCoSExactBacklog::new(1);
-        backlog.publish_with_serviceable(1, 1500, 1500, local_exact_demand_mask(&peer_root));
+        backlog.publish_demand(1, 1500, local_exact_demand_mask(&peer_root));
 
         // The local worker has no exact backlog of its own; all demand is the peer's.
         let local_root = sixty_five_queue_root();
@@ -182,13 +184,12 @@ fn exact_demand_mask_has_a_bit_for_every_u8_queue_id() {
 #[test]
 fn shared_backlog_carries_every_mask_word() {
     let backlog = SharedCoSExactBacklog::new(2);
-    backlog.publish_with_serviceable(
+    backlog.publish_demand(
         1,
-        1500,
         1500,
         ExactDemandQueueMask::EMPTY.with_queue(64).with_queue(255),
     );
-    backlog.publish_with_serviceable(2, 1500, 1500, ExactDemandQueueMask::EMPTY.with_queue(130));
+    backlog.publish_demand(2, 1500, ExactDemandQueueMask::EMPTY.with_queue(130));
 
     let seen_by_0 = backlog.peer_exact_demand_queue_mask(0);
     assert!(seen_by_0.counts(64) && seen_by_0.counts(255) && seen_by_0.counts(130));
@@ -220,10 +221,10 @@ fn reference_u64_mask(root: &CoSInterfaceRuntime) -> u64 {
     root.queues
         .iter()
         .enumerate()
-        .filter(|(_, queue)| {
+        .filter(|(queue_idx, queue)| {
             queue.config.exact
                 && queue.config.guarantee_enabled
-                && cos_exact_queue_demands_reservation(queue)
+                && cos_exact_queue_demands_reservation(root.parked_exact_demand, *queue_idx, queue)
         })
         .fold(0u64, |acc, (queue_idx, _)| {
             if queue_idx < u64::BITS as usize {
@@ -314,8 +315,10 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
     );
 }
 
-/// `publish_cos_exact_backlog` is the only producer of the peer-visible mask.
-/// It must publish the serviceable set, not every queue: a peer reading ALL
+/// `publish_cos_exact_backlog` is the only producer of the peer-visible mask
+/// on the enqueue and completion paths (#18748 adds a republish after a
+/// no-progress drain, same mask). It must publish the demanding set, not
+/// every queue: a peer reading ALL
 /// would reserve every exact class's rate and starve best-effort, which is the
 /// defect this issue fixed for the local side.
 #[test]

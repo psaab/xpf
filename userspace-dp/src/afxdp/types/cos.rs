@@ -676,6 +676,22 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     pub(in crate::afxdp) tokens: u64,
     pub(in crate::afxdp) nonexact_surplus_under_exact_tokens: u64,
     pub(in crate::afxdp) nonexact_surplus_under_exact_last_refill_ns: u64,
+    /// #18748: whether each parked exact queue demanded its reservation when
+    /// it parked (one bit per index into `queues`). A queue parked on ROOT
+    /// with its own tokens covering its head demands; a queue parked on its
+    /// own tokens does not. Recorded by the selectors at the park site
+    /// (`record_exact_park_demand`) so a parked queue's demand is read in
+    /// O(1) instead of re-running the MQFQ head search, which walks every
+    /// active flow bucket, on each publish and surplus build. Bits of
+    /// runnable queues are stale and never read.
+    pub(in crate::afxdp) parked_exact_demand: ExactDemandQueueMask,
+    /// #18748: this worker gave its root credit back because its only
+    /// pending work was residual-bounded non-exact surplus that the residual
+    /// budget cannot cover (no local exact backlog, no non-exact guarantee
+    /// backlog). While set, the drain does not top the root up, so a worker
+    /// that cannot spend root does not hold the lease's outstanding credit
+    /// away from the worker whose exact class the reservation is for.
+    pub(in crate::afxdp) surplus_root_released: bool,
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,

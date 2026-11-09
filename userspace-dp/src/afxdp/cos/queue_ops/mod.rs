@@ -5,7 +5,9 @@
 
 use std::collections::VecDeque;
 
-use crate::afxdp::types::{CoSPendingTxItem, CoSQueuePopSnapshot, CoSQueueRuntime, FlowFairState};
+use crate::afxdp::types::{
+    CoSPendingTxItem, CoSQueuePopSnapshot, CoSQueueRuntime, ExactDemandQueueMask, FlowFairState,
+};
 use crate::afxdp::TX_BATCH_SIZE;
 use crate::session::SessionKey;
 
@@ -190,11 +192,37 @@ pub(in crate::afxdp) fn cos_queue_front(queue: &CoSQueueRuntime) -> Option<&CoSP
         .flow_fair_state
         .as_ref()
         .expect("cos_queue_front: flow_fair queue without flow_fair_state");
+    #[cfg(test)]
+    front_scan_probe::bump();
     // #785 Phase 3 — MQFQ: return the head of the bucket with the
     // smallest virtual-finish-time, not the DRR-rotation head. This
     // is the byte-rate-fair dequeue order (classical SFQ / WFQ).
     let bucket = usize::from(cos_queue_min_finish_bucket(ff, u64::MAX)?);
     ff.flow_bucket_items[bucket].front()
+}
+
+/// #18748 review (R6 P3), test builds only: counts the flow-bucket head
+/// searches `cos_queue_front` runs, so a cell can pin that a parked exact
+/// queue's demand check does not walk its buckets.
+#[cfg(test)]
+pub(in crate::afxdp) mod front_scan_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SCANS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn bump() {
+        SCANS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(in crate::afxdp) fn reset() {
+        SCANS.with(|c| c.set(0));
+    }
+
+    pub(in crate::afxdp) fn count() -> u64 {
+        SCANS.with(|c| c.get())
+    }
 }
 
 /// #1229 v7: cap-aware variant of `cos_queue_front` for the drain
@@ -378,25 +406,52 @@ pub(in crate::afxdp) fn cos_item_len(item: &CoSPendingTxItem) -> u64 {
 /// that is backlogged but ships zero bytes because it is limited by ITSELF
 /// (its own rate is spent and it parked on queue tokens, or its v8 lease is
 /// not granting) must not reserve its rate, or best-effort is held to the
-/// residual while the link idles. Every such state has `tokens < head`.
+/// residual while the link idles. A runnable queue in such a state has
+/// `tokens <` its current head; a parked one recorded "no demand" when it
+/// parked (below).
 ///
 /// #18748 narrowed what counts as "limited by itself". T-6(b) required the
 /// queue to be serviceable right now: runnable and holding ROOT tokens for
 /// its head as well. Every exact selector checks the root before the queue
-/// tokens and parks a root-short queue on `RootTokenStarvation`, so a queue
-/// that lost the root race dropped out of the local and the published demand
-/// masks. Peers' non-exact surplus then ran unconstrained, the greedy root
-/// lease gave its worker about 1/N of the root, and the exact queue spent
-/// that share ahead of the colocated non-exact queue: the exact class was
-/// capped near one worker's share and the colocated non-exact instance got
-/// about nothing, a loop that sustained itself. The root is the resource
-/// the reservation protects, so a queue short only of root keeps its demand;
-/// reserving makes peers yield the root and the reserved rate is spent, not
-/// idled. `runnable` is not consulted: a root-parked queue is not runnable,
-/// and a queue-token-parked queue is parked only from a `tokens < head`
-/// branch and is not topped up until it wakes, so this test releases it.
+/// tokens. The guarantee selectors park a root-short queue on
+/// `RootTokenStarvation`; waterfill phase 2 and surplus-sharing exact queues
+/// skip it without parking. Either way a queue that lost the root race
+/// dropped out of the local and the published demand masks. Peers'
+/// non-exact surplus then ran unconstrained, the greedy root lease gave its
+/// worker about 1/N of the root, and the exact queue spent that share ahead
+/// of the colocated non-exact queue: the exact class was capped near one
+/// worker's share and the colocated non-exact instance got about nothing, a
+/// loop that sustained itself. The root is the resource the reservation
+/// protects, so a queue short only of root keeps its demand; reserving
+/// makes peers yield the root and the reserved rate is spent, not idled.
+///
+/// A PARKED queue's demand was decided where it parked and is read from
+/// `parked_demand` (`CoSInterfaceRuntime::parked_exact_demand`, written by
+/// `record_exact_park_demand` at every exact park site): a root park with
+/// its own tokens covering the head demands, an own-token park does not.
+/// Nothing tops a parked queue up until it wakes, so the decision holds while
+/// it is parked; an enqueue that changes the MQFQ head while it is parked
+/// (a short packet in a lower-finish bucket) does not flip it. Reading the
+/// recorded decision keeps the check O(1): re-deciding would run the MQFQ
+/// head search, which walks every active flow bucket, on each publish
+/// (every exact enqueue) and each surplus build and settle (#18748 review
+/// R4 F1, R6 P3). A runnable queue with no own tokens cannot cover any
+/// head; otherwise the head is searched, as the selector itself does.
 #[inline]
-pub(in crate::afxdp) fn cos_exact_queue_demands_reservation(queue: &CoSQueueRuntime) -> bool {
+pub(in crate::afxdp) fn cos_exact_queue_demands_reservation(
+    parked_demand: ExactDemandQueueMask,
+    queue_idx: usize,
+    queue: &CoSQueueRuntime,
+) -> bool {
+    if cos_queue_is_empty(queue) {
+        return false;
+    }
+    if queue.hot.parked {
+        return parked_demand.counts(queue_idx);
+    }
+    if queue.hot.tokens == 0 {
+        return false;
+    }
     cos_queue_front(queue).is_some_and(|head| queue.hot.tokens >= cos_item_len(head))
 }
 
