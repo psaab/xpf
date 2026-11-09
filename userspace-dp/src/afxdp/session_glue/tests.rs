@@ -22975,8 +22975,10 @@ fn session_hit_reresolves_on_live_neighbor_mac_change_v6_11315() {
 }
 
 /// #12255: the Go neighbor manager's authoritative replace (#1197) can remove
-/// a snapshot-seeded neighbor without a forwarding-generation bump or a shard
-/// epoch bump (the row was never in the dynamic map). An established local
+/// a snapshot-seeded neighbor without a forwarding-generation bump. Before
+/// #19034 it did not advance the shard epoch either (the row was never in the
+/// dynamic map). The session-hit path never reads the shard epoch, so the
+/// re-resolve pinned here holds either way. An established local
 /// ForwardFlow hit must still treat the absent binding as stale (#11315) and
 /// re-resolve through the production resolver instead of serving the removed
 /// MAC from its stored decision.
@@ -23058,10 +23060,10 @@ fn session_hit_reresolves_after_manager_replace_removes_snapshot_neighbor_12255(
         generation,
         "manager replace republishes without a forwarding-generation bump"
     );
-    assert_eq!(
+    assert_ne!(
         dynamic.mac_change_epoch_for(&key),
         0,
-        "no shard-epoch bump for a snapshot-seeded row"
+        "#19034: the replace advances the shard of the snapshot-seeded key it withdrew"
     );
 
     let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
