@@ -562,8 +562,17 @@ class MoveRecord:
 
 def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[Tuple[float, int]],
                        stalls: List[StreamRun], agg: List[StreamRun], intervals,
-                       budget: Budget) -> Dict:
-    """The traffic facts for one family in one move window [t0, t1) on the LAN clock."""
+                       budget: Budget, ping_alive_until: Optional[float] = None,
+                       iperf_alive_until: Optional[float] = None) -> Dict:
+    """The traffic facts for one family in one move window [t0, t1) on the LAN clock.
+
+    #19054 review: a window is covered only if each GENERATOR process was
+    seen alive at or after the window's end (`*_alive_until`, LAN clock,
+    from the soak's own process polls). Successful replies cannot prove
+    that: a live ping behind a blackhole gets none, and a generator that
+    exited 0.4 s before the window ended left its last reply inside the
+    window's final second. Without process evidence (direct callers), the
+    old reply/interval-based test is used."""
     win_gaps = [g for g in gaps if t0 <= g.start < t1]
     lost = sum(g.lost for g in win_gaps)
     max_gap = max((g.end - g.start for g in win_gaps), default=None)
@@ -584,11 +593,27 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     agg_worst = max((s.seconds for s in win_agg), default=0.0)
     tail_iv = [iv for iv in intervals if iv[0] >= tail0 and iv[1] <= t1 + 1e-6]
     tail_bps = statistics.mean(iv[3] for iv in tail_iv) if tail_iv else None
-    covered_ping = bool(replies) and replies[0][0] <= t0 and replies[-1][0] >= tail0
-    covered_iperf = bool(intervals) and intervals[0][0] <= t0 + 0.2 and intervals[-1][1] >= tail0
+    if ping_alive_until is not None:
+        covered_ping = ping_alive_until >= t1 - 1e-6
+    else:
+        covered_ping = bool(replies) and replies[0][0] <= t0 and replies[-1][0] >= tail0
+    if iperf_alive_until is not None:
+        covered_iperf = iperf_alive_until >= t1 - 1e-6
+    else:
+        covered_iperf = bool(intervals) and intervals[0][0] <= t0 + 0.2 and intervals[-1][1] >= tail0
+    # A ping that ran through the window end, with no reply since `last`:
+    # the silence up to the window end is a gap too (a blackhole has no
+    # closing reply).
+    last = None
+    for ts, _ in replies:  # ping prints replies in time order
+        if ts >= t1:
+            break
+        last = ts
+    open_gap = (t1 - max(t0, last if last is not None else t0)) if covered_ping else None
     return {
         "ping_lost": lost,
         "ping_max_gap_ms": None if max_gap is None else round(max_gap * 1000.0, 1),
+        "ping_open_gap_ms": None if open_gap is None else round(open_gap * 1000.0, 1),
         "ping_tail_replies": tail_replies,
         "worst_stall_ms": 0.0 if worst is None else round(worst.seconds * 1000.0, 1),
         "worst_stall_stream": None if worst is None else worst.stream,
@@ -720,7 +745,8 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 reasons.append(f"traffic did not follow: no {fam} ping replies in the last {budget.tail_s:g}s of the window")
             if t.get("iperf_covered") and (t.get("tail_gbps") or 0.0) * 1e9 < budget.low_bps:
                 reasons.append(f"traffic did not follow: {fam} iperf3 aggregate under {budget.low_bps / 1e6:g} Mbit/s in the window tail")
-            gap = t.get("ping_max_gap_ms")
+            gap = max((g for g in (t.get("ping_max_gap_ms"), t.get("ping_open_gap_ms")) if g is not None),
+                      default=None)
             if gap is not None and gap > budget.max_gap_ms:
                 reasons.append(f"{fam} ping gap {gap:g} ms > {budget.max_gap_ms:g} ms ({t.get('ping_lost')} lost)")
             agg_worst = t.get("agg_worst_ms") or 0.0
@@ -1183,6 +1209,7 @@ class Soak:
         # move's traffic window.
         self._anchor = (self.now(), self.wall())
         self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
+        self.gen_alive_until: Dict[Tuple[str, str], float] = {}  # #19054 review: last seen alive, LAN clock
         # #19055: the RGs this run moves, and dual-active samples seen for an
         # RG of this move that has no result yet (its own move comes later).
         self._scope_rgs: List[int] = []
@@ -1326,6 +1353,7 @@ class Soak:
                  "for l in sys.stdin:\n"
                  "    sys.stdout.write('%.6f %s' % (time.time(), l)); sys.stdout.flush()\n")
         self.procs = []
+        self.gens = {}  # (kind, fam) -> generator process (#19054 review)
         for fam, target, port, streams in self.families():
             t = shlex.quote(target)
             v = "-6" if fam == "v6" else "-4"
@@ -1334,8 +1362,20 @@ class Soak:
                      f" | python3 -u -c {shlex.quote(stamp)}")
             ping = f"echo $$ > /tmp/r-soak-{rid}.ping{fam}.pid; exec ping {v} -D -i 0.01 -W 1 -w {duration_s} {t}"
             self.procs.append(self.c.popen_lan(ping, self._path("ping", fam)))
+            self.gens[("ping", fam)] = self.procs[-1][0]
             self.procs.append(self.c.popen_lan(iperf, self._path("iperf", fam)))
+            self.gens[("iperf", fam)] = self.procs[-1][0]
         self.traffic_started = True
+
+    def poll_generators(self):
+        """Stamp, on the LAN clock, every generator process still running
+        now (#19054 review). A window is covered only by a generator seen
+        alive at or after its end. Called right after each move's issue
+        (the previous window's end) and after the last window."""
+        lan = self.lan_time(self.now())
+        for key, p in getattr(self, "gens", {}).items():
+            if p.poll() is None:
+                self.gen_alive_until[key] = lan
 
     def stop_traffic(self):
         if not self.traffic_started:
@@ -1746,6 +1786,7 @@ class Soak:
             for i in range(1, cfg.moves + 1):
                 target = targets[rgs[0]]
                 t_issue = self.now()
+                self.poll_generators()
                 udp_probe_checks = []
                 udp_probe_pending = None
                 results: List[RGMoveResult] = []
@@ -1818,6 +1859,7 @@ class Soak:
                     targets[rg] = 1 - targets[rg]
             if moves:
                 moves[-1].t_next_lan = self.lan_time(self.now())
+                self.poll_generators()
         except VoidRun as e:
             void_reason = str(e)
             self.log(f"FATAL: {void_reason}")
@@ -1893,14 +1935,17 @@ class Soak:
                 for m in moves:
                     m.traffic = m.traffic or {}
                     t = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
-                                           intervals, cfg.budget)
+                                           intervals, cfg.budget,
+                                           ping_alive_until=self.gen_alive_until.get(("ping", fam), float("-inf")),
+                                           iperf_alive_until=self.gen_alive_until.get(("iperf", fam), float("-inf")))
                     if not (t["ping_covered"] and t["iperf_covered"]):
                         # #19054: say WHY the generators were not there.
                         t["uncovered_cause"] = (
                             f"the traffic run's planned end came before this window closed "
                             f"(SOAK_TRAFFIC_S={info.get('traffic_s')})"
                             if m.t_next_lan > self.traffic_end_lan else
-                            "a generator stopped early" + (f" (iperf3: {err})" if err else ""))
+                            "a generator process exited before this window closed"
+                            + (f" (iperf3: {err})" if err else ""))
                     m.traffic[fam] = t
         for m in moves:
             m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)

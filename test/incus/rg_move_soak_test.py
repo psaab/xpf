@@ -605,6 +605,15 @@ class FakeClock:
 
 
 class Proc:
+    """A fake generator process. `alive()` says whether it still runs, as
+    Popen.poll() does for the real one (#19054 review)."""
+
+    def __init__(self, alive=None):
+        self.alive = alive
+
+    def poll(self):
+        return None if self.alive is None or self.alive() else 0
+
     def wait(self, timeout=None):
         return 0
 
@@ -944,7 +953,12 @@ class FakeCluster:
             with open(outfile, "a") as f:
                 f.write(f"{self.clock_.t + self.lan_off:.6f} " + json.dumps(
                     {"event": "error", "data": "error - the server is busy running a test. try again later"}) + "\n")
-        return Proc(), open(os.devnull, "w")
+        return Proc(alive=lambda k=kind, f=fam: self._gen_alive(k, f)), open(os.devnull, "w")
+
+    def _gen_alive(self, kind, fam):
+        if self.gen_start is None or (kind == "iperf" and self.busy_iperf):
+            return False
+        return self.clock_.t < getattr(self, "gen_end", {}).get((kind, fam), float("inf"))
 
     def lan_sh(self, script):
         self.gen_start = None  # generators stopped
@@ -2840,6 +2854,53 @@ class FinalMoveTail19062(unittest.TestCase):
         self.assertEqual(last["traffic"]["v4"]["died_streams"], [7])
         self.assertEqual(last["verdict"], "FAIL", last["reasons"])
         self.assertTrue(any("never recovered" in r for r in last["reasons"]), last["reasons"])
+
+
+class Blackhole(FakeCluster):
+    """Codex's #19054 review finding 2: 0.3 s after the move CLI returns,
+    the dataplane stops delivering ping and TCP for good, and the UDP probe
+    loses its replies. The generators keep running."""
+
+    def cli(self, node, cmd):
+        out = super().cli(node, cmd)
+        self.events.append((self.clock_.t + self.lan_off + 0.3, float("inf"), "gap"))
+        return out
+
+
+class GeneratorLifetime19054(unittest.TestCase):
+    """#19054 review: coverage is the generator processes' lifetime through
+    the window END, measured apart from what the traffic delivered."""
+
+    def test_a_generator_that_ends_before_the_window_closes_does_not_cover_it(self):
+        # Codex finding 1: traffic_s=9 ends both generators about 0.4 s
+        # before the only window closes. Judged against the fake's actual
+        # generator end, not against the coverage flags under test.
+        clock = FakeClock()
+        c = FakeCluster(clock, {2: 0})
+        rc, res, _ = run_fake(c, clock, moves=1, traffic_s=9, restore=False)
+        m = res["moves"][0]
+        gen_end_lan = c.gen_end[("ping", "v4")] + c.lan_off
+        self.assertLess(gen_end_lan, m["t_next_lan"])  # the fixture's premise
+        self.assertNotIn(m["verdict"], ("PASS", "COST"), m["reasons"])
+        self.assertFalse(m["traffic"]["v4"]["ping_covered"] and m["traffic"]["v4"]["iperf_covered"])
+        self.assertTrue(any("did not cover the move window" in r for r in m["reasons"]), m["reasons"])
+
+    def test_a_blackhole_with_live_generators_fails(self):
+        # Codex finding 2: live generators, nothing delivered. That is a
+        # dataplane failure, not "the generator stopped".
+        clock = FakeClock()
+        c = Blackhole(clock, {2: 0}, faults={1: "udp-lost"})
+        rc, res, _ = run_fake(c, clock, moves=1, restore=False)
+        m = res["moves"][0]
+        v4 = m["traffic"]["v4"]
+        self.assertTrue(v4["ping_covered"] and v4["iperf_covered"], v4)
+        self.assertEqual(m["verdict"], "FAIL", m["reasons"])
+        why = " | ".join(m["reasons"])
+        self.assertIn("ping gap", why)
+        self.assertIn("aggregate outage", why)
+        self.assertIn("never recovered", why)
+        self.assertIn("UDP probe LOST", why)
+        self.assertEqual(rc, 1)
 
 
 if __name__ == "__main__":

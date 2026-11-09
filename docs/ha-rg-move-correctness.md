@@ -609,7 +609,14 @@ One verdict per move:
     then scored "never recovered" on the last one.
 - **VOID, uncovered** (#19054): ping or iperf3 did not cover the move's
   window. Whatever the traffic checks say about a window with no traffic,
-  they say it about nothing, so the move is never PASS, COST or FAIL.
+  they say it about nothing, so the move is never PASS or COST.
+  - "Covered" means the generator PROCESS was seen still running at or
+    after the window's END. The soak polls the processes right after each
+    move is issued and after the last window.
+  - Replies cannot prove coverage. A live ping behind a blackhole gets
+    none; that window is covered, and its silence FAILs as a ping gap. A
+    generator that exited 0.4 s before the window closed still had replies
+    in the window's last second, and that once passed as covered.
   - The reason names the cause: the traffic run's planned end came first
     (`SOAK_TRAFFIC_S`), or a generator stopped early, with iperf3's error
     text when it has one.
