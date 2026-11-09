@@ -41,6 +41,7 @@ fn ha_with<'a>(
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
         node_served,
+        shared_row: &|_| None,
     }
 }
 

@@ -701,7 +701,12 @@ pub(in crate::afxdp) fn replay_late_synced_sessions(
     // The initial replay queue may contain an entry removed or replaced while
     // workers were still spawning. Keep non-upsert commands in order, then
     // append the authoritative current snapshot below.
-    pending.retain(|command| !matches!(command, WorkerCommand::UpsertSynced(_)));
+    pending.retain(|command| {
+        !matches!(
+            command,
+            WorkerCommand::UpsertSynced(_) | WorkerCommand::UpsertSyncedRestoreCloser(_)
+        )
+    });
     for entry in entries {
         let replica = crate::afxdp::shared_ops::synced_replica_entry(&entry);
         // #15105: a snapshot row refused at the queue cap must not vanish.

@@ -137,6 +137,24 @@ thread_local! {
 
 /// #16223: node-level served-handshake evidence for `key` (either half of
 /// the pair), with #18722/#18742's counts, incarnation and recency proof.
+/// #19026: the restore close fence's shared-row read — the primary row under
+/// exactly `key` (one keyed lookup, any protocol), as `(session_id,
+/// fwd_packets + rev_packets)`. `fwd_packets`/`rev_packets` are the shared
+/// row's max-merged counters every serving worker restamps, so they advance
+/// whenever ANY worker served the session after a restore. Called only for
+/// an expiring forward `SharedPromote` copy (cold, GC pass).
+pub(in crate::afxdp) fn shared_row_identity(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> Option<crate::session::SharedRowIdentity> {
+    lock_shared_recover(shared_sessions)
+        .get(key)
+        .map(|entry| crate::session::SharedRowIdentity {
+            session_id: entry.session_id,
+            packets: entry.fwd_packets.saturating_add(entry.rev_packets),
+        })
+}
+
 /// #18663: every branch is a keyed primary or alias lookup. Direct and plain
 /// reverse keys retain precedence; translated aliases resolve through the
 /// live alias-owner index maintained with `shared_sessions` under the same

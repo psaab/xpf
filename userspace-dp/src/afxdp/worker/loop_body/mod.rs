@@ -86,6 +86,9 @@ mod fabric_swap_epoch_18534_tests;
 #[cfg(test)]
 #[path = "housekeeping_rx_starvation_19026_tests.rs"]
 mod housekeeping_rx_starvation_19026_tests;
+#[cfg(test)]
+#[path = "promote_fence_19026_tests.rs"]
+mod promote_fence_19026_tests;
 
 // #13075 (D4-12): cold snapshot-rotation reconciliation (discriminator,
 // ancestry matchers, rematch/rebind walkers, the #6291/#6592 refresh seam,

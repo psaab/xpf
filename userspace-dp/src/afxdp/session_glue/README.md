@@ -107,6 +107,28 @@ Why, and what a change here must not break:
   `exported_sequences.iter().max()` per pass, and FIFO makes each pass's
   max strictly greater than the last.
 
+## Restore closer (`UpsertSyncedRestoreCloser`, #19026)
+
+At RG activation, `shared_ops::prewarm_reverse_synced_sessions_for_owner_rgs`
+restores a locally promoted row as `SharedPromote` on every live worker.
+Exactly one queue gets `WorkerCommand::UpsertSyncedRestoreCloser` instead of
+`UpsertSynced`: the first one, lowest index, that accepts the push.
+
+The dispatch arm (`commands/worker_command_dispatch.rs`) does two things:
+1. It runs the ordinary `handle_upsert_synced_command`.
+2. It calls `SessionTable::mark_restore_closer` for that incarnation. This
+   marks the row the install produced, or the same-incarnation row that the
+   local-replace guard kept.
+
+The expiry fence then lets only the marked copy close a restored session that
+no copy served after the restore. The rules are in `session/README.md`,
+"Restored `SharedPromote` copies: the close fence".
+
+The bring-up replay (`coordinator/reconcile/bringup.rs`) drops queued
+restore-closer upserts together with plain upserts before it appends the
+authoritative snapshot. A queued closer command is still an upsert of a
+possibly stale generation.
+
 ## A refused cross-worker `DeleteSynced` (#8114 item 4)
 
 `replicate_session_delete` fans a `DeleteSynced` out to every sibling

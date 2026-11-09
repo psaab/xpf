@@ -1371,6 +1371,13 @@ struct SessionEntry {
     /// same pass. Preserved across a same-incarnation re-import; never
     /// synced.
     served_here: bool,
+    /// #19026: this worker's copy of a restored `SharedPromote` row is the
+    /// prewarm's designated restore closer: when NO copy served after the
+    /// restore (shared counters not advanced), only this copy's expiry emits
+    /// the Close (and so the HA delete). Set by
+    /// `WorkerCommand::UpsertSyncedRestoreCloser` via `mark_restore_closer`;
+    /// preserved across a same-incarnation re-import; never synced.
+    restore_closer: bool,
     /// #10888 carries this marker as the distinct SynAckFirstPending wire state.
     /// #965: absolute tick in the ordinary expiry wheel. Updated when a
     /// non-held deadline changes; while held, it is the horizon recheck tick.
@@ -7591,6 +7598,24 @@ impl SessionTable {
         self.deltas.front()
     }
 
+    /// #19026: mark this worker's restored `SharedPromote` copy of exactly
+    /// the `session_id` incarnation as the designated restore closer (the
+    /// activation prewarm's `UpsertSyncedRestoreCloser`). Returns whether a
+    /// row was marked; any other origin or incarnation is left untouched.
+    pub(crate) fn mark_restore_closer(&mut self, key: &SessionKey, session_id: u64) -> bool {
+        match self.entry_by_key_mut(key) {
+            Some(entry)
+                if entry.origin == SessionOrigin::SharedPromote
+                    && !entry.metadata.is_reverse
+                    && entry.session_id == session_id =>
+            {
+                entry.restore_closer = true;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// #2442: read-and-clear the loss-of-sync latch. Returns true iff
     /// `push_delta` dropped at least one delta since the last call — i.e. the
     /// incremental session-sync stream went lossy and the downstream consumer's
@@ -7786,6 +7811,7 @@ impl SessionTable {
                         close_class: entry.tcp_close_class_wire(),
                         install_epoch: entry.install_epoch,
                         overflow_close: None,
+                        close_fenced: false,
                     });
                 }
             }
@@ -8417,6 +8443,9 @@ mod reimport_idle_anchor_16043_tests;
 #[cfg(test)]
 #[path = "promoted_opening_gc_16218_tests.rs"]
 mod promoted_opening_gc_16218_tests;
+#[cfg(test)]
+#[path = "promote_copy_close_fence_19026_tests.rs"]
+mod promote_copy_close_fence_19026_tests;
 // #9582: a close seen only by a worker replica of a local session is announced, with
 // the installer's id. Written before the fix.
 #[cfg(test)]

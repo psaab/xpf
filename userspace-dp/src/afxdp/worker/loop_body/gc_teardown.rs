@@ -168,6 +168,20 @@ pub(super) fn reap_expired_sessions(
             now_ns,
             worker_id,
         );
+        // #19026: a close-fenced restored `SharedPromote` copy (no Close was
+        // emitted: the session is served, closed or replaced elsewhere) still
+        // releases THIS worker's NAT holder bit and persistent hold above (it
+        // reserved them at restore, #15966r, and nothing else releases them
+        // once the row is gone), its steering-row claims (the ownership
+        // registry keeps rows a sibling owns) and its flow-cache slots below.
+        // It must NOT delete the tuple's conntrack mirror row: under the same
+        // session id that row is the live incarnation's. `-1` fds skip
+        // exactly that leg.
+        let (ct_v4, ct_v6) = if expired_entry.close_fenced {
+            (-1, -1)
+        } else {
+            (conntrack_v4_fd, conntrack_v6_fd)
+        };
         let result =
             crate::afxdp::bpf_map::delete_session_map_entry_for_removed_session_with_origin_and_id(
                 session_map,
@@ -175,8 +189,8 @@ pub(super) fn reap_expired_sessions(
                 expired_entry.decision,
                 &expired_entry.metadata,
                 expired_entry.origin,
-                conntrack_v4_fd,
-                conntrack_v6_fd,
+                ct_v4,
+                ct_v6,
                 expired_entry.session_id,
             );
         if result == crate::afxdp::bpf_map::ConntrackDeleteResult::GateBusy {

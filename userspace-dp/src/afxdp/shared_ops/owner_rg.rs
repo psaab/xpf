@@ -254,6 +254,13 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             // is one increment per failure, not a double count.
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
+        // #19026: a SharedPromote restore designates exactly one restore
+        // closer: the first queue (lowest index) that ACCEPTS the push. The
+        // expiry fence (session/expire.rs `promote_copy_emits_close`) lets
+        // only that copy close a restored session no copy served after the
+        // restore; every other never-served copy is silent. Raw local rows are
+        // restored as peer-synced replicas, which age silently anyway.
+        let mut closer_pending = forward.origin == SessionOrigin::SharedPromote;
         for commands in worker_commands {
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // activation-prewarm UpsertSynced for a poisoned worker queue.
@@ -266,11 +273,15 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             } else {
                 synced_replica_entry(forward)
             };
+            let command = if closer_pending {
+                WorkerCommand::UpsertSyncedRestoreCloser(replica)
+            } else {
+                WorkerCommand::UpsertSynced(replica)
+            };
             let mut pending = worker_queue::lock_recover(commands);
-            worker_queue::push_bounded(
-                &mut pending,
-                WorkerCommand::UpsertSynced(replica),
-            );
+            if worker_queue::push_bounded(&mut pending, command) {
+                closer_pending = false;
+            }
         }
     }
     if fwd_publish_errors > 0 {

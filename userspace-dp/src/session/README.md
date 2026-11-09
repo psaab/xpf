@@ -1818,6 +1818,86 @@ the known active/active `owner_rg_id == 0` under-retention residual
 observable — a `==0` entry for a standby RG path on an otherwise-active
 node ages and is re-derived on promotion via the reverse-synced prewarm).
 
+### Restored `SharedPromote` copies: the close fence (#19026)
+
+At RG activation the prewarm
+(`afxdp/shared_ops/owner_rg.rs::prewarm_reverse_synced_sessions_for_owner_rgs`)
+restores a locally promoted row as `SharedPromote` on EVERY live worker
+(#15950). Only the worker the flow's packets land on refreshes its copy.
+`SharedPromote` is not peer-synced, so the others get no SELF-HEAL. They
+AGE one window after the activation re-stamp.
+
+Before #19026, each idle copy's expiry Close was the carrier of:
+- the shared-map removal;
+- the sibling `DeleteSynced` fan-out;
+- the HA delete to the peer.
+
+All three are keyed by tuple, so a non-serving copy tore down the serving
+worker's live row. On udp, live pings were closed "idle Timeout" at T0+62,
+with up to four Close frames per session.
+
+The fence applies to an expiring **forward `SharedPromote`** row, on a node
+that **forwards its RG**, with an HA context. It reads the shared primary row
+under the same key through `ExpireHaContext::shared_row`, a keyed,
+protocol-agnostic read of `(session_id, fwd_packets + rev_packets)`. In
+production that read is `shared_ops::shared_row_identity`.
+
+| rule | condition | result |
+|---|---|---|
+| R1 | shared row absent, or a different `session_id` (already closed or replaced elsewhere) | silent |
+| R3 | this copy served since install (`last_packet_seen_ns >= created_ns`, nonzero) | ordinary AGE + Close |
+| R2(a) | never served here; shared `fwd+rev` exceeds this copy's install-seeded counters (someone served after the restore) | silent |
+| R2(b) | never served here; shared counters not advanced (a never-served restored session) | Close only on the designated restore closer |
+
+R1 is checked first, so a copy whose shared row is gone stays silent even if
+it served. R3 then wins over R2.
+
+**What "silent" does.**
+- No Close delta is pushed, and none rides `overflow_close`.
+- The row is removed with `RemovalKind::Transfer`, so no export tombstone can
+  later announce a close to the peer.
+- `ExpiredSession::close_fenced` is set. The reap
+  (`afxdp/worker/loop_body/gc_teardown.rs::reap_expired_sessions`) then skips
+  only the session-id-gated conntrack mirror delete, which under R2 would
+  delete the live incarnation's kernel row.
+- The reap still releases the copy's own per-worker resources:
+  - this worker's source-NAT and NAT64 holder bit, with its persistent hold.
+    The copy reserved them at restore (#15966r), and nothing else releases
+    them once the row is gone.
+  - its steering-row claims, whose ownership registry keeps rows a sibling
+    owns;
+  - its flow-cache slots.
+- The worker housekeeping does not forget a TCP/1723 PPTP control channel
+  for a fenced copy, because the serving copy still carries that channel.
+
+**Designated closer.** The prewarm hands the first live worker queue that
+ACCEPTS the push (lowest index) `WorkerCommand::UpsertSyncedRestoreCloser`.
+Every other queue gets the plain `UpsertSynced`. The worker applies it as an
+`UpsertSynced` and then `SessionTable::mark_restore_closer(key, session_id)`
+sets the worker-local `SessionEntry::restore_closer` bit on the
+`SharedPromote` row of that exact incarnation. A same-id re-import keeps the
+bit; a new incarnation drops it.
+
+The approved plan preferred the session's minting worker. The activation path
+carries no node id (it lives only on the bring-up `ConfigSnapshot`), and
+R2(b) needs exactly one closer, not a particular one.
+
+The bit fits in existing padding: `SessionEntry` stays at the 648 B pin
+(`idle_served_keepalive_18722_tests.rs`).
+
+Accepted residual: a restored copy replaced by a later plain upsert of the
+same incarnation keeps its bit (preserved). A copy that never received the
+closer command is never a closer. If the closer worker's copy is lost
+otherwise, a never-served restored session ends with no Close. The peer's
+copy then waits for its stale-synced HOLD ceiling,
+`min(3 × timeout, ~7 d)` (`STALE_SYNCED_CEILING_MULT` /
+`STALE_SYNCED_CEILING_ABS_NS`). The respawn path has the same shape and is
+tracked in #19030.
+
+Cells: `session/promote_copy_close_fence_19026_tests.rs` (rules, twins,
+exactly-once) and `afxdp/shared_ops/restore_closer_19026_tests.rs` (closer
+designation, respawn then activation).
+
 ## "Current sessions" gauge accounting (#2428)
 
 The `session_creates` / `session_expires` BindingLiveState counters feed

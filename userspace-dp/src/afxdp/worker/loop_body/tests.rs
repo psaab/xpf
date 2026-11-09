@@ -210,6 +210,7 @@ mod flow_cache_invalidation_tests {
             close_class: 0,
             install_epoch: 0,
             overflow_close: None,
+            close_fenced: false,
         }
     }
 
@@ -338,6 +339,7 @@ mod flow_cache_invalidation_tests {
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
+            shared_row: &|_| None,
         };
         let gc = |table: &mut crate::session::SessionTable,
                       binding: &mut BindingWorker,
@@ -593,6 +595,7 @@ mod flow_cache_invalidation_tests {
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
+            shared_row: &|_| None,
         };
 
         let mut binding = BindingWorker::new_for_mirror_test(0, 0, REAP_INGRESS_IF, 0);
@@ -2039,6 +2042,7 @@ mod gc_reap_source_nat_release_tests_6901 {
             metadata: metadata(),
             persistent_lease_hold: None,
             overflow_close: None,
+            close_fenced: false,
         }
     }
 
@@ -2257,6 +2261,7 @@ mod gc_reap_nat64_release_tests_7740 {
             install_epoch: 0,
             origin: SessionOrigin::ForwardFlow,
             overflow_close: None,
+            close_fenced: false,
         }
     }
 

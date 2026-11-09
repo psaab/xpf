@@ -72,6 +72,15 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
             WorkerCommand::UpsertSynced(entry) => {
                 super::handle_upsert_synced_command(ctx, entry);
             }
+            WorkerCommand::UpsertSyncedRestoreCloser(entry) => {
+                // #19026: install exactly as a plain restore, then mark the
+                // copy of this incarnation (if the install took, or the row
+                // the local-replace guard kept is that same incarnation).
+                let key = entry.key.clone();
+                let session_id = entry.session_id;
+                super::handle_upsert_synced_command(ctx, entry);
+                ctx.sessions.mark_restore_closer(&key, session_id);
+            }
             WorkerCommand::UpsertLocal(entry) => {
                 super::handle_upsert_local(ctx.sessions, entry, ctx.now_ns);
             }

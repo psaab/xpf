@@ -1764,6 +1764,7 @@ mod handshake_monotonic_16223_tests {
             ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
             ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
             node_served: &node_served,
+            shared_row: &|_| None,
         };
         let _ = table.expire_stale_entries_ha(t0 + 12 * SEC, Some(&ha));
         assert_eq!(

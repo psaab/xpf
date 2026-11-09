@@ -122,6 +122,7 @@ fn expired(entry: &SyncedSessionEntry) -> ExpiredSession {
         close_class: 0,
         install_epoch: 0,
         overflow_close: None,
+        close_fenced: false,
     }
 }
 

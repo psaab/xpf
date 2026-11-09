@@ -979,6 +979,12 @@ pub(crate) struct ExpiredSession {
     /// means the Close was accepted by the ring (or this is a tombstone from
     /// a removal path that does not emit an expiry Close).
     pub(crate) overflow_close: Option<SessionDelta>,
+    /// #19026: the restore close fence silenced this expiry (a non-serving
+    /// restored `SharedPromote` copy, or one whose session was already closed
+    /// or replaced elsewhere): no Close was emitted, and the reap must not
+    /// delete the tuple's conntrack mirror row, which belongs to the live (or
+    /// replacing) incarnation. Per-worker resources are still released.
+    pub(crate) close_fenced: bool,
 }
 
 #[cfg(test)]

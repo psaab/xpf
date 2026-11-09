@@ -253,6 +253,10 @@ pub(super) fn run_session_housekeeping(
         evidence.shared_evidence_max_cadence_ns = Some(shared_evidence_max_cadence_ns);
         evidence
     };
+    // #19026: the restore close fence's keyed shared-row read.
+    let shared_row = |key: &crate::session::SessionKey| {
+        crate::afxdp::shared_ops::shared_row_identity(shared_sessions, key)
+    };
     let ha_ctx = crate::session::ExpireHaContext {
         node_active,
         forwards_rg: &forwards_rg,
@@ -260,6 +264,7 @@ pub(super) fn run_session_housekeeping(
         ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
+        shared_row: &shared_row,
     };
     let mut deferred_delta_cleanup = false;
     retry_deferred_pressure_sheds(
@@ -292,6 +297,12 @@ pub(super) fn run_session_housekeeping(
     // already expired on their independent data-idle clock.
     for expired in &expired_entries {
         let key = &expired.key;
+        // #19026: a close-fenced restored copy is not the end of the session
+        // (it is served, closed or replaced elsewhere), so it must not forget
+        // the control channel the serving copy still carries.
+        if expired.close_fenced {
+            continue;
+        }
         if key.protocol == crate::ip_proto::PROTO_TCP
             && (key.src_port == crate::session::pptp_control::PPTP_CONTROL_PORT
                 || key.dst_port == crate::session::pptp_control::PPTP_CONTROL_PORT)

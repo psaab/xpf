@@ -7417,6 +7417,7 @@ fn run_expire_ha(
         ceiling_mult: TEST_CEIL_MULT,
         ceiling_abs_ns: TEST_CEIL_ABS_NS,
     node_served: &|_| NodeServedEvidence::default(),
+    shared_row: &|_| None,
     };
     table.expire_stale_entries_ha(now_ns, Some(&ctx))
 }

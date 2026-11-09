@@ -307,6 +307,7 @@ fn run_wheel(fx: &mut Fixture, now_secs: u64) -> (Vec<SessionKey>, crate::sessio
         ceiling_mult: crate::session::STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: crate::session::STALE_SYNCED_CEILING_ABS_NS,
         node_served: &node_served,
+        shared_row: &|_| None,
     };
     let expired = fx
         .sessions

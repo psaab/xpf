@@ -64,6 +64,7 @@ fn expire_with(
         ceiling_mult: STALE_SYNCED_CEILING_MULT,
         ceiling_abs_ns: STALE_SYNCED_CEILING_ABS_NS,
     node_served: &|_| NodeServedEvidence::default(),
+    shared_row: &|_| None,
     };
     table.last_gc_ns = 0;
     table.expire_stale_entries_ha(now_ns, Some(&ha))

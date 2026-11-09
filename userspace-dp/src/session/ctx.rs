@@ -156,6 +156,22 @@ pub(crate) struct ExpireHaContext<'a> {
     /// Production wires this to the shared synced map + serving
     /// counters (see `NodeServedEvidence`); tests drive it directly.
     pub(crate) node_served: &'a dyn Fn(&SessionKey) -> NodeServedEvidence,
+    /// #19026: keyed, protocol-agnostic read of the node's SHARED primary
+    /// row under the same key: its session id and max-merged `fwd+rev`
+    /// packet counters (the only fields every serving worker stamps for any
+    /// protocol). Consulted only for an expiring forward `SharedPromote` copy
+    /// on a node that forwards its RG (the restore close fence). Production:
+    /// `afxdp::shared_ops::shared_row_identity`; `None` = no shared row.
+    pub(crate) shared_row: &'a dyn Fn(&SessionKey) -> Option<SharedRowIdentity>,
+}
+
+/// #19026: the shared primary row's identity for the restore close fence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SharedRowIdentity {
+    pub(crate) session_id: u64,
+    /// `fwd_packets + rev_packets` of the shared row (max-merged across the
+    /// workers that restamp it).
+    pub(crate) packets: u64,
 }
 /// #16223: node-level served-handshake evidence for one tuple — the
 /// promoted serving companion's handshake wire state plus its admitted

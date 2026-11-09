@@ -279,6 +279,14 @@ impl SessionTable {
                         entry.session_id
                     };
                     let e_reset = entry.reset;
+                    // #19026: the restore close fence's per-copy inputs.
+                    let e_served_since_install = entry.last_packet_seen_ns != 0
+                        && entry.last_packet_seen_ns >= entry.created_ns;
+                    let e_own_packets = entry
+                        .counters
+                        .fwd_packets
+                        .saturating_add(entry.counters.rev_packets);
+                    let e_restore_closer = entry.restore_closer;
                     let e_closing = entry.closing;
                     let e_fin_own = entry.fin_own;
                     let e_fin_peer = entry.fin_peer;
@@ -515,7 +523,33 @@ impl SessionTable {
                         self.last_pop_stats.kept_alive_by_companion += 1;
                         continue;
                     }
-                    if let Some(removed) = self.remove_entry(&key, RemovalKind::Terminal) {
+                    // #19026: the restore close fence. Decided after every
+                    // keep-alive arm above (they are unchanged) and before the
+                    // removal: a silenced copy leaves as a Transfer (the session
+                    // continues elsewhere — no export tombstone) and emits no
+                    // Close below.
+                    let close_fenced = match ha {
+                        Some(ha)
+                            if e_origin == SessionOrigin::SharedPromote
+                                && !e_is_reverse
+                                && (ha.forwards_rg)(e_owner_rg) =>
+                        {
+                            !promote_copy_emits_close(
+                                (ha.shared_row)(&key),
+                                e_session_id,
+                                e_own_packets,
+                                e_served_since_install,
+                                e_restore_closer,
+                            )
+                        }
+                        _ => false,
+                    };
+                    let removal_kind = if close_fenced {
+                        RemovalKind::Transfer
+                    } else {
+                        RemovalKind::Terminal
+                    };
+                    if let Some(removed) = self.remove_entry(&key, removal_kind) {
                         self.last_pop_stats.expired += 1;
                         let decision = removed.decision;
                         let close_class = removed.tcp_close_class_wire();
@@ -539,7 +573,8 @@ impl SessionTable {
                         // #13974: a MissingNeighborSeed is local-only for HA,
                         // but must produce the close delta consumed by RT_FLOW
                         // and flow export. Fabric punt and TUN origins stay silent.
-                        let overflow_close = if !metadata.is_reverse
+                        let overflow_close = if !close_fenced
+                            && !metadata.is_reverse
                             && !removed.origin.is_peer_synced()
                             && !removed.origin.is_local_tun_origin()
                             && removed.origin != crate::session::SessionOrigin::FabricPuntSeed
@@ -597,6 +632,7 @@ impl SessionTable {
                             close_class,
                             install_epoch: removed.install_epoch,
                             overflow_close,
+                            close_fenced,
                         });
                     }
                 } else {
@@ -1327,6 +1363,40 @@ impl SessionTable {
         }
         StandbyGateDecision::Age
     }
+}
+
+/// #19026: the restore close fence (approved design (b) on the issue) for an
+/// expiring forward `SharedPromote` copy on a node that forwards its RG.
+/// Returns whether THIS copy's expiry emits the Close (and so, once flushed,
+/// the shared removal, the sibling `DeleteSynced` fan-out and the HA delete):
+/// - R1: the shared primary row is absent, or holds another session id —
+///   the session was already closed or replaced elsewhere: silent;
+/// - R3: this copy served since its install: ordinary AGE with its Close;
+/// - R2(a): never served here, and the shared `fwd+rev` exceeds this copy's
+///   install-seeded counters — someone served after the restore: silent;
+/// - R2(b): never served here, counters not advanced (a never-served restored
+///   session): only the designated restore closer closes.
+/// Pure, so the rule is pinned without a worker.
+pub(crate) fn promote_copy_emits_close(
+    shared: Option<SharedRowIdentity>,
+    session_id: u64,
+    own_packets: u64,
+    served_since_install: bool,
+    restore_closer: bool,
+) -> bool {
+    let Some(shared) = shared else {
+        return false;
+    };
+    if shared.session_id != session_id {
+        return false;
+    }
+    if served_since_install {
+        return true;
+    }
+    if shared.packets > own_packets {
+        return false;
+    }
+    restore_closer
 }
 
 /// #2120: outcome of the standby retention gate for one idle-crossed
