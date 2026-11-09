@@ -4337,7 +4337,12 @@ test_prepare_deb_older_only_rebuilds() {
 	setup_make_fixture
 	: > "$MAKE_FIXTURE_OUT/xpf_0.0.1+gabc_amd64.deb"
 	local out rc
-	out=$(_make_n prepare-deb); rc=$?
+	# Pin the stock version's commit count. Stock is 0.0.<count>+g<sha>, and
+	# the cell's premise is that the prebuilt 0.0.1 is OLDER than stock. In a
+	# checkout without .git (the #19035 test-runner sync) the count is 0, so
+	# stock is 0.0.0, the prebuilt is newer, and the cell failed on a false
+	# premise rather than on the reuse rule.
+	out=$(_make_n prepare-deb DEB_GIT_COUNT=19000); rc=$?
 	if [[ $rc -eq 0 && "$out" == *"is older than stock"* && "$out" == *"dpkg-buildpackage"* ]]; then
 		ok "prepare-deb: older-only prebuilt rebuilds stock (not reused)"
 	else

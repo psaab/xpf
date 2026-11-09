@@ -32,6 +32,22 @@ incus orchestration, and runs hermetic shell censuses that touch no kernel
 state. If both runners are saturated, provision another one rather than
 running tests locally.
 
+The script also prepares the runner environment:
+- It runs `go mod download` after the sync. `scripts/testguard-run.sh` runs
+  Go tests in a private network namespace with no network, so on a cold
+  module cache every package there fails as `[setup failed]`.
+- It exports a runner-local `GOCACHE`, because the Makefile's default
+  (`/var/worktrees/.cache/go-build`) exists only on the workstation. Root
+  legs get a separate one.
+- If the runner is paused by a gate cell (below), it waits up to
+  `XPF_TEST_RUNNER_WAIT_S` seconds (default 7200) for the runner to resume,
+  then exits 75.
+
+The synced tree has no `.git`, so anything derived from `git describe` or a
+commit count reads as `unknown`/`0` on a runner. A test whose premise depends
+on those values must pin them, as `deploy-lib-selftest.sh`'s `older-only`
+cell now pins `DEB_GIT_COUNT`.
+
 The runners share their lab host's CPUs with that host's cluster. A gate
 measurement cell therefore pauses the same-host runner with
 `incus pause <machine>:xpf-testrunner` and resumes it with `incus start` in

@@ -69,8 +69,15 @@ base="/work/${name}"
 # A gate measurement cell pauses the same-host runner while it measures
 # (plan section 8). Wait for it to resume rather than fail with "Instance is
 # frozen". A job already running inside the VM just stalls and resumes.
+#
+# Read the state with `incus info`. `incus list remote:name` treats the name as
+# a filter it never matches and prints nothing, so the first version of this
+# loop (61e3e483e4) never saw FROZEN and never waited.
+runner_status() {
+	incus info "$runner" 2>/dev/null | awk '/^Status:/ {print $2; exit}'
+}
 waited=0
-while [[ "$(incus list "$runner" -c s -f csv 2>/dev/null | head -1)" == "FROZEN" ]]; do
+while [[ "$(runner_status)" == "FROZEN" ]]; do
 	if [[ "$waited" -eq 0 ]]; then
 		echo "vm-test-run: ${runner} is FROZEN by a gate cell; waiting for it to resume ..." >&2
 	fi
@@ -97,6 +104,14 @@ if [[ "$sync" -eq 1 ]]; then
 	incus exec "$runner" -- bash -c "rm -rf '${base}/src' && mkdir -p '${base}/src' '${base}/target' '${base}/tmp' && chown -R runner:runner '${base}'"
 	(cd "$top" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) |
 		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src'"
+	# testguard-run.sh runs Go tests in a private network namespace with no
+	# network, so a cold module cache fails there as "setup failed". Fetch the
+	# modules first, outside the guard. With a warm cache this is quick and
+	# fetches nothing.
+	if incus exec "$runner" -- test -f "${base}/src/go.mod"; then
+		incus exec "$runner" -- su - runner -c "cd '${base}/src' && GOFLAGS=-buildvcs=false go mod download" >&2 ||
+			echo "vm-test-run: warning: go mod download failed on ${runner}; Go legs under testguard may fail with [setup failed]" >&2
+	fi
 fi
 
 # One argument is a shell command string ('VAR=1 make test' works as
@@ -109,7 +124,12 @@ else
 	cmd=""
 	for a in "$@"; do cmd+="$(printf '%q ' "$a")"; done
 fi
-env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src'"
+# GOCACHE: the Makefile defaults it to the workstation's shared
+# /var/worktrees/.cache/go-build, which does not exist on a runner. Root legs
+# get their own cache so they never leave root-owned entries in runner's.
+gocache=/home/runner/.cache/go-build
+[[ "$as_root" -eq 1 ]] && gocache=/root/.cache/go-build
+env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOCACHE='${gocache}' GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src'"
 if [[ "$as_root" -eq 1 ]]; then
 	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}"
 else

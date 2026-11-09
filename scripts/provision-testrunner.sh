@@ -37,11 +37,15 @@ if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$GO_VER"; then
   rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm -f /tmp/go.tgz
 fi
 ln -sf /usr/local/go/bin/go /usr/local/bin/go; ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+# Some selftests pin PATH to "...:/usr/bin:/bin" (deploy-lib-selftest's
+# clean-PATH make-deb guard), and the workstation's Go is in /usr/bin.
+ln -sf /usr/local/go/bin/go /usr/bin/go; ln -sf /usr/local/go/bin/gofmt /usr/bin/gofmt
 id runner >/dev/null 2>&1 || useradd -m -s /bin/bash runner
 echo 'runner ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/runner
 su - runner -c 'command -v rustup >/dev/null 2>&1 || (curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.98.1 >/dev/null)'
 su - runner -c '. ~/.cargo/env; rustup toolchain install 1.98.1 --profile minimal -c rustfmt -c clippy >/dev/null; rustup default 1.98.1 >/dev/null; rustc --version; cargo --version'
 mkdir -p /work && chown runner:runner /work
+install -d -o runner -g runner /home/runner/.cache /home/runner/.cache/go-build
 install -d -m 1777 /wtgt
 echo "xpf-testrunner: provisioned $(date -u +%FT%TZ)" > /etc/xpf-testrunner
 go version
