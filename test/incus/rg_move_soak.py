@@ -39,7 +39,12 @@ What this harness does, per move:
     neighbour entry for the LAN VIP resolves to the target node's MAC;
   * attributes IPv4 and IPv6 ping loss / longest ping gap and the worst
     iperf3 per-stream stall to the move's window, all on the LAN host's
-    clock.
+    clock;
+  * with routed targets set (#19050), does the same for destinations no
+    connected subnet covers (the default route, a non-default static), and
+    records the new WAN owner's host-originated routed-path lag on its own
+    clock. Every routed probe must answer before the first move, or its
+    cells are VOID for the run.
 
 It never touches a clock. The preflight measures inter-node skew and reports
 it, because a skewed cluster is exactly what the operator's loop hit.
@@ -544,6 +549,10 @@ class MoveRecord:
     rgs: List[RGMoveResult]
     traffic: Optional[Dict[str, Dict]] = None  # family -> facts
     udp_probe: Optional[Dict] = None  # per-CLI sequence + firewall Session ID verdicts
+    # #19050: routed-destination probes (name -> facts, LAN clock) and the
+    # host-originated route lag on the move's target (its own clock).
+    routed: Optional[Dict[str, Dict]] = None
+    host4: Optional[Dict] = None
     verdict: str = ""
     reasons: List[str] = field(default_factory=list)
 
@@ -584,6 +593,114 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
         "ping_covered": covered_ping,
         "iperf_covered": covered_iperf,
     }
+
+
+# ---------------------------------------------------------------------------
+# #19050: routed-destination and host-originated probes
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RoutedProbe:
+    """A LAN-host ping to a destination NO connected subnet covers.
+
+    The connected-target ping above measures the path to a WAN subnet the
+    firewall is attached to. Most real traffic is ROUTED: it leaves through
+    the default route (or another static) to a next hop. After an RG move
+    the new WAN owner's FRR-rendered default lags its connected prefixes by
+    1.4-4.8 s on loss (#19050), so a probe that never leaves a connected
+    subnet cannot see whether routed traffic paid for that lag.
+
+    gap_fails: a ping gap over SOAK_MAX_GAP_MS FAILs the move, as the
+    connected ping does. False for a destination beyond the lab (the public
+    resolver, an external router), whose path has losses the cluster did
+    not cause: there the gap is a COST, judged master-relative, and only
+    "no replies in the window's tail" (routed traffic did not resume) FAILs.
+    """
+    name: str
+    target: str
+    family: str  # "v4" | "v6"
+    interval_s: float = 0.01
+    gap_fails: bool = True
+
+
+def routed_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[Tuple[float, int]],
+                      budget: Budget) -> Dict:
+    """One routed probe's ping facts for one move window [t0, t1), LAN clock."""
+    t = traffic_for_window(t0, t1, gaps, replies, [], [], [], budget)
+    return {k: t[k] for k in ("ping_lost", "ping_max_gap_ms", "ping_tail_replies", "ping_covered")}
+
+
+def routed_reasons(routed: Optional[Dict[str, Dict]], budget: Budget) -> Tuple[List[str], List[str]]:
+    """(FAIL reasons, COST reasons) from one move's routed-probe facts. A
+    probe VOIDed by its baseline control contributes nothing here: the run
+    already exits 2 for it (it is a disabled check, never a PASS)."""
+    reasons: List[str] = []
+    costs: List[str] = []
+    for name, t in sorted((routed or {}).items()):
+        if t.get("void"):
+            continue
+        what = f"routed {name} ({t.get('target')})"
+        if not t.get("ping_covered", False):
+            reasons.append(f"{what} ping did not cover the move window (ping died or never started)")
+            continue
+        if t.get("ping_tail_replies", 0) == 0:
+            reasons.append(f"routed traffic did not resume: no {what} replies in the last {budget.tail_s:g}s of the window")
+        gap = t.get("ping_max_gap_ms")
+        if gap is not None and gap > budget.max_gap_ms:
+            msg = f"{what} ping gap {gap:g} ms > {budget.max_gap_ms:g} ms ({t.get('ping_lost')} lost)"
+            if t.get("gap_fails", True):
+                reasons.append(msg)
+            else:
+                costs.append(msg + " (off-lab path: COST, judged master-relative)")
+    return reasons, costs
+
+
+_HOST_REPLY = re.compile(r"^\[(\d+\.\d+)\] \d+ bytes from ")
+
+
+def parse_host_ping(text: str) -> List[float]:
+    """Reply timestamps from a node-side `ping -D` loop. The loop restarts
+    ping whenever it exits (a route that blackholes makes ping fail at
+    connect() and exit), so sequence numbers restart and error lines are
+    interleaved; only the reply timestamps matter here."""
+    out = []
+    for line in text.splitlines():
+        m = _HOST_REPLY.match(line)
+        if m:
+            out.append(float(m.group(1)))
+    out.sort()
+    return out
+
+
+def host_route_lag(anchor: List[float], routed: List[float], t0: float, t1: float,
+                   pre_s: float = 1.0) -> Dict:
+    """The new WAN owner's own routed-path delay for one move, on ITS clock.
+
+    `anchor` is the node's ping to its connected WAN gateway, `routed` its
+    ping to a destination reached only via the default route. A standby
+    reaches neither (it holds no WAN address, and its default is the cluster
+    Null0). After the move hands it the WAN RG, the connected route lands with
+    the address; the routed one waits for the default (#19050). The lag
+    between the two first replies is the routed window host-originated
+    traffic sees, and needs no cross-node clock: both stamps are the node's.
+    t0/t1 bound the search only (mapped onto the node's clock by the
+    measured offset; `pre_s` absorbs its error)."""
+    if any(t0 - pre_s <= x < t0 for x in anchor):
+        return {"status": "N/A", "detail": "the target already reached its WAN gateway before the move "
+                                          "(it already owned the WAN RG)"}
+    a = next((x for x in anchor if t0 <= x < t1), None)
+    if a is None:
+        return {"status": "N/A", "detail": "the target never reached its WAN gateway in the window "
+                                          "(this move did not hand it the WAN RG)"}
+    r = next((x for x in routed if t0 <= x < t1), None)
+    out = {"status": "MEASURED", "anchor_s": round(a - t0, 3)}
+    if r is None:
+        out.update(routed_s=None, lag_ms=None,
+                   detail="no routed reply before the window ended: host-originated routed traffic "
+                          "had no usable default for the rest of the window")
+        return out
+    out.update(routed_s=round(r - t0, 3), lag_ms=round(max(0.0, r - a) * 1000.0, 1))
+    return out
 
 
 def follow_reasons(r: RGMoveResult, budget: Budget) -> List[str]:
@@ -710,16 +827,53 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 reasons.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_cost_stall_ms:g} ms (past the COST cap)")
             elif stall > budget.max_stall_ms and not t.get("died_streams"):
                 costs.append(f"{fam} stream {t.get('worst_stall_stream')} stalled {stall:g} ms > {budget.max_stall_ms:g} ms (recovered; ping and aggregate within budget)")
+        r_reasons, r_costs = routed_reasons(rec.routed, budget)
+        reasons.extend(r_reasons)
+        costs.extend(r_costs)
+    # #19050: a routed probe whose baseline control failed has no evidence
+    # for this move. Like a VOID UDP probe, it never lets the move PASS.
+    routed_void = [f"routed probe {n} VOID: {t['void']}" for n, t in sorted((rec.routed or {}).items())
+                   if t.get("void")] if traffic_enabled else []
     if reasons:
         if udp_void_reason:
             reasons.append(f"UDP probe evidence VOID: {udp_void_reason}")
-        reasons.extend(f"VOID evidence: {f}" for f in fallback_void)
+        reasons.extend(f"VOID evidence: {f}" for f in fallback_void + routed_void)
         return FAIL, reasons + costs
-    if udp_void_reason or fallback_void:
-        return VOID, fallback_void + ([udp_void_reason] if udp_void_reason else [])
+    if udp_void_reason or fallback_void or routed_void:
+        return VOID, fallback_void + ([udp_void_reason] if udp_void_reason else []) + routed_void
     if costs:
         return COST, costs
     return PASS, []
+
+
+def _dist(vals: List[float]) -> Optional[Dict]:
+    if not vals:
+        return None
+    return {"median": statistics.median(vals), "p95": sorted(vals)[int(0.95 * (len(vals) - 1))], "max": max(vals)}
+
+
+def format_routed_table(moves: List[MoveRecord]) -> Optional[str]:
+    """#19050: one line per move for the routed and host-originated probes,
+    or None when neither ran."""
+    names = sorted({n for m in moves for n in (m.routed or {})})
+    if not names and not any(m.host4 for m in moves):
+        return None
+    hdr = f"{'#':>4} {'to':>3}" + "".join(f" {n + ' gap':>10}" for n in names) + f" {'host4 lag_ms':>13}"
+    lines = ["routed probes (#19050):", hdr]
+    for m in moves:
+        row = f"{m.index:>4} {m.target:>3}"
+        for n in names:
+            t = (m.routed or {}).get(n, {})
+            g = t.get("ping_max_gap_ms")
+            row += f" {('VOID' if t.get('void') else '-' if g is None else f'{g:.0f}'):>10}"
+        h = m.host4 or {}
+        if h.get("status") == "MEASURED":
+            cell = "none" if h.get("lag_ms") is None else f"{h['lag_ms']:.0f}"
+        else:
+            cell = h.get("status", "-")
+        row += f" {cell:>13}"
+        lines.append(row)
+    return "\n".join(lines)
 
 
 def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str], strict_cost: bool) -> Dict:
@@ -758,6 +912,22 @@ def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str
                     return None
                 return {"median": statistics.median(vals), "p95": sorted(vals)[int(0.95 * (len(vals) - 1))], "max": max(vals)}
             out[fam] = {k: dist(k) for k in ("ping_lost", "ping_max_gap_ms", "worst_stall_ms")}
+        # #19050: routed-destination probes, per probe name.
+        names = sorted({n for m in scored for n in (m.routed or {})})
+        for name in names:
+            rows = [m.routed[name] for m in scored if m.routed and name in m.routed and not m.routed[name].get("void")]
+            gaps = [t["ping_max_gap_ms"] for t in rows if t.get("ping_max_gap_ms") is not None]
+            lost = [t["ping_lost"] for t in rows if t.get("ping_lost") is not None]
+            out.setdefault("routed", {})[name] = {
+                "ping_max_gap_ms": _dist(gaps), "ping_lost": _dist(lost), "moves": len(rows)}
+        host = [m.host4 for m in scored if m.host4]
+        if host:
+            measured = [h for h in host if h.get("status") == "MEASURED"]
+            lags = [h["lag_ms"] for h in measured if h.get("lag_ms") is not None]
+            out["host4"] = {"measured": len(measured),
+                            "no_routed_reply": sum(1 for h in measured if h.get("lag_ms") is None),
+                            "not_applicable": sum(1 for h in host if h.get("status") == "N/A"),
+                            "lag_ms": _dist(lags)}
     reasons: Dict[str, int] = {}
     for m in moves:
         for r in m.reasons:
@@ -894,6 +1064,23 @@ def neigh_mac(text: str) -> Optional[str]:
     return m.group(1) if m else None
 
 
+def host_ping_loop(rid: str, kind: str, dst: str, duration_s: int) -> str:
+    """#19050: a node-side `ping -D` that survives a blackholed route. ping
+    exits at connect() when the route is a blackhole (the standby's cluster
+    Null0 default), so the loop restarts it every 50 ms until the deadline;
+    the first reply after a move is what host_route_lag reads."""
+    d = shlex.quote(dst)
+    return (f"echo $$ > /tmp/r-soak-{rid}.host{kind}.pid; end=$(( $(date +%s) + {int(duration_s)} ));"
+            f" while [ $(date +%s) -lt $end ]; do"
+            f" ping -4 -D -i 0.01 -W 1 -w $(( end - $(date +%s) )) {d} 2>&1; sleep 0.05; done")
+
+
+def host_ping_stop(rid: str) -> str:
+    return (f"for p in /tmp/r-soak-{rid}.host*.pid; do [ -f $p ] || continue;"
+            f" pkill -INT -P $(cat $p) 2>/dev/null; kill $(cat $p) 2>/dev/null; done; sleep 1;"
+            f" rm -f /tmp/r-soak-{rid}.host*.pid")
+
+
 class IncusCluster:
     """Talks to the live cluster through `incus exec` only."""
 
@@ -1015,6 +1202,15 @@ class IncusCluster:
     def lan_sh(self, script: str) -> Tuple[int, str]:
         return self._exec(self.lan, ["sh", "-c", script], timeout=20)
 
+    def popen_node(self, node: int, script: str, outfile: str):
+        """#19050: a long-running probe in a firewall node's default instance."""
+        f = open(outfile, "w")
+        return subprocess.Popen(["incus", "exec", self.fw[node], "--", "sh", "-c", script], stdout=f,
+                                stderr=subprocess.STDOUT), f
+
+    def node_sh(self, node: int, script: str) -> Tuple[int, str]:
+        return self._exec(self.fw[node], ["sh", "-c", script], timeout=20)
+
     def _udp_probe_paths(self, run_id: str) -> Tuple[str, str, str]:
         root = f"/tmp/r-soak-{run_id}.udp"
         return root, f"{root}/udp_session_probe.py", f"{root}/probe.log"
@@ -1127,6 +1323,12 @@ class Config:
     outdir: str = ""
     run_id: str = ""
     form: str = FORM_TARGETED
+    # #19050: routed-destination probes from the LAN host, and the
+    # host-originated probe pair run on BOTH nodes (host4_target via the
+    # default route, host4_anchor the connected WAN gateway).
+    routed: List[RoutedProbe] = field(default_factory=list)
+    host4_target: str = ""
+    host4_anchor: str = ""
 
 
 class Soak:
@@ -1150,6 +1352,13 @@ class Soak:
         self.udp_probe_started = False
         self.udp_probe_baseline: Optional[str] = None
         self.v6_router: Optional[Tuple[str, str]] = None
+        # #19050: per-probe baseline VOID reasons, and each node's clock
+        # offset (node clock minus this host's), for the host-originated
+        # probe's window bounds.
+        self.routed_void: Dict[str, str] = {}
+        self.host4_void: Optional[str] = None
+        self.node_offset: Dict[int, float] = {0: 0.0, 1: 0.0}
+        self.node_procs: List = []
 
         self.move_commands_issued = 0
 
@@ -1215,6 +1424,9 @@ class Soak:
         return out
 
     def _path(self, kind: str, fam: str) -> str:
+        if kind in ("route", "host"):
+            # #19050: fam is the probe name ("r4") or "<node>-<anchor|routed>".
+            return os.path.join(self.cfg.outdir, f"{kind}-{fam}.log")
         suffix = "" if fam == "v4" else "6"
         return os.path.join(self.cfg.outdir, f"ping{suffix}.log" if kind == "ping" else f"iperf{suffix}.jsonl")
 
@@ -1244,6 +1456,9 @@ class Soak:
         self.lan_offset = offs["lan"][0]
         if offs["node0"] and offs["node1"]:
             info["node1_minus_node0_s"] = round(offs["node1"][0] - offs["node0"][0], 2)
+        for n in (0, 1):
+            if offs[f"node{n}"]:
+                self.node_offset[n] = offs[f"node{n}"][0]
         info["chrony"] = {n: self.c.chrony(n) for n in (0, 1)}
         # #18585 builds print the heartbeat-measured peer offset; record it
         # beside the harness's own measurement (absent on older builds).
@@ -1287,6 +1502,16 @@ class Soak:
             ping = f"echo $$ > /tmp/r-soak-{rid}.ping{fam}.pid; exec ping {v} -D -i 0.01 -W 1 -w {duration_s} {t}"
             self.procs.append(self.c.popen_lan(ping, self._path("ping", fam)))
             self.procs.append(self.c.popen_lan(iperf, self._path("iperf", fam)))
+        for p in self.cfg.routed:
+            v = "-6" if p.family == "v6" else "-4"
+            ping = (f"echo $$ > /tmp/r-soak-{rid}.route{p.name}.pid; exec ping {v} -D -i {p.interval_s:g} -W 1"
+                    f" -w {duration_s} {shlex.quote(p.target)}")
+            self.procs.append(self.c.popen_lan(ping, self._path("route", p.name)))
+        if self.cfg.host4_target and self.cfg.host4_anchor:
+            for n in (0, 1):
+                for kind, dst in (("anchor", self.cfg.host4_anchor), ("routed", self.cfg.host4_target)):
+                    self.node_procs.append(self.c.popen_node(
+                        n, host_ping_loop(rid, kind, dst, duration_s), self._path("host", f"{n}-{kind}")))
         self.traffic_started = True
 
     def stop_traffic(self):
@@ -1297,7 +1522,10 @@ class Soak:
         self.c.lan_sh(f"for p in /tmp/r-soak-{rid}.*.pid; do"
                       f" [ -f $p ] && kill -INT $(cat $p) 2>/dev/null; done; sleep 2;"
                       f" rm -f /tmp/r-soak-{rid}.*.pid")
-        for p, f in self.procs:
+        if self.node_procs:
+            for n in (0, 1):
+                self.c.node_sh(n, host_ping_stop(rid))
+        for p, f in self.procs + self.node_procs:
             try:
                 p.wait(timeout=20)
             except subprocess.TimeoutExpired:
@@ -1326,7 +1554,32 @@ class Soak:
                 return f"{fam} iperf3 to {target}:{port} is not streaming after {self.cfg.warmup_s:g}s warmup ({len(good)} good intervals)"
             if len(parse_ping(ptxt)) < 20:
                 return f"{fam} ping to {target} is not answering after {self.cfg.warmup_s:g}s warmup"
+        self.routed_baseline()
         return None
+
+    def routed_baseline(self):
+        """#19050: the same-run positive control. A routed probe that does not
+        answer before any move cannot score a move: its cells are VOID for the
+        whole run (a disabled check, exit 2), never PASS."""
+        for p in self.cfg.routed:
+            replies = parse_ping(self._read(self._path("route", p.name)))
+            need = max(5, min(20, int(0.3 * self.cfg.warmup_s / p.interval_s)))
+            if len(replies) < need:
+                self.routed_void[p.name] = (f"routed {p.name} ping to {p.target} answered {len(replies)} times in the "
+                                            f"{self.cfg.warmup_s:g}s warmup (need {need}): its baseline control failed")
+        if not (self.cfg.host4_target and self.cfg.host4_anchor):
+            return
+        got = {n: (len(parse_host_ping(self._read(self._path("host", f"{n}-anchor")))),
+                   len(parse_host_ping(self._read(self._path("host", f"{n}-routed")))))
+               for n in (0, 1)}
+        owners = [n for n in (0, 1) if got[n][0] >= 20]
+        if len(owners) != 1 or got[1 - owners[0]][0] != 0:
+            self.host4_void = (f"host4 anchor ping to {self.cfg.host4_anchor} cannot tell the WAN owner from the "
+                               f"standby at baseline (replies node0={got[0][0]} node1={got[1][0]}; exactly one "
+                               "node must answer)")
+        elif got[owners[0]][1] < 20:
+            self.host4_void = (f"host4 routed ping to {self.cfg.host4_target} from the WAN owner node{owners[0]} "
+                               f"answered {got[owners[0]][1]} times at baseline: its positive control failed")
 
     def start_udp_probe(self) -> Optional[str]:
         """Start one long-lived datagram socket and prove its pre-move baseline."""
@@ -1782,10 +2035,15 @@ class Soak:
                     m.traffic = m.traffic or {}
                     m.traffic[fam] = traffic_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, stalls, agg,
                                                         intervals, cfg.budget)
+        if cfg.traffic:
+            self.score_routed(moves, disabled)
         for m in moves:
             m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)
         summary = summarize(moves, cfg.traffic, disabled, cfg.strict_cost)
         self.log(format_table(moves, cfg.traffic))
+        routed_table = format_routed_table(moves)
+        if routed_table:
+            self.log(routed_table)
         self.log("summary: " + json.dumps(summary, sort_keys=True))
         for d in disabled:
             self.log(f"NOTE: check disabled: {d} — the run exits 2, not 0")
@@ -1804,6 +2062,39 @@ class Soak:
         self._write({"preflight": info, "config": asdict(cfg), "summary": summary,
                      "moves": [asdict(m) for m in moves]})
         return summary["exit"]
+
+    def score_routed(self, moves: List[MoveRecord], disabled: List[str]):
+        """#19050: attach each move's routed-probe facts (LAN clock) and its
+        target's host-originated route lag (the target's clock)."""
+        cfg = self.cfg
+        for p in cfg.routed:
+            void = self.routed_void.get(p.name)
+            if void:
+                disabled.append(f"routed probe {p.name} VOID: {void}")
+            replies = parse_ping(self._read(self._path("route", p.name)))
+            gaps = ping_gaps(replies)
+            for m in moves:
+                m.routed = m.routed or {}
+                if void:
+                    m.routed[p.name] = {"void": void, "target": p.target}
+                    continue
+                facts = routed_for_window(m.t_issue_lan, m.t_next_lan, gaps, replies, cfg.budget)
+                facts.update(target=p.target, gap_fails=p.gap_fails, interval_s=p.interval_s)
+                m.routed[p.name] = facts
+        if not (cfg.host4_target and cfg.host4_anchor):
+            return
+        if self.host4_void:
+            disabled.append(f"host4 probe VOID: {self.host4_void}")
+            for m in moves:
+                m.host4 = {"status": "VOID", "detail": self.host4_void}
+            return
+        anchor = {n: parse_host_ping(self._read(self._path("host", f"{n}-anchor"))) for n in (0, 1)}
+        routed = {n: parse_host_ping(self._read(self._path("host", f"{n}-routed"))) for n in (0, 1)}
+        for m in moves:
+            t = m.target
+            # LAN clock -> this host's clock -> the target node's clock.
+            shift = self.node_offset[t] - self.lan_offset
+            m.host4 = host_route_lag(anchor[t], routed[t], m.t_issue_lan + shift, m.t_next_lan + shift)
 
     def _write(self, obj):
         if self.cfg.outdir:
@@ -1831,6 +2122,32 @@ def iperf_target_managedness(target4: str, target6: str, mouse4: str, mouse6: st
     return v4, v6
 
 
+def routed_probes_from_env(routed4: str, routed6: str, static6: str, v6: bool, env=None) -> List[RoutedProbe]:
+    """#19050: the routed-destination probes for this run. SOAK_ROUTED=0
+    turns them off; SOAK_ROUTED4/6 and SOAK_STATIC6 override the env-file
+    targets. v4 (a lab host behind the default route) probes at 10 ms and
+    FAILs a move on a gap like the connected ping; the v6 default probe is
+    the public resolver, probed at 100 ms to stay clear of ICMP rate limits,
+    and the non-default static's host is an external router, also at 100 ms:
+    for both a gap is a COST (their paths leave the lab)."""
+    env = os.environ if env is None else env
+    if env.get("SOAK_ROUTED", "1") == "0":
+        return []
+    out: List[RoutedProbe] = []
+    r4 = env.get("SOAK_ROUTED4", routed4)
+    if r4:
+        out.append(RoutedProbe("r4", r4, "v4", float(env.get("SOAK_ROUTED4_INTERVAL", "0.01")),
+                               env.get("SOAK_ROUTED4_GAP_FAILS", "1") != "0"))
+    if v6:
+        r6 = env.get("SOAK_ROUTED6", routed6)
+        if r6:
+            out.append(RoutedProbe("r6", r6, "v6", float(env.get("SOAK_ROUTED6_INTERVAL", "0.1")), False))
+        s6 = env.get("SOAK_STATIC6", static6)
+        if s6:
+            out.append(RoutedProbe("s6", s6, "v6", float(env.get("SOAK_STATIC6_INTERVAL", "0.1")), False))
+    return out
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--fw0", required=True)
@@ -1842,6 +2159,12 @@ def main(argv=None) -> int:
     ap.add_argument("--mouse-target", required=True)
     ap.add_argument("--lan-vip6", default="", help="ignored: IPv6 follows the LAN host's RA default router")
     ap.add_argument("--outdir", required=True)
+    # #19050: routed destinations (env file ROUTED_TARGET4/6, STATIC_TARGET6)
+    # and the connected WAN gateway the host-originated probe anchors on.
+    ap.add_argument("--routed4", default="")
+    ap.add_argument("--routed6", default="")
+    ap.add_argument("--static6", default="")
+    ap.add_argument("--wan-gw4", default="")
     a = ap.parse_args(argv)
     sleep_s = _env_float("SOAK_SLEEP", 5.0)
     budget = Budget(
@@ -1884,7 +2207,12 @@ def main(argv=None) -> int:
         outdir=a.outdir,
         run_id=re.sub(r"[^A-Za-z0-9_.-]", "_", os.path.basename(a.outdir.rstrip("/"))),
         form=os.environ.get("SOAK_FORM", FORM_TARGETED),
+        routed=routed_probes_from_env(a.routed4, a.routed6, a.static6, bool(target6)),
     )
+    r4 = next((p.target for p in cfg.routed if p.name == "r4"), "")
+    if r4 and os.environ.get("SOAK_HOST4", "1") != "0":
+        cfg.host4_target = r4
+        cfg.host4_anchor = os.environ.get("SOAK_HOST4_ANCHOR", a.wan_gw4)
     if cfg.issuer not in (0, 1):
         print("FATAL: SOAK_FROM must be 0 or 1", file=sys.stderr)
         return 2
@@ -1895,6 +2223,10 @@ def main(argv=None) -> int:
     print(f"rg-move-soak: {cfg.moves} moves of RG {cfg.rgs} from node{cfg.issuer} every {cfg.sleep_s:g}s, form {cfg.form}; "
           f"converge<= {budget.converge_s:g}s gap<= {budget.max_gap_ms:g}ms stall<= {budget.max_stall_ms:g}ms; "
           f"traffic={'on' if cfg.traffic else 'off'} v6={'on' if cfg.target6 else 'off'}; out={cfg.outdir}")
+    print("rg-move-soak: routed probes: "
+          + (", ".join(f"{p.name}={p.target}@{p.interval_s:g}s{'' if p.gap_fails else ' (gap=COST)'}" for p in cfg.routed)
+             or "none configured (#19050: set ROUTED_TARGET4/6 or STATIC_TARGET6 in the cluster env)")
+          + (f"; host4 {cfg.host4_target} anchored on {cfg.host4_anchor}" if cfg.host4_anchor else ""))
     soak = Soak(cfg, IncusCluster({0: a.fw0, 1: a.fw1}, a.lan, a.mouse_target))
 
     def on_term(signum, frame):
