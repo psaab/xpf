@@ -161,11 +161,18 @@ func foldServiceGID(t *testing.T) int {
 // publishing new secrets world-readable) and the old inode is untouched.
 // RED-on-revert: capping without migration lands 0640 with the process
 // gid; flooring succeeds at 0644 with new content — both fail here.
+//
+// #19058: Case 1 needs a gid this process can fchown its own file to; Case 2
+// needs nothing. The whole test used to skip unless euid == 0 and then chown
+// to a fixed gid 4242. That predicate is not the capability: under
+// scripts/testguard-run.sh the suite is uid 0 in a user namespace that maps
+// ONLY gid 0, so chown to 4242 is EINVAL and Case 1 failed on every run.
+// Before testguard the suite ran as non-root and skipped both cases. Now
+// Case 1 runs wherever a migration target gid exists (real root: 4242; any
+// user: a supplementary group, the same route foldServiceGID gives the
+// non-root cells) and skips with the reason otherwise, and Case 2 always
+// runs.
 func TestFRRConfRootRoot0644MigratesToServiceGroup(t *testing.T) {
-	if os.Geteuid() != 0 {
-		t.Skip("group migration requires root to chown to the frr gid")
-	}
-	const frrGID = 4242
 	restore := resolveFRRGroup
 	t.Cleanup(func() { resolveFRRGroup = restore })
 
@@ -184,52 +191,94 @@ func TestFRRConfRootRoot0644MigratesToServiceGroup(t *testing.T) {
 	}
 
 	// Case 1: frr group resolves → migrate group, tighten to 0640.
-	resolveFRRGroup = func() (int, bool) { return frrGID, true }
-	conf, _ := seedLegacy(t)
-	m := &Manager{frrConf: conf}
-	if err := m.writeManagedSection("router bgp 65000\n neighbor 192.0.2.9 password new-secret\n"); err != nil {
-		t.Fatalf("writeManagedSection (migrate): %v", err)
-	}
-	fi, err := os.Stat(conf)
-	if err != nil {
-		t.Fatalf("stat migrated frr.conf: %v", err)
-	}
-	if got := fi.Mode().Perm(); got != 0o640 {
-		t.Fatalf("migrated frr.conf mode = %04o, want 0640", got)
-	}
-	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok {
-		t.Fatalf("stat migrated frr.conf: no Stat_t")
-	}
-	if int(st.Gid) != frrGID {
-		t.Fatalf("migrated frr.conf gid = %d, want frr gid %d (0640 root:root would deny the frr reader, #16046 fold)", st.Gid, frrGID)
-	}
-	if int(st.Uid) != os.Geteuid() {
-		t.Fatalf("migrated frr.conf uid = %d, want preserved owner uid %d (only the group migrates)", st.Uid, os.Geteuid())
-	}
-	if !frrServiceReadable(fi, frrGID) {
-		t.Fatalf("migrated frr.conf not readable by frr service group (mode %04o gid %d)", fi.Mode().Perm(), st.Gid)
-	}
+	t.Run("group resolves: migrate and tighten", func(t *testing.T) {
+		frrGID, ok := migrationServiceGID19058(t)
+		if !ok {
+			t.Skipf("no gid this process can chown to besides its egid %d: euid %d cannot chown to "+
+				"%d (a user namespace that maps only gid 0, as testguard-run.sh's unshare -Urp does) "+
+				"and it has no supplementary group; the migration runs under real root or as a "+
+				"non-root member of a supplementary group", os.Getegid(), os.Geteuid(), rootServiceGID19058)
+		}
+		resolveFRRGroup = func() (int, bool) { return frrGID, true }
+		conf, _ := seedLegacy(t)
+		m := &Manager{frrConf: conf}
+		if err := m.writeManagedSection("router bgp 65000\n neighbor 192.0.2.9 password new-secret\n"); err != nil {
+			t.Fatalf("writeManagedSection (migrate): %v", err)
+		}
+		fi, err := os.Stat(conf)
+		if err != nil {
+			t.Fatalf("stat migrated frr.conf: %v", err)
+		}
+		if got := fi.Mode().Perm(); got != 0o640 {
+			t.Fatalf("migrated frr.conf mode = %04o, want 0640", got)
+		}
+		st, ok := fi.Sys().(*syscall.Stat_t)
+		if !ok {
+			t.Fatalf("stat migrated frr.conf: no Stat_t")
+		}
+		if int(st.Gid) != frrGID {
+			t.Fatalf("migrated frr.conf gid = %d, want frr gid %d (0640 root:root would deny the frr reader, #16046 fold)", st.Gid, frrGID)
+		}
+		if int(st.Uid) != os.Geteuid() {
+			t.Fatalf("migrated frr.conf uid = %d, want preserved owner uid %d (only the group migrates)", st.Uid, os.Geteuid())
+		}
+		if !frrServiceReadable(fi, frrGID) {
+			t.Fatalf("migrated frr.conf not readable by frr service group (mode %04o gid %d)", fi.Mode().Perm(), st.Gid)
+		}
+	})
 
 	// Case 2 (fold-2 claim 2): group unresolvable → error before
 	// publication; old inode (content+mode) untouched, new secret absent.
-	resolveFRRGroup = func() (int, bool) { return 0, false }
-	conf2, seed2 := seedLegacy(t)
-	m2 := &Manager{frrConf: conf2}
-	if err := m2.writeManagedSection("router bgp 65000\n neighbor 192.0.2.9 password new-secret\n"); err == nil {
-		t.Fatalf("writeManagedSection (unresolved group) succeeded; want error before publishing new secrets world-readable (#16046 fold-2)")
+	t.Run("group unresolvable: refuse before publication", func(t *testing.T) {
+		resolveFRRGroup = func() (int, bool) { return 0, false }
+		conf2, seed2 := seedLegacy(t)
+		m2 := &Manager{frrConf: conf2}
+		if err := m2.writeManagedSection("router bgp 65000\n neighbor 192.0.2.9 password new-secret\n"); err == nil {
+			t.Fatalf("writeManagedSection (unresolved group) succeeded; want error before publishing new secrets world-readable (#16046 fold-2)")
+		}
+		got2, err := os.ReadFile(conf2)
+		if err != nil {
+			t.Fatalf("read rejected frr.conf: %v", err)
+		}
+		if string(got2) != seed2 {
+			t.Fatalf("rejected write replaced the old inode:\n got %q\nwant seed %q", got2, seed2)
+		}
+		fi2, _ := os.Stat(conf2)
+		if fi2.Mode().Perm() != 0o644 {
+			t.Fatalf("rejected write changed mode to %04o, want untouched 0644", fi2.Mode().Perm())
+		}
+	})
+}
+
+// rootServiceGID19058 is the synthetic frr gid Case 1 migrates to as root.
+const rootServiceGID19058 = 4242
+
+// migrationServiceGID19058 returns a gid this process can fchown a file it
+// owns to, other than its egid: rootServiceGID19058 when a probe chown to it
+// succeeds (real root, or a user namespace that maps it), else a
+// supplementary group (permitted for any user). ok is false when neither
+// exists. The probe is the capability itself, not a euid guess (#19058).
+func migrationServiceGID19058(t *testing.T) (int, bool) {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		probe := filepath.Join(t.TempDir(), "chown-probe")
+		if err := os.WriteFile(probe, nil, 0o600); err != nil {
+			t.Fatalf("chown probe: %v", err)
+		}
+		if err := os.Chown(probe, -1, rootServiceGID19058); err == nil {
+			return rootServiceGID19058, true
+		}
 	}
-	got2, err := os.ReadFile(conf2)
+	groups, err := os.Getgroups()
 	if err != nil {
-		t.Fatalf("read rejected frr.conf: %v", err)
+		t.Fatalf("getgroups: %v", err)
 	}
-	if string(got2) != seed2 {
-		t.Fatalf("rejected write replaced the old inode:\n got %q\nwant seed %q", got2, seed2)
+	for _, gid := range groups {
+		if gid != os.Getegid() {
+			return gid, true
+		}
 	}
-	fi2, _ := os.Stat(conf2)
-	if fi2.Mode().Perm() != 0o644 {
-		t.Fatalf("rejected write changed mode to %04o, want untouched 0644", fi2.Mode().Perm())
-	}
+	return 0, false
 }
 
 // TestFRRWritePlanDecision pins the single-decision table (fold-2 claim
