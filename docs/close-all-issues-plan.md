@@ -546,7 +546,7 @@ skill. Work lands on `master` as ordinary commits:
     incus orchestration of the lab clusters, and runs hermetic shell
     censuses that touch no kernel state.
   - When the runners are saturated, create another runner with the same
-    provisioning (Ubuntu 26.04 VM, low `limits.cpu.priority` so the
+    provisioning (`scripts/provision-testrunner.sh`: a Debian 14 VM, low `limits.cpu.priority` so the
     clusters' gate measurements keep priority). Do not fall back to the
     workstation.
   - The bullets below still apply inside the runner VM.

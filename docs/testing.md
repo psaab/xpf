@@ -13,7 +13,7 @@
 User directive, 2026-11-08: the dataplane and its tests must not run on the
 development workstation. Every test command runs in a disposable test-runner
 VM on a lab host. The runners are `tcp:xpf-testrunner` and
-`udp:xpf-testrunner`: Ubuntu 26.04, 8 vCPU at low CPU priority, 32 GiB RAM,
+`udp:xpf-testrunner`: Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU at low CPU priority, 32 GiB RAM,
 150 GiB disk, Go per `go.mod`, and Rust per `userspace-dp/rust-toolchain.toml`.
 Run them from the worktree:
 

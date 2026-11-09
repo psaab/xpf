@@ -4,7 +4,7 @@
 # Tests never run on the workstation; they run in these VMs on the lab hosts
 # through scripts/vm-test-run.sh. To create a runner (example: udp):
 #
-#   incus init images:ubuntu/26.04/cloud udp:xpf-testrunner --vm \
+#   incus init images:debian/14/cloud udp:xpf-testrunner --vm \
 #       --storage default --network incusbr-udp \
 #       -c limits.cpu=8 -c limits.memory=32GiB -c limits.cpu.priority=1 \
 #       -c security.secureboot=false
@@ -24,6 +24,13 @@ apt-get install -y -qq build-essential clang llvm lld libbpf-dev libxdp-dev libe
   pkg-config git make python3 python3-venv iproute2 nftables ethtool tcpdump iperf3 bpftool kmod \
   debhelper devscripts shellcheck jq curl ca-certificates protobuf-compiler rsync sudo util-linux \
   "linux-headers-$(uname -r)" >/dev/null
+# The crate's build.rs pins libelf >= 0.195 (#9931, userspace-dp/build_support/libversions.rs);
+# Ubuntu 26.04 ships 0.194, so runners use Debian 14 (forky) like the deb-building workstation.
+elf_ver=$(dpkg-query -W -f='${Version}' libelf-dev | sed 's/-.*//')
+if ! dpkg --compare-versions "$elf_ver" ge 0.195; then
+  echo "provision-testrunner: libelf-dev $elf_ver < 0.195 (#9931); use a Debian 14 image" >&2
+  exit 2
+fi
 GO_VER=1.24.9
 if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go$GO_VER"; then
   curl -fsSL "https://go.dev/dl/go${GO_VER}.linux-amd64.tar.gz" -o /tmp/go.tgz
