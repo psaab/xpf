@@ -1833,23 +1833,31 @@ fn seed_straddling_a_neighbor_push_cannot_keep_the_old_mac_19034() {
 }
 
 /// #19034 (R4 review of b5a55949e3): the worker side of the straddle fix,
-/// pinned in source. The loop must take the tick's epoch snapshot before the
-/// tick's view load, and the descriptor pass must stamp from it. The bump
-/// must be Release and the snapshot Acquire, so a snapshot that saw a
-/// post-publish bump implies a view load after that publish. A single-threaded
-/// cell cannot observe the ordering, so this pins the text.
+/// pinned in source. The worker loop must take the tick's epoch snapshot and
+/// load the view through `snapshot_epochs_then_refresh_view`, which snapshots
+/// BEFORE the load, and the descriptor pass must stamp from that snapshot.
+/// The bump must be Release and the snapshot Acquire.
+/// - The order is also killed behaviourally by
+///   `tick_epoch_snapshot_predates_a_straddling_publish_19034` (loop-body
+///   tests), through the helper's `after_snapshot` seam.
+/// - The Release/Acquire pair is not observable on x86: under TSO every load
+///   already acquires and `lock xadd` is a full fence. So this text pin is
+///   its only cell.
 #[test]
 fn tick_epoch_snapshot_precedes_the_view_load_19034() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
     let loop_body =
         std::fs::read_to_string(root.join("worker/loop_body/mod.rs")).expect("read loop body");
-    let snapshot_at = loop_body
-        .find("let tick_neighbor_epochs = dynamic_neighbors.snapshot_shard_epochs();")
-        .expect("the loop takes the tick's epoch snapshot");
-    let view_at = loop_body
-        .find("refresh_runtime_view(&forwarding, &shared_runtime")
-        .expect("the loop loads the tick's view");
-    assert!(snapshot_at < view_at, "the epoch snapshot must precede the view load");
+    assert_eq!(
+        loop_body.matches("snapshot_epochs_then_refresh_view(&dynamic_neighbors, &forwarding, &shared_runtime, || {}").count(),
+        1,
+        "the loop loads its view through the snapshot-first helper"
+    );
+    assert_eq!(
+        loop_body.matches("refresh_runtime_view(").count(),
+        0,
+        "no tick view load bypasses the snapshot-first helper"
+    );
     assert_eq!(
         loop_body
             .matches("binding.tick_neighbor_epochs = Some(tick_neighbor_epochs);")
@@ -1857,11 +1865,19 @@ fn tick_epoch_snapshot_precedes_the_view_load_19034() {
         1,
         "every binding gets the tick's snapshot"
     );
+    let reconcile =
+        std::fs::read_to_string(root.join("worker/loop_body/reconcile.rs")).expect("read reconcile");
+    let snapshot_at = reconcile
+        .find("let epochs = dynamic_neighbors.snapshot_shard_epochs();")
+        .expect("the helper takes the snapshot");
+    let load_at = reconcile
+        .find("let (new_forwarding, validation) = refresh_runtime_view(forwarding, shared_runtime, between);")
+        .expect("the helper loads the view");
+    assert!(snapshot_at < load_at, "the epoch snapshot must precede the view load");
     let descriptor = std::fs::read_to_string(root.join("poll_descriptor/mod.rs"))
         .expect("read descriptor pass");
     assert_eq!(
-        descriptor.matches(".tick_neighbor_epochs\n").count()
-            + descriptor.matches(".tick_neighbor_epochs;").count(),
+        descriptor.matches(".tick_neighbor_epochs\n").count(),
         1,
         "the seed stamps from the tick's snapshot"
     );

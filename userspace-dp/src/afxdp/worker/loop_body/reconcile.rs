@@ -775,6 +775,40 @@ pub(super) fn refresh_runtime_view(
     (new_forwarding, validation)
 }
 
+/// #19034 (R4 review of b5a55949e3): the tick's neighbor-epoch snapshot,
+/// then the tick's view load, in that order.
+///
+/// Writers that change a resolution without moving the flow-cache generation
+/// pair (Go's neighbor push, `refresh_fabric_links`) publish first and bump
+/// second (Release). The snapshot loads Acquire, so if it already shows such
+/// a bump, the view load after it returns that publish or a later one. Every
+/// flow-cache seed of the tick stamps from this snapshot
+/// (`BindingWorker::tick_neighbor_epochs`). Loading the view first would let
+/// a seed pair the bumped epoch with the view published before the bump, and
+/// that entry would never be evicted.
+///
+/// `after_snapshot` is a deterministic test seam that runs between the two
+/// steps. `worker_loop` passes a no-op closure, which this `#[inline]` generic
+/// compiles away. The cell `tick_epoch_snapshot_predates_a_straddling_publish_19034`
+/// (`loop_body/tests.rs`) injects a publish-then-bump writer there.
+#[inline]
+pub(super) fn snapshot_epochs_then_refresh_view(
+    dynamic_neighbors: &crate::afxdp::ShardedNeighborMap,
+    forwarding: &Arc<ForwardingState>,
+    shared_runtime: &RuntimeViewReader,
+    after_snapshot: impl FnOnce(),
+    between: impl FnOnce(&crate::afxdp::types::RuntimeView),
+) -> (
+    crate::afxdp::sharded_neighbor::ShardEpochSnapshot,
+    Option<Arc<ForwardingState>>,
+    ValidationState,
+) {
+    let epochs = dynamic_neighbors.snapshot_shard_epochs();
+    after_snapshot();
+    let (new_forwarding, validation) = refresh_runtime_view(forwarding, shared_runtime, between);
+    (epochs, new_forwarding, validation)
+}
+
 /// #18693: adopt one rotated forwarding snapshot — the cold
 /// rotation-adoption orchestration, extracted verbatim from `worker_loop`
 /// in loop_body/mod.rs (pure code motion into the #13075 reconcile sibling;
