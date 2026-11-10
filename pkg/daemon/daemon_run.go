@@ -1199,6 +1199,12 @@ func ignoreSIGHUP() (stop func()) {
 	}
 }
 
+// shutdownSignalAbsorbedWarning is the line guardShutdownSignals logs per
+// absorbed signal. A const so the #16801 cells, which count these records to
+// know a signal was consumed before they release the guard (#19087), match the
+// text the daemon logs: rewording it must not read as a signal regression.
+const shutdownSignalAbsorbedWarning = "shutdown signal received while shutdown already in progress; ignoring until the fail-closed sequence completes (#16801)"
+
 // guardShutdownSignals installs a long-lived sink for the shutdown
 // signal set (daemonSignals) that absorbs — and logs — any SIGTERM /
 // SIGINT delivered while runShutdownSequence is in progress (#16801).
@@ -1237,7 +1243,7 @@ func guardShutdownSignals() (stop func()) {
 		for {
 			select {
 			case sig := <-ch:
-				slog.Warn("shutdown signal received while shutdown already in progress; ignoring until the fail-closed sequence completes (#16801)", "signal", sig)
+				slog.Warn(shutdownSignalAbsorbedWarning, "signal", sig)
 			case <-done:
 				return
 			}
