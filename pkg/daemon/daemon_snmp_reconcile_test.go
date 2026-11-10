@@ -47,11 +47,14 @@ func snmpDowngradeConfig() *config.Config {
 // applyConfigLocked and this test fails — the agent keeps its read-write gate
 // and SETAuthorized("private") stays true after the apply.
 func TestApplyConfigLockedReconcilesSNMPAuthorization(t *testing.T) {
-	agent := snmp.NewAgent(&config.SNMPConfig{
+	// #19084: explicit temp persistence paths. snmp.NewAgent persists
+	// engineBoots and the EngineID component under /var/lib/xpf, which as
+	// real root wrote the host's files.
+	agent := snmp.NewAgentWithPaths(&config.SNMPConfig{
 		Communities: map[string]*config.SNMPCommunity{
 			"private": {Name: "private", Authorization: "read-write"},
 		},
-	})
+	}, filepath.Join(t.TempDir(), "snmp-engineboots"), filepath.Join(t.TempDir(), "snmp-engine-id"))
 	if !agent.SETAuthorized("private") {
 		t.Fatal("precondition: agent should start read-write")
 	}
@@ -96,11 +99,14 @@ func TestApplyConfigLockedReconcilesSNMPAuthorization(t *testing.T) {
 // apply (step 16b) and this test fails — the early return skips it and the gate
 // stays read-write.
 func TestApplyConfigLockedReconcilesSNMPBeforeDataplaneAbort(t *testing.T) {
-	agent := snmp.NewAgent(&config.SNMPConfig{
+	// #19084: explicit temp persistence paths. snmp.NewAgent persists
+	// engineBoots and the EngineID component under /var/lib/xpf, which as
+	// real root wrote the host's files.
+	agent := snmp.NewAgentWithPaths(&config.SNMPConfig{
 		Communities: map[string]*config.SNMPCommunity{
 			"private": {Name: "private", Authorization: "read-write"},
 		},
-	})
+	}, filepath.Join(t.TempDir(), "snmp-engineboots"), filepath.Join(t.TempDir(), "snmp-engine-id"))
 	if !agent.SETAuthorized("private") {
 		t.Fatal("precondition: agent should start read-write")
 	}

@@ -920,7 +920,14 @@ func (d *Daemon) startSNMPLocked(cfg *config.Config) error {
 		}
 	}
 	ctx, cancel := context.WithCancel(d.daemonCtx)
-	agent := snmp.NewAgentWithPaths(cfg.System.SNMP, d.snmpBootsPath, d.snmpEngineIDPath)
+	bootsPath, engineIDPath := d.snmpBootsPath, d.snmpEngineIDPath
+	if bootsPath == "" {
+		bootsPath = defaultSNMPBootsPath
+	}
+	if engineIDPath == "" {
+		engineIDPath = defaultSNMPEngineIDPath
+	}
+	agent := snmp.NewAgentWithPaths(cfg.System.SNMP, bootsPath, engineIDPath)
 	if vrfDevice == "" {
 		slog.Warn("SNMP management VRF is not configured; serving from main routing table")
 	}
@@ -1069,3 +1076,14 @@ func (d *Daemon) teardownSNMP() {
 	d.teardownSNMPLocked()
 	d.snmpHash, d.snmpHashSet = 0, false
 }
+
+// defaultSNMPBootsPath and defaultSNMPEngineIDPath stand in for a Daemon's
+// empty snmpBootsPath/snmpEngineIDPath. Empty means the snmp package default
+// under /var/lib/xpf, which is production behaviour. The package TestMain
+// points them at a temp dir so a test whose Daemon leaves the fields empty
+// does not persist SNMP engine state into the host's /var/lib/xpf when run as
+// real root (#19084).
+var (
+	defaultSNMPBootsPath    string
+	defaultSNMPEngineIDPath string
+)
