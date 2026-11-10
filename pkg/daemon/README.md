@@ -3427,12 +3427,16 @@ never lock an operator out of a remote box it manages.
     exit status of a daemon that is already stopping. The delivery cell
     itself runs in a re-executed child, so a regression there kills the
     child and fails the cell by name rather than the whole test binary.
-    Two more cells guard it: `TestSIGHUPCaptureReleasedOnlyAfterDelivery19070`
-    pins the HELPER (200 rounds in a child; a helper that releases before
-    observing fails at round 1), and `TestNoInProcessSelfSignal19070` pins
-    the CALLERS from the source: a self-signal in a pkg/daemon test is
-    allowed only in the helper or in a re-executed child's branch, and
-    the #15084 cell must still call the helper.
+    The re-exec is the real protection. Two more cells back it:
+    `TestSIGHUPCaptureReleasedOnlyAfterDelivery19070` pins the HELPER
+    (200 rounds in a child; a helper that releases before observing fails
+    at round 1), and `TestNoInProcessSelfSignal19070` is a source pin over
+    the common self-signal forms (syscall/unix `Kill`/`Tgkill` at
+    `Getpid()`, a pid local or 0, `os.FindProcess(...).Signal`, and those
+    or the helper taken as a value): each must sit in the helper, a listed
+    child body, or an `os.Getenv(X) == "1"` branch, and the #15084 cell
+    must still call the helper. It does not see import aliases or a child
+    process that signals its parent.
   - **Second shutdown signal during the shutdown sequence is absorbed
     (#16801).** `runShutdownSequence` called the signal context's
     `stop()` before `wg.Wait()` and the fail-closed block;
