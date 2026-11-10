@@ -514,9 +514,15 @@ Actual deletions use the same targeted invalidation:
   and flows seeded in between still resolved the old MAC (static first).
   So the snapshot that finally installs the new MAC is still a change.
 
-  Why comparing against the current tables is enough: every writer that
-  changes a key's resolution advances that key's shard, including Go's
-  neighbor push for the static-table changes it makes (above). So a cached
+  Why comparing against the current tables is enough: every AUTHORITATIVE
+  writer that changes a key's resolution advances that key's shard. That
+  covers the snapshot refresh, Go's neighbor push (for the static-table
+  changes it makes, above), `refresh_fabric_links`, and the dynamic-map
+  writers. The worker's fabric overlay (`worker/loop_body/ct_slice.rs`) and
+  its runtime-view adoption (`worker/loop_body/reconcile.rs`) also copy
+  neighbor and fabric state, but they only consume what those writers
+  published, and they rely on the writers' bumps instead of bumping
+  themselves (Codex review of b5a55949e3). So a cached
   flow whose stamped epoch is current holds the current resolution, and a
   refresh that leaves the resolution alone has nothing to invalidate. The
   refresh's old blanket bump had been hiding the push's missing static-table
@@ -557,14 +563,40 @@ mapping) and the stamp would capture the NEW shard epoch onto the cached OLD
 decision — a fresh-looking stale entry that survives every hit until it ages
 out. Snapshotting first guarantees the stamped shard epoch is `<=` the shard
 epoch observed at resolve time, so a mapping-change bump makes the entry stale
-on its next hit and it re-resolves. Relaxed loads suffice: the snapshot and
-the stamp run on the one worker thread (program order sequences the snapshot
-before the resolve), and the neighbor shard `Mutex` — not these counters —
-synchronizes neighbor entries and MAC bytes; the epochs are monotonic
-invalidation signals needing only eventual cross-thread visibility. Mirrors
-the #2170/#3912 record-before-use discipline. The snapshot is NUM_SHARDS
-relaxed loads on the cold cache-miss/resolve path only (established flows hit
-the cache and never reach it).
+on its next hit and it re-resolves. Mirrors the #2170/#3912 record-before-use
+discipline.
+
+**Per tick, before the view load (#19034, R4 review of b5a55949e3).** Two
+writers change what a cached flow resolved WITHOUT moving the
+`(config_generation, fib_generation)` pair the flow cache checks: Go's
+neighbor push (the static table) and `refresh_fabric_links` (fabric links).
+They publish a new `RuntimeView`, then bump. A worker loads its view once per
+tick, so a per-descriptor snapshot could pair a post-bump epoch with the view
+its tick loaded before the publish. That entry kept the old MAC under a
+current epoch and was never evicted.
+- The worker therefore snapshots the epoch vector once per tick, BEFORE the
+  tick's view load (`worker/loop_body/reconcile.rs`,
+  `snapshot_epochs_then_refresh_view`). It stores the snapshot on each
+  binding (`BindingWorker::tick_neighbor_epochs`), and every seed of the tick
+  stamps from it.
+- The bump is Release and the snapshot loads are Acquire. So a snapshot
+  that shows a post-publish bump implies a view load at or after that
+  publish.
+- An older snapshot is only more conservative for the dynamic-map race
+  above. Bindings no tick has reached yet, and the test harnesses, fall back
+  to a per-descriptor snapshot.
+- Cost:
+  - per worker tick: NUM_SHARDS (64) loads, which are plain loads on x86,
+    plus one 256-byte copy into each of the worker's bindings;
+  - per packet: no atomic loads added. The hit path is unchanged. The
+    cold seed path copies the tick's 256-byte vector instead of doing 64
+    loads.
+- Pinned behaviourally by
+  `seed_straddling_a_neighbor_push_cannot_keep_the_old_mac_19034` and
+  `tick_epoch_snapshot_predates_a_straddling_publish_19034`, which injects a
+  publish-then-bump writer through the helper's `after_snapshot` seam. The
+  Release/Acquire pair is not observable on x86, so a source pin is its only
+  cell (`tick_epoch_snapshot_precedes_the_view_load_19034`).
 
 **Scope / tradeoff (per #5147, superseding the #3048 global epoch):** the
 flow cache is keyed by the flow 5-tuple, not by next-hop, so it cannot key

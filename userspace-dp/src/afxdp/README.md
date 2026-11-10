@@ -2515,6 +2515,14 @@ own view's flow-cache entry:
       row, or a withdrawn static-only key, moved no epoch. Only the
       refresh's bump of every manager key hid that, and #19034 removed that
       bump.
+    - The worker stamps every flow-cache seed from an epoch snapshot taken
+      once per tick, BEFORE the tick's view load
+      (`worker/loop_body/reconcile.rs`,
+      `snapshot_epochs_then_refresh_view`). Go's push and
+      `refresh_fabric_links` publish and then bump without moving the
+      generation pair, so a per-descriptor snapshot could pair a post-bump
+      epoch with the view the tick had already loaded (R4 review of
+      b5a55949e3).
     - A genuine MAC change or removal still bumps, and a held pass still
       drops the backlog of a flow whose next hop really moved.
   - This describes the ordinary flow-cache route, not every pre-cache arm.

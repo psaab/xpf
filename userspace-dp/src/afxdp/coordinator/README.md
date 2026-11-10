@@ -316,9 +316,14 @@ Differences that matter (#1881):
   It used to remove every previous manager row, advancing every present
   manager key's shard on every apply and never a static-only key's. Go's neighbor push (`apply_manager_neighbors`) bumps by the same
   rule (`ShardedNeighborMap::bump_resolution_changed`). The refresh's
-  "before" side is sound only because every static-table writer bumps on
-  a resolution change: a cached flow whose shard epoch is current then
-  holds the current resolution. A non-policy integrity fault (invalid interface address,
+  "before" side is sound only because every authoritative static-table and
+  fabric writer bumps on a resolution change: a cached flow whose shard
+  epoch is current then holds the current resolution. The worker's fabric
+  overlay and runtime-view adoption are consumers of that published state
+  and do not bump themselves. The push and `refresh_fabric_links` publish
+  first and bump second; the worker stamps from a per-tick snapshot taken
+  before its view load (`docs/flow-cache-simplification.md`, "Per tick,
+  before the view load"). A non-policy integrity fault (invalid interface address,
   CoS queue, NAT64 / NPTv6 rule) that only the full build catches now
   returns `Err(SnapshotIntegrityError)`; the handler reports `ok=false`,
   restores the bumped status generation, and does NOT persist the
