@@ -354,10 +354,11 @@ mod.rs for further file-level breakdown.
         the only path that adds an exact item. It counts the item in
         `queued_bytes` before queueing it, and it publishes the backlog
         before it returns. Pops and restores leave `queued_bytes` alone;
-        only a send or a drop takes it down. So the floor never reads
-        "idle" while exact work is queued, here or on a peer. An exact queue
-        holds queue-lease credit only while it is non-empty, so lease credit
-        adds nothing to the gate.
+        only a send or a drop takes it down. So this binding's own
+        accounting never reads "idle" while it has exact work queued, and a
+        peer sees that work from the publish on. An exact queue holds
+        queue-lease credit only while it is non-empty, so lease credit adds
+        nothing to the gate.
       - The hold (`cos_exact_floor_on`, `exact_work_seen_ns` per root)
         bridges the gaps of a class running below its rate. Its queue
         empties between frames. Without the hold the floor dropped each
@@ -365,21 +366,60 @@ mod.rs for further file-level breakdown.
         floor back on with the pool to refill past `F` first: best-effort
         lost 2-5 Gb/s at 24 and 32 KB roots. 0.25, 1 and 4 ms were
         measured; 4 ms changed nothing against 1 ms, and 0.25 ms traded the
-        steady shape against the on/off ones.
+        steady shape against the on/off ones. The hold is a trade, not a
+        free gain: at 12 and 16 KB it costs best-effort 4.6-5.0 and
+        2.0-3.3 Gb/s against no hold, with exact unaffected (the table
+        below).
       - An idle exact class therefore costs best-effort nothing. An exact
         class waking beside saturating best-effort is served in the step its
-        first frame arrives, because the enqueue's publish turns the peers'
-        floor on.
+        first frame arrives in the serial drain simulation, because the
+        enqueue's publish turns the peers' floor on.
     - What the pool floor costs. With every exact class idle past the hold:
       nothing. At 12 KB best-effort carries 12.33-12.39 Gb/s (master 11.63;
       an always-on floor carried 1.68), at 24 KB 23.52 (master 19.6-20.0)
       and at 32 KB 24.78 (master 23.0-23.2). While an exact class is active,
-      `F` is a large share of `C` at small explicit bursts, and best-effort
-      pays it. With an exact class at 8 Gb/s of 24, best-effort carries
-      10.9-12.1 Gb/s at 24 KB and 12.8-13.9 at 32 KB (an always-on floor:
-      11.9-12.1 and 14.1-14.3), and 3.6 at 12 KB (no floor would give
-      8.3-8.6). The default burst and 96 KB are unaffected. #19074 tracks
-      bounding `F` relative to `C` for the active case.
+      best-effort Gb/s beside an exact class at 8 Gb/s of 24 (four 10 Gb/s
+      workers, drain simulation; exact carries 8.00 in every column):
+      | root burst | shipped (floor, 1 ms hold) | floor, no hold | no floor | exact root parks, shipped / no floor |
+      | 12 KB | 3.63-3.66 | 8.30-8.63 | 4.83-5.11 | 0 / 185-198 |
+      | 16 KB | 9.86-11.14 | 13.14-13.17 | 5.33-6.23 | 0 / 192-214 |
+      | 24 KB | 10.89-12.09 | 9.78-9.96 | 5.75-6.20 | 0 / 240-251 |
+      | 32 KB | 12.81-13.86 | 8.73-9.41 | 6.92-7.46 | 0 / 260-283 |
+      | 96 KB | 16.97-16.98 | 16.96-16.97 | 13.24-13.41 | 0 / 269-291 |
+      | default | 16.99-17.00 | 16.99-17.00 | 16.99-17.00 | 0 / 289-313 |
+      (R5 on #18748 at 85bf4e2155.) Read it this way:
+      - The floor itself is a net gain for best-effort while an exact class
+        is active at 16 KB and above. Without it exact root-parks a few
+        hundred times a run, and each park publishes demand that cuts
+        surplus to the residual. The floor's net cost is confined to roots
+        where `F` plus a head reaches `C` (with 1,500-byte heads and four
+        workers, `C` of 3,000 or less, the 12 KB-class root): 4.8-5.1 Gb/s
+        without it, 3.6 with it. #19074 tracks that case.
+      - The hold costs 12 and 16 KB best-effort what it buys at 24 and
+        32 KB (above). It is kept deliberately.
+      - The rest of the gap below the 17 Gb/s an 8-of-25 exact load leaves
+        at 16-32 KB is not the floor. While the class is backlogged, the
+        residual budget reserves its configured 24 Gb/s, not its 8 Gb/s:
+        the over-reservation by configured rate (#19023). Small caps
+        (#19051, #19075) bound the rest.
+    - Stated limits of the demand gate (Codex on 85bf4e2155):
+      - First-arrival protection is a policy on observed demand, not an
+        atomic enqueue-to-grant invariant. A non-exact build samples the
+        gate and fixes its limit before it acquires. A worker that sampled
+        "idle" after its hold expired, and acquires after a peer has
+        enqueued and published exact work, still acquires against the
+        whole pool and can empty it. The new exact frame then root-parks
+        for up to one 50 us wheel tick. The serial simulation cannot
+        interleave that; R4 bounds it at one wheel tick per idle-to-busy
+        edge, the "no floor" column's latency.
+      - The gate adds scans. On a root with an exact class, each non-exact
+        build walks its queues for exact bytes, and when they are zero it
+        reads each peer slot's published bytes (the 64-byte slot whose
+        demand mask the build already loads). The demand republish after
+        an exact pass that sent nothing walks the root's queues for the
+        local mask even on a root with no exact class, where a non-exact
+        guarantee then succeeds at once. Scheduling there is unchanged; the
+        CPU cost is unmeasured.
     - What it costs in lease operations: on a root with an exact class, one
       acquire CAS per batch and one release CAS when a drain ends with
       unspent credit (a partial grant, a short TX ring), on top of the
@@ -402,7 +442,11 @@ mod.rs for further file-level breakdown.
       waiter whose poll period missed every cooldown, a holder whose
       best-effort trickle kept resetting the timer).
   - The reserved AMOUNT is still the configured rate. An exact class held
-    below it by its worker's TX capacity over-reserves (#19023). Exact
+    below it while backlogged over-reserves (#19023): by its worker's TX
+    capacity, or by a slow poll at a small explicit burst (R4 on
+    85bf4e2155: a 400 us poll at 12-16 KB keeps the residual at 1 of
+    25 Gb/s). Because a root-starved queue now keeps its demand, this also
+    applies at explicit bursts where master did not see the demand. Exact
     classes whose demanding rates sum to the shaping rate or more leave a
     zero residual, so best-effort surplus gets nothing while they all demand
     (strict exact-over-surplus; `oversubscription-policy guarantee-rate`
