@@ -283,7 +283,9 @@ use a production default path. #19066 R18 found one:
 every root leg minted `cert.pem`/`key.pem` into the runner's `/etc`. The
 host-residue snapshot that `testguard-run.sh` takes before and after a run now
 lists `/etc/xpf`, `/var/lib/xpf`, `/etc/frr` and `/etc/systemd/network`, so a
-write there shows up in its HOST RESIDUE DIFFERENCE report.
+write there shows up in its HOST RESIDUE DIFFERENCE report. Its first root
+leg found a second writer that is not a re-exec child: two in-process 12168
+cells write `/var/lib/xpf` state as real root (#19084).
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about
 4 more minutes, measured at 691 s at runner load 4-8. That is above go test's
