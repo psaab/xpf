@@ -101,19 +101,21 @@ TRAFFIC_S_SLACK = 600
 # plus this margin, so a stall that began in the last window can show it
 # recovered.
 FINAL_TAIL_MARGIN_S = 2.0
-# #19054 review, round 2: who ended a generator is decided from instants
-# the harness RECORDS, never from a time tolerance. A generator counts as
-# ended by the harness only if its own output reaches such an instant and
-# it has no terminal error. Two guards make "its output reaches the
-# instant" hold for every generator still alive then:
+# #19054 review, rounds 2-3: who ended a generator is decided from what
+# the generators and the harness RECORD, never from a time tolerance or
+# the reader's clock:
+# - iperf3 reports its own end: an `end` event with no error is its -t
+#   running out (the planned end); SIGINT's exact error text below is the
+#   soak's stop or its watchdog (nothing else signals it); any other error
+#   is a death. iperf3 3.22 appends " by signal Interrupt(2)" (measured on
+#   udp:xpf-testrunner); older versions print the bare text.
+# - the soak's stop and the watchdog record, on the LAN host, which
+#   generator pids answered `kill -0` at the instant before their SIGINT.
 # - ping's -w runs this much past iperf3's -t, so a ping alive at the
-#   planned end (recorded before either starts) writes lines after it, and
-#   keeps observing the windows past iperf3's end;
+#   planned end (recorded before either starts) prints past it, and keeps
+#   observing the windows past iperf3's end.
 PING_DEADLINE_EXTRA_S = 60
-# - the watchdog records its fire instant, then waits this long before its
-#   SIGINT: longer than either generator's output cadence (ping -O 10 ms,
-#   iperf3 100 ms), so each generator alive at the instant writes after it.
-WATCHDOG_GUARD_S = 0.2
+IPERF_SIGINT_ERROR = re.compile(r"interrupt - the client has terminated(?: by signal Interrupt\(2\))?")
 # #19054 review (R16): a LAN-host watchdog stops the generators when the
 # controller has not touched its heartbeat for this long, so a SIGKILLed
 # controller cannot leave full-rate traffic running until the -t/-w cap.
@@ -368,13 +370,28 @@ def ping_last_seen(text: str) -> Optional[float]:
     return last
 
 
-def traffic_watchdog_script(run_id: str, limit_s: int, poll_s: float = WATCHDOG_POLL_S,
+def generator_stop_script(run_id: str, root: str = "/tmp") -> str:
+    """POSIX sh that stops the soak's generators and leaves, in `$t` and
+    `$up`, the LAN time it did so and the generators (`pingv4`, `iperfv6`,
+    ...) whose pid still answered `kill -0` at that instant (#19054 review,
+    round 3). Liveness at the stop is proved there, not inferred from
+    output cadence."""
+    base = f"{root}/r-soak-{run_id}"
+    return (f't=$(date +%s.%N); up=""; '
+            f'for p in {base}.*.pid; do [ -f "$p" ] || continue; '
+            f'n=${{p##*/}}; n=${{n#r-soak-{run_id}.}}; n=${{n%.pid}}; '
+            f'kill -0 "$(cat "$p")" 2>/dev/null && up="$up $n"; done; '
+            f'for p in {base}.*.pid; do [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null; done; ')
+
+
+def traffic_watchdog_script(run_id: str, limit_s: int, token: str, poll_s: float = WATCHDOG_POLL_S,
                             root: str = "/tmp") -> str:
     """A POSIX-sh dead-man for the soak's LAN-host generators (#19054 review).
 
     The controller touches `<base>.alive` once per move. If that file is
-    older than `limit_s`, the watchdog SIGINTs every generator pid file and
-    the UDP probe, writes `<base>.watchdog` ("<LAN epoch> <age s>") and
+    older than `limit_s`, the watchdog stops every generator
+    (generator_stop_script) and the UDP probe, writes `<base>.watchdog`
+    ("<LAN time> <age s> <run token> <generators alive then>...") and
     exits. When the file is gone (the soak's own stop), it exits quietly."""
     base = f"{root}/r-soak-{run_id}"
     return (f'echo $$ > {base}.wdpid; alive={base}.alive; touch "$alive"; '
@@ -382,59 +399,86 @@ def traffic_watchdog_script(run_id: str, limit_s: int, poll_s: float = WATCHDOG_
             f'm=$(stat -c %Y "$alive" 2>/dev/null) || exit 0; '
             f'age=$(( $(date +%s) - m )); '
             f'[ "$age" -le {int(limit_s)} ] && continue; '
-            f't=$(date +%s.%N); sleep {WATCHDOG_GUARD_S}; '
-            f'for p in {base}.*.pid; do [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null; done; '
+            + generator_stop_script(run_id, root) +
             f'[ -f {base}.udp/probe.pid ] && kill "$(cat {base}.udp/probe.pid)" 2>/dev/null; '
-            f'echo "$t $age" > {base}.watchdog; exit 0; done')
+            f'echo "$t $age {token}$up" > {base}.watchdog; exit 0; done')
 
 
-def parse_watchdog_marker(rc: int, out: str, started_at: float,
-                          read_at: float) -> Tuple[Optional[float], Optional[str]]:
-    """The watchdog's fire instant (LAN clock) from its marker (#19054 review,
-    round 2): (instant, None) when it fired in this run; (None, None) when
-    there is no marker; (None, problem) when the read failed or the marker
-    is not this run's. An unusable marker never counts as a harness stop."""
+def parse_stop_record(out: str) -> Tuple[Optional[float], Optional[frozenset]]:
+    """The soak's own stop: (LAN time, generators alive then) from its
+    `STOPPED <time> <names>...` line, or (None, None)."""
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "STOPPED":
+            try:
+                return float(parts[1]), frozenset(parts[2:])
+            except ValueError:
+                return None, None
+    return None, None
+
+
+def parse_watchdog_marker(rc: int, out: str, started_at: float, read_at: float,
+                          token: str) -> Tuple[Optional[float], Optional[frozenset], Optional[str]]:
+    """The watchdog's fire instant (LAN clock) and the generators alive then,
+    from its marker (#19054 review, rounds 2-3): (instant, alive, None) when
+    THIS run's watchdog fired; (None, None, None) when there is no marker;
+    (None, None, problem) when the read failed, the marker is malformed, it
+    carries another run's token, or its instant is outside this run. An
+    unusable marker never counts as a harness stop."""
     if rc != 0:
-        return None, f"the marker read failed (rc={rc}): {(out or '').strip()[:120]}"
+        return None, None, f"the marker read failed (rc={rc}): {(out or '').strip()[:120]}"
     text = (out or "").strip()
     if not text:
-        return None, None
-    m = re.fullmatch(r"(\d+(?:\.\d+)?) (\d+)", text)
-    if not m:
-        return None, f"malformed marker {text[:80]!r}"
-    at = float(m.group(1))
+        return None, None, None
+    parts = text.split()
+    if len(parts) < 3 or not re.fullmatch(r"\d+(?:\.\d+)?", parts[0]) or not parts[1].isdigit():
+        return None, None, f"malformed marker {text[:80]!r}"
+    if parts[2] != token:
+        return None, None, f"the marker carries another run's token ({parts[2][:20]!r})"
+    at = float(parts[0])
     if not started_at <= at <= read_at:
-        return None, (f"the marker's instant {at:.3f} is outside this run's watchdog "
-                      f"[{started_at:.3f}, {read_at:.3f}]")
-    return at, None
+        return None, None, (f"the marker's instant {at:.3f} is outside this run's watchdog "
+                            f"[{started_at:.3f}, {read_at:.3f}]")
+    return at, frozenset(parts[3:]), None
 
 
 def terminal_error(err: Optional[str]) -> Optional[str]:
-    """An iperf3 `error` event that ended it by itself. SIGINT's "interrupt -
-    the client has terminated" is not one: only the soak's stop or its
-    watchdog sends SIGINT, and whether the harness ended a window is
-    decided from the instants it recorded (generator_end)."""
-    return err if err and "interrupt" not in err.lower() else None
+    """An iperf3 `error` event that ended it by itself: any error except
+    SIGINT's exact text, which only the soak's stop or its watchdog causes."""
+    return None if err is None or IPERF_SIGINT_ERROR.fullmatch(err.strip()) else err
 
 
-def generator_end(label: str, last_seen: Optional[float], error: Optional[str],
-                  instants: Dict[str, Optional[float]]) -> Tuple[str, str]:
-    """Who ended a generator (#19054 review, round 2).
+def generator_end(kind: str, label: str, name: str, last_seen: Optional[float], error: Optional[str],
+                  ended: bool, stops: List[Tuple[str, float, Optional[frozenset]]],
+                  planned_end: Optional[float]) -> Tuple[str, str]:
+    """Who ended a generator (#19054 review, rounds 2-3): ("harness", <how>)
+    or ("self", <cause>). No time tolerance, and no reader clock.
 
-    ("harness", <instant name>) only when its own output reaches an instant
-    at which the harness ended the traffic (`instants`: the planned end,
-    the watchdog's fire instant) and it has no terminal error. Otherwise
-    ("self", <cause>). There is no tolerance: PING_DEADLINE_EXTRA_S and
-    WATCHDOG_GUARD_S make a generator alive at such an instant write output
-    after it."""
-    if error:
-        return "self", f"{label} ended with an error ({error})"
-    if last_seen is not None:
-        for name, at in sorted(((n, a) for n, a in instants.items() if a is not None), key=lambda x: x[1]):
-            if last_seen >= at:
-                return "harness", name
+    iperf3 says how it ended: a terminal error is a death; SIGINT's exact
+    error is the harness (only its stop and its watchdog send SIGINT); an
+    `end` event with no error is its -t, the planned end; output that just
+    stops is a death. ping does not, so it ended with the harness only if
+    a recorded stop found its pid alive (`stops`: (name, LAN time, alive
+    names)), or it printed at or past the recorded planned end, which a
+    running ping does (its -w runs PING_DEADLINE_EXTRA_S longer)."""
+    if kind == "iperf":
+        if error is not None and terminal_error(error) is not None:
+            return "self", f"{label} ended with an error ({error})"
+        if error is not None:
+            return "harness", next((n for n, _, up in sorted(stops, key=lambda s: s[1])
+                                    if up is not None and name in up), "the soak's SIGINT")
+        if ended:
+            return "harness", "planned end"
+        if last_seen is None:
+            return "self", f"{label} wrote no interval"
+        return "self", f"{label}'s output stopped at LAN {last_seen:.3f} with no end or error event"
+    for n, _, up in sorted(stops, key=lambda s: s[1]):
+        if up is not None and name in up:
+            return "harness", n
+    if planned_end is not None and last_seen is not None and last_seen >= planned_end:
+        return "harness", "planned end"
     seen = "wrote no output" if last_seen is None else f"was last seen at LAN {last_seen:.3f}"
-    return "self", f"{label} {seen}, before any instant at which the soak ended the traffic"
+    return "self", f"{label} {seen}, and no recorded stop found it running"
 
 
 def parse_ping(text: str) -> List[Tuple[float, int]]:
@@ -479,14 +523,45 @@ class StreamRun:
     to_end: bool = False  # still stalled at the last interval: the stream died
 
 
-def parse_iperf_stream(text: str) -> Tuple[List[Tuple[float, float, Dict[int, float], float]], bool, bool]:
-    """Parse arrival-stamped `iperf3 --json-stream` output.
+def iperf_generator_anchor(text: str) -> Optional[float]:
+    """iperf3's own clock for its intervals (#19054 review, round 3): the
+    LAN time of its `start` event's `timestamp`, taken when it connected.
+    `timemillisecs` (iperf3 3.17+) or else `timesecs`. Both are at or
+    before the test start that interval offsets count from, so every
+    interval time derived from it is a LOWER bound of the true one: it
+    can never make output look later than it was. The reader's arrival
+    stamps are not used for time: a slow reader shifts them all later."""
+    for line in (text or "").splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            ev = json.loads(parts[1])
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(ev, dict) or ev.get("event") != "start":
+            continue
+        ts = (ev.get("data") or {}).get("timestamp") or {}
+        try:
+            if ts.get("timemillisecs") is not None:
+                return float(ts["timemillisecs"]) / 1000.0
+            if ts.get("timesecs") is not None:
+                return float(ts["timesecs"])
+        except (TypeError, ValueError):
+            return None
+        return None
+    return None
 
-    Each line is `<lan_arrival_ts> <json event>` (the LAN host stamps lines as
-    they arrive). Returns (intervals, started, ended), with each interval as
-    (lan_start, lan_end, {stream: bps}, sum_bps). Absolute time is anchored by
-    the median of (arrival - interval end) — robust to one slow flush.
+
+def parse_iperf_stream(text: str) -> Tuple[List[Tuple[float, float, Dict[int, float], float]], bool, bool]:
+    """Parse `iperf3 --json-stream` output, each line `<arrival> <json event>`.
+
+    Returns (intervals, started, ended), with each interval as (lan_start,
+    lan_end, {stream: bps}, sum_bps) on iperf3's OWN clock: its start
+    timestamp (iperf_generator_anchor) plus the interval's offsets. With no
+    start timestamp there is no interval time, and no intervals.
     """
+    anchor = iperf_generator_anchor(text)
     raw = []
     started = ended = False
     for line in (text or "").splitlines():
@@ -526,11 +601,10 @@ def parse_iperf_stream(text: str) -> Tuple[List[Tuple[float, float, Dict[int, fl
             sum_bps = sum(streams.values())
         if span is None:
             continue
-        raw.append((arrival, span[0], span[1], streams, sum_bps))
-    if not raw:
+        raw.append((span[0], span[1], streams, sum_bps))
+    if not raw or anchor is None:
         return [], started, ended
-    anchor = statistics.median(a - e for a, _, e, _, _ in raw)
-    return [(anchor + s, anchor + e, st, sb) for _, s, e, st, sb in raw], started, ended
+    return [(anchor + s, anchor + e, st, sb) for s, e, st, sb in raw], started, ended
 
 
 def stream_stalls(intervals, low_bps: float) -> Tuple[List[StreamRun], List[StreamRun]]:
@@ -740,7 +814,8 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
 
 
 def family_traffic(windows: List[Tuple[int, float, float]], ping_text: str, iperf_text: str,
-                   budget: Budget, instants: Dict[str, Optional[float]],
+                   budget: Budget, fam: str, planned_end: Optional[float],
+                   stops: List[Tuple[str, float, Optional[frozenset]]],
                    causes: Dict[str, str]) -> List[Dict]:
     """One family's traffic facts for every move window [(move, t0, t1)].
 
@@ -748,17 +823,23 @@ def family_traffic(windows: List[Tuple[int, float, float]], ping_text: str, iper
     flushed it: ping -O writes a line per probe, answered or not; iperf3 an
     interval per 100 ms, outage or not. Replies are not liveness, and
     coverage never extends past the last real line or interval (#19054
-    review). A generator that stopped is judged once (generator_end): ended
-    by the harness, every window it left is VOID; stopped by itself, the
-    window it stopped in FAILs and the later ones are VOID ("after")."""
+    review). Interval times are iperf3's own clock (parse_iperf_stream), a
+    lower bound, so a slow reader cannot stretch coverage. A generator that
+    stopped is judged once (generator_end), and its death is always
+    charged: ended by the harness, every window it left is VOID; stopped
+    by itself, the first window it did not cover FAILs (or, if it covered
+    them all, the LAST move: it died in the final tail), the later ones
+    are VOID ("after"), and a stall still open when it stopped is a stream
+    that never recovered, not a cut one (#19054 review, round 3)."""
     replies = parse_ping(ping_text)
-    intervals, _, _ = parse_iperf_stream(iperf_text)
+    intervals, _, iperf_ended = parse_iperf_stream(iperf_text)
     gaps = ping_gaps(replies)
     stalls, agg = stream_stalls(intervals, budget.low_bps)
     err = iperf_error(iperf_text)
     last = {"ping": ping_last_seen(ping_text), "iperf": intervals[-1][1] if intervals else None}
-    ends = {"ping": generator_end("ping", last["ping"], None, instants),
-            "iperf": generator_end("iperf3", last["iperf"], terminal_error(err), instants)}
+    ends = {"ping": generator_end("ping", "ping", f"ping{fam}", last["ping"], None, False, stops, planned_end),
+            "iperf": generator_end("iperf", "iperf3", f"iperf{fam}", last["iperf"], err, iperf_ended, stops,
+                                   planned_end)}
     charged: Dict[str, int] = {}
     out: List[Dict] = []
     for n, t0, t1 in windows:
@@ -772,15 +853,26 @@ def family_traffic(windows: List[Tuple[int, float, float]], ping_text: str, iper
             if by == "harness":
                 cause = causes.get(why, why)
             elif kind in charged:
-                by, cause = "after", (f"{label} stopped by itself in move {charged[kind]}, which FAILed for it; "
-                                      f"this window had no {label}")
+                # finish() words this from move k's actual verdict.
+                by, cause = "after", f"{label} stopped by itself in move {charged[kind]}"
+                t[f"{kind}_charged_move"] = charged[kind]
             else:
                 charged[kind] = n
                 where = ("" if last[kind] is None else
                          f", {t1 - last[kind]:.1f} s before this window closed")
                 cause = f"{why}{where}"
             t[f"{kind}_uncovered_by"], t[f"{kind}_uncovered_cause"] = by, cause
+        if ends["iperf"][0] != "harness" and t.get("cut_streams"):
+            # The data ended because iperf3 stopped by itself, not because
+            # the harness stopped it: the stall never recovered.
+            t["died_streams"] = sorted(set(t["died_streams"]) | set(t["cut_streams"]))
+            t["cut_streams"] = []
         out.append(t)
+    for kind, label in (("ping", "ping"), ("iperf", "iperf3")):
+        if out and ends[kind][0] == "self" and kind not in charged:
+            # It covered every window and died after the last one closed,
+            # before the soak's stop: the final tail belongs to the last move.
+            out[-1][f"{kind}_tail_death"] = ends[kind][1]
     return out
 
 
@@ -906,6 +998,10 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 else:
                     reasons.append(f"{fam} {label} did not cover the move window: {cause}; a generator that "
                                    "stopped by itself fails the move it stopped in (#19054)")
+            for kind, label in (("ping", "ping"), ("iperf", "iperf3")):
+                if t.get(f"{kind}_tail_death"):
+                    reasons.append(f"{fam} {label} stopped by itself in the final tail, after this last move's "
+                                   f"window and before the soak's stop: {t[f'{kind}_tail_death']} (#19054)")
             if t.get("cut_streams"):
                 uncovered.append(f"{fam} stream(s) {t['cut_streams']} were still stalled when the traffic stopped, "
                                  f"before the {budget.max_cost_stall_ms:g} ms COST cap; their recovery was not "
@@ -1244,11 +1340,11 @@ class IncusCluster:
     def lan_sh(self, script: str) -> Tuple[int, str]:
         return self._exec(self.lan, ["sh", "-c", script], timeout=20)
 
-    def start_traffic_watchdog(self, run_id: str, limit_s: int) -> Tuple[int, str]:
+    def start_traffic_watchdog(self, run_id: str, limit_s: int, token: str) -> Tuple[int, str]:
         """Start the detached LAN-host watchdog; "watchdog-running" in the
         output means its process was alive half a second later."""
         base = f"/tmp/r-soak-{run_id}"
-        script = traffic_watchdog_script(run_id, limit_s)
+        script = traffic_watchdog_script(run_id, limit_s, token)
         return self._exec(self.lan, ["sh", "-c",
                                      f"rm -f {base}.watchdog {base}.wdpid; touch {base}.alive; "
                                      f"setsid sh -c {shlex.quote(script)} </dev/null >/dev/null 2>&1 & "
@@ -1259,9 +1355,8 @@ class IncusCluster:
         self._exec(self.lan, ["touch", f"/tmp/r-soak-{run_id}.alive"], timeout=10)
 
     def traffic_watchdog_fired(self, run_id: str) -> Tuple[int, str]:
-        """Read and consume the watchdog's marker ("<LAN instant> <age s>"):
-        (rc, text), empty text if it never fired. parse_watchdog_marker
-        checks both."""
+        """Read and consume the watchdog's marker: (rc, text), empty text if
+        it never fired. parse_watchdog_marker checks both."""
         base = f"/tmp/r-soak-{run_id}"
         return self._exec(self.lan, ["sh", "-c", f"cat {base}.watchdog 2>/dev/null; rm -f {base}.watchdog"],
                           timeout=10)
@@ -1408,7 +1503,9 @@ class Soak:
         self.traffic_end_lan = float("inf")  # #19054: the generators' planned end, LAN clock
         self.watchdog_fired_at: Optional[float] = None  # LAN instant the watchdog recorded before its SIGINT
         self.watchdog_started_lan: Optional[float] = None
-        self.traffic_stopped_lan: Optional[float] = None
+        self.watchdog_alive: Optional[frozenset] = None
+        self.soak_stop: Tuple[Optional[float], Optional[frozenset]] = (None, None)
+        self.run_token = os.urandom(6).hex()  # the watchdog's marker must carry it
         # #19055: the RGs this run moves, and dual-active samples seen for an
         # RG of this move that has no result yet (its own move comes later).
         self._scope_rgs: List[int] = []
@@ -1573,13 +1670,17 @@ class Soak:
             return
         self.traffic_started = False
         rid = self.cfg.run_id
-        # Every move window ends before this (the final tail runs first), so
-        # the soak's own stop never ends a window; it is recorded for the
-        # result and bounds the watchdog marker's range.
-        self.traffic_stopped_lan = self.lan_time(self.now())
-        self.c.lan_sh(f"for p in /tmp/r-soak-{rid}.*.pid; do"
-                      f" [ -f $p ] && kill -INT $(cat $p) 2>/dev/null; done; sleep 2;"
-                      f" rm -f /tmp/r-soak-{rid}.*.pid /tmp/r-soak-{rid}.alive /tmp/r-soak-{rid}.wdpid")
+        # Every move window ends before this (the final tail runs first).
+        # The LAN host records the instant and which generators were still
+        # running then. One that was not, and gave no other harness end,
+        # stopped by itself in the final tail, which FAILs the last move
+        # (#19054 review, round 3).
+        rc, out = self.c.lan_sh(generator_stop_script(rid) + 'echo "STOPPED $t$up"; sleep 2;'
+                                f" rm -f /tmp/r-soak-{rid}.*.pid /tmp/r-soak-{rid}.alive /tmp/r-soak-{rid}.wdpid")
+        self.soak_stop = parse_stop_record(out)
+        if self.soak_stop[0] is None:
+            self.log(f"WARNING: the soak's own traffic stop left no record (rc={rc}): {(out or '').strip()[:120]}; "
+                     "a ping it stopped can read as stopped by itself")
         for p, f in self.procs:
             try:
                 p.wait(timeout=20)
@@ -1603,6 +1704,9 @@ class Soak:
             err = iperf_error(itxt)
             if err:
                 return f"{fam} iperf3 to {target}:{port} failed before any move: {err}"
+            if iperf_generator_anchor(itxt) is None and itxt.strip():
+                return (f"{fam} iperf3 to {target}:{port} reports no start timestamp, so its intervals have no "
+                        "generator time (#19054 review, round 3)")
             intervals, _, _ = parse_iperf_stream(itxt)
             good = [iv for iv in intervals if iv[3] >= self.cfg.budget.low_bps]
             if len(good) < 5:
@@ -1977,7 +2081,7 @@ class Soak:
                 self.watchdog_limit_s = max(WATCHDOG_MIN_S, int(
                     4 * (cfg.sleep_s + len(rgs) * cfg.budget.converge_s) + 120))
                 self.watchdog_started_lan = self.lan_time(self.now())
-                rc_wd, out_wd = self.c.start_traffic_watchdog(cfg.run_id, self.watchdog_limit_s)
+                rc_wd, out_wd = self.c.start_traffic_watchdog(cfg.run_id, self.watchdog_limit_s, self.run_token)
                 if "watchdog-running" not in (out_wd or ""):
                     raise VoidRun("could not start the LAN-host traffic watchdog: "
                                   + ((out_wd or "").strip()[:200] or f"rc={rc_wd}"))
@@ -2092,17 +2196,18 @@ class Soak:
                     # plus a margin first.
                     self.sleep(cfg.budget.max_cost_stall_ms / 1000.0 + FINAL_TAIL_MARGIN_S if moves else 1.0)
                 self.stop_traffic()
-                if self.traffic_stopped_lan is not None:
-                    info["traffic_stopped_lan"] = round(self.traffic_stopped_lan, 3)
+                if self.soak_stop[0] is not None:
+                    info["traffic_stopped_lan"] = round(self.soak_stop[0], 3)
+                    info["traffic_running_at_stop"] = sorted(self.soak_stop[1] or ())
                 if not self.terminated and self.watchdog_started_lan is not None:
                     rc_m, out_m = self.c.traffic_watchdog_fired(cfg.run_id)
-                    at, problem = parse_watchdog_marker(rc_m, out_m, self.watchdog_started_lan,
-                                                        self.lan_time(self.now()))
+                    at, up, problem = parse_watchdog_marker(rc_m, out_m, self.watchdog_started_lan,
+                                                            self.lan_time(self.now()), self.run_token)
                     if problem:
                         self.log(f"WARNING: the LAN-host traffic watchdog's marker is unusable, so no window "
                                  f"counts as ended by it: {problem}")
                     elif at is not None:
-                        self.watchdog_fired_at = at
+                        self.watchdog_fired_at, self.watchdog_alive = at, up
                         info["traffic_watchdog_fired_lan"] = round(at, 3)
                         self.log(f"WARNING: the LAN-host traffic watchdog stopped the generators "
                                  f"(LAN instant, heartbeat age s): {out_m.strip()}")
@@ -2149,19 +2254,40 @@ class Soak:
         cfg = self.cfg
         if cfg.traffic:
             windows = [(m.index, m.t_issue_lan, m.t_next_lan) for m in moves]
-            instants = {"planned end": self.traffic_end_lan, "watchdog": self.watchdog_fired_at}
+            stops = []
+            if self.watchdog_fired_at is not None:
+                stops.append(("watchdog", self.watchdog_fired_at, self.watchdog_alive))
+            if self.soak_stop[0] is not None:
+                stops.append(("the soak's stop", self.soak_stop[0], self.soak_stop[1]))
             causes = {"planned end": (f"the traffic run's planned end came before this window closed "
                                       f"(SOAK_TRAFFIC_S={info.get('traffic_s')})"),
                       "watchdog": ("the soak's LAN-host watchdog stopped the traffic (no controller "
-                                   "heartbeat within its limit)")}
+                                   "heartbeat within its limit)"),
+                      "the soak's SIGINT": "the soak stopped the traffic (iperf3 reported its SIGINT)",
+                      "the soak's stop": "the soak stopped the traffic"}
             for fam, _, _, _ in self.families():
                 facts = family_traffic(windows, self._read(self._path("ping", fam)),
-                                       self._read(self._path("iperf", fam)), cfg.budget, instants, causes)
+                                       self._read(self._path("iperf", fam)), cfg.budget, fam,
+                                       self.traffic_end_lan, stops, causes)
                 for m, t in zip(moves, facts):
                     m.traffic = m.traffic or {}
                     m.traffic[fam] = t
         for m in moves:
             m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)
+        # A window after a generator's death names the move charged with it,
+        # by that move's ACTUAL verdict (a precondition VOID move did not
+        # FAIL for it).
+        by_index = {m.index: m for m in moves}
+        for m in moves:
+            changed = False
+            for t in (m.traffic or {}).values():
+                for kind in ("ping", "iperf"):
+                    k = t.get(f"{kind}_charged_move")
+                    if k is not None and k in by_index:
+                        t[f"{kind}_uncovered_cause"] += f", which scored {by_index[k].verdict}; this window had none of it"
+                        changed = True
+            if changed:
+                m.verdict, m.reasons = move_verdict(m, cfg.budget, cfg.traffic)
         summary = summarize(moves, cfg.traffic, disabled, cfg.strict_cost)
         self.log(format_table(moves, cfg.traffic))
         self.log("summary: " + json.dumps(summary, sort_keys=True))

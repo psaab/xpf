@@ -435,6 +435,14 @@ to the moment the next one is issued, on the LAN host's clock.
   Host Unreachable`, show that ping is still running; they are not replies
   (#19054 review).
 - **iperf3** (IPv4 `-P8 -p 5211`, IPv6 `-P2 -p 5210`, `-i 0.1 --json-stream`).
+  Interval times are iperf3's OWN clock: its `start` event's `timestamp`
+  (`timemillisecs`, iperf3 3.17+; else whole-second `timesecs`), taken when
+  it connected, plus each interval's offset. That is at or before the
+  true time, never after, so a slow reader on the LAN host cannot stretch
+  a stream's life. The reader's arrival stamps are not used for time
+  (#19054 review, round 3: a reader 150 ms late once made a stream reset
+  at 9.910 look alive at 10.05). An iperf3 with no start timestamp voids
+  the run at the traffic preflight.
   The worst per-stream stall is the longest run of 100 ms intervals under
   1 Mbit/s. A stream that disappears from the output counts as stalled from
   that point on; one that is still stalled at the end of the run never
@@ -600,16 +608,18 @@ One verdict per move:
   - a LAN neighbour entry (IPv4 VIP or IPv6 RA router) that resolves to no
     RETH MAC on a move, after the preflight proved it resolvable
     ("traffic-follow unmeasured");
-  - a traffic generator (ping or iperf3) that stopped by itself in the
-    window: an iperf3 error such as a reset connection, or output that
-    ends before any instant at which the harness ended the traffic
-    (#19054 review). Streams dying is a FAIL, whether the stream stalls to
-    the end or the generator exits. Only the move it stopped in FAILs for
-    it. The later windows had none of its traffic, so they are VOID
-    ("stopped by itself in move k, which FAILed for it") unless other
-    evidence FAILs them. A blackhole is different: a live generator
-    observes its silence in every window it lasts, and each of those
-    FAILs;
+  - a traffic generator (ping or iperf3) that stopped by itself: an
+    iperf3 error such as a reset connection, or a stop the harness did not
+    cause (#19054 review). Streams dying is a FAIL, whether the stream
+    stalls to the end or the generator exits. Its death is always charged,
+    to exactly one move: the first window it did not cover, or, if it
+    covered them all, the LAST move ("stopped by itself in the final
+    tail", round 3). The later windows had none of its traffic, so they
+    are VOID ("stopped by itself in move k, which scored <verdict>")
+    unless other evidence FAILs them. A blackhole is different: a live
+    generator observes its silence in every window it lasts, and each of
+    those FAILs. A stall still open when iperf3 stopped by itself never
+    recovered, so it FAILs too;
 - **VOID**: the precondition failed. Before a move to node *t*, the RG was not
   cleanly owned by the other node at the end of the previous window. A failed
   move therefore costs one FAIL, and the next move, back to where the RG
@@ -622,8 +632,10 @@ One verdict per move:
   19 s stall. A VOID reason that sits beside a FAIL is listed as "VOID
   evidence".
 - **VOID, recovery not observable** (#19062): a stream was still stalled
-  when the traffic stopped, but for no longer than `SOAK_MAX_COST_STALL_MS`,
-  so the soak could not see whether it would recover.
+  when the HARNESS stopped the traffic (its stop, its watchdog, or the
+  planned end), but for no longer than `SOAK_MAX_COST_STALL_MS`, so the
+  soak could not see whether it would recover. If iperf3 stopped by
+  itself instead, the stall FAILs (round 3).
   - After the last window the soak keeps the traffic running for
     `SOAK_MAX_COST_STALL_MS` + 2 s before stopping it, so this happens only
     when the traffic ended early.
@@ -644,25 +656,33 @@ One verdict per move:
     none; that window is covered, and its silence FAILs as a ping gap. A
     generator that exited 0.4 s before the window closed still had replies
     in the window's last second, and that once passed as covered.
-  - Who ended it decides the verdict, from instants the harness RECORDS,
-    with no time tolerance (#19054 review, round 2). The harness ended a
-    generator only if its output reaches one of them AND it has no
-    terminal error (an iperf3 `error` event other than SIGINT's
-    `interrupt`):
-    - the run's planned end, recorded before the generators start. iperf3's
-      `-t` and ping's `-w` both count from a later start, and ping's runs
-      60 s longer, so a generator still running then writes past it;
-    - the watchdog's fire instant, which it records 0.2 s before its
-      SIGINT. That is longer than either output cadence, so a generator
-      still running then writes past it.
-    The soak's own stop comes after every window (it is recorded in
-    `result.json` as `traffic_stopped_lan`), so it never ends one. A
-    harness-ended window is VOID, with the cause. Anything else stopped by
-    itself, and FAILs the move it stopped in (see the FAIL list above).
+  - Who ended it decides the verdict, from what the generators and the
+    harness record, with no time tolerance and no reader clock (#19054
+    review, rounds 2-3):
+    - iperf3 says how it ended. An `end` event with no error is its `-t`
+      running out (the planned end). SIGINT's exact text, `interrupt -
+      the client has terminated` (iperf3 3.22 appends ` by signal
+      Interrupt(2)`), is the harness: only the soak's stop and its
+      watchdog send SIGINT. Any other error, including another
+      "interrupt", is a death. Output that stops with neither is a death.
+    - ping does not, so it ended with the harness only if a recorded stop
+      found its pid running, or it printed at or past the run's planned
+      end. That end is recorded before ping starts, and ping's `-w` runs
+      60 s past iperf3's `-t`, so a running ping prints past it.
+    - The soak's own stop and the watchdog both run the same LAN-host
+      stop: record the time, record which generator pids answer `kill -0`,
+      then SIGINT. That proves who was running at the stop, instead of
+      inferring it from output cadence. The soak's stop prints `STOPPED
+      <time> <running>...`; `result.json` keeps it as
+      `traffic_stopped_lan` and `traffic_running_at_stop`.
+    A harness-ended window is VOID, with the cause. Anything else stopped
+    by itself, and FAILs the move it is charged to (see the FAIL list).
   - Before round 2, the soak extended each generator's last output by
     0.2 s and called anything within 2 s of the planned end harness-ended.
     That passed a reset 90 ms before the window end, and called a reset
-    within about 2 s of the planned end the harness's end.
+    within about 2 s of the planned end the harness's end. Round 2's
+    0.2 s watchdog guard relied on output cadence, and round 3 replaced
+    it with the `kill -0` record.
   - In a harness-ended window, the checks that need traffic through the
     window's END are skipped for that family: no ping replies in the tail
     and a low tail rate. So are the traffic-follow counters. A ping gap is
@@ -698,9 +718,10 @@ detached watchdog on the LAN host:
 
 - The soak touches `/tmp/r-soak-<run>.alive` after every move. The
   watchdog checks it every 10 s. If it is older than the limit, the
-  watchdog records the LAN time, waits 0.2 s, SIGINTs every generator pid
-  file and stops the UDP probe. It writes `/tmp/r-soak-<run>.watchdog`
-  (the recorded time and the heartbeat's age), and exits.
+  watchdog records the LAN time and which generator pids answer `kill -0`,
+  SIGINTs them and stops the UDP probe. It writes
+  `/tmp/r-soak-<run>.watchdog` (`<time> <age> <run token> <running>...`),
+  and exits.
 - The limit is 4 × (`SOAK_SLEEP` + RGs per move × `SOAK_CONVERGE_S`) + 120 s,
   and at least 300 s. That is far longer than any normal move, and far
   shorter than the cap.
@@ -712,11 +733,14 @@ detached watchdog on the LAN host:
   it are VOID ("the soak's LAN-host watchdog stopped the traffic"): the
   harness ended them.
 - The soak checks the marker before it believes it: the read must exit 0,
-  the marker must be `<time> <age>`, and the time must fall between the
-  watchdog's start and the read. A read that timed out, a malformed marker
-  or one from outside this run is logged (`WARNING: the LAN-host traffic
-  watchdog's marker is unusable ...`) and ends no window, so a generator
-  that stopped then still FAILs (#19054 review, round 2).
+  the marker must parse, it must carry THIS run's random token (the soak
+  hands it to the watchdog at start, so another run's or a replayed marker
+  is refused), and its time must fall between the watchdog's start and
+  the read. A read that timed out, a malformed or foreign marker, or one
+  from outside this run is logged (`WARNING: the LAN-host traffic
+  watchdog's marker is unusable ...`) and ends no window, so a ping that
+  stopped then still FAILs (#19054 review, rounds 2-3). iperf3 reports
+  the SIGINT itself, so its end does not depend on the marker.
 - The cells run the real watchdog script and the real starter on the test
   runner, with stand-in generators.
 
@@ -906,7 +930,9 @@ production; its clock and shared state are locked for the parallel reads.
 | `v4/v6 ping/iperf3 did not cover the move window: the traffic run's planned end came before this window closed ...; ... unscored unless other evidence FAILs it (#19054)` (VOID) | The run's planned end came first | Raise `SOAK_TRAFFIC_S` |
 | `v4/v6 ping/iperf3 did not cover the move window: the soak's LAN-host watchdog stopped the traffic ...` (VOID) | The controller did not feed the watchdog within its limit (it hung or was stopped), and the watchdog stopped the generators | Find out why the controller stalled; the run did not measure those windows |
 | `v4/v6 ping/iperf3 did not cover the move window: iperf3 ended with an error (<error>), N s before this window closed; ...` or `... <generator> was last seen at LAN T, before any instant at which the soak ended the traffic ...; a generator that stopped by itself fails the move it stopped in (#19054)` (FAIL) | The generator exited by itself in this window: a reset or refused connection, or output that stopped before the planned end or the watchdog | Treat as a dying stream. Read `iperf.jsonl`'s error event and `ping.log` |
-| `v4/v6 ping/iperf3 did not cover the move window: <generator> stopped by itself in move k, which FAILed for it; ...` (VOID) | A later window: the generator was already gone | Read move k |
+| `v4/v6 ping/iperf3 did not cover the move window: <generator> stopped by itself in move k, which scored <verdict>; ...` (VOID) | A later window: the generator was already gone | Read move k |
+| `v4/v6 iperf3/ping stopped by itself in the final tail, after this last move's window and before the soak's stop: ... (#19054)` (FAIL, last move) | The generator died after the last window closed, while the soak waited for stalls to recover | Treat as a dying stream on the last move |
+| `FATAL: traffic preflight: v4 iperf3 to ... reports no start timestamp, so its intervals have no generator time` | The LAN host's iperf3 prints no `start.timestamp` | Install an iperf3 that does (any 3.x does; 3.17+ gives milliseconds) |
 | `WARNING: the LAN-host traffic watchdog stopped the generators (LAN instant, heartbeat age s): ...` | The watchdog fired | As above |
 | `WARNING: the LAN-host traffic watchdog's marker is unusable, so no window counts as ended by it: ...` | The marker read failed, or the marker is malformed or not from this run | A generator that stopped is then scored as stopping by itself. Check the LAN host's `/tmp/r-soak-<run>.*` files |
 | `precondition: RGg was on nodeX before a move to nodeX` (VOID) | The previous move did not happen | Read the previous move's FAIL |

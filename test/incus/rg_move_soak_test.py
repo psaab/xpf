@@ -421,10 +421,10 @@ class MoveVerdict(unittest.TestCase):
     def test_traffic_ended_by_the_harness_is_void(self):
         # #19054: the run's planned end (or the soak's watchdog) left the
         # window unobserved: VOID, with the reason. So did a generator that
-        # had stopped by itself in an EARLIER move, which FAILed for it.
+        # had stopped by itself in an EARLIER move, charged there.
         for kind in ("iperf", "ping"):
             for by, cause in (("harness", "the traffic run's planned end came before this window closed"),
-                              ("after", "stopped by itself in move 2, which FAILed for it")):
+                              ("after", "stopped by itself in move 2, which scored FAIL")):
                 with self.subTest(kind=kind, by=by):
                     v, why = self.verdict(rec([rgres()], dict(GOOD_TRAFFIC, **{
                         f"{kind}_covered": False, f"{kind}_uncovered_by": by,
@@ -547,7 +547,8 @@ class Traffic(unittest.TestCase):
         return "\n".join(lines)
 
     def _iperf(self, anchor, n, dead=None, streams=(5, 7)):
-        lines = []
+        lines = [f"{anchor + 0.002:.6f} " + json.dumps({"event": "start", "data": {"timestamp": {
+            "timesecs": int(anchor), "timemillisecs": int(round(anchor * 1000))}}})]
         for i in range(n):
             st = []
             for sid in streams:
@@ -694,9 +695,14 @@ class FakeCluster:
     stream), "stall" (stream 7 stalls 2.5 s), "die" (stream 7 stops for good).
     """
 
-    # A real generator starts after the soak records the planned end (an
-    # incus exec, iperf3's connect), so it ends after it too (#19054 round 2).
+    # A real generator starts after the soak launches it (an incus exec,
+    # iperf3's connect): its output, and the -t/-w it counts, begin this
+    # long after the launch (#19054 review, rounds 2-3).
     GEN_START_DELAY_S = 0.15
+    # iperf3 stamps its `start` event when it connects, this long before the
+    # test start its interval offsets count from.
+    IPERF_CONNECT_LEAD_S = 0.01
+    IPERF_SIGINT = "interrupt - the client has terminated by signal Interrupt(2)"
 
     def __init__(self, clock, owner, skew_s=0.0, cli_rc_on_error=0, lag_polls=0, lan_off=3.0,
                  stuck_traffic=False, revert_after_s=None, dual_after_land=False, helper_lie=False,
@@ -760,6 +766,13 @@ class FakeCluster:
         self.udp_probe_snapshot_count = 0
         self.ping_seq = {}
         self.iv_index = {}
+        self.gen_t0 = {}        # (kind, fam) -> when its output starts (fake clock)
+        self.gen_end = {}       # (kind, fam) -> when its output stops
+        self.planned_end = {}   # (kind, fam) -> when its own -t/-w runs out
+        self.gen_events = set()  # (kind, fam, "start"|"end") already written
+        self.killed = set()     # generators that did not reach their -t/-w
+        self.reader_delay = 0.002  # the LAN-side reader's arrival-stamp delay
+        self.watchdog_token = None
         self.events = []  # (lan_t0, lan_t1, kind)
         self._status_lock = threading.Lock()
         clock.listeners.append(self._tick)
@@ -980,12 +993,13 @@ class FakeCluster:
         if self.gen_start is None:
             self.target_prepared_when_generators_started = self.target_prepared
             self.gen_start = self.last_emit = self.clock_.t
-        # #19054: the generator stops by itself after its own -t/-w seconds.
+        t0 = self.clock_.t + self.GEN_START_DELAY_S
+        self.gen_t0[(kind, fam)] = t0
+        # #19054: the generator stops by itself after its own -t/-w seconds,
+        # counted from its own start.
         m = re.search(r" -t (\d+) " if kind == "iperf" else r" -w (\d+) ", script)
         if m:
-            if not hasattr(self, "gen_end"):
-                self.gen_end = {}
-            self.gen_end[(kind, fam)] = self.gen_start + int(m.group(1)) + self.GEN_START_DELAY_S
+            self.gen_end[(kind, fam)] = self.planned_end[(kind, fam)] = t0 + int(m.group(1))
         if kind == "iperf" and self.busy_iperf:
             with open(outfile, "a") as f:
                 f.write(f"{self.clock_.t + self.lan_off:.6f} " + json.dumps(
@@ -995,14 +1009,37 @@ class FakeCluster:
     def _gen_alive(self, kind, fam):
         if self.gen_start is None or (kind == "iperf" and self.busy_iperf):
             return False
-        return self.clock_.t < getattr(self, "gen_end", {}).get((kind, fam), float("inf"))
+        return self.clock_.t < self.gen_end.get((kind, fam), float("inf"))
+
+    def _iperf_event(self, fam, at, event, data):
+        """Write an iperf3 event that happened at fake time `at`."""
+        with open(self.files[("iperf", fam)], "a") as f:
+            f.write(f"{at + self.lan_off + self.reader_delay:.6f} " + json.dumps({"event": event, "data": data}) + "\n")
+
+    def sigint(self, kinds, at):
+        """The harness's SIGINT at fake time `at`: iperf3 reports it and its
+        end, as iperf3 3.22 does; each listed generator's output stops."""
+        for kind, fam in kinds:
+            self.gen_end[(kind, fam)] = min(self.gen_end.get((kind, fam), float("inf")), at)
+            self.killed.add((kind, fam))
+            if kind == "iperf":
+                self._iperf_event(fam, at, "error", self.IPERF_SIGINT)
+                self._iperf_event(fam, at, "end", {})
 
     def lan_sh(self, script):
-        self.gen_start = None  # generators stopped
+        # The soak's stop: it records which generators were running, then
+        # SIGINTs them (generator_stop_script).
         self.lan_scripts = getattr(self, "lan_scripts", []) + [script]
-        return 0, ""
+        if self.gen_start is None:
+            return 0, ""
+        now = self.clock_.t
+        up = sorted((kind, fam) for kind, fam in self.files if self._gen_alive(kind, fam))
+        self.sigint(up, now)
+        self.gen_start = None  # generators stopped
+        return 0, f"STOPPED {now + self.lan_off:.6f}" + "".join(f" {k}{f}" for k, f in up) + "\n"
 
-    def start_traffic_watchdog(self, run_id, limit_s):
+    def start_traffic_watchdog(self, run_id, limit_s, token=None):
+        self.watchdog_token = token
         self.watchdog_limit_s = limit_s
         self.watchdog_started_before_generators = self.gen_start is None
         return 0, self.watchdog_start_out
@@ -1034,13 +1071,19 @@ class FakeCluster:
         for (kind, fam), path in list(self.files.items()):
             if kind == "iperf" and self.busy_iperf:
                 continue
-            t_gen = min(t, getattr(self, "gen_end", {}).get((kind, fam), t))
+            t0 = self.gen_t0[(kind, fam)]
+            t_gen = min(t, self.gen_end.get((kind, fam), t))
+            if kind == "iperf" and t >= t0 and (kind, fam, "start") not in self.gen_events:
+                self.gen_events.add((kind, fam, "start"))
+                stamp = t0 - self.IPERF_CONNECT_LEAD_S + self.lan_off
+                self._iperf_event(fam, t0, "start", {"timestamp": {
+                    "timesecs": int(stamp), "timemillisecs": int(stamp * 1000)}})
             with open(path, "a") as f:
                 if kind == "ping":
                     seq = self.ping_seq.get(fam, 0)
-                    while self.gen_start + (seq + 1) * 0.01 <= t_gen:
+                    while t0 + (seq + 1) * 0.01 <= t_gen:
                         seq += 1
-                        ts = self.gen_start + seq * 0.01 + self.lan_off
+                        ts = t0 + seq * 0.01 + self.lan_off
                         if not self._in(ts, "gap"):
                             f.write(f"[{ts:.6f}] 64 bytes from x: icmp_seq={seq % 65536} ttl=63 time=0.1 ms\n")
                         elif self.ping_O.get(fam):  # ping -O reports each unanswered probe
@@ -1048,8 +1091,8 @@ class FakeCluster:
                     self.ping_seq[fam] = seq
                 else:
                     i = self.iv_index.get(fam, 0)
-                    while self.gen_start + (i + 1) * 0.1 <= t_gen:
-                        mid = self.gen_start + i * 0.1 + 0.05 + self.lan_off
+                    while t0 + (i + 1) * 0.1 <= t_gen + 1e-9:
+                        mid = t0 + i * 0.1 + 0.05 + self.lan_off
                         gap = self._in(mid, "gap")
                         st = []
                         for sid in (5, 7, 9):
@@ -1059,9 +1102,14 @@ class FakeCluster:
                         ev = {"event": "interval", "data": {"streams": st, "sum": {
                             "start": i * 0.1, "end": (i + 1) * 0.1,
                             "bits_per_second": sum(s["bits_per_second"] for s in st), "omitted": False}}}
-                        f.write(f"{self.gen_start + (i + 1) * 0.1 + self.lan_off + 0.002:.6f} {json.dumps(ev)}\n")
+                        f.write(f"{t0 + (i + 1) * 0.1 + self.lan_off + self.reader_delay:.6f} {json.dumps(ev)}\n")
                         i += 1
                     self.iv_index[fam] = i
+            end = self.planned_end.get((kind, fam))
+            if (kind == "iperf" and end is not None and t >= end and (kind, fam) not in self.killed
+                    and (kind, fam, "end") not in self.gen_events):
+                self.gen_events.add((kind, fam, "end"))  # its -t ran out
+                self._iperf_event(fam, end, "end", {})
 
 
 def run_fake(cluster, clock, moves=6, rgs="2", issuer=0, sleep_s=5.0, traffic=True, helper_check=True,
@@ -3102,41 +3150,51 @@ class BlackholeAfter(FakeCluster):
 class GeneratorsStopAt(FakeCluster):
     """At move `at`, the listed generators exit `delay` s after its CLI
     returns: iperf3 with a connection reset (the product killed it) or, with
-    `watchdog`, by the soak's LAN-host watchdog. The watchdog records its
-    instant WATCHDOG_GUARD_S before its SIGINT, and iperf3 reports the
-    SIGINT as "interrupt - the client has terminated", as the real ones do.
-    `watchdog` picks the marker the soak then reads: "valid", "timeout"
-    (the read timed out), or "stale" (a marker that is not this run's).
-    `blackhole_at`: from that move's CLI on, nothing is answered."""
+    `watchdog`, by the soak's LAN-host watchdog, which records which
+    generators were alive at its instant and SIGINTs them (iperf3 reports
+    the SIGINT, as iperf3 3.22 does). `watchdog` picks the marker the soak
+    then reads: "valid", "timeout" (the read timed out), "stale" (an
+    instant outside this run), or "foreign" (another run's token).
+    `blackhole_at`: from that move's CLI on, nothing is answered.
+    `stall_at`: (move, s) stream 7 carries nothing from s after that
+    move's CLI on."""
 
-    def __init__(self, clock, owner, at, kinds, watchdog=None, delay=0.3, blackhole_at=None, **kw):
+    def __init__(self, clock, owner, at, kinds, watchdog=None, delay=0.3, blackhole_at=None,
+                 stall_at=None, **kw):
         super().__init__(clock, owner, **kw)
         self.stop_at, self.stop_kinds, self.by_watchdog = at, kinds, watchdog
-        self.delay, self.blackhole_at = delay, blackhole_at
+        self.delay, self.blackhole_at, self.stall_at = delay, blackhole_at, stall_at
 
     def cli(self, node, cmd):
         out = super().cli(node, cmd)
         if self.moves_seen == self.blackhole_at:
             self.events.append((self.clock_.t + self.lan_off, float("inf"), "gap"))
+        if self.stall_at and self.moves_seen == self.stall_at[0]:
+            self.events.append((self.clock_.t + self.stall_at[1] + self.lan_off, float("inf"), "stall"))
         if self.moves_seen == self.stop_at and self.gen_start is not None:
             t = self.clock_.t + self.delay
-            for key in self.stop_kinds:
-                self.gen_end[key] = t
-            if self.by_watchdog == "valid":
-                # getattr: the soak before the round-2 fold has no guard, and
-                # runs these cells for RED.
-                at = t - getattr(soak, "WATCHDOG_GUARD_S", 0.2) + self.lan_off
-                self.watchdog_rc, self.watchdog_marker = 0, f"{at:.6f} 301"
-            elif self.by_watchdog == "timeout":
-                self.watchdog_rc, self.watchdog_marker = 124, "error: incus exec fake:lan timed out"
-            elif self.by_watchdog == "stale":
-                self.watchdog_rc, self.watchdog_marker = 0, "0 301"
-            event = ("error - unable to receive results: Connection reset by peer" if not self.by_watchdog
-                     else "interrupt - the client has terminated")
-            for kind, fam in self.stop_kinds:
-                if kind == "iperf":
-                    with open(self.files[(kind, fam)], "a") as f:
-                        f.write(f"{t + self.lan_off:.6f} " + json.dumps({"event": "error", "data": event}) + "\n")
+            if self.by_watchdog:
+                # The soak before the round-2/3 folds had a guard and no
+                # token or alive list; give it the marker it read, so these
+                # cells run on it for RED.
+                guard = getattr(soak, "WATCHDOG_GUARD_S", 0.0)
+                at = t - guard + self.lan_off
+                names = "".join(f" {k}{f}" for k, f in self.stop_kinds)
+                tail = f" {self.watchdog_token}{names}" if hasattr(soak, "generator_stop_script") else ""
+                self.watchdog_rc, self.watchdog_marker = {
+                    "valid": (0, f"{at:.6f} 301{tail}"),
+                    "timeout": (124, "error: incus exec fake:lan timed out"),
+                    "stale": (0, f"0 301{tail}"),
+                    "foreign": (0, f"{at:.6f} 301 0123456789ab{names}"),
+                }[self.by_watchdog]
+                self.sigint(self.stop_kinds, t)
+            else:
+                for kind, fam in self.stop_kinds:
+                    self.gen_end[(kind, fam)] = t
+                    self.killed.add((kind, fam))
+                    if kind == "iperf":
+                        self._iperf_event(fam, t, "error",
+                                          "error - unable to receive results: Connection reset by peer")
         return out
 
 
@@ -3170,7 +3228,7 @@ class HarnessOnlyVoid19054(unittest.TestCase):
         self.assertIn("iperf3 did not cover the move window", why)
         self.assertIn("Connection reset by peer", why)
         for m in res["moves"][2:]:
-            self.assertTrue(any("stopped by itself in move 2, which FAILed for it" in r for r in m["reasons"]),
+            self.assertTrue(any("stopped by itself in move 2, which scored FAIL" in r for r in m["reasons"]),
                             m["reasons"])
         self.assertEqual(rc, 1)
 
@@ -3192,7 +3250,7 @@ class HarnessOnlyVoid19054(unittest.TestCase):
         # or no marker at all: the same exits are generators that stopped by
         # themselves, so the move they stopped in FAILs.
         kinds = [("iperf", "v4"), ("ping", "v4")]
-        for marker in ("timeout", "stale", None):
+        for marker in ("timeout", "stale", "foreign", None):
             with self.subTest(marker=marker):
                 clock = FakeClock()
                 c = GeneratorsStopAt(clock, {2: 0}, at=2, kinds=kinds, watchdog=marker)
@@ -3217,6 +3275,60 @@ class HarnessOnlyVoid19054(unittest.TestCase):
         self.assertEqual(m3["traffic"]["v4"].get("ping_uncovered_by"), "harness", m3["traffic"]["v4"])
         self.assertEqual(m3["verdict"], "FAIL", m3["reasons"])
         self.assertTrue(any(r.startswith("v4 ping gap") for r in m3["reasons"]), m3["reasons"])
+
+    def test_a_death_in_the_final_tail_fails_the_last_move(self):
+        # R16 round 3, F1: after the last window the traffic runs on for the
+        # COST cap plus 2 s. iperf3 reset there, 8 s after move 3's CLI: the
+        # last move FAILs. With a stall from 1 s after that CLI, the same.
+        for stall_at in (None, (3, 1.0)):
+            with self.subTest(stall=stall_at):
+                clock = FakeClock()
+                c = GeneratorsStopAt(clock, {2: 0}, at=3, kinds=[("iperf", "v4")], delay=8.0, stall_at=stall_at)
+                rc, res, _ = run_fake(c, clock, moves=3, restore=False)
+                self.assertEqual(verdicts(res), ["PASS", "PASS", "FAIL"], [m["reasons"] for m in res["moves"]])
+                self.assertTrue(any("final tail" in r and "Connection reset by peer" in r
+                                    for r in res["moves"][2]["reasons"]), res["moves"][2]["reasons"])
+                self.assertEqual(rc, 1)
+
+    def test_a_stall_cut_by_a_death_is_not_a_cut_stall(self):
+        # R16 round 3, F1: stream 7 stalls from 1 s after move 2's CLI and
+        # iperf3 is reset 0.3 s after move 3's. The data ended because iperf3
+        # stopped by itself, so move 2's stall never recovered (FAIL), not
+        # "cut by the traffic stop" (VOID).
+        clock = FakeClock()
+        c = GeneratorsStopAt(clock, {2: 0}, at=3, kinds=[("iperf", "v4")], stall_at=(2, 1.0))
+        rc, res, _ = run_fake(c, clock, moves=4, restore=False)
+        self.assertEqual(verdicts(res), ["PASS", "FAIL", "FAIL", "VOID"], [m["reasons"] for m in res["moves"]])
+        self.assertEqual(res["moves"][1]["traffic"]["v4"]["died_streams"], [7], res["moves"][1]["traffic"]["v4"])
+        # Control: the harness's own stop cutting the same stall is VOID.
+        clock = FakeClock()
+        c = GeneratorsStopAt(clock, {2: 0}, at=3, kinds=[("iperf", "v4"), ("ping", "v4")], watchdog="valid",
+                             stall_at=(2, 1.0))
+        rc, res, _ = run_fake(c, clock, moves=4, restore=False)
+        self.assertEqual(verdicts(res), ["PASS", "VOID", "VOID", "VOID"], [m["reasons"] for m in res["moves"]])
+
+    def test_the_fake_generators_start_late(self):
+        # Codex round 3, N2: the fake's generators start GEN_START_DELAY_S
+        # after their launch, output and -t/-w alike.
+        clock = FakeClock()
+        clock.t = 100.0
+        c = FakeCluster(clock, {2: 0}, lan_off=0.0)
+        with tempfile.TemporaryDirectory() as d:
+            c.popen_lan("exec ping -4 -D -O -i 0.01 -W 1 -w 10 x", os.path.join(d, "ping.log"))
+            c.popen_lan("sh -c 'exec iperf3 -4 -c x -p 5211 -P 8 -t 10 -i 0.1' | python3", os.path.join(d, "iperf.jsonl"))
+            clock.sleep(0.11)
+            for name in ("ping.log", "iperf.jsonl"):
+                with open(os.path.join(d, name)) as f:
+                    self.assertEqual(f.read(), "", name)
+            clock.sleep(0.19)  # 100.30
+            with open(os.path.join(d, "ping.log")) as f:
+                self.assertEqual(soak.parse_ping(f.read())[0][0], 100.16)
+            with open(os.path.join(d, "iperf.jsonl")) as f:
+                text = f.read()
+            self.assertAlmostEqual(soak.iperf_generator_anchor(text), 100.14, places=3)
+            intervals, _, _ = soak.parse_iperf_stream(text)
+            self.assertAlmostEqual(intervals[0][1], 100.24, places=3)  # true 100.25, a lower bound
+            self.assertEqual(c.planned_end[("iperf", "v4")], 110.15)
 
     def test_ping_outlives_iperf3s_planned_end(self):
         # traffic_s=12 under 3 moves: iperf3 ends by plan in move 2 or 3,
@@ -3273,53 +3385,124 @@ def ping_text(replies_to, silent_to=None, start=0.0):
     return "\n".join(lines) + "\n"
 
 
-def iperf_text(until, error_at=None, error="error - unable to receive results: Connection reset by peer",
-               start=0.0):
-    """Arrival-stamped `iperf3 --json-stream` output: healthy 100 ms
-    intervals ending at start+0.1 .. `until`, then an error event."""
-    lines, i = [], 0
+RESET = "error - unable to receive results: Connection reset by peer"
+SIGINT = "interrupt - the client has terminated by signal Interrupt(2)"  # iperf3 3.22
+
+
+def iperf_text(until, error_at=None, error=RESET, start=0.0, reader_delay=0.002, end_at=None):
+    """`iperf3 --json-stream` output as the LAN reader stamps it, every line
+    arriving `reader_delay` after iperf3 wrote it: the start event (iperf3's
+    own connect stamp `start`), healthy 100 ms intervals ending start+0.1 ..
+    `until`, an error event at `error_at`, and an end event at `end_at`."""
+    lines = [f"{start + reader_delay:.6f} " + json.dumps({"event": "start", "data": {"timestamp": {
+        "timesecs": int(start), "timemillisecs": int(round(start * 1000))}}})]
+    i = 0
     while round(start + (i + 1) * 0.1, 6) <= until:
         st = [{"socket": s, "start": i * 0.1, "end": (i + 1) * 0.1, "bits_per_second": 2e9} for s in (5, 7, 9)]
         ev = {"event": "interval", "data": {"streams": st, "sum": {
             "start": i * 0.1, "end": (i + 1) * 0.1, "bits_per_second": 6e9, "omitted": False}}}
-        lines.append(f"{start + (i + 1) * 0.1 + 0.002:.6f} {json.dumps(ev)}")
+        lines.append(f"{start + (i + 1) * 0.1 + reader_delay:.6f} {json.dumps(ev)}")
         i += 1
     if error_at is not None:
-        lines.append(f"{error_at:.6f} " + json.dumps({"event": "error", "data": error}))
+        lines.append(f"{error_at + reader_delay:.6f} " + json.dumps({"event": "error", "data": error}))
+    if end_at is not None:
+        lines.append(f"{end_at + reader_delay:.6f} " + json.dumps({"event": "end", "data": {}}))
     return "\n".join(lines) + "\n"
 
 
+def stopped_iperf(until, **kw):
+    """iperf3 healthy through `until`, where the harness's SIGINT stopped it."""
+    return iperf_text(until, error_at=until, error=SIGINT, end_at=until, **kw)
+
+
+BOTH = ("pingv4", "iperfv4")
+
+
 class HarnessInstants19054(unittest.TestCase):
-    """#19054 review, round 2 (Codex P1s 1, 2 and 4, R16 F2): who ended a
-    generator comes from instants the harness recorded, with no time
-    tolerance. Each case is a reviewer's fixture, scored by the soak's own
-    Soak.finish() from LAN-host logs written for it, beside its twin."""
+    """#19054 review, rounds 2-3 (Codex P1s, R16 F1/F2): who ended a
+    generator comes from what the generators and the harness record, with
+    no time tolerance and no reader clock. Each case is a reviewer's
+    fixture, scored by the soak's own Soak.finish() from LAN-host logs
+    written for it, beside its twin."""
 
     B = soak.Budget()
 
-    def verdict(self, ping, iperf, planned_end, watchdog=None):
+    def score(self, windows, ping, iperf, planned_end=720.0, watchdog=None, stop=None, pres=None):
         with tempfile.TemporaryDirectory() as d:
-            cfg = soak.Config(moves=1, rgs="2", traffic=True, outdir=d, run_id="u", budget=self.B,
+            cfg = soak.Config(moves=len(windows), rgs="2", traffic=True, outdir=d, run_id="u", budget=self.B,
                               target4="172.16.80.200", target6="")
             s = soak.Soak(cfg, None, log=lambda *_: None)
-            s.traffic_end_lan, s.watchdog_fired_at = planned_end, watchdog
+            s.traffic_end_lan = planned_end
+            if watchdog is not None:
+                s.watchdog_fired_at, s.watchdog_alive = watchdog[0], frozenset(watchdog[1])
+            if stop is not None:
+                s.soak_stop = (stop[0], frozenset(stop[1]))
             for kind, text in (("ping", ping), ("iperf", iperf)):
                 with open(s._path(kind, "v4"), "w") as f:
                     f.write(text)
-            m = rec([rgres()])
-            m.traffic, m.t_issue_lan, m.t_next_lan = None, 0.0, 10.0
-            s.finish([m], {"traffic_s": 720}, [])
-        return (m.verdict, m.reasons), m.traffic["v4"]
+            moves = []
+            for n, (t0, t1) in enumerate(windows, 1):
+                m = rec([rgres(pre=(pres or {}).get(n, 0))])
+                m.index, m.traffic, m.t_issue_lan, m.t_next_lan = n, None, t0, t1
+                moves.append(m)
+            s.finish(moves, {"traffic_s": 720}, [])
+        return [(m.verdict, m.reasons, m.traffic["v4"]) for m in moves]
+
+    def verdict(self, ping, iperf, **kw):
+        v, why, facts = self.score([(0.0, 10.0)], ping, iperf, **kw)[0]
+        return (v, why), facts
 
     def test_a_reset_just_before_the_window_end_fails(self):
-        # Codex 1: window [0,10), planned end 720, healthy intervals through
-        # 9.900, reset at 9.910. Coverage never extends past 9.900.
-        (v, why), f = self.verdict(ping_text(10.5), iperf_text(9.9, error_at=9.91), 720.0)
+        # Codex 1: window [0,10), healthy intervals through 9.900, reset at
+        # 9.910. Coverage never extends past 9.900.
+        (v, why), f = self.verdict(ping_text(10.5), iperf_text(9.9, error_at=9.91), stop=(10.5, ["pingv4"]))
         self.assertFalse(f["iperf_covered"], f)
         self.assertEqual(v, soak.FAIL, why)
         self.assertTrue(any("Connection reset by peer" in w for w in why), why)
         # Twin: the same stream healthy through 10.5 passes.
-        (v, why), _ = self.verdict(ping_text(10.5), iperf_text(10.5), 720.0)
+        (v, why), _ = self.verdict(ping_text(10.5), stopped_iperf(10.5), stop=(10.5, BOTH))
+        self.assertEqual(v, soak.PASS, why)
+
+    def test_a_delayed_reader_cannot_stretch_a_dead_stream(self):
+        # Codex round 3, N1: every line reaches the reader 0.150 s late; the
+        # true reset is at 9.910 (read at 10.060). iperf3's own clock puts
+        # its last interval at 9.900: the window it died in FAILs.
+        (v, why), f = self.verdict(ping_text(10.5), iperf_text(9.9, error_at=9.91, reader_delay=0.15),
+                                   stop=(10.5, ["pingv4"]))
+        self.assertFalse(f["iperf_covered"], f)
+        self.assertEqual(v, soak.FAIL, why)
+        self.assertFalse(any("final tail" in w for w in why), why)  # charged to its window, not the tail
+        # Over two windows, the move it died in FAILs and the next is VOID.
+        # Reader time would have passed move 1 and FAILed move 2.
+        got = self.score([(0.0, 10.0), (10.0, 20.0)], ping_text(20.5),
+                         iperf_text(9.9, error_at=9.91, reader_delay=0.15), stop=(20.5, ["pingv4"]))
+        self.assertEqual([g[0] for g in got], [soak.FAIL, soak.VOID], [g[1] for g in got])
+        # Healthy twin, read just as late: both windows PASS.
+        got = self.score([(0.0, 10.0), (10.0, 20.0)], ping_text(20.5), stopped_iperf(20.5, reader_delay=0.15),
+                         stop=(20.5, BOTH))
+        self.assertEqual([g[0] for g in got], [soak.PASS, soak.PASS], [g[1] for g in got])
+
+    def test_a_later_window_names_the_charged_moves_actual_verdict(self):
+        # Codex round 3: "which FAILed for it" was written before the
+        # verdicts. Here move 1 is a precondition VOID, so it did not FAIL
+        # for the death it is charged with, and move 2 says so.
+        got = self.score([(0.0, 10.0), (10.0, 20.0)], ping_text(20.5), iperf_text(9.9, error_at=9.91),
+                         stop=(20.5, ["pingv4"]), pres={1: 1})
+        self.assertEqual([g[0] for g in got], [soak.VOID, soak.VOID], [g[1] for g in got])
+        self.assertTrue(any("stopped by itself in move 1, which scored VOID" in w for w in got[1][1]), got[1][1])
+
+    def test_a_death_after_the_last_window_fails_the_last_move(self):
+        # R16 round 3, F1 (unit): healthy through 12.0, reset at 12.01, in the
+        # final tail before the soak's stop at 15.
+        (v, why), f = self.verdict(ping_text(15.0), iperf_text(12.0, error_at=12.01), stop=(15.0, ["pingv4"]))
+        self.assertTrue(f["iperf_covered"], f)
+        self.assertEqual(v, soak.FAIL, why)
+        self.assertTrue(any("final tail" in w and "Connection reset by peer" in w for w in why), why)
+        # A ping the soak's stop did not find running died in the tail too.
+        (v, why), _ = self.verdict(ping_text(12.0), stopped_iperf(15.0), stop=(15.0, ["iperfv4"]))
+        self.assertEqual(v, soak.FAIL, why)
+        # Twin: both running at the soak's stop.
+        (v, why), _ = self.verdict(ping_text(15.0), stopped_iperf(15.0), stop=(15.0, BOTH))
         self.assertEqual(v, soak.PASS, why)
 
     def test_a_reset_near_the_planned_end_fails(self):
@@ -3327,49 +3510,72 @@ class HarnessInstants19054(unittest.TestCase):
         # a reset 1 s before a planned end that falls inside the window.
         for planned_end, until in ((11.0, 9.1), (9.5, 8.5)):
             with self.subTest(planned_end=planned_end):
-                (v, why), _ = self.verdict(ping_text(10.5), iperf_text(until, error_at=until + 0.01), planned_end)
+                (v, why), _ = self.verdict(ping_text(10.5), iperf_text(until, error_at=until + 0.01),
+                                           planned_end=planned_end, stop=(10.5, ["pingv4"]))
                 self.assertEqual(v, soak.FAIL, why)
-        # Twin: a clean -t end at the planned end (9.5, inside the window).
-        (v, why), f = self.verdict(ping_text(10.5), iperf_text(9.6), 9.5)
+        # Twin: iperf3's own -t ran out at 9.6 (its end event, no error).
+        (v, why), f = self.verdict(ping_text(10.5), iperf_text(9.6, end_at=9.6), planned_end=9.5,
+                                   stop=(10.5, ["pingv4"]))
         self.assertEqual(f["iperf_uncovered_by"], "harness", f)
         self.assertEqual(v, soak.VOID, why)
-        # A reset after the RECORDED planned end but before iperf3's own -t
-        # ran out (it started after the soak recorded the end): its output
-        # reaches the instant, and the error still makes it a FAIL.
-        (v, why), f = self.verdict(ping_text(10.5), iperf_text(9.6, error_at=9.61), 9.5)
+        # A reset just before its own -t ran out is still a reset.
+        (v, why), _ = self.verdict(ping_text(10.5), iperf_text(9.6, error_at=9.61), planned_end=9.5,
+                                   stop=(10.5, ["pingv4"]))
         self.assertEqual(v, soak.FAIL, why)
 
     def test_a_gap_proved_before_the_harness_stop_is_kept(self):
         # Codex 4: planned end 9; ping replies through 6.000, then only "no
-        # answer yet" through 9.000; iperf3 healthy to 9.1.
-        (v, why), f = self.verdict(ping_text(6.0, silent_to=9.0), iperf_text(9.1), 9.0)
+        # answer yet" through 9.000; iperf3 runs out its -t at 9.1.
+        (v, why), f = self.verdict(ping_text(6.0, silent_to=9.0), iperf_text(9.1, end_at=9.1), planned_end=9.0)
         self.assertEqual(f["ping_uncovered_by"], "harness", f)
         self.assertEqual(v, soak.FAIL, why)
         self.assertTrue(any(w.startswith("v4 ping gap 30") for w in why), why)
         # Twin: answered through 9.000, the same harness end is VOID.
-        (v, why), _ = self.verdict(ping_text(9.0), iperf_text(9.1), 9.0)
+        (v, why), _ = self.verdict(ping_text(9.0), iperf_text(9.1, end_at=9.1), planned_end=9.0)
         self.assertEqual(v, soak.VOID, why)
 
-    def test_the_watchdog_instant_ends_only_what_reached_it(self):
-        # The watchdog's instant is 8.0. A stream whose output reaches it is
-        # harness-ended; one that went silent at 7.0 stopped by itself.
-        (v, _), f = self.verdict(ping_text(8.1), iperf_text(8.1, error_at=8.2,
-                                                           error="interrupt - the client has terminated"),
-                                 720.0, watchdog=8.0)
+    def test_the_watchdog_ends_only_what_it_found_running(self):
+        # The watchdog stopped the traffic at 8.0. What it found running
+        # (kill -0) and SIGINTed is harness-ended; what had already stopped
+        # stopped by itself.
+        (v, _), f = self.verdict(ping_text(8.0), stopped_iperf(8.0), watchdog=(8.0, BOTH))
         self.assertEqual((f["ping_uncovered_by"], f["iperf_uncovered_by"]), ("harness", "harness"), f)
         self.assertEqual(v, soak.VOID)
-        (v, _), f = self.verdict(ping_text(8.1), iperf_text(7.0), 720.0, watchdog=8.0)
+        (v, _), f = self.verdict(ping_text(8.0), iperf_text(7.0), watchdog=(8.0, ["pingv4"]))
         self.assertEqual(f["iperf_uncovered_by"], "self", f)
         self.assertEqual(v, soak.FAIL)
+        (v, _), f = self.verdict(ping_text(7.0), stopped_iperf(8.0), watchdog=(8.0, ["iperfv4"]))
+        self.assertEqual(f["ping_uncovered_by"], "self", f)
+        self.assertEqual(v, soak.FAIL)
+
+    def test_only_iperf3s_own_sigint_text_is_the_harness(self):
+        # Codex round 3: the exact SIGINT text, in both iperf3 forms, is the
+        # harness's stop; another "interrupt" (the server's) is a death.
+        for error, want in ((SIGINT, soak.VOID), ("interrupt - the client has terminated", soak.VOID),
+                            ("interrupt - the server has terminated", soak.FAIL)):
+            with self.subTest(error=error):
+                (v, why), _ = self.verdict(ping_text(9.0), iperf_text(9.0, error_at=9.0, error=error, end_at=9.0),
+                                           stop=(9.0, ["pingv4"]))
+                self.assertEqual(v, want, why)
+
+    def test_iperf3_needs_its_own_clock(self):
+        # Without its start timestamp iperf3's intervals have no generator
+        # time, and the traffic preflight voids the run.
+        text = "\n".join(l for l in iperf_text(5.0).splitlines() if '"start"' not in l)
+        self.assertIsNone(soak.iperf_generator_anchor(text))
+        self.assertEqual(soak.parse_iperf_stream(text)[0], [])
+        self.assertAlmostEqual(soak.iperf_generator_anchor(iperf_text(5.0, start=12.345)), 12.345)
 
     def test_watchdog_markers_are_checked(self):
         parse = soak.parse_watchdog_marker
-        self.assertEqual(parse(0, "1000.5 301\n", 900.0, 1100.0), (1000.5, None))
-        self.assertEqual(parse(0, "", 900.0, 1100.0), (None, None))
-        for rc, out in ((124, "error: incus exec lan timed out"), (1, "1000.5 301"),
-                        (0, "0 301"), (0, "1200 301"), (0, "garbage")):
+        self.assertEqual(parse(0, "1000.5 301 tok pingv4 iperfv4\n", 900.0, 1100.0, "tok"),
+                         (1000.5, frozenset(BOTH), None))
+        self.assertEqual(parse(0, "", 900.0, 1100.0, "tok"), (None, None, None))
+        for rc, out in ((124, "error: incus exec lan timed out"), (1, "1000.5 301 tok pingv4"),
+                        (0, "0 301 tok pingv4"), (0, "1200 301 tok pingv4"), (0, "garbage"),
+                        (0, "1000.5 301 other pingv4"), (0, "1000.5 301")):
             with self.subTest(rc=rc, out=out):
-                at, problem = parse(rc, out, 900.0, 1100.0)
+                at, up, problem = parse(rc, out, 900.0, 1100.0, "tok")
                 self.assertIsNone(at)
                 self.assertTrue(problem)
 
@@ -3421,8 +3627,8 @@ class TrafficWatchdog19054(unittest.TestCase):
         c = LocalIncus({0: "fw0", 1: "fw1"}, "lan", "target")
         try:
             with mock.patch.object(soak, "traffic_watchdog_script",
-                                   lambda r, limit_s: fast(r, limit_s, poll_s=0.2)):
-                rc, out = c.start_traffic_watchdog(rid, 300)
+                                   lambda r, limit_s, token: fast(r, limit_s, token, poll_s=0.2)):
+                rc, out = c.start_traffic_watchdog(rid, 300, "tok")
             self.assertIn("watchdog-running", out, (rc, out))
             with open(f"{base}.wdpid") as f:
                 wd = int(f.read())
@@ -3451,8 +3657,8 @@ class TrafficWatchdog19054(unittest.TestCase):
             self.assertFalse(os.path.exists(f"{base}.watchdog"))
             # A watchdog that dies at once is not reported running.
             with mock.patch.object(soak, "traffic_watchdog_script",
-                                   lambda r, limit_s: f"echo $$ > /tmp/r-soak-{r}.wdpid; exit 0"):
-                rc, out = c.start_traffic_watchdog(rid, 300)
+                                   lambda r, limit_s, token: f"echo $$ > /tmp/r-soak-{r}.wdpid; exit 0"):
+                rc, out = c.start_traffic_watchdog(rid, 300, "tok")
             self.assertNotIn("watchdog-running", out, (rc, out))
         finally:
             for suffix in (".alive", ".wdpid", ".watchdog"):
@@ -3489,16 +3695,18 @@ class TrafficWatchdog19054(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             gen = self._generator(d)
             try:
-                wd = subprocess.Popen(["sh", "-c", soak.traffic_watchdog_script("wd", limit_s=1, poll_s=0.5, root=d)])
+                wd = subprocess.Popen(["sh", "-c", soak.traffic_watchdog_script("wd", limit_s=1, token="tok",
+                                                                                 poll_s=0.5, root=d)])
                 gen.wait(timeout=8)
-                died = time.time()
                 wd.wait(timeout=5)
                 with open(os.path.join(d, "r-soak-wd.watchdog")) as f:
-                    at, age = f.read().split()
-                self.assertGreater(int(age), 1)
-                # The recorded instant precedes the SIGINT by the guard, so a
-                # generator alive then writes output after it.
-                self.assertGreaterEqual(died - float(at), soak.WATCHDOG_GUARD_S * 0.75)
+                    marker = f.read()
+                at, up, problem = soak.parse_watchdog_marker(0, marker, 0.0, time.time(), "tok")
+                self.assertIsNone(problem, marker)
+                self.assertGreater(int(marker.split()[1]), 1)
+                # It recorded the generator as running at its instant (kill
+                # -0), then SIGINTed it.
+                self.assertEqual(up, frozenset({"iperfv4"}), marker)
             finally:
                 if gen.poll() is None:
                     gen.kill()
@@ -3509,7 +3717,8 @@ class TrafficWatchdog19054(unittest.TestCase):
             gen = self._generator(d)
             try:
                 alive = os.path.join(d, "r-soak-wd.alive")
-                wd = subprocess.Popen(["sh", "-c", soak.traffic_watchdog_script("wd", limit_s=2, poll_s=0.5, root=d)])
+                wd = subprocess.Popen(["sh", "-c", soak.traffic_watchdog_script("wd", limit_s=2, token="tok",
+                                                                                 poll_s=0.5, root=d)])
                 for _ in range(10):  # 5 s of heartbeats, past the 2 s limit
                     time.sleep(0.5)
                     os.utime(alive, None)
@@ -3522,6 +3731,28 @@ class TrafficWatchdog19054(unittest.TestCase):
                 gen.kill()
                 gen.wait()
 
+
+    def test_the_real_stop_records_what_was_running(self):
+        # generator_stop_script, as the soak's own stop runs it: a running
+        # generator is listed and SIGINTed; a dead one's pid file is not
+        # listed (#19054 review, round 3).
+        with tempfile.TemporaryDirectory() as d:
+            gen = self._generator(d)
+            gone = subprocess.Popen(["true"])
+            gone.wait()
+            with open(os.path.join(d, "r-soak-wd.pingv4.pid"), "w") as f:
+                f.write(str(gone.pid))
+            try:
+                p = subprocess.run(["sh", "-c", soak.generator_stop_script("wd", root=d) + 'echo "STOPPED $t$up"'],
+                                   capture_output=True, text=True, timeout=10)
+                at, up = soak.parse_stop_record(p.stdout)
+                self.assertIsNotNone(at, p.stdout + p.stderr)
+                self.assertEqual(up, frozenset({"iperfv4"}), p.stdout)
+                gen.wait(timeout=5)
+            finally:
+                if gen.poll() is None:
+                    gen.kill()
+                    gen.wait()
 
 if __name__ == "__main__":
     unittest.main()
