@@ -295,7 +295,9 @@ every root leg minted `cert.pem`/`key.pem` into the runner's `/etc`. The
 host-residue snapshot that `testguard-run.sh` takes before and after a run now
 lists `/etc/xpf`, `/var/lib/xpf`, `/etc/frr`, `/etc/systemd/network`,
 `/etc/ssh/ssh_known_hosts`, `/etc/ssh/sshd_config.d`, `/etc/chrony/sources.d`,
-`/etc/chrony/conf.d` and `/etc/rsyslog.d`, each as entries with metadata
+`/etc/chrony/conf.d` and `/etc/rsyslog.d`, and since #19084 also
+`/var/lib/kea`, `/run/xpf`, `/var/log/xpf`, `/etc/kea`, `/etc/swanctl`,
+`/etc/sudoers.d` and `/etc/systemd/resolved.conf.d`, each as entries with metadata
 (symlink targets included) and as a sha256 of every regular file reached with
 symlinks followed, so a same-size rewrite with its mtime restored, or a change
 behind a symlinked directory, still shows. A difference in any of them FAILS
@@ -310,7 +312,33 @@ xpf-managed SSH, chrony and rsyslog files (#19066 Codex); their fixture points
 those seams at a temp dir and covers `/etc` with an overlay in the child's
 private mount namespace. The snapshot's first root leg found a writer that is
 not a re-exec child: two in-process 12168 cells write `/var/lib/xpf` state as
-real root (#19084), so a root leg of pkg/daemon fails until that is fixed.
+real root (#19084).
+
+**Root runs cover the production trees (#19084).** Redirecting production
+paths one by one did not close the class: after pkg/daemon's TestMain
+redirected every path the first probes found, a 46-file seeded root probe
+(R18) still saw 7 deleted or rewritten, each through a seam nobody had listed.
+So on a root run `testguard-run.sh` now covers `/etc`, `/var/lib`, `/var/log`
+and `/run` with a throwaway overlay before the test namespaces are created.
+The lower layer is the host's real tree, so tests still read it; every
+write, unlink, rename or chmod lands in an upper layer on a tmpfs that exists
+only in that mount namespace and is discarded at exit. The command and every
+child it starts share the namespace, so a test reads back what it just wrote.
+Host daemons (systemd-networkd, journald, the incus agent) are outside it and
+keep using the real trees; nothing a test writes reaches them. The overlay is
+mounted by real root before any user namespace exists, because inside the
+user namespace of the no-VM-proof root path the inherited mounts are locked
+and overlayfs cannot clone a lower tree with locked submounts (`/run` has
+several). A tree that cannot be covered fails the run before the command
+starts (exit 2). Non-root runs are unchanged: they cannot write those trees.
+pkg/daemon's TestMain redirects stay as defence in depth (they keep non-root
+runs off production paths too), and the residue snapshot above stays as the
+detector; on a root run it should report nothing. `make vm-test-root` runs
+`make test-testguard-overlay`, which checks both root paths: a command that
+writes, rewrites, chmods and deletes in each covered tree sees all of it
+(also from a child process) while the host's seeded files stay byte-, mode-
+and mtime-identical, and a root run that deletes a file in an UNCOVERED state
+path still fails.
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about
 4 more minutes, measured at 691 s at runner load 4-8. That is above go test's

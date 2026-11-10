@@ -39,9 +39,14 @@ record dpkg-state dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Abbrev}\
 # trees are small. testguard-run.sh fails the run on any difference in these
 # sections (the "state " records). XPF_RESIDUE_EXTRA_STATE_PATHS (space
 # separated) ADDS paths; it cannot remove any. Its user is the selftest.
+# #19084 adds the trees R18's and Codex's probes found written: kea's
+# leases, /run/xpf, xpf's syslog files, and the kea, swanctl, sudoers and
+# resolved drop-in directories.
 for path in /etc/xpf /var/lib/xpf /etc/frr /etc/systemd/network \
 	/etc/ssh/ssh_known_hosts /etc/ssh/sshd_config.d /etc/chrony/sources.d \
-	/etc/chrony/conf.d /etc/rsyslog.d ${XPF_RESIDUE_EXTRA_STATE_PATHS:-}; do
+	/etc/chrony/conf.d /etc/rsyslog.d /var/lib/kea /run/xpf /var/log/xpf \
+	/etc/kea /etc/swanctl /etc/sudoers.d /etc/systemd/resolved.conf.d \
+	${XPF_RESIDUE_EXTRA_STATE_PATHS:-}; do
 	record "state $path" find "$path" -xdev -maxdepth 6 -printf '%y %m %U:%G %s %T@ %p -> %l\n'
 	record "state-content $path" sh -c 'find -L "$1" -xdev -maxdepth 6 -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum' sh "$path"
 done

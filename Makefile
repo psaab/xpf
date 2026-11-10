@@ -242,6 +242,14 @@ test-xfrm-lifecycle:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp XPF_REQUIRE_XFRM_LIFECYCLE=1 $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
 
+# #19084: a root run under testguard-run.sh covers /etc, /var/lib, /var/log
+# and /run with a throwaway overlay, so a test cannot change host state there
+# and still reads back its own writes. Root only (refuses otherwise); both
+# root paths (user namespace, VM proof) are exercised.
+.PHONY: test-testguard-overlay
+test-testguard-overlay:
+	@bash scripts/testguard-overlay-selftest.sh
+
 .PHONY: vm-test-root
 vm-test-root:
 	@scripts/mark-test-vm.sh
@@ -249,6 +257,7 @@ vm-test-root:
 	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-memlock-guards
 	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-xfrm-lifecycle
 	@XPF_SACRIFICIAL_HOST=1 $(MAKE) --no-print-directory test-ctrl-row-root
+	@$(MAKE) --no-print-directory test-testguard-overlay
 	@echo "make vm-test-root: the privilege-gated VM legs ran."
 	@echo "  NOTE: some cells skip BECAUSE you are root (10 at last census)."
 	@echo "  No single run examines every cell; see 'make go-skip-census'."
