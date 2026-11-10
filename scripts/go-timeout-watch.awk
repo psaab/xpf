@@ -36,6 +36,13 @@
 #                  the state is kept per package.
 #
 # Exit 3 with a banner on stderr naming every timed-out package; 0 otherwise.
+#
+# #19070: also NAMES a package whose test binary was killed by a signal: cmd/go
+# prints the column-0 "signal: <name>" line and then the package's
+# "FAIL<TAB><pkg>" line. Such a run is an ordinary FAIL (go test already exits
+# nonzero), so this changes no exit status; it prints a TRUNCATED banner,
+# because every test after the one running at the death never ran, and a
+# by-name census of the results cannot see a test that never reported.
 function hit(k, s) { if (!pending[k]) shape[k] = s; pending[k] = 1 }
 function record(k, name) {
 	if (!(name in named)) { named[name] = 1; order[++n] = name; why[name] = shape[k] }
@@ -52,6 +59,15 @@ function record(k, name) {
 		if (!DETECTONLY) { print; fflush() }
 	}
 	if (armedC[k]) { armedC[k] = 0; if (line ~ /^FAIL\t/) hit(k, "C") }
+	if (sigline[k] != "") {
+		if (line ~ /^FAIL[ \t]+[^ \t]/) {
+			split(line, g, /[ \t]+/)
+			tname = TAGGED ? k : g[2]
+			if (!(tname in truncated)) { truncated[tname] = sigline[k]; torder[++tn] = tname }
+		}
+		sigline[k] = ""
+	}
+	if (line ~ /^signal: [a-z][a-z ]*$/) sigline[k] = substr(line, 9)
 	# Alarm shapes A and B share the dump sequence; only A has the running-test
 	# list. An adjacent printed panic+list pair is not enough: a failing test
 	# can print both. Keep the candidate until the alarm goroutine's first frame,
@@ -98,6 +114,10 @@ function record(k, name) {
 	}
 }
 END {
+	if (tn > 0) {
+		for (j = 1; j <= tn; j++)
+			print "go-test TRUNCATED: " torder[j] ": the test binary was killed by signal " truncated[torder[j]] "; every test after the one running at that moment NEVER RAN (#19070)." > "/dev/stderr"
+	}
 	for (k in pending) {
 		if (pending[k]) record(k, (TAGGED && k != "") ? k : "(package not named in the output)")
 	}
