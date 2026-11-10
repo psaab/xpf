@@ -2153,20 +2153,29 @@ Each carries a RED-on-revert unit test.
     the rest before the drain returns (Rule 2). Rule 2 applies to every
     batch on such a root, best-effort included and whether or not exact
     traffic is present: on the lab's `reth0.80` that is all WAN traffic.
-    Non-exact service never takes the lease's available pool below one
-    frame `F = min(tx_frame_capacity, C / 2)` (the pool floor), so an exact
-    frame that arrives at an idle exact queue does not root-park behind
+    While an exact class has work (exact backlog here or published by a
+    peer) and for 1 ms after, non-exact service never takes the lease's
+    available pool below one frame `F = min(tx_frame_capacity, C / 2)` (the
+    demand-gated pool floor), so an exact frame does not root-park behind
     best-effort that drained the pool. An exact pass that sends nothing (a
     V_min skip) returns the root it acquired before the non-exact fallback,
     which would otherwise spend it past the floor (Codex P2 on cycle 3).
     Codex's three findings are cells, RED at 5e1b3c55cc; the progress
     property is per exact class (it failed to see an exact class starved
     while best-effort moved).
-  - The pool floor costs nothing at the default burst or at 96 KB, but a
-    real share of a small explicit burst, even beside an idle exact class
-    (four best-effort workers): 2.0–2.7 Gb/s at 24 KB, 0.77 at 32 KB, and at
-    12 KB (`F` = a whole 1,500-byte head) 1.68 Gb/s against master's 16.62.
-    Bounding `F` relative to `C` is #19074.
+  - The floor is gated because an always-on floor taxed the no-demand case:
+    beside an idle exact class at 12 KB, best-effort carried 1.68 Gb/s
+    against master's 11.63 (R4 C3-2), and it lost 2.0–2.7 Gb/s at 24 KB.
+    Gated, an idle exact class costs nothing (12 KB: 12.33–12.39 Gb/s). A
+    waking class is served in the step its first frame arrives: the
+    enqueue publishes the backlog, which turns the peers' floor on. The
+    1 ms hold bridges the gaps of a class running below its rate, whose
+    queue empties between frames; without it best-effort lost 2–5 Gb/s at
+    24 and 32 KB to refilling the pool past `F` on every toggle. 0.25, 1
+    and 4 ms were measured, and 1 ms kept. While an exact class is active,
+    the floor still costs a small explicit burst best-effort rate (at 32 KB,
+    12.8–13.9 Gb/s beside an 8 Gb/s exact class); bounding `F` relative to
+    `C` for that case is #19074.
   - Cycle 3 also reserved the demanding exact classes' share `R` of the
     outstanding cap against non-exact grants ("Rule 1"). It is not part of
     #18748: it gave a configured non-exact transmit-rate guarantee nothing
