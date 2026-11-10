@@ -9,5 +9,7 @@ import (
 
 func TestMain(m *testing.M) {
 	testguard.ExitIfUnsafe()
-	os.Exit(m.Run())
+	// #19088: after the tests, no OS thread may be left outside the
+	// package's network namespace.
+	os.Exit(testguard.Run(m))
 }

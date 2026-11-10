@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -15,6 +14,8 @@ import (
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // TestSNMPManagementVRFReplyAndTrap11427 reproduces the transport failure
@@ -131,24 +132,12 @@ func TestSNMPManagementVRFReplyAndTrap11427(t *testing.T) {
 // outside that VRF, so an unbound UDP reply or trap has no main-table route.
 func snmpVRFManagerFixture11427(t *testing.T) (netns.NsHandle, *net.UDPConn) {
 	t.Helper()
-	runtime.LockOSThread()
-	original, err := netns.Get()
+	// #19088: EnterNewNetns restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	appliance, err := testguard.EnterNewNetns(t)
 	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read network namespace: %v", err)
-	}
-	appliance, err := netns.New()
-	if err != nil {
-		original.Close()
-		runtime.UnlockOSThread()
 		t.Skipf("cannot create private appliance netns (needs CAP_NET_ADMIN): %v", err)
 	}
-	t.Cleanup(func() {
-		_ = netns.Set(original)
-		_ = appliance.Close()
-		_ = original.Close()
-		runtime.UnlockOSThread()
-	})
 
 	vrf := &netlink.Vrf{LinkAttrs: netlink.LinkAttrs{Name: config.ManagementVRFDeviceName}, Table: config.ManagementVRFTableID}
 	if err := netlink.LinkAdd(vrf); err != nil {

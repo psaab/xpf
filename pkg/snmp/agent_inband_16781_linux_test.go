@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +15,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // TestSNMPInbandPollWithManagementVRF16781 is the #16781 defect cell: with
@@ -164,24 +165,12 @@ func TestSNMPInbandPollWithManagementVRF16781(t *testing.T) {
 // the management VRF and one in-band.
 func snmpInbandFixture16781(t *testing.T) (netns.NsHandle, netns.NsHandle, *net.UDPConn, *net.UDPConn, *net.UDPConn) {
 	t.Helper()
-	runtime.LockOSThread()
-	original, err := netns.Get()
+	// #19088: EnterNewNetns restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	appliance, err := testguard.EnterNewNetns(t)
 	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read network namespace: %v", err)
-	}
-	appliance, err := netns.New()
-	if err != nil {
-		original.Close()
-		runtime.UnlockOSThread()
 		t.Skipf("cannot create private appliance netns (needs CAP_NET_ADMIN): %v", err)
 	}
-	t.Cleanup(func() {
-		_ = netns.Set(original)
-		_ = appliance.Close()
-		_ = original.Close()
-		runtime.UnlockOSThread()
-	})
 	// This fixture starts in a fresh namespace, where lo is down. Bring it up
 	// before Bind so Go's generic udp wildcard listener selects its intended
 	// dual-stack socket and this cell exercises the IPv6 receive path.

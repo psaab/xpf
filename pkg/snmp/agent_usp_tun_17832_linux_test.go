@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +18,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // Test class: N (netns-kernel). This cell builds a private network namespace
@@ -140,31 +141,17 @@ func TestSNMPUserspaceTUNPollAnswered17832(t *testing.T) {
 // fd-passed to the isolated child).
 func snmpUSPTUNFixture17832(t *testing.T) (netns.NsHandle, *net.UDPConn, *os.File) {
 	t.Helper()
-	runtime.LockOSThread()
-	original, err := netns.Get()
+	// #19088: EnterNewNetnsFrom restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	appliance, original, err := testguard.EnterNewNetnsFrom(t)
 	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read network namespace: %v", err)
-	}
-	appliance, err := netns.New()
-	if err != nil {
-		original.Close()
-		runtime.UnlockOSThread()
 		t.Skipf("cannot create private appliance netns (needs CAP_NET_ADMIN): %v", err)
 	}
 	// Class-N isolation assert: the fixture must be inside its own netns
-	// before any kernel mutation — never the initial (host) namespace.
-	if cur, err := netns.Get(); err != nil || cur == original {
+	// before any kernel mutation — never the namespace it started in.
+	if cur, err := testguard.ThreadNetnsLink(); err != nil || cur == original {
 		t.Fatalf("class N cell is not namespace-isolated (cur=%v err=%v): refusing to mutate a shared namespace", cur, err)
-	} else {
-		cur.Close()
 	}
-	t.Cleanup(func() {
-		_ = netns.Set(original)
-		_ = appliance.Close()
-		_ = original.Close()
-		runtime.UnlockOSThread()
-	})
 
 	attrs := netlink.NewLinkAttrs()
 	attrs.Name = "trust0"

@@ -210,16 +210,17 @@
 # netns helper skips ("cannot read current netns", "cannot create private
 # netns", ...). Measured at its first commit: -5 priv-absent, -5 total, so
 # the floors move 665/151 -> 660/146.
+# Its second commit ("guard five more packages") removes 6 more: 654/140.
 # Master's floors are unchanged at b96d977c6e, where this census reds by
 # #19104's priv-absent site and by one "other" site added since bd1a23d3fe;
 # neither is banked here, so this tree reds by exactly those two, as master
 # does.
-total        = 660
+total        = 654
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 146
+priv-absent  = 140
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
