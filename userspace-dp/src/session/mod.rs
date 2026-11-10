@@ -1028,7 +1028,7 @@ pub(crate) fn tcp_close_window_ns_with_app(
         }
     }
 }
-const MAX_SESSION_DELTAS: usize = 4096;
+pub(crate) const MAX_SESSION_DELTAS: usize = 4096;
 use crate::ip_proto::{PROTO_ICMP, PROTO_ICMPV6, PROTO_OSPF, PROTO_TCP, PROTO_UDP};
 // #2151: TCP flag bits from the shared crate::tcp_flags SSOT. Re-exported
 // so the conntrack submodules (install, lookup, expire) keep referencing
@@ -7640,6 +7640,12 @@ impl SessionTable {
     /// #19026 (R13 F3) cell seam: deltas ever drained from the ring.
     #[cfg(test)]
     pub(crate) fn delta_drained_for_test(&self) -> u64 {
+        self.delta_drained
+    }
+
+    /// #19026: deltas ever drained from the ring (the close barrier's
+    /// per-pass parking budget measures re-drains with it).
+    pub(crate) fn delta_drained_total(&self) -> u64 {
         self.delta_drained
     }
 

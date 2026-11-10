@@ -48,6 +48,17 @@ use super::*;
 /// microseconds).
 pub(super) const CLOSE_PERMIT_BARRIER_NS: u64 = 1_000_000;
 
+/// #19026 (Codex review of af0ea8415c): parking work allowed in ONE
+/// housekeeping pass, in deltas moved: ring deltas re-drained behind a
+/// newly blocked head, plus overflow suffix deltas copied around a parked
+/// overflow head. The 1 ms bound limits skipped TICKS, not the work of one
+/// pass. Without this budget, 4,096 distinct blocked Closes cost about one
+/// million delta drains in the pass that parked them; master stopped at the
+/// first blocked head. One ring's worth (`MAX_SESSION_DELTAS`) keeps a pass
+/// within the cost of draining one full ring. Past it the pass returns to RX
+/// and the run carries over, so the next pass parks at once.
+pub(super) const CLOSE_PARK_PASS_BUDGET: usize = crate::session::MAX_SESSION_DELTAS;
+
 /// #19026: process-wide rate limit for the barrier journal lines (one line
 /// per interval across ALL workers, the #1760 CAS-throttle pattern), so a
 /// recurring permit stall cannot flood journald. Suppressed lines are counted
@@ -123,6 +134,10 @@ pub(super) struct ClosePermitBarrier {
     pub(super) parked: Vec<SessionDelta>,
     /// Closes ever parked (diagnostic).
     pub(super) parked_total: u64,
+    /// Parking work spent in this housekeeping pass (`CLOSE_PARK_PASS_BUDGET`).
+    pass_work: usize,
+    /// The budget ran out this pass: the run carries over the RX tick.
+    budget_exhausted: bool,
 }
 
 impl ClosePermitBarrier {
@@ -172,10 +187,30 @@ impl ClosePermitBarrier {
         BlockedVerdict::Parked
     }
 
-    /// The tick polls RX: the run of held ticks ends.
+    /// The tick polls RX: the run of held ticks ends, unless this pass
+    /// stopped parking at its work budget. Then the run carries over, so the
+    /// next pass parks the remaining blocked heads at once instead of
+    /// holding RX for a fresh bound.
     pub(super) fn clear(&mut self, sessions: &mut crate::session::SessionTable) {
         sessions.set_close_head_blocked(false);
-        self.run_since_ns = 0;
+        if !std::mem::take(&mut self.budget_exhausted) {
+            self.run_since_ns = 0;
+        }
+    }
+
+    /// A housekeeping pass starts: its parking budget is fresh.
+    pub(super) fn begin_pass(&mut self) {
+        self.pass_work = 0;
+    }
+
+    /// Account `work` deltas of parking work. Returns `true` (and marks the
+    /// run to carry over) once this pass is over `CLOSE_PARK_PASS_BUDGET`.
+    pub(super) fn spend(&mut self, work: usize) -> bool {
+        self.pass_work = self.pass_work.saturating_add(work);
+        if self.pass_work >= CLOSE_PARK_PASS_BUDGET {
+            self.budget_exhausted = true;
+        }
+        self.budget_exhausted
     }
 }
 

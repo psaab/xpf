@@ -147,11 +147,13 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     tick that polls RX ends the run. A Close that blocks after an RX tick
     gets its own window again.
   - **At the bound the blocked Close is parked** out of the FIFO into a side
-    slot, and the drain continues in the same tick: every delta behind it
-    (the other Closes, HA sync, RT_FLOW, the RPC mirror) retires before RX
-    polls. The parked Close is retried first on every tick and retires once
-    its permit frees. Three rules keep the parked slot as good as the ring
-    it left (Codex review of bbe57884f2):
+    slot, and the drain continues in the same tick: the deltas behind it (the
+    other Closes, HA sync, RT_FLOW, the RPC mirror) retire before RX polls, up
+    to the pass's parking budget (below). The parked Close is retried on every
+    tick, before the drains and again after them. Once its permit frees it
+    retires on the first tick whose ring has room after the drain. Three rules
+    keep the parked slot as good as the ring it left (Codex review of
+    bbe57884f2):
     - **Cancellation reaches it.** `SessionTable::cancel_pending_close` (the
       pressure-shed retry's reply-evidence protection) searches the ring.
       For a Close it cannot find there, it records a cancellation, which the
@@ -160,12 +162,32 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     - **A retry needs ring room.** A retry whose flush loses the permit race
       is requeued by that flush, and `requeue_deltas_front` drops what does
       not fit. So a parked Close is retried only while the ring has a free
-      slot; the ring drain later in the tick makes one.
+      slot. The retry also runs AFTER the drains, which made room. Without
+      that second retry, a ring that is full again at every housekeeping
+      entry postponed a free parked Close without bound (Codex review of
+      af0ea8415c).
     - **The ring is drained once more after the overflow suffix.** An
       overflow chunk's flush can lose its permit race and requeue the chunk
       into the ring, so a successful purge does not mean the Close retired.
       Master ran a final ring drain after the suffix; so does this, through
       the same bounded barrier.
+  - **One parking pass is bounded in work, not only in ticks** (Codex review
+    of af0ea8415c). The 1 ms bound limits skipped ticks. Each park, however,
+    used to re-drain and requeue the next 256-delta batch, so 4,096 distinct
+    blocked Closes cost 1,015,680 delta drains (about 36 ms, optimized) in
+    the one pass that parked them. Master stopped at the first blocked head.
+    Now:
+    - a newly exposed head that is itself a blocked Close is marked at once,
+      so it costs one permit try instead of a re-drain;
+    - each pass spends at most `CLOSE_PARK_PASS_BUDGET` (one ring,
+      `MAX_SESSION_DELTAS`) deltas of re-drain and overflow-suffix copying.
+      Past it, the pass returns to RX and the run carries over
+      (`ClosePermitBarrier::clear`), so the next pass parks the remaining
+      blocked heads at once instead of holding RX for a fresh bound.
+
+    The cost: with more blocked work than one budget, the deltas behind it
+    wait a pass or more while RX polls. Each tick also tries every parked
+    Close's permits twice, which is O(parked) while those permits stay held.
 
     A same-tuple reincarnation that overtakes it is safe:
     the flush's stale-incarnation fence makes the old Close's local teardown

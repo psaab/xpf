@@ -515,8 +515,8 @@ fn stuck_close_is_parked_and_later_deltas_flow_19026() {
 /// the side slot. That flush takes the permits again and, finding one busy,
 /// requeues the Close at the ring head. Left there, the Close would block the
 /// next ring drain and hold RX for a fresh bound on every lost race. The
-/// flush closure here loses its first two calls: the parked retry, and a ring
-/// drain if the Close were left in the ring.
+/// flush closure here loses its first two calls: the parked retries before
+/// and after the drains.
 #[test]
 fn parked_close_that_loses_the_flush_race_is_parked_again_19026() {
     let mut h = Harness19026::new();
@@ -535,10 +535,14 @@ fn parked_close_that_loses_the_flush_race_is_parked_again_19026() {
     h.flush_requeues_remaining = Some(2);
     let calls_before = h.flush_calls;
     let skipped = h.tick(now);
+    // Two attempts, both from the parked slot: the retry before the drains
+    // and, since the Codex review of af0ea8415c, the retry after them. Both
+    // lose the race and the Close goes back to the slot each time. It is
+    // never left in the ring to be re-drained (that would hold RX: below).
     assert_eq!(
         h.flush_calls - calls_before,
-        1,
-        "one flush attempt this tick: the parked retry, not a second ring drain"
+        2,
+        "two parked retries this tick (before and after the drains), no ring re-drain"
     );
     assert!(!skipped, "a parked Close that lost the flush race does not hold RX");
     assert_eq!(h.close_barrier.parked.len(), 1, "it is back in the side slot");
@@ -1071,4 +1075,167 @@ fn barrier_line_names_the_tuple_and_the_holder_class_19026() {
     ] {
         assert!(line.contains(needle), "missing {needle:?} in {line}");
     }
+}
+
+// ---- #19026 Codex review of af0ea8415c: the cost of ONE parking pass ----
+
+/// Drive `h` until its first post-bound pass, then up to `max_ticks` more
+/// passes. Returns, per pass, the ring deltas drained and whether the pass
+/// skipped RX.
+fn parking_passes(h: &mut Harness19026, max_ticks: u64, done: &dyn Fn(&mut Harness19026) -> bool) -> Vec<(u64, bool)> {
+    let mut now = BASE_NS;
+    assert!(h.tick(now), "FIXTURE: the first blocked tick holds RX");
+    now += super::close_barrier::CLOSE_PERMIT_BARRIER_NS;
+    let mut passes = Vec::new();
+    for _ in 0..max_ticks {
+        let before = h.sessions.delta_drained_for_test();
+        let skipped = h.tick(now);
+        passes.push((h.sessions.delta_drained_for_test() - before, skipped));
+        now += TICK_NS;
+        if done(h) {
+            break;
+        }
+    }
+    passes
+}
+
+/// One parking pass is bounded by one ring's worth of re-drain
+/// (`CLOSE_PARK_PASS_BUDGET`), not by the number of blocked Closes. Here
+/// blocked Closes alternate with free ones, so every park re-drains a batch.
+/// At af0ea8415c one pass re-drained about 255 deltas per blocked Close, so
+/// 2,048 of them took about half a million drains in ONE pass. Now every pass
+/// stays within budget plus one ring, RX polls every pass, and the run
+/// carries over, so later passes park at once without a fresh hold.
+#[test]
+fn one_parking_pass_is_bounded_with_interleaved_blocked_closes_19026() {
+    let mut h = Harness19026::new();
+    let blocked: Vec<SessionKey> = (0..2048u16).map(|i| key_19026(40_000 + i)).collect();
+    for (i, key) in blocked.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1902_7000 + i as u64);
+        h.queue_close(key_19026(44_100 + i as u16), 0x1902_9000 + i as u64);
+    }
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked.clone())
+        .expect("hold every blocked tuple");
+    let passes = parking_passes(&mut h, 400, &|h| h.close_barrier.parked.len() == 2048);
+    let parked = h.close_barrier.parked.len();
+    let free_flushed = (0..2048u16)
+        .filter(|i| h.flushed_closes_for(&key_19026(44_100 + i)) == 1)
+        .count();
+    drop(held);
+    let bound = (super::close_barrier::CLOSE_PARK_PASS_BUDGET
+        + crate::session::MAX_SESSION_DELTAS
+        + 256) as u64;
+    for (pass, (drained, skipped)) in passes.iter().enumerate() {
+        assert!(
+            *drained <= bound,
+            "Codex (af0ea8415c): pass {pass} drained {drained} deltas, over {bound}"
+        );
+        assert!(!skipped, "pass {pass}: past the bound every pass polls RX (the run carries over)");
+    }
+    assert_eq!(parked, 2048, "every blocked Close is parked in the end");
+    assert_eq!(free_flushed, 2048, "every free Close retired");
+}
+
+/// Dense blocked Closes (no free delta between them) park with one permit
+/// try each: a newly exposed blocked head is marked, so it is not re-drained.
+#[test]
+fn dense_blocked_closes_park_without_redraining_19026() {
+    let mut h = Harness19026::new();
+    let blocked: Vec<SessionKey> = (0..4096u16).map(|i| key_19026(48_000 + i)).collect();
+    for (i, key) in blocked.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1902_b000 + i as u64);
+    }
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked.clone())
+        .expect("hold every blocked tuple");
+    let passes = parking_passes(&mut h, 8, &|h| h.close_barrier.parked.len() == 4096);
+    let parked = h.close_barrier.parked.len();
+    drop(held);
+    let drained: u64 = passes.iter().map(|(d, _)| d).sum();
+    assert_eq!(parked, 4096, "every blocked Close is parked within a few passes");
+    assert!(
+        drained <= 2 * 256,
+        "dense blocked heads cost one permit try each, not a re-drain: {drained} drains"
+    );
+    assert!(passes.iter().all(|(_, skipped)| !skipped), "RX polls every pass");
+}
+
+/// Blocked Closes in the deferred #10309 overflow suffix: each park copies
+/// the rest of the suffix, so one pass parks only as many as its budget
+/// covers, and the rest wait for later passes (RX polls in between).
+#[test]
+fn overflow_parking_is_bounded_per_pass_19026() {
+    let mut h = Harness19026::new();
+    let blocked: Vec<SessionKey> = (0..1024u16).map(|i| key_19026(53_000 + i)).collect();
+    let mut producer = SessionTable::new();
+    for (i, key) in blocked.iter().enumerate() {
+        producer.emit_close_delta_with_origin(
+            key.clone(),
+            decision_19026(),
+            metadata_19026(),
+            SessionOrigin::ForwardFlow,
+            false,
+            0x1902_d000 + i as u64,
+        );
+    }
+    h.deferred_expiry_overflow_deltas = producer.drain_deltas(4096);
+    assert_eq!(h.deferred_expiry_overflow_deltas.len(), 1024, "FIXTURE: overflow suffix");
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked.clone())
+        .expect("hold every blocked tuple");
+    let mut now = BASE_NS;
+    assert!(h.tick(now), "FIXTURE: the first blocked tick holds RX");
+    now += super::close_barrier::CLOSE_PERMIT_BARRIER_NS;
+    let mut parks_per_pass = Vec::new();
+    for _ in 0..2000 {
+        let before = h.close_barrier.parked.len();
+        assert!(!h.tick(now), "past the bound every pass polls RX");
+        parks_per_pass.push(h.close_barrier.parked.len() - before);
+        now += TICK_NS;
+        if h.close_barrier.parked.len() == 1024 {
+            break;
+        }
+    }
+    drop(held);
+    assert_eq!(h.close_barrier.parked.len(), 1024, "every blocked overflow Close parks in the end");
+    assert!(
+        parks_per_pass[0] < 1024,
+        "Codex (af0ea8415c): one pass must not copy a 1,024-delta suffix 1,024 times"
+    );
+}
+
+/// Codex review of af0ea8415c (passing control, kept as a cell): a
+/// cancellation record cancels only the exact key and session id, and a
+/// record taken while nothing is parked cannot cancel a later obligation.
+#[test]
+fn parked_close_cancellations_are_scoped_and_consumed_19026() {
+    let mut h = Harness19026::new();
+    let a = key_19026(19_083);
+    h.queue_close(a.clone(), 101);
+    let delta = h.sessions.drain_deltas(1).pop().unwrap();
+    h.close_barrier.parked.push(delta.clone());
+    // A stale id and a different full key must both leave A alone.
+    assert!(!h.sessions.cancel_pending_close(&a, 100));
+    let mut scope = a.clone();
+    scope.routing_domain += 1;
+    assert!(!h.sessions.cancel_pending_close(&scope, 101));
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([a.clone()]).unwrap();
+    h.tick(BASE_NS);
+    assert_eq!(h.close_barrier.parked.len(), 1);
+    assert!(h.sessions.take_parked_close_cancellations().is_empty());
+    assert!(!h.sessions.cancel_pending_close(&a, 101));
+    h.tick(BASE_NS + TICK_NS);
+    assert!(h.close_barrier.parked.is_empty());
+    assert!(h.sessions.take_parked_close_cancellations().is_empty());
+    // Even a matching-id stale record is consumed when there is no parked row.
+    assert!(!h.sessions.cancel_pending_close(&a, 101));
+    h.tick(BASE_NS + 2*TICK_NS);
+    h.close_barrier.parked.push(delta);
+    h.tick(BASE_NS + 3*TICK_NS);
+    assert_eq!(h.close_barrier.parked.len(), 1, "stale record cannot cancel a later obligation");
+    drop(held);
+    h.tick(BASE_NS + 4*TICK_NS);
+    assert_eq!(h.flushed_closes_for(&a), 1);
 }

@@ -1056,3 +1056,61 @@ fn an_announcing_replacement_still_suppresses_the_old_ha_close_19026() {
         );
     }
 }
+
+/// Codex review of af0ea8415c (P2): a parked Close whose permit is free must
+/// make progress even when the ring is full again at every housekeeping
+/// entry. Here RX fills the ring, the post-RX export takes 256, and a command
+/// slice of 256 local clears refills it before housekeeping (the worker
+/// order). At af0ea8415c the parked Close was retried only before the drain,
+/// behind the ring-room guard, so it starved (`rt=0` after 8 such ticks).
+/// Now it is retried again after the drain has made room.
+#[test]
+fn a_parked_close_progresses_while_every_ring_is_full_again_19026() {
+    let mut w = F1Worker::new();
+    let key = f1_key(19_189, 0);
+    let t0 = crate::afxdp::neighbor::monotonic_nanos();
+    let old_id = w.install(&key, t0);
+    w.export_ring();
+    w.table.delete_with_control_close(&key, 0);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([key.clone()]).unwrap();
+    assert!(w.tick(t0 + 1));
+    assert!(!w.tick(t0 + 1_000_001));
+    assert_eq!(w.barrier.parked.len(), 1);
+    drop(held);
+    for tick in 0..8 {
+        // RX fills the ring; the real steady-state export removes 256.
+        let clears: Vec<_> = (0..256).map(|i| f1_key(30000 + i, 0)).collect();
+        for key in &clears { w.install(key, t0 + 2_000_001 + tick * 1_000_000); }
+        for i in 0..3840 {
+            w.table.emit_open_delta_with_origin(f1_key(20000 + i, 0),
+                f1_decision(), f1_metadata(), SessionOrigin::ForwardFlow, false);
+        }
+        assert_eq!(w.table.pending_delta_count(), 4096);
+        w.export_ring();
+        assert_eq!(w.table.pending_delta_count(), 3840);
+        // The next loop's real bounded command pass fills those 256 slots.
+        // Commands precede housekeeping in worker/loop_body/mod.rs:1077.
+        w.queue.lock().unwrap().extend(clears.into_iter().map(WorkerCommand::DeleteLocalControl));
+        let result = crate::afxdp::session_glue::apply_worker_commands(
+            &w.queue, &mut w.table, SteeringMap::unshared_for_test(-1), -1, -1,
+            &w.forwarding, &ha_at(t0 + 2_000_001 + tick * 1_000_000),
+            &Arc::new(crate::afxdp::sharded_neighbor::ShardedNeighborMap::new()),
+            0, &mut VecDeque::new());
+        assert!(!result.commands_backlogged);
+        assert_eq!(w.table.pending_delta_count(), 4096, "real command pass refilled the ring");
+        assert!(!w.tick(t0 + 2_000_001 + tick * 1_000_000));
+        assert_eq!(w.table.pending_delta_count(), 0, "the entire ring drained this tick");
+        w.drain_frames(); // avoid an artificial event-stream backlog
+    }
+    let parked = w.barrier.parked.len();
+    let rt = w.rt_flow_closes(old_id);
+    let shared = w.shared_id(&key);
+    let drops = w.table.delta_drops();
+    // A quiet next tick is the control: A immediately retires.
+    w.tick(t0 + 10_000_001);
+    let quiet_rt = w.rt_flow_closes(old_id);
+    eprintln!("#19026 full-ring progress: ticks=8 command_closes=2048 post_rx_opens=2048 ring_deltas=32768 parked={parked} rt={rt} shared={shared:?} old_id={old_id} drops={drops} quiet_rt={quiet_rt}");
+    assert_eq!(quiet_rt, 1, "control: free permit and spare ring room retire A");
+    assert_eq!(rt, 1, "a free parked Close must progress while later full rings drain");
+}

@@ -159,6 +159,7 @@ pub(super) fn run_session_housekeeping(
     // #19026 (R13 F1): parked Closes are the oldest pending work (each was
     // the oldest delta of its store when it parked); retry them first, every
     // tick, before anything queued since.
+    close_barrier.begin_pass();
     retry_parked_closes(
         sessions,
         bindings,
@@ -299,7 +300,13 @@ pub(super) fn run_session_housekeeping(
                 *deferred_expiry_overflow_deltas = expiry_overflow_deltas;
                 return true;
             }
-            BlockedVerdict::Parked => {}
+            BlockedVerdict::Parked => {
+                // Each park copies the remaining suffix once; bound the pass.
+                if close_barrier.spend(expiry_overflow_deltas.len().saturating_add(1)) {
+                    *deferred_expiry_overflow_deltas = expiry_overflow_deltas;
+                    break;
+                }
+            }
             BlockedVerdict::PollRx => {
                 *deferred_expiry_overflow_deltas = expiry_overflow_deltas;
                 break;
@@ -330,6 +337,23 @@ pub(super) fn run_session_housekeeping(
     {
         return true;
     }
+    // #19026 (Codex review of af0ea8415c, P2): parked Closes are retried
+    // before the drain only while the ring has room (a lost flush race must
+    // be able to requeue them). A ring that is full again at every
+    // housekeeping entry would postpone them without bound, so retry them
+    // once more here, after the drains made room.
+    retry_parked_closes(
+        sessions,
+        bindings,
+        binding_lookup,
+        shared_recycles,
+        shared_runtime,
+        shared_sessions,
+        shared_owner_rg_indexes,
+        worker_lossless_wedged,
+        close_barrier,
+        flush_deltas,
+    );
     close_barrier.clear(sessions);
     false
 }
@@ -361,6 +385,8 @@ fn drain_ring_bounded(
 ) -> bool {
     while sessions.has_pending_deltas() {
         let mut blocked = false;
+        let pending_before = sessions.pending_delta_count();
+        let drained_before = sessions.delta_drained_total();
         let _ = drain_and_flush_all_impl(
             &mut *sessions,
             &mut *bindings,
@@ -376,6 +402,12 @@ fn drain_ring_bounded(
         if !blocked {
             return false;
         }
+        // Deltas this attempt drained and then put back: the re-drain cost
+        // a blocked head adds over master's single stop (Codex review of
+        // af0ea8415c).
+        let drained = sessions.delta_drained_total().saturating_sub(drained_before) as usize;
+        let retired = pending_before.saturating_sub(sessions.pending_delta_count());
+        let redrained = drained.saturating_sub(retired);
         match close_barrier.on_blocked(
             sessions,
             &mut Vec::new(),
@@ -384,7 +416,19 @@ fn drain_ring_bounded(
             now_ns,
         ) {
             BlockedVerdict::HoldRx => return true,
-            BlockedVerdict::Parked => {}
+            BlockedVerdict::Parked => {
+                // A next head that is itself a blocked Close is marked now, so
+                // the next attempt re-tests it with one permit try instead of
+                // draining and requeueing 256 deltas around it.
+                if sessions.front_pending_delta().is_some_and(|front| {
+                    front.kind == SessionDeltaKind::Close && !close_permits_available(front)
+                }) {
+                    sessions.set_close_head_blocked(true);
+                }
+                if close_barrier.spend(redrained.saturating_add(1)) {
+                    return false;
+                }
+            }
             BlockedVerdict::PollRx => return false,
         }
     }
