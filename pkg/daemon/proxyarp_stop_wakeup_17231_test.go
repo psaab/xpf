@@ -3,11 +3,11 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -133,6 +133,56 @@ func runResponder17231(d *Daemon, ctx context.Context, ifName string, r *proxyAR
 // make the observation fail.
 var readThreadNetns17231 = func(task string) (string, error) { return os.Readlink(task + "/ns/net") }
 
+// readTaskDir17231 lists /proc/self/task. A var so a cell can make the listing
+// fail part-way. os.ReadDir, never filepath.Glob: Glob discards a directory
+// read error and returns the matches read so far with a nil error, so a
+// listing that failed before reaching a stranded thread would pass the census
+// (#19049 Codex cycle 3). os.ReadDir returns that error beside the partial
+// entries.
+var readTaskDir17231 = os.ReadDir
+
+// threadsInNetns17231 is one census pass: the ids of this process's threads,
+// other than self, whose netns link is netnsLink. It returns an error, never
+// a partial answer, when it could not observe every thread: the listing
+// failed (even with entries returned), a read failed other than because the
+// thread exited, or no thread besides self was inspected.
+func threadsInNetns17231(netnsLink, self string) ([]string, error) {
+	entries, err := readTaskDir17231("/proc/self/task")
+	if err != nil {
+		return nil, fmt.Errorf("list this process's threads (%d entries before the error): %w; "+
+			"a partial listing can omit the stranded thread", len(entries), err)
+	}
+	var left []string
+	inspected := 0
+	for _, e := range entries {
+		tid := e.Name()
+		if tid == self {
+			continue
+		}
+		ns, err := readThreadNetns17231("/proc/self/task/" + tid)
+		if err != nil {
+			// A thread that exits between the listing and the Readlink has
+			// left the namespace (ENOENT/ESRCH). Any other error means the
+			// census could not observe the thread: that is a FAIL, never
+			// "no leak" (#19049 Codex P2).
+			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+				continue
+			}
+			return nil, fmt.Errorf("read thread %s's netns: %w; the census cannot tell whether it is still in the private netns", tid, err)
+		}
+		inspected++
+		if ns == netnsLink {
+			left = append(left, tid)
+		}
+	}
+	// A Go process always runs more threads than the test's own, so a
+	// census that inspected none observed nothing.
+	if inspected == 0 {
+		return nil, fmt.Errorf("the census inspected no thread besides the test's own (%d listed); it observed nothing", len(entries))
+	}
+	return left, nil
+}
+
 // assertNoThreadLeftInPrivateNetns17231 is the #19049 cell. Once every
 // responder has returned, no thread of this process other than the
 // test's own (locked into the private netns by enterPrivateNetns17231)
@@ -156,37 +206,9 @@ func assertNoThreadLeftInPrivateNetns17231(t *testing.T) {
 	var left []string
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		left = left[:0]
-		tasks, err := filepath.Glob("/proc/self/task/*")
+		left, err = threadsInNetns17231(privateNS, self)
 		if err != nil {
-			t.Fatalf("list this process's threads: %v", err)
-		}
-		inspected := 0
-		for _, task := range tasks {
-			tid := filepath.Base(task)
-			if tid == self {
-				continue
-			}
-			ns, err := readThreadNetns17231(task)
-			if err != nil {
-				// A thread that exits between the Glob and the Readlink has
-				// left the namespace (ENOENT/ESRCH). Any other error means
-				// the census could not observe the thread: that is a FAIL,
-				// never "no leak" (#19049 Codex P2).
-				if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
-					continue
-				}
-				t.Fatalf("read thread %s's netns: %v; the census cannot tell whether it is still in the private netns", tid, err)
-			}
-			inspected++
-			if ns == privateNS {
-				left = append(left, tid)
-			}
-		}
-		// A Go process always runs more threads than the test's own, so a
-		// census that inspected none observed nothing.
-		if inspected == 0 {
-			t.Fatalf("the census inspected no thread besides the test's own (%d listed); it observed nothing", len(tasks))
+			t.Fatal(err)
 		}
 		if len(left) == 0 {
 			return
@@ -200,6 +222,48 @@ func assertNoThreadLeftInPrivateNetns17231(t *testing.T) {
 		"responder returned: a responder unlocked its thread without restoring the namespace, "+
 		"so a later goroutine scheduled there sees a namespace with loopback down (#19049)",
 		left, privateNS)
+}
+
+// TestThreadCensusFailsOnPartialListing19049 pins the census's listing
+// contract without needing a namespace (#19049 Codex cycle 3). The listing
+// is made to return every real entry but the last, plus an error: the shape
+// os.ReadDir returns when getdents fails part-way, and the shape in which
+// the omitted entry is the stranded thread. The census must FAIL on it.
+// The control first shows the same census passes on the full listing, so
+// the failure is the error's doing, not the namespace argument or the
+// zero-inspected guard.
+func TestThreadCensusFailsOnPartialListing19049(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	self := strconv.Itoa(unix.Gettid())
+	const noSuchNetns = "net:[0]"
+
+	full, err := os.ReadDir("/proc/self/task")
+	if err != nil {
+		t.Fatalf("list this process's threads: %v", err)
+	}
+	if len(full) < 3 {
+		t.Fatalf("precondition: %d threads listed; the partial listing must keep a thread besides self", len(full))
+	}
+	if left, err := threadsInNetns17231(noSuchNetns, self); err != nil || len(left) != 0 {
+		t.Fatalf("control: the census on the full listing = (%v, %v), want ([], nil)", left, err)
+	}
+
+	orig := readTaskDir17231
+	t.Cleanup(func() { readTaskDir17231 = orig })
+	injected := errors.New("injected: getdents failed after a partial read")
+	readTaskDir17231 = func(dir string) ([]os.DirEntry, error) {
+		entries, err := orig(dir)
+		if err != nil {
+			return entries, err
+		}
+		return entries[:len(entries)-1], injected
+	}
+	left, err := threadsInNetns17231(noSuchNetns, self)
+	if !errors.Is(err, injected) {
+		t.Fatalf("census on a listing that failed part-way = (%v, %v), want the listing error: "+
+			"an incomplete listing was accepted as proof that no thread was left behind", left, err)
+	}
 }
 
 // TestQ53ProxyARPCloseDoesNotUnblockRecv is the namespace-gated
