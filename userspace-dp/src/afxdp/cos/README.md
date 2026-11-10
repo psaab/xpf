@@ -315,7 +315,14 @@ mod.rs for further file-level breakdown.
   against 5.7). A first version gave each binding a private `residual / n`
   part instead; it double-credited intervals when n changed, stranded parts
   a slow binding could not spend and let a part larger than the worker
-  starve the exact class, so it was replaced (docs/log/19025.md). Not
+  starve the exact class, so it was replaced (docs/log/19025.md).
+  Accepted trade: when an exact class flips idle and busy (R2 at on/off
+  100/100 us, 96 KB root), the colocated instance gets 2.1-2.4 Gb/s against
+  3.0 on #18748 alone, while total best-effort rises (15.7-15.8 against
+  14.8-15.1). It is served throughout, never unserved for more than 1 ms.
+  On #18748 alone it used its whole worker in its exact-free time; the
+  turns refresh its floor hold, so every worker holds alike (coordinator,
+  2026-11-10, unless #19025's seats show a measured harm). Not
   addressed: the reserved amount is still the configured rate, so a
   TX-capped exact class still over-reserves (#19023's other half). A
   worker that dies by panic never runs its CoS teardown, so the
