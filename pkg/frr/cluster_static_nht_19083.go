@@ -1,14 +1,11 @@
 package frr
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
@@ -557,34 +554,4 @@ func parseStaticNHTBinding19083(out string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// VtyshConfigLines runs one vtysh process:
-// `vtysh -c "configure terminal" -c <line>... -c end`. The caller's ctx carries
-// the bound; cancelling it SIGKILLs the process group, as for frr-reload.py.
-// vtysh can exit 0 after FRR rejected a line in a multi -c batch, so a `% `
-// diagnostic in the output is reported as an error.
-func (realExecutor) VtyshConfigLines(ctx context.Context, lines []string) ([]byte, error) {
-	args := []string{"-c", "configure terminal"}
-	for _, l := range lines {
-		args = append(args, "-c", l)
-	}
-	args = append(args, "-c", "end")
-	cmd := exec.CommandContext(ctx, vtyshBinary, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
-	cmd.WaitDelay = 5 * time.Second
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return out, fmt.Errorf("vtysh configure (%d lines): %w", len(lines), err)
-	}
-	if bytes.Contains(out, []byte("% ")) {
-		return out, fmt.Errorf("vtysh configure (%d lines): FRR reported an error", len(lines))
-	}
-	return out, nil
 }
