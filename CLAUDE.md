@@ -34,7 +34,7 @@
   logged, last-resort action, never a routine cleanup step.
 - **Never run the dataplane or its tests on this workstation (#19035,
   user directive 2026-11-08).** Run test commands in a test-runner VM on
-  the tcp or udp lab host (`tcp:xpf-testrunner`, `udp:xpf-testrunner`)
+  the tcp or udp lab host (`tcp:xpf-testrunner{,2}`, `udp:xpf-testrunner{,2}`)
   through `scripts/vm-test-run.sh -- <command>`. This covers:
   - `cargo test`/benches/mutation matrices for userspace-dp/userspace-xdp;
   - `make test`, `make test-go`, `make test-rust`;

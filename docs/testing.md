@@ -12,8 +12,9 @@
 
 User directive, 2026-11-08: the dataplane and its tests must not run on the
 development workstation. Every test command runs in a disposable test-runner
-VM on a lab host. The runners are `tcp:xpf-testrunner` and
-`udp:xpf-testrunner`: Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU at low CPU priority, 32 GiB RAM,
+VM on a lab host. The runners are `tcp:xpf-testrunner`, `tcp:xpf-testrunner2`,
+`udp:xpf-testrunner` and `udp:xpf-testrunner2` (the second runner on each host
+was added 2026-11-09, when one free runner was saturated): Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU at low CPU priority, 32 GiB RAM,
 150 GiB disk, Go per `go.mod`, and Rust per `userspace-dp/rust-toolchain.toml`.
 Run them from the worktree:
 
@@ -61,9 +62,12 @@ on those values must pin them, as `deploy-lib-selftest.sh`'s `older-only`
 cell now pins `DEB_GIT_COUNT`.
 
 The runners share their lab host's CPUs with that host's cluster. A gate
-measurement cell therefore pauses the same-host runner with
-`incus pause <machine>:xpf-testrunner` and resumes it with `incus start` in
-a trap. Paused jobs resume where they stopped.
+measurement cell therefore pauses every runner on that host
+(`incus pause <machine>:xpf-testrunner` and `<machine>:xpf-testrunner2`) and
+resumes them with `incus start` in a trap. Paused jobs resume where they
+stopped. Measured cells on tcp and udp are staggered so one host's runners are
+always available; pick a runner on the other host (or wait, since
+`vm-test-run.sh` waits on a FROZEN runner).
 
 For current userspace validation, use
 [`userspace-ha-validation.md`](userspace-ha-validation.md) and the

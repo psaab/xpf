@@ -536,7 +536,8 @@ skill. Work lands on `master` as ordinary commits:
   2026-11-08: "running the dataplane on this host is a bad idea ...
   run them in a VM on tcp or udp, make new vms if necessary").**
   - Every test command runs in a test-runner VM on a lab host,
-    `tcp:xpf-testrunner` or `udp:xpf-testrunner`, through
+    `tcp:xpf-testrunner{,2}` or `udp:xpf-testrunner{,2}` (two runners per
+    host since 2026-11-09), through
     `scripts/vm-test-run.sh [--runner R] [--name lane] [--root] -- <cmd>`.
   - "Every test command" covers: `cargo test` and mutation matrices for
     userspace-dp/userspace-xdp, Go package suites, `make test`,
@@ -549,10 +550,12 @@ skill. Work lands on `master` as ordinary commits:
     provisioning (`scripts/provision-testrunner.sh`: a Debian 14 VM, low `limits.cpu.priority` so the
     clusters' gate measurements keep priority). Do not fall back to the
     workstation.
-  - **Gate measurement cells pause the runner VM on the same lab host.**
-    Run `incus pause <machine>:xpf-testrunner` at the start of a
-    throughput/failover measurement cell and `incus start` it again at
-    the end, in a trap so it always resumes. Record the pause in the gate
+  - **Gate measurement cells pause EVERY runner VM on the same lab host**
+    (`<machine>:xpf-testrunner` and `<machine>:xpf-testrunner2`). Run
+    `incus pause` on each at the start of a throughput/failover
+    measurement cell and `incus start` again at the end, in a trap so they
+    always resume. Measured cells on tcp and udp are staggered, never
+    concurrent, so one host's runners are always free. Record the pause in the gate
     record. A runner compiling on the same host inflated the LAN host's
     loadavg from about 3 to 13-20 during the #18559 tcp gate (2026-11-09).
   - The bullets below still apply inside the runner VM.
