@@ -334,28 +334,52 @@ mod.rs for further file-level breakdown.
       and without the return the non-exact batch found it there, skipped its
       own acquire, and so skipped the pool floor below (Codex P2 on
       2c985b38fa).
-    - The pool floor: a non-exact grant on such a root, guarantee and
-      surplus alike, never takes the lease's AVAILABLE pool below one frame
-      `F = min(tx_frame_capacity, C / 2)`, whether or not exact demand is
-      published (`RootGrantLimit::nonexact`,
+    - The pool floor, demand-gated: while an exact class on the root has
+      work, and for 1 ms after (`COS_EXACT_FLOOR_HOLD_NS`), a non-exact
+      grant, guarantee and surplus alike, never takes the lease's AVAILABLE
+      pool below one frame `F = min(tx_frame_capacity, C / 2)`
+      (`RootGrantLimit::nonexact`,
       `SharedCoSRootLease::acquire_above_pool_floor`). Exact service takes
       the whole pool (`RootGrantLimit::FULL`). With no root credit held
-      between drains, an exact frame arriving at an idle exact queue would
-      otherwise find the pool best-effort had just drained, root-park for a
-      50 us wheel tick and publish demand that throttles every non-exact
-      instance to the residual while it catches up. In the drain simulation
-      the colocated non-exact instance fell to 0.63-0.69 Gb/s against its
-      1.0 floor without it. The bound sits in the same single CAS on the same
-      packed word, with no new shared state.
-    - What the pool floor costs. At the default burst (1% of the shaping
-      rate) and at 96 KB, nothing. At small explicit root bursts `F` is a
-      large share of `C`, and it costs best-effort rate even beside an idle
-      exact class (drain simulation, four best-effort workers): about 0.3-0.4
-      Gb/s at 16 KB, 2.0-2.7 Gb/s (9-11%) at 24 KB and 0.77 Gb/s (3%) at
-      32 KB. At 12 KB (`C = 3,000`, so `F` is a whole 1,500-byte head) a
-      non-exact grant needs the full cap available, and best-effort carries
-      1.68 Gb/s where master carries 16.62. #19074 tracks bounding `F`
-      relative to `C`.
+      between drains, an exact frame would otherwise find the pool
+      best-effort had just drained, root-park for a 50 us wheel tick and
+      publish demand that throttles every non-exact instance to the residual
+      while it catches up. In the drain simulation the colocated non-exact
+      instance fell to 0.63-0.69 Gb/s against its 1.0 floor without a floor.
+      The bound sits in the same single CAS on the same packed word, with no
+      new shared state.
+      - "Has work" (`cos_exact_class_has_work`) is exact backlog on this
+        worker (`queued_bytes`) or exact backlog a peer published
+        (`SharedCoSExactBacklog::has_peer_backlog`). `enqueue_cos_item` is
+        the only path that adds an exact item. It counts the item in
+        `queued_bytes` before queueing it, and it publishes the backlog
+        before it returns. Pops and restores leave `queued_bytes` alone;
+        only a send or a drop takes it down. So the floor never reads
+        "idle" while exact work is queued, here or on a peer. An exact queue
+        holds queue-lease credit only while it is non-empty, so lease credit
+        adds nothing to the gate.
+      - The hold (`cos_exact_floor_on`, `exact_work_seen_ns` per root)
+        bridges the gaps of a class running below its rate. Its queue
+        empties between frames. Without the hold the floor dropped each
+        time, best-effort drained the pool, and the next frame turned the
+        floor back on with the pool to refill past `F` first: best-effort
+        lost 2-5 Gb/s at 24 and 32 KB roots. 0.25, 1 and 4 ms were
+        measured; 4 ms changed nothing against 1 ms, and 0.25 ms traded the
+        steady shape against the on/off ones.
+      - An idle exact class therefore costs best-effort nothing. An exact
+        class waking beside saturating best-effort is served in the step its
+        first frame arrives, because the enqueue's publish turns the peers'
+        floor on.
+    - What the pool floor costs. With every exact class idle past the hold:
+      nothing. At 12 KB best-effort carries 12.33-12.39 Gb/s (master 11.63;
+      an always-on floor carried 1.68), at 24 KB 23.52 (master 19.6-20.0)
+      and at 32 KB 24.78 (master 23.0-23.2). While an exact class is active,
+      `F` is a large share of `C` at small explicit bursts, and best-effort
+      pays it. With an exact class at 8 Gb/s of 24, best-effort carries
+      10.9-12.1 Gb/s at 24 KB and 12.8-13.9 at 32 KB (an always-on floor:
+      11.9-12.1 and 14.1-14.3), and 3.6 at 12 KB (no floor would give
+      8.3-8.6). The default burst and 96 KB are unaffected. #19074 tracks
+      bounding `F` relative to `C` for the active case.
     - What it costs in lease operations: on a root with an exact class, one
       acquire CAS per batch and one release CAS when a drain ends with
       unspent credit (a partial grant, a short TX ring), on top of the

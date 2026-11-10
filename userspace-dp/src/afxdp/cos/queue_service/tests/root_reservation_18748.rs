@@ -12,7 +12,9 @@
 //!   `SharedCoSRootLease::acquire_above_pool_floor`): non-exact service,
 //!   guarantee and surplus alike, never takes the lease's available pool
 //!   below `F = min(tx_frame_capacity, C / 2)`, where `C` is the lease's
-//!   outstanding cap.
+//!   outstanding cap, while an exact class has work and for 1 ms after
+//!   (`cos_exact_class_has_work`, `cos_exact_floor_on`). With the exact
+//!   classes idle past that hold it takes the whole pool.
 //!
 //! Cycle 3's Rule 1, a reserve on outstanding credit for the demanding exact
 //! classes, was split out of #18748 into #19073. One cell here pins what its
@@ -23,7 +25,7 @@
 use super::cos_drain_sim::*;
 use super::v_min_skip::{vmin_skip_exact_queue, vmin_skip_nonexact_queue};
 use super::*;
-use crate::afxdp::cos::tx_completion::{exact_root_frame_bytes, RootGrantLimit};
+use crate::afxdp::cos::tx_completion::RootGrantLimit;
 use crate::afxdp::tx_frame_capacity;
 use crate::afxdp::types::lease_cas_probe;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -130,84 +132,171 @@ fn nonexact_root_grants_leave_one_frame_of_the_pool_18748() {
     }
 }
 
-/// The pool floor, at a drain. On a root with an exact class, best-effort
-/// drains the root lease's available pool as far as it may, at one instant;
-/// then an exact frame arrives at the idle exact queue (own tokens covering
-/// it) and is drained at the same instant. It must be sent at once, without
-/// root-parking: best-effort may not take the pool's last frame
-/// (`exact_root_frame_bytes`). Without the floor, with no root credit held
-/// between drains, the exact frame found the pool empty, root-parked for a
-/// wheel tick (50 us) and published demand that throttled every non-exact
-/// instance while it caught up (the X shape: the colocated non-exact
-/// instance fell to 0.63-0.69 Gb/s). Mutant: floor = 0.
+/// The demand-gated pool floor's wake-up bound (it replaces the always-on
+/// floor's arrival cell, which asserted that an idle exact class's first frame
+/// went at the very instant best-effort had drained the pool). Four 10 Gb/s
+/// workers saturate the root with best-effort while a 24 Gb/s exact class is
+/// idle; from the window's start 8 Gb/s of it arrives on worker 0. Its first
+/// frame arrives 1 us in (1,500 bytes at 8 Gb/s); it must be sent in that
+/// step, the class must carry at least 95% of its 8 Gb/s over the first
+/// millisecond, and none of its frames may root-park in the window: the
+/// enqueue publishes the backlog, and best-effort on the other workers leaves
+/// the floor from then on. Measured at every burst: first frame at 1 us,
+/// 7.99 Gb/s over 1 ms, 8.00 over 10, no root park. With the gate blind to the
+/// peers' published backlog, the first frame waited up to 50 us (a wheel
+/// tick) and the class root-parked 60-82 times in 100 ms. Mutant: the gate
+/// ignores the peers' published backlog.
 #[test]
-fn an_exact_frame_arriving_after_best_effort_drained_the_pool_is_sent_at_once_18748() {
-    let now = 2_000_000_000u64;
-    let root_burst = 96_000;
-    let root_lease = Arc::new(SharedCoSRootLease::new(SHAPING_BYTES, root_burst, 1));
-    let mut fast = test_cos_fast_interfaces(
-        IFX,
-        IFX,
-        NONEXACT_QUEUE,
-        vec![
-            (EXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
-            (NONEXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
-        ],
-        None,
-        Some(root_lease.clone()),
-    );
-    fast.get_mut(&IFX).expect("fast path").shared_exact_backlog =
-        Some(Arc::new(SharedCoSExactBacklog::new(0)));
-    let fast = fast.get(&IFX).expect("fast path").clone();
-    let mut root = lab_runtime(&[24 * GBIT], root_burst);
-    root.shared_root_lease = Some(root_lease.clone());
-    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFX, root, fast);
-    let mut descs = Vec::new();
-    for _ in 0..200 {
-        top_up_backlog(&mut binding, NONEXACT_IDX, NONEXACT_QUEUE, 40_000, now);
-        let before = binding.live.tx_bytes.load(AtomicOrdering::Relaxed);
-        let _ = drain_shaped_tx(&mut binding, now, &mut Vec::new());
-        complete_tx(&mut binding, &mut descs);
-        if binding.live.tx_bytes.load(AtomicOrdering::Relaxed) == before {
-            break;
+fn an_idle_exact_class_waking_beside_saturating_best_effort_is_served_at_once_18748() {
+    for (root_burst, label) in [
+        (12_000u64, "12k"),
+        (16_000, "16k"),
+        (24_000, "24k"),
+        (32_000, "32k"),
+        (96_000, "96k"),
+        (SHAPING_BYTES / 100, "default"),
+    ] {
+        let mut arm = Arm::new(4, 10, 24, &[8]);
+        arm.root_burst_bytes = root_burst;
+        arm.exact_arrivals = Arrivals::FromWindowStart;
+        arm.window_ns = 10_000_000;
+        assert_every_seed(&format!("wake-up, root burst {label}"), &arm, |o| {
+            match o.first_exact_send_ns[0] {
+                Some(ns) if ns <= 1_000 => {}
+                first => {
+                    return Err(format!(
+                        "the first exact frame arrived at 1 us and was first sent at {first:?} \
+                         ns, after {} drains",
+                        o.drains_to_first_exact[0]
+                    ))
+                }
+            }
+            let first_ms = o.exact_class_bytes_by_mark[0][0] as f64 * 8.0 / 1e6;
+            if first_ms < 0.95 * 8.0 {
+                return Err(format!(
+                    "the waking class carried {first_ms:.2} Gb/s over its first millisecond"
+                ));
+            }
+            if o.exact_root_parks > 0 {
+                return Err(format!(
+                    "the waking class root-parked {} times",
+                    o.exact_root_parks
+                ));
+            }
+            Ok(())
+        });
+    }
+}
+
+/// The hold of the demand-gated pool floor. An exact class running below its
+/// rate (8 Gb/s of a 24 Gb/s class on a 10 Gb/s worker) empties its queue
+/// between frames. Without the hold the floor dropped each time, best-effort
+/// drained the pool, and the next frame turned the floor back on with the
+/// pool to refill past `F` first, so best-effort lost the refill on every
+/// toggle: 9.78-9.96 Gb/s at a 24 KB root and 8.73-9.41 at 32 KB, against
+/// 11.91-12.14 and 14.06-14.31 with the floor always on. The 1 ms hold
+/// carries 10.89-12.09 and 12.81-13.86, so best-effort must carry at least
+/// 10.5 and 12.0 Gb/s there; the exact class its 8 Gb/s at every burst, with
+/// no root park. Mutant: no hold.
+#[test]
+fn a_steady_exact_class_below_its_rate_keeps_the_floor_through_its_gaps_18748() {
+    for (root_burst, label, best_effort) in [
+        (16_000u64, "16k", 0.0),
+        (24_000, "24k", 10.5),
+        (32_000, "32k", 12.0),
+        (96_000, "96k", 0.0),
+    ] {
+        let mut arm = Arm::new(4, 10, 24, &[8]);
+        arm.root_burst_bytes = root_burst;
+        assert_every_seed(
+            &format!("steady exact 8 of 24, root burst {label}"),
+            &arm,
+            |o| {
+                if o.exact_class_gbps(0) < 0.95 * 8.0 {
+                    return Err(format!(
+                        "the exact class carried {:.2} of its 8 Gb/s",
+                        o.exact_class_gbps(0)
+                    ));
+                }
+                if o.exact_root_parks > 0 {
+                    return Err(format!(
+                        "the exact class root-parked {} times",
+                        o.exact_root_parks
+                    ));
+                }
+                if o.nonexact_total_gbps() < best_effort {
+                    return Err(format!(
+                        "best-effort carried {:.2} Gb/s, under {best_effort}",
+                        o.nonexact_total_gbps()
+                    ));
+                }
+                Ok(())
+            },
+        );
+    }
+}
+
+/// The demand-gated pool floor under an exact class whose demand flips
+/// idle and busy (8 Gb/s for `on`, idle for `off`, from the start), at 5/5,
+/// 100/100 and 1,000/1,000 us, on a 16 KB, a 96 KB and the default root. The
+/// floor toggles with it (the 1,000 us off phases outlast the 1 ms hold), and
+/// neither side may lose: every exact frame that arrives in the window is
+/// admitted, the class sends at least 95% of the bytes that arrived, it never
+/// root-parks, and no best-effort instance goes unserved for longer than
+/// `MAX_UNSERVED_NS`. Measured: exact 4.00 Gb/s with no drop and
+/// a 1 us longest stall in every shape; with the gate blind to the peers'
+/// published backlog, 31-63 root parks and 50 us stalls. Mutant: the gate
+/// ignores the peers' published backlog.
+#[test]
+fn an_exact_class_flipping_idle_and_busy_loses_nothing_either_side_18748() {
+    for (root_burst, label) in [
+        (16_000u64, "16k"),
+        (96_000, "96k"),
+        (SHAPING_BYTES / 100, "default"),
+    ] {
+        for (on_ns, off_ns) in [
+            (5_000u64, 5_000u64),
+            (100_000, 100_000),
+            (1_000_000, 1_000_000),
+        ] {
+            let mut arm = Arm::new(4, 10, 24, &[8]);
+            arm.root_burst_bytes = root_burst;
+            arm.exact_arrivals = Arrivals::OnOff { on_ns, off_ns };
+            assert_every_seed(
+                &format!("exact on {on_ns} ns / off {off_ns} ns, root burst {label}"),
+                &arm,
+                |o| {
+                    if o.exact_dropped_bytes[0] > 0 {
+                        return Err(format!(
+                            "{} of {} arriving exact bytes were not admitted",
+                            o.exact_dropped_bytes[0], o.exact_arrived_bytes[0]
+                        ));
+                    }
+                    if (o.exact_class_bytes[0] as f64) < 0.95 * o.exact_arrived_bytes[0] as f64 {
+                        return Err(format!(
+                            "the exact class sent {} of the {} bytes that arrived",
+                            o.exact_class_bytes[0], o.exact_arrived_bytes[0]
+                        ));
+                    }
+                    if o.exact_root_parks > 0 {
+                        return Err(format!(
+                            "the exact class root-parked {} times",
+                            o.exact_root_parks
+                        ));
+                    }
+                    if let Some(w) =
+                        (0..arm.workers).find(|&w| o.longest_unserved_ns[w] > MAX_UNSERVED_NS)
+                    {
+                        return Err(format!(
+                            "best-effort on worker {w} went unserved for {} ms",
+                            o.longest_unserved_ns[w] / 1_000_000
+                        ));
+                    }
+                    Ok(())
+                },
+            );
         }
     }
-    let floor = exact_root_frame_bytes(root_lease.max_total_leased());
-    let left = root_lease.available_for_test(now);
-    assert!(
-        left < floor + FRAME as u64,
-        "premise: best-effort drained the pool to its floor (left {left}, floor {floor})"
-    );
-    {
-        let queue = &mut binding
-            .cos
-            .cos_interfaces
-            .get_mut(&IFX)
-            .expect("root")
-            .queues[EXACT_IDX];
-        queue.hot.tokens = 96_000;
-        queue.hot.last_refill_ns = now;
-    }
-    assert!(sim_enqueue(
-        &mut binding,
-        EXACT_QUEUE,
-        sim_item(EXACT_QUEUE, 30_000, now)
-    ));
-    let _ = drain_shaped_tx(&mut binding, now, &mut Vec::new());
-    let queue = &binding.cos.cos_interfaces[&IFX].queues[EXACT_IDX];
-    assert_eq!(
-        queue.telemetry.drop_counters.root_token_starvation_parks, 0,
-        "the arriving exact frame root-parked (pool left {left})"
-    );
-    assert_eq!(
-        queue
-            .telemetry
-            .owner_profile
-            .drain_sent_bytes
-            .load(AtomicOrdering::Relaxed),
-        FRAME as u64,
-        "the arriving exact frame was not sent at once (pool left {left})"
-    );
 }
 
 /// Bindings on one root with an exact class at `exact_rate`, `workers` of
@@ -360,24 +449,34 @@ fn no_root_credit_is_held_between_drains_on_an_exact_root_18748() {
 
 /// Best-effort beside an idle exact class, against master on the SAME
 /// configuration (four workers of best-effort beside an idle 24 Gb/s exact
-/// class, drain simulation, committed seeds; master b57a950e21 measured with
+/// class, drain simulation, committed seeds; master f490c6db2b measured with
 /// this harness ported):
 /// - 96 KB and default (1%-of-rate) root bursts: master carries 25.00 Gb/s
-///   on every seed, and so must this (at least 95% of the root). The pool
-///   floor costs nothing here.
+///   on every seed, and so must this (at least 95% of the root).
 /// - 16,000-byte root (`C = 4,000`): master carries 0.00 Gb/s on every
 ///   seed. Prime-and-hold splits the 4,000-byte cap into sub-frame holdings
 ///   no worker can add to. Rule 2 holds nothing between drains, so this
-///   carries 19.6-20.1 Gb/s; at least 75% of the root. The gain applies only
-///   to a root with an exact class: a root without one still primes and
+///   carries 19.85-20.51 Gb/s; at least 75% of the root. The gain applies
+///   only to a root with an exact class: a root without one still primes and
 ///   holds, and still sends nothing at 16 KB (#19075, R5 C1).
+/// - 12, 24 and 32 KB (R4 C3-2): master carries 11.63, 19.58-20.03 and
+///   22.98-23.22 Gb/s. A pool floor left on with the exact class idle cost
+///   these roots 1.68 (10x below master), 20.81-21.47 and 24.00 Gb/s; the
+///   demand-gated floor takes the whole pool and carries 12.33-12.39, 23.52
+///   and 24.78. So at least 45%, 90% and 97% of the root.
 ///
-/// The pool floor's cost at 12-32 KB bursts is not pinned here; #19074
-/// tracks it (CoS README). Mutant: prime and hold on a root with an exact
-/// class.
+/// Mutants: prime and hold on a root with an exact class (16 KB); the floor
+/// left on with every exact class idle (12, 24 and 32 KB).
 #[test]
 fn best_effort_beside_an_idle_exact_class_fills_the_root_18748() {
-    for (root_burst, share) in [(16_000, 0.75), (96_000, 0.95), (SHAPING_BYTES / 100, 0.95)] {
+    for (root_burst, share) in [
+        (12_000, 0.45),
+        (16_000, 0.75),
+        (24_000, 0.90),
+        (32_000, 0.97),
+        (96_000, 0.95),
+        (SHAPING_BYTES / 100, 0.95),
+    ] {
         let mut arm = Arm::new(4, 10, 24, &[]);
         arm.root_burst_bytes = root_burst;
         assert_every_seed(
@@ -708,6 +807,11 @@ fn a_v_min_skipped_exact_visit_does_not_fund_the_nonexact_fallback_18748() {
     for _ in 0..8 {
         cos_queue_push_back(&mut root.queues[0], test_flow_cos_item(10_000, FRAME));
     }
+    // What `enqueue_cos_item` counts for the items it queues (the direct
+    // pushes above and below do not): the gate of the demand-gated floor
+    // reads it.
+    root.queues[0].hot.queued_bytes = 8 * FRAME as u64;
+    root.queues[1].hot.queued_bytes = 8 * FRAME as u64;
     root.queues[1].hot.tokens = POOL;
     root.queues[1].hot.last_refill_ns = NOW;
     root.queues[1].hot.runnable = true;

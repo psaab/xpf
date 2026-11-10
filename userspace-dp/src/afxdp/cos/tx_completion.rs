@@ -491,17 +491,19 @@ pub(in crate::afxdp) fn exact_root_frame_bytes(cap: u64) -> u64 {
 /// #18748: what a per-batch grant must leave of a root lease's available
 /// pool. Exact service takes `FULL`. Non-exact service (guarantee and
 /// surplus) on a root with an exact class leaves one frame `F`
-/// (`exact_root_frame_bytes`), whether or not exact demand is published.
-/// With no root credit held between drains (Rule 2), an exact frame arriving
-/// at an idle exact queue would otherwise race best-effort for a pool that
-/// best-effort had just drained, root-park for a 50 us wheel tick, and
-/// publish demand that throttles every non-exact instance to the residual
-/// while it catches up. The floor costs nothing at the default burst or at
-/// 96 KB, but a real share of a small explicit burst (CoS README; #19074
-/// tracks bounding `F` relative to `C`). A reserve on outstanding credit,
-/// cycle 3's Rule 1, was split out to #19073: the serial simulation cannot
-/// exercise it, and its review found it starved non-exact guarantees and
-/// small-cap best-effort.
+/// (`exact_root_frame_bytes`) while an exact class has work and for
+/// `COS_EXACT_FLOOR_HOLD_NS` after (`cos_exact_floor_on`), and `FULL`
+/// otherwise. With no root credit held between drains (Rule 2), an exact
+/// frame would otherwise race best-effort for a pool best-effort had just
+/// drained, root-park for a 50 us wheel tick, and publish demand that
+/// throttles every non-exact instance to the residual while it catches up.
+/// Gating the floor on exact work keeps a root whose exact classes are idle
+/// at full best-effort rate (an always-on floor cost 12 KB roots 10x, 1.68
+/// against master's 11.63 Gb/s). While an exact class is active the floor
+/// still costs a small explicit burst some best-effort rate (CoS README;
+/// #19074). A reserve on outstanding credit, cycle 3's Rule 1, was split out
+/// to #19073: the serial simulation cannot exercise it, and its review found
+/// it starved non-exact guarantees and small-cap best-effort.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::afxdp) struct RootGrantLimit {
     pub(in crate::afxdp) pool_floor: u64,
@@ -658,6 +660,55 @@ fn exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
         .fold(0u64, |acc, queue| {
             acc.saturating_add(queue.hot.queued_bytes)
         })
+}
+
+/// #18748 (the demand-gated pool floor): whether an exact class on this root
+/// has work: exact backlog on this worker, or exact backlog a peer
+/// published. `queued_bytes` counts an exact item from `enqueue_cos_item`,
+/// the only path that adds one, until its bytes are sent or dropped (pops
+/// and restores leave it alone), and that enqueue publishes the backlog
+/// before it returns, so neither reads "idle" while exact work is queued.
+/// Credit outstanding on an exact queue lease adds nothing: a queue tops its
+/// lease up only while it is non-empty and returns the credit at the settle
+/// that empties it.
+#[inline]
+pub(in crate::afxdp) fn cos_exact_class_has_work(
+    root: &CoSInterfaceRuntime,
+    shared_exact_backlog: Option<&crate::afxdp::types::SharedCoSExactBacklog>,
+    binding_slot: u32,
+) -> bool {
+    exact_backlog_bytes(root) > 0
+        || shared_exact_backlog.is_some_and(|backlog| backlog.has_peer_backlog(binding_slot))
+}
+
+/// #18748 (the demand-gated pool floor): how long the floor stays on after a
+/// non-exact build last saw exact work. Without a hold, an exact class
+/// running below its rate empties its queue between frames, the floor drops,
+/// best-effort drains the pool, and the next frame turns the floor back on
+/// with the pool to refill past `F` first.
+/// 1 ms: measured against 0.25 and 4 ms (docs/log/18748.md); 4 ms changed
+/// nothing, and 0.25 ms traded steady below-rate best-effort against the
+/// on/off shapes.
+pub(in crate::afxdp) const COS_EXACT_FLOOR_HOLD_NS: u64 = 1_000_000;
+
+/// #18748 (the demand-gated pool floor): whether non-exact service on this
+/// root leaves the pool floor now: while an exact class has work
+/// (`has_work`, from `cos_exact_class_has_work`) and for
+/// `COS_EXACT_FLOOR_HOLD_NS` after this root last saw it. A root whose exact
+/// classes have been idle for longer takes the whole pool, as a root without
+/// an exact class does.
+#[inline]
+pub(in crate::afxdp) fn cos_exact_floor_on(
+    root: &mut CoSInterfaceRuntime,
+    has_work: bool,
+    now_ns: u64,
+) -> bool {
+    if has_work {
+        root.exact_work_seen_ns = now_ns;
+        return true;
+    }
+    root.exact_work_seen_ns != 0
+        && now_ns.saturating_sub(root.exact_work_seen_ns) < COS_EXACT_FLOOR_HOLD_NS
 }
 
 #[inline]

@@ -187,6 +187,20 @@ pub(super) struct ExactClass {
     pub(super) buffer_bytes: Option<u64>,
 }
 
+/// When an exact class's arrivals run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Arrivals {
+    /// From the start of the run (warm-up included).
+    Always,
+    /// Idle through the warm-up, then at the offered rate from the start of
+    /// the measured window: an idle class waking up beside best-effort that
+    /// has had the root to itself.
+    FromWindowStart,
+    /// Alternating `on_ns` at the offered rate and `off_ns` idle, from the
+    /// start of the run.
+    OnOff { on_ns: u64, off_ns: u64 },
+}
+
 /// One simulated traffic shape.
 #[derive(Clone, Debug)]
 pub(super) struct Arm {
@@ -206,6 +220,10 @@ pub(super) struct Arm {
     /// A transmit-rate guarantee for every instance of the non-exact class
     /// (its buffer is 1% of it), or `None` for best-effort surplus only.
     pub(super) nonexact_guarantee_bytes: Option<u64>,
+    /// When the exact classes' arrivals run (every class alike).
+    pub(super) exact_arrivals: Arrivals,
+    /// The measured window (the production cells use `WINDOW_NS`).
+    pub(super) window_ns: u64,
 }
 
 impl Arm {
@@ -230,6 +248,8 @@ impl Arm {
             root_burst_bytes: SHAPING_BYTES / 100,
             poll_period_steps: vec![1; workers],
             nonexact_guarantee_bytes: None,
+            exact_arrivals: Arrivals::Always,
+            window_ns: WINDOW_NS,
         }
     }
 
@@ -256,31 +276,54 @@ pub(super) struct Outcome {
     /// class, the longest stretch in the window in which the class had work
     /// queued on some worker and sent nothing.
     pub(super) longest_exact_class_stall_ns: Vec<u64>,
-    exact_root_parks: u64,
+    pub(super) exact_root_parks: u64,
     exact_queue_parks: u64,
+    /// The measured window's length.
+    pub(super) window_ns: u64,
+    /// Per exact class, from the start of the window to the first step in
+    /// which the class had sent something in the window.
+    pub(super) first_exact_send_ns: Vec<Option<u64>>,
+    /// Per exact class, `drain_shaped_tx` calls (every worker) from the start
+    /// of the window through the step of its first send.
+    pub(super) drains_to_first_exact: Vec<u64>,
+    /// Per exact class, bytes sent in the first 1, 10 and 100 ms of the
+    /// window (0 past the window's end).
+    pub(super) exact_class_bytes_by_mark: Vec<[u64; 3]>,
+    /// Per exact class, bytes that arrived in the window, and bytes of those
+    /// the enqueue did not admit (the simulation's depth cap or admission).
+    pub(super) exact_arrived_bytes: Vec<u64>,
+    pub(super) exact_dropped_bytes: Vec<u64>,
 }
 
+/// The marks of `Outcome::exact_class_bytes_by_mark`.
+pub(super) const EXACT_MARKS_NS: [u64; 3] = [1_000_000, 10_000_000, 100_000_000];
+
 impl Outcome {
+    /// Bytes over a production `WINDOW_NS` window, in Gb/s.
     pub(super) fn gbps(bytes: u64) -> f64 {
         bytes as f64 * 8.0 / WINDOW_NS as f64
     }
+    /// Bytes over this outcome's window, in Gb/s.
+    fn rate(&self, bytes: u64) -> f64 {
+        bytes as f64 * 8.0 / self.window_ns as f64
+    }
     pub(super) fn exact_gbps(&self) -> f64 {
-        Self::gbps(self.exact_bytes.iter().sum())
+        self.rate(self.exact_bytes.iter().sum())
     }
     pub(super) fn exact_class_gbps(&self, class: usize) -> f64 {
-        Self::gbps(self.exact_class_bytes[class])
+        self.rate(self.exact_class_bytes[class])
     }
     pub(super) fn nonexact_gbps(&self, worker: usize) -> f64 {
-        Self::gbps(self.nonexact_bytes[worker])
+        self.rate(self.nonexact_bytes[worker])
     }
     pub(super) fn nonexact_total_gbps(&self) -> f64 {
-        Self::gbps(self.nonexact_bytes.iter().sum())
+        self.rate(self.nonexact_bytes.iter().sum())
     }
     pub(super) fn total_gbps(&self) -> f64 {
         self.exact_gbps() + self.nonexact_total_gbps()
     }
     pub(super) fn report(&self, label: &str) -> String {
-        let round = |b: &u64| (Self::gbps(*b) * 100.0).round() / 100.0;
+        let round = |b: &u64| (self.rate(*b) * 100.0).round() / 100.0;
         format!(
             "{label}: total {:.2}; exact {:.2} per class {:?} per worker {:?}; non-exact {:.2} per worker {:?}; \
              longest unserved ms {:?}; longest global stall us {}; longest stall us per exact class {:?}; \
@@ -410,18 +453,32 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
     let mut tx_credit = vec![0i64; workers];
     let mut rng: u64 = seed | 1;
     let measure_ns = start_ns + WARMUP_NS;
-    let end_ns = measure_ns + WINDOW_NS;
+    let end_ns = measure_ns + arm.window_ns;
+    let mut first_send: Vec<Option<u64>> = vec![None; classes];
+    let mut drains_to_first = vec![0u64; classes];
+    let mut by_mark = vec![[0u64; 3]; classes];
+    let mut arrived = vec![0u64; classes];
+    let mut dropped = vec![0u64; classes];
+    let mut drains_in_step = 0u64;
     let class_sent = |bindings: &Vec<BindingWorker>, class: usize| -> u64 {
         bindings.iter().map(|b| queue_sent(b, class)).sum()
     };
     let mut now = start_ns;
     while now < end_ns {
+        let arriving = match arm.exact_arrivals {
+            Arrivals::Always => true,
+            Arrivals::FromWindowStart => now >= measure_ns,
+            Arrivals::OnOff { on_ns, off_ns } => (now - start_ns) % (on_ns + off_ns) < on_ns,
+        };
         for w in 0..workers {
             for (c, class) in arm.exact.iter().enumerate() {
+                if !arriving {
+                    continue;
+                }
                 exact_credit[c][w] += class.offered_bytes[w] * STEP_NS / 1_000_000_000;
                 while exact_credit[c][w] >= FRAME as u64 {
                     exact_credit[c][w] -= FRAME as u64;
-                    if queued_bytes(&bindings[w], c) < EXACT_MAX_DEPTH {
+                    let admitted = queued_bytes(&bindings[w], c) < EXACT_MAX_DEPTH && {
                         let flows = class.flows[w].max(1);
                         exact_flow_cursor[c][w] = (exact_flow_cursor[c][w] + 1) % flows;
                         let port = 30_000
@@ -429,7 +486,13 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                             + (w as u16) * 100
                             + exact_flow_cursor[c][w];
                         let item = sim_item(EXACT_QUEUE_IDS[c], port, now);
-                        let _ = sim_enqueue(&mut bindings[w], EXACT_QUEUE_IDS[c], item);
+                        sim_enqueue(&mut bindings[w], EXACT_QUEUE_IDS[c], item)
+                    };
+                    if now >= measure_ns {
+                        arrived[c] += FRAME as u64;
+                        if !admitted {
+                            dropped[c] += FRAME as u64;
+                        }
                     }
                 }
             }
@@ -465,6 +528,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                     break;
                 }
                 let before = tx_total(binding);
+                drains_in_step += 1;
                 let serviced = drain_shaped_tx(binding, now, &mut recycles);
                 descs.clear();
                 binding.xsk.tx.take_submitted_for_test(&mut descs);
@@ -522,6 +586,23 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         }
         if now >= measure_ns {
             for c in 0..classes {
+                let in_window = class_sent(&bindings, c) - base_class[c];
+                if first_send[c].is_none() {
+                    drains_to_first[c] += drains_in_step;
+                    if in_window > 0 {
+                        first_send[c] = Some(now - measure_ns);
+                    }
+                }
+                for (m, mark) in EXACT_MARKS_NS.iter().enumerate() {
+                    if now - measure_ns + STEP_NS == *mark {
+                        by_mark[c][m] = in_window;
+                    }
+                }
+            }
+        }
+        drains_in_step = 0;
+        if now >= measure_ns {
+            for c in 0..classes {
                 let sent = class_sent(&bindings, c);
                 let queued = bindings.iter().any(|binding| queued_bytes(binding, c) > 0);
                 if now == measure_ns || sent > class_last_sent[c] || !queued {
@@ -566,6 +647,12 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         longest_exact_class_stall_ns: longest_class_stall,
         exact_root_parks,
         exact_queue_parks,
+        window_ns: arm.window_ns,
+        first_exact_send_ns: first_send,
+        drains_to_first_exact: drains_to_first,
+        exact_class_bytes_by_mark: by_mark,
+        exact_arrived_bytes: arrived,
+        exact_dropped_bytes: dropped,
     }
 }
 

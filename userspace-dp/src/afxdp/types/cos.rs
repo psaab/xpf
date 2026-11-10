@@ -685,6 +685,10 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// active flow bucket, on each publish and surplus build. Bits of
     /// runnable queues are stale and never read.
     pub(in crate::afxdp) parked_exact_demand: ExactDemandQueueMask,
+    /// #18748 (the demand-gated pool floor): the last time a non-exact batch
+    /// build on this root saw an exact class with work (0 = never). The pool
+    /// floor stays on for `COS_EXACT_FLOOR_HOLD_NS` after it.
+    pub(in crate::afxdp) exact_work_seen_ns: u64,
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,

@@ -121,8 +121,9 @@ use waterfill::apply_phase1_waterfill_honor_refund;
 
 use super::tx_completion::{
     acquire_root_for_batch, apply_cos_prepared_result, apply_cos_send_result,
-    apply_direct_exact_send_result_fields, cos_root_can_service_after_prime,
-    cos_root_credit_per_batch, cos_tick_for_ns, count_park_reason, count_tx_ring_full_submit_stall,
+    apply_direct_exact_send_result_fields, cos_exact_class_has_work, cos_exact_floor_on,
+    cos_root_can_service_after_prime, cos_root_credit_per_batch, cos_tick_for_ns,
+    count_park_reason, count_tx_ring_full_submit_stall,
     count_tx_ring_full_submit_stall_on_interfaces, park_cos_queue, prime_cos_root_for_service,
     publish_cos_exact_backlog_on_cos, record_exact_park_demand, refresh_cos_interface_activity,
     refresh_cos_interface_activity_on_cos, republish_cos_exact_demand_if_changed,
@@ -458,14 +459,22 @@ fn build_nonexact_cos_batch_with_demand(
         // this pass (no queue state changed in between).
         let exact_demand_rate =
             exact_demand_rate_bytes_for_mask(root, local_exact_demand | peer_exact_demand_mask);
-        // #18748 (the pool floor): non-exact service, guarantee and surplus
-        // alike, acquires root per batch (Rule 2) leaving one frame of the
-        // root lease's available pool, so an exact frame always finds one.
-        // Nothing on a root that primes and holds.
+        // #18748 (the demand-gated pool floor): non-exact service, guarantee
+        // and surplus alike, acquires root per batch (Rule 2) and, while an
+        // exact class has work and for a hold after it, leaves one frame of
+        // the root lease's available pool, so an exact frame always finds
+        // one. With every exact class idle past the hold it takes the whole
+        // pool. Nothing on a root that primes and holds.
+        let floor_on = cos_root_credit_per_batch(root) && {
+            let has_work = cos_exact_class_has_work(
+                root,
+                shared_exact_backlog.map(|backlog| &**backlog),
+                binding.slot,
+            );
+            cos_exact_floor_on(root, has_work, now_ns)
+        };
         let root_limit = match root.shared_root_lease.as_ref() {
-            Some(lease) if cos_root_credit_per_batch(root) => {
-                RootGrantLimit::nonexact(lease.max_total_leased())
-            }
+            Some(lease) if floor_on => RootGrantLimit::nonexact(lease.max_total_leased()),
             _ => RootGrantLimit::FULL,
         };
         match select_nonexact_cos_guarantee_batch_into(
