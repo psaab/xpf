@@ -94,11 +94,14 @@ func TestRelocatingSSHDConfPathRelocatesItsDirectory7609(t *testing.T) {
 func TestProductionDropInDirIsUnchanged7609(t *testing.T) {
 	const wantPath = "/etc/ssh/sshd_config.d/00-xpf.conf"
 	const wantDir = "/etc/ssh/sshd_config.d"
-	if sshdConfPath != wantPath {
+	// #19084: TestMain redirects sshdConfPath for the whole package, so the
+	// declared production value is read from what it recorded before that.
+	declared := productionStateDefaults19084["sshdConfPath"]
+	if declared != wantPath {
 		t.Fatalf("sshdConfPath = %q, want %q — the production location is part of "+
-			"the operator contract, not an implementation detail", sshdConfPath, wantPath)
+			"the operator contract, not an implementation detail", declared, wantPath)
 	}
-	if got := filepath.Dir(sshdConfPath); got != wantDir {
+	if got := filepath.Dir(declared); got != wantDir {
 		t.Fatalf("filepath.Dir(sshdConfPath) = %q, want %q — the derivation must "+
 			"reproduce the literal it replaced, or #7609 silently moved where a "+
 			"real box writes its sshd drop-in", got, wantDir)

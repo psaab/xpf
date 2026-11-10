@@ -2034,7 +2034,18 @@ func (s *Server) serveBound(ctx context.Context, httpLn, httpsLn net.Listener) e
 // defaultTLSSelfSignedDir is the production location of the durable
 // self-signed management pair (#17213). Config.TLSSelfSignedDir overrides
 // it at construction; the pair's file names are fixed (cert.pem/key.pem).
-const defaultTLSSelfSignedDir = "/etc/xpf/tls"
+var defaultTLSSelfSignedDir = "/etc/xpf/tls"
+
+// SetDefaultTLSSelfSignedDirForTesting redirects the production self-signed
+// directory used when Config.TLSSelfSignedDir is empty, and returns a restore
+// function (#19084). For other packages' tests: a pkg/daemon test that starts
+// a management server without TLSSelfSignedDir minted cert.pem/key.pem into
+// the host's /etc/xpf/tls when run as real root. Not for production callers.
+func SetDefaultTLSSelfSignedDirForTesting(dir string) func() {
+	orig := defaultTLSSelfSignedDir
+	defaultTLSSelfSignedDir = dir
+	return func() { defaultTLSSelfSignedDir = orig }
+}
 
 // TLS persistence test seams (#1916 injected-failure tests). Production
 // code must never mutate these. tlsHostname is the SAN-source seam (#5719):
