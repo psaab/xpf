@@ -2501,8 +2501,14 @@ func (d *Daemon) stopClusterCommsWithFinalizer(finalize func()) bool {
 		d.cluster.ClearPeerSyncSourceIfCurrent(ss)
 	}
 	if finalize != nil {
+		// #19067: this stop cleared d.sessionSync above, so "no successor
+		// published since" means the generation is unchanged AND the session
+		// slot is still EMPTY. Comparing with the captured ss was false for
+		// every running epoch (ss != nil), so the finalizer never ran and
+		// step 20 (reconcileClusterTransportBinding) never restarted comms on
+		// a fabric-less cluster after a transport change.
 		d.clusterCommsMu.Lock()
-		stillCurrent := d.clusterCommsGen == stopGen && d.sessionSync == ss
+		stillCurrent := d.clusterCommsGen == stopGen && d.sessionSync == nil
 		d.clusterCommsMu.Unlock()
 		if !stillCurrent {
 			d.clusterCommsLifecycleMu.Unlock()
