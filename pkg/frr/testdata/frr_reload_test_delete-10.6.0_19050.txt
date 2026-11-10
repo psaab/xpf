@@ -1,0 +1,18 @@
+2026-11-10 12:39:19,346  INFO: Called via "Namespace(input=None, reload=False, test=True, debug=False, log_level='info', stdout=False, pathspace=None, filename='/etc/frr/frr.conf', overwrite=False, bindir='/usr/bin', confdir='/etc/frr', rundir='/var/run/frr', vty_socket=None, daemon='', test_reset=False, logfmt=False, logfile='/var/log/frr/frr-reload.log')"
+2026-11-10 12:39:19,346  INFO: Loading Config object from file /etc/frr/frr.conf
+2026-11-10 12:39:19,366  INFO: Loading Config object from vtysh show running
+2026-11-10 12:39:19,399  INFO: "frr version 10.6.0" cannot be removed
+2026-11-10 12:39:19,399  INFO: "frr defaults traditional" cannot be removed
+2026-11-10 12:39:19,399  INFO: "service integrated-vtysh-config" cannot be removed
+
+Lines To Delete
+===============
+no hostname xpf-userspace-fw1
+
+Lines To Add
+============
+vrf vrf-mgmt
+ no ip route 198.51.100.128/25 Null0 254
+exit
+no ip route 198.51.100.0/24 172.16.50.1 254
+no ipv6 route 2001:db8:1905:50::/64 2001:559:8585:50::1 ge-7-0-2.50 254
