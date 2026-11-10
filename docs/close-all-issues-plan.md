@@ -371,6 +371,21 @@ clearing `.configdb` does nothing, because `xpfd` loads the old
 - Roles settled: one primary per RG, sync Up, bulk primed, heartbeat
   sent/received advancing over two samples.
 - Key IDs from step 1 recorded (IDs only, never key material).
+- RSS key pinned and recorded (#19072). xpfd installs a new random RSS
+  key at every start and re-applies its own on every config commit, so
+  A/B arms otherwise get different flow-to-worker placement.
+  - Run `make cluster-rss-pin` (`test/incus/rss-pin.sh pin`) after the
+    last config change (deploy, canonical reset, CoS apply) and before
+    the first measured cell. `cluster-deploy-and-gate` already pins after
+    its deploy.
+  - Record each data interface's key state and `ethtool -x` sha with
+    `make cluster-rss-record LABEL=<cell>` around every
+    placement-sensitive cell (H1, H11, per-stream F2), and quote the
+    lines.
+  - H1's crash reboot re-randomizes the crashed node's key. Re-pin after
+    H1, or run placement-sensitive cells before it.
+  - A per-stream A/B whose arms do not show the same pinned key is VOID
+    for placement.
 - `loadavg` — orchestrator, both firewall VMs **and the LAN host**
   (all four; `docs/regression-test-matrix.md` Tier 2) — beside
   every throughput number. Gate budget: ≤ 20 min inside the lock
