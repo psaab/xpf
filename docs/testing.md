@@ -266,11 +266,14 @@ binary (`os.Args[0]` or `os.Executable()`). It fails on a literal
 user-namespace flag outside `UnshareFlags` (`-r`, `-U`, a `-c` cluster with a
 namespace letter, `--user`, `--map-*`); a `t.Skip*` call (one inside an `if`
 on `runtime.GOOS` is a platform guard and is exempt); a function with no
-child-success witness, which is a `RequireChildPass` call or a
-`strings`/`bytes.Contains` over the output whose needle names `--- PASS: ` or
-a `PASSED` sentinel (a bare literal elsewhere, such as a log line, does not
-count); and a re-exec built with `exec.Command` instead of `ReexecCommand`.
-It also fails on a package-level value holding a user-namespace flag. Its
+child-success witness, which is a `RequireChildPass` call or an `if` whose
+condition holds a `strings`/`bytes.Contains` over the output with a
+`--- PASS: ` or `PASSED` needle and whose body fails the test (a Contains that
+is logged or discarded does not count); and a re-exec built with
+`exec.Command` instead of `ReexecCommand`. A standalone `-c` is caught by its
+position among unshare's options (before the program), so a shell's `-c`
+after the program is not mistaken for one. It also fails on a package-level
+value holding a user-namespace flag, or an option-only list holding `-c`. Its
 limit: it reads one function at a time, so a re-exec split across a helper
 that receives the binary path escapes it, and forcing mode does NOT backstop
 that shape when the parent uses a raw `t.Skip`. Keep a re-exec, its flags
@@ -290,11 +293,16 @@ every root leg minted `cert.pem`/`key.pem` into the runner's `/etc`. The
 host-residue snapshot that `testguard-run.sh` takes before and after a run now
 lists `/etc/xpf`, `/var/lib/xpf`, `/etc/frr`, `/etc/systemd/network`,
 `/etc/ssh/ssh_known_hosts`, `/etc/ssh/sshd_config.d`, `/etc/chrony/sources.d`,
-`/etc/chrony/conf.d` and `/etc/rsyslog.d`, and a difference in any of them
-FAILS the run (exit 3 when the tests themselves passed); the rest of the
-residue report stays report-only. A deletion shows as well as a write, but
-only for a file that existed before the run, so a host with no xpf state
-cannot show one: validate against pre-populated files. The 12168 kernel
+`/etc/chrony/conf.d` and `/etc/rsyslog.d`, each as entries with metadata
+(symlink targets included) and as a sha256 of every regular file reached with
+symlinks followed, so a same-size rewrite with its mtime restored, or a change
+behind a symlinked directory, still shows. A difference in any of them FAILS
+the run with exit 1 when the tests themselves passed, never 3: the wrappers
+read 3 as VOID (a timeout), which would turn a host mutation into
+"undetermined" (pinned end to end in `scripts/go-test-json-selftest.sh`). The
+rest of the residue report stays report-only. A deletion shows as well as a
+write, but only for a file that existed before the run, so a host with no xpf
+state cannot show one: validate against pre-populated files. The 12168 kernel
 children run the real apply tail, whose empty desired state removes
 xpf-managed SSH, chrony and rsyslog files (#19066 Codex); their fixture points
 those seams at a temp dir and covers `/etc` with an overlay in the child's
