@@ -319,8 +319,11 @@ func (m *Manager) resolveFastInDoubtLocked(ctx context.Context) bool {
 // inline (`ip route ... vrf NAME`), so an indented line under a `vrf` context
 // is also compared in its inline form. Over-matching only delays the clear
 // (fail-closed); unrelated drift, such as the memory-only QNH metric overlay
-// (#15183), does not block it (review R4 F2). The exact shapes are pinned by
-// testdata fixtures captured from FRR 10.5.1.
+// (#15183), does not block it (review R4 F2). A deletion prints with a
+// leading "no ", and FRR 10.6.0 prints a static's deletion under "Lines To
+// Add", so both sections are scanned. The exact shapes are pinned by testdata
+// fixtures captured from FRR 10.6.0 (loss); udp and tcp run 10.5.1, whose
+// capture is still to come.
 func reloadTestDiffMentions19050(out []byte, lines []string) bool {
 	want := make(map[string]bool, len(lines))
 	for _, l := range lines {

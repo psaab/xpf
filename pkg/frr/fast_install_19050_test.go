@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -308,19 +309,34 @@ func TestFastInDoubtClearsDespiteUnrelatedOverlayDrift19050(t *testing.T) {
 // --- the F2 matcher, pinned with frr-reload.py --test output -------------
 //
 // R4's implementation condition: the matcher is pinned with REAL output
-// captured on FRR 10.5.1 (testdata/frr_reload_test_*_19050.txt). Until the
-// capture lands, the cells below use the format reloadTestHasDiff15203
-// already parses ("Lines To Add"/"Lines To Delete" headers, "=" rules).
+// (testdata/frr_reload_test_<form>-<frr version>_19050.txt). The 10.6.0 pair
+// was captured on loss fw1 (standby) on 2026-11-10; loss runs FRR 10.6.0, udp
+// and tcp run 10.5.1. Each file is the raw combined output of
+// `frr-reload.py --test` (the INFO log lines come first; production passes
+// --stdout, which moves those lines but not the diff). The two forms:
+//   - add: the lines are absent from running config. They print under
+//     "Lines To Add", the VRF line as a `vrf NAME` block (an empty block, then
+//     the block holding the indented line, each closed by `exit`).
+//   - delete: the lines are present in running config only. FRR prints their
+//     removal as `no ...` lines under "Lines To ADD", not "Lines To Delete";
+//     the VRF one indented inside a `vrf NAME` block.
+// Both carry real unrelated drift (`no hostname ...` under "Lines To Delete").
 
 func TestReloadTestDiffMentionsMatcher19050(t *testing.T) {
 	v6q := "ipv6 route 2001:db8:1905:50::/64 2001:559:8585:50::1 ge-7-0-2.50 254"
 	vrf := "ip route 198.51.100.128/25 Null0 254 vrf vrf-mgmt"
 	v4 := "ip route 198.51.100.0/24 172.16.50.1 254"
+	absent := "ip route 203.0.113.0/24 172.16.50.1 254"
 	for _, fx := range readFixtures19050(t) {
 		for _, line := range []string{v4, v6q, vrf} {
 			if !reloadTestDiffMentions19050(fx.out, []string{line}) {
 				t.Errorf("%s: matcher missed %q in:\n%s", fx.name, line, fx.out)
 			}
+		}
+		// Real output must not over-match: its INFO lines, the unrelated
+		// drift and the vrf/exit framing name no in-doubt line here.
+		if reloadTestDiffMentions19050(fx.out, []string{absent}) {
+			t.Errorf("%s: matcher matched the absent line %q", fx.name, absent)
 		}
 	}
 	// Positive control: a present stale line keeps the flag SET.
@@ -347,12 +363,24 @@ func readFixtures19050(t *testing.T) []fixture19050 {
 	t.Helper()
 	paths, _ := filepath.Glob(filepath.Join("testdata", "frr_reload_test_*_19050.txt"))
 	var out []fixture19050
+	verRE := regexp.MustCompile(`"frr version ([0-9][0-9.]*)"`)
 	for _, p := range paths {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			t.Fatal(err)
 		}
-		out = append(out, fixture19050{name: filepath.Base(p), out: b})
+		name := filepath.Base(p)
+		// A fixture names the FRR version it was captured on, and the
+		// capture's own "frr version" line must agree: a mislabelled capture
+		// would pin one version's format under another's name.
+		m := verRE.FindSubmatch(b)
+		if m == nil {
+			t.Fatalf("%s: no \"frr version\" line; a fixture must be a raw capture", name)
+		}
+		if !strings.Contains(name, "-"+string(m[1])+"_19050") {
+			t.Fatalf("%s: captured on FRR %s, but the name does not say so", name, m[1])
+		}
+		out = append(out, fixture19050{name: name, out: b})
 	}
 	if len(out) == 0 {
 		t.Fatal("no frr-reload --test fixtures (testdata/frr_reload_test_*_19050.txt)")
