@@ -716,25 +716,17 @@ pub(crate) fn worker_loop(
         let loop_now_secs = loop_now_ns / 1_000_000_000;
         let mut rebuild_cos_fast_interfaces = false;
         // #19034 (R4 review of b5a55949e3): the tick's neighbor-epoch
-        // snapshot, taken BEFORE the view load below. Writers that change a
-        // resolution without moving the generation pair (the neighbor push,
-        // `refresh_fabric_links`) publish first and bump second (Release),
-        // and this snapshot loads Acquire. So a seed stamped from it with a
-        // post-bump epoch also resolved through the published view. A
-        // per-descriptor snapshot could pair that epoch with the view this
-        // tick had already loaded, and the entry would never be evicted.
-        let tick_neighbor_epochs = dynamic_neighbors.snapshot_shard_epochs();
-        for binding in bindings.iter_mut() {
-            binding.tick_neighbor_epochs = Some(tick_neighbor_epochs);
-        }
+        // snapshot is taken BEFORE the view load, inside
+        // `snapshot_epochs_then_refresh_view` (see there), and every
+        // descriptor of the tick stamps from it.
         // #6592: ONE load for both halves. The coordinator publishes
         // validation and forwarding in a single `RuntimeView`, so whichever
         // view this observes gives a coherent pair — neither torn orientation
         // is reachable. Still read BEFORE the CoS map Arcs below (#5166), and
         // still #1188-short-circuited on the forwarding Arc — see
         // `refresh_runtime_view`.
-        let (new_forwarding_opt, live_validation) =
-            refresh_runtime_view(&forwarding, &shared_runtime, |view| {
+        let (tick_neighbor_epochs, new_forwarding_opt, live_validation) =
+            snapshot_epochs_then_refresh_view(&dynamic_neighbors, &forwarding, &shared_runtime, || {}, |view| {
                 let Some(transport) = ipsec_inner_transport.as_ref() else {
                     return;
                 };
@@ -881,6 +873,9 @@ pub(crate) fn worker_loop(
                     ipsec_inner_completions.clear();
                 }
             });
+        for binding in bindings.iter_mut() {
+            binding.tick_neighbor_epochs = Some(tick_neighbor_epochs);
+        }
         // #11075/#12074: FIB generation advanced. #11373 re-resolves stale
         // sessions on their next hit; #12074 re-judges zone policy if that
         // resolution changes the egress zone. Count sessions awaiting that

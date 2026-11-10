@@ -1927,6 +1927,63 @@ mod snapshot_refresh_ordering_tests {
             "validation-only publish",
         );
     }
+
+    /// #19034 (R4 review of b5a55949e3): the tick's neighbor-epoch snapshot
+    /// predates the tick's view load, deterministically. A publish-then-bump
+    /// writer (Go's neighbor push, `refresh_fabric_links`) is injected through
+    /// `snapshot_epochs_then_refresh_view`'s `after_snapshot` seam, BETWEEN
+    /// the two steps:
+    /// - with the snapshot first, the tick's stamp predates the bump, so a
+    ///   flow seeded under either view is evicted on its next hit;
+    /// - with the view loaded first, the tick holds the view published BEFORE
+    ///   the writer and an epoch that already includes its bump. A seed would
+    ///   pair the old resolution with a current epoch, and the entry would
+    ///   never be evicted (the defect R4 reproduced).
+    #[test]
+    fn tick_epoch_snapshot_predates_a_straddling_publish_19034() {
+        use crate::afxdp::types::NeighborEntry;
+        let mut published = PublishedGenerations::new();
+        let channel = RuntimeViewChannel::default();
+        channel.publish(published.mint(1));
+        let shared_runtime = channel.reader();
+        let cached = shared_runtime.load().forwarding().clone();
+        let dynamic = crate::afxdp::ShardedNeighborMap::new();
+        let gateway = (12, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)));
+        assert!(dynamic.insert_if_changed(gateway, NeighborEntry { mac: [0x02, 0, 0, 0, 0, 0x0a] }));
+        let v1 = published.mint(2);
+
+        let (epochs, new_forwarding_opt, observed) = snapshot_epochs_then_refresh_view(
+            &dynamic,
+            &cached,
+            &shared_runtime,
+            || {
+                // The writer: publish the new view, THEN bump the shard.
+                channel.publish(v1);
+                assert!(dynamic.insert_if_changed(gateway, NeighborEntry { mac: [0x02, 0, 0, 0, 0, 0x0b] }));
+            },
+            |_| {},
+        );
+
+        let bumped = dynamic.mac_change_epoch_for(&gateway);
+        let effective = new_forwarding_opt.as_ref().unwrap_or(&cached);
+        let tick_view_generation = published.generation_of(effective);
+        assert!(
+            epochs.epoch_for(&gateway) != bumped || tick_view_generation == 2,
+            "the tick holds view generation {tick_view_generation} with a stamp that already includes \
+             a bump made AFTER generation 2 was published: a seed would keep the old resolution \
+             under a current epoch"
+        );
+        assert_ne!(
+            epochs.epoch_for(&gateway),
+            bumped,
+            "the tick's snapshot is taken before the writer ran"
+        );
+        assert_eq!(
+            (tick_view_generation, observed.config_generation),
+            (2, 2),
+            "the tick's view load comes after the writer's publish"
+        );
+    }
 }
 
 mod gc_reap_source_nat_release_tests_6901 {
