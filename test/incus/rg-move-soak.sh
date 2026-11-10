@@ -77,10 +77,20 @@ xpf_enter_destructive_cluster_cell "rg-move-soak ${SOAK_MOVES:-20}x RG${SOAK_RG:
 
 # shellcheck source=test/incus/cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+# shellcheck source=test/incus/rss-pin.sh
+source "${SCRIPT_DIR}/rss-pin.sh"
 
 OUT="${SOAK_OUT:-/var/tmp/rg-move-soak-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$OUT"
 echo "rg-move-soak: env=${BPFRX_CLUSTER_ENV:-} fw0=$FW0 fw1=$FW1 lan=$CLUSTER_LAN_HOST target=$IPERF_TARGET4"
+# #19072: per-stream stalls depend on flow-to-worker placement, which is the
+# RSS key xpfd randomizes per process. Record it before and after; in the gate
+# path (XPF_RSS_PIN=1) a cell that starts unpinned is VOID.
+XPF_RSS_RECORD="${XPF_RSS_RECORD:-$OUT/rss.txt}" rss_record pre-h11 "$FW0" "$FW1" || true
+if [[ "${XPF_RSS_PIN:-}" == "1" ]] && ! rss_verify "$FW0" "$FW1"; then
+	echo "rg-move-soak: VOID: XPF_RSS_PIN=1 but the RSS key is not pinned on every data interface (run rss-pin.sh pin after the last config change)"
+	exit 2
+fi
 # The pipeline's status is tee's under `|| true`; take python's from
 # PIPESTATUS with errexit off instead.
 set +e
@@ -91,6 +101,7 @@ python3 -u "${SCRIPT_DIR}/rg_move_soak.py" \
 	--mouse-target "${MOUSE_TARGET_REF:-}" \
 	--outdir "$OUT" 2>&1 | tee "$OUT/soak.log"
 rc=${PIPESTATUS[0]}
+XPF_RSS_RECORD="${XPF_RSS_RECORD:-$OUT/rss.txt}" rss_record post-h11 "$FW0" "$FW1"
 set -e
 echo "rg-move-soak: exit $rc (exit codes: 0 = every move PASS/COST, 1 = a FAIL, 2 = VOID); artefacts in $OUT"
 exit "$rc"

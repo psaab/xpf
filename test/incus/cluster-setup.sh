@@ -160,6 +160,8 @@ die()   { echo "ERROR: $*" >&2; exit 1; }
 # after info/warn/die so the lib can use them.
 # shellcheck source=deploy-lib.sh
 source "${SCRIPT_DIR}/deploy-lib.sh"
+# shellcheck source=rss-pin.sh
+source "${SCRIPT_DIR}/rss-pin.sh"
 
 # ── Helpers ───────────────────────────────────────────────────────────
 
@@ -811,6 +813,31 @@ cmd_deploy() {
 	# trained away, which is the failure mode the check exists to avoid.
 	# A no-op outside a with-cluster.sh cell.
 	xpf_cluster_rebaseline_build
+
+	deploy_rss_after "$target"
+}
+
+# deploy_rss_after <0|1|all> (#19072): the restarted xpfd has just programmed
+# a fresh per-process random RSS key, so flow-to-worker placement changed
+# with this deploy. Record the key per data interface every time. With
+# XPF_RSS_PIN=1 (the gate path), pin the fixed key (rss-pin.sh) and verify
+# it; a pin that does not hold fails the deploy, so the gate cannot measure
+# with uncontrolled placement. A later config commit (CoS apply, canonical
+# reset) re-applies xpfd's own key: pin again after it.
+deploy_rss_after() {
+	local target="$1" idx insts=()
+	case "$target" in
+	all) for idx in 0 1; do insts+=("$(r "$(vm_name "$idx")")"); done ;;
+	*) insts+=("$(r "$(vm_name "$target")")") ;;
+	esac
+	rss_record post-deploy "${insts[@]}" || warn "RSS record after deploy incomplete (see above)"
+	if [[ "${XPF_RSS_PIN:-}" == "1" ]]; then
+		rss_pin "${insts[@]}" ||
+			die "XPF_RSS_PIN=1: the fixed RSS key did not hold on every data interface; placement is uncontrolled, so the gate is VOID"
+		rss_record pinned "${insts[@]}" || true
+	else
+		info "RSS key not pinned (XPF_RSS_PIN unset): flow-to-worker placement is this deploy's random key"
+	fi
 }
 
 # When requested by the rolling-upgrade gate, record wall-clock cut bounds

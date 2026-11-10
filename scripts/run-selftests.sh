@@ -510,6 +510,8 @@ run_bash test/incus/cluster-build-identity-selftest.sh
 run_bash test/incus/cluster-cell-selftest.sh
 run_bash test/incus/cluster-env-selftest.sh
 run_bash test/incus/cos-apply-lib-selftest.sh
+# #19072: RSS key pin/record tooling, mocked incus + ethtool, with a mutation leg.
+run_bash test/incus/rss-pin-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
 # #18977: verdict emission must follow a successful ledger write; the fixture

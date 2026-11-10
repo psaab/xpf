@@ -51,6 +51,29 @@ against its own band below, never against another cluster's. Use each env's
 `IPERF_TARGET4/6` (loss `172.16.80.202`, tcp `172.16.80.210`, udp
 `172.16.80.211`), never `172.16.100.x`.
 
+**RSS key and flow placement (#19072).** Which worker a flow lands on is the
+NIC's Toeplitz hash of its 5-tuple under the RSS key. xpfd programs a fresh
+CSPRNG key on every data interface (#11057), drawn once per xpfd process: every
+deploy, every daemon restart and every reboot installs a new one, and every
+config commit re-applies the current process's key. Two arms of a paired A/B
+therefore differ in placement unless the key is pinned.
+- `make cluster-deploy-and-gate` pins a fixed key after the deploy
+  (`XPF_RSS_PIN=1`, `test/incus/rss-pin.sh`). Any other gate runs
+  `make cluster-rss-pin` after its last config change (deploy, canonical
+  reset, CoS apply) and before its first measured cell.
+- Every gate record carries, per data interface, the key (PINNED or its
+  sha) and the `ethtool -x` sha, from `make cluster-rss-record LABEL=<cell>`
+  around each placement-sensitive cell. Those cells are H1 Group 8b, H1's
+  per-stream zero intervals, H11's per-stream stalls and per-stream F2/loss
+  `-P8` spreads. The H11 soak records the key itself before and after the
+  cell, and voids when `XPF_RSS_PIN=1` and the key is not pinned.
+- H1's crash reboots the crashed node, and its xpfd installs a new random
+  key. After H1, that node's placement is uncontrolled until it is
+  re-pinned. Run per-stream cells that must compare placement before H1,
+  or re-pin after it.
+- A per-stream A/B comparison whose arms did not both record the same
+  pinned key is VOID for placement. Aggregate cells are unaffected.
+
 **Baseline bands** (Gbit/s, 20 s runs). `make perf-matrix` uses port 5211,
 the unshaped class; port 5201 is the lab CoS config's 100 Mbit/s exact class
 (#9691), so never measure on it while CoS may be applied. The rows below were
