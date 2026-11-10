@@ -1856,6 +1856,42 @@ other copies AGE one window after the activation re-stamp.
   designation. Every copy that reaches a Close emits it, as on master.
 
 **Node-wide service evidence, bound to the incarnation.**
+- **Two production publishers**, both in the ct-slice evidence leg
+  (`afxdp/worker/loop_body/ct_slice.rs`), over the same slot range:
+  - `ct_slice_forward_pairs` carries every non-closing forward pair, with
+    counters (the stage/count restamp);
+  - `ct_slice_last_served_extras` carries, for `last_served_ns` ONLY, two
+    kinds of service the first one skips (fold cycle 1, reviews of
+    9a599d0900):
+    - a single-FIN half-close (closing, not RST, not both FINs), whose
+      non-FINed direction keeps flowing (Codex P1);
+    - a reverse row whose forward half is not in that worker's table (R7
+      F1). Its id is the forward's (#18718), so it stamps the shared
+      FORWARD row.
+
+    Counters, stages and the #18742 sibling recency do not move for these,
+    so neither the handshake promotion nor the RST/TIME_WAIT refresh policy
+    widens.
+- **The companion's reverse time only** (Codex P2a). The pair's packet time
+  takes the reverse row's time only when that row is a reverse half that
+  belongs to the forward. It belongs when either:
+  - it carries the forward's id (#18718), or
+  - it was installed AFTER the forward (`install_epoch`, which is
+    write-once per incarnation, #9856).
+
+  **Writer census of reverse halves:**
+  - local companions (`poll_descriptor` reverse install): the forward's id;
+  - the synced companion synthesis (`shared_ops/reverse_synth.rs`): the
+    forward's id;
+  - peer imports: the wire id, which is the peer companion's, so the
+    forward's id;
+  - imports with a wire id of 0 (a legacy peer, a tunnel replica): a fresh
+    id per half.
+
+  Only the last path yields different ids. Its reverse is installed after
+  its forward and still counts. The excluded case is the reachable mixed
+  pair: a forward B that replaced A while A's promoted reverse refused
+  replacement. That reverse has A's id and predates B.
 - **Who stamps it.** `last_served_ns` is set by every worker's ct-slice
   restamp, the minting worker included, through both
   `restamp_shared_packet_counts_batch` and the single-pair
@@ -1868,8 +1904,10 @@ other copies AGE one window after the activation re-stamp.
   `session_id` equals the source id, the forward row or its reverse
   companion (which adopts the forward's id, #18718). A delayed restamp of an
   old incarnation therefore cannot keep its replacement alive.
-- **Publication.** Same-incarnation republication keeps the larger value;
-  a new incarnation starts from its own.
+- **Publication.** Republication keeps the larger value only when both ids
+  are equal and NONZERO. An unknown id (0) is not "the same", so it cannot
+  bridge A's service into a different B (Codex P2b). A new incarnation
+  starts from its own.
 - **Unchanged:** counters and `sibling_last_seen_ns` keep their #18742
   meaning.
 
@@ -1894,6 +1932,13 @@ other copies AGE one window after the activation re-stamp.
     Unequal worker cadences, a pending stage/count traversal, pathological
     alias fan-out or a stalled publisher can each publish a served packet
     after the hold ends.
+  - **The shared primary row is absent, or names another session**
+    (Codex review of 9a599d0900, P2c). Cross-worker protection needs a
+    discoverable primary shared row for THIS incarnation at the decision.
+    Rule 2 closes the idle copy at once, with no hold: it cannot see another
+    worker's service of A. Even when F1 suppresses the HA leg, because the
+    exact key now holds B, the RT_FLOW Close of A is still emitted while
+    another worker serves A. Timely publication does not prevent it.
   - **#19047** (a parked Close's tuple re-materializes).
   - The same-key/same-id restart collision (above).
   - Off-RG copies, until #19065.
@@ -1903,8 +1948,9 @@ other copies AGE one window after the activation re-stamp.
     to the siblings.
   - Not exactly once (#19068) and not a delivery guarantee.
   - It needs a surviving emitting copy and ring/permit progress.
-- **Record losses, stated** (state converges in each; only the RT_FLOW
-  record or counters are lost):
+- **Record losses, stated.** In the first two cases state converges and
+  only the RT_FLOW record or counters are lost. In the third, shared state
+  can linger.
   - **A forward resume over an idle-crossed or held copy.** The copy's
     lookups fail closed, so the resume installs a new session B, which drops
     the old copy as master's `Replace` does. The hold widens that window

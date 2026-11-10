@@ -267,6 +267,11 @@ fn run_shared_evidence_leg(
     let next_cursor =
         sessions.ct_slice_forward_pairs(cursor, CT_EVIDENCE_CHUNK, &mut counted);
     counted.retain(|(_, _, fwd, rev, _, _)| *fwd > 0 || *rev > 0);
+    // #19063: half-close and reverse-only service, for the restore fence's
+    // `last_served_ns` only (same slot range as the pairs above).
+    let mut served_extras: Vec<(SessionKey, crate::nat::NatDecision, u64, u64)> = Vec::new();
+    sessions.ct_slice_last_served_extras(cursor, CT_EVIDENCE_CHUNK, &mut served_extras);
+    crate::afxdp::shared_ops::restamp_shared_last_served_batch(shared_sessions, &served_extras);
     let source_namespace = sessions.session_id_namespace();
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
         shared_sessions,

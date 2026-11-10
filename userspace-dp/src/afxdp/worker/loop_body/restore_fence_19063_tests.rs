@@ -36,6 +36,10 @@ struct Worker {
     recycles: Vec<(u32, u64)>,
     wedged: bool,
     pending_flush: Vec<SessionDelta>,
+    /// This worker's production ct-slice state (`run_ct_slice`): cursor,
+    /// cycle start, last slice, volume high water, established cursor.
+    ct: (usize, u64, u64, u64, usize),
+    ct_pending: Option<super::ct_slice::PendingStageCountsEmission>,
 }
 
 struct Fixture {
@@ -151,6 +155,8 @@ impl Fixture {
                     recycles: Vec::new(),
                     wedged: false,
                     pending_flush: Vec::new(),
+                    ct: (0, 0, 0, 0, 0),
+                    ct_pending: None,
                 }
             })
             .collect();
@@ -982,31 +988,6 @@ fn a_hold_closes_only_on_its_own_anchor_and_evidence_19063() {
     assert!(table.promote_fence_hold_for(&key).is_none(), "the hold is dropped");
 }
 
-/// Structural cost: one shared-row read at the crossing and one at hold
-/// end; none while the copy's own service keeps it.
-#[test]
-fn the_fence_reads_the_shared_row_at_most_twice_per_crossing_19063() {
-    let key = udp_v4_key();
-    let (forwards, epoch) = (|_: i32| true, |_: i32| 0u32);
-    let served = |_: &SessionKey| crate::session::NodeServedEvidence::default();
-    let t = 1_000 * SEC;
-    let idle_since = t - 2 * WINDOW;
-    let row = |_: &SessionKey| Some(identity(7, 24, idle_since));
-    let ha = fence_ctx(&row, &forwards, &epoch, &served);
-    let mut table = SessionTable::new();
-    let _ = table.promote_fence_step(&ha, &key, 7, idle_since, t - SEC, WINDOW, t);
-    assert_eq!(table.promote_fence_shared_reads_for_test(), 0, "own service: no read");
-    let until = t + CADENCE + SESSION_GC_INTERVAL_NS;
-    assert_eq!(
-        table.promote_fence_step(&ha, &key, 7, idle_since, 0, WINDOW, t),
-        crate::session::PromoteFence::Defer { until_ns: until }
-    );
-    assert_eq!(
-        table.promote_fence_step(&ha, &key, 7, idle_since, 0, WINDOW, until),
-        crate::session::PromoteFence::Close
-    );
-    assert_eq!(table.promote_fence_shared_reads_for_test(), 2);
-}
 
 /// Codex r2 P2#4: the restamp's serving evidence is bound to the source
 /// incarnation. A delayed restamp of the old incarnation A (another
@@ -1105,3 +1086,376 @@ fn republication_keeps_last_served_per_incarnation_19063() {
     assert_eq!(read(), Some(0), "a new incarnation starts from its own");
 }
 
+// ---------------------------------------------------------------------------
+// Fold cycle 1 (reviews of 9a599d0900): the production evidence publisher
+// ---------------------------------------------------------------------------
+
+impl Fixture {
+    /// Worker `w`'s production ct-slice (`run_ct_slice`, which runs at its
+    /// own cadence and publishes the evidence), instead of `Fixture::restamp`.
+    fn ct_slice(&mut self, w: usize, now_ns: u64) {
+        let mut forwarding = Arc::new(self.forwarding.clone());
+        let fabrics = Arc::new(arc_swap::ArcSwap::from_pointee(Vec::<FabricLink>::new()));
+        let wg_queues = Arc::new(arc_swap::ArcSwap::from_pointee(std::collections::BTreeMap::new()));
+        let mut wg_batch = crate::afxdp::wg_uncovered_forward::WgUncoveredInjectedBatch::new();
+        let worker = &mut self.workers[w];
+        let (cursor, cycle_start, last_slice, high_water, est_cursor) = &mut worker.ct;
+        super::ct_slice::run_ct_slice(
+            &mut worker.table,
+            &mut forwarding,
+            now_ns,
+            -1,
+            -1,
+            cursor,
+            cycle_start,
+            last_slice,
+            high_water,
+            &fabrics,
+            &wg_queues,
+            &mut wg_batch,
+            w as u32,
+            &self.shared_sessions,
+            &self.shared_wire,
+            &self.indexes,
+            est_cursor,
+            &mut worker.ct_pending,
+        );
+    }
+
+    /// One round with every worker's production ct-slice first.
+    fn round_with_ct_slice(&mut self, now_ns: u64) {
+        for w in 0..WORKERS {
+            self.ct_slice(w, now_ns);
+        }
+        self.round(now_ns);
+    }
+}
+
+/// Codex review of 9a599d0900 (P1): a single-FIN half-close is live service:
+/// the non-FINed direction keeps flowing. `ct_slice_forward_pairs` skips
+/// CLOSING rows (their stage/count policy), so that service never reached
+/// `last_served_ns`. The extras collector carries it, for `last_served_ns`
+/// only, with the reply's packet time.
+#[test]
+fn half_close_service_is_collected_19063() {
+    let mut f = Fixture::new(0);
+    let t0 = f.t0;
+    f.activate(t0);
+    let key = f.row.key.clone();
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+    assert!(f.workers[2].table.lookup_with_origin(&key, t0 + SEC, fin).is_some());
+    f.workers[2].table.account_packet_at(&key, 64, fin, 0, t0 + SEC);
+    f.serve_reverse(2, t0 + 2 * SEC, false);
+    let table = &f.workers[2].table;
+    assert_eq!(
+        table.packet_counts_and_last_packet_seen_for(&key).2,
+        t0 + 2 * SEC,
+        "FIXTURE: the reply is this pair's newest packet"
+    );
+    let mut pairs = Vec::new();
+    table.ct_slice_forward_pairs(0, usize::MAX, &mut pairs);
+    assert!(
+        !pairs.iter().any(|p| p.0 == key),
+        "FIXTURE: the closing forward is outside the stage/count publisher"
+    );
+    let mut extras = Vec::new();
+    table.ct_slice_last_served_extras(0, usize::MAX, &mut extras);
+    assert!(
+        extras.iter().any(|e| e.0 == key && e.2 == t0 + 2 * SEC && e.3 == f.row.session_id),
+        "Codex P1: admitted half-close service reaches the serving-evidence publisher"
+    );
+}
+
+/// The end-to-end twin, through every worker's PRODUCTION ct-slice: worker 2
+/// sees one FIN, then serves replies every second through the other copies'
+/// window plus hold. No copy may close the live half-closed session.
+#[test]
+fn a_half_closed_session_served_on_another_worker_never_closes_19063() {
+    let mut f = Fixture::new(0);
+    let t0 = f.t0;
+    f.activate(t0);
+    let key = f.row.key.clone();
+    let id = f.row.session_id;
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+    assert!(f.workers[2].table.lookup_with_origin(&key, t0 + SEC, fin).is_some());
+    f.workers[2].table.account_packet_at(&key, 64, fin, 0, t0 + SEC);
+    let end = t0 + 3 * f.window_ns();
+    let mut now = t0 + SEC;
+    while now < end {
+        now += SEC;
+        f.serve_reverse(2, now, false);
+        f.round_with_ct_slice(now);
+        assert_eq!(
+            (f.ha_closes(), f.rt_flow_closes(id)),
+            (0, 0),
+            "Codex P1: a Close of the half-closed session worker 2 serves (t=t0+{}s)",
+            (now - t0) / SEC
+        );
+    }
+    assert!(f.shared_present(), "the live session's shared row survives");
+}
+
+/// R7 review of 9a599d0900 (F1): the serving worker holds only the REVERSE
+/// half (its restored forward copy is gone: the prewarm missed it, or it was
+/// evicted). Its reply service is published onto the shared FORWARD row
+/// through the production ct-slice, so the idle copies keep the session.
+#[test]
+fn reverse_only_service_on_another_worker_keeps_the_session_19063() {
+    let mut f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    f.activate(t0);
+    let forward = f.row.key.clone();
+    let reverse = crate::session::reverse_session_key(&forward, f.row.decision.nat);
+    f.workers[2].table.delete(&forward);
+    assert!(
+        f.workers[2].table.entry_with_origin(&forward).is_none()
+            && f.workers[2].table.entry_with_origin(&reverse).is_some(),
+        "FIXTURE: worker 2 holds only the reverse half"
+    );
+    let id = f.row.session_id;
+    let end = t0 + 3 * f.window_ns();
+    let mut now = t0;
+    while now < end {
+        now += SEC;
+        f.serve_reverse(2, now, false);
+        f.round_with_ct_slice(now);
+        assert_eq!(
+            (f.ha_closes(), f.rt_flow_closes(id)),
+            (0, 0),
+            "R7 F1: a Close of the session worker 2 serves in reverse only (t=t0+{}s)",
+            (now - t0) / SEC
+        );
+    }
+    assert!(f.shared_present());
+    assert!(f.workers[2].table.entry_with_origin(&reverse).is_some(), "the serving row survives");
+}
+
+/// Codex review of 9a599d0900 (P2a): a surviving reverse row of an OLDER
+/// incarnation A at the derived companion key of forward B is not B's
+/// service. Neither the fence's own evidence nor the publisher may relabel
+/// A's reply time with B's id.
+#[test]
+fn old_reverse_service_is_not_new_forward_service_19063() {
+    let mut f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    f.activate(t0);
+    let key = f.row.key.clone();
+    let reverse = crate::session::reverse_session_key(&key, f.row.decision.nat);
+    let a = f.row.session_id;
+    let mut b = f.row.clone();
+    b.session_id = a + 1;
+    assert!(f.workers[0].table.upsert_synced_with_origin(
+        b.clone().into_session_install(t0 + SEC),
+        true
+    ));
+    assert_eq!(f.workers[0].table.session_id_for(&reverse), a, "FIXTURE: reverse A survives");
+    crate::afxdp::shared_ops::publish_shared_session(
+        &f.shared_sessions,
+        &f.shared_nat,
+        &f.shared_wire,
+        &f.indexes,
+        &b,
+    );
+    f.serve_reverse(0, t0 + 2 * SEC, false);
+    let foreign = t0 + 2 * SEC;
+    assert_ne!(
+        f.workers[0].table.packet_counts_and_last_packet_seen_for(&key).2,
+        foreign,
+        "the fence's own evidence for B excludes A's reply"
+    );
+    let mut pairs = Vec::new();
+    f.workers[0].table.ct_slice_forward_pairs(0, usize::MAX, &mut pairs);
+    assert!(
+        pairs.iter().all(|p| p.0 != key || p.4 != foreign),
+        "the publisher does not carry A's reply as B's service"
+    );
+    crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
+        &f.shared_sessions,
+        &f.shared_wire,
+        f.workers[0].table.session_id_namespace(),
+        &pairs,
+    );
+    let rows = crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions);
+    assert_ne!(rows.get(&key).expect("B").last_served_ns, foreign, "B's evidence excludes A's reply");
+}
+
+/// Codex review of 9a599d0900 (P2b): an unknown id (0) is not "the same
+/// incarnation" for `last_served_ns`. Publishing an id-0 row and then a
+/// different B must not carry A's service into B.
+#[test]
+fn an_unknown_id_never_bridges_last_served_into_another_session_19063() {
+    let f = Fixture::with_key(0, udp_v4_key());
+    let key = f.row.key.clone();
+    let read = || {
+        crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions)
+            .get(&key)
+            .map(|row| row.last_served_ns)
+    };
+    let publish = |row: &SyncedSessionEntry| {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &f.shared_sessions,
+            &f.shared_nat,
+            &f.shared_wire,
+            &f.indexes,
+            row,
+        )
+    };
+    let mut served = f.row.clone();
+    served.last_served_ns = 65 * SEC;
+    publish(&served);
+    assert_eq!(read(), Some(65 * SEC), "FIXTURE: A is served");
+    let mut unknown = f.row.clone();
+    unknown.session_id = 0;
+    publish(&unknown);
+    let mut b = f.row.clone();
+    b.session_id += 1;
+    publish(&b);
+    assert_eq!(read(), Some(0), "an unknown identity must not bridge A's service into B");
+}
+
+/// Codex review of 9a599d0900 (P3): the scheduler, not just the helper. An
+/// installed idle cohort is driven through housekeeping on EVERY GC tick
+/// from before the crossing to past the hold. Each copy reads the shared row
+/// at its crossing and at its hold end, and nowhere in between. A Defer that
+/// revisited every GC interval would read about 14 times per copy.
+#[test]
+fn an_idle_cohort_reads_the_shared_row_only_at_crossing_and_hold_end_19063() {
+    let mut f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    f.activate(t0);
+    let id = f.row.session_id;
+    let horizon = f.idle_close_horizon();
+    let mut now = t0;
+    while now < horizon && f.rt_flow_closes(id) == 0 {
+        now += SEC;
+        f.round(now);
+    }
+    let reads: u64 = (0..WORKERS)
+        .map(|w| f.workers[w].table.promote_fence_shared_reads_for_test())
+        .sum();
+    eprintln!("#19063 cohort shared-row reads: {reads} for {WORKERS} copies, closed at t0+{}s", (now - t0) / SEC);
+    assert!(f.rt_flow_closes(id) >= 1, "FIXTURE: the idle cohort closed");
+    assert!(
+        reads <= 2 * WORKERS as u64,
+        "Codex P3: {reads} shared-row reads for {WORKERS} copies; at most one at the crossing and one at hold end each"
+    );
+}
+
+
+/// The extras publisher does NOT widen the RST/TIME_WAIT policy: a pair that
+/// has seen both FINs, or an RST, publishes no service.
+#[test]
+fn time_wait_and_reset_pairs_publish_no_service_19063() {
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+    let rst = crate::tcp_flags::TCP_RST | crate::tcp_flags::TCP_ACK;
+    for case in ["both FINs", "RST"] {
+        let mut f = Fixture::new(0);
+        let t0 = f.t0;
+        f.activate(t0);
+        let key = f.row.key.clone();
+        let reverse = crate::session::reverse_session_key(&key, f.row.decision.nat);
+        let table = &mut f.workers[2].table;
+        match case {
+            "both FINs" => {
+                assert!(table.lookup_with_origin(&key, t0 + SEC, fin).is_some());
+                table.account_packet_at(&key, 64, fin, 0, t0 + SEC);
+                let _ = table.lookup_with_origin(&reverse, t0 + 2 * SEC, fin);
+                table.account_packet_at(&reverse, 64, fin, 0, t0 + 2 * SEC);
+            }
+            _ => {
+                let _ = table.lookup_with_origin(&key, t0 + SEC, rst);
+                table.account_packet_at(&key, 64, rst, 0, t0 + SEC);
+            }
+        }
+        assert!(
+            table.entry_with_origin(&key).is_some(),
+            "FIXTURE ({case}): the closing forward row is still in the table"
+        );
+        let mut extras = Vec::new();
+        table.ct_slice_last_served_extras(0, usize::MAX, &mut extras);
+        assert!(
+            !extras.iter().any(|e| e.0 == key),
+            "{case}: a terminal pair publishes no serving evidence"
+        );
+    }
+}
+
+/// The REACHABLE mixed pair (Codex review of 9a599d0900, P2a): forward B
+/// replaced A while A's reverse stayed. A's later reply is excluded, AND what
+/// #18722/#18742 protect still holds for B: B's own forward service is still
+/// published, both as the sibling packet recency (#18742: real packet time,
+/// from a non-minting worker) and as `last_served_ns`. Worker 1 holds the
+/// pair, so its namespace differs from B's minting namespace.
+#[test]
+fn a_replaced_forward_keeps_publishing_its_own_service_beside_a_stale_reverse_19063() {
+    let mut f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    f.activate(t0);
+    let key = f.row.key.clone();
+    let reverse = crate::session::reverse_session_key(&key, f.row.decision.nat);
+    let a = f.row.session_id;
+    let mut b = f.row.clone();
+    b.session_id = a + 1;
+    let w = 1usize;
+    assert!(f.workers[w].table.upsert_synced_with_origin(
+        b.clone().into_session_install(t0 + SEC),
+        true
+    ));
+    assert_eq!(f.workers[w].table.session_id_for(&reverse), a, "FIXTURE: reverse A survives");
+    crate::afxdp::shared_ops::publish_shared_session(
+        &f.shared_sessions,
+        &f.shared_nat,
+        &f.shared_wire,
+        &f.indexes,
+        &b,
+    );
+    let own = t0 + 2 * SEC;
+    let foreign = t0 + 3 * SEC;
+    f.serve(w, own, false);
+    f.serve_reverse(w, foreign, false);
+    assert_eq!(
+        f.workers[w].table.packet_counts_and_last_packet_seen_for(&key).2,
+        own,
+        "B's pair time is its own forward packet, not A's later reply"
+    );
+    f.restamp(w);
+    let rows = crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions);
+    let row = rows.get(&key).expect("B");
+    assert_eq!(row.session_id, a + 1);
+    assert_eq!(row.last_served_ns, own, "B's own service is published as its evidence");
+    assert_eq!(
+        row.sibling_last_seen_ns, own,
+        "#18742: the sibling recency is B's real packet time, not A's reply"
+    );
+}
+
+/// The production pair whose halves have DIFFERENT ids: an import with a
+/// wire id of 0 (a legacy peer, a tunnel replica) allocates a fresh id per
+/// half. The reverse was installed after the forward, so it is the forward's
+/// companion, and its reply still counts as the pair's service.
+#[test]
+fn a_fresh_id_import_companion_still_counts_its_reply_19063() {
+    let f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    let key = f.row.key.clone();
+    let reverse_key = crate::session::reverse_session_key(&key, f.row.decision.nat);
+    let mut table = SessionTable::new();
+    table.set_session_id_namespace(0, 2);
+    let mut forward = f.row.clone();
+    forward.session_id = 0;
+    assert!(table.upsert_synced_with_origin(forward.into_session_install(t0), true));
+    let mut reverse = f.row.clone();
+    reverse.key = reverse_key.clone();
+    reverse.metadata.is_reverse = true;
+    reverse.session_id = 0;
+    assert!(table.upsert_synced_with_origin(reverse.into_session_install(t0), true));
+    let (fid, rid) = (table.session_id_for(&key), table.session_id_for(&reverse_key));
+    assert!(fid != 0 && rid != 0 && fid != rid, "FIXTURE: fresh, different ids ({fid}, {rid})");
+    assert!(table.lookup_with_origin(&reverse_key, t0 + 5 * SEC, 0).is_some());
+    table.account_packet(&reverse_key, 64, 0, 0);
+    assert_eq!(
+        table.packet_counts_and_last_packet_seen_for(&key).2,
+        t0 + 5 * SEC,
+        "a companion installed after its forward counts, whatever its id"
+    );
+}

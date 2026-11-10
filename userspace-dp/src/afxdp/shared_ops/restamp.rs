@@ -347,6 +347,26 @@ fn stamp_last_served(entry: &mut SyncedSessionEntry, source_session_id: u64, pac
     }
 }
 
+/// #19063: `last_served_ns` alone, for the ct-slice service
+/// `SessionTable::ct_slice_last_served_extras` collects (a single-FIN
+/// half-close, or a reverse row without its forward half). One lock for the
+/// batch; only the shared FORWARD row is stamped, and only under the identity
+/// fence (`stamp_last_served`).
+pub(in crate::afxdp) fn restamp_shared_last_served_batch(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    items: &[(SessionKey, crate::nat::NatDecision, u64, u64)],
+) {
+    if items.is_empty() {
+        return;
+    }
+    let mut sessions = lock_shared_recover(shared_sessions);
+    for (forward_key, _nat, packet_seen_ns, session_id) in items {
+        if let Some(entry) = sessions.get_mut(forward_key) {
+            stamp_last_served(entry, *session_id, *packet_seen_ns);
+        }
+    }
+}
+
 /// #19063: the restore fence's shared-row read: the primary row under
 /// exactly `key` (one keyed lookup, any protocol), as its session id,
 /// max-merged `fwd+rev` counters and `last_served_ns`. Called only for an

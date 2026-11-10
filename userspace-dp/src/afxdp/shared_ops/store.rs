@@ -421,8 +421,13 @@ pub(in crate::afxdp) fn publish_shared_session(
             let keep_sibling_last_seen =
                 same && entry.sibling_last_seen_ns < previous.sibling_last_seen_ns;
             // #19063: the restore fence's serving evidence is monotonic per
-            // incarnation too; a new incarnation starts from its own value.
-            let keep_last_served = same && entry.last_served_ns < previous.last_served_ns;
+            // incarnation, and a new incarnation starts from its own value.
+            // Its own STRICT rule (Codex review of 9a599d0900, P2b): an
+            // unknown id (0) is not "the same", or two publications could
+            // carry A's service through an id-0 row into a different B.
+            let keep_last_served = entry.session_id != 0
+                && entry.session_id == previous.session_id
+                && entry.last_served_ns < previous.last_served_ns;
             if keep_stage || keep_rev || keep_fwd || keep_sibling_last_seen || keep_last_served {
                 entry_owned = entry.clone();
                 if keep_stage {

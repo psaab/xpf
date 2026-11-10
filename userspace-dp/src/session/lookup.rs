@@ -2375,14 +2375,7 @@ impl SessionTable {
         for idx in start..end {
             if let Some(record) = self.entries.get(idx) {
                 if !record.entry.metadata.is_reverse && !record.entry.closing {
-                    let forward_packet_seen_ns = record.entry.last_packet_seen_ns;
-                    let reverse_key =
-                        reverse_session_key(&record.key, record.entry.decision.nat);
-                    let packet_seen_ns = self
-                        .entry_by_key(&reverse_key)
-                        .map_or(forward_packet_seen_ns, |reverse| {
-                            reverse.last_packet_seen_ns.max(forward_packet_seen_ns)
-                        });
+                    let packet_seen_ns = self.pair_last_packet_seen_ns(&record.key, &record.entry);
                     out.push((
                         record.key.clone(),
                         record.entry.decision.nat,
@@ -2398,6 +2391,89 @@ impl SessionTable {
         }
         if end >= cap { 0 } else { end }
     }
+    /// #19063 (Codex review of 9a599d0900, P2a): the newest admitted packet
+    /// time of a forward row and its reverse COMPANION. The reverse row counts
+    /// only when it is a reverse half that belongs to this forward:
+    /// - it carries the forward's full id (#18718: local companions,
+    ///   poll_descriptor's reverse install, and the synced companion
+    ///   synthesis), or
+    /// - it was installed AFTER the forward (`install_epoch`, write-once per
+    ///   incarnation, #9856). That covers the production pair whose halves
+    ///   have different ids: an import with a wire id of 0 (a legacy peer
+    ///   that predates the field, or a tunnel replica) allocates a fresh id
+    ///   per half (install.rs `upsert_synced_with_origin`).
+    ///
+    /// The reachable mixed pair Codex named is excluded: a forward B that
+    /// REPLACED A while A's promoted reverse refused replacement (the import
+    /// queues the halves separately; the active-RG guard keeps the local
+    /// row). That reverse has A's id AND predates B.
+    fn pair_last_packet_seen_ns(&self, key: &SessionKey, forward: &SessionEntry) -> u64 {
+        let reverse_key = reverse_session_key(key, forward.decision.nat);
+        self.entry_by_key(&reverse_key)
+            .filter(|reverse| {
+                reverse.metadata.is_reverse
+                    && (reverse.session_id == forward.session_id
+                        || reverse.install_epoch > forward.install_epoch)
+            })
+            .map_or(forward.last_packet_seen_ns, |reverse| {
+                reverse.last_packet_seen_ns.max(forward.last_packet_seen_ns)
+            })
+    }
+
+    /// #19063: serving evidence `ct_slice_forward_pairs` does not carry, over
+    /// the SAME slot range, as (forward key, nat, packet time, session id),
+    /// for `last_served_ns` only. Counters, stages and the #18742 sibling
+    /// recency are untouched, so neither the handshake promotion nor the
+    /// RST/TIME_WAIT refresh policy widens.
+    /// - A CLOSING forward row in a single-FIN half-close (not RST, not both
+    ///   FINs). Its packets are live service: `lookup` admits payload and
+    ///   refreshes the non-FINed direction (Codex review of 9a599d0900, P1).
+    /// - A REVERSE row whose forward half is not in this table. Its id is the
+    ///   forward's (#18718), so the writer binds it to the shared forward row
+    ///   (R7 review of 9a599d0900, F1).
+    pub(crate) fn ct_slice_last_served_extras(
+        &self,
+        cursor: usize,
+        budget: usize,
+        out: &mut Vec<(SessionKey, crate::nat::NatDecision, u64, u64)>,
+    ) {
+        let cap = self.slot_high_watermark.min(self.entries.capacity());
+        if cap == 0 || budget == 0 {
+            return;
+        }
+        let start = if cursor >= cap { 0 } else { cursor };
+        let end = start.saturating_add(budget).min(cap);
+        for idx in start..end {
+            let Some(record) = self.entries.get(idx) else {
+                continue;
+            };
+            let entry = &record.entry;
+            if entry.session_id == 0 {
+                continue;
+            }
+            if !entry.metadata.is_reverse {
+                if entry.closing && !entry.reset && !(entry.fin_own && entry.fin_peer) {
+                    out.push((
+                        record.key.clone(),
+                        entry.decision.nat,
+                        self.pair_last_packet_seen_ns(&record.key, entry),
+                        entry.session_id,
+                    ));
+                }
+                continue;
+            }
+            let forward_key = reverse_session_key(&record.key, entry.decision.nat);
+            if self.entry_by_key(&forward_key).is_none() && entry.last_packet_seen_ns != 0 {
+                out.push((
+                    forward_key,
+                    entry.decision.nat,
+                    entry.last_packet_seen_ns,
+                    entry.session_id,
+                ));
+            }
+        }
+    }
+
     /// Return forward-pair counters and the newest admitted packet timestamp
     /// from either half. Directional lookup stamps its own row, while ct-slice
     /// publishes one canonical forward-row record.
@@ -2408,13 +2484,7 @@ impl SessionTable {
         let Some(entry) = self.entry_by_key(key) else {
             return (0, 0, 0);
         };
-        let forward_packet_seen_ns = entry.last_packet_seen_ns;
-        let reverse_key = reverse_session_key(key, entry.decision.nat);
-        let packet_seen_ns = self
-            .entry_by_key(&reverse_key)
-            .map_or(forward_packet_seen_ns, |reverse| {
-                reverse.last_packet_seen_ns.max(forward_packet_seen_ns)
-            });
+        let packet_seen_ns = self.pair_last_packet_seen_ns(key, entry);
         (
             entry.counters.fwd_packets,
             entry.counters.rev_packets,
