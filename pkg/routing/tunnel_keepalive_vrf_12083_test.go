@@ -95,7 +95,7 @@ func TestTunnelKeepaliveVRFHeldSourcePeerAlive12083(t *testing.T) {
 		t.Fatalf("netns unavailable (XPF_REQUIRE_NETNS is set): %v\n%s", err, out)
 	}
 
-	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run=^TestTunnelKeepaliveVRFHeldSourcePeerAlive12083$", "-test.v")...)
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run=^TestTunnelKeepaliveVRFHeldSourcePeerAlive12083$", "-test.v")...)
 	cmd.Env = append(os.Environ(), keepalive12083NetnsChild+"=1")
 	out, err := cmd.CombinedOutput()
 	if strings.Contains(string(out), "NETNS-CHILD-SKIPPED-12083") {

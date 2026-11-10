@@ -65,16 +65,12 @@ func TestNftNetlinkParity(t *testing.T) {
 	// Re-exec ONLY this test inside a fresh netns so a forked `nft` shares it and
 	// the host ruleset is never touched.
 	args := append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestNftNetlinkParity$", "-test.v")
-	cmd := exec.Command(unshare, args...)
+	cmd := testguard.ReexecCommand(t, unshare, args...)
 	cmd.Env = append(os.Environ(), t1InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("inner T1 output:\n%s", out)
-	if err != nil {
-		if strings.Contains(string(out), "Operation not permitted") || strings.Contains(string(out), "unshare:") {
-			testguard.NetnsUnavailable(t, "T1 gate SKIPPED: cannot create private netns under unshare (%v) — run as root or with CAP_NET_ADMIN", err)
-		}
-		t.Fatalf("T1 ruleset-parity gate FAILED (netlink build diverged from the exec-nft oracle): %v", err)
-	}
+	// A FAIL here is the netlink build diverging from the exec-nft oracle.
+	testguard.RequireChildPass(t, "TestNftNetlinkParity", out, err)
 }
 
 func runNftNetlinkParityInner(t *testing.T) {

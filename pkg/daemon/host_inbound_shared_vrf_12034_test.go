@@ -85,7 +85,7 @@ func TestHostInboundSharedVRFMasterIngressAndFineDeny12034(t *testing.T) {
 			testguard.NetnsUnavailable(t, "%s not available", tool)
 		}
 	}
-	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestHostInboundSharedVRFMasterIngressAndFineDeny12034$", "-test.count=1", "-test.v")...)
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestHostInboundSharedVRFMasterIngressAndFineDeny12034$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), netnsChild12034+"=1")
 	out, err := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "NETNS-CHILD-STARTED-12034") {

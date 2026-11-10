@@ -299,7 +299,7 @@ func TestLifelineSharedDenyAllVerdictsOnRealKernel12229(t *testing.T) {
 			testguard.NetnsUnavailable(t, "%s not available", tool)
 		}
 	}
-	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestLifelineSharedDenyAllVerdictsOnRealKernel12229$", "-test.count=1", "-test.v")...)
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestLifelineSharedDenyAllVerdictsOnRealKernel12229$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), lifelineDenyAllNetnsChild12229+"=1")
 	out, err := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "NETNS-CHILD-STARTED-12229") {

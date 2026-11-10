@@ -27,9 +27,11 @@ import (
 
 const vrfRetry12168ChildEnv = "XPF_VRF_RETRY_12168_CHILD"
 
-// isolatedVRFRetryChild12168 gives each real-kernel test its own user, network,
-// and mount namespaces. The child test name is explicit so the outer process
-// can invoke one acceptance case without rerunning the whole package.
+// isolatedVRFRetryChild12168 gives each real-kernel test its own network and
+// mount namespaces, plus a user namespace only when the caller is not already
+// uid 0 (testguard.UnshareFlags, #19066). The child test name is explicit so
+// the outer process can invoke one acceptance case without rerunning the
+// whole package.
 func isolatedVRFRetryChild12168(t *testing.T) bool {
 	t.Helper()
 	if os.Getenv(vrfRetry12168ChildEnv) == t.Name() {
@@ -50,7 +52,7 @@ func isolatedVRFRetryChild12168(t *testing.T) bool {
 		}
 		t.Fatalf("isolated VRF namespace probe failed: %v\n%s", probeErr, probeOutput)
 	}
-	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-Urnm", "--propagation", "private", "--"), os.Args[0],
+	cmd := testguard.ReexecCommand(t, unshare, append(testguard.UnshareFlags("-Urnm", "--propagation", "private", "--"), os.Args[0],
 		"-test.run=^"+t.Name()+"$", "-test.v")...)
 	cmd.Env = append(os.Environ(), vrfRetry12168ChildEnv+"="+t.Name())
 	output, err := cmd.CombinedOutput()
@@ -61,6 +63,8 @@ func isolatedVRFRetryChild12168(t *testing.T) bool {
 		t.Fatalf("isolated kernel VRF acceptance test skipped after the capability probe succeeded:\n%s", output)
 	}
 	t.Logf("isolated kernel VRF acceptance output:\n%s", output)
+	// The exit status cannot see a -test.run that matched nothing (#19066 R2).
+	testguard.RequireChildPass(t, t.Name(), output, err)
 	return false
 }
 

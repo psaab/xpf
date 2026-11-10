@@ -230,7 +230,7 @@ binary, so its `TestMain` runs `testguard.ExitIfUnsafe`, which reads
 a second user namespace whose root cannot read PID 1's links, so the guard
 refused the child. At master `b8bd60dc61`, 27 of the 42 re-exec cells were
 refused. Of those, 10 skipped as "netns unavailable" on every run and 17
-failed. Two rules now apply:
+failed. Four rules now apply:
 
 - **No nesting.** Re-exec cells build their flags with
   `testguard.UnshareFlags(...)`, which drops `-U`/`-r` (and `--user`,
@@ -240,12 +240,36 @@ failed. Two rules now apply:
   under `XPF_REQUIRE_NETNS`. `testguard-run.sh` exports that variable,
   because a private namespace is always creatable inside it.
 
-`TestNetnsReexecCensus19066` (`internal/testguard`) enforces both over every
+- **A child result, not an exit status.** Go exits 0 for a child that
+  SKIPs and for a `-test.run` that matches nothing, so a parent that reads
+  only the exit status reports PASS having examined nothing. A parent judges
+  its child with `testguard.RequireChildPass(t, name, out, err)` (the child
+  runs with `-test.v`): only the child's own `--- PASS: <name> (` line with a
+  zero exit passes; its `--- SKIP` with a zero exit goes through
+  `NetnsUnavailable`; anything else fails, including a skip followed by a
+  nonzero exit. A parent that instead requires a `...PASSED...` sentinel the
+  child prints after its last assertion also satisfies this. A child body
+  reports a missing kernel feature through `NetnsUnavailable` too, so under
+  `XPF_REQUIRE_NETNS` it fails rather than skips (#19066 R2).
+- **A deadline of its own.** The re-exec is built with
+  `testguard.ReexecCommand(t, …)`, which kills the child 30 s before the
+  parent's own deadline (10 minutes when there is none). A test binary run
+  directly has no default `-test.timeout`, so a hung child otherwise blocked
+  until the package `-timeout` panicked everything (#19066 R18).
+
+`TestNetnsReexecCensus19066` (`internal/testguard`) enforces these over every
 guarded package. Its scope is functions that run `unshare` and re-execute a
-test binary (`os.Args[0]` or `os.Executable()`). A literal user-namespace
-flag outside `UnshareFlags`, or a `t.Skip*` call, fails it. Shell-script
-children (`unshare -rn bash -c …`) are out of scope: they are not guarded
-binaries.
+test binary (`os.Args[0]` or `os.Executable()`). It fails on a literal
+user-namespace flag outside `UnshareFlags`; a `t.Skip*` call (one inside an
+`if` on `runtime.GOOS` is a platform guard and is exempt); a function with no
+child-success witness (`RequireChildPass`, or a `--- PASS: ` / `PASSED`
+literal); and a re-exec built with `exec.Command` instead of
+`ReexecCommand`. It reads one function's literals: flags held in a
+package-level variable, or a re-exec split across a helper that receives the
+binary path, escape it. Forcing mode is the backstop for those shapes, since a
+nested user namespace the guard refuses then makes the cell itself fail.
+Shell-script children (`unshare -rn bash -c …`) are out of scope: they are
+not guarded binaries.
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about
 4 more minutes, measured at 691 s at runner load 4-8. That is above go test's

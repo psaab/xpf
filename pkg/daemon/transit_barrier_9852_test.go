@@ -142,16 +142,11 @@ func TestTransitBarrierNetlinkParity9852(t *testing.T) {
 		testguard.NetnsUnavailable(t, "bridge-barrier kernel cell SKIPPED: unshare not found")
 	}
 	args := append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestTransitBarrierNetlinkParity9852$", "-test.v")
-	cmd := exec.Command(unshare, args...)
+	cmd := testguard.ReexecCommand(t, unshare, args...)
 	cmd.Env = append(os.Environ(), transitBarrierInnerEnv9852+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("inner bridge-barrier output:\n%s", out)
-	if err != nil {
-		if strings.Contains(string(out), "Operation not permitted") || strings.Contains(string(out), "operation not permitted") || strings.Contains(string(out), "unshare:") {
-			testguard.NetnsUnavailable(t, "bridge-barrier kernel cell SKIPPED: cannot create private netns (%v)", err)
-		}
-		t.Fatalf("bridge-barrier kernel cell FAILED: %v", err)
-	}
+	testguard.RequireChildPass(t, "TestTransitBarrierNetlinkParity9852", out, err)
 }
 
 type transitBarrierShape9852 struct {
@@ -178,7 +173,7 @@ func runTransitBarrierNetlinkParityInner9852(t *testing.T) {
 
 	if err := inst.InstallTransitBarrier(); err != nil {
 		if transitBarrierUnsupported9852(err) {
-			t.Skipf("bridge-barrier kernel cell SKIPPED: nf_tables family unavailable: %v", err)
+			testguard.NetnsUnavailable(t, "bridge-barrier kernel cell SKIPPED: nf_tables family unavailable: %v", err)
 		}
 		t.Fatalf("install barrier: %v", err)
 	}

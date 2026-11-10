@@ -1,9 +1,14 @@
 package testguard
 
 import (
+	"context"
+	"fmt"
 	"os"
+	"os/exec"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 // RequireNetnsEnv is set (to any value) by scripts/testguard-run.sh. Inside
@@ -41,6 +46,12 @@ func UnshareFlags(flags ...string) []string {
 	return stripUserNamespaceFlags(flags)
 }
 
+// unshareNoArgShortFlags are unshare(1)'s short options that take no
+// argument. Only a cluster made of these is rewritten: in any other cluster a
+// letter may be an attached argument ("-w/srv/run"), and stripping U or r
+// there would corrupt it (R18 N2 on #19066).
+const unshareNoArgShortFlags = "mUinpuCTrcf"
+
 // stripUserNamespaceFlags is UnshareFlags' uid-0 rewrite, separated so it is
 // testable without being root.
 func stripUserNamespaceFlags(flags []string) []string {
@@ -51,7 +62,8 @@ func stripUserNamespaceFlags(flags []string) []string {
 			continue
 		case strings.HasPrefix(f, "--user=") || strings.HasPrefix(f, "--map-"):
 			continue
-		case len(f) > 1 && f[0] == '-' && f[1] != '-':
+		case len(f) > 1 && f[0] == '-' && f[1] != '-' &&
+			strings.Trim(f[1:], unshareNoArgShortFlags) == "":
 			kept := strings.Map(func(r rune) rune {
 				if r == 'U' || r == 'r' {
 					return -1
@@ -85,4 +97,105 @@ func NetnsUnavailable(t testing.TB, format string, args ...any) {
 		return // a real testing.T never returns from Fatalf; a recording TB does
 	}
 	t.Skipf(format, args...)
+}
+
+// ReexecCommand is exec.CommandContext for a re-executed child, with a
+// deadline of its own (R18 N1 on #19066). A test binary run directly has no
+// default -test.timeout, so a hung child would block the parent's
+// CombinedOutput until the package -timeout panicked the whole package, with
+// no trace of which child hung. The child is killed reexecMargin before the
+// parent's own deadline (or after reexecDefault when the parent has none),
+// and WaitDelay keeps a killed child's inherited pipes from holding the
+// parent. The kill surfaces as a nonzero exit that RequireChildPass reports.
+func ReexecCommand(t testing.TB, name string, args ...string) *exec.Cmd {
+	t.Helper()
+	deadline := time.Now().Add(reexecDefault)
+	if d, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
+		if pd, ok := d.Deadline(); ok && pd.Add(-reexecMargin).Before(deadline) {
+			deadline = pd.Add(-reexecMargin)
+		}
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	t.Cleanup(cancel)
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = 5 * time.Second
+	return cmd
+}
+
+const (
+	reexecDefault = 10 * time.Minute
+	reexecMargin  = 30 * time.Second
+)
+
+// ChildVerdict is how RequireChildPass reads a re-executed child.
+type ChildVerdict int
+
+const (
+	ChildFailed ChildVerdict = iota
+	ChildPassed
+	ChildSkipped
+)
+
+var childLogLine = regexp.MustCompile(`(?m)^\s+\S+_test\.go:\d+: (.*)$`)
+
+// JudgeChild reads a re-executed child's -test.v output for the test name.
+// Its exit status cannot judge it: Go exits 0 for a test that SKIPs and for
+// a -test.run pattern that matches nothing ("testing: warning: no tests to
+// run"), so a parent that trusted the status reported PASS having examined
+// nothing (#19058 R16 F1; #19066 R2 F1).
+//
+// A result record for the exact name ("--- PASS|SKIP|FAIL: <name> (" at
+// column 0) decides first. FAIL is a failure. SKIP with a zero exit is a skip
+// carrying the child's reason; SKIP with a nonzero exit is a crash after the
+// skip, a failure. PASS with a zero exit is the only pass. Only with NO
+// record does the pre-start refusal exception apply: an unshare that failed
+// before the child test started (no "=== RUN" line, a nonzero exit, and
+// unshare's refusal text) is a skip. Everything else is a failure, including
+// an EPERM from inside a child that did start, which is the acceptance
+// failing, not the namespace being unavailable. Output is CRLF-normalized
+// first, so a CRLF "=== RUN" line still reads as started (#19058 Codex F1).
+//
+// This is a presence and precedence check over the records, not a validator
+// of a whole transcript: a duplicated PASS, a PASS beside a SKIP, or a line
+// truncated right after " (" are decided only by the precedence above.
+func JudgeChild(name string, out []byte, runErr error) (ChildVerdict, string) {
+	s := strings.ReplaceAll(string(out), "\r\n", "\n")
+	line := func(kind string) bool {
+		return regexp.MustCompile(`(?m)^--- ` + kind + `: ` + regexp.QuoteMeta(name) + ` \(`).MatchString(s)
+	}
+	started := strings.Contains(s, "=== RUN   "+name+"\n")
+	passed, skipped, failed := line("PASS"), line("SKIP"), line("FAIL")
+	record := passed || skipped || failed
+	switch {
+	case failed:
+		return ChildFailed, fmt.Sprintf("the child reported FAIL (exit: %v)", runErr)
+	case skipped && runErr != nil:
+		return ChildFailed, fmt.Sprintf("the child skipped and then exited nonzero (exit: %v)", runErr)
+	case skipped:
+		reason := "the child skipped"
+		if m := childLogLine.FindAllStringSubmatch(s, -1); len(m) > 0 {
+			reason += ": " + m[len(m)-1][1]
+		}
+		return ChildSkipped, reason
+	case passed && runErr == nil:
+		return ChildPassed, ""
+	case !record && !started && runErr != nil &&
+		(strings.Contains(s, "Operation not permitted") || strings.Contains(s, "unshare:")):
+		return ChildSkipped, fmt.Sprintf("cannot create private namespace: %v: %s", runErr, strings.TrimSpace(s))
+	}
+	return ChildFailed, fmt.Sprintf("the child did not report \"--- PASS: %s\" (exit: %v)", name, runErr)
+}
+
+// RequireChildPass judges a re-executed child (run with -test.v) and acts on
+// the verdict: a PASS returns, a SKIP goes through NetnsUnavailable (a FAIL
+// under RequireNetnsEnv), and anything else FAILS the test with the reason.
+func RequireChildPass(t testing.TB, name string, out []byte, runErr error) {
+	t.Helper()
+	switch verdict, reason := JudgeChild(name, out, runErr); verdict {
+	case ChildPassed:
+	case ChildSkipped:
+		NetnsUnavailable(t, "%s: %s", name, reason)
+	default:
+		t.Fatalf("%s: re-executed child failed: %s", name, reason)
+	}
 }

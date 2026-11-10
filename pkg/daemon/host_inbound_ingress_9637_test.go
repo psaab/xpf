@@ -294,7 +294,7 @@ func TestHostInboundIngressZoneVerdictsOnRealKernel9637(t *testing.T) {
 			testguard.NetnsUnavailable(t, "%s not available", tool)
 		}
 	}
-	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0],
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0],
 		"-test.run", "^TestHostInboundIngressZoneVerdictsOnRealKernel9637$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), netnsChild9637+"=1")
 	out, err := cmd.CombinedOutput()
@@ -493,7 +493,7 @@ func TestHostInboundUnzonedIngressVerdictsOnRealKernel11409(t *testing.T) {
 			testguard.NetnsUnavailable(t, "%s not available", tool)
 		}
 	}
-	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0],
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0],
 		"-test.run", "^TestHostInboundUnzonedIngressVerdictsOnRealKernel11409$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), netnsChild11409+"=1")
 	out, err := cmd.CombinedOutput()
