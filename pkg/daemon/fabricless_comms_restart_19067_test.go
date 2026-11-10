@@ -57,14 +57,14 @@ func fabriclessEpoch19067(t *testing.T, active clusterTransportKey) (*Daemon, *i
 	}
 	_, gen, _ := d.beginClusterCommsEpoch(context.Background())
 	if active != (clusterTransportKey{}) && !d.setActiveTransportIfCurrent(gen, active) {
-		t.Fatal("premise: could not publish the running epoch's transport")
+		t.Fatal("premise: could not publish the epoch's transport")
 	}
 	ss := cluster.NewSessionSync(":0", "10.99.0.2:4785", nil)
 	if !d.publishSessionSyncIfCurrent(gen, ss) {
-		t.Fatal("premise: could not publish the running epoch's session")
+		t.Fatal("premise: could not publish the epoch's session object")
 	}
 	if d.getSessionSync() != ss {
-		t.Fatal("premise: the running epoch must hold a LIVE session; without one the stop's finalizer guard is trivially true and the defect is invisible")
+		t.Fatal("premise: the epoch must hold a published session object; without one the stop's finalizer guard is trivially true and the defect is invisible")
 	}
 	t.Cleanup(func() { d.stopClusterComms() })
 	return d, &restarts, mon
@@ -127,18 +127,28 @@ func TestFabriclessOwedRestartRunsWithLiveSession19067(t *testing.T) {
 // no successor epoch can begin inside that window, and the guard is therefore
 // invariantly true when reached. The test parks the stop INSIDE the window
 // (after its d.sessionSync clear, at stopSyncReadyTimer, by holding
-// syncReadyTimerMu) and makes a successor CONTEND for it (Codex D3: the
-// contention must be proven, not left to the scheduler):
+// syncReadyTimerMu) and starts a successor that tries to begin an epoch:
 //   - the successor signals just before it calls beginClusterCommsEpoch, and
 //     the test waits for that signal while the stop is still parked; a cell
-//     that never sees the attempt inside the window FAILS ("did not exercise
-//     contention") instead of passing;
-//   - while still parked, the comms generation must not advance for 2 s: the
-//     successor is blocked on the lifecycle lock;
-//   - after release, the stop reports success with exactly one finalizer run,
-//     and the successor's begin completes only after the stop returned;
+//     that never sees the signal FAILS ("did not exercise contention");
+//   - while still parked, the comms generation must not advance: it is
+//     watched for 2 s and sampled once more right before the park is
+//     released, which narrows (does not close) the unsampled tail;
+//   - after release, the stop reports success with exactly one finalizer run;
+//     the successor can begin only after the stop releases
+//     clusterCommsLifecycleMu (daemon_ha_sync.go:2527), which is the
+//     exclusion boundary (it precedes the stop's return to its caller);
 //   - had a successor begun inside the window, the stop must NOT report
 //     success, or step 20 would start comms a second time.
+//
+// The kill of M5 (beginClusterCommsEpoch without clusterCommsLifecycleMu) is
+// PROBABILISTIC, not deterministic (Codex, cycle 3): the signal proves the
+// successor reached the signal, not the lock, so a successor descheduled
+// between the two until after the park is released lets M5 pass. Observed:
+// M5 killed 40/40 (lane H x20, R13 x10, R8 x10 at d8d6a3c9de), M3+M5 30/30.
+// TestStopClusterCommsSerializesLateSuccessorStart17060 is the other M5
+// witness and has the same shape (a pre-lock signal, then a single 25 ms
+// sample, then teardown assertions), so its kill is not deterministic either.
 func TestStopWindowSerializesSuccessor19067(t *testing.T) {
 	d, _, _ := fabriclessEpoch19067(t, clusterTransportKey{ControlInterface: "em0", PeerAddress: "10.99.0.2"})
 	gen := func() uint64 {
@@ -189,6 +199,11 @@ func TestStopWindowSerializesSuccessor19067(t *testing.T) {
 			break
 		}
 		time.Sleep(time.Millisecond)
+	}
+	if !beganInWindow && gen() != stopGen {
+		// Final sample right before release (Codex cycle 3, scenario B: the
+		// loop's last sleep was never sampled).
+		beganInWindow = true
 	}
 	if beganInWindow {
 		t.Errorf("a successor epoch began inside the stop's teardown window (generation %d -> %d while the stop was parked): beginClusterCommsEpoch must wait for clusterCommsLifecycleMu, which the stop holds through its guard and finalizer (#19067)", stopGen, gen())
