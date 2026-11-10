@@ -1743,3 +1743,142 @@ fn held_pass_drops_when_a_refresh_installs_the_monitor_confirmed_mac_19034() {
     run_held_19034(&mut fx, &views, &dynamic);
     assert_held_backlog_dropped_19034(&fx, entry.mac, "refresh installing the monitor-confirmed MAC");
 }
+
+/// #19034 (R4 review of b5a55949e3), end to end: a flow-cache seed whose
+/// worker tick straddles Go's neighbor push. The push changes the gateway's
+/// static MAC A→B, publishes, then bumps the shard. It moves neither part of
+/// the generation pair the flow cache checks. A worker loads its view once
+/// per tick, so the tick's next packet still resolves through the old view
+/// (A) and seeds.
+///
+/// With a per-descriptor epoch snapshot, that seed carried the post-bump
+/// epoch: once the worker adopted the new view, every hit served MAC A while
+/// the dataplane resolved B, and nothing evicted the entry. The worker now
+/// stamps from the snapshot it took BEFORE the tick's view load
+/// (`BindingWorker::tick_neighbor_epochs`). The straddling entry carries the
+/// pre-push epoch, and the next tick evicts it and sends to B.
+#[test]
+fn seed_straddling_a_neighbor_push_cannot_keep_the_old_mac_19034() {
+    let mut fx = udp_flow_fixture();
+    let v0 = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = gateway_19034(&fx);
+    let mut mac_b = entry.mac;
+    mac_b[5] ^= 0x01;
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&nat_snapshot_with_fabric())
+        .expect("first apply");
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    let ha = txn_ha_state();
+    let batch = run_pass_neigh(&mut fx, &v0, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(batch.session_creates >= 1, "premise: the flow is established under 7/9");
+
+    // The worker's next tick snapshots the epochs, then loads its view (V0).
+    fx.binding.tick_neighbor_epochs = Some(dynamic.snapshot_shard_epochs());
+    // Meanwhile the gateway moves to B. The monitor learns B behind the
+    // static A (a fresh row, no bump), and Go's push installs B in the static
+    // table, publishes, and bumps.
+    assert!(
+        dynamic.insert_if_changed(gateway, NeighborEntry { mac: mac_b }),
+        "premise: the monitor learns B"
+    );
+    let epoch_before = dynamic.mac_change_epoch_for(&gateway);
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(gateway.0, gateway.1, NeighborEntry { mac: mac_b })]),
+        "premise: Go's push naming B is accepted"
+    );
+    assert_ne!(
+        dynamic.mac_change_epoch_for(&gateway),
+        epoch_before,
+        "premise: the push bumped the gateway's shard"
+    );
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(gateway.0, gateway.1),
+        Some(mac_b),
+        "premise: the published static table resolves B"
+    );
+    // The view the push published: V0 with the gateway's static row on B.
+    let v1 = Arc::new({
+        let mut forwarding = (*v0).clone();
+        forwarding.neighbors.insert(gateway, NeighborEntry { mac: mac_b });
+        forwarding
+    });
+
+    // Later in the straddling tick: the flow's next packet resolves through
+    // V0 (A) and seeds the flow cache.
+    run_pass_neigh(&mut fx, &v0, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(
+        txn_flow_cache_entries(&fx.binding) > 0,
+        "premise: the straddling packet seeds under the old view"
+    );
+
+    // Next tick: the worker adopts V1. The generation pair is unchanged.
+    fx.binding.tick_neighbor_epochs = Some(dynamic.snapshot_shard_epochs());
+    fx.binding.scratch.scratch_forwards.clear();
+    run_pass_neigh(&mut fx, &v1, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert_eq!(
+        held_forwards_19034(&fx, entry.mac).1,
+        0,
+        "no packet may be sent to the MAC the gateway left"
+    );
+    assert_eq!(
+        held_forwards_19034(&fx, mac_b),
+        (1, 1),
+        "the packet is sent to the gateway's current MAC"
+    );
+    assert!(
+        neighbor_evictions_19034(&fx) >= 1,
+        "the straddled entry is evicted on the neighbor epoch"
+    );
+}
+
+/// #19034 (R4 review of b5a55949e3): the worker side of the straddle fix,
+/// pinned in source. The loop must take the tick's epoch snapshot before the
+/// tick's view load, and the descriptor pass must stamp from it. The bump
+/// must be Release and the snapshot Acquire, so a snapshot that saw a
+/// post-publish bump implies a view load after that publish. A single-threaded
+/// cell cannot observe the ordering, so this pins the text.
+#[test]
+fn tick_epoch_snapshot_precedes_the_view_load_19034() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
+    let loop_body =
+        std::fs::read_to_string(root.join("worker/loop_body/mod.rs")).expect("read loop body");
+    let snapshot_at = loop_body
+        .find("let tick_neighbor_epochs = dynamic_neighbors.snapshot_shard_epochs();")
+        .expect("the loop takes the tick's epoch snapshot");
+    let view_at = loop_body
+        .find("refresh_runtime_view(&forwarding, &shared_runtime")
+        .expect("the loop loads the tick's view");
+    assert!(snapshot_at < view_at, "the epoch snapshot must precede the view load");
+    assert_eq!(
+        loop_body
+            .matches("binding.tick_neighbor_epochs = Some(tick_neighbor_epochs);")
+            .count(),
+        1,
+        "every binding gets the tick's snapshot"
+    );
+    let descriptor = std::fs::read_to_string(root.join("poll_descriptor/mod.rs"))
+        .expect("read descriptor pass");
+    assert_eq!(
+        descriptor.matches(".tick_neighbor_epochs\n").count()
+            + descriptor.matches(".tick_neighbor_epochs;").count(),
+        1,
+        "the seed stamps from the tick's snapshot"
+    );
+    let neighbors =
+        std::fs::read_to_string(root.join("sharded_neighbor.rs")).expect("read neighbor map");
+    assert_eq!(
+        neighbors
+            .matches("self.shard_mac_epochs[shard].fetch_add(1, Ordering::Release);")
+            .count(),
+        1,
+        "the shard bump is Release"
+    );
+    assert_eq!(
+        neighbors
+            .matches("self.shard_mac_epochs[i].load(Ordering::Acquire)")
+            .count(),
+        1,
+        "the epoch snapshot loads Acquire"
+    );
+}
