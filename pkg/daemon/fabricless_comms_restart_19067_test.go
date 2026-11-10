@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
@@ -100,7 +102,7 @@ func TestFabriclessTransportChangeRestartsComms19067(t *testing.T) {
 // with an unchanged key takes the same stop-then-start path.
 func TestFabriclessOwedRestartRunsWithLiveSession19067(t *testing.T) {
 	active := clusterTransportKey{ControlInterface: "em0", PeerAddress: "10.99.0.2"}
-	d, restarts, _ := fabriclessEpoch19067(t, active)
+	d, restarts, mon := fabriclessEpoch19067(t, active)
 	cfg := fabriclessConfig19067("10.99.0.2")
 	if got := d.clusterTransportForConfig(cfg); got != active {
 		t.Fatalf("premise: the key must be UNCHANGED so only restartOwed drives the restart (active=%+v new=%+v)", active, got)
@@ -110,6 +112,117 @@ func TestFabriclessOwedRestartRunsWithLiveSession19067(t *testing.T) {
 
 	if *restarts != 1 {
 		t.Errorf("owed restart on a fabric-less cluster with a live session ran %d times, want 1 (#19067)", *restarts)
+	}
+	if got := mon.Watched(); len(got) != 0 {
+		t.Errorf("fabric-less owed restart left the fabric watcher armed: %v (the stop's finalizer did not run)", got)
+	}
+}
+
+// TestStopWindowSerializesSuccessor19067 pins what the finalizer guard relies
+// on, at the level that enforces it (cell shape from review seat R13 on
+// #19067). The stop holds clusterCommsLifecycleMu from its re-capture through
+// the guard and the finalizer; beginClusterCommsEpoch takes the same lock, so
+// no successor epoch can begin inside that window, and the guard is therefore
+// invariantly true when reached. The test parks the stop INSIDE the window
+// (after its d.sessionSync clear, at stopSyncReadyTimer, by holding
+// syncReadyTimerMu) and starts a successor:
+//   - the successor must not begin until the stop finishes;
+//   - the stop must report success and run its finalizer exactly once;
+//   - had a successor begun inside the window, the stop must NOT report
+//     success, or step 20 would start comms a second time.
+func TestStopWindowSerializesSuccessor19067(t *testing.T) {
+	d, _, _ := fabriclessEpoch19067(t, clusterTransportKey{ControlInterface: "em0", PeerAddress: "10.99.0.2"})
+
+	d.syncReadyTimerMu.Lock()
+	parked := true
+	defer func() {
+		if parked {
+			d.syncReadyTimerMu.Unlock()
+		}
+	}()
+
+	var finalized atomic.Int32
+	stopDone := make(chan bool, 1)
+	go func() {
+		stopDone <- d.stopClusterCommsWithFinalizer(func() { finalized.Add(1) })
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for d.getSessionSync() != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("premise: the stop never reached its session clear")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	successorBegan := make(chan context.CancelFunc, 1)
+	go func() {
+		_, _, cancel := d.beginClusterCommsEpoch(context.Background())
+		successorBegan <- cancel
+	}()
+	beganInWindow := false
+	select {
+	case cancel := <-successorBegan:
+		beganInWindow = true
+		t.Errorf("a successor epoch began inside the stop's teardown window: beginClusterCommsEpoch must wait for clusterCommsLifecycleMu, which the stop holds through its guard and finalizer (#19067)")
+		defer cancel()
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	d.syncReadyTimerMu.Unlock()
+	parked = false
+	var stopped bool
+	select {
+	case stopped = <-stopDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the parked stop did not finish after its window was released")
+	}
+	if !beganInWindow {
+		select {
+		case cancel := <-successorBegan:
+			defer cancel()
+		case <-time.After(5 * time.Second):
+			t.Fatal("the successor never began after the stop finished")
+		}
+	}
+
+	if beganInWindow {
+		if stopped || finalized.Load() != 0 {
+			t.Errorf("the stop reported success (stopped=%v, finalized=%d) although a successor epoch began inside its window: step 20 would start comms a second time", stopped, finalized.Load())
+		}
+		return
+	}
+	if !stopped || finalized.Load() != 1 {
+		t.Errorf("a stop that still owned teardown returned stopped=%v finalized=%d, want true/1: step 20 would never restart comms (#19067)", stopped, finalized.Load())
+	}
+}
+
+// TestBootstrapTeardownWithLiveSessionClearsWatcher19067: bootstrap rollback
+// (relinquishClusterForBootstrap) uses the same finalizer path on EVERY
+// cluster, fabric-configured or not. Before #18751 it cleared the fabric
+// watcher unconditionally; #18751 moved the clear into the finalizer, and the
+// `== ss` guard then skipped it whenever comms were live. The teardown must
+// clear the watcher, leave comms stopped (it does not restart), and owe the
+// #7901 restart.
+func TestBootstrapTeardownWithLiveSessionClearsWatcher19067(t *testing.T) {
+	d, restarts, mon := fabriclessEpoch19067(t, clusterTransportKey{
+		ControlInterface: "em0", PeerAddress: "10.99.0.2", FabricInterface: "fab0",
+	})
+
+	if steps := d.relinquishClusterForBootstrap(); len(steps) != 0 {
+		t.Fatalf("premise: no RG to resign, so the teardown must report no failed step, got %+v", steps)
+	}
+
+	if got := mon.Watched(); len(got) != 0 {
+		t.Errorf("bootstrap teardown with a live session left the fabric watcher armed: %v (#18751 intent, #19067)", got)
+	}
+	if got := d.getSessionSync(); got != nil {
+		t.Errorf("bootstrap teardown left the session published: %p", got)
+	}
+	if *restarts != 0 {
+		t.Errorf("bootstrap teardown restarted comms %d times, want 0 (it is a stop-without-start)", *restarts)
+	}
+	if !d.takeClusterCommsRestartNeeded() {
+		t.Error("bootstrap teardown did not owe the #7901 restart")
 	}
 }
 

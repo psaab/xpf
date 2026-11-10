@@ -1389,6 +1389,24 @@ goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
   callback binding. It clears session-sync, refresh channels, and fabric slots
   only if its stop generation is still current, so a concurrent successor
   cannot be joined or cleared by the old stop.
+- `stopClusterCommsWithFinalizer(finalize)` is `stopClusterComms` with a
+  teardown hook (#18751, #19067).
+  - It runs `finalize` under `clusterCommsLifecycleMu` exactly when its own
+    stop generation still owns teardown, and it returns whether it did.
+  - When the guard is reached, it is invariantly true. `beginClusterCommsEpoch`
+    takes the same lock, the stop holds that lock from its re-capture through
+    the finalizer, and only `publishSessionSyncIfCurrent` (gen-gated) publishes
+    a session.
+  - A false return means a successor owns comms, so the caller must not start
+    them again.
+  - Its callers clear the fabric-segment watcher through it
+    (`stopClusterCommsAndClearFabricWatcher`):
+    - step 20's `removingFabric` arm, which restarts comms only on a true
+      return;
+    - bootstrap rollback (`relinquishClusterForBootstrap`), which never
+      restarts and owes the #7901 restart.
+  - Before #19067 the guard compared the session it had just cleared, so it
+    was false for every running epoch.
 - Populate loops publish their slot configuration only while holding
   `clusterCommsMu` and matching their captured generation. Peer identity and
   userspace constraint changes remain under `fabricMu`, so a late cancelled

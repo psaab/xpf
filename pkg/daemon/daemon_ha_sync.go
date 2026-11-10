@@ -2507,6 +2507,14 @@ func (d *Daemon) stopClusterCommsWithFinalizer(finalize func()) bool {
 		// every running epoch (ss != nil), so the finalizer never ran and
 		// step 20 (reconcileClusterTransportBinding) never restarted comms on
 		// a fabric-less cluster after a transport change.
+		//
+		// Under the current locking this guard is invariantly TRUE when
+		// reached. This stop holds clusterCommsLifecycleMu from its re-capture
+		// through here, and beginClusterCommsEpoch (the only other generation
+		// writer) takes that lock. Only publishSessionSyncIfCurrent, which is
+		// gen-gated, stores a non-nil session. The guard is defense in depth
+		// should that serialization ever break; TestStopWindowSerializesSuccessor19067
+		// pins the serialization itself.
 		d.clusterCommsMu.Lock()
 		stillCurrent := d.clusterCommsGen == stopGen && d.sessionSync == nil
 		d.clusterCommsMu.Unlock()
