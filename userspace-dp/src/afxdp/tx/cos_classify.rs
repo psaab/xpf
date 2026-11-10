@@ -2276,6 +2276,20 @@ pub(in crate::afxdp) fn cos_queue_dscp_rewrite(
     queue.and_then(|queue| queue.config.dscp_rewrite)
 }
 
+/// Test seam (#18748 review R4 F4): the production enqueue, admission gates
+/// and exact-backlog publish included, for multi-worker drain simulations.
+#[cfg(test)]
+pub(in crate::afxdp) fn enqueue_cos_item_for_test(
+    binding: &mut BindingWorker,
+    egress_ifindex: i32,
+    queue_id: u8,
+    item: CoSPendingTxItem,
+    now_ns: u64,
+) -> Result<(), CoSPendingTxItem> {
+    let item_len = crate::afxdp::cos::cos_item_len(&item);
+    enqueue_cos_item(binding, egress_ifindex, Some(queue_id), item_len, item, now_ns, None)
+}
+
 fn enqueue_cos_item(
     binding: &mut BindingWorker,
     egress_ifindex: i32,

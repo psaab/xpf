@@ -49,6 +49,18 @@ impl ExactDemandQueueMask {
         Self(words)
     }
 
+    /// Clear one queue's bit. Past `BITS` there is no bit to clear: the
+    /// overflow policy saturated the mask when that index was set.
+    #[inline]
+    pub(in crate::afxdp) fn without_queue(self, queue_idx: usize) -> Self {
+        if queue_idx >= Self::BITS {
+            return self;
+        }
+        let mut words = self.0;
+        words[queue_idx / u64::BITS as usize] &= !(1u64 << (queue_idx % u64::BITS as usize));
+        Self(words)
+    }
+
     #[inline]
     pub(in crate::afxdp) fn counts(self, queue_idx: usize) -> bool {
         if queue_idx >= Self::BITS {
@@ -84,9 +96,10 @@ impl std::ops::BitOr for ExactDemandQueueMask {
 #[repr(align(64))]
 struct PaddedBacklogSlot {
     queued_bytes: AtomicU64,
-    serviceable_bytes: AtomicU64,
-    /// #9365: one `AtomicU64` per `ExactDemandQueueMask` word. Two byte
-    /// counters plus four words is 48 bytes, inside the 64-byte alignment.
+    /// #9365: one `AtomicU64` per `ExactDemandQueueMask` word. One byte
+    /// counter plus four words is 40 bytes, inside the 64-byte alignment.
+    /// (#18748 dropped the write-only `serviceable_bytes` counter: its only
+    /// reader was a test.)
     demand_queue_mask: [AtomicU64; EXACT_DEMAND_MASK_WORDS],
 }
 
@@ -111,15 +124,15 @@ struct PaddedResidualBudget {
 
 /// Interface-global exact-backlog visibility for diagnostics and
 /// cross-binding surplus suppression. Each binding owns one slot and publishes:
-///   * queued exact bytes, used by diagnostics; and
-///   * serviceable exact bytes, used as the priority signal for suppressing
-///     peer non-exact surplus.
-///   * backlogged exact queue mask, used to reserve each exact queue's
-///     aggregate guarantee rate once when bounding peer residual surplus.
+///   * queued exact bytes, used by diagnostics and `has_peer_backlog`; and
+///   * the mask of exact queues that demand their reservation (#18748:
+///     backlogged with their own tokens covering the head), used to reserve
+///     each exact queue's aggregate guarantee rate once when bounding peer
+///     residual surplus.
 ///
-/// The serviceable/rate signals use release/acquire ordering so transitions are
-/// visible across bindings without putting a locked operation in the forwarding
-/// loop. The queued-byte diagnostic remains relaxed.
+/// The demand mask uses release/acquire ordering so transitions are visible
+/// across bindings without putting a locked operation in the forwarding loop.
+/// The queued-byte diagnostic remains relaxed.
 pub(in crate::afxdp) struct SharedCoSExactBacklog {
     worker_bytes: Box<[PaddedBacklogSlot]>,
     residual_budget: PaddedResidualBudget,
@@ -131,7 +144,6 @@ impl SharedCoSExactBacklog {
             worker_bytes: (0..=max_binding_slot)
                 .map(|_| PaddedBacklogSlot {
                     queued_bytes: AtomicU64::new(0),
-                    serviceable_bytes: AtomicU64::new(0),
                     demand_queue_mask: std::array::from_fn(|_| AtomicU64::new(0)),
                 })
                 .collect::<Vec<_>>()
@@ -150,9 +162,8 @@ impl SharedCoSExactBacklog {
 
     #[inline]
     pub(in crate::afxdp) fn publish(&self, binding_slot: u32, bytes: u64) {
-        self.publish_with_serviceable(
+        self.publish_demand(
             binding_slot,
-            bytes,
             bytes,
             if bytes > 0 {
                 ExactDemandQueueMask::ALL
@@ -163,17 +174,14 @@ impl SharedCoSExactBacklog {
     }
 
     #[inline]
-    pub(in crate::afxdp) fn publish_with_serviceable(
+    pub(in crate::afxdp) fn publish_demand(
         &self,
         binding_slot: u32,
         queued_bytes: u64,
-        serviceable_bytes: u64,
         demand_queue_mask: ExactDemandQueueMask,
     ) {
         if let Some(slot) = self.worker_bytes.get(binding_slot as usize) {
             slot.queued_bytes.store(queued_bytes, Ordering::Relaxed);
-            slot.serviceable_bytes
-                .store(serviceable_bytes, Ordering::Release);
             // #9365: the words are stored one at a time, so a reader racing
             // this publish can combine words from two publishes. Each word is
             // one a worker really published, so the result can only add or
@@ -184,6 +192,23 @@ impl SharedCoSExactBacklog {
         }
     }
 
+    /// The demand mask this binding last published (#18748): lets a drain
+    /// republish only when its demand actually changed.
+    #[inline]
+    pub(in crate::afxdp) fn published_demand_queue_mask(
+        &self,
+        binding_slot: u32,
+    ) -> ExactDemandQueueMask {
+        self.worker_bytes
+            .get(binding_slot as usize)
+            .map(|slot| {
+                ExactDemandQueueMask::from_words(std::array::from_fn(|word| {
+                    slot.demand_queue_mask[word].load(Ordering::Acquire)
+                }))
+            })
+            .unwrap_or(ExactDemandQueueMask::EMPTY)
+    }
+
     #[inline]
     pub(in crate::afxdp) fn has_peer_backlog(&self, binding_slot: u32) -> bool {
         self.worker_bytes
@@ -191,15 +216,6 @@ impl SharedCoSExactBacklog {
             .enumerate()
             .filter(|(idx, _)| *idx != binding_slot as usize)
             .any(|(_, slot)| slot.queued_bytes.load(Ordering::Relaxed) > 0)
-    }
-
-    #[inline]
-    pub(in crate::afxdp) fn has_peer_serviceable_backlog(&self, binding_slot: u32) -> bool {
-        self.worker_bytes
-            .iter()
-            .enumerate()
-            .filter(|(idx, _)| *idx != binding_slot as usize)
-            .any(|(_, slot)| slot.serviceable_bytes.load(Ordering::Acquire) > 0)
     }
 
     #[inline]

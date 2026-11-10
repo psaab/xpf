@@ -177,11 +177,71 @@ pub(super) fn unpack_shared_cos_lease_credits(credits: u64) -> (u64, u64) {
     ((credits >> 32) as u64, (credits as u32) as u64)
 }
 
+/// #18748 review cycle 3: test-only count, per thread, of compare-exchange
+/// attempts on a ROOT lease's shared words (credits and refill clock), for
+/// the cells that measure what per-batch root acquisition costs. Queue
+/// leases share the instrumented functions but are not counted: only calls
+/// made inside a `SharedCoSRootLease` method (a `RootScope`) are. Each site
+/// counts AFTER its compare-exchange, outside the load-to-CAS window: inside
+/// it, the thread-local read widened the window and roughly doubled the
+/// rollback-exhaustion flake of the concurrent v8 ledger test (#7062's
+/// test) in test builds.
+#[cfg(test)]
+pub(in crate::afxdp) mod lease_cas_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static ATTEMPTS: Cell<u64> = const { Cell::new(0) };
+        static IN_ROOT: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[inline(always)]
+    pub(in crate::afxdp) fn record() {
+        if IN_ROOT.with(Cell::get) {
+            ATTEMPTS.with(|attempts| attempts.set(attempts.get() + 1));
+        }
+    }
+
+    /// Counts the instrumented attempts made while it lives.
+    pub(in crate::afxdp) struct RootScope;
+
+    impl RootScope {
+        pub(in crate::afxdp) fn enter() -> Self {
+            IN_ROOT.with(|in_root| in_root.set(true));
+            Self
+        }
+    }
+
+    impl Drop for RootScope {
+        fn drop(&mut self) {
+            IN_ROOT.with(|in_root| in_root.set(false));
+        }
+    }
+
+    /// The root-lease attempts on this thread since the last call.
+    pub(in crate::afxdp) fn take() -> u64 {
+        ATTEMPTS.with(|attempts| attempts.replace(0))
+    }
+}
+
 fn shared_cos_lease_acquire(
     config: SharedCoSLeaseConfig,
     state: &SharedCoSLeaseState,
     now_ns: u64,
     requested: u64,
+) -> u64 {
+    shared_cos_lease_acquire_above_floor(config, state, now_ns, requested, 0)
+}
+
+/// `shared_cos_lease_acquire` that leaves `available_floor` bytes of the
+/// available pool behind: the grant never takes the pool below the floor.
+/// Same single CAS on the same packed word.
+fn shared_cos_lease_acquire_above_floor(
+    config: SharedCoSLeaseConfig,
+    state: &SharedCoSLeaseState,
+    now_ns: u64,
+    requested: u64,
+    available_floor: u64,
 ) -> u64 {
     if requested == 0 {
         return 0;
@@ -194,7 +254,9 @@ fn shared_cos_lease_acquire(
         let lease_headroom = config
             .max_total_leased
             .saturating_sub(outstanding_leased_tokens);
-        let granted = requested.min(available_tokens).min(lease_headroom);
+        let granted = requested
+            .min(available_tokens.saturating_sub(available_floor))
+            .min(lease_headroom);
         if granted == 0 {
             return 0;
         }
@@ -202,11 +264,13 @@ fn shared_cos_lease_acquire(
             available_tokens.saturating_sub(granted),
             outstanding_leased_tokens.saturating_add(granted),
         );
-        if state
+        let swapped = state
             .credits
             .compare_exchange_weak(credits, new_credits, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+            .is_ok();
+        #[cfg(test)]
+        lease_cas_probe::record();
+        if swapped {
             return granted;
         }
     }
@@ -224,11 +288,13 @@ fn shared_cos_lease_consume(state: &SharedCoSLeaseState, bytes: u64) {
             available_tokens,
             outstanding_leased_tokens.saturating_sub(bytes),
         );
-        if state
+        let swapped = state
             .credits
             .compare_exchange_weak(credits, new_credits, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+            .is_ok();
+        #[cfg(test)]
+        lease_cas_probe::record();
+        if swapped {
             return;
         }
     }
@@ -259,11 +325,13 @@ fn shared_cos_lease_release_unused(
             .saturating_add(bytes)
             .min(shared_cos_lease_available_cap(config, new_outstanding));
         let new_credits = pack_shared_cos_lease_credits(new_available, new_outstanding);
-        if state
+        let swapped = state
             .credits
             .compare_exchange_weak(credits, new_credits, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
+            .is_ok();
+        #[cfg(test)]
+        lease_cas_probe::record();
+        if swapped {
             return;
         }
     }
@@ -282,11 +350,13 @@ pub(super) fn refill_shared_cos_lease_state(
     loop {
         let last_refill_ns = state.last_refill_ns.load(Ordering::Acquire);
         if last_refill_ns == 0 {
-            if state
+            let swapped = state
                 .last_refill_ns
                 .compare_exchange(0, now_ns, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+                .is_ok();
+            #[cfg(test)]
+            lease_cas_probe::record();
+            if swapped {
                 return;
             }
             continue;
@@ -299,11 +369,13 @@ pub(super) fn refill_shared_cos_lease_state(
         if added == 0 {
             return;
         }
-        if state
+        let lost = state
             .last_refill_ns
             .compare_exchange(last_refill_ns, now_ns, Ordering::AcqRel, Ordering::Acquire)
-            .is_err()
-        {
+            .is_err();
+        #[cfg(test)]
+        lease_cas_probe::record();
+        if lost {
             continue;
         }
         loop {
@@ -319,11 +391,13 @@ pub(super) fn refill_shared_cos_lease_state(
                     ));
             let new_credits =
                 pack_shared_cos_lease_credits(new_available, outstanding_leased_tokens);
-            if state
+            let swapped = state
                 .credits
                 .compare_exchange_weak(credits, new_credits, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
+                .is_ok();
+            #[cfg(test)]
+            lease_cas_probe::record();
+            if swapped {
                 return;
             }
         }
@@ -1536,14 +1610,63 @@ impl SharedCoSRootLease {
     }
 
     pub(in crate::afxdp) fn acquire(&self, now_ns: u64, requested: u64) -> u64 {
+        #[cfg(test)]
+        let _scope = lease_cas_probe::RootScope::enter();
         shared_cos_lease_acquire(self.config, &self.state, now_ns, requested)
     }
 
+    /// #18748 (the pool floor): an acquire that leaves `pool_floor` bytes of
+    /// the available pool to other callers; it never takes the pool below
+    /// the floor. Non-exact service on a root with an exact class acquires
+    /// through this (`RootGrantLimit::nonexact`), so a full `acquire` (exact
+    /// service) always finds at least `pool_floor` of credit, less what other
+    /// full acquires took. `pool_floor == 0` is `acquire`. Same single CAS on
+    /// the same packed word; no new shared state.
+    pub(in crate::afxdp) fn acquire_above_pool_floor(
+        &self,
+        now_ns: u64,
+        requested: u64,
+        pool_floor: u64,
+    ) -> u64 {
+        #[cfg(test)]
+        let _scope = lease_cas_probe::RootScope::enter();
+        shared_cos_lease_acquire_above_floor(
+            self.config,
+            &self.state,
+            now_ns,
+            requested,
+            pool_floor,
+        )
+    }
+
+    /// Credit currently in the pool (refilled up to `now_ns`), for the cells.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn available_for_test(&self, now_ns: u64) -> u64 {
+        refill_shared_cos_lease_state(self.config, &self.state, now_ns);
+        unpack_shared_cos_lease_credits(self.state.credits.load(Ordering::Acquire)).0
+    }
+
+    /// The aggregate outstanding-credit cap (`C` in docs/log/18748.md).
+    pub(in crate::afxdp) fn max_total_leased(&self) -> u64 {
+        self.config.max_total_leased
+    }
+
+    /// Credit currently held by workers (granted and neither consumed nor
+    /// returned).
+    #[cfg(test)]
+    pub(in crate::afxdp) fn outstanding_for_test(&self) -> u64 {
+        unpack_shared_cos_lease_credits(self.state.credits.load(Ordering::Acquire)).1
+    }
+
     pub(in crate::afxdp) fn consume(&self, bytes: u64) {
+        #[cfg(test)]
+        let _scope = lease_cas_probe::RootScope::enter();
         shared_cos_lease_consume(&self.state, bytes);
     }
 
     pub(in crate::afxdp) fn release_unused(&self, bytes: u64) {
+        #[cfg(test)]
+        let _scope = lease_cas_probe::RootScope::enter();
         shared_cos_lease_release_unused(self.config, &self.state, bytes);
     }
 }

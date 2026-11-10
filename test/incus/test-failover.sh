@@ -1966,8 +1966,15 @@ fi
 # ── Phase 1b: pool-mode NAT traffic (#8280) ─────────────────────────
 #
 # A SECOND iperf3, bound to the pool-matched source and aimed at a different
-# CoS class port, so it cannot contend with the main stream on 5211 (the
-# server handles one client per port).
+# CoS class port (the target's server handles one client per port). When
+# `cos-iperf-config.set` is applied (a deploy wipes CoS, so this depends on
+# the cluster's last apply; see the CoS note near the top of this file) it
+# DOES contend with the main stream: both leave on the shaped reth0.80,
+# POOL_PORT 5210 is the EXACT 24 Gb/s `iperf-24g` class and 5211 the
+# non-exact `iperf-uncapped` class, so the exact class's reservation bounds
+# the main stream's surplus. Before #18748 a root-starved exact queue dropped its
+# reservation and starved the 5211 instances on its own worker (#18683
+# phase 1); this traffic mix is the reproducer, so keep it.
 if [[ -n "$POOL_LAN_IF" ]]; then
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c \
 		"iperf3 --forceflush --connect-timeout 5000 -B ${POOL_SRC} -t ${IPERF_DURATION} -c ${IPERF_TARGET} -p ${POOL_PORT} -P 2 > /tmp/iperf3-pool-8280.log 2>&1 &"
