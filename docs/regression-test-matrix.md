@@ -52,11 +52,14 @@ against its own band below, never against another cluster's. Use each env's
 `172.16.80.211`), never `172.16.100.x`.
 
 **RSS key and flow placement (#19072).** Which worker a flow lands on is the
-NIC's Toeplitz hash of its 5-tuple under the RSS key. xpfd programs a fresh
-CSPRNG key on every data interface (#11057), drawn once per xpfd process: every
-deploy, every daemon restart and every reboot installs a new one, and every
-config commit re-applies the current process's key. Two arms of a paired A/B
-therefore differ in placement unless the key is pinned.
+NIC's Toeplitz hash of its 5-tuple under the RSS key. xpfd programs a CSPRNG
+key on every data interface (#11057), and every config commit re-applies
+xpfd's own key over any key set by hand. Since #19072's product fix the key is
+one per BOOT (`/run/xpf/rss-hash-key`): a deploy or daemon restart keeps it,
+and a reboot draws a new one. Builds without that fix draw a new key in every
+xpfd process, so every deploy and restart changes it. Two arms of a paired A/B
+therefore differ in placement after any reboot, across nodes and clusters, and
+on any arm built without the fix, unless the key is pinned.
 - `make cluster-deploy-and-gate` pins a fixed key after the deploy
   (`XPF_RSS_PIN=1`, `test/incus/rss-pin.sh`). Any other gate runs
   `make cluster-rss-pin` after its last config change (deploy, canonical

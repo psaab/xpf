@@ -7,14 +7,17 @@
 #
 # Why it is needed: xpfd programs a CSPRNG Toeplitz key with
 # `ethtool -X <if> hkey <key>` on every data interface (#11057,
-# pkg/dataplane/compiler.go configureRSSHashKey). The key is drawn once per
-# xpfd PROCESS (rssHashKeyForBoot is a sync.Once), so every deploy, every
-# daemon restart and every reboot (H1's crash) installs a new one. Every
-# config commit re-applies the current process's key, because the write
-# runs on each CompileConfig. A fixed key set here therefore holds only
-# until the next xpfd start or config commit: pin AFTER the last config
-# change (deploy, canonical reset, CoS apply) and before the measured
-# cells, and record around every placement-sensitive cell.
+# pkg/dataplane/compiler.go configureRSSHashKey). Builds with the #19072
+# product fix keep one key per BOOT (stored in /run/xpf/rss-hash-key), so a
+# deploy or daemon restart keeps it, but a reboot (H1's crash) draws a new
+# one, and the two clusters' nodes all differ. Builds without the fix draw
+# a new key in every xpfd PROCESS, so every deploy and restart changes it.
+# Every config commit re-applies xpfd's own key, because the write runs on
+# each CompileConfig. A fixed key set here therefore holds only until the
+# next config commit, or the next xpfd start on a build without the fix:
+# pin AFTER the last config change (deploy, canonical reset, CoS apply) and
+# before the measured cells, and record around every placement-sensitive
+# cell.
 #
 # Data interfaces are the `ge-*` netdevs (not VLAN children) that expose a
 # readable RSS hash key in `ethtool -x`. That is a capability probe, not a
