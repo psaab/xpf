@@ -30,6 +30,8 @@ func TestStripUserNamespaceFlags19066(t *testing.T) {
 		// R18 N2: a cluster carrying an attached argument is left alone.
 		{[]string{"-w/srv/run", "-rn"}, []string{"-w/srv/run", "-n"}},
 		{[]string{"-n/run/netns/x"}, []string{"-n/run/netns/x"}},
+		// Codex F4: -c (--map-current-user) implies --user.
+		{[]string{"-cn"}, []string{"-n"}},
 	} {
 		if got := stripUserNamespaceFlags(tc.in); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("stripUserNamespaceFlags(%q) = %q, want %q", tc.in, got, tc.want)
@@ -87,7 +89,19 @@ func TestNetnsUnavailableFailsUnderRequire19066(t *testing.T) {
 // internal/testguard, whose canaries run unshare on purpose, as guarded.
 var guardedTestMain19066 = regexp.MustCompile(`func TestMain\(m \*testing\.M\)\s*\{\s*testguard\.ExitIfUnsafe\(\)`)
 
-var userNSFlag19066 = regexp.MustCompile(`^(-[A-Za-z]*[rU][A-Za-z]*|--user|--map-root-user|--map-current-user)$`)
+var userNSFlag19066 = regexp.MustCompile(`^(-[A-Za-z]*[rU][A-Za-z]*|-[A-Za-z]*c[A-Za-z]*|--user|--map-root-user|--map-current-user)$`)
+
+// isUserNSFlag19066: a short cluster with c counts only beside an unshare
+// namespace letter ("-cn"), so a shell's "-c" is not mistaken for one.
+func isUserNSFlag19066(s string) bool {
+	if !userNSFlag19066.MatchString(s) {
+		return false
+	}
+	if strings.HasPrefix(s, "--") || strings.ContainsAny(s, "rU") {
+		return true
+	}
+	return strings.ContainsAny(s[1:], "mnuipCT")
+}
 
 // netnsReexecViolations19066 reports, for one parsed _test.go file, every
 // function that runs `unshare` and re-executes a test binary (it references
@@ -118,6 +132,25 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 			continue
 		}
 		runsUnshare, reexecs := false, false
+		// Idents holding the unshare path: `x, err := exec.LookPath("unshare")`
+		// under any name (#19066 Codex F3), besides the conventional `unshare`.
+		unshareVars := map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
+				return true
+			}
+			if call, ok := as.Rhs[0].(*ast.CallExpr); ok {
+				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "LookPath" && len(call.Args) == 1 {
+					if lit, ok := call.Args[0].(*ast.BasicLit); ok && lit.Value == `"unshare"` {
+						if id, ok := as.Lhs[0].(*ast.Ident); ok {
+							unshareVars[id.Name] = true
+						}
+					}
+				}
+			}
+			return true
+		})
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch e := n.(type) {
 			case *ast.CallExpr:
@@ -125,17 +158,14 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "exec" &&
 						(sel.Sel.Name == "Command" || sel.Sel.Name == "CommandContext") {
 						for _, a := range e.Args {
-							if id, ok := a.(*ast.Ident); ok && id.Name == "unshare" {
-								runsUnshare = true
-							}
-							if lit, ok := a.(*ast.BasicLit); ok && lit.Value == `"unshare"` {
+							if isUnshareArg19066(a, unshareVars) {
 								runsUnshare = true
 							}
 						}
 					}
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "testguard" && sel.Sel.Name == "ReexecCommand" {
 						for _, a := range e.Args {
-							if isUnshareArg19066(a) {
+							if isUnshareArg19066(a, unshareVars) {
 								runsUnshare = true
 							}
 						}
@@ -190,14 +220,20 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 			}
 			return true
 		})
+		// A witness is a check over the child's output (#19066 Codex F3): a
+		// RequireChildPass call, or strings/bytes.Contains whose needle holds
+		// "--- PASS: " or a "...PASSED..." sentinel. A bare literal elsewhere
+		// (a t.Log("child PASSED")) checks nothing and does not count.
 		witness := false
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch e := n.(type) {
-			case *ast.BasicLit:
-				if e.Kind == token.STRING && (strings.Contains(e.Value, "--- PASS: ") || strings.Contains(e.Value, "PASSED")) {
-					witness = true
-				}
 			case *ast.CallExpr:
+				if sel, ok := e.Fun.(*ast.SelectorExpr); ok {
+					if pkg, ok := sel.X.(*ast.Ident); ok && (pkg.Name == "strings" || pkg.Name == "bytes") &&
+						sel.Sel.Name == "Contains" && len(e.Args) == 2 && holdsSuccessLiteral19066(e.Args[1]) {
+						witness = true
+					}
+				}
 				sel, ok := e.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
@@ -210,8 +246,8 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 					witness = true
 				}
 				if pkg.Name == "exec" && (sel.Sel.Name == "Command" || sel.Sel.Name == "CommandContext") &&
-					len(e.Args) > 0 && isUnshareArg19066(e.Args[0]) || pkg.Name == "exec" && sel.Sel.Name == "CommandContext" &&
-					len(e.Args) > 1 && isUnshareArg19066(e.Args[1]) {
+					len(e.Args) > 0 && isUnshareArg19066(e.Args[0], unshareVars) || pkg.Name == "exec" && sel.Sel.Name == "CommandContext" &&
+					len(e.Args) > 1 && isUnshareArg19066(e.Args[1], unshareVars) {
 					reexecCall := false
 					for _, a := range e.Args {
 						if holdsOSArgs0_19066(a, argVars) {
@@ -252,7 +288,7 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 			switch e := n.(type) {
 			case *ast.BasicLit:
 				if e.Kind == token.STRING && !allowed[e] {
-					if s := strings.Trim(e.Value, "`\""); userNSFlag19066.MatchString(s) {
+					if s := strings.Trim(e.Value, "`\""); isUserNSFlag19066(s) {
 						out = append(out, fmt.Sprintf("%s: %s passes the user-namespace flag %s to a re-exec of a guarded test binary; use testguard.UnshareFlags(...) so a uid-0 caller does not nest a user namespace the package guard refuses (#19066)",
 							fset.Position(e.Pos()), fn.Name.Name, e.Value))
 					}
@@ -277,13 +313,50 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 }
 
 // isUnshareArg19066 reports whether a call argument names unshare: the
-// conventional `unshare` variable from exec.LookPath, or the literal.
-func isUnshareArg19066(a ast.Expr) bool {
-	if id, ok := a.(*ast.Ident); ok && id.Name == "unshare" {
+// conventional `unshare` variable, any ident in vars (assigned from
+// exec.LookPath("unshare")), or the literal.
+func isUnshareArg19066(a ast.Expr, vars map[string]bool) bool {
+	if id, ok := a.(*ast.Ident); ok && (id.Name == "unshare" || vars[id.Name]) {
 		return true
 	}
 	lit, ok := a.(*ast.BasicLit)
 	return ok && lit.Value == `"unshare"`
+}
+
+// holdsSuccessLiteral19066 reports whether e contains a string literal naming
+// a child's success: "--- PASS: " or a "...PASSED..." sentinel.
+func holdsSuccessLiteral19066(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING &&
+			(strings.Contains(lit.Value, "--- PASS: ") || strings.Contains(lit.Value, "PASSED")) {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// packageLevelUserNSFlags19066 reports package-level var/const values in a
+// guarded package's test file that hold a literal user-namespace flag: the
+// census reads function bodies, so flags parked at package level would escape
+// it (#19066 Codex F3).
+func packageLevelUserNSFlags19066(fset *token.FileSet, file *ast.File) []string {
+	var out []string
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || (gd.Tok != token.VAR && gd.Tok != token.CONST) {
+			continue
+		}
+		ast.Inspect(gd, func(n ast.Node) bool {
+			if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING && isUserNSFlag19066(strings.Trim(lit.Value, "`\"")) {
+				out = append(out, fmt.Sprintf("%s: a package-level value holds the user-namespace flag %s; build re-exec flags inside the function with testguard.UnshareFlags(...) so the census can see them (#19066)",
+					fset.Position(lit.Pos()), lit.Value))
+			}
+			return true
+		})
+	}
+	return out
 }
 
 // holdsOSArgs0_19066 reports whether e contains os.Args[0] (or an ident in
@@ -301,6 +374,12 @@ func holdsOSArgs0_19066(e ast.Expr, vars map[string]bool) bool {
 		case *ast.Ident:
 			if vars[x.Name] {
 				found = true
+			}
+		case *ast.CallExpr:
+			if sel, ok := x.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Executable" {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" {
+					found = true
+				}
 			}
 		}
 		return !found
@@ -356,7 +435,22 @@ func TestPlainCommand(t *testing.T) {
 }
 func TestScriptChildIsOutOfScope(t *testing.T) {
 	_ = exec.Command("unshare", "-rn", "bash", "-c", "ip link")
-}`
+}
+func TestLogOnlyWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	if _, err := cmd.CombinedOutput(); err != nil { t.Fatal(err) }
+	t.Log("child PASSED")
+}
+func TestRenamedUnshare(t *testing.T) {
+	u, _ := exec.LookPath("unshare")
+	out, err := exec.Command(u, "-cn", os.Args[0], "-test.v").CombinedOutput()
+	testguard.RequireChildPass(t, "TestRenamedUnshare", out, err)
+}
+func TestWrapperSplitIsAKnownEscape(t *testing.T) {
+	out, err := childCommand19066(os.Args[0]).CombinedOutput()
+	if err != nil { t.Skipf("netns unavailable: %s", out) }
+}
+func childCommand19066(binary string) *exec.Cmd { return exec.Command("unshare", "-rn", binary) }`
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "fixture_test.go", src, 0)
 	if err != nil {
@@ -373,9 +467,28 @@ func TestScriptChildIsOutOfScope(t *testing.T) {
 		"TestBadSlice passes the user-namespace flag",
 		"TestNoWitness judges its re-executed child without a child-success witness",
 		"TestPlainCommand re-executes a test binary with exec.Command",
+		// Codex F3/F4: a log line is not a witness; a renamed unshare path
+		// and a -c cluster are still seen.
+		"TestLogOnlyWitness judges its re-executed child without a child-success witness",
+		"TestRenamedUnshare re-executes a test binary with exec.Command",
+		"TestRenamedUnshare passes the user-namespace flag \"-cn\"",
+		// TestWrapperSplitIsAKnownEscape: the helper has unshare but no
+		// os.Args, the parent the reverse, so neither is in scope. This is
+		// the documented limit (docs/testing.md); the row pins it so a
+		// census that starts catching it updates the docs too.
 	}
 	if len(got) != len(want) {
 		t.Fatalf("census found %d violations, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
+	}
+	pkgSrc := `package p
+var flags19066 = []string{"-rn"}
+var shellArgs19066 = []string{"-c", "true"}`
+	pf, err := parser.ParseFile(fset, "pkgflags_test.go", pkgSrc, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pv := packageLevelUserNSFlags19066(fset, pf); len(pv) != 1 || !strings.Contains(pv[0], `"-rn"`) {
+		t.Errorf("package-level flag census = %q, want exactly the \"-rn\" value (a shell's \"-c\" is not one)", pv)
 	}
 	for _, w := range want {
 		n := 0
@@ -439,6 +552,7 @@ func TestNetnsReexecCensus19066(t *testing.T) {
 		}
 		scanned++
 		violations = append(violations, netnsReexecViolations19066(fset, f)...)
+		violations = append(violations, packageLevelUserNSFlags19066(fset, f)...)
 	}
 	if scanned == 0 {
 		t.Fatal("census scanned no guarded test files")
