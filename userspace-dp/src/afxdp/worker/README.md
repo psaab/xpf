@@ -179,15 +179,49 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     Now:
     - a newly exposed head that is itself a blocked Close is marked at once,
       so it costs one permit try instead of a re-drain;
-    - each pass spends at most `CLOSE_PARK_PASS_BUDGET` (one ring,
-      `MAX_SESSION_DELTAS`) deltas of re-drain and overflow-suffix copying.
-      Past it, the pass returns to RX and the run carries over
+    - each pass charges its re-drain and overflow-suffix copying against
+      `CLOSE_PARK_PASS_BUDGET` (B, one ring, `MAX_SESSION_DELTAS`). Once
+      it is spent, the pass returns to RX and the run carries over
       (`ClosePermitBarrier::clear`), so the next pass parks the remaining
       blocked heads at once instead of holding RX for a fresh bound.
+    - **The bound is O(B + N + R) per pass, not "at most B"** (Codex
+      review of 661d9cb6ba). The budget is checked after work is done,
+      so one batch (256) and the second drain call overshoot it. A blocked
+      overflow attempt copies the remaining suffix, N, which can exceed the
+      ring, before it is charged. R is the parked-retry budget below; a
+      pass that applies pressure-shed cancellations also scans the parked
+      slot once.
+    - **Progress.** With stable permits and m blocked Closes ahead of a
+      non-Close delta, each park charges at most 257, so a budget-exhausting
+      pass parks at least 16. The delta retires within `ceil(m/16) + 1`
+      passes after the initial hold (at most 257 for a full ring). That is
+      a PASS bound, not a millisecond bound.
+    - **A budget yield is not a drained ring.** The overflow suffix runs
+      only once the ring is empty. When an overflow chunk's flush loses its
+      permit race and requeues into the ring, the rest of the suffix waits
+      too. So at most one 256-delta chunk is ever requeued, always into an
+      empty ring: no drop, no overtaking. The pass's FIRST ring drain is
+      what empties the ring, so the suffix still runs in the same pass
+      while RX refills the ring between passes.
 
-    The cost: with more blocked work than one budget, the deltas behind it
-    wait a pass or more while RX polls. Each tick also tries every parked
-    Close's permits twice, which is O(parked) while those permits stay held.
+    - **The order holds across a budget exit** (R13 N7 / R14 R1 on
+      661d9cb6ba). A pass that stops at its budget leaves deltas in the
+      ring, so the #10309 overflow suffix is deferred to a later pass
+      rather than run ahead of them. Otherwise a Close would overtake its
+      own session's older Open.
+    - Every parked Close is older than everything left in the ring (it was
+      the head when it parked), so the retry after the drains is safe even
+      with a non-empty ring.
+    - **The parked retry is bounded too** (R13 N8). The two retries of a
+      pass make at most `PARKED_RETRY_PASS_BUDGET` (256) permit tries and
+      retirements together. They walk the slot with a cursor, so a larger
+      backlog cycles over the following passes. Unbounded, 16,000 parked
+      Closes cost about 29 ms a tick.
+
+    The cost: with more blocked work than one budget, the Closes left in
+    the ring, the deferred overflow suffix and the parked Closes all wait
+    a pass or more while RX polls. A parked backlog over 256 retires over
+    several passes.
 
     A same-tuple reincarnation that overtakes it is safe:
     the flush's stale-incarnation fence makes the old Close's local teardown
@@ -218,11 +252,13 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
   - Each park logs one rate-limited `xpf-dp: wN: #19026 session close
     parked after N us` line, at most one per 10 s process-wide. The line
     names the tuple and a `TupleGate::probe()` of the holder class.
-  - **Residual: the parked tuple itself.** While a parked Close waits, RX
-    polls, so a packet of that one tuple can re-materialize a same-id row from
-    the still-published shared copy; that row outlives the Close and ages out
-    on its own idle timer (the #10419 hazard, for the parked tuple only;
-    #19047). Cycle 1 retired such a row with a bare
+  - **Residual: every Close that waits across an RX poll** (R14 R2 on
+    661d9cb6ba). That is the parked Closes, the Closes a budget exit leaves
+    in the ring, and a deferred overflow suffix. While one of them waits, RX
+    polls, so a packet of its tuple can re-materialize a same-id row from the
+    still-published shared copy. That row outlives the Close and ages out on
+    its own idle timer: the #10419 hazard, for those tuples (#19047, including
+    its `ha=[2,1]` same-id promote order). Cycle 1 retired such a row with a bare
     `DeleteSynced(key)`, which could delete a queued replacement incarnation
     (Codex R15 P1#4), so that mechanism was removed.
   - Before #19026 the skip was unbounded. Because the heartbeat is stored

@@ -273,6 +273,14 @@ pub(super) fn run_session_housekeeping(
         *deferred_expiry_overflow_deltas = expiry_overflow_deltas;
         return true;
     }
+    // #19026 (R13 N7 / R14 R1 on 661d9cb6ba): a pass that stopped at its
+    // parking budget returns with deltas still in the ring. The overflow
+    // suffix must not run ahead of them (a Close would overtake its own
+    // session's older Open/Update, the N2 order), so it waits for a later
+    // pass, exactly as on the HoldRx arm above.
+    if sessions.has_pending_deltas() {
+        *deferred_expiry_overflow_deltas = std::mem::take(&mut expiry_overflow_deltas);
+    }
     while !expiry_overflow_deltas.is_empty() {
         let Some(rest) = flush_overflow_chunks(
             sessions,
@@ -289,6 +297,13 @@ pub(super) fn run_session_housekeeping(
             break;
         };
         expiry_overflow_deltas = rest;
+        // A chunk's flush requeued into the (otherwise drained) ring: that is
+        // not a blocked head. The rest of the suffix waits for a later pass,
+        // behind the requeued chunk, which the final ring drain retires.
+        if sessions.has_pending_deltas() {
+            *deferred_expiry_overflow_deltas = expiry_overflow_deltas;
+            break;
+        }
         match close_barrier.on_blocked(
             sessions,
             &mut expiry_overflow_deltas,
@@ -341,7 +356,10 @@ pub(super) fn run_session_housekeeping(
     // before the drain only while the ring has room (a lost flush race must
     // be able to requeue them). A ring that is full again at every
     // housekeeping entry would postpone them without bound, so retry them
-    // once more here, after the drains made room.
+    // once more here, after the drains made room. This is safe even when a
+    // budget exit left deltas in the ring (R14 R1 corollary): every parked
+    // Close was the HEAD of its store when it parked, so it is older than
+    // everything still in the ring, and retiring it first keeps the order.
     retry_parked_closes(
         sessions,
         bindings,
@@ -360,9 +378,14 @@ pub(super) fn run_session_housekeeping(
 
 /// #19026: drain the ring, a blocked head first. Inside the RX bound a
 /// blocked Close holds the tick (`true`: skip RX, teardown first). Past it the
-/// blocked Close is parked and the drain continues in this same tick, so every
-/// delta behind it (including the other Closes, whose permits are free) is
-/// retired before RX polls: only the parked Close itself waits.
+/// blocked Close is parked and the drain continues in this same tick, so the
+/// deltas behind it (including the other Closes, whose permits are free)
+/// retire before RX polls, up to the pass's parking budget
+/// (`CLOSE_PARK_PASS_BUDGET`). Past the budget this returns `false` with
+/// deltas still in the ring: they, the parked Closes, and the caller's
+/// deferred overflow suffix all wait across the RX poll (R14 R2 on
+/// 661d9cb6ba; the #19047 exposure covers each of them, not only the parked
+/// tuple).
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 fn drain_ring_bounded(
     sessions: &mut crate::session::SessionTable,
@@ -474,9 +497,17 @@ fn flush_overflow_chunks(
             deltas,
             Some(&mut *sessions),
         );
+        let queued_before = sessions.pending_delta_count();
         flush_deltas(sessions, bindings, worker_lossless_wedged, &deltas[..handled]);
         if handled < deltas.len() {
             return Some(overflow[start + handled..].to_vec());
+        }
+        // #19026 (Codex review of 661d9cb6ba, P1): the flush lost a permit
+        // race and requeued this chunk into the ring. Stop here: the rest of
+        // the suffix is newer than that chunk (order), and stopping after one
+        // chunk keeps every requeue within the ring's room (no drop).
+        if sessions.pending_delta_count() > queued_before {
+            return Some(overflow[end..].to_vec());
         }
         start = end;
     }
@@ -522,18 +553,31 @@ fn retry_parked_closes(
                     .any(|(key, session_id)| *key == delta.key && *session_id == delta.session_id))
         });
     }
-    let parked = std::mem::take(&mut close_barrier.parked);
-    let mut still_parked = Vec::new();
-    for delta in parked {
+    // #19026 (R13 N8 on 661d9cb6ba): the retry is bounded per pass. At most
+    // `PARKED_RETRY_PASS_BUDGET` permit tries (and so retirements) across the
+    // pass's two calls, resuming where the last call stopped (a cursor over
+    // the slot; retirements `swap_remove`, so no call moves the whole slot).
+    // At 16,000 parked Closes the unbounded form cost about 29 ms a tick.
+    let limit = close_barrier.retry_limit();
+    let mut i = close_barrier.retry_cursor;
+    for _ in 0..limit {
         // #19026 (Codex review of bbe57884f2, P2#2): a retry whose flush loses
         // the permit race is requeued by the flush; with no ring room that
         // requeue drops it, and the retry below would read "not requeued" as
         // retired. Retry only with room; the ring drain later this tick makes
-        // room.
-        if !close_permits_available(&delta) || !sessions.delta_ring_has_room() {
-            still_parked.push(delta);
+        // room, and the retry after the drains uses it.
+        if close_barrier.parked.is_empty() || !sessions.delta_ring_has_room() {
+            break;
+        }
+        if i >= close_barrier.parked.len() {
+            i = 0;
+        }
+        close_barrier.spend_retry();
+        if !close_permits_available(&close_barrier.parked[i]) {
+            i += 1;
             continue;
         }
+        let delta = close_barrier.parked.swap_remove(i);
         let one = std::slice::from_ref(&delta);
         let handled = purge_queued_flows_for_closed_deltas(
             bindings,
@@ -546,7 +590,7 @@ fn retry_parked_closes(
             Some(&mut *sessions),
         );
         if handled == 0 {
-            still_parked.push(delta);
+            close_barrier.parked.push(delta);
             continue;
         }
         let queued_before = sessions.pending_delta_count();
@@ -557,11 +601,11 @@ fn retry_parked_closes(
             });
         if requeued {
             if let Some(back) = sessions.pop_front_delta() {
-                still_parked.push(back);
+                close_barrier.parked.push(back);
             }
         }
     }
-    close_barrier.parked = still_parked;
+    close_barrier.retry_cursor = i;
 }
 
 // #13075: the loop's `drain_and_flush_all!` macro as a fn (shared with

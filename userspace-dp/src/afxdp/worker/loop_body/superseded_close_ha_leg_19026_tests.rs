@@ -1114,3 +1114,82 @@ fn a_parked_close_progresses_while_every_ring_is_full_again_19026() {
     assert_eq!(quiet_rt, 1, "control: free permit and spare ring room retire A");
     assert_eq!(rt, 1, "a free parked Close must progress while later full rings drain");
 }
+
+// ---- Codex review of 661d9cb6ba (P1): a budget yield is not "ring drained".
+// Both cells were RED at 661d9cb6ba (runner-only probes from that review,
+// adopted unchanged apart from their names).
+
+fn budget_prefix_19026(w: &mut F1Worker, pairs: u16) -> Vec<SessionKey> {
+    let blocked: Vec<_> = (0..pairs).map(|i| f1_key(60_000 + i, 0)).collect();
+    for (i, key) in blocked.iter().enumerate() {
+        w.table.emit_close_delta_with_origin(
+            key.clone(), f1_decision(), f1_metadata(),
+            SessionOrigin::ForwardFlow, false, 0x1902_e000 + i as u64,
+        );
+        w.table.emit_open_delta_with_origin(
+            f1_key(62_100 + i as u16, 0), f1_decision(), f1_metadata(),
+            SessionOrigin::ForwardFlow, false,
+        );
+    }
+    blocked
+}
+
+#[test]
+fn a_budget_yield_never_lets_an_overflow_close_overtake_its_older_open_19026() {
+    let mut w = F1Worker::new();
+    let t0 = crate::afxdp::neighbor::monotonic_nanos();
+    let blocked = budget_prefix_19026(&mut w, 2047);
+    let x = f1_key(19_210, 0);
+    let id = w.install(&x, t0); // original Open(X) near the ring tail
+    w.table.emit_open_delta_with_origin(
+        f1_key(64_999, 0), f1_decision(), f1_metadata(),
+        SessionOrigin::ForwardFlow, false,
+    );
+    assert_eq!(w.table.pending_delta_count(), 4096);
+    w.table.delete(&x); // expiry boundary: local row gone, shared row remains
+    let mut producer = SessionTable::new();
+    producer.emit_close_delta_with_origin(
+        x.clone(), f1_decision(), f1_metadata(),
+        SessionOrigin::ForwardFlow, false, id,
+    );
+    w.overflow = producer.drain_deltas(1);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked).unwrap();
+    assert!(w.tick(t0 + 1));
+    for pass in 0..400u64 {
+        assert!(!w.tick(t0 + 1_000_001 + pass * 100_000));
+        if !w.table.has_pending_deltas() && w.overflow.is_empty() {
+            break;
+        }
+    }
+    drop(held);
+    assert!(!w.table.has_pending_deltas());
+    assert_eq!(w.table.delta_drops(), 0);
+    assert_eq!(w.ha_frames(&x), vec![1, 2],
+        "the original Open must precede its own expiry Close");
+}
+
+#[test]
+fn a_budget_yield_never_drops_a_requeued_overflow_chunk_19026() {
+    let mut w = F1Worker::new();
+    let t0 = crate::afxdp::neighbor::monotonic_nanos();
+    let victims: Vec<_> = (0..256u16).map(|i| f1_key(57_000 + i, 0)).collect();
+    for key in &victims { w.install(key, t0); }
+    w.export_ring();
+    assert_eq!(w.table.pending_delta_count(), 0);
+    for key in &victims { w.table.delete_with_control_close(key, 0); }
+    w.overflow = w.table.drain_deltas(256);
+    assert_eq!(w.overflow.len(), 256);
+    let blocked = budget_prefix_19026(&mut w, 2048);
+    assert_eq!(w.table.pending_delta_count(), 4096);
+    assert_eq!(w.table.delta_drops(), 0);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked).unwrap();
+    assert!(w.tick(t0 + 1));
+    // Ring prefixes contain only free Opens; the helper's first-Close
+    // race therefore targets the overflow chunk after its purge succeeds.
+    assert!(!w.tick_with_flush_race(t0 + 1_000_001));
+    let drops = w.table.delta_drops();
+    drop(held);
+    assert_eq!(drops, 0, "a budget yield must not discard overflow Closes");
+}

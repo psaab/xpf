@@ -1239,3 +1239,312 @@ fn parked_close_cancellations_are_scoped_and_consumed_19026() {
     h.tick(BASE_NS + 4*TICK_NS);
     assert_eq!(h.flushed_closes_for(&a), 1);
 }
+
+// ---- R14 review of 661d9cb6ba (delta af0ea8415c..661d9cb6ba) ----
+
+/// R14 (661d9cb6ba): `drain_ring_bounded` now returns `false` when the pass
+/// parking budget runs out with the ring still non-empty. The caller reads
+/// `false` as "ring drained" and runs the #10309 overflow suffix next, so an
+/// overflow Close(X) flushes AHEAD of its own older Open(X) still in the ring
+/// -- the Codex R15 P1#3 / R13 N2 order that
+/// `overflow_close_never_overtakes_its_own_older_open_19026` pins with ONE
+/// blocked head (under budget). Here 32 interleaved blocked heads (about 256
+/// re-drained deltas per park, so the budget runs out after about 16 parks)
+/// sit ahead of Open(X). At af0ea8415c the drain parks all 32 and retires
+/// Open(X) before the suffix: [Open, Close].
+#[test]
+fn budget_exit_never_lets_an_overflow_close_overtake_its_older_open_19026() {
+    let mut h = Harness19026::new();
+    let blocked: Vec<SessionKey> = (0..32u16).map(|i| key_19026(56_000 + i)).collect();
+    for (i, key) in blocked.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1902_e000 + i as u64);
+        h.queue_open(key_19026(57_000 + i as u16));
+    }
+    let x = key_19026(19_090);
+    h.queue_open(x.clone());
+    let mut p = 58_000u16;
+    while h.sessions.pending_delta_count() < 4096 {
+        h.queue_open(key_19026(p));
+        p += 1;
+    }
+    assert_eq!(h.sessions.pending_delta_count(), 4096, "FIXTURE: the ring is full");
+    let mut producer = SessionTable::new();
+    producer.emit_close_delta_with_origin(
+        x.clone(),
+        decision_19026(),
+        metadata_19026(),
+        SessionOrigin::ForwardFlow,
+        false,
+        0x1902_e090,
+    );
+    h.deferred_expiry_overflow_deltas
+        .push(producer.pop_front_delta().expect("FIXTURE: overflow close"));
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked.clone())
+        .expect("hold every blocked tuple");
+    let mut now = BASE_NS;
+    assert!(h.tick(now), "FIXTURE: the first blocked tick holds RX");
+    now += super::close_barrier::CLOSE_PERMIT_BARRIER_NS;
+    let mut first_pass_open_x = None;
+    for i in 0..64 {
+        h.tick(now);
+        if i == 0 {
+            first_pass_open_x = Some(
+                h.flushed
+                    .iter()
+                    .any(|d| d.key == x && d.kind == SessionDeltaKind::Open),
+            );
+        }
+        now += TICK_NS;
+    }
+    drop(held);
+    for _ in 0..4 {
+        h.tick(now);
+        now += TICK_NS;
+    }
+    let order: Vec<bool> = h
+        .flushed
+        .iter()
+        .filter(|d| d.key == x)
+        .map(|d| d.kind == SessionDeltaKind::Close)
+        .collect();
+    eprintln!(
+        "R14 budget-exit order: {order:?} parked_total={} first_pass_open_x={first_pass_open_x:?}",
+        h.close_barrier.parked_total
+    );
+    assert_eq!(
+        order,
+        vec![false, true],
+        "R14 (661d9cb6ba): a budget-exhausted pass must not run the overflow suffix ahead of \
+         an older Open of the same session still in the ring"
+    );
+}
+
+/// R13 N7 (D11 shape, inverted): 2,000 blocked Closes interleaved with free
+/// Opens, then Open(K) in the ring and Close(K) in the deferred #10309
+/// overflow suffix. Every pass exits on its parking budget with the ring
+/// non-empty, so the suffix must wait behind the ring: K's order is
+/// [Open, Close]. At 661d9cb6ba it was [Close, Open].
+#[test]
+fn budget_exit_defers_the_overflow_suffix_behind_the_ring_19026() {
+    let mut h = Harness19026::new();
+    let blocked: Vec<SessionKey> = (0..2000u16).map(|i| key_19026(30_000 + i)).collect();
+    for (i, key) in blocked.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1903_0000 + i as u64);
+        h.queue_open(key_19026(33_000 + i as u16));
+    }
+    let k = key_19026(19_091);
+    h.queue_open(k.clone());
+    let mut producer = SessionTable::new();
+    producer.emit_close_delta_with_origin(
+        k.clone(),
+        decision_19026(),
+        metadata_19026(),
+        SessionOrigin::ForwardFlow,
+        false,
+        0x1903_9091,
+    );
+    h.deferred_expiry_overflow_deltas
+        .push(producer.pop_front_delta().expect("FIXTURE: overflow close"));
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked.clone())
+        .expect("hold every blocked tuple");
+    let mut now = BASE_NS;
+    let mut ticks = 0;
+    while ticks < 400
+        && !h
+            .flushed
+            .iter()
+            .any(|d| d.key == k && d.kind == SessionDeltaKind::Close)
+    {
+        h.tick(now);
+        now += TICK_NS;
+        ticks += 1;
+    }
+    drop(held);
+    let order: Vec<SessionDeltaKind> = h
+        .flushed
+        .iter()
+        .filter(|d| d.key == k)
+        .map(|d| d.kind)
+        .collect();
+    assert_eq!(
+        order,
+        vec![SessionDeltaKind::Open, SessionDeltaKind::Close],
+        "R13 N7: a budget exit must not let the overflow Close overtake its older Open ({ticks} ticks)"
+    );
+}
+
+/// R13 N8: the parked retry is bounded per pass. 1,000 parked Closes, more
+/// than `PARKED_RETRY_PASS_BUDGET`. While their permits are held, each pass
+/// makes at most the budget's permit tries, not two walks of the slot.
+/// Once they free, each pass retires at most the budget, and the cursor
+/// cycles the whole slot within a few passes.
+#[test]
+fn the_parked_retry_is_bounded_per_pass_19026() {
+    let budget = super::close_barrier::PARKED_RETRY_PASS_BUDGET as u64;
+    let mut h = Harness19026::new();
+    let blocked: Vec<SessionKey> = (0..1000u16).map(|i| key_19026(36_000 + i)).collect();
+    for (i, key) in blocked.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1903_a000 + i as u64);
+    }
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(blocked.clone())
+        .expect("hold every blocked tuple");
+    let mut now = BASE_NS;
+    for _ in 0..30 {
+        h.tick(now);
+        now += TICK_NS;
+        if h.close_barrier.parked.len() == 1000 {
+            break;
+        }
+    }
+    assert_eq!(h.close_barrier.parked.len(), 1000, "FIXTURE: every Close parked");
+    for _ in 0..3 {
+        let before = h.close_barrier.retry_tries;
+        h.tick(now);
+        now += TICK_NS;
+        let tries = h.close_barrier.retry_tries - before;
+        assert!(tries <= budget, "R13 N8: {tries} parked permit tries in one pass, over {budget}");
+    }
+    drop(held);
+    let mut retired_total = 0u64;
+    for _ in 0..8 {
+        let before = h.flushed.len() as u64;
+        h.tick(now);
+        now += TICK_NS;
+        let retired = h.flushed.len() as u64 - before;
+        assert!(retired <= budget, "R13 N8: {retired} parked retirements in one pass, over {budget}");
+        retired_total += retired;
+    }
+    assert_eq!(retired_total, 1000, "the cursor cycles the whole slot: every parked Close retires");
+    assert!(h.close_barrier.parked.is_empty());
+}
+
+
+/// R13 N8 (the cursor): with more parked Closes than one pass's tries, the
+/// retry resumes where it stopped, so a Close parked last, whose permit
+/// frees while every earlier one stays blocked, still retires within a few
+/// passes. A retry restarting at the slot's head every pass would never
+/// reach it.
+#[test]
+fn the_parked_retry_cursor_reaches_every_parked_close_19026() {
+    let mut h = Harness19026::new();
+    let stuck: Vec<SessionKey> = (0..600u16).map(|i| key_19026(38_000 + i)).collect();
+    let last = key_19026(38_700);
+    for (i, key) in stuck.iter().enumerate() {
+        h.queue_close(key.clone(), 0x1903_c000 + i as u64);
+    }
+    h.queue_close(last.clone(), 0x1903_c700);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs(stuck.clone())
+        .expect("hold the stuck tuples");
+    let held_last = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([last.clone()])
+        .expect("hold the last tuple");
+    let mut now = BASE_NS;
+    for _ in 0..30 {
+        h.tick(now);
+        now += TICK_NS;
+        if h.close_barrier.parked.len() == 601 {
+            break;
+        }
+    }
+    assert_eq!(h.close_barrier.parked.len(), 601, "FIXTURE: every Close parked");
+    drop(held_last);
+    let mut passes = 0;
+    while h.flushed_closes_for(&last) == 0 && passes < 10 {
+        h.tick(now);
+        now += TICK_NS;
+        passes += 1;
+    }
+    drop(held);
+    assert_eq!(
+        h.flushed_closes_for(&last),
+        1,
+        "R13 N8: the cursor reaches the last parked Close within a few passes ({passes})"
+    );
+}
+
+/// Codex review of 661d9cb6ba (P1, the drop half), on a DRAINED ring. An
+/// overflow chunk whose flush loses the permit race is requeued into the
+/// ring. That is not a blocked head, because no permit is held, and the rest
+/// of the suffix is newer than that chunk. So the pass stops the suffix
+/// behind it: RX still polls, nothing parks, the final ring drain retires the
+/// chunk, and the next pass flushes the rest. Every Close flushes once, in
+/// suffix order. (Not continuing also keeps every requeue within the ring's
+/// room: one chunk always fits a drained ring.)
+#[test]
+fn a_requeued_overflow_chunk_stops_the_suffix_behind_it_19026() {
+    let mut h = Harness19026::new();
+    let keys: Vec<SessionKey> = (0..512u16).map(|i| key_19026(47_100 + i)).collect();
+    let mut producer = SessionTable::new();
+    for (i, key) in keys.iter().enumerate() {
+        producer.emit_close_delta_with_origin(
+            key.clone(),
+            decision_19026(),
+            metadata_19026(),
+            SessionOrigin::ForwardFlow,
+            false,
+            0x1902_f000 + i as u64,
+        );
+    }
+    h.deferred_expiry_overflow_deltas = producer.drain_deltas(4096);
+    assert_eq!(h.deferred_expiry_overflow_deltas.len(), 512, "FIXTURE: a two-chunk overflow suffix");
+    h.flush_requeues_remaining = Some(1);
+    let mut now = BASE_NS;
+    let skipped = h.tick(now);
+    assert_eq!(h.flush_requeues_remaining, Some(0), "FIXTURE: a flush lost the permit race");
+    assert!(!skipped, "a requeued chunk is not a blocked head: RX polls");
+    assert_eq!(h.close_barrier.parked.len(), 0, "nothing parks: no permit is held");
+    assert_eq!(
+        (h.flushed.len(), h.deferred_expiry_overflow_deltas.len()),
+        (256, 256),
+        "the final ring drain retires the requeued chunk; the rest of the suffix waits behind it"
+    );
+    for _ in 0..4 {
+        now += TICK_NS;
+        h.tick(now);
+    }
+    let order: Vec<u16> = h.flushed.iter().map(|d| d.key.src_port).collect();
+    let want: Vec<u16> = keys.iter().map(|k| k.src_port).collect();
+    assert_eq!(order, want, "every Close flushes once, in suffix order");
+}
+
+/// The first ring drain is what lets an overflow suffix run in the same
+/// pass. Since cycle 3 the suffix waits whenever the ring still holds deltas
+/// after that drain (R13 N7 / R14 R1). So without the drain, a ring that RX
+/// refills before every pass would defer the suffix for as long as traffic
+/// flows. Here RX queues one Open before every pass and no permit is held:
+/// the suffix still retires on the first pass, right after that pass's Open.
+#[test]
+fn an_overflow_suffix_retires_while_rx_refills_the_ring_every_pass_19026() {
+    let mut h = Harness19026::new();
+    let mut producer = SessionTable::new();
+    for i in 0..8u16 {
+        producer.emit_close_delta_with_origin(
+            key_19026(47_700 + i),
+            decision_19026(),
+            metadata_19026(),
+            SessionOrigin::ForwardFlow,
+            false,
+            0x1902_f700 + u64::from(i),
+        );
+    }
+    h.deferred_expiry_overflow_deltas = producer.drain_deltas(4096);
+    assert_eq!(h.deferred_expiry_overflow_deltas.len(), 8, "FIXTURE: an overflow suffix");
+    let mut now = BASE_NS;
+    for i in 0..4u16 {
+        h.queue_open(key_19026(47_800 + i));
+        assert!(!h.tick(now), "no permit is held: RX polls");
+        now += TICK_NS;
+    }
+    let kinds: Vec<bool> = h.flushed.iter().map(|d| d.kind == SessionDeltaKind::Close).collect();
+    assert_eq!(h.deferred_expiry_overflow_deltas.len(), 0, "the suffix retired while RX kept the ring busy");
+    assert_eq!(
+        kinds.iter().position(|close| *close),
+        Some(1),
+        "the suffix retires on the first pass, right after the Open RX queued before it"
+    );
+    assert_eq!(kinds.iter().filter(|close| **close).count(), 8, "every Close flushes once");
+}
