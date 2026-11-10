@@ -629,6 +629,15 @@ pub struct Coordinator {
     /// parallel tests never race.
     #[cfg(test)]
     pub(crate) cos_owner_at_forwarding_publish: Option<BTreeMap<(i32, u8), u32>>,
+    /// #19034 test seam (Codex review F6-1, absent from release builds): a
+    /// barrier the snapshot refresh calls right after its early neighbor
+    /// rotation (rows removed, changed shards bumped) and BEFORE it publishes
+    /// the new view. A cell captures there the epoch snapshot a worker tick
+    /// would take at that moment, while the published view is still the old
+    /// one.
+    #[cfg(test)]
+    pub(crate) after_neighbor_rotation_19034:
+        Option<Box<dyn FnMut(&crate::afxdp::ShardedNeighborMap) + Send + Sync>>,
     /// #6592 test seam (per-instance, NOT a process-global), inherited from
     /// the #6291 `validation_at_forwarding_publish` it replaces. Under
     /// `cfg(test)`, `publish_runtime_view` records the coordinator's INTENDED
@@ -776,6 +785,8 @@ impl Coordinator {
             synced_import_cap_override: Arc::clone(&synced_import_cap_override),
             #[cfg(test)]
             cos_owner_at_forwarding_publish: None,
+            #[cfg(test)]
+            after_neighbor_rotation_19034: None,
             #[cfg(test)]
             runtime_view_at_publish: None,
             #[cfg(test)]

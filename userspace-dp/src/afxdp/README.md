@@ -2515,7 +2515,8 @@ own view's flow-cache entry:
       row, or a withdrawn static-only key, moved no epoch. Only the
       refresh's bump of every manager key hid that, and #19034 removed that
       bump.
-    - The worker stamps every flow-cache seed from an epoch snapshot taken
+    - The worker stamps every neighbor-dependent forwarding seed (deny seeds
+      carry no epoch) from an epoch snapshot taken
       once per tick, BEFORE the tick's view load
       (`worker/loop_body/reconcile.rs`,
       `snapshot_epochs_then_refresh_view`). Go's push and
@@ -2524,7 +2525,10 @@ own view's flow-cache entry:
       epoch with the view the tick had already loaded (R4 review of
       b5a55949e3).
     - A genuine MAC change or removal still bumps, and a held pass still
-      drops the backlog of a flow whose next hop really moved.
+      drops the backlog of a flow whose next hop really moved. That
+      includes an entry a worker seeded under the old view in the middle of
+      a snapshot refresh: the refresh bumps its changed keys once with the
+      row removals and again after it publishes (Codex review F6-1).
     - Residual, pre-existing and not changed by #19034 (#19078): a tunnel
       flow whose OUTER route is ECMP with only one member's neighbor in the
       dynamic map stamps the shard of the member a static-only re-resolution

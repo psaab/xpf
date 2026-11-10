@@ -424,6 +424,10 @@ impl super::Coordinator {
         self.neighbors
             .dynamic
             .bulk_remove_manager_keys(&remove_keys, &changed);
+        #[cfg(test)]
+        if let Some(hook) = self.after_neighbor_rotation_19034.as_mut() {
+            hook(&self.neighbors.dynamic);
+        }
         // #1873 R-D (Codex code r3): captured BEFORE the overwrite —
         // gates the new-appearance purge arm below. False only when no
         // coordinator apply has ever installed a snapshot (disarmed
@@ -657,12 +661,23 @@ impl super::Coordinator {
         // stamps from its tick's pre-view-load snapshot
         // (`BindingWorker::tick_neighbor_epochs`), so a stamp that shows this
         // bump implies the new links (R4 review of b5a55949e3).
+        //
+        // The changed neighbor keys are bumped AGAIN here (Codex review F6-1).
+        // Their early bump above, in `bulk_remove_manager_keys`, has to stay:
+        // a removed dynamic row must never leave silently. But it lands
+        // BEFORE this publish. A worker tick whose snapshot falls between the
+        // two loads the old view, seeds the old resolution with the
+        // early-bump epoch, and keeps it. An ordinary G+1 pass never hits
+        // that G entry, but a #18560 held pass under the retained old view
+        // does, for up to MATCHED_VIEW_GRACE_NS. This post-publish bump
+        // (Release, like the other publishers) makes that entry stale. Only
+        // changed keys are bumped; unchanged manager keys still are not.
+        let mut published_changes =
+            fabric_changed_neighbor_keys(&old_fabrics, &self.forwarding.fabrics);
+        published_changes.extend(changed.iter().copied());
         self.neighbors
             .dynamic
-            .bump_resolution_changed(&fabric_changed_neighbor_keys(
-                &old_fabrics,
-                &self.forwarding.fabrics,
-            ));
+            .bump_resolution_changed(&published_changes);
         // #15188 (C08-02): the publish above shipped this apply's single-use
         // rename metadata on its clone. Strip the retained copies now so a
         // later helper-internal republish (neighbor push, HA fabric refresh)

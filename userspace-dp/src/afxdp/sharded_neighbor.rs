@@ -550,7 +550,8 @@ impl ShardedNeighborMap {
     /// NUM_SHARDS loads.
     ///
     /// #19034 (R4 review of b5a55949e3): the worker loop takes this once per
-    /// tick, BEFORE the tick's `RuntimeView` load, and every descriptor of
+    /// tick, BEFORE the tick's `RuntimeView` load, and every
+    /// neighbor-dependent forwarding seed of
     /// the tick stamps from it (`BindingWorker::tick_neighbor_epochs`). The
     /// loads are Acquire and every bump is Release. So a stamp that already
     /// shows a bump made after a coordinator publish implies the tick's view

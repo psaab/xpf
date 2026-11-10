@@ -1898,3 +1898,197 @@ fn tick_epoch_snapshot_precedes_the_view_load_19034() {
         "the epoch snapshot loads Acquire"
     );
 }
+
+/// Where the worker tick that seeds the flow takes its epoch snapshot,
+/// relative to a snapshot refresh that changes the gateway (Codex review of
+/// 57dbf877ff, F6-1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RotationTick19034 {
+    /// Between the refresh's early neighbor rotation (changed shards bumped)
+    /// and its view publication. The tick still loads the OLD view.
+    BetweenRotationAndPublish,
+    /// Before the refresh started.
+    BeforeRefresh,
+}
+
+/// #19034, F6-1 scenario: an established flow; a same-plan snapshot moves the
+/// gateway to a permanent MAC B (the fence accepts a permanent row
+/// directly). A worker tick takes its epoch snapshot at `tick`, loads the
+/// old view V0 (static A), and seeds the flow's next packet under it. Returns
+/// the fixture, the coordinator's map, V0, V1 (V0 with the gateway on B) and
+/// the two MACs.
+fn refresh_straddle_19034(
+    tick: RotationTick19034,
+) -> (
+    GreFixture,
+    Arc<ShardedNeighborMap>,
+    Arc<ForwardingState>,
+    Arc<ForwardingState>,
+    [u8; 6],
+    [u8; 6],
+) {
+    let mut fx = udp_flow_fixture();
+    let v0 = Arc::clone(&fx.forwarding);
+    let (gateway, entry) = gateway_19034(&fx);
+    let mut mac_b = entry.mac;
+    mac_b[5] ^= 0x01;
+    let mut snapshot = nat_snapshot_with_fabric();
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("first apply");
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    let ha = txn_ha_state();
+    let batch = run_pass_neigh(&mut fx, &v0, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(batch.session_creates >= 1, "premise: the flow is established under 7/9");
+
+    let row = snapshot
+        .neighbors
+        .iter_mut()
+        .find(|row| row.ifindex == gateway.0 && row.ip.parse::<IpAddr>().ok() == Some(gateway.1))
+        .expect("premise: the snapshot names the gateway");
+    row.mac = mac_text_19034(mac_b);
+    row.state = "permanent".to_string();
+    snapshot.generation += 1;
+
+    let epoch_before = dynamic.mac_change_epoch_for(&gateway);
+    let captured: Arc<Mutex<Option<crate::afxdp::sharded_neighbor::ShardEpochSnapshot>>> =
+        Arc::new(Mutex::new(None));
+    match tick {
+        RotationTick19034::BeforeRefresh => {
+            *captured.lock().unwrap() = Some(dynamic.snapshot_shard_epochs());
+        }
+        RotationTick19034::BetweenRotationAndPublish => {
+            let slot = Arc::clone(&captured);
+            coordinator.after_neighbor_rotation_19034 = Some(Box::new(move |dynamic| {
+                *slot.lock().unwrap() = Some(dynamic.snapshot_shard_epochs());
+            }));
+        }
+    }
+    coordinator
+        .refresh_runtime_snapshot(&snapshot)
+        .expect("refresh naming a permanent B");
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(gateway.0, gateway.1),
+        Some(mac_b),
+        "premise: the published static table resolves B"
+    );
+    let tick_epochs = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("premise: the worker tick took its snapshot");
+    if tick == RotationTick19034::BetweenRotationAndPublish {
+        assert_ne!(
+            tick_epochs.epoch_for(&gateway),
+            epoch_before,
+            "premise: the tick's snapshot already shows the refresh's early bump"
+        );
+    }
+
+    // That tick loaded V0 (nothing published yet) and seeds under it.
+    fx.binding.tick_neighbor_epochs = Some(tick_epochs);
+    run_pass_neigh(&mut fx, &v0, STAMPED, PassView::current(), true, &ha, &dynamic);
+    assert!(
+        txn_flow_cache_entries(&fx.binding) > 0,
+        "premise: the flow seeds under the old view with MAC A"
+    );
+    let v1 = Arc::new({
+        let mut forwarding = (*v0).clone();
+        forwarding.neighbors.insert(gateway, NeighborEntry { mac: mac_b });
+        forwarding
+    });
+    (fx, dynamic, v0, v1, entry.mac, mac_b)
+}
+
+/// #19034, Codex review of 57dbf877ff F6-1, end to end. The snapshot
+/// refresh's early neighbor rotation bumps the changed gateway's shard
+/// BEFORE the new view is published. A worker tick between the two
+/// snapshots that epoch, loads the old view, and seeds MAC A with it. The G
+/// entry then serves the flow's queued G packets in a #18560 held pass
+/// under the retained old view. The refresh therefore bumps the changed keys
+/// again after the publish, and the held pass must drop every packet and
+/// send none to A. Without the post-publish bump the entry stays current
+/// and all three go to A.
+#[test]
+fn held_pass_drops_a_seed_that_straddled_a_refresh_publish_19034() {
+    let (mut fx, dynamic, v0, _v1, mac_a, _mac_b) =
+        refresh_straddle_19034(RotationTick19034::BetweenRotationAndPublish);
+    let views = views_with(STAMPED, &v0, NEWER);
+    let ha = txn_ha_state();
+    for _ in 0..3 {
+        run_pass_neigh(
+            &mut fx,
+            &v0,
+            NEWER,
+            PassView {
+                prev_views: Some(&views),
+                held_pass: false,
+                view: None,
+            },
+            true,
+            &ha,
+            &dynamic,
+        );
+    }
+    assert_eq!(fx.binding.view_held.len(), 3, "premise: three 7/9 packets are parked");
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, mac_a, "seed that straddled the refresh's publish");
+}
+
+/// F6-1 control 1 (Codex): an entry seeded from a snapshot taken BEFORE the
+/// refresh's early bump is evicted as well; the held pass drops.
+#[test]
+fn held_pass_drops_a_seed_from_before_the_refresh_19034() {
+    let (mut fx, dynamic, v0, _v1, mac_a, _mac_b) =
+        refresh_straddle_19034(RotationTick19034::BeforeRefresh);
+    let views = views_with(STAMPED, &v0, NEWER);
+    let ha = txn_ha_state();
+    for _ in 0..3 {
+        run_pass_neigh(
+            &mut fx,
+            &v0,
+            NEWER,
+            PassView {
+                prev_views: Some(&views),
+                held_pass: false,
+                view: None,
+            },
+            true,
+            &ha,
+            &dynamic,
+        );
+    }
+    assert_eq!(fx.binding.view_held.len(), 3, "premise: three 7/9 packets are parked");
+
+    run_held_19034(&mut fx, &views, &dynamic);
+    assert_held_backlog_dropped_19034(&fx, mac_a, "seed from before the refresh");
+}
+
+/// F6-1 control 2 (Codex): an ordinary G+1 packet never hits the G entry the
+/// straddling tick seeded (the flow-cache stamp carries the generation pair),
+/// so it re-resolves under the new view and is sent to B, with or without the
+/// post-publish bump.
+#[test]
+fn next_generation_packet_misses_a_straddled_seed_19034() {
+    let (mut fx, dynamic, _v0, v1, mac_a, mac_b) =
+        refresh_straddle_19034(RotationTick19034::BetweenRotationAndPublish);
+    let ha = txn_ha_state();
+    // A G+1 packet: the shim stamps it with the new generation pair.
+    fx.meta.config_generation = NEWER.config_generation;
+    fx.meta.fib_generation = NEWER.fib_generation;
+    fx.binding.tick_neighbor_epochs = Some(dynamic.snapshot_shard_epochs());
+    fx.binding.scratch.scratch_forwards.clear();
+    run_pass_neigh(&mut fx, &v1, NEWER, PassView::current(), true, &ha, &dynamic);
+    assert_eq!(
+        held_forwards_19034(&fx, mac_a).1,
+        0,
+        "a G+1 packet must not be served the G entry's MAC A"
+    );
+    assert_eq!(
+        held_forwards_19034(&fx, mac_b),
+        (1, 1),
+        "a G+1 packet is sent to the gateway's current MAC"
+    );
+}
