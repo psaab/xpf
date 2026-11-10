@@ -15,7 +15,8 @@
 #
 #   --runner   test-runner instance (default: $XPF_TEST_RUNNER, else
 #              udp:xpf-testrunner). The provisioned runners are
-#              tcp:xpf-testrunner and udp:xpf-testrunner.
+#              tcp:xpf-testrunner{,2} and udp:xpf-testrunner{,2,3}
+#              (docs/testing.md has the current list).
 #   --name     per-lane directory on the runner (default: the worktree's
 #              basename). Source lands in /work/<name>/src; cargo output in
 #              /work/<name>/target, so incremental builds persist per lane.
