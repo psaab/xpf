@@ -1397,8 +1397,19 @@ goes through `getSessionSync()` / `snapshotFabricRefreshChans()` /
     takes the same lock, the stop holds that lock from its re-capture through
     the finalizer, and only `publishSessionSyncIfCurrent` (gen-gated) publishes
     a session.
-  - A false return means a successor owns comms, so the caller must not start
-    them again.
+  - A true return records that THIS stop owned teardown and ran `finalize`.
+    It does NOT reserve comms until the caller's later start:
+    `clusterCommsLifecycleMu` is released before the function returns, and
+    step 20 starts comms afterwards (`startClusterCommsForCurrentConfig`,
+    `daemon_apply_tail.go`). A false return means a newer stop or a successor
+    epoch owned teardown, so the caller must not start comms again (Codex
+    review §3 / D2 on #19067).
+  - What serializes the COMPLETE stop/start pair is `applySem`, a capacity-1
+    `semaphore.NewWeighted(1)` (`daemon.go`). Step 20 runs under it, and so do
+    commits (`daemon_apply_commit.go`), background applies (`daemon_apply.go`)
+    and the mgmt-VRF reasserter (`mgmt_vrf_reassert_11448.go`). No second
+    applier can interleave a stop or start between this stop's return and the
+    caller's start.
   - Its callers clear the fabric-segment watcher through it
     (`stopClusterCommsAndClearFabricWatcher`):
     - step 20's `removingFabric` arm, which restarts comms only on a true

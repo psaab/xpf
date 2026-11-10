@@ -22,12 +22,14 @@ import (
 // until the process restarted.
 //
 // The 7072/7901 cells drive step 20 after an explicit stop, when no session is
-// published, so they could not see this. These cells publish a live session
-// first, which is the production shape: comms are up when a commit moves the
-// transport.
+// published, so they could not see this. These cells publish a session OBJECT
+// first (the production shape is comms up when a commit moves the transport).
+// What they assert is the published session object and the step-20 restart
+// call count: the fixture never calls SessionSync.Start, opens no socket, and
+// "restart" is a counting startClusterCommsFn hook (Codex F2).
 
-// fabriclessEpoch19067 returns a daemon whose running comms epoch published the
-// transport key `active` and a live session-sync object, plus a counter of
+// fabriclessEpoch19067 returns a daemon whose comms epoch published the
+// transport key `active` and a (never started) session-sync object, plus a counter of
 // step-20 restarts and an armed fabric watcher that step 20 must clear when the
 // config carries no fabric.
 func fabriclessEpoch19067(t *testing.T, active clusterTransportKey) (*Daemon, *int, *fabricsegment.Monitor) {
@@ -125,13 +127,25 @@ func TestFabriclessOwedRestartRunsWithLiveSession19067(t *testing.T) {
 // no successor epoch can begin inside that window, and the guard is therefore
 // invariantly true when reached. The test parks the stop INSIDE the window
 // (after its d.sessionSync clear, at stopSyncReadyTimer, by holding
-// syncReadyTimerMu) and starts a successor:
-//   - the successor must not begin until the stop finishes;
-//   - the stop must report success and run its finalizer exactly once;
+// syncReadyTimerMu) and makes a successor CONTEND for it (Codex D3: the
+// contention must be proven, not left to the scheduler):
+//   - the successor signals just before it calls beginClusterCommsEpoch, and
+//     the test waits for that signal while the stop is still parked; a cell
+//     that never sees the attempt inside the window FAILS ("did not exercise
+//     contention") instead of passing;
+//   - while still parked, the comms generation must not advance for 2 s: the
+//     successor is blocked on the lifecycle lock;
+//   - after release, the stop reports success with exactly one finalizer run,
+//     and the successor's begin completes only after the stop returned;
 //   - had a successor begun inside the window, the stop must NOT report
 //     success, or step 20 would start comms a second time.
 func TestStopWindowSerializesSuccessor19067(t *testing.T) {
 	d, _, _ := fabriclessEpoch19067(t, clusterTransportKey{ControlInterface: "em0", PeerAddress: "10.99.0.2"})
+	gen := func() uint64 {
+		d.clusterCommsMu.Lock()
+		defer d.clusterCommsMu.Unlock()
+		return d.clusterCommsGen
+	}
 
 	d.syncReadyTimerMu.Lock()
 	parked := true
@@ -153,19 +167,31 @@ func TestStopWindowSerializesSuccessor19067(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
+	stopGen := gen()
 
+	attempting := make(chan struct{})
 	successorBegan := make(chan context.CancelFunc, 1)
 	go func() {
+		close(attempting)
 		_, _, cancel := d.beginClusterCommsEpoch(context.Background())
 		successorBegan <- cancel
 	}()
-	beganInWindow := false
 	select {
-	case cancel := <-successorBegan:
-		beganInWindow = true
-		t.Errorf("a successor epoch began inside the stop's teardown window: beginClusterCommsEpoch must wait for clusterCommsLifecycleMu, which the stop holds through its guard and finalizer (#19067)")
-		defer cancel()
-	case <-time.After(200 * time.Millisecond):
+	case <-attempting:
+	case <-time.After(5 * time.Second):
+		t.Fatal("did not exercise contention: the successor never attempted beginClusterCommsEpoch while the stop was parked")
+	}
+	beganInWindow := false
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if gen() != stopGen {
+			beganInWindow = true
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if beganInWindow {
+		t.Errorf("a successor epoch began inside the stop's teardown window (generation %d -> %d while the stop was parked): beginClusterCommsEpoch must wait for clusterCommsLifecycleMu, which the stop holds through its guard and finalizer (#19067)", stopGen, gen())
 	}
 
 	d.syncReadyTimerMu.Unlock()
@@ -176,13 +202,11 @@ func TestStopWindowSerializesSuccessor19067(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("the parked stop did not finish after its window was released")
 	}
-	if !beganInWindow {
-		select {
-		case cancel := <-successorBegan:
-			defer cancel()
-		case <-time.After(5 * time.Second):
-			t.Fatal("the successor never began after the stop finished")
-		}
+	select {
+	case cancel := <-successorBegan:
+		defer cancel()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the successor never began after the stop finished")
 	}
 
 	if beganInWindow {
@@ -221,14 +245,21 @@ func TestBootstrapTeardownWithLiveSessionClearsWatcher19067(t *testing.T) {
 	if *restarts != 0 {
 		t.Errorf("bootstrap teardown restarted comms %d times, want 0 (it is a stop-without-start)", *restarts)
 	}
+	if d.clusterCommsEpochActive() {
+		t.Error("bootstrap teardown left a comms epoch active")
+	}
 	if !d.takeClusterCommsRestartNeeded() {
 		t.Error("bootstrap teardown did not owe the #7901 restart")
 	}
 }
 
-// TestFabriclessStartupEpochWithoutKeyRestartsComms19067: startup can publish
-// an epoch (and its session) before its transport key. Step 20's zero-key
-// branch joins that epoch and must start comms for the current config.
+// TestFabriclessStartupEpochWithoutKeyRestartsComms19067 is SYNTHETIC
+// coverage of step 20's zero-key branch (Codex F2): an epoch with a published
+// session but no transport key. Production startClusterComms publishes the key
+// (setActiveTransportIfCurrent, daemon_ha_sync.go:1781) BEFORE the constructor
+// publishes the session (publishSessionSyncIfCurrent, :1940), so this cell does
+// not reproduce a real startup ordering; it pins that the branch, if reached
+// with a session, still joins the epoch and starts comms for the current config.
 func TestFabriclessStartupEpochWithoutKeyRestartsComms19067(t *testing.T) {
 	d, restarts, mon := fabriclessEpoch19067(t, clusterTransportKey{})
 	if d.activeTransport() != (clusterTransportKey{}) {
