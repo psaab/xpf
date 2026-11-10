@@ -2170,9 +2170,12 @@ Each carries a RED-on-revert unit test.
     waking class is served in the step its first frame arrives in the
     serial simulation: the enqueue publishes the backlog, which turns the
     peers' floor on. Concurrently, a peer that sampled "idle" just before
-    the publish can still take the pool, which costs the first frame up to
-    one 50 µs wheel tick (the gate is a policy on observed demand, not an
-    atomic enqueue-to-grant invariant). The 1 ms hold bridges the gaps of a
+    the publish can still take the pool (the gate is a policy on observed
+    demand, not an atomic enqueue-to-grant invariant), and the first frame
+    root-parks. Its wake follows the root rate and the byte deficit,
+    rounded up to 50 µs ticks, then the worker's next poll: within a tick
+    at 25 Gb/s with 1 µs polls (R4's measured floor-off fixture, at most
+    50 µs), but 30 ticks at a 1 MB/s root, and longer under slow polls. The 1 ms hold bridges the gaps of a
     class running below its rate, whose queue empties between frames;
     without it best-effort lost 2–5 Gb/s at 24 and 32 KB to refilling the
     pool past `F` on every toggle. 0.25, 1 and 4 ms were measured, and 1 ms

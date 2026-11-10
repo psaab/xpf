@@ -204,8 +204,8 @@ fn an_idle_exact_class_waking_beside_saturating_best_effort_is_served_at_once_18
 /// and each park cut surplus to the residual. So best-effort must carry at
 /// least 3.0 Gb/s at 12 KB, 9.0 at 16 KB, 10.5 at 24 KB, 12.0 at 32 KB and
 /// 16.0 at 96 KB, and the exact class its 8 Gb/s at every burst with no root
-/// park. Mutants: no hold (24 KB); no floor (16 KB, roughly halved); a floor
-/// 7x the frame (12 KB, zeroed).
+/// park. Mutants: no hold (24 and 32 KB); no floor (16 KB, 5.33-6.23, roughly
+/// halved); a floor 7x the frame (12 KB, 2.18-2.22, below 3.0).
 #[test]
 fn a_steady_exact_class_below_its_rate_keeps_the_floor_through_its_gaps_18748() {
     let mut failures = Vec::new();
