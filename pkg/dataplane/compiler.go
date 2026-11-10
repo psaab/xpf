@@ -155,13 +155,17 @@ func readRSSHashKey(source io.Reader) ([rssHashKeySize]byte, error) {
 }
 
 // rssHashKeyForBoot returns one cryptographically random key shared by every
-// interface for this dataplane process lifetime. Production callers cannot
-// configure a deterministic key; tests inject their fixed vector into
+// interface for the current BOOT: the first xpfd process of a boot draws it
+// and stores it on /run, and later processes in that boot reuse it, so an
+// xpfd restart, deploy or upgrade no longer moves flows between workers
+// (#19072; loadOrCreateBootRSSKey has the security argument). Before #19072
+// it was drawn per process. Production callers cannot configure a
+// deterministic key; tests inject their fixed vector into
 // configureRSSHashKeyWithKey where deterministic command/output assertions are
 // needed.
 func rssHashKeyForBoot() ([rssHashKeySize]byte, error) {
 	rssHashKeyOnce.Do(func() {
-		rssHashKey, rssHashKeyErr = readRSSHashKey(cryptorand.Reader)
+		rssHashKey, rssHashKeyErr = loadOrCreateBootRSSKey(rssBootKeyPath, rssBootIDPath, cryptorand.Reader)
 	})
 	return rssHashKey, rssHashKeyErr
 }
@@ -2493,7 +2497,9 @@ func (r *CompileResult) tuneInterfaceBuffers(link netlink.Link) {
 
 // configureRSSHashKey sets the per-boot Toeplitz key via ethtool -X. Sharing a
 // CSPRNG key across interfaces keeps each box's tuple-to-worker mapping stable
-// for its process lifetime without exposing a fleet-wide precomputable key.
+// for the whole boot (#19072) without exposing a fleet-wide precomputable key.
+// It runs on every CompileConfig, so it also puts this boot's key back over a
+// key set by hand.
 func configureRSSHashKey(name string) {
 	key, err := rssHashKeyForBoot()
 	if err != nil {

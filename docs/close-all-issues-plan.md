@@ -371,9 +371,11 @@ clearing `.configdb` does nothing, because `xpfd` loads the old
 - Roles settled: one primary per RG, sync Up, bulk primed, heartbeat
   sent/received advancing over two samples.
 - Key IDs from step 1 recorded (IDs only, never key material).
-- RSS key pinned and recorded (#19072). xpfd installs a new random RSS
-  key at every start and re-applies its own on every config commit, so
-  A/B arms otherwise get different flow-to-worker placement.
+- RSS key pinned and recorded (#19072). xpfd installs a random RSS key
+  per boot (per process on builds without #19072's fix) and re-applies
+  its own on every config commit, so A/B arms otherwise get different
+  flow-to-worker placement after any reboot (H1's crash) or on a build
+  without the fix.
   - Run `make cluster-rss-pin` (`test/incus/rss-pin.sh pin`) after the
     last config change (deploy, canonical reset, CoS apply) and before
     the first measured cell. `cluster-deploy-and-gate` already pins after

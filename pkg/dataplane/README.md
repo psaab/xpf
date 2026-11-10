@@ -2350,6 +2350,45 @@ compares verdicts, so the resolvable length is measured on both sides.
   interfaces are virtio with native XDP. Per-VF passthrough would need
   generic XDP and hit the iavf cliff.
 
+## RSS hash key: one random key per boot (#11057, #19072)
+
+`tuneInterfaceBuffers` programs the Toeplitz RSS key on every data interface
+(`configureRSSHashKey`, `ethtool -X <if> hkey`), and it does so on every
+`CompileConfig`, so it also puts the key back over one set by hand.
+
+- **Random, per box (#11057).** A fleet-wide hardcoded key let a remote
+  attacker precompute tuple-to-queue placement and aim a flood at one worker,
+  so the key comes from the CSPRNG and is never configurable in production.
+- **Per boot, not per process (#19072).** `rssHashKeyForBoot` used to draw
+  the key once per xpfd process. Every restart, deploy and upgrade therefore
+  moved every flow to another worker, and lab A/B arms differed in placement
+  by deploy rather than by build. Now the first xpfd process of a boot draws
+  the key and stores it in `/run/xpf/rss-hash-key` (mode 0600; the line is
+  `v1 <boot_id> <hex key>`). Later processes in the same boot reuse it
+  (`loadOrCreateBootRSSKey`, `rss_boot_key.go`).
+- **What still changes the key:**
+  - a reboot: `/run` is tmpfs, and a stored key for another `boot_id` is
+    ignored even where `/run` survives;
+  - a factory reset, which wipes `/run/xpf`.
+- **Not derived from `boot_id`.** Every local user can read `boot_id`, and it
+  travels in journal metadata (`_BOOT_ID`). An unkeyed derivation would be
+  predictable, and a keyed one would need a long-lived secret at rest.
+- **Trust.** A stored file that is not a regular file owned by xpfd's user,
+  or that has group or other permissions, is ignored and replaced: a planted
+  key is a known key. The unit keeps `/run/xpf` across stops
+  (`RuntimeDirectoryPreserve=yes`, `test/incus/xpfd.service`).
+- **Fallbacks.** With no readable `boot_id`, or no writable `/run/xpf`, the
+  process uses a fresh key of its own, which was the behaviour before #19072.
+  It is never a fixed key.
+- **Trade-off, accepted.** Placement that an attacker infers through a side
+  channel now holds until the next reboot instead of the next xpfd restart. A
+  restart was never a designed rotation.
+- **Tests.** The package `TestMain` points `rssBootKeyPath` at a temporary
+  directory, so no test writes `/run/xpf`.
+  `compiler_rss_boot_key_19072_test.go` pins the key as the same across
+  starts in one boot and different across boots, plus the trust and fallback
+  rules.
+
 ## Flow export ownership
 
 Flow export (NetFlow v9 / IPFIX) is owned by `pkg/flowexport` on the

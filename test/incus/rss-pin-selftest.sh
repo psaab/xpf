@@ -95,7 +95,7 @@ node() {
 key_of() { cat "$T/state/$1/eth/$2.key"; }
 
 # Two lab-shaped nodes: the virtio fabric parent (no key), two mlx5 data VFs
-# sharing xpfd's per-process random key, a VLAN child and fxp0.
+# sharing xpfd's random key, a VLAN child and fxp0.
 lab_nodes() {
 	node fw0 "ge-0-0-0:virtio_net=-" "ge-0-0-1:mlx5_core=$RANDKEY_A" "ge-0-0-2:mlx5_core=$RANDKEY_A" \
 		"ge-0-0-2.50:vlan=-" "fxp0:virtio_net=-"
