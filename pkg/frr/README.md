@@ -538,8 +538,16 @@ v2.1-v2.3 addenda):
     in-doubt lines, clears it (`resolveFastInDoubtLocked`).
   - Unrelated drift does not block the clear; the memory-only QNH overlay
     (#15183) is the case that matters.
-  - The diff matcher is pinned with real FRR 10.5.1 `--test` output in
-    `testdata/frr_reload_test_*_19050.txt`.
+  - The diff matcher is pinned with real `--test` output in
+    `testdata/frr_reload_test_<form>-<frr version>_19050.txt`. The fixture
+    loader checks that each file's `frr version` line matches its name.
+    - Captured so far: FRR 10.6.0 (loss).
+    - Still to come: 10.5.1, which udp and tcp run.
+    - On 10.6.0 a static's deletion prints as `no ip route ...` under
+      "Lines To Add", and a VRF static prints inside a `vrf NAME` ...
+      `exit` block. The matcher scans both sections, ignores a leading
+      `no `, and compares an indented line under `vrf NAME` in its
+      inline `... vrf NAME` form.
 - **Shutdown.** `fastStopped` and `fastWG.Add` are both taken under
   `retryMu`, the `retryEnabled` pattern. `Stop` sets the flag, cancels the
   lifetime context (which kills an in-flight batch), and joins.
