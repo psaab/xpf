@@ -241,9 +241,36 @@ run_cells() { # <library path>; every cell sources it in a subshell
 	out=$(bash -c 'source "$1"; rss_pin fw0 >/dev/null; rm -f "$2"; rss_verify fw0' _ "$lib" "$T/state/fw0/rss-required" 2>&1)
 	rc=$?
 	if ((rc == 2)) && grep -q 'no pin inventory' <<<"$out"; then
-		ok "verify: no pin inventory on the node (a reboot clears it) is rc 2, never success"
+		ok "verify: the inventory removed while the keys stay pinned is rc 2, never success"
 	else
 		bad "verify without an inventory: rc=$rc out=$out"
+	fi
+	# The true post-reboot state (Codex review of ae1e5dc3b2): /run lost the
+	# inventory AND xpfd programmed its own new key. Mismatch outranks the
+	# missing inventory, so this is rc 1, with both reported.
+	lab_nodes
+	out=$(bash -c 'source "$1"; rss_pin fw0 >/dev/null; rm -f "$2"; printf "%s\n" "$3" >"$4"; printf "%s\n" "$3" >"$5"; rss_verify fw0' \
+		_ "$lib" "$T/state/fw0/rss-required" "$RANDKEY_B" "$T/state/fw0/eth/ge-0-0-1.key" "$T/state/fw0/eth/ge-0-0-2.key" 2>&1)
+	rc=$?
+	if ((rc == 1)) && grep -q 'no pin inventory' <<<"$out" && grep -q 'ge-0-0-1 carries another key' <<<"$out"; then
+		ok "verify: after a reboot (inventory gone, xpfd's new key) it is rc 1 (mismatch outranks the missing inventory), both reported"
+	else
+		bad "verify after a reboot: rc=$rc out=$out"
+	fi
+	# Re-pin after the interface set changes: the inventory is rebuilt.
+	lab_nodes
+	bash -c 'source "$1"; rss_pin fw0' _ "$lib" >/dev/null 2>&1
+	rm -rf "$T/state/fw0/net/ge-0-0-2"
+	mkdir -p "$T/state/fw0/net/ge-0-0-3"
+	echo mlx5_core >"$T/state/fw0/eth/ge-0-0-3.driver"
+	printf '%s\n' "$RANDKEY_A" >"$T/state/fw0/eth/ge-0-0-3.key"
+	out=$(bash -c 'source "$1"; rss_verify fw0; echo "before=$?"; rss_pin fw0 >/dev/null; rss_verify fw0; echo "after=$?"' _ "$lib" 2>&1)
+	if grep -q '^before=1$' <<<"$out" && grep -q 'required interface ge-0-0-2 is missing' <<<"$out" &&
+		grep -q 'ge-0-0-3 carries another key' <<<"$out" && grep -q '^after=0$' <<<"$out" &&
+		[[ "$(tr '\n' ' ' <"$T/state/fw0/rss-required")" == "ge-0-0-1 ge-0-0-3 " ]]; then
+		ok "re-pin: after a VF is replaced, verify fails until a re-pin rebuilds the required set"
+	else
+		bad "re-pin after an interface change: $out inventory=$(cat "$T/state/fw0/rss-required" 2>&1)"
 	fi
 
 	# Review F2: the post-cell verdict.
@@ -427,6 +454,107 @@ else
 	fi
 fi
 
+
+# Review (Codex, ae1e5dc3b2): the post-cell verdict must be WIRED into the
+# real soak, and reach the ledger. Run the REAL rg-move-soak.sh from a copy
+# beside stub cluster-cell.sh / cluster-env.sh and a stub rg_move_soak.py
+# that writes result.json, prints the summary pair, and (optionally) puts
+# xpfd's key back on one VF mid-run. The real rss-pin.sh and the real
+# smoke-cells adapter (harness-result.sh) judge the outcome.
+soak_stub_tree() { # <soak script>
+	local d="$T/soakstub"
+	rm -rf "$d"
+	mkdir -p "$d"
+	cp "$1" "$d/rg-move-soak.sh"
+	cp "$LIB" "$d/rss-pin.sh"
+	printf '%s\n' 'xpf_enter_destructive_cluster_cell() { :; }' >"$d/cluster-cell.sh"
+	printf '%s\n' 'FW0=fw0 FW1=fw1 CLUSTER_LAN_HOST=lan IPERF_TARGET4=192.0.2.1 IPERF_TARGET6=' >"$d/cluster-env.sh"
+	cat >"$d/rg_move_soak.py" <<'PY'
+import json, os, sys
+args = sys.argv[1:]
+out = args[args.index("--outdir") + 1]
+rc = 0 if os.environ["STUB_SOAK_MODE"] == "pass" else 1
+drift = os.environ.get("STUB_SOAK_DRIFT", "")
+if drift:  # xpfd restored its own key on one VF during the cell
+    with open(drift, "w") as f:
+        f.write(os.environ["STUB_SOAK_DRIFT_KEY"] + "\n")
+with open(os.path.join(out, "result.json"), "w") as f:
+    json.dump({"summary": {"exit": rc}}, f)
+print("rg-move-soak: %d passed, %d failed, 0 cost (0 void)" % ((3, 0) if rc == 0 else (2, 1)))
+sys.exit(rc)
+PY
+}
+soak_run() { # <label> <pass|fail> <drift: yes|no> -> "rc verdict reason"
+	local label=$1 mode=$2 drift="" out="$T/soakout-$1" rc adapt
+	[[ "$3" == yes ]] && drift="$T/state/fw1/eth/ge-7-0-2.key"
+	lab_nodes
+	bash -c 'source "$1"; rss_pin fw0 fw1' _ "$LIB" >/dev/null 2>&1
+	rm -rf "$out"
+	(cd "$T/soakstub" && env XPF_RSS_PIN=1 SOAK_OUT="$out" STUB_SOAK_MODE="$mode" STUB_SOAK_DRIFT="$drift" \
+		STUB_SOAK_DRIFT_KEY="$RANDKEY_B" bash ./rg-move-soak.sh >"$T/soak-$label.log" 2>&1)
+	rc=$?
+	adapt=$(bash -c 'source "$1"; harness_adapt_smoke_cells "$2" "$3"' _ "$SCRIPT_DIR/harness-result.sh" "$rc" "$T/soak-$label.log" 2>/dev/null | tail -1)
+	printf '%s\t%s\n' "$rc" "$adapt"
+}
+soak_exit() { # <label> -> result.json summary.exit and rss.effect
+	python3 -I -c 'import json,sys; o=json.load(open(sys.argv[1])); print(o["summary"]["exit"], o.get("rss", {}).get("effect", "absent"))' \
+		"$T/soakout-$1/result.json" 2>&1
+}
+soak_cells() { # <soak script> -> 0 if every expectation held
+	local all=0 got rc verdict reason
+	soak_stub_tree "$1"
+	got=$(soak_run drift-pass pass yes)
+	IFS=$'\t' read -r rc verdict reason _ <<<"$got"
+	if [[ "$rc" == 2 && "$verdict" == VOID && "$reason" == *"ABORT_CAUSE=rss: the RSS pin did not hold"* &&
+		"$(soak_exit drift-pass)" == "2 PASS->VOID" ]]; then
+		ok "soak: a pin lost during a passing soak exits 2, result.json exit 2 (PASS->VOID), ledger row VOID with the rss reason"
+	else
+		bad "soak (drift, pass): rc=$rc verdict=$verdict reason=${reason:0:160} json=$(soak_exit drift-pass)"
+		all=1
+	fi
+	got=$(soak_run drift-fail fail yes)
+	IFS=$'\t' read -r rc verdict reason _ <<<"$got"
+	if [[ "$rc" == 1 && "$verdict" == FAIL && "$(soak_exit drift-fail)" == "1 kept rc=1" ]]; then
+		ok "soak: a FAILing soak whose pin also drifted stays FAIL (exit 1, ledger FAIL, result.json exit 1)"
+	else
+		bad "soak (drift, fail): rc=$rc verdict=$verdict reason=${reason:0:160} json=$(soak_exit drift-fail)"
+		all=1
+	fi
+	got=$(soak_run hold-pass pass no)
+	IFS=$'\t' read -r rc verdict reason _ <<<"$got"
+	if [[ "$rc" == 0 && "$verdict" == PASS && "$(soak_exit hold-pass)" == "0 none" ]]; then
+		ok "soak: a held pin keeps a passing soak PASS (exit 0, ledger PASS, rss recorded in result.json)"
+	else
+		bad "soak (held, pass): rc=$rc verdict=$verdict reason=${reason:0:160} json=$(soak_exit hold-pass)"
+		all=1
+	fi
+	return "$all"
+}
+soak_cells "$SCRIPT_DIR/rg-move-soak.sh"
+soak_mutant() { # <name> <old> <new>
+	local name=$1 before=$FAIL passed=$PASS
+	python3 -I - "$SCRIPT_DIR/rg-move-soak.sh" "$T/rg-move-soak.mut" "$2" "$3" <<'PY'
+import sys
+src, dst, old, new = sys.argv[1:5]
+t = open(src).read()
+assert t.count(old) == 1, ("anchor", old, t.count(old))
+open(dst, "w").write(t.replace(old, new))
+PY
+	if (($? != 0)); then
+		bad "mutant $name: anchor missing (VOID)"
+		return
+	fi
+	echo "--- mutant: $name"
+	soak_cells "$T/rg-move-soak.mut" >"$T/soak-mut.out" 2>&1
+	FAIL=$before PASS=$passed
+	if grep -q '^FAIL: soak (drift, pass)' "$T/soak-mut.out"; then
+		ok "mutant $name KILLED by: $(grep -m1 '^FAIL: soak (drift, pass)' "$T/soak-mut.out" | cut -c7-110)"
+	else
+		bad "mutant $name SURVIVED: $(grep -m2 '^FAIL:\|^PASS: soak' "$T/soak-mut.out" | tr '\n' ' ')"
+	fi
+}
+soak_mutant "soak never calls the post-cell verdict" $'\trss_post_cell_verdict "$rc" "$OUT/result.json" "$FW0" "$FW1"\n\trc=$?' $'\t:'
+soak_mutant "soak drops the post-cell verdict's status" $'\trss_post_cell_verdict "$rc" "$OUT/result.json" "$FW0" "$FW1"\n\trc=$?' $'\trss_post_cell_verdict "$rc" "$OUT/result.json" "$FW0" "$FW1"'
 
 # Mutation leg: each mutant must turn at least one cell red.
 mutant() { # <name> <python replace old> <new>

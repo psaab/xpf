@@ -31,9 +31,12 @@
 # that set to be present, keyed and pinned, and fails on any failed read
 # (#19072 review F3): a VF that vanishes or stops answering cannot drop out.
 #
-# Key material never leaves the node: records show PINNED (the pin key is
-# public), none, UNREADABLE or a sha prefix, and the raw `ethtool -x` dump in
-# $XPF_RSS_RECORD has its key line replaced the same way (review R2).
+# Keys are excluded from every record and artifact this tool emits (review
+# R2): records show PINNED (the pin key is public), none, UNREADABLE or a sha
+# prefix, and the `ethtool -x` dump appended to $XPF_RSS_RECORD has its key
+# line replaced the same way. The raw dump itself does cross `incus exec` to
+# the calling host, where it is parsed and redacted in memory before anything
+# is written or printed.
 #
 # CLI (instances default to $FW0 $FW1 from cluster-env.sh):
 #   rss-pin.sh record <label> [instance...]  read-only; one line per node,
@@ -49,7 +52,10 @@
 # Exit codes: 0 ok; 1 a required data interface is missing or does not carry
 # the key (or a set failed); 2 placement is uncontrolled (no keyed data
 # interface, or no pin inventory on the node); 3 a node or an interface could
-# not be read.
+# not be read. When several apply, 3 wins over 1, and 1 over 2. So after a
+# reboot (the inventory is on /run and gone, and xpfd has programmed its own
+# new key) verify is rc 1, or rc 3 if a read fails; rc 2 alone means the keys
+# still carry the pin but the inventory is missing, or nothing is keyed.
 #
 # Library: source it and call rss_record / rss_verify / rss_pin, and
 # rss_post_cell_verdict for a gate's post-cell check.
@@ -202,7 +208,7 @@ rss_record() {
 # other keyed interface carries it too, and no interface read failed.
 # rc 1: a required interface is missing or carries another key; 2: no
 # keyed data interface, or no pin inventory; 3: a node or interface could
-# not be read.
+# not be read. Precedence when several apply: 3, then 1, then 2.
 rss_verify() {
 	local inst dump pin tag name key state keyed req have r noinv unreadable=0 mismatch=0 nokey=0
 	pin=$(rss_pin_key)
