@@ -410,11 +410,18 @@ mod.rs for further file-level breakdown.
         "idle" after its hold expired, and acquires after a peer has
         enqueued and published exact work, still acquires against the
         whole pool and can empty it. The new exact frame then root-parks.
-        Its wake is computed from the root rate and the byte deficit,
-        rounded up to 50 us wheel ticks, and it is served at the worker's
-        next poll after that. So the delay is not bounded by one tick: at
-        25 Gb/s a 1,500-byte deficit refills within a tick, but at a
-        1 MB/s root it is 30 ticks, and a slow poll adds its period. The
+        Its wake (`estimate_cos_queue_wakeup_tick`) is the refill time of
+        the byte deficit at the root rate, rounded up to whole nanoseconds
+        and added to now. That deadline is converted to a 50 us wheel tick
+        by integer division, so it is floored, then clamped to at least the
+        next tick: `max(floor((now + refill) / 50 us), floor(now / 50 us)
+        + 1)`. The queue may become eligible up to a tick before the
+        estimated refill. The worker's next poll after that is a service
+        attempt, not a guarantee: if root credit is still short, the queue
+        parks again. So the delay is not bounded by one tick. At 25 Gb/s a
+        1,500-byte deficit refills in 480 ns and the queue is eligible at
+        the next tick. At a 1 MB/s root it refills in 1.5 ms, 30 ticks
+        later, and a slow poll adds its period. The
         serial simulation cannot interleave the race. Its floor-off column
         (the same root-park on every edge, at 25 Gb/s with 1 us polls)
         measured at most 50 us per edge (R4).
