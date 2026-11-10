@@ -12,8 +12,9 @@ import (
 	"time"
 
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // #16669 regression tests.
@@ -53,24 +54,11 @@ import (
 // enterPrivateNetns16669 moves the test goroutine into a fresh netns.
 func enterPrivateNetns16669(t *testing.T) {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current netns (%v)", err)
+	// #19088: EnterNewNetns restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	if _, err := testguard.EnterNewNetns(t); err != nil {
+		t.Skipf("cannot enter a private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
 	}
-	ns, err := netns.New()
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
-		t.Skipf("cannot create private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = netns.Set(orig)
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 }
 
 const stopWakeup16669InnerEnv = "XPF_16669_STOP_WAKEUP_INNER"

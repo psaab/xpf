@@ -5,12 +5,12 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
-	"runtime"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 func safeRxVlanPreconditionsForTest(string) (error, error) {
@@ -312,24 +312,11 @@ func TestInterfaceLinkRefreshAdoptsConflictRetryGeneration16153(t *testing.T) {
 }
 
 func TestInterfaceLinkRefreshUsesRealKernelLinkChurn11530(t *testing.T) {
-	runtime.LockOSThread()
-	original, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current network namespace: %v", err)
+	// #19088: EnterNewNetns restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	if _, err := testguard.EnterNewNetns(t); err != nil {
+		t.Skipf("cannot enter a private network namespace: %v", err)
 	}
-	private, err := netns.New()
-	if err != nil {
-		original.Close()
-		runtime.UnlockOSThread()
-		t.Skipf("cannot create private network namespace: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = netns.Set(original)
-		_ = private.Close()
-		_ = original.Close()
-		runtime.UnlockOSThread()
-	})
 
 	const name = "x11530"
 	create := func(mtu int) netlink.Link {

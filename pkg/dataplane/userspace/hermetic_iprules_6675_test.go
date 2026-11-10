@@ -49,7 +49,9 @@ func TestMain(m *testing.M) {
 	persistentNatLeaseGenerationPath11486 = filepath.Join(dir, "generation.json")
 	ruleListFn = func(int) ([]netlink.Rule, error) { return nil, nil }
 	ruleDSCPSelectorsFn = func(int) ([]routing.RuleDSCPSelector, error) { return nil, nil }
-	code := m.Run()
+	// #19088: after the tests, no OS thread may be left outside the
+	// package's network namespace (testguard.Run).
+	code := testguard.Run(m)
 	_ = os.RemoveAll(dir)
 	os.Exit(code)
 }

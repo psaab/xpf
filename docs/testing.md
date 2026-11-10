@@ -225,7 +225,8 @@ Incus cluster cells pass through `test/incus/with-cluster.sh`, which checks both
 The rule in the paragraph above (put a thread back before
 `runtime.UnlockOSThread`) is enforced, not just stated. #19049 fixed one
 site; a census of pkg/daemon, pkg/nftables and pkg/routing found the same
-error-path class in 14 files: a helper that unlocked after a failed restore,
+error-path class in 14 files, and pkg/dataplane/userspace, pkg/flowexport,
+pkg/lldp and pkg/snmp had six more helpers of the same shape: a helper that unlocked after a failed restore,
 after `netns.New` had unshared but failed to open the new namespace, or that
 restored to `/proc/self/ns/net` (the thread-group LEADER's namespace, not the
 calling thread's, `inNetns12034`).
@@ -240,7 +241,12 @@ calling thread's, `inNetns12034`).
   restores a partial create instead of just unlocking. `EnterNetns` joins an
   existing one (a subtest joining its parent's).
 - **The runtime guard** (`testguard.Run`, called from the TestMain of
-  pkg/daemon, pkg/nftables and pkg/routing). After the tests it requires
+  pkg/daemon, pkg/nftables, pkg/routing, pkg/dataplane/userspace,
+  pkg/flowexport, pkg/lldp, pkg/nfqueue and pkg/snmp: every package whose
+  tests switch a thread's network namespace in-process or re-exec themselves
+  into one. pkg/nfqueue's TestMain gains only the guard, not #18038's
+  `ExitIfUnsafe`: its kernel cells run in a re-executed `unshare -Urn` child,
+  and the guard covers that child's process too). After the tests it requires
   every OS thread of the test binary to be back in the namespace the package
   started in, polling up to 5 s, and fails the package otherwise, naming each
   thread and its namespace. New sites are caught by what they do, not by a
@@ -249,7 +255,7 @@ calling thread's, `inNetns12034`).
   that failed for any reason but the thread exiting, or a census that
   inspected no thread is an error, never "clean".
 - **The static guard** (`testguard.CheckNetnsThreadDiscipline`, one
-  `TestNetnsThreadDiscipline19088` cell per package). The runtime guard sees
+  `TestNetnsThreadDiscipline19088` cell in each of those packages). The runtime guard sees
   only the paths a run took; the error arms run only when a restore or an
   open fails. So a `_test.go` file that switches a thread's namespace
   (`netns.New/NewNamed/Set/Setns`, `unix.Setns/Unshare`, `syscall.Unshare`,
@@ -258,10 +264,6 @@ calling thread's, `inNetns12034`).
   `/proc/self/ns/`. A switch made while a helper already holds the thread (an
   inner `netns.Set` under `EnterNewNetns`) is allowed: the helper's `Release`
   restores whatever it left.
-
-Other packages that switch namespaces in tests (pkg/dataplane/userspace,
-pkg/flowexport, pkg/lldp, pkg/nfqueue, pkg/snmp) are not yet under either
-guard.
 
 ### A test that arms a commit-confirmed window must disarm it (#19089)
 
