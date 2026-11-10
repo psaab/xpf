@@ -490,6 +490,60 @@ single-bounded-caller census), `pkg/api/routing_frr_admission_9143_test.go`,
   in `status_parse.go`. All shell-outs route through `m.executor()`
   so they can be faked in tests (see `executor_test.go`).
 
+- `RenderStaticLines(fc) []string` and `FastInstallStatics(want, precheck)`,
+  in `fast_install_19050.go`: the #19050 fast static install (below).
+
+## Fast static install on promotion (#19050 option B)
+
+An RG promotion used to wait for the coalesced HA reload (250 ms debounce,
+render, `frr-reload.py`) before the new owner's kernel had its static
+default. On udp that took a median of 618 ms (v4) / 610 ms (v6) after the
+WAN VIP. `FastInstallStatics` installs the owned static lines through vtysh
+at once. Measured: 39.5 ms (v4) / 57 ms (v6). Demotion needs nothing new:
+zebra NHT drops an owned default about 20 ms after its VIP leaves, and the
+demotion reload removes the lines.
+
+**The invariant: WHEN, never WHAT.**
+- The fast path installs only static lines that the node's next HA render
+  contains verbatim.
+- `RenderStaticLines` uses the managed section's own per-line renderer and
+  reads no mutable `Manager` state, so it needs no `buildMu`.
+- FRR stays the only writer.
+- The coalesced reload stays the authority: it finds a fast line present (a
+  no-op), or absent from `frr.conf` (it deletes it).
+
+**The protocol** (design: #19050 issuecomment-6763838572 and the
+v2.1-v2.3 addenda):
+- **Lock: `reloadMu` only.** It serializes with every other writer: apply,
+  `Clear` and the degraded retry.
+- **Counters: never touched.** The fast path never moves `confGen`,
+  `writeGen` or `unconditionalWriteGen`. A bump would supersede a pending
+  demotion reload, which would then skip itself and leak the line.
+- **Pre-check.** The caller's pre-check runs under `reloadMu`, right before
+  the exec. It must not take `Manager` locks; atomic reads are fine.
+- **Fast set.** The wanted lines minus the managed section as last written
+  (read from `frr.conf` under `reloadMu`), v6 first, in ONE `vtysh` batch.
+- **Bound.** The exec has the same `reloadTimeout` bound as the other
+  writers, and `reloadMu` is held until vtysh exits. 500 ms is only a logged
+  latency alarm.
+- **`fastInDoubt` (guarded by `reloadMu`).** A kill at the bound, a
+  non-zero exit, or an FRR error in the batch's output leaves the lines in
+  doubt.
+  - It arms the retry.
+  - A normal successful reload does not clear it and does not cancel the
+    retry (`noteReloadOutcomeLocked`, and the `commitManagedSectionIf`
+    re-arm guard).
+  - Only a successful barrier (a fresh `configure terminal` through mgmtd),
+    followed by a `frr-reload.py --test` whose diff names none of the
+    in-doubt lines, clears it (`resolveFastInDoubtLocked`).
+  - Unrelated drift does not block the clear; the memory-only QNH overlay
+    (#15183) is the case that matters.
+  - The diff matcher is pinned with real FRR 10.5.1 `--test` output in
+    `testdata/frr_reload_test_*_19050.txt`.
+- **Shutdown.** `fastStopped` and `fastWG.Add` are both taken under
+  `retryMu`, the `retryEnabled` pattern. `Stop` sets the flag, cancels the
+  lifetime context (which kills an in-flight batch), and joins.
+
 ## Callers
 
 `pkg/daemon` (lifecycle), `pkg/grpcapi` (show commands).

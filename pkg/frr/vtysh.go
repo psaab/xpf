@@ -438,3 +438,58 @@ func (m *Manager) GetBGPNeighborDetail(ctx context.Context, ip string) (string, 
 	}
 	return m.vtysh(ctx, cmd)
 }
+
+// VtyshConfigLines runs one vtysh process:
+// `vtysh -c "configure terminal" -c <line>... -c end` (#19050 B). With no
+// lines it is the in-doubt barrier: a fresh configuration session through
+// mgmtd that must succeed. The caller's ctx carries the bound (reloadTimeout
+// under reloadMu); cancelling it SIGKILLs the process group, as for
+// frr-reload.py. Whether FRR still applies a line whose client was killed is
+// exactly what the in-doubt state exists for.
+func (realExecutor) VtyshConfigLines(ctx context.Context, lines []string) ([]byte, error) {
+	args := []string{"-c", "configure terminal"}
+	for _, l := range lines {
+		args = append(args, "-c", l)
+	}
+	args = append(args, "-c", "end")
+	cmd := exec.CommandContext(ctx, vtyshBinary, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("vtysh configure (%d lines): %w", len(lines), err)
+	}
+	// vtysh can exit 0 after FRR rejected a line in a multi -c batch; a
+	// rejection message means the batch is partial, which is in doubt.
+	if bytes.Contains(out, []byte("% ")) {
+		return out, fmt.Errorf("vtysh configure (%d lines): FRR reported an error", len(lines))
+	}
+	return out, nil
+}
+
+// FrrReloadPyTestOutput runs `frr-reload.py --test --stdout <conf>` and returns
+// its output unjudged (#19050 B: the in-doubt resolution matches the diff
+// against the in-doubt lines itself). Same process-group contract as
+// FrrReloadPyTest.
+func (realExecutor) FrrReloadPyTestOutput(ctx context.Context, conf string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, frrReloadScript, "--test", "--stdout", conf)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
+	cmd.WaitDelay = 5 * time.Second
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("%s --test %s: %w", frrReloadScript, conf, err)
+	}
+	return out, nil
+}

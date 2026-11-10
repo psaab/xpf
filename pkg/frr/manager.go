@@ -200,6 +200,19 @@ type Manager struct {
 	// frr-reload.py process groups and terminates the retry goroutine.
 	mgrCtx    context.Context
 	mgrCancel context.CancelFunc
+
+	// #19050 B (fast_install_19050.go). fastInDoubt is guarded by reloadMu:
+	// non-nil while fast-installed lines await verification; only a barrier
+	// plus a --test naming none of them clears it. fastStopped and the
+	// fastWG.Add are guarded by retryMu, the same pattern as retryEnabled,
+	// so Stop's Wait never races an install starting.
+	fastInDoubt *fastInDoubtState19050
+	fastStopped bool
+	fastWG      sync.WaitGroup
+	// fastJoined counts installs that entered fastWG. A cell pins that no
+	// install enters it once Stop began: the WaitGroup contract must not rest
+	// on the cancelled context alone (review R14).
+	fastJoined atomic.Int64
 }
 
 // New creates a new FRR manager with the degraded-retry loop enabled
@@ -360,11 +373,15 @@ func (m *Manager) Stop() {
 	// its Add before this disable or observes it and spawns nothing.
 	m.retryMu.Lock()
 	m.retryEnabled = false
+	m.fastStopped = true // #19050: no fast install starts behind the Wait below
 	m.retryMu.Unlock()
 	if m.mgrCancel != nil {
 		m.mgrCancel()
 	}
 	m.retryWG.Wait()
+	// The cancel above kills an in-flight fast vtysh at once, so this join is
+	// bounded by process teardown, not by reloadTimeout.
+	m.fastWG.Wait()
 }
 
 // lifetimeCtx returns the manager lifetime context, tolerating
@@ -1084,7 +1101,9 @@ func (m *Manager) commitManagedSectionIf(section string, overlays map[string]str
 	// is idempotent against the episode the degraded outcome itself
 	// may have just scheduled.
 	defer func() {
-		if m.degraded.Load() {
+		// #19050 (R4 F1): the pre-cancel above also cancels an in-doubt
+		// fast-install retry; re-arm it too.
+		if m.degraded.Load() || m.fastInDoubt != nil {
 			m.ensureRetryLocked(false)
 		}
 	}()
@@ -1974,7 +1993,12 @@ func (m *Manager) noteReloadOutcomeLocked(err error) {
 	switch {
 	case err == nil:
 		m.degraded.Store(false)
-		m.signalRetryCancel()
+		// #19050 (R4 B1): a successful reload proves nothing about a fast
+		// line FRR may still apply after this reload read the running
+		// config. While lines are in doubt the retry keeps running.
+		if m.fastInDoubt == nil {
+			m.signalRetryCancel()
+		}
 	case errors.Is(err, ErrFRRReloadDegraded):
 		m.degraded.Store(true)
 		m.ensureRetryLocked(isFrrReloadPyMissing(err))
@@ -2101,7 +2125,12 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 		return true, false
 	}
 	if !m.degraded.Load() {
-		return true, false
+		// #19050: a plain reload success is not verification of in-doubt
+		// fast lines; resolve them (barrier + --test) before stopping.
+		if m.fastInDoubt == nil {
+			return true, false
+		}
+		return m.resolveFastInDoubtLocked(ctx), false
 	}
 	gen := m.confGen
 	rctx, rcancel := context.WithTimeout(ctx, reloadTimeout)
@@ -2137,7 +2166,8 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 	}
 	m.degraded.Store(false)
 	slog.Info("FRR reload converged after degraded fallback", "generation", gen)
-	return true, false
+	// #19050: in-doubt fast lines still need their own verification.
+	return m.fastInDoubt == nil, false
 }
 
 // clearEpisodeIfMine nils the episode fields iff they still belong to

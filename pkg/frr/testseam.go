@@ -30,6 +30,24 @@ type RecordingExecutor struct {
 	TestErr error
 	// TestCalls counts FrrReloadPyTest invocations.
 	TestCalls int
+	// FastInstalls records every #19050 fast-path VtyshConfigLines batch
+	// (barriers, with no lines, are not recorded); FastInstallErr fails them.
+	FastInstalls   [][]string
+	FastInstallErr error
+}
+
+// VtyshConfigLines records a #19050 fast-path batch.
+func (r *RecordingExecutor) VtyshConfigLines(_ context.Context, lines []string) ([]byte, error) {
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	r.FastInstalls = append(r.FastInstalls, append([]string(nil), lines...))
+	return nil, r.FastInstallErr
+}
+
+// FrrReloadPyTestOutput reports no diff.
+func (r *RecordingExecutor) FrrReloadPyTestOutput(context.Context, string) ([]byte, error) {
+	return nil, nil
 }
 
 func (r *RecordingExecutor) Vtysh(context.Context, string) (string, error) { return "", nil }
