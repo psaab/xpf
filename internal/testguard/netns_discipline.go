@@ -35,6 +35,10 @@ var netnsSwitchCalls = map[string]map[string]bool{
 // Calls that switch while a helper already holds the thread (an inner
 // netns.Set under EnterNewNetns) are allowed: the helper's Release restores
 // whatever the inner switch left.
+//
+// Limits (Codex review of 97b646d8fa): this is a per-file syntax rule. It
+// does not prove that a helper holds the thread at every switch. A switch
+// with no lock at all, a raw lock in another file, and dot imports pass it.
 func CheckNetnsThreadDiscipline(dir string) error {
 	paths, err := filepath.Glob(filepath.Join(dir, "*_test.go"))
 	if err != nil {
