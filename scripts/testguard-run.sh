@@ -65,16 +65,56 @@ fi
 # to the namespace, so isolation from the host is unchanged. A failure to
 # raise it is reported, not hidden.
 inner='ip link set lo up 2>/dev/null || echo "testguard-run: could not bring loopback up in the test namespace" >&2; exec "$@"'
+# #19084: on a ROOT run, the production trees are covered by a throwaway
+# overlay in a private mount namespace before the command runs. A private
+# mount namespace alone isolates nothing on disk: a root test that writes or
+# unlinks /etc/... does it on the host's root filesystem. Every enumeration of
+# production paths (TestMain redirects, seams) has missed some (#19084: 7 of
+# R18's 46 seeded files still deleted or rewritten after the redirects), so
+# the trees themselves are covered instead. The lower layer is the host's real
+# tree, so tests still READ it; every write, unlink, rename or chmod lands in
+# an upper layer on a tmpfs that exists only in this namespace and is
+# discarded when the run ends. The test namespaces below are created inside
+# this one, so the command and every child it starts see the overlay and read
+# back what they just wrote. Host daemons are outside it and keep the real
+# trees: nothing a test writes reaches them, which is the point.
+#
+# The overlay is mounted by real root BEFORE any user namespace exists. Inside
+# the user namespace (the root path without the VM proof) mounts inherited
+# from the host are locked, and overlayfs cannot clone a lower tree that has
+# locked submounts (/run has several: "failed to clone lowerpath"). A tree
+# that cannot be covered FAILS the run before the command starts (exit 2): a
+# root run without the overlay is exactly the destructive run this prevents.
+# Non-root runs are unchanged: they cannot write these trees anyway. The
+# residue check below stays as the detector: on a root run it should report
+# nothing.
+overlay_trees="/etc /var/lib /var/log /run"
+cover=()
+if [[ $(id -u) == 0 ]]; then
+	mkdir -p "$work/overlay"
+	cover=(unshare -m --propagation private sh -c '
+s=$0; t=$1; shift
+mount -t tmpfs -o mode=0700 testguard-overlay "$s" || { echo "testguard-run: FATAL: cannot mount the overlay scratch tmpfs on $s; refusing a root run that could write host state (#19084)" >&2; exit 2; }
+for d in $t; do
+	n=$(printf %s "$d" | tr / _)
+	mkdir -p "$s/$n.upper" "$s/$n.work" || exit 2
+	mount -t overlay testguard-overlay -o "lowerdir=$d,upperdir=$s/$n.upper,workdir=$s/$n.work" "$d" || {
+		echo "testguard-run: FATAL: cannot cover $d with a throwaway overlay; refusing a root run that could write host state (#19084)" >&2
+		exit 2
+	}
+done
+exec "$@"' "$work/overlay" "$overlay_trees")
+fi
 if [[ $(id -u) == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]; then
 	# The VM proof permits the privileged lane to retain its VM capabilities
 	# (for BPF/memlock tests); namespace identity is still independently
 	# checked by testguard in the child.
-	XPF_SACRIFICIAL_HOST=1 \
+	XPF_SACRIFICIAL_HOST=1 "${cover[@]}" \
 		unshare -pf --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner" "$@"
 else
 	# A caller-supplied intent sentinel is not proof; do not propagate it on
 	# the workstation path.
-	env -u XPF_SACRIFICIAL_HOST \
+	env -u XPF_SACRIFICIAL_HOST "${cover[@]}" \
 		unshare -Urp --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner" "$@"
 fi
 rc=$?
