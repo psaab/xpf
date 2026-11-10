@@ -406,5 +406,51 @@ else
 	bad "timeout control: a package that finished in time was voided"
 fi
 
+# ── #19066 R18: a production-state change FAILS (1), it is not VOID (3) ──
+# testguard-run.sh fails a run that changed a production state path. Its
+# status must survive go-test-json.sh and go-test-watch.sh as a FAIL: 3 is
+# VOID there (a go-test timeout), which would read a host mutation as
+# "undetermined". The state path is a temp dir added through
+# XPF_RESIDUE_EXTRA_STATE_PATHS (which can only add paths), and the "go" is a
+# stand-in that passes and then writes, rewrites in place or deletes a file
+# in it. The clean stand-in is the control: same harness, no state change.
+SW=$(mktemp -d "${TMPDIR:-/tmp}/gtj-state.XXXXXX")
+mkdir -p "$SW/state"; printf 'seed\n' > "$SW/state/xpf.sources"
+mk_fakego() { # $1 name, $2 shell action on "$SW/state"
+	cat > "$SW/$1" <<EOT
+#!/bin/sh
+$2
+echo "ok  	fake	0.001s"
+exit 0
+EOT
+	chmod +x "$SW/$1"
+}
+mk_fakego clean ':'
+mk_fakego writes "printf 'new\\n' > '$SW/state/xpf.conf'"
+mk_fakego deletes "rm -f '$SW/state/xpf.sources'"
+mk_fakego rewrites "cp -p '$SW/state/xpf.sources' '$SW/ref'; printf 'SEED\\n' > '$SW/state/xpf.sources'; touch -r '$SW/ref' '$SW/state/xpf.sources'"
+# behindlink: the state tree holds a symlink to a directory elsewhere, and the
+# change (same size, mtime restored) is inside that directory.
+mkdir -p "$SW/real"; ln -s "$SW/real" "$SW/state/linked"
+mk_fakego behindlink "cp -p '$SW/real/f' '$SW/ref'; printf 'SEED\\n' > '$SW/real/f'; touch -r '$SW/ref' '$SW/real/f'"
+for case in clean writes deletes rewrites behindlink; do
+	printf 'seed\n' > "$SW/real/f"; touch -d @1700000000 "$SW/real/f"
+	printf 'seed\n' > "$SW/state/xpf.sources"; rm -f "$SW/state/xpf.conf"
+	out=$(XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" bash "$here/go-test-json.sh" "" "$SW/$case" ./... 2>&1); rc=$?
+	printf 'seed\n' > "$SW/real/f"; touch -d @1700000000 "$SW/real/f"
+	printf 'seed\n' > "$SW/state/xpf.sources"; rm -f "$SW/state/xpf.conf"
+	wout=$(XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" bash "$here/go-test-watch.sh" "$SW/$case" test ./... 2>&1); wrc=$?
+	if [ "$case" = clean ]; then
+		check "state control: a passing run that changes no state path exits 0 (go-test-json)" "$rc" "0"
+		check "state control: a passing run that changes no state path exits 0 (go-test-watch)" "$wrc" "0"
+		continue
+	fi
+	check "state $case: go-test-json exits 1 (FAIL, not VOID 3)" "$rc" "1"
+	check "state $case: go-test-watch exits 1 (FAIL, not VOID 3)" "$wrc" "1"
+	case "$out" in *"changed production state paths"*) ok "state $case: the FAIL names the production state change";;
+		*) bad "state $case: no production-state FAIL message in: $out";; esac
+done
+rm -rf "$SW"
+
 printf '\ngo-test-json-selftest: passed=%d failed=%d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

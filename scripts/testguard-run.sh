@@ -84,14 +84,18 @@ if ! cmp -s "$work/before.txt" "$work/after.txt"; then
 	echo "HOST RESIDUE DIFFERENCE (report-only; no cleanup performed):"
 	diff -u "$work/before.txt" "$work/after.txt" || true
 fi
-# #19066: a difference in the production state paths FAILS the run. The rest
-# of the report stays report-only (systemd session scopes come and go with
-# other users of the host); these paths have no other writer on a test host,
-# so a difference there is a test that wrote or deleted production state.
-state_sections() { awk '/^--- state /{on=1} /^--- / && !/^--- state /{on=0} on' "$1"; }
+# #19066: a difference in the production state paths FAILS the run, with
+# status 1 when the tests themselves passed. NOT 3: go-test-json.sh,
+# go-test-watch.sh and the Makefile read 3 as VOID (a go-test timeout), which
+# would turn a host mutation into "undetermined", and a rerun would come back
+# clean because the files are already gone (#19066 R18). The rest of the
+# report stays report-only (systemd session scopes come and go with other
+# users of the host); these paths have no other writer on a test host, so a
+# difference there is a test that wrote or deleted production state.
+state_sections() { awk '/^--- state(-content)? /{on=1} /^--- / && !/^--- state(-content)? /{on=0} on' "$1"; }
 if ! cmp -s <(state_sections "$work/before.txt") <(state_sections "$work/after.txt"); then
 	echo "testguard-run: FAIL: the run changed production state paths on the host (no cleanup performed):" >&2
 	diff -u <(state_sections "$work/before.txt") <(state_sections "$work/after.txt") >&2 || true
-	[[ "$rc" -eq 0 ]] && rc=3
+	[[ "$rc" -eq 0 ]] && rc=1
 fi
 exit "$rc"

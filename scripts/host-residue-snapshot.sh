@@ -32,11 +32,16 @@ record dpkg-state dpkg-query -W -f='${Package}\t${Version}\t${db:Status-Abbrev}\
 # state removes xpf-managed SSH, chrony and rsyslog files. A re-executed test
 # child at uid 0 is real root on a root leg, and a file it creates or unlinks
 # is on the shared root filesystem even from a private mount namespace.
-# Listing these trees (type, mode, owner, size, mtime) makes a write OR a
-# deletion show in the before/after difference. testguard-run.sh fails the
-# run on any difference in these sections (the "state " records).
+# Each tree is recorded twice: entries with metadata (type, mode, owner, size,
+# mtime, and a symlink's target), and a sha256 of every regular file reached
+# with symlinks followed, so a same-size overwrite with its mtime restored, or
+# a change behind a symlinked directory, still shows (#19066 Codex D3). These
+# trees are small. testguard-run.sh fails the run on any difference in these
+# sections (the "state " records). XPF_RESIDUE_EXTRA_STATE_PATHS (space
+# separated) ADDS paths; it cannot remove any. Its user is the selftest.
 for path in /etc/xpf /var/lib/xpf /etc/frr /etc/systemd/network \
 	/etc/ssh/ssh_known_hosts /etc/ssh/sshd_config.d /etc/chrony/sources.d \
-	/etc/chrony/conf.d /etc/rsyslog.d; do
-	record "state $path" find "$path" -xdev -maxdepth 6 -printf '%y %m %U:%G %s %T@ %p\n'
+	/etc/chrony/conf.d /etc/rsyslog.d ${XPF_RESIDUE_EXTRA_STATE_PATHS:-}; do
+	record "state $path" find "$path" -xdev -maxdepth 6 -printf '%y %m %U:%G %s %T@ %p -> %l\n'
+	record "state-content $path" sh -c 'find -L "$1" -xdev -maxdepth 6 -type f -print0 2>/dev/null | sort -z | xargs -0 -r sha256sum' sh "$path"
 done
