@@ -5,7 +5,9 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"golang.org/x/sync/semaphore"
 
@@ -68,7 +70,58 @@ func (f *failingRollbackDHCP16678) Apply(cfg *config.DHCPServerConfig) error {
 	return f.err
 }
 
+// rollbackJoin16678 owns the commit-confirmed rollback executions of one
+// fixture (#19089). The store's timer runs the executor on its own goroutine,
+// outside the store's mutex, so stopping the timer does not wait for a
+// rollback that already started: after PromoteRollback has cleared the
+// pending window, cancellation returns at once while the rollback's service
+// teardown (and its ERROR log) is still to come. The wrapper counts every
+// admitted execution, refuses new ones once closed, and closeAndWait waits for
+// the admitted ones to finish.
+type rollbackJoin16678 struct {
+	mu     sync.Mutex
+	closed bool
+	wg     sync.WaitGroup
+	// afterRun, when set, runs after an admitted execution and before it
+	// is counted done (a cell holds a promoted rollback here).
+	afterRun func()
+}
+
+func (j *rollbackJoin16678) wrap(run func(gen uint64)) func(gen uint64) {
+	return func(gen uint64) {
+		j.mu.Lock()
+		if j.closed {
+			j.mu.Unlock()
+			return
+		}
+		j.wg.Add(1)
+		after := j.afterRun
+		j.mu.Unlock()
+		defer j.wg.Done()
+		run(gen)
+		if after != nil {
+			after()
+		}
+	}
+}
+
+// closeAndWait refuses every later execution (a timer that fires after the
+// test, including one whose window a manual dispatch already resolved), then
+// waits for the admitted ones to finish.
+func (j *rollbackJoin16678) closeAndWait() {
+	j.mu.Lock()
+	j.closed = true
+	j.mu.Unlock()
+	j.wg.Wait()
+}
+
 func newFirstCommitRollbackDaemon16678(t *testing.T, dhcp *rollbackDHCPRecorder16678) (*Daemon, *configstore.Store) {
+	t.Helper()
+	d, s, _ := newFirstCommitRollbackDaemonJoined16678(t, dhcp)
+	return d, s
+}
+
+func newFirstCommitRollbackDaemonJoined16678(t *testing.T, dhcp *rollbackDHCPRecorder16678) (*Daemon, *configstore.Store, *rollbackJoin16678) {
 	t.Helper()
 	isolateFirstCommitRollbackHostAuth12169(t)
 	dir := t.TempDir()
@@ -106,12 +159,23 @@ func newFirstCommitRollbackDaemon16678(t *testing.T, dhcp *rollbackDHCPRecorder1
 		}
 	})
 	t.Cleanup(d.dhcpRelay.Stop)
-	// #19089: the join. A cell that ends with the window still armed (the
-	// DEGRADED cell drives enterBootstrapMode directly and never fires the
-	// timer) has its timer stopped before the test returns.
-	t.Cleanup(s.CancelConfirmTimerForTesting)
-	s.SetRollbackExecutor(d.executeConfirmedRollback)
-	return d, s
+	// #19089: the join, run before the relay stops and before the temp dir
+	// goes. It (1) closes admission, so a timer that fires later runs no
+	// rollback; (2) stops a window the test left armed (the DEGRADED cell
+	// drives enterBootstrapMode directly and never fires the timer); and
+	// (3) waits for every rollback already admitted, including one that has
+	// promoted (window cleared) but not yet torn services down. Stopping the
+	// timer alone did only (2): it cannot wait for a callback that started.
+	join := &rollbackJoin16678{}
+	t.Cleanup(func() {
+		join.mu.Lock()
+		join.closed = true
+		join.mu.Unlock()
+		s.CancelConfirmTimerForTesting()
+		join.closeAndWait()
+	})
+	s.SetRollbackExecutor(join.wrap(d.executeConfirmedRollback))
+	return d, s, join
 }
 
 func armFirstCommitConfirmed16678(t *testing.T, s *configstore.Store) {
@@ -273,5 +337,60 @@ func TestBootstrapRelayStopFailureDegrades17693(t *testing.T) {
 	}
 	if !d.inBootstrap() {
 		t.Fatal("daemon must still enter bootstrap mode after a partial service stop")
+	}
+}
+
+// TestRollbackJoinWaitsForAPromotedRollback19089 is the case stopping the
+// timer could not cover (Codex review of 97b646d8fa). A rollback that has
+// already been admitted and has PROMOTED (the pending window is cleared, so
+// IsConfirmPending reads false) is held before it finishes. The fixture's
+// cleanup must not return until it does, and once closed it admits nothing.
+func TestRollbackJoinWaitsForAPromotedRollback19089(t *testing.T) {
+	rec := &rollbackDHCPRecorder16678{recordingDHCPApplier9349: &recordingDHCPApplier9349{}}
+	d, s, join := newFirstCommitRollbackDaemonJoined16678(t, rec)
+	promoted := make(chan struct{})
+	release := make(chan struct{})
+	join.afterRun = func() {
+		close(promoted)
+		<-release
+	}
+	armFirstCommitConfirmed16678(t, s)
+	fired := make(chan struct{})
+	go func() {
+		defer close(fired)
+		s.InvokeRollbackTimerForTesting(s.ConfirmGenForTesting())
+	}()
+	select {
+	case <-promoted:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("FIXTURE: the admitted rollback never ran")
+	}
+	if s.IsConfirmPending() || !d.inBootstrap() {
+		close(release)
+		t.Fatalf("FIXTURE: the held rollback must have promoted (pending=%v, bootstrap=%v)", s.IsConfirmPending(), d.inBootstrap())
+	}
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		join.closeAndWait()
+	}()
+	select {
+	case <-joined:
+		close(release)
+		t.Fatal("#19089: cleanup returned while an admitted rollback was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-joined:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup never returned after the rollback finished")
+	}
+	<-fired
+	ran := false
+	join.wrap(func(uint64) { ran = true })(0)
+	if ran {
+		t.Fatal("#19089: a rollback fired after cleanup was admitted")
 	}
 }

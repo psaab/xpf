@@ -263,7 +263,13 @@ calling thread's, `inNetns12034`).
   `runtime.UnlockOSThread` directly, and no test file may name
   `/proc/self/ns/`. A switch made while a helper already holds the thread (an
   inner `netns.Set` under `EnterNewNetns`) is allowed: the helper's `Release`
-  restores whatever it left.
+  restores whatever it left. **What it does not check** (Codex review of
+  97b646d8fa): it is a per-file syntax rule, so it does not prove that a
+  helper holds the thread at every switch. A switch with no lock at all, a
+  raw lock moved into another file, and dot imports all pass it, and the
+  runtime guard sees them only on paths a run takes. It rejects the
+  reverted sites' exact shape (raw lock and unlock beside a switch), not
+  every way of getting the locking wrong.
 
 ### A test that arms a commit-confirmed window must disarm it (#19089)
 
@@ -275,10 +281,18 @@ an ERROR into that test's capture. That is how
 `TestFirstCommitRollbackServiceFailureIsDegraded16678` failed
 `TestBootstrapLifelineRetainsMACFormLink12156` in 1 of 10 full runs. Before
 it fires it is a pending timer, not a goroutine, so a goroutine-count leak
-check cannot see it. The #16678 fixture now cancels the window in its
-cleanup (`CancelConfirmTimerForTesting`) and then requires
-`IsConfirmPending()` to be false, so the cell goes red if the cancel is
-removed.
+check cannot see it. Stopping the timer is not enough either. The timer runs
+the rollback executor on its own goroutine outside the store's mutex, and
+once that rollback has promoted, the pending window reads as cleared while
+its service teardown is still to come (Codex review of 97b646d8fa). The
+#16678 fixture therefore owns its rollbacks. It installs the executor through
+a wrapper (`rollbackJoin16678`) that counts admitted executions. Its cleanup
+closes admission (a timer that fires later runs nothing), stops a window the
+test left armed (`CancelConfirmTimerForTesting`), and waits for every
+admitted rollback to finish, before the relay stops and the temp dir goes. A
+last cleanup then requires `IsConfirmPending()` to be false.
+`TestRollbackJoinWaitsForAPromotedRollback19089` holds a promoted rollback and
+fails if cleanup returns before it finishes.
 
 ### The go-skip census, and the thing it found
 
