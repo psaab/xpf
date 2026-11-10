@@ -2393,6 +2393,13 @@ compares verdicts, so the resolvable length is measured on both sides.
 - **Re-rolling an unlucky placement** (two elephant flows on one worker): a
   restart no longer changes it. Delete `/run/xpf/rss-hash-key`, then restart
   xpfd, and the next start draws a new key.
+- **Lost on a driver re-init (#19097).** The key is written only by
+  `CompileConfig`, which runs on xpfd start and on config commit. A link
+  DOWN/UP or a MAC change keeps it. A VF reset, VF unbind and rebind,
+  `devlink reload` or a module reload re-inits the driver, and the NIC then
+  falls back to the kernel's per-boot default key until the next start or
+  commit. That is from R18's reading of mlx5e's structure, not a lab
+  measurement.
 - **Tests.** The package `TestMain` points `rssBootKeyPath` at a temporary
   directory, so no test writes `/run/xpf`.
   `compiler_rss_boot_key_19072_test.go` pins:

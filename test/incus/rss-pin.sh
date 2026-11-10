@@ -21,11 +21,17 @@
 #
 # Data interfaces are the `ge-*` netdevs (not VLAN children) that expose a
 # readable RSS hash key in `ethtool -x`. That is a capability probe, not a
-# driver-name gate (#9040). Each interface is one of three states:
-#   keyed        `ethtool -x` shows an RSS hash key;
-#   unsupported  `ethtool -x` fails with "Operation not supported" (the
-#                fabric parent's virtio NIC): recorded, never pinned;
-#   failed       any other outcome: unreadable, never an exemption.
+# driver-name gate (#9040). Each interface is one of three states, judged
+# by the CONTENT under `ethtool -x`'s "RSS hash key:" header, never by the
+# header alone (review R18, 371b2cd39c):
+#   keyed        the line under the header is a colon-separated hex key
+#                (^[0-9a-f]{2}(:[0-9a-f]{2})+$);
+#   unsupported  the line under the header is "Operation not supported", at
+#                any exit status (ethtool 6.19 on the lab's virtio fabric
+#                parent exits 0 and prints exactly that), or there is no
+#                header and ethtool failed with "Operation not supported":
+#                recorded, never pinned;
+#   failed       anything else: unreadable, never an exemption.
 # `pin` stores the keyed set on the node (/run/xpf-rss-pin.required; /run,
 # so a reboot clears it with the pin). `verify` requires every interface in
 # that set to be present, keyed and pinned, and fails on any failed read
@@ -90,10 +96,11 @@ for p in "$root"/ge-*; do
 	case $i in *.*) continue ;; esac
 	out=$(ethtool -x "$i" 2>&1)
 	xrc=$?
-	if printf "%s\n" "$out" | grep -q "^RSS hash key"; then
+	under=$(printf "%s\n" "$out" | awk "f { print; exit } /^RSS hash key/ { f = 1 }" | tr -d " \t")
+	if printf "%s\n" "$under" | grep -Eqi "^[0-9a-f]{2}(:[0-9a-f]{2})+\$"; then
 		req="$req$i "
 		if ethtool -X "$i" hkey "$key" >/dev/null 2>&1; then echo "$i set"; else echo "$i FAILED"; rc=1; fi
-	elif [ "$xrc" -ne 0 ] && printf "%s\n" "$out" | grep -q "Operation not supported"; then
+	elif [ "$under" = "Operationnotsupported" ] || { [ "$xrc" -ne 0 ] && ! printf "%s\n" "$out" | grep -q "^RSS hash key" && printf "%s\n" "$out" | grep -q "Operation not supported"; }; then
 		:
 	else
 		echo "$i UNREADABLE"
@@ -116,6 +123,7 @@ rss_exec() { # <instance> <sh script> [args...]
 rss_parse() {
 	python3 -I -c '
 import hashlib, re, sys
+HEX_KEY = re.compile(r"^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2})+$")
 text = sys.stdin.read()
 inv = re.search(r"^@@ (required(?:-absent)?)(.*)$", text, flags=re.M)
 blocks = re.split(r"^== ", re.split(r"^@@ ", text, flags=re.M)[0], flags=re.M)
@@ -125,19 +133,25 @@ for b in blocks[1:]:
     drv = (re.search(r"driver=(\S*)", head) or [None, "unknown"])[1]
     rc = (re.search(r"rc=(\d+)", head) or [None, "?"])[1]
     lines = body.splitlines()
-    key = "-"
+    under = None  # the line under the "RSS hash key:" header, if there is one
     for n, l in enumerate(lines):
         if l.startswith("RSS hash key"):
-            key = (lines[n + 1] if n + 1 < len(lines) else "").strip().lower() or "-"
-    if key != "-":
-        state = "keyed"
-    elif rc not in ("0", "?") and "Operation not supported" in body:
+            under = (lines[n + 1] if n + 1 < len(lines) else "").strip()
+    key = "-"
+    if under is not None and HEX_KEY.match(under):
+        key, state = under.lower(), "keyed"
+    elif under == "Operation not supported":
+        state = "unsupported"  # ethtool 6.19 on virtio: rc 0, this text under the header
+    elif under is None and rc not in ("0", "?") and "Operation not supported" in body:
         state = "unsupported"
     else:
         state = "failed"
     indir = "\n".join(l for l in lines if re.match(r"^\s+\d+:", l))
-    print("I", name, key, hashlib.sha256(indir.encode()).hexdigest()[:8],
-          hashlib.sha256(body.encode()).hexdigest()[:12], drv, state)
+    fields = ["I", name, key, hashlib.sha256(indir.encode()).hexdigest()[:8],
+              hashlib.sha256(body.encode()).hexdigest()[:12], drv, state]
+    if any(not f or any(c.isspace() for c in f) for f in fields):
+        fields = ["I", re.sub(r"\s", "?", name) or "?", "-", "-", "-", "-", "failed"]  # never shift a field
+    print(" ".join(fields))
 if inv and inv.group(1) == "required":
     for name in inv.group(2).split():
         print("R", name)
@@ -151,16 +165,17 @@ else:
 # node's random key (#19072 review R2).
 rss_redact() {
 	python3 -I -c '
-import hashlib, sys
+import hashlib, re, sys
 pin = sys.argv[1]
 lines = sys.stdin.read().splitlines()
 out, take = [], False
 for l in lines:
     if take:
-        k = l.strip().lower()
-        out.append("    <" + ("PINNED" if k == pin else "sha256:" + hashlib.sha256(k.encode()).hexdigest()[:12]) + ">")
         take = False
-        continue
+        k = l.strip().lower()
+        if re.match(r"^[0-9a-f]{2}(:[0-9a-f]{2})+$", k):  # only a real key is redacted; text such as
+            out.append("    <" + ("PINNED" if k == pin else "sha256:" + hashlib.sha256(k.encode()).hexdigest()[:12]) + ">")
+            continue  # "Operation not supported" stays as printed (review R18)
     out.append(l)
     take = l.startswith("RSS hash key")
 print("\n".join(out))
