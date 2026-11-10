@@ -54,6 +54,16 @@ case "$op" in
 		echo "Cannot get RX flow hash indirection table: Input/output error"
 		exit 1
 	fi
+	if [[ -f "$s.twoheaders" ]]; then # two "RSS hash key:" headers: ambiguous
+		printf '%s\n' "RX flow hash indirection table for $i with 6 RX ring(s):" \
+			"    0:      0     1     2     3     4     5     0     1" "RSS hash key:" "$(cat "$s.key")" "RSS hash key:" "aa:bb"
+		exit 0
+	fi
+	if [[ -f "$s.oddspace" ]]; then # the virtio text with doubled spaces under the header
+		printf '%s\n' "RX flow hash indirection table for $i with 6 RX ring(s):" \
+			"Operation  not supported" "RSS hash key:" "Operation  not  supported"
+		exit 0
+	fi
 	if [[ -f "$s.garbled" ]]; then # a header with something that is not a key under it
 		printf '%s\n' "RX flow hash indirection table for $i with 6 RX ring(s):" \
 			"    0:      0     1     2     3     4     5     0     1" "RSS hash key:" "zz:qq:not-a-key"
@@ -241,6 +251,29 @@ run_cells() { # <library path>; every cell sources it in a subshell
 		ok "R18: a header with no well-formed hex key under it is failed (rc 3), never keyed or unsupported"
 	else
 		bad "garbled key line: $out"
+	fi
+
+	# Codex at 2188aca657: ONE classifier (rss_parse on the calling host); the node only
+	# sets the names it is handed. Shapes the two former classifiers disagreed on:
+	node fw5 "ge-0-0-1:mlx5_core=$RANDKEY_A" "ge-0-0-2:mlx5_core=$RANDKEY_A" "ge-0-0-3:mlx5_core=$RANDKEY_A" "ge-0-0-4:virtio_net=-"
+	printf '%s\r\n' "$RANDKEY_A" >"$T/state/fw5/eth/ge-0-0-1.key"                                  # CR-terminated key line
+	printf '%s\n' "${RANDKEY_A:0:5} ${RANDKEY_A:6}" >"$T/state/fw5/eth/ge-0-0-2.key"                 # interior whitespace
+	touch "$T/state/fw5/eth/ge-0-0-3.twoheaders" "$T/state/fw5/eth/ge-0-0-4.oddspace"
+	out=$(bash -c 'source "$1"; rss_record cls fw5' _ "$lib" 2>&1)
+	if grep -q 'ge-0-0-1 key=[0-9a-f]\{8\} ' <<<"$out" && grep -q 'ge-0-0-2 key=UNREADABLE' <<<"$out" &&
+		grep -q 'ge-0-0-3 key=UNREADABLE' <<<"$out" && grep -q 'ge-0-0-4 key=none' <<<"$out"; then
+		ok "one classifier: a CR-terminated key is keyed, interior whitespace and two headers are failed, doubled spaces in 'Operation not supported' are unsupported"
+	else
+		bad "classifier shapes: $out"
+	fi
+	rm -f "$T/state/fw5/eth/ge-0-0-2.key" "$T/state/fw5/eth/ge-0-0-3.twoheaders"
+	printf '%s\n' "$RANDKEY_A" >"$T/state/fw5/eth/ge-0-0-2.key"; printf '%s\n' "$RANDKEY_A" >"$T/state/fw5/eth/ge-0-0-3.key"
+	out=$(bash -c 'source "$1"; rss_pin fw5; echo "pin_rc=$?"' _ "$lib" 2>&1)
+	if grep -q '^pin_rc=0$' <<<"$out" && [[ "$(key_of fw5 ge-0-0-1)" == "$pin" ]] &&
+		[[ "$(tr '\n' ' ' <"$T/state/fw5/rss-required")" == "ge-0-0-1 ge-0-0-2 ge-0-0-3 " ]]; then
+		ok "pin: the node sets exactly the interfaces the caller classified keyed (a CR-terminated key included), inventory from that list"
+	else
+		bad "pin of the caller's list: $out inventory=$(cat "$T/state/fw5/rss-required" 2>&1)"
 	fi
 
 	# Review F3: a required VF must not drop out of the verified set.
@@ -625,13 +658,13 @@ mutant "keyless node passes verify" $'\tif ((nokey)); then return 2; fi' $'\tif 
 mutant "VLAN children recorded as data interfaces" $'\tcase $i in *.*) continue ;; esac\n\td=$(ethtool -i' $'\td=$(ethtool -i'
 mutant "failed read treated as unsupported" $'    else:\n        state = "failed"' $'    else:\n        state = "unsupported"'
 mutant "required set ignored" $'\t\tfor r in $req; do' $'\t\tfor r in ; do'
-mutant "pin skips an unreadable interface" $'\t\techo "$i UNREADABLE"\n\t\trc=1' $'\t\t:'
+mutant "pin skips an unreadable interface" $'\t\t\tfailed) out+="$name UNREADABLE "; rc=1 ;;' $'\t\t\tfailed) ;;'
 mutant "raw key written to the record" $'"$(printf \'%s\\n\' "$dump" | rss_redact "$pin")"' $'"$dump"'
 mutant "post-cell drift keeps a PASS" $'\t\t\trc=2\n\t\t\teffect="PASS->VOID"' $'\t\t\teffect="PASS->VOID"'
 mutant "post-cell relabels a FAIL" $'\t\tif ((rc == 0)); then\n\t\t\trc=2' $'\t\tif ((rc <= 1)); then\n\t\t\trc=2'
-mutant "rss_parse keyed by the header alone" $'    if under is not None and HEX_KEY.match(under):' $'    if under is not None:'
-mutant "pin selects by the header alone" $'	if printf "%s\\n" "$under" | grep -Eqi' $'	if printf "%s\\n" "$out" | grep -q "^RSS hash key" || printf "%s\\n" "$under" | grep -Eqi'
-mutant "key read from the header line" $'under = (lines[n + 1] if n + 1 < len(lines) else "").strip()' $'under = (lines[n] if n < len(lines) else "").strip()'
+mutant "rss_parse keyed by the header alone" $'    elif under is not None and HEX_KEY.match(under):' $'    elif under is not None:'
+mutant "remote pin re-adds its own classification" $'for i in "$@"; do\n\tif ethtool -X' $'for i in "$@"; do\n\tethtool -x "$i" 2>/dev/null | awk "f { print; exit } /^RSS hash key/ { f = 1 }" | tr -d " \\t" | grep -Eqi "^[0-9a-f]{2}(:[0-9a-f]{2})+\\$" || continue\n\tif ethtool -X'
+mutant "key read from the header line" $'lines[heads[0] + 1] if heads[0] + 1 < len(lines)' $'lines[heads[0]] if heads[0] < len(lines)'
 
 echo
 echo "rss-pin selftest: $PASS passed, $FAIL failed"

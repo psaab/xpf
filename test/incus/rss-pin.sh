@@ -89,25 +89,15 @@ done
 if [ -r "$inv" ]; then echo "@@ required $(tr "\n" " " <"$inv")"; else echo "@@ required-absent"; fi
 exit 0'
 
-RSS_REMOTE_PIN='root=${RSS_SYSFS:-/sys/class/net}; inv=${RSS_REQUIRED:-/run/xpf-rss-pin.required}; key=$1; rc=0; req=""
-for p in "$root"/ge-*; do
-	[ -e "$p" ] || continue
-	i=${p##*/}
-	case $i in *.*) continue ;; esac
-	out=$(ethtool -x "$i" 2>&1)
-	xrc=$?
-	under=$(printf "%s\n" "$out" | awk "f { print; exit } /^RSS hash key/ { f = 1 }" | tr -d " \t")
-	if printf "%s\n" "$under" | grep -Eqi "^[0-9a-f]{2}(:[0-9a-f]{2})+\$"; then
-		req="$req$i "
-		if ethtool -X "$i" hkey "$key" >/dev/null 2>&1; then echo "$i set"; else echo "$i FAILED"; rc=1; fi
-	elif [ "$under" = "Operationnotsupported" ] || { [ "$xrc" -ne 0 ] && ! printf "%s\n" "$out" | grep -q "^RSS hash key" && printf "%s\n" "$out" | grep -q "Operation not supported"; }; then
-		:
-	else
-		echo "$i UNREADABLE"
-		rc=1
-	fi
+# The remote pin does NO classification (review, Codex at 2188aca657: two classifiers,
+# one in sh on the node and one in python here, diverged twice, so the mechanism is gone).
+# The calling host classifies ONCE with rss_parse; this script sets exactly the
+# interfaces it is handed, then writes the inventory from that same list.
+RSS_REMOTE_PIN='inv=${RSS_REQUIRED:-/run/xpf-rss-pin.required}; key=$1; shift; rc=0
+for i in "$@"; do
+	if ethtool -X "$i" hkey "$key" >/dev/null 2>&1; then echo "$i set"; else echo "$i FAILED"; rc=1; fi
 done
-printf "%s\n" $req >"$inv.tmp" && mv -f "$inv.tmp" "$inv" || { echo "pin inventory not written"; rc=1; }
+printf "%s\n" "$@" >"$inv.tmp" && mv -f "$inv.tmp" "$inv" || { echo "pin inventory not written"; rc=1; }
 exit $rc'
 
 rss_exec() { # <instance> <sh script> [args...]
@@ -133,16 +123,17 @@ for b in blocks[1:]:
     drv = (re.search(r"driver=(\S*)", head) or [None, "unknown"])[1]
     rc = (re.search(r"rc=(\d+)", head) or [None, "?"])[1]
     lines = body.splitlines()
-    under = None  # the line under the "RSS hash key:" header, if there is one
-    for n, l in enumerate(lines):
-        if l.startswith("RSS hash key"):
-            under = (lines[n + 1] if n + 1 < len(lines) else "").strip()
+    heads = [n for n, l in enumerate(lines) if l.startswith("RSS hash key")]
+    # the line under the one "RSS hash key:" header (more than one header is ambiguous: failed)
+    under = (lines[heads[0] + 1] if heads[0] + 1 < len(lines) else "").strip() if len(heads) == 1 else None
     key = "-"
-    if under is not None and HEX_KEY.match(under):
+    if len(heads) > 1:
+        state = "failed"
+    elif under is not None and HEX_KEY.match(under):
         key, state = under.lower(), "keyed"
-    elif under == "Operation not supported":
+    elif under is not None and " ".join(under.split()) == "Operation not supported":
         state = "unsupported"  # ethtool 6.19 on virtio: rc 0, this text under the header
-    elif under is None and rc not in ("0", "?") and "Operation not supported" in body:
+    elif not heads and rc not in ("0", "?") and "Operation not supported" in " ".join(body.split()):
         state = "unsupported"
     else:
         state = "failed"
@@ -284,13 +275,28 @@ rss_verify() {
 # verify by reading it back. A driver that accepts the write but keeps its
 # own key is caught by the read-back.
 rss_pin() {
-	local inst out rc=0 vrc key
+	local inst out pout prc rc=0 vrc key dump tag name state
+	local -a keyed
 	key=$(rss_pin_key)
 	for inst in "$@"; do
-		if ! out=$(rss_exec "$inst" "$RSS_REMOTE_PIN" "$key"); then
+		if ! dump=$(rss_exec "$inst" "$RSS_REMOTE_DUMP"); then
+			echo "rss pin $inst: UNREADABLE"
 			rc=1
+			continue
 		fi
-		echo "rss pin $inst: $(printf '%s' "$out" | tr '\n' ' ')"
+		keyed=() out=""
+		while read -r tag name _ _ _ _ state; do
+			[[ "$tag" == I ]] || continue
+			case "$state" in
+			keyed) keyed+=("$name") ;;
+			failed) out+="$name UNREADABLE "; rc=1 ;;
+			esac
+		done < <(printf '%s\n' "$dump" | rss_parse)
+		pout=$(rss_exec "$inst" "$RSS_REMOTE_PIN" "$key" "${keyed[@]}")
+		prc=$?
+		out+=$(printf '%s' "$pout" | tr '\n' ' ')
+		((prc == 0)) || rc=1
+		echo "rss pin $inst: $out"
 	done
 	rss_verify "$@"
 	vrc=$?
