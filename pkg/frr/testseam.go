@@ -33,11 +33,12 @@ type RecordingExecutor struct {
 	// TestCalls counts FrrReloadPyTest invocations.
 	TestCalls int
 
-	// ConfigBatches records every non-empty VtyshConfigLines batch (the
-	// #19083 static-NHT rebind and restore); ConfigBatchErr fails them. When
-	// ConfigBatchGate is non-nil a batch waits for it before returning, so a
-	// cell can hold a re-evaluation in flight. Guarded by mu: the #19083
-	// re-evaluation runs on its own goroutine. Read with ConfigBatchesSnapshot.
+	// ConfigBatches records every non-empty VtyshConfigLines batch that only
+	// binds next-hop-tracking maps (the #19083 static-NHT rebind and
+	// restore); ConfigBatchErr fails them. When ConfigBatchGate is non-nil
+	// such a batch waits for it before returning, so a cell can hold a
+	// re-evaluation in flight. Guarded by mu: the #19083 re-evaluation runs
+	// on its own goroutine. Read with ConfigBatchesSnapshot.
 	mu              sync.Mutex
 	ConfigBatches   [][]string
 	ConfigBatchErr  error
@@ -47,6 +48,11 @@ type RecordingExecutor struct {
 	// converges them to frr.conf, and `show ip|ipv6 nht route-map` reports
 	// them, so the #19083 binding restore sees a readable zebra.
 	nhtV4, nhtV6 string
+	// FastInstalls records every other non-empty batch (#19050 fast-path
+	// static lines; barriers, with no lines, are not recorded);
+	// FastInstallErr fails them.
+	FastInstalls   [][]string
+	FastInstallErr error
 }
 
 // applyNHTBindingLocked models one `ip|ipv6 nht static route-map NAME` line.
@@ -60,12 +66,25 @@ func (r *RecordingExecutor) applyNHTBindingLocked(line string) {
 	}
 }
 
-// VtyshConfigLines records a configuration batch.
+// VtyshConfigLines records a configuration batch: an NHT-binding batch in
+// ConfigBatches, any other in FastInstalls.
 func (r *RecordingExecutor) VtyshConfigLines(_ context.Context, lines []string) ([]byte, error) {
 	if len(lines) == 0 {
 		return nil, nil
 	}
+	nht := true
+	for _, l := range lines {
+		if !strings.HasPrefix(l, "ip nht ") && !strings.HasPrefix(l, "ipv6 nht ") {
+			nht = false
+		}
+	}
 	r.mu.Lock()
+	if !nht {
+		r.FastInstalls = append(r.FastInstalls, append([]string(nil), lines...))
+		err := r.FastInstallErr
+		r.mu.Unlock()
+		return nil, err
+	}
 	r.ConfigBatches = append(r.ConfigBatches, append([]string(nil), lines...))
 	err, gate := r.ConfigBatchErr, r.ConfigBatchGate
 	if err == nil {
@@ -80,7 +99,7 @@ func (r *RecordingExecutor) VtyshConfigLines(_ context.Context, lines []string) 
 	return nil, err
 }
 
-// ConfigBatchesSnapshot returns a copy of the recorded configuration batches.
+// ConfigBatchesSnapshot returns a copy of the recorded NHT-binding batches.
 func (r *RecordingExecutor) ConfigBatchesSnapshot() [][]string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,6 +123,11 @@ func (r *RecordingExecutor) Vtysh(_ context.Context, cmd string) (string, error)
 	}
 	return "VRF: default\nProtocol                  : route-map\n-------------------------------------\n" +
 		"static                    : " + v + "\n", nil
+}
+
+// FrrReloadPyTestOutput reports no diff.
+func (r *RecordingExecutor) FrrReloadPyTestOutput(context.Context, string) ([]byte, error) {
+	return nil, nil
 }
 
 func (r *RecordingExecutor) FrrReloadPy(_ context.Context, conf string) error {
