@@ -112,11 +112,45 @@ type deadlineTB19066 struct {
 
 func (d deadlineTB19066) Deadline() (time.Time, bool) { return d.d, true }
 
+// TestReexecDeadlinePolicy19066 pins the deadline arithmetic (Codex F2): a
+// long parent budget is honoured to within the margin (no hidden 10-minute
+// cap), a short one keeps three quarters for the child instead of expiring
+// at once, and the default applies only without a parent deadline.
+func TestReexecDeadlinePolicy19066(t *testing.T) {
+	now := time.Date(2026, 11, 10, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		parent time.Duration // 0: no parent deadline
+		want   time.Duration // child deadline relative to now
+	}{
+		{"60-minute parent budget", 60 * time.Minute, 60*time.Minute - reexecMargin},
+		{"20-second parent budget", 20 * time.Second, 15 * time.Second},
+		{"2-minute parent budget", 2 * time.Minute, 2*time.Minute - reexecMargin},
+		{"no parent deadline", 0, reexecDefault},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var tb testing.TB = t
+			if tc.parent > 0 {
+				tb = deadlineTB19066{T: t, d: now.Add(tc.parent)}
+			} else {
+				tb = noDeadlineTB19066{T: t}
+			}
+			if got := reexecDeadline(tb, now).Sub(now); got != tc.want {
+				t.Fatalf("child deadline = now+%v, want now+%v", got, tc.want)
+			}
+		})
+	}
+}
+
+type noDeadlineTB19066 struct{ *testing.T }
+
+func (noDeadlineTB19066) Deadline() (time.Time, bool) { return time.Time{}, false }
+
 // TestReexecCommandHasItsOwnDeadline19066 (R18 N1): the child is killed
-// reexecMargin before the parent's own deadline, so a hung child fails its
-// cell instead of hanging until the package -timeout.
+// before the parent's own deadline, so a hung child fails its cell instead of
+// hanging until the package -timeout.
 func TestReexecCommandHasItsOwnDeadline19066(t *testing.T) {
-	tb := deadlineTB19066{T: t, d: time.Now().Add(reexecMargin + time.Second)}
+	tb := deadlineTB19066{T: t, d: time.Now().Add(4 * time.Second)}
 	cmd := ReexecCommand(tb, "sleep", "30")
 	start := time.Now()
 	err := cmd.Run()
@@ -124,6 +158,6 @@ func TestReexecCommandHasItsOwnDeadline19066(t *testing.T) {
 		t.Fatal("a child running past its deadline exited cleanly")
 	}
 	if elapsed := time.Since(start); elapsed > 10*time.Second {
-		t.Fatalf("the child ran %v; it should have been killed about 1 s in", elapsed)
+		t.Fatalf("the child ran %v; it should have been killed about 3 s in", elapsed)
 	}
 }

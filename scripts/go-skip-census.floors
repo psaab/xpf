@@ -185,8 +185,9 @@
 # Six parent sites ("cannot create private namespace/netns" and the 12088
 # verdict skip: 3 priv-absent, 3 other) became RequireChildPass calls, and
 # seven RequireChildPass calls count as priv-absent: the six plus the 12168
-# helper, whose child-skip check gained a pre-start refusal skip path. Net
-# +1 total, +4 priv-absent, -3 other. findbinary's GOOS guard moved from
+# helper's verdict call. That seventh is a conservative syntactic site, not a
+# newly reachable skip: the helper's earlier err and any-SKIP checks end the
+# test first (#19066 Codex). Net +1 total, +4 priv-absent, -3 other. findbinary's GOOS guard moved from
 # NetnsUnavailable back to t.Skip with the same message: net zero.
 total        = 657
 

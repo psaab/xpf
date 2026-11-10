@@ -253,23 +253,29 @@ failed. Four rules now apply:
   `XPF_REQUIRE_NETNS` it fails rather than skips (#19066 R2).
 - **A deadline of its own.** The re-exec is built with
   `testguard.ReexecCommand(t, …)`, which kills the child 30 s before the
-  parent's own deadline (10 minutes when there is none). A test binary run
-  directly has no default `-test.timeout`, so a hung child otherwise blocked
-  until the package `-timeout` panicked everything (#19066 R18).
+  parent's own deadline, or a quarter of the remaining budget before it when
+  that is shorter; 10 minutes applies only when the parent has no deadline. A
+  test binary run directly has no default `-test.timeout`, so a hung child
+  otherwise blocked until the package `-timeout` panicked everything (#19066
+  R18). The kill is announced on stderr ("killed at its harness deadline").
 
 `TestNetnsReexecCensus19066` (`internal/testguard`) enforces these over every
-guarded package. Its scope is functions that run `unshare` and re-execute a
-test binary (`os.Args[0]` or `os.Executable()`). It fails on a literal
-user-namespace flag outside `UnshareFlags`; a `t.Skip*` call (one inside an
-`if` on `runtime.GOOS` is a platform guard and is exempt); a function with no
-child-success witness (`RequireChildPass`, or a `--- PASS: ` / `PASSED`
-literal); and a re-exec built with `exec.Command` instead of
-`ReexecCommand`. It reads one function's literals: flags held in a
-package-level variable, or a re-exec split across a helper that receives the
-binary path, escape it. Forcing mode is the backstop for those shapes, since a
-nested user namespace the guard refuses then makes the cell itself fail.
-Shell-script children (`unshare -rn bash -c …`) are out of scope: they are
-not guarded binaries.
+guarded package. Its scope is functions that run `unshare` (the literal, or a
+variable assigned from `exec.LookPath("unshare")`) and re-execute a test
+binary (`os.Args[0]` or `os.Executable()`). It fails on a literal
+user-namespace flag outside `UnshareFlags` (`-r`, `-U`, a `-c` cluster with a
+namespace letter, `--user`, `--map-*`); a `t.Skip*` call (one inside an `if`
+on `runtime.GOOS` is a platform guard and is exempt); a function with no
+child-success witness, which is a `RequireChildPass` call or a
+`strings`/`bytes.Contains` over the output whose needle names `--- PASS: ` or
+a `PASSED` sentinel (a bare literal elsewhere, such as a log line, does not
+count); and a re-exec built with `exec.Command` instead of `ReexecCommand`.
+It also fails on a package-level value holding a user-namespace flag. Its
+limit: it reads one function at a time, so a re-exec split across a helper
+that receives the binary path escapes it, and forcing mode does NOT backstop
+that shape when the parent uses a raw `t.Skip`. Keep a re-exec, its flags
+and its verdict in one function. Shell-script children
+(`unshare -rn bash -c …`) are out of scope: they are not guarded binaries.
 
 **A uid-0 child has the caller's full credentials.** Without the nested user
 namespace, a child re-executed by a uid-0 caller keeps that caller's
@@ -282,10 +288,19 @@ use a production default path. #19066 R18 found one:
 `TLSSelfSignedDir`, whose empty value is the production `/etc/xpf/tls`, and
 every root leg minted `cert.pem`/`key.pem` into the runner's `/etc`. The
 host-residue snapshot that `testguard-run.sh` takes before and after a run now
-lists `/etc/xpf`, `/var/lib/xpf`, `/etc/frr` and `/etc/systemd/network`, so a
-write there shows up in its HOST RESIDUE DIFFERENCE report. Its first root
-leg found a second writer that is not a re-exec child: two in-process 12168
-cells write `/var/lib/xpf` state as real root (#19084).
+lists `/etc/xpf`, `/var/lib/xpf`, `/etc/frr`, `/etc/systemd/network`,
+`/etc/ssh/ssh_known_hosts`, `/etc/ssh/sshd_config.d`, `/etc/chrony/sources.d`,
+`/etc/chrony/conf.d` and `/etc/rsyslog.d`, and a difference in any of them
+FAILS the run (exit 3 when the tests themselves passed); the rest of the
+residue report stays report-only. A deletion shows as well as a write, but
+only for a file that existed before the run, so a host with no xpf state
+cannot show one: validate against pre-populated files. The 12168 kernel
+children run the real apply tail, whose empty desired state removes
+xpf-managed SSH, chrony and rsyslog files (#19066 Codex); their fixture points
+those seams at a temp dir and covers `/etc` with an overlay in the child's
+private mount namespace. The snapshot's first root leg found a writer that is
+not a re-exec child: two in-process 12168 cells write `/var/lib/xpf` state as
+real root (#19084), so a root leg of pkg/daemon fails until that is fixed.
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about
 4 more minutes, measured at 691 s at runner load 4-8. That is above go test's

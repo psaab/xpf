@@ -27,7 +27,7 @@ const RequireNetnsEnv = "XPF_REQUIRE_NETNS"
 // the privilege for the others.
 //
 // A caller that is already uid 0 gets them with the user-namespace flags
-// removed: the letters U and r from a short cluster, and --user,
+// removed: the letters U, r and c from a short cluster, and --user,
 // --map-root-user and --map-current-user. Such a caller is the Go suite
 // under scripts/testguard-run.sh (uid 0 in a user namespace) or real root on
 // a VM leg. The reason: the child is a guarded package's test binary, and
@@ -64,8 +64,10 @@ func stripUserNamespaceFlags(flags []string) []string {
 			continue
 		case len(f) > 1 && f[0] == '-' && f[1] != '-' &&
 			strings.Trim(f[1:], unshareNoArgShortFlags) == "":
+			// c is --map-current-user, which implies --user like r does
+			// (#19066 Codex F4).
 			kept := strings.Map(func(r rune) rune {
-				if r == 'U' || r == 'r' {
+				if r == 'U' || r == 'r' || r == 'c' {
 					return -1
 				}
 				return r
@@ -103,23 +105,44 @@ func NetnsUnavailable(t testing.TB, format string, args ...any) {
 // deadline of its own (R18 N1 on #19066). A test binary run directly has no
 // default -test.timeout, so a hung child would block the parent's
 // CombinedOutput until the package -timeout panicked the whole package, with
-// no trace of which child hung. The child is killed reexecMargin before the
-// parent's own deadline (or after reexecDefault when the parent has none),
-// and WaitDelay keeps a killed child's inherited pipes from holding the
-// parent. The kill surfaces as a nonzero exit that RequireChildPass reports.
+// no trace of which child hung.
+//
+// With a parent deadline, the child gets the parent's remaining budget minus
+// a cleanup margin: reexecMargin, or a quarter of the remaining budget when
+// that is shorter, so a short budget still leaves the child three quarters of
+// it (Codex F2). Only without a parent deadline does reexecDefault apply.
+// WaitDelay keeps a killed child's inherited pipes from holding the parent.
+// The kill is announced on the parent's stderr, so a harness-budget
+// exhaustion is not mistaken for a product failure; it surfaces as a nonzero
+// exit that RequireChildPass reports.
 func ReexecCommand(t testing.TB, name string, args ...string) *exec.Cmd {
 	t.Helper()
-	deadline := time.Now().Add(reexecDefault)
-	if d, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
-		if pd, ok := d.Deadline(); ok && pd.Add(-reexecMargin).Before(deadline) {
-			deadline = pd.Add(-reexecMargin)
-		}
-	}
+	deadline := reexecDeadline(t, time.Now())
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	t.Cleanup(cancel)
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.WaitDelay = 5 * time.Second
+	testName := t.Name()
+	cmd.Cancel = func() error {
+		fmt.Fprintf(os.Stderr, "testguard: %s: re-executed child killed at its harness deadline %s (testguard.ReexecCommand)\n",
+			testName, deadline.Format(time.RFC3339))
+		return cmd.Process.Kill()
+	}
 	return cmd
+}
+
+// reexecDeadline is ReexecCommand's deadline policy, separated for testing.
+func reexecDeadline(t testing.TB, now time.Time) time.Time {
+	if d, ok := t.(interface{ Deadline() (time.Time, bool) }); ok {
+		if pd, ok := d.Deadline(); ok {
+			margin := reexecMargin
+			if remaining := pd.Sub(now); remaining/4 < margin {
+				margin = remaining / 4
+			}
+			return pd.Add(-margin)
+		}
+	}
+	return now.Add(reexecDefault)
 }
 
 const (
