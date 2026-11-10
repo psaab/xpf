@@ -381,6 +381,7 @@ mod.rs for further file-level breakdown.
       best-effort Gb/s beside an exact class at 8 Gb/s of 24 (four 10 Gb/s
       workers, drain simulation; exact carries 8.00 in every column):
       | root burst | shipped (floor, 1 ms hold) | floor, no hold | no floor | exact root parks, shipped / no floor |
+      |---|---|---|---|---|
       | 12 KB | 3.63-3.66 | 8.30-8.63 | 4.83-5.11 | 0 / 185-198 |
       | 16 KB | 9.86-11.14 | 13.14-13.17 | 5.33-6.23 | 0 / 192-214 |
       | 24 KB | 10.89-12.09 | 9.78-9.96 | 5.75-6.20 | 0 / 240-251 |
@@ -408,10 +409,15 @@ mod.rs for further file-level breakdown.
         gate and fixes its limit before it acquires. A worker that sampled
         "idle" after its hold expired, and acquires after a peer has
         enqueued and published exact work, still acquires against the
-        whole pool and can empty it. The new exact frame then root-parks
-        for up to one 50 us wheel tick. The serial simulation cannot
-        interleave that; R4 bounds it at one wheel tick per idle-to-busy
-        edge, the "no floor" column's latency.
+        whole pool and can empty it. The new exact frame then root-parks.
+        Its wake is computed from the root rate and the byte deficit,
+        rounded up to 50 us wheel ticks, and it is served at the worker's
+        next poll after that. So the delay is not bounded by one tick: at
+        25 Gb/s a 1,500-byte deficit refills within a tick, but at a
+        1 MB/s root it is 30 ticks, and a slow poll adds its period. The
+        serial simulation cannot interleave the race. Its floor-off column
+        (the same root-park on every edge, at 25 Gb/s with 1 us polls)
+        measured at most 50 us per edge (R4).
       - The gate adds scans. On a root with an exact class, each non-exact
         build walks its queues for exact bytes, and when they are zero it
         reads each peer slot's published bytes (the 64-byte slot whose
