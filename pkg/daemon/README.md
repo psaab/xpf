@@ -3415,7 +3415,19 @@ never lock an operator out of a remote box it manages.
     only `ExecStart`/`ExecStartPre`, so the directive survives cuts.
     Pinned by `sighup_15084_test.go`: the shutdown set excludes SIGHUP
     (and keeps SIGTERM/SIGINT), a real delivered HUP leaves the
-    process alive, and the parsed unit forces the restart.
+    process alive, and the parsed unit forces the restart. The
+    delivery cell waits until the capture has logged each HUP before
+    the next kill and before releasing it (#19070): `kill(2)` returns
+    before the signal is handled, since the kernel may hand a
+    process-directed signal to another (parked) thread, and a release
+    that won that race let the late HUP kill the whole test binary
+    mid-run (10 of 23 full pkg/daemon runs). The same window exists
+    when `Run` returns and its deferred `stopSIGHUP()` runs, but the
+    process exits right after, so a HUP landing there only changes the
+    exit status of a daemon that is already stopping.
+    `TestSIGHUPCaptureReleasedOnlyAfterDelivery19070` repeats the
+    sequence 200 times in a re-executed child and fails if any release
+    happens with a HUP unobserved or the child dies by a signal.
   - **Second shutdown signal during the shutdown sequence is absorbed
     (#16801).** `runShutdownSequence` called the signal context's
     `stop()` before `wg.Wait()` and the fail-closed block;

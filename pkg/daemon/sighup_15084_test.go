@@ -70,19 +70,21 @@ func TestDaemonSignalsExcludeSIGHUP15084(t *testing.T) {
 // stop() is called exactly once at the end (a double close would
 // panic), pinning that the returned func is the single release Run
 // defers.
+//
+// #19070: kill(2) returns before the signal is handled. The kernel may
+// hand a process-directed signal to another thread (a parked main
+// thread, typically), so a stop() straight after the kills could
+// restore the default action while a HUP was still pending, and the
+// late delivery then killed the test binary, at a random later test,
+// in 10 of 23 full pkg/daemon runs. deliverSIGHUPsUnderCapture19070
+// waits until the capture has logged each HUP before the next kill and
+// before stop(), and reports how many it saw.
 func TestIgnoreSIGHUPSurvivesDelivery15084(t *testing.T) {
-	stop := ignoreSIGHUP()
-
-	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
-		t.Fatalf("deliver SIGHUP to self: %v", err)
+	seen := countSIGHUPWarnings19070(t)
+	// Two HUPs: a second one must be equally inert.
+	if got := deliverSIGHUPsUnderCapture19070(t, seen, 2); got != 2 {
+		t.Fatalf("the capture observed %d of 2 SIGHUPs before it was released, want 2", got)
 	}
-	// A second HUP must be equally inert (burst safety: buffered chan).
-	if err := syscall.Kill(syscall.Getpid(), syscall.SIGHUP); err != nil {
-		t.Fatalf("deliver second SIGHUP to self: %v", err)
-	}
-	// Reaching this line at all is the assertion: with the default
-	// disposition the first Kill above terminated the process.
-	stop()
 }
 
 // TestUnitRestartForceExitStatus15084 pins the supervisor leg: the
