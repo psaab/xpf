@@ -18,8 +18,8 @@
 //   open/close, RT_FLOW, the RPC mirror) retire before RX polls, up to the
 //   pass budget `CLOSE_PARK_PASS_BUDGET`. Past the budget, the Closes left in
 //   the ring and the deferred overflow suffix also wait for a later pass. A
-//   parked Close is retried before and after the drains, at most
-//   `PARKED_RETRY_PASS_BUDGET` tries a pass (a cursor over the slot), and
+//   parked Close is retried before and after the drains, in one in-order walk
+//   of the slot each time (oldest first; survivors keep their order), and
 //   retires once its permit frees. A same-tuple reincarnation that overtakes
 //   it is safe: the flush's stale-incarnation fence
 //   (`session_delta.rs::close_delta_is_stale_incarnation`) makes the old
@@ -41,6 +41,12 @@
 // The cycle-1 "zombie retirement" queued a bare `DeleteSynced` for it, which
 // could delete a queued replacement (Codex R15 P1#4); it was removed.
 // Tracked in #19047.
+//
+// Residual (stated, #19064): each retry walks the whole parked slot, so a
+// large parked backlog costs O(parked) per pass (R13 measured about 29 ms a
+// tick at 16,000 parked). Fold 3's bounded cursor walk broke same-key order
+// and could starve an eligible old Close (Codex review of b62a36e29d); it
+// was removed, not repaired. A bounded, per-key FIFO, fair retry is #19064.
 
 use super::*;
 
@@ -62,13 +68,6 @@ pub(super) const CLOSE_PERMIT_BARRIER_NS: u64 = 1_000_000;
 /// within the cost of draining one full ring. Past it the pass returns to RX
 /// and the run carries over, so the next pass parks at once.
 pub(super) const CLOSE_PARK_PASS_BUDGET: usize = crate::session::MAX_SESSION_DELTAS;
-
-/// #19026 (R13 N8 on 661d9cb6ba): parked-Close permit tries (and so
-/// retirements) allowed in ONE housekeeping pass, across its two retry calls.
-/// The slot is walked with a cursor, so a backlog larger than this cycles
-/// over the following passes. R13 measured about 29 ms a tick for 16,000
-/// parked Closes with the unbounded walk.
-pub(super) const PARKED_RETRY_PASS_BUDGET: usize = 256;
 
 /// #19026: process-wide rate limit for the barrier journal lines (one line
 /// per interval across ALL workers, the #1760 CAS-throttle pattern), so a
@@ -149,12 +148,6 @@ pub(super) struct ClosePermitBarrier {
     pass_work: usize,
     /// The budget ran out this pass: the run carries over the RX tick.
     budget_exhausted: bool,
-    /// Where the next parked retry resumes in `parked`.
-    pub(super) retry_cursor: usize,
-    /// Parked permit tries left in this pass (`PARKED_RETRY_PASS_BUDGET`).
-    retry_left: usize,
-    /// Parked permit tries ever made (diagnostic; cells count it).
-    pub(super) retry_tries: u64,
 }
 
 impl ClosePermitBarrier {
@@ -215,23 +208,9 @@ impl ClosePermitBarrier {
         }
     }
 
-    /// A housekeeping pass starts: its parking and retry budgets are fresh.
+    /// A housekeeping pass starts: its parking budget is fresh.
     pub(super) fn begin_pass(&mut self) {
         self.pass_work = 0;
-        self.retry_left = PARKED_RETRY_PASS_BUDGET;
-    }
-
-    /// This call's parked-retry limit: the tries left in the pass, but never
-    /// more than one walk of the slot. Each try spends one (`spend_retry`),
-    /// so tries a call does not make stay for the pass's later call.
-    pub(super) fn retry_limit(&self) -> usize {
-        self.retry_left.min(self.parked.len())
-    }
-
-    /// One parked permit try.
-    pub(super) fn spend_retry(&mut self) {
-        self.retry_left = self.retry_left.saturating_sub(1);
-        self.retry_tries = self.retry_tries.saturating_add(1);
     }
 
     /// Account `work` deltas of parking work. Returns `true` (and marks the

@@ -553,31 +553,25 @@ fn retry_parked_closes(
                     .any(|(key, session_id)| *key == delta.key && *session_id == delta.session_id))
         });
     }
-    // #19026 (R13 N8 on 661d9cb6ba): the retry is bounded per pass. At most
-    // `PARKED_RETRY_PASS_BUDGET` permit tries (and so retirements) across the
-    // pass's two calls, resuming where the last call stopped (a cursor over
-    // the slot; retirements `swap_remove`, so no call moves the whole slot).
-    // At 16,000 parked Closes the unbounded form cost about 29 ms a tick.
-    let limit = close_barrier.retry_limit();
-    let mut i = close_barrier.retry_cursor;
-    for _ in 0..limit {
+    // #19026 (Codex review of b62a36e29d): one in-order walk of the whole
+    // slot, survivors kept in their order. Fold 3 bounded this walk with a
+    // cursor and `swap_remove`; that permuted the slot (a newer Close of a key
+    // retired before an older one, with stable permits) and let refilled
+    // arrivals starve an eligible old Close. It was removed rather than
+    // repaired: the walk is O(parked) per call again, a stated residual
+    // (#19064, worker/README.md).
+    let parked = std::mem::take(&mut close_barrier.parked);
+    let mut still_parked = Vec::new();
+    for delta in parked {
         // #19026 (Codex review of bbe57884f2, P2#2): a retry whose flush loses
         // the permit race is requeued by the flush; with no ring room that
         // requeue drops it, and the retry below would read "not requeued" as
         // retired. Retry only with room; the ring drain later this tick makes
-        // room, and the retry after the drains uses it.
-        if close_barrier.parked.is_empty() || !sessions.delta_ring_has_room() {
-            break;
-        }
-        if i >= close_barrier.parked.len() {
-            i = 0;
-        }
-        close_barrier.spend_retry();
-        if !close_permits_available(&close_barrier.parked[i]) {
-            i += 1;
+        // room.
+        if !close_permits_available(&delta) || !sessions.delta_ring_has_room() {
+            still_parked.push(delta);
             continue;
         }
-        let delta = close_barrier.parked.swap_remove(i);
         let one = std::slice::from_ref(&delta);
         let handled = purge_queued_flows_for_closed_deltas(
             bindings,
@@ -590,7 +584,7 @@ fn retry_parked_closes(
             Some(&mut *sessions),
         );
         if handled == 0 {
-            close_barrier.parked.push(delta);
+            still_parked.push(delta);
             continue;
         }
         let queued_before = sessions.pending_delta_count();
@@ -601,11 +595,11 @@ fn retry_parked_closes(
             });
         if requeued {
             if let Some(back) = sessions.pop_front_delta() {
-                close_barrier.parked.push(back);
+                still_parked.push(back);
             }
         }
     }
-    close_barrier.retry_cursor = i;
+    close_barrier.parked = still_parked;
 }
 
 // #13075: the loop's `drain_and_flush_all!` macro as a fn (shared with

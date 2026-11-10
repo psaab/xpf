@@ -1375,14 +1375,71 @@ fn budget_exit_defers_the_overflow_suffix_behind_the_ring_19026() {
     );
 }
 
-/// R13 N8: the parked retry is bounded per pass. 1,000 parked Closes, more
-/// than `PARKED_RETRY_PASS_BUDGET`. While their permits are held, each pass
-/// makes at most the budget's permit tries, not two walks of the slot.
-/// Once they free, each pass retires at most the budget, and the cursor
-/// cycles the whole slot within a few passes.
+/// Codex review of b62a36e29d (blocker 1): with stable permits, the parked
+/// retry keeps a key's Closes in age order. Fold 3's cursor walk retired by
+/// `swap_remove`, so retiring X swapped K(new) ahead of K(old): [102, 101].
+/// The restored walk is one in-order pass with survivors kept in order.
 #[test]
-fn the_parked_retry_is_bounded_per_pass_19026() {
-    let budget = super::close_barrier::PARKED_RETRY_PASS_BUDGET as u64;
+fn stable_permits_keep_same_key_close_order_19026() {
+    let mut h = Harness19026::new();
+    let x = key_19026(19_220);
+    let k = key_19026(19_221);
+    h.queue_close(x.clone(), 100);
+    h.queue_close(k.clone(), 101);
+    h.queue_close(k.clone(), 102);
+    let held = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([x, k.clone()])
+        .expect("hold both tuples");
+    assert!(h.tick(BASE_NS), "FIXTURE: the first blocked tick holds RX");
+    let ready = BASE_NS + super::close_barrier::CLOSE_PERMIT_BARRIER_NS;
+    assert!(!h.tick(ready));
+    assert_eq!(h.close_barrier.parked.len(), 3, "FIXTURE: all three Closes parked");
+    drop(held); // every permit stays free through the retirement pass
+    assert!(!h.tick(ready + TICK_NS));
+    let ids: Vec<_> = h
+        .flushed
+        .iter()
+        .filter(|d| d.key == k)
+        .map(|d| d.session_id)
+        .collect();
+    assert_eq!(ids, vec![101, 102], "a key's parked Closes retire oldest first");
+}
+
+/// Codex review of b62a36e29d (blocker 2): an eligible old parked Close is
+/// not starved by newer arrivals. 513 parked Closes, all eligible, with the
+/// victim second; 256 newly parked, eligible Closes are appended after every
+/// pass. Fold 3's 256-try cursor stayed pinned at index 0 and never reached
+/// the victim. The restored walk retires it on the first pass.
+#[test]
+fn a_ready_old_close_retires_despite_parked_store_refill_19026() {
+    let mut h = Harness19026::new();
+    let victim = key_19026(55_001);
+    // Boundary fixture: previously parked entries, now all eligible (the
+    // same seeding as the cancellation cell).
+    for i in 0..513u16 {
+        h.queue_close(key_19026(55_000 + i), 1000 + u64::from(i));
+    }
+    h.close_barrier.parked = h.sessions.drain_deltas(4096);
+    let mut retired_at = None;
+    for pass in 0..8u64 {
+        assert!(!h.tick(BASE_NS + pass * TICK_NS));
+        if retired_at.is_none() && h.flushed_closes_for(&victim) == 1 {
+            retired_at = Some(pass);
+        }
+        for i in 0..256u16 {
+            h.queue_close(key_19026(56_000 + i), 10_000 + pass * 256 + u64::from(i));
+        }
+        h.close_barrier.parked.extend(h.sessions.drain_deltas(4096));
+    }
+    assert_eq!(h.flushed_closes_for(&victim), 1, "the eligible old Close retires exactly once");
+    assert_eq!(retired_at, Some(0), "it retires on the first pass it is eligible, ahead of later arrivals");
+}
+
+/// The restored walk reaches the whole slot in one pass, in order: 1,000
+/// parked Closes whose permits free together all retire on the next pass,
+/// in the order they parked.
+#[test]
+fn every_freed_parked_close_retires_in_one_pass_in_order_19026() {
     let mut h = Harness19026::new();
     let blocked: Vec<SessionKey> = (0..1000u16).map(|i| key_19026(36_000 + i)).collect();
     for (i, key) in blocked.iter().enumerate() {
@@ -1400,35 +1457,20 @@ fn the_parked_retry_is_bounded_per_pass_19026() {
         }
     }
     assert_eq!(h.close_barrier.parked.len(), 1000, "FIXTURE: every Close parked");
-    for _ in 0..3 {
-        let before = h.close_barrier.retry_tries;
-        h.tick(now);
-        now += TICK_NS;
-        let tries = h.close_barrier.retry_tries - before;
-        assert!(tries <= budget, "R13 N8: {tries} parked permit tries in one pass, over {budget}");
-    }
+    let parked_order: Vec<u64> = h.close_barrier.parked.iter().map(|d| d.session_id).collect();
     drop(held);
-    let mut retired_total = 0u64;
-    for _ in 0..8 {
-        let before = h.flushed.len() as u64;
-        h.tick(now);
-        now += TICK_NS;
-        let retired = h.flushed.len() as u64 - before;
-        assert!(retired <= budget, "R13 N8: {retired} parked retirements in one pass, over {budget}");
-        retired_total += retired;
-    }
-    assert_eq!(retired_total, 1000, "the cursor cycles the whole slot: every parked Close retires");
+    let before = h.flushed.len();
+    h.tick(now);
+    let retired: Vec<u64> = h.flushed[before..].iter().map(|d| d.session_id).collect();
+    assert_eq!(retired, parked_order, "every freed parked Close retires in one pass, in parked order");
     assert!(h.close_barrier.parked.is_empty());
 }
 
-
-/// R13 N8 (the cursor): with more parked Closes than one pass's tries, the
-/// retry resumes where it stopped, so a Close parked last, whose permit
-/// frees while every earlier one stays blocked, still retires within a few
-/// passes. A retry restarting at the slot's head every pass would never
-/// reach it.
+/// A Close parked last, whose permit frees while every earlier one stays
+/// blocked, retires on the next pass: the walk skips the blocked ones and
+/// keeps them, in order.
 #[test]
-fn the_parked_retry_cursor_reaches_every_parked_close_19026() {
+fn a_parked_close_freed_last_retires_on_the_next_pass_19026() {
     let mut h = Harness19026::new();
     let stuck: Vec<SessionKey> = (0..600u16).map(|i| key_19026(38_000 + i)).collect();
     let last = key_19026(38_700);
@@ -1451,19 +1493,13 @@ fn the_parked_retry_cursor_reaches_every_parked_close_19026() {
         }
     }
     assert_eq!(h.close_barrier.parked.len(), 601, "FIXTURE: every Close parked");
+    let stuck_order: Vec<u64> = h.close_barrier.parked[..600].iter().map(|d| d.session_id).collect();
     drop(held_last);
-    let mut passes = 0;
-    while h.flushed_closes_for(&last) == 0 && passes < 10 {
-        h.tick(now);
-        now += TICK_NS;
-        passes += 1;
-    }
+    h.tick(now);
+    let kept: Vec<u64> = h.close_barrier.parked.iter().map(|d| d.session_id).collect();
     drop(held);
-    assert_eq!(
-        h.flushed_closes_for(&last),
-        1,
-        "R13 N8: the cursor reaches the last parked Close within a few passes ({passes})"
-    );
+    assert_eq!(h.flushed_closes_for(&last), 1, "the freed Close retires on the next pass");
+    assert_eq!(kept, stuck_order, "the blocked Closes stay parked, in order");
 }
 
 /// Codex review of 661d9cb6ba (P1, the drop half), on a DRAINED ring. An

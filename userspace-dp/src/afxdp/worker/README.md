@@ -150,8 +150,10 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     slot, and the drain continues in the same tick: the deltas behind it (the
     other Closes, HA sync, RT_FLOW, the RPC mirror) retire before RX polls, up
     to the pass's parking budget (below). The parked Close is retried on every
-    tick, before the drains and again after them. Once its permit frees it
-    retires on the first tick whose ring has room after the drain. Three rules
+    tick, before the drains and again after them, in one in-order walk of
+    the slot (oldest first; the Closes that cannot retire keep their order).
+    Once its permit frees it retires on the first tick whose ring has room
+    after the drain. Three rules
     keep the parked slot as good as the ring it left (Codex review of
     bbe57884f2):
     - **Cancellation reaches it.** `SessionTable::cancel_pending_close` (the
@@ -184,13 +186,13 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
       it is spent, the pass returns to RX and the run carries over
       (`ClosePermitBarrier::clear`), so the next pass parks the remaining
       blocked heads at once instead of holding RX for a fresh bound.
-    - **The bound is O(B + N + R) per pass, not "at most B"** (Codex
+    - **The bound is O(B + N + P) per pass, not "at most B"** (Codex
       review of 661d9cb6ba). The budget is checked after work is done,
       so one batch (256) and the second drain call overshoot it. A blocked
       overflow attempt copies the remaining suffix, N, which can exceed the
-      ring, before it is charged. R is the parked-retry budget below; a
-      pass that applies pressure-shed cancellations also scans the parked
-      slot once.
+      ring, before it is charged. P is the parked slot: each of the pass's
+      two retries walks all of it (the residual below), and a pass that
+      applies pressure-shed cancellations scans it once more.
     - **Progress.** With stable permits and m blocked Closes ahead of a
       non-Close delta, each park charges at most 257, so a budget-exhausting
       pass parks at least 16. The delta retires within `ceil(m/16) + 1`
@@ -202,7 +204,16 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
       too. So at most one 256-delta chunk is ever requeued, always into an
       empty ring: no drop, no overtaking. The pass's FIRST ring drain is
       what empties the ring, so the suffix still runs in the same pass
-      while RX refills the ring between passes.
+      while RX refills the ring between passes, PROVIDED that first drain
+      completes. Residual (Codex review of b62a36e29d, residual 3; #19064):
+      if every pass's first drain exhausts its parking budget (enough
+      interleaved blocked Closes and free deltas, with the retired room
+      refilled between passes), the suffix is deferred on every pass and
+      waits for as long as that contention lasts, even when its own
+      permits are free. That starvation class predates this branch: master
+      deferred the suffix and returned while ring cleanup stayed blocked.
+      The `ceil(m/16) + 1` bound above is for a fixed ring-resident delta,
+      not for a deferred suffix behind continually arriving work.
 
     - **The order holds across a budget exit** (R13 N7 / R14 R1 on
       661d9cb6ba). A pass that stops at its budget leaves deltas in the
@@ -212,16 +223,28 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     - Every parked Close is older than everything left in the ring (it was
       the head when it parked), so the retry after the drains is safe even
       with a non-empty ring.
-    - **The parked retry is bounded too** (R13 N8). The two retries of a
-      pass make at most `PARKED_RETRY_PASS_BUDGET` (256) permit tries and
-      retirements together. They walk the slot with a cursor, so a larger
-      backlog cycles over the following passes. Unbounded, 16,000 parked
-      Closes cost about 29 ms a tick.
+    - **Residual: the parked retry is O(parked) per call** (R13 N8 on
+      661d9cb6ba; split to #19064). Each pass walks the whole slot twice,
+      before and after the drains, so a large parked backlog costs time on
+      every tick: R13 measured about 29 ms a tick for 16,000 parked Closes,
+      and up to about 36 ms. The trigger is many Closes whose permits stay
+      held past the 1 ms bound at once, so they park and stay parked: a
+      long-held tuple gate across thousands of tuples. Fold 3 bounded the
+      walk with a 256-try cursor and `swap_remove`. That broke two things
+      (Codex review of b62a36e29d): with stable permits, a key's newer Close
+      retired before its older one, and refilled newer arrivals could
+      starve an eligible old Close forever. It was REMOVED rather than
+      repaired a fourth time. The restored walk is fold 2's: in order, with
+      survivors kept in order. A bounded, per-key FIFO, fair retry is the
+      design item #19064. Under CHANGING permit availability the walk can
+      still skip an older blocked Close and retire a later one (the
+      pre-existing residual). A key's Closes check the same tuple permit,
+      so they reorder only if that permit frees during the walk, between
+      the older Close's check and the newer one's.
 
     The cost: with more blocked work than one budget, the Closes left in
     the ring, the deferred overflow suffix and the parked Closes all wait
-    a pass or more while RX polls. A parked backlog over 256 retires over
-    several passes.
+    a pass or more while RX polls.
 
     A same-tuple reincarnation that overtakes it is safe:
     the flush's stale-incarnation fence makes the old Close's local teardown
