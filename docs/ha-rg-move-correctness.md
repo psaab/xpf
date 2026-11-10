@@ -557,7 +557,24 @@ default route to a next hop. On a standby the RETH statics are left out of
 the FRR render (#15734), so its kernel default is the cluster Null0. After
 an RG move, the new WAN owner's kernel default stays that Null0 until the
 next FRR render installs the static, 1.4-4.8 s after promotion in lane G's
-loss FIB dumps (#19050). So the soak also probes destinations that no
+loss FIB dumps (#19050). On udp the kernel default appeared a median 540 ms
+after the WAN VIP, and host-originated routed traffic on the new owner lagged
+by a median of 493-752 ms.
+
+The chosen fix, B, is under design review on #19050. B renders nothing ahead
+on the standby. On activation, a fenced incremental `vtysh` install of the
+newly owned static lines lands ahead of the coalesced reload. A lab spike
+measured the kernel default 38 ms after the VIP.
+
+An earlier approach (D1) is dropped. D1 pre-rendered address-only RETH
+statics on the standby for zebra's next-hop tracking to gate, but zebra
+resolves a gateway recursively through ANY covering route. A covering
+route, or the default for a non-default static, activated the gated
+statics on the standby, including a forwardable default out the LAN. This
+was lab-confirmed on udp on 2026-11-10. D1 is kept on `wip/19050-d1` for
+reference.
+
+The soak therefore also probes destinations that no
 connected subnet covers:
 
 - `r4`, `r6`, `s6` (LAN host): scored per move like the connected ping.
@@ -569,10 +586,24 @@ connected subnet covers:
 - `host4` (each node): the delay between the new WAN owner's first reply
   from its connected WAN gateway and its first reply from `r4`, both on
   that node's own clock. It is the routed window host-originated traffic
-  (probes, syslog, IKE) sees. A standby reaches neither target; a move
-  that does not hand the target the WAN RG is `N/A`. It is recorded per move
-  (`host4` in `result.json`, the `routed probes` table, `summary.host4`) and
-  does not change a verdict.
+  (probes, syslog, IKE) sees. A move that does not hand the target the WAN
+  RG is `N/A`. It is SCORED (#19050 review R14-1 / R4 F2):
+  - a WAN-handing move with no routed reply from the new owner FAILs;
+  - a lag over `SOAK_MAX_HOST4_LAG_MS` (default 250 ms) is a COST. Master
+    measured 544-1184 ms, so it scores COST on every WAN move. The B spike
+    measured 0-4.5 ms, and the dropped D1 prototype 0-28 ms;
+  - a routed reply from a node that does not hold the WAN address FAILs
+    (`LEAK`). That covers the standby at baseline, the new owner more than
+    250 ms before its gateway first answers, and the old owner after its
+    gateway stopped answering. Such a node's only default is the cluster
+    Null0, so a reply means another route resolved it. The check sees only
+    leaks that deliver replies: an activation that resolves to a blackhole
+    or a loop is silent to ping;
+  - a move that took the WAN off the other node but whose target never
+    reached its gateway is VOID.
+
+  `ROUTED_TARGET4` is set in the loss, tcp and udp env files, so a default
+  `make test-rg-move-soak` runs `r4` and `host4`.
 - **Same-run positive control.** Before any move, every routed probe must
   answer. For `host4`, exactly one node must reach the anchor, and that node
   must also reach `r4`. A probe that fails its control is VOID for the whole
