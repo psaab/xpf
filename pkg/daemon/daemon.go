@@ -1883,6 +1883,13 @@ type Daemon struct {
 	// frrStaticNHTReevalFn is a #19083 test seam that replaces the launch of
 	// the static-NHT re-evaluation after a VIP removal.
 	frrStaticNHTReevalFn func(rgID int)
+	// #19050 B: per-RG ownership epoch, bumped (under directVIPMu, then this
+	// leaf lock) only on a real ownership edge. The fast FRR install captures
+	// it at the promotion edge and re-checks it under the FRR manager's
+	// reloadMu. frrFastInstallFn is a test seam that replaces the launch.
+	directVIPEpochMu sync.Mutex
+	directVIPEpoch   map[int]uint64
+	frrFastInstallFn func(rgID int, epoch uint64)
 	// garpClampWarned dedups the #5695 per-RG "gratuitous-arp-count clamped"
 	// warning so directSendGARPs (per-failover path) logs it at most once per
 	// RG, not per send. Guarded by garpClampWarnMu.
