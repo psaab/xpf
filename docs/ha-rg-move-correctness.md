@@ -561,9 +561,13 @@ loss FIB dumps (#19050). On udp the kernel default appeared a median 540 ms
 after the WAN VIP, and host-originated routed traffic on the new owner lagged
 by a median of 493-752 ms.
 
-The chosen fix, B, is under design review on #19050. B renders nothing ahead
-on the standby. On activation, a fenced incremental `vtysh` install of the
-newly owned static lines lands ahead of the coalesced reload. A lab spike
+The fix is B (#19050; design DESIGN-READY from R4 and R14). B renders nothing
+ahead on the standby. On the promotion edge of direct-mode VIP ownership, a
+fenced incremental `vtysh` install of the newly owned static lines lands
+ahead of the coalesced reload: `frr.Manager.FastInstallStatics`, triggered by
+`frrFastInstall19050`, with the protocol in `pkg/frr/README.md` and
+`pkg/daemon/README.md`. Demotion needs nothing new, because zebra NHT drops an
+owned default about 20 ms after the VIP leaves. A lab spike
 measured the kernel default 38 ms after the VIP.
 
 An earlier approach (D1) is dropped. D1 pre-rendered address-only RETH

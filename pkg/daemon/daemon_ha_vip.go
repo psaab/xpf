@@ -178,9 +178,18 @@ func (d *Daemon) applyDirectVIPOwnershipWith(rgID int, wantFn func(int) bool, re
 			d.applyRethServicesForRG(rgID)
 		}
 		d.directVIPOwned[rgID] = true
+		var fastEpoch uint64
+		if !prev {
+			// #19050 B: a real promotion edge; the safety-net re-add of an
+			// owned RG (prev == want) must not move the epoch.
+			fastEpoch = d.bumpDirectVIPEpoch19050(rgID)
+		}
 		announce := !prev || added > 0
 		cfg := d.store.ActiveConfig()
 		d.directVIPMu.Unlock()
+		if !prev {
+			d.triggerFRRFastInstall19050(rgID, fastEpoch)
+		}
 		if announce {
 			d.scheduleDirectAnnounce(rgID, reason)
 			if cfg != nil {
@@ -198,6 +207,9 @@ func (d *Daemon) applyDirectVIPOwnershipWith(rgID int, wantFn func(int) bool, re
 	d.cancelDirectAnnounce(rgID)
 	removed := d.removeDirectVIPs(rgID)
 	d.removeDirectStableLinkLocal(rgID)
+	if prev {
+		d.bumpDirectVIPEpoch19050(rgID) // #19050 B: a real demotion edge
+	}
 	d.directVIPOwned[rgID] = false
 	d.directVIPMu.Unlock()
 	if prev || removed > 0 {

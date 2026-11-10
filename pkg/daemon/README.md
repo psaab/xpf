@@ -2163,6 +2163,42 @@ failover blackhole until the stale entry aged out. #2377 fixed the identical
 forced-.1 in `vrrp.sendGARP` but missed this direct-mode site; #3922 routes
 both through the shared `vrrp.GatewayProbeTarget` helper.
 
+**Fast static install on promotion (#19050 option B).** On the
+`!prev && want` edge of `applyDirectVIPOwnershipWith` (after `addDirectVIPs`),
+the daemon bumps the RG's ownership epoch and starts
+`frrFastInstall19050` (`daemon_frr_fast_install_19050.go`) in a goroutine. It
+never blocks the VIP path.
+- **What it does.** It renders under `applySem`, as the HA reconcile does,
+  and releases `applySem` before the FRR manager's `reloadMu`. It then calls
+  `frr.Manager.FastInstallStatics`, so the new owner's static default lands
+  about 40-60 ms after the VIP instead of after the coalesced reload's
+  ~600 ms. The scheduled reload still runs and stays the authority. See
+  pkg/frr/README.md.
+- **The epoch** (`directVIPEpoch`, leaf lock `directVIPEpochMu`) moves ONLY
+  on a real ownership edge, in either direction. A safety-net re-add of an
+  owned RG moves nothing.
+- **The pre-check** (`fastInstallPrecheck19050`) runs under `reloadMu`. It
+  requires every render input to be unchanged:
+  - no factory reset in progress;
+  - the same epoch;
+  - `IsLocalPrimary(rg)`, the render's own predicate;
+  - the same active config pointer;
+  - the same FRR `UnconditionalWriteGeneration`;
+  - the same local ownership vector.
+
+  The lock order is `reloadMu` -> cluster lock / `directVIPEpochMu`. The fast
+  path never takes `applySem` while holding `reloadMu`, and never touches
+  `frrApplySeq`.
+- **The VIP-add primitive** (`reconcileDirectVIPAddrs(_, true)`) is
+  census-pinned (`TestDirectVIPAddPrimitiveCensus19050`) to its classified
+  callers:
+  - the hook;
+  - link-cycle recovery's re-add of an OWNED RG, which writes neither
+    `directVIPOwned` nor the epoch.
+- **Graceful shutdown.** It removes VIPs with the raw `directRemoveVIPs` and
+  leaves owned statics in FRR. That is the pre-existing #19083; the fast path
+  refuses once the FRR manager is stopping, so it cannot widen it.
+
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`
 (`direct_vip_reconcile_18573.go`). Before #18573 both derived their address
