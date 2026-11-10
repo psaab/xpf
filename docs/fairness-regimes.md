@@ -2172,11 +2172,16 @@ Each carries a RED-on-revert unit test.
     peers' floor on. Concurrently, a peer that sampled "idle" just before
     the publish can still take the pool (the gate is a policy on observed
     demand, not an atomic enqueue-to-grant invariant), and the first frame
-    root-parks. Its wake follows the root rate and the byte deficit,
-    rounded up to 50 µs ticks, then the worker's next poll: within a tick
-    at 25 Gb/s with 1 µs polls (R4's measured floor-off fixture, at most
-    50 µs), but 30 ticks at a 1 MB/s root, and longer under slow polls. The 1 ms hold bridges the gaps of a
-    class running below its rate, whose queue empties between frames;
+    root-parks. Its wake is the deficit's refill time at the root rate
+    (rounded up to whole nanoseconds), added to now, converted to a 50 µs
+    wheel tick by integer division (floored), and clamped to at least the
+    next tick. The worker's next poll after that is a service attempt, and
+    the queue parks again if root credit is still short. At 25 Gb/s the
+    1,500-byte refill takes 480 ns, so the queue is eligible at the next
+    tick (R4's measured floor-off fixture, 1 µs polls: at most 50 µs). At a
+    1 MB/s root it takes 1.5 ms, 30 ticks, and longer under slow polls.
+    The 1 ms hold bridges the gaps of a class running below its rate, whose
+    queue empties between frames;
     without it best-effort lost 2–5 Gb/s at 24 and 32 KB to refilling the
     pool past `F` on every toggle. 0.25, 1 and 4 ms were measured, and 1 ms
     kept.
