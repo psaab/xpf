@@ -53,23 +53,35 @@ against its own band below, never against another cluster's. Use each env's
 
 **RSS key and flow placement (#19072).** Which worker a flow lands on is the
 NIC's Toeplitz hash of its 5-tuple under the RSS key. xpfd programs a CSPRNG
-key on every data interface (#11057), and every config commit re-applies
-xpfd's own key over any key set by hand. Since #19072's product fix the key is
-one per BOOT (`/run/xpf/rss-hash-key`): a deploy or daemon restart keeps it,
-and a reboot draws a new one. Builds without that fix draw a new key in every
-xpfd process, so every deploy and restart changes it. Two arms of a paired A/B
-therefore differ in placement after any reboot, across nodes and clusters, and
-on any arm built without the fix, unless the key is pinned.
-- `make cluster-deploy-and-gate` pins a fixed key after the deploy
-  (`XPF_RSS_PIN=1`, `test/incus/rss-pin.sh`). Any other gate runs
-  `make cluster-rss-pin` after its last config change (deploy, canonical
-  reset, CoS apply) and before its first measured cell.
-- Every gate record carries, per data interface, the key (PINNED or its
-  sha) and the `ethtool -x` sha, from `make cluster-rss-record LABEL=<cell>`
-  around each placement-sensitive cell. Those cells are H1 Group 8b, H1's
-  per-stream zero intervals, H11's per-stream stalls and per-stream F2/loss
-  `-P8` spreads. The H11 soak records the key itself before and after the
-  cell, and voids when `XPF_RSS_PIN=1` and the key is not pinned.
+key on every data interface (#11057), and every xpfd start and every config
+commit re-applies xpfd's own key over any key set by hand. Since #19072's
+product fix that key is one per BOOT (`/run/xpf/rss-hash-key`): a deploy or
+daemon restart puts the same boot key back (so placement returns to it, and a
+pin is lost), and a reboot draws a new one. Builds without that fix draw a new
+key in every xpfd process. Two arms of a paired A/B therefore differ in
+placement after any reboot, across nodes and clusters, and on any arm built
+without the fix, unless the key is pinned after the last start and config
+change.
+- `make cluster-deploy-and-gate` pins a fixed key after the deploy and
+  exports `XPF_RSS_PIN=1` (default; `XPF_RSS_PIN=0` opts out) to the whole
+  cell, deploy and gate alike. Any other gate runs `make cluster-rss-pin`
+  after its last config change (deploy, canonical reset, CoS apply) and
+  before its first measured cell.
+- The pin stores each node's keyed data interfaces as its required set
+  (`/run/xpf-rss-pin.required`). Verification fails when a required interface
+  is missing, carries another key, or cannot be read (`ethtool -x` failing for
+  any reason other than "Operation not supported", which only the keyless
+  fabric parent reports).
+- Every gate record carries, per data interface, the key (PINNED, none,
+  UNREADABLE or a sha prefix; never the key itself) and the `ethtool -x` sha,
+  from `make cluster-rss-record LABEL=<cell>` around each placement-sensitive
+  cell. Those cells are H1 Group 8b, H1's per-stream zero intervals, H11's
+  per-stream stalls and per-stream F2/loss `-P8` spreads. Under
+  `XPF_RSS_PIN=1` the H11 soak verifies the pin before the cell (an unpinned
+  start is VOID) and after it: a pin that did not hold turns a PASS into VOID
+  (`ABORT_CAUSE=rss: ...` in the ledger row, `"rss"` in `result.json`), and a
+  FAIL stays FAIL. A before/after check cannot see a pin that was lost and
+  restored inside the cell.
 - H1's crash reboots the crashed node, and its xpfd installs a new random
   key. After H1, that node's placement is uncontrolled until it is
   re-pinned. Run per-stream cells that must compare placement before H1,

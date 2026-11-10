@@ -88,10 +88,19 @@ func validRSSBootID(id string) bool {
 // readRSSBootKeyFile returns the key stored for bootID. It refuses a file
 // that is not a regular file owned by this process's user with no group or
 // other permissions: such a file may have been planted, and a planted key is
-// a known key.
+// a known key. The checks run on the OPENED descriptor (#19072 review R1), so
+// the file that is judged is the file that is read: the path is opened once,
+// O_NOFOLLOW refuses a final symlink, and O_NONBLOCK keeps a planted FIFO from
+// blocking the apply. Hardening against a hostile parent directory is a
+// tracked residual (#19095); /run/xpf is root-owned 0750 on a correct install.
 func readRSSBootKeyFile(path, bootID string) ([rssHashKeySize]byte, error) {
 	var key [rssHashKeySize]byte
-	fi, err := os.Lstat(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return key, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
 	if err != nil {
 		return key, err
 	}
@@ -101,20 +110,20 @@ func readRSSBootKeyFile(path, bootID string) ([rssHashKeySize]byte, error) {
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return key, fmt.Errorf("%s has mode %#o, want no group or other access", path, perm)
 	}
-	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Geteuid() {
-		return key, fmt.Errorf("%s is owned by uid %d, not %d", path, st.Uid, os.Geteuid())
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Geteuid() {
+		return key, fmt.Errorf("%s is not owned by uid %d", path, os.Geteuid())
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return key, err
-	}
-	defer f.Close()
-	raw, err := io.ReadAll(io.LimitReader(f, 256))
+	raw, err := io.ReadAll(io.LimitReader(f, int64(rssBootKeyFileMax+1)))
 	if err != nil {
 		return key, err
 	}
 	fields := strings.Fields(string(raw))
 	if len(fields) != 3 || fields[0] != rssBootKeyFileVersion {
+		return key, fmt.Errorf("%s: unrecognized format", path)
+	}
+	// Exactly one record and nothing else: a valid line followed by padding
+	// or trailing bytes is not a file this code wrote.
+	if string(raw) != fmt.Sprintf("%s %s %s\n", fields[0], fields[1], fields[2]) {
 		return key, fmt.Errorf("%s: unrecognized format", path)
 	}
 	if fields[1] != bootID {
@@ -127,6 +136,10 @@ func readRSSBootKeyFile(path, bootID string) ([rssHashKeySize]byte, error) {
 	copy(key[:], decoded)
 	return key, nil
 }
+
+// rssBootKeyFileMax is the length of the one record the file may hold:
+// "v1 " + a 36-byte boot_id + " " + 80 hex digits + "\n".
+const rssBootKeyFileMax = len(rssBootKeyFileVersion) + 1 + 36 + 1 + 2*rssHashKeySize + 1
 
 var errRSSBootKeyOtherBoot = errors.New("key belongs to another boot")
 

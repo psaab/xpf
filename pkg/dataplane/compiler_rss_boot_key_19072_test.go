@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 )
 
 // #19072: the RSS key is one random key per BOOT. Two xpfd starts in one boot
@@ -131,6 +133,14 @@ func TestRSSBootKeyRefusesUntrustedOrMalformedFile19072(t *testing.T) {
 				t.Fatal(err)
 			}
 		},
+		// Whitespace padding keeps the three fields intact, so only the
+		// exact-record check can refuse it.
+		"padding after the record": func(t *testing.T, keyPath string) {
+			raw, _ := os.ReadFile(keyPath)
+			if err := os.WriteFile(keyPath, append(raw, []byte("   \n\n")...), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
 	}
 	for name, spoil := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -148,6 +158,84 @@ func TestRSSBootKeyRefusesUntrustedOrMalformedFile19072(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The trust checks run on the opened descriptor (#19072 review R1). The
+// foreign-owner and FIFO cells are adopted from R7's review of ca81cda7a8
+// (R7-1): each pins one predicate no other cell can see.
+//   - A file owned by another uid is a known key and must not be used. The
+//     cell needs real root to chown, and FAILS rather than skips without it,
+//     so it cannot pass vacuously (the package's testguard already requires
+//     the runner's root namespace leg).
+//   - A FIFO at the path with no writer must not block the apply: the load
+//     runs inside CompileConfig before XDP attach, so a block is a bring-up
+//     hang. O_NONBLOCK is what this pins.
+//   - A FIFO held open by an idle writer: even a non-blocking open then
+//     parks the read, so only the regular-file check on the descriptor
+//     keeps it from hanging. That pins the regular-file check.
+//
+// Each FIFO case is bounded at 5 s, so a regression fails instead of hanging
+// the package run.
+func TestRSSBootKeyRefusesAForeignOwner19072(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Fatalf("FIXTURE: needs real root to chown (euid %d); run this package in the runner's root leg", os.Geteuid())
+	}
+	keyPath, bootPath := rssTestFiles(t, rssTestBootA)
+	if _, err := loadOrCreateBootRSSKey(keyPath, bootPath, rssTestRandom(0x11)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(keyPath, 65534, 65534); err != nil {
+		t.Fatalf("FIXTURE: chown: %v", err)
+	}
+	got, err := loadOrCreateBootRSSKey(keyPath, bootPath, rssTestRandom(0x56))
+	if err != nil || got != rssTestKey(0x56) {
+		t.Fatalf("key %x err %v: a key file owned by uid 65534 was used, want a fresh draw", got, err)
+	}
+}
+
+// It launches a goroutine (the 5 s bound), so the ./pkg/dataplane/ race leg
+// in the Makefile runs it too (race_gate_coverage_9045_test.go).
+func TestRSSBootKeyFIFOAtThePathNeverBlocks19072(t *testing.T) {
+	fifoCase := func(t *testing.T, holdWriter bool, fill byte) {
+		keyPath, bootPath := rssTestFiles(t, rssTestBootA)
+		if err := os.MkdirAll(filepath.Dir(keyPath), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(keyPath, 0o600); err != nil {
+			t.Fatalf("FIXTURE: mkfifo: %v", err)
+		}
+		if holdWriter {
+			// O_RDWR opens a FIFO without waiting for a peer (Linux).
+			w, err := os.OpenFile(keyPath, os.O_RDWR, 0)
+			if err != nil {
+				t.Fatalf("FIXTURE: open the FIFO's writer: %v", err)
+			}
+			defer w.Close()
+		}
+		type result struct {
+			key [rssHashKeySize]byte
+			err error
+		}
+		done := make(chan result, 1)
+		go func() {
+			k, e := loadOrCreateBootRSSKey(keyPath, bootPath, rssTestRandom(fill))
+			done <- result{k, e}
+		}()
+		select {
+		case r := <-done:
+			if r.err != nil || r.key != rssTestKey(fill) {
+				t.Fatalf("key %x err %v, want a fresh draw", r.key, r.err)
+			}
+			fi, err := os.Lstat(keyPath)
+			if err != nil || !fi.Mode().IsRegular() {
+				t.Fatalf("the FIFO was not replaced by a regular key file (%v, %v)", fi, err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a FIFO at the key path blocked the key load for 5 s (bring-up would hang)")
+		}
+	}
+	t.Run("fifo with no writer", func(t *testing.T) { fifoCase(t, false, 0x57) })
+	t.Run("fifo held open by an idle writer", func(t *testing.T) { fifoCase(t, true, 0x58) })
 }
 
 // Without a boot_id, or without a writable /run, the key is still a fresh

@@ -40,7 +40,7 @@ shift 2
 [[ "${1:-}" == -- ]] && shift
 d="$MOCK_ROOT/state/$inst"
 [[ -d "$d" ]] || { echo "Error: Instance not found" >&2; exit 1; }
-RSS_SYSFS="$d/net" FAKE_ETH="$d/eth" PATH="$MOCK_ROOT/bin:$PATH" exec "$@"
+RSS_SYSFS="$d/net" RSS_REQUIRED="$d/rss-required" FAKE_ETH="$d/eth" PATH="$MOCK_ROOT/bin:$PATH" exec "$@"
 EOF
 
 cat >"$T/bin/ethtool" <<'EOF'
@@ -50,6 +50,10 @@ op=$1 i=$2 s="$FAKE_ETH/$2"
 case "$op" in
 -i) echo "driver: $(cat "$s.driver" 2>/dev/null || echo virtio_net)" ;;
 -x)
+	if [[ -f "$s.broken" ]]; then
+		echo "Cannot get RX flow hash indirection table: Input/output error"
+		exit 1
+	fi
 	if [[ ! -f "$s.key" ]]; then
 		echo "Cannot get RX ring count: Operation not supported"
 		exit 1
@@ -107,12 +111,18 @@ run_cells() { # <library path>; every cell sources it in a subshell
 	pin="6d:5a:56:da:25:5b:0e:c2:41:67:25:3d:43:a3:8f:b0:d0:ca:2b:cb:ae:7b:30:b4:77:cb:2d:a3:80:30:f2:0c:6a:42:b7:3b:be:ac:01:fa"
 
 	lab_nodes
+	# A fresh record file per run: the mutation leg reruns these cells, and a
+	# key one mutant leaked into an appended file must not fail (and so
+	# falsely "kill") every later mutant.
+	rm -f "$T/rec.txt"
 	out=$(XPF_RSS_RECORD="$T/rec.txt" bash -c 'source "$1"; rss_record post-deploy fw0 fw1' _ "$lib" 2>&1)
 	rc=$?
 	if ((rc == 0)) && grep -q '^rss\[post-deploy\] fw0: ge-0-0-0 key=none indir=' <<<"$out" &&
 		grep -q 'ge-0-0-1 key=[0-9a-f]\{8\} indir=[0-9a-f]\{8\} x=[0-9a-f]\{12\};' <<<"$out" &&
-		! grep -q 'ge-0-0-2.50\|fxp0' <<<"$out" && grep -q '^### rss\[post-deploy\] fw1 ' "$T/rec.txt"; then
-		ok "record: one line per node, data VFs keyed, VLAN children and fxp0 skipped, raw dump kept"
+		! grep -q 'ge-0-0-2.50\|fxp0' <<<"$out" && grep -q '^### rss\[post-deploy\] fw1 ' "$T/rec.txt" &&
+		grep -q '^    <sha256:[0-9a-f]\{12\}>$' "$T/rec.txt" && grep -q 'toeplitz: on' "$T/rec.txt" &&
+		! grep -qiF -e "${RANDKEY_A:0:20}" -e "${RANDKEY_B:0:20}" "$T/rec.txt"; then
+		ok "record: one line per node, data VFs keyed, VLAN children and fxp0 skipped, dump kept with its key redacted"
 	else
 		bad "record: unexpected output (rc=$rc): $out"
 	fi
@@ -173,10 +183,11 @@ run_cells() { # <library path>; every cell sources it in a subshell
 		bad "keyless node: rc=$rc out=$out"
 	fi
 
-	# The last ge-* netdev has no RSS key (its `ethtool -x` fails): the node
-	# is still readable, and a pinned data VF before it still verifies.
+	# The last ge-* netdev has no RSS key (its `ethtool -x` fails with
+	# "Operation not supported"): the node is still readable, and a pinned
+	# data VF before it still verifies.
 	node fw8 "ge-0-0-1:mlx5_core=$pin" "ge-0-0-9:virtio_net=-"
-	out=$(bash -c 'source "$1"; rss_verify fw8' _ "$lib" 2>&1)
+	out=$(bash -c 'source "$1"; rss_pin fw8 >/dev/null; rss_verify fw8' _ "$lib" 2>&1)
 	rc=$?
 	if ((rc == 0)); then
 		ok "verify: a keyless interface listed last does not make the node unreadable"
@@ -189,6 +200,89 @@ run_cells() { # <library path>; every cell sources it in a subshell
 		ok "record/verify: an unreadable node is rc 3"
 	else
 		bad "unreadable node: $out"
+	fi
+
+	# Review F3: a required VF must not drop out of the verified set.
+	lab_nodes
+	out=$(bash -c 'source "$1"; rss_pin fw0' _ "$lib" 2>&1)
+	rc=$?
+	if ((rc == 0)) && [[ "$(tr '\n' ' ' <"$T/state/fw0/rss-required")" == "ge-0-0-1 ge-0-0-2 " ]]; then
+		ok "pin: stores the keyed data VFs as the node's required set (the keyless fabric parent is not in it)"
+	else
+		bad "pin inventory: rc=$rc out=$out inventory=$(cat "$T/state/fw0/rss-required" 2>&1)"
+	fi
+	touch "$T/state/fw0/eth/ge-0-0-2.broken"
+	out=$(bash -c 'source "$1"; rss_verify fw0' _ "$lib" 2>&1)
+	rc=$?
+	if ((rc == 3)) && grep -q 'ge-0-0-2: ethtool -x failed' <<<"$out"; then
+		ok "verify: a pinned VF whose ethtool -x starts failing is unreadable (rc 3), not skipped"
+	else
+		bad "verify with a failing required VF: rc=$rc out=$out"
+	fi
+	rm -f "$T/state/fw0/eth/ge-0-0-2.broken"
+	rm -rf "$T/state/fw0/net/ge-0-0-2"
+	out=$(bash -c 'source "$1"; rss_verify fw0' _ "$lib" 2>&1)
+	rc=$?
+	if ((rc == 1)) && grep -q 'required interface ge-0-0-2 is missing' <<<"$out"; then
+		ok "verify: a pinned VF that vanishes fails verification (rc 1) although the other VF is pinned"
+	else
+		bad "verify with a vanished required VF: rc=$rc out=$out"
+	fi
+	lab_nodes
+	touch "$T/state/fw0/eth/ge-0-0-2.broken"
+	out=$(bash -c 'source "$1"; rss_pin fw0' _ "$lib" 2>&1)
+	rc=$?
+	if ((rc != 0)) && grep -q 'ge-0-0-2 UNREADABLE' <<<"$out"; then
+		ok "pin: a VF whose ethtool -x fails (not 'not supported') fails the pin"
+	else
+		bad "pin with a failing VF: rc=$rc out=$out"
+	fi
+	lab_nodes
+	out=$(bash -c 'source "$1"; rss_pin fw0 >/dev/null; rm -f "$2"; rss_verify fw0' _ "$lib" "$T/state/fw0/rss-required" 2>&1)
+	rc=$?
+	if ((rc == 2)) && grep -q 'no pin inventory' <<<"$out"; then
+		ok "verify: no pin inventory on the node (a reboot clears it) is rc 2, never success"
+	else
+		bad "verify without an inventory: rc=$rc out=$out"
+	fi
+
+	# Review F2: the post-cell verdict.
+	local res
+	res="$T/result.json"
+	lab_nodes
+	bash -c 'source "$1"; rss_pin fw0 fw1' _ "$lib" >/dev/null 2>&1
+	printf '{"summary": {"exit": 0}}\n' >"$res"
+	out=$(bash -c 'source "$1"; rss_post_cell_verdict 0 "$2" fw0 fw1; echo "rc=$?"' _ "$lib" "$res" 2>&1)
+	if grep -q '^rc=0$' <<<"$out" && grep -q 'pin held from the start to the end' <<<"$out" &&
+		python3 -I -c 'import json,sys; o=json.load(open(sys.argv[1])); sys.exit(0 if o["rss"]["post_cell_verify_rc"]==0 and o["summary"]["exit"]==0 else 1)' "$res"; then
+		ok "post-cell: an unchanged pin keeps a PASS (rc 0) and is recorded in result.json"
+	else
+		bad "post-cell control: $out $(cat "$res")"
+	fi
+	printf '%s\n' "$RANDKEY_B" >"$T/state/fw1/eth/ge-7-0-2.key" # xpfd restored its key mid-cell
+	printf '{"summary": {"exit": 0}}\n' >"$res"
+	out=$(bash -c 'source "$1"; rss_post_cell_verdict 0 "$2" fw0 fw1; echo "rc=$?"' _ "$lib" "$res" 2>&1)
+	if grep -q '^rc=2$' <<<"$out" && grep -q '^ABORT_CAUSE=rss: the RSS pin did not hold' <<<"$out" &&
+		python3 -I -c 'import json,sys; o=json.load(open(sys.argv[1])); sys.exit(0 if o["summary"]["exit"]==2 and o["rss"]["effect"]=="PASS->VOID" else 1)' "$res"; then
+		ok "post-cell: a key replaced during a passing cell turns it VOID (rc 2, ABORT_CAUSE, result.json exit 2)"
+	else
+		bad "post-cell drift on PASS: $out $(cat "$res")"
+	fi
+	printf '{"summary": {"exit": 1}}\n' >"$res"
+	out=$(bash -c 'source "$1"; rss_post_cell_verdict 1 "$2" fw0 fw1; echo "rc=$?"' _ "$lib" "$res" 2>&1)
+	if grep -q '^rc=1$' <<<"$out" && ! grep -q '^ABORT_CAUSE=' <<<"$out" &&
+		python3 -I -c 'import json,sys; o=json.load(open(sys.argv[1])); sys.exit(0 if o["summary"]["exit"]==1 else 1)' "$res"; then
+		ok "post-cell: a FAIL stays FAIL (rc 1) when the pin also drifted"
+	else
+		bad "post-cell drift on FAIL: $out $(cat "$res")"
+	fi
+	lab_nodes
+	bash -c 'source "$1"; rss_pin fw0 fw1' _ "$lib" >/dev/null 2>&1
+	out=$(bash -c 'source "$1"; rss_post_cell_verdict 0 "" fw0 ghost; echo "rc=$?"' _ "$lib" 2>&1)
+	if grep -q '^rc=2$' <<<"$out" && grep -q '^ABORT_CAUSE=rss: .*rc=3' <<<"$out"; then
+		ok "post-cell: a node that cannot be read after the cell turns a PASS into VOID"
+	else
+		bad "post-cell unreadable: $out"
 	fi
 
 	lab_nodes
@@ -252,6 +346,87 @@ deploy_hook_cells() {
 
 run_cells "$LIB"
 deploy_hook_cells
+# Review F1: cluster-deploy-and-gate must carry XPF_RSS_PIN to the GATE, not
+# only to the deploy. Run the real recipe from a copy of the Makefile, with
+# the real deploy-lib.sh, stub with-cluster.sh / cluster-setup.sh, and a stub
+# gate target (MAKEFILES) that writes what it observes. The copy is its own
+# throwaway git repository, because deploy_gate_wave compares the checkout's
+# identity before and after the deploy.
+wiring_run() { # <makefile> <label> [make args...] -> prints the probe file
+	local mk=$1 label=$2 w="$T/wiring-$2"
+	shift 2
+	rm -rf "$w"
+	mkdir -p "$w/test/incus" "$w/scripts/image"
+	cp "$mk" "$w/Makefile"
+	# The Makefile validates its build metadata at parse time (#12698).
+	cp "$SCRIPT_DIR/../../scripts/image/validate-build-metadata.py" "$w/scripts/image/"
+	cp "$SCRIPT_DIR/deploy-lib.sh" "$w/test/incus/deploy-lib.sh"
+	printf '%s\n' '#!/usr/bin/env bash' 'while (($#)) && [[ $1 != -- ]]; do shift; done; shift; exec "$@"' >"$w/test/incus/with-cluster.sh"
+	printf '%s\n' '#!/usr/bin/env bash' 'echo "deploy XPF_RSS_PIN=${XPF_RSS_PIN-unset}" >>"$RSS_WIRING_PROBE"' >"$w/test/incus/cluster-setup.sh"
+	chmod +x "$w/test/incus/with-cluster.sh" "$w/test/incus/cluster-setup.sh"
+	printf 'rss-wiring-gate:\n\t@echo "gate XPF_RSS_PIN=$${XPF_RSS_PIN-unset}" >>"$$RSS_WIRING_PROBE"\n' >"$T/wiring-stub.mk"
+	(cd "$w" && git init -q && git add -A && git -c user.name=t -c user.email=t@t commit -qm wiring) || {
+		echo "WIRING-SETUP-FAILED"
+		return
+	}
+	: >"$T/wiring-$label.probe"
+	(cd "$w" && env -u MAKEFLAGS -u MFLAGS -u MAKELEVEL "${WIRING_ENV[@]}" MAKEFILES="$T/wiring-stub.mk" \
+		RSS_WIRING_PROBE="$T/wiring-$label.probe" make -s -o prepare-deb cluster-deploy-and-gate \
+		CLUSTER_GATE=rss-wiring-gate "$@" >"$T/wiring-$label.out" 2>&1) || echo "MAKE-RC=$?"
+	cat "$T/wiring-$label.probe"
+}
+wiring_cells() { # <makefile> -> 0 if every expectation held
+	local mk=$1 got all=0
+	WIRING_ENV=(-u XPF_RSS_PIN)
+	got=$(wiring_run "$mk" unset)
+	if [[ "$got" == $'deploy XPF_RSS_PIN=1\ngate XPF_RSS_PIN=1' ]]; then
+		ok "wiring: with XPF_RSS_PIN unset, the deploy AND the gate both see 1"
+	else
+		bad "wiring (unset): got [${got//$'\n'/|}] $(tail -3 "$T/wiring-unset.out" 2>/dev/null | tr '\n' ' ')"
+		all=1
+	fi
+	got=$(wiring_run "$mk" cmdline XPF_RSS_PIN=0)
+	if [[ "$got" == $'deploy XPF_RSS_PIN=0\ngate XPF_RSS_PIN=0' ]]; then
+		ok "wiring: XPF_RSS_PIN=0 on the command line stays 0 for the deploy and the gate"
+	else
+		bad "wiring (cmdline 0): got [${got//$'\n'/|}]"
+		all=1
+	fi
+	WIRING_ENV=(XPF_RSS_PIN=0)
+	got=$(wiring_run "$mk" env0)
+	if [[ "$got" == $'deploy XPF_RSS_PIN=0\ngate XPF_RSS_PIN=0' ]]; then
+		ok "wiring: XPF_RSS_PIN=0 in the environment stays 0 for the deploy and the gate"
+	else
+		bad "wiring (env 0): got [${got//$'\n'/|}]"
+		all=1
+	fi
+	return "$all"
+}
+wiring_cells "$SCRIPT_DIR/../../Makefile"
+# Its mutant: the pre-fix recipe, which gave the policy to the deploy's env only.
+python3 -I - "$SCRIPT_DIR/../../Makefile" "$T/Makefile.mut" <<'PY'
+import sys
+src, dst = sys.argv[1:3]
+t = open(src).read()
+old = 'env XPF_RSS_PIN="$(XPF_RSS_PIN)" bash -c \'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" '
+new = 'bash -c \'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" XPF_RSS_PIN="$(XPF_RSS_PIN)" '
+assert t.count(old) == 1, ("anchor", t.count(old))
+open(dst, "w").write(t.replace(old, new))
+PY
+if (($? != 0)); then
+	bad "mutant pin policy given to the deploy only: anchor missing (VOID)"
+else
+	before=$FAIL passed=$PASS
+	echo "--- mutant: pin policy given to the deploy only"
+	wiring_cells "$T/Makefile.mut" >"$T/wiring-mut.out" 2>&1
+	FAIL=$before PASS=$passed
+	if grep -qF 'FAIL: wiring (unset): got [deploy XPF_RSS_PIN=1|gate XPF_RSS_PIN=unset]' "$T/wiring-mut.out"; then
+		ok "mutant pin policy given to the deploy only KILLED by: the gate saw XPF_RSS_PIN unset"
+	else
+		bad "mutant pin policy given to the deploy only SURVIVED: $(grep -m2 'wiring' "$T/wiring-mut.out")"
+	fi
+fi
+
 
 # Mutation leg: each mutant must turn at least one cell red.
 mutant() { # <name> <python replace old> <new>
@@ -279,7 +454,12 @@ PY
 mutant "pin without read-back" $'\trss_verify "$@"\n\tvrc=$?' $'\ttrue\n\tvrc=$?'
 mutant "keyless node passes verify" $'\tif ((nokey)); then return 2; fi' $'\tif ((nokey)); then return 0; fi'
 mutant "VLAN children recorded as data interfaces" $'\tcase $i in *.*) continue ;; esac\n\td=$(ethtool -i' $'\td=$(ethtool -i'
-mutant "dump status taken from the last ethtool" $'done\nexit 0\'\n\nRSS_REMOTE_PIN' $'done\'\n\nRSS_REMOTE_PIN'
+mutant "failed read treated as unsupported" $'    else:\n        state = "failed"' $'    else:\n        state = "unsupported"'
+mutant "required set ignored" $'\t\tfor r in $req; do' $'\t\tfor r in ; do'
+mutant "pin skips an unreadable interface" $'\t\techo "$i UNREADABLE"\n\t\trc=1' $'\t\t:'
+mutant "raw key written to the record" $'"$(printf \'%s\\n\' "$dump" | rss_redact "$pin")"' $'"$dump"'
+mutant "post-cell drift keeps a PASS" $'\t\t\trc=2\n\t\t\teffect="PASS->VOID"' $'\t\t\teffect="PASS->VOID"'
+mutant "post-cell relabels a FAIL" $'\t\tif ((rc == 0)); then\n\t\t\trc=2' $'\t\tif ((rc <= 1)); then\n\t\t\trc=2'
 mutant "key read from the header line" $'key = (lines[n + 1] if n + 1 < len(lines) else "")' $'key = (lines[n] if n < len(lines) else "")'
 
 echo
