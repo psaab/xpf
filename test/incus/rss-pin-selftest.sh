@@ -54,9 +54,21 @@ case "$op" in
 		echo "Cannot get RX flow hash indirection table: Input/output error"
 		exit 1
 	fi
+	if [[ -f "$s.garbled" ]]; then # a header with something that is not a key under it
+		printf '%s\n' "RX flow hash indirection table for $i with 6 RX ring(s):" \
+			"    0:      0     1     2     3     4     5     0     1" "RSS hash key:" "zz:qq:not-a-key"
+		exit 0
+	fi
 	if [[ ! -f "$s.key" ]]; then
-		echo "Cannot get RX ring count: Operation not supported"
-		exit 1
+		if [[ -f "$s.oldstyle" ]]; then # the shape this selftest used before review R18
+			echo "Cannot get RX ring count: Operation not supported"
+			exit 1
+		fi
+		# The REAL lab shape (review R18, 371b2cd39c): ethtool 6.19 on the virtio
+		# fabric parent exits 0 and prints "Operation not supported" UNDER the header.
+		printf '%s\n' "RX flow hash indirection table for $i with 6 RX ring(s):" \
+			"Operation not supported" "RSS hash key:" "Operation not supported"
+		exit 0
 	fi
 	echo "RX flow hash indirection table for $i with 6 RX ring(s):"
 	echo "    0:      0     1     2     3     4     5     0     1"
@@ -68,7 +80,7 @@ case "$op" in
 	;;
 -X)
 	[[ "$3" == hkey ]] || exit 2
-	[[ -f "$s.key" ]] || { echo "Cannot set RX flow hash configuration: Operation not supported" >&2; exit 1; }
+	[[ -f "$s.key" ]] || { echo "Cannot set RX flow hash configuration: Hash key setting not supported" >&2; exit 1; }
 	[[ -f "$s.refuse" ]] && { echo "Cannot set RX flow hash configuration: Invalid argument" >&2; exit 1; }
 	[[ -f "$s.sticky" ]] && exit 0
 	printf '%s\n' "$4" >"$s.key"
@@ -200,6 +212,35 @@ run_cells() { # <library path>; every cell sources it in a subshell
 		ok "record/verify: an unreadable node is rc 3"
 	else
 		bad "unreadable node: $out"
+	fi
+
+	# Review R18 (371b2cd39c): the lab's virtio fabric parent prints its
+	# "Operation not supported" UNDER the "RSS hash key:" header with rc 0. It is
+	# unsupported, never keyed: not in the inventory, not pinned, recorded none.
+	lab_nodes
+	out=$(bash -c 'source "$1"; rss_pin fw0; echo "pin_rc=$?"; rss_record r18 fw0' _ "$lib" 2>&1)
+	if grep -q '^pin_rc=0$' <<<"$out" && ! grep -q 'ge-0-0-0 FAILED\|ge-0-0-0 set' <<<"$out" &&
+		grep -q '^rss\[r18\] fw0: ge-0-0-0 key=none indir=[0-9a-f]\{8\} x=[0-9a-f]\{12\}; ge-0-0-1 key=PINNED' <<<"$out" &&
+		[[ "$(tr '\n' ' ' <"$T/state/fw0/rss-required")" == "ge-0-0-1 ge-0-0-2 " ]]; then
+		ok "R18: ethtool 6.19's virtio output (rc 0, 'Operation not supported' under the header) is unsupported: not pinned, not required, recorded none"
+	else
+		bad "R18 virtio 6.19 shape: $out inventory=$(cat "$T/state/fw0/rss-required" 2>&1)"
+	fi
+	node fw7 "ge-0-0-0:virtio_net=-" "ge-0-0-1:mlx5_core=$RANDKEY_A"
+	touch "$T/state/fw7/eth/ge-0-0-0.oldstyle"
+	out=$(bash -c 'source "$1"; rss_pin fw7; echo "pin_rc=$?"; rss_record old fw7' _ "$lib" 2>&1)
+	if grep -q '^pin_rc=0$' <<<"$out" && grep -q '^rss\[old\] fw7: ge-0-0-0 key=none' <<<"$out"; then
+		ok "R18: the older shape (no header, rc 1, 'Operation not supported') is still unsupported"
+	else
+		bad "old virtio shape: $out"
+	fi
+	node fw6 "ge-0-0-1:mlx5_core=$pin" "ge-0-0-5:mlx5_core=-"
+	touch "$T/state/fw6/eth/ge-0-0-5.garbled"
+	out=$(bash -c 'source "$1"; rss_record g fw6; rss_verify fw6; echo "verify_rc=$?"' _ "$lib" 2>&1)
+	if grep -q '^verify_rc=3$' <<<"$out" && grep -q 'ge-0-0-5 key=UNREADABLE' <<<"$out" && grep -q 'ge-0-0-5: ethtool -x failed' <<<"$out"; then
+		ok "R18: a header with no well-formed hex key under it is failed (rc 3), never keyed or unsupported"
+	else
+		bad "garbled key line: $out"
 	fi
 
 	# Review F3: a required VF must not drop out of the verified set.
@@ -588,7 +629,9 @@ mutant "pin skips an unreadable interface" $'\t\techo "$i UNREADABLE"\n\t\trc=1'
 mutant "raw key written to the record" $'"$(printf \'%s\\n\' "$dump" | rss_redact "$pin")"' $'"$dump"'
 mutant "post-cell drift keeps a PASS" $'\t\t\trc=2\n\t\t\teffect="PASS->VOID"' $'\t\t\teffect="PASS->VOID"'
 mutant "post-cell relabels a FAIL" $'\t\tif ((rc == 0)); then\n\t\t\trc=2' $'\t\tif ((rc <= 1)); then\n\t\t\trc=2'
-mutant "key read from the header line" $'key = (lines[n + 1] if n + 1 < len(lines) else "")' $'key = (lines[n] if n < len(lines) else "")'
+mutant "rss_parse keyed by the header alone" $'    if under is not None and HEX_KEY.match(under):' $'    if under is not None:'
+mutant "pin selects by the header alone" $'	if printf "%s\\n" "$under" | grep -Eqi' $'	if printf "%s\\n" "$out" | grep -q "^RSS hash key" || printf "%s\\n" "$under" | grep -Eqi'
+mutant "key read from the header line" $'under = (lines[n + 1] if n + 1 < len(lines) else "").strip()' $'under = (lines[n] if n < len(lines) else "").strip()'
 
 echo
 echo "rss-pin selftest: $PASS passed, $FAIL failed"
