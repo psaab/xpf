@@ -406,5 +406,63 @@ else
 	bad "timeout control: a package that finished in time was voided"
 fi
 
+# ── #19070 item 3: a signal-killed test binary is NAMED, and stays a FAIL ──
+# cmd/go reports a test binary killed by a signal as a column-0
+# "signal: <name>" line followed by the package FAIL line. The run must keep
+# its ordinary FAIL status (1, not VOID 3) and say which package was
+# truncated. The control prints "signal: hangup" inside an indented test log,
+# which is not cmd/go's report.
+SG=$(mktemp -d "${TMPDIR:-/tmp}/gtj-signal.XXXXXX")
+cat > "$SG/killed" <<'EOT'
+#!/bin/sh
+printf '=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\nsignal: hangup\nFAIL\tfake/pkg\t0.012s\n'
+exit 1
+EOT
+cat > "$SG/logged" <<'EOT'
+#!/bin/sh
+printf '=== RUN   TestA\n    a_test.go:9: child said: signal: hangup\n--- FAIL: TestA (0.00s)\nFAIL\nFAIL\tfake/pkg\t0.012s\n'
+exit 1
+EOT
+chmod +x "$SG/killed" "$SG/logged"
+out=$(bash "$here/go-test-json.sh" "" "$SG/killed" ./... 2>&1); rc=$?
+check "signal death: go-test-json keeps the ordinary FAIL (exit 1, not VOID 3)" "$rc" "1"
+case "$out" in *"go-test TRUNCATED: fake/pkg: the test binary was killed by signal hangup"*) ok "signal death: the truncated package and signal are named";;
+	*) bad "signal death: no TRUNCATED banner in: $out";; esac
+wout=$(bash "$here/go-test-watch.sh" "$SG/killed" test ./... 2>&1); wrc=$?
+check "signal death: go-test-watch keeps the ordinary FAIL (exit 1)" "$wrc" "1"
+case "$wout" in *"go-test TRUNCATED: fake/pkg"*) ok "signal death: go-test-watch names it too";;
+	*) bad "signal death: go-test-watch printed no TRUNCATED banner: $wout";; esac
+out=$(bash "$here/go-test-json.sh" "" "$SG/logged" ./... 2>&1); rc=$?
+check "signal control: an indented log line is not cmd/go's report (exit 1)" "$rc" "1"
+case "$out" in *"TRUNCATED"*) bad "signal control: a logged 'signal: hangup' was read as a death: $out";;
+	*) ok "signal control: no TRUNCATED banner for a logged line";; esac
+# A REAL signal death, through both paths: a test that SIGKILLs its own
+# binary. TestZNeverRuns is after it and must not report.
+mkdir -p "$SG/m"
+printf 'module sigdeath\n\ngo 1.21\n' > "$SG/m/go.mod"
+cat > "$SG/m/s_test.go" <<'EOT'
+package sigdeath
+
+import (
+	"syscall"
+	"testing"
+)
+
+func TestA(t *testing.T)              {}
+func TestKillsItsOwnBinary(t *testing.T) { _ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL) }
+func TestZNeverRuns(t *testing.T)     {}
+EOT
+out=$(cd "$SG/m" && bash "$here/go-test-json.sh" "" go -count=1 ./... 2>&1); rc=$?
+check "real signal death, text path: ordinary FAIL (exit 1)" "$rc" "1"
+case "$out" in *"go-test TRUNCATED: sigdeath: the test binary was killed by signal killed"*) ok "real signal death, text path: named";;
+	*) bad "real signal death, text path: no TRUNCATED banner in: $out";; esac
+SJ="$SG/s.json"; : > "$SJ"
+out=$(cd "$SG/m" && bash "$here/go-test-json.sh" "$SJ" go -count=1 ./... 2>&1); rc=$?
+check "real signal death, side-file path: ordinary FAIL (exit 1)" "$rc" "1"
+case "$out" in *"go-test TRUNCATED: sigdeath:"*) ok "real signal death, side-file path: named";;
+	*) bad "real signal death, side-file path: no TRUNCATED banner in: $out";; esac
+if grep -q '"Test":"TestZNeverRuns"' "$SJ"; then bad "real signal death: a test after the death reported"; else ok "real signal death: the test after the death never reported (what the banner warns of)"; fi
+rm -rf "$SG"
+
 printf '\ngo-test-json-selftest: passed=%d failed=%d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

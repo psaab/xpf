@@ -1891,6 +1891,15 @@ they repeatedly bite:
     FAIL is indistinguishable from test-printed text and is not classified as
     VOID; the run remains an ordinary failure rather than a false timeout.
 
+    **A test binary killed by a signal is NAMED (#19070).** cmd/go reports it
+    as a column-0 `signal: <name>` line immediately followed by the package's
+    `FAIL<TAB><pkg>` line. The same watcher prints `go-test TRUNCATED: <pkg>:
+    the test binary was killed by signal <name>` on stderr. The status stays the
+    ordinary FAIL (not VOID): the death is a real failure, but every test after
+    the one running at that moment never ran, and a by-name census of the
+    results cannot see a test that never reported. #19070's SIGHUP deaths, at
+    about test 5,200 of pkg/daemon, were the case.
+
     The default text paths pin `-json=false` at the go command line, and the
     side-file path explicitly requests `-json`, so inherited `GOFLAGS` cannot
     change the stream format under the watcher. `go test -json` interleaves
