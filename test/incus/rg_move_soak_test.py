@@ -659,7 +659,8 @@ class FakeCluster:
                  stuck_traffic=False, revert_after_s=None, dual_after_land=False, helper_lie=False,
                  busy_iperf=False, faults=None, dual_after_s=None, stale_iperf_ports=None,
                  iperf_reset_fail=False, iperf_reset_timeout=False, untargeted_reply="transfer",
-                 routed_dead=(), host_route_lag_s=0.0, host_anchor_everywhere=False):
+                 routed_dead=(), host_route_lag_s=0.0, host_anchor_everywhere=False,
+                 host_standby_routed=False, host_anchor_dead=()):
         self.clock_ = clock
         # #19050: routed probes that never answer (their baseline control
         # fails), the new WAN owner's host-originated routed-path lag after
@@ -668,6 +669,10 @@ class FakeCluster:
         self.routed_dead = set(routed_dead)
         self.host_route_lag_s = host_route_lag_s
         self.host_anchor_everywhere = host_anchor_everywhere
+        # R4 F2: a standby whose routed ping answers (a covering route
+        # resolved its default), and nodes whose WAN gateway never answers.
+        self.host_standby_routed = host_standby_routed
+        self.host_anchor_dead = set(host_anchor_dead)
         self.route_files = {}  # name -> (path, interval_s)
         self.route_seq = {}
         self.host_files = {}  # (node, "anchor"|"routed") -> path
@@ -981,7 +986,11 @@ class FakeCluster:
         target host_route_lag_s after its landing; a standby reaches
         neither (unless the anchor is reachable everywhere)."""
         wan = 1
+        if kind == "anchor" and node in self.host_anchor_dead:
+            return False
         if self.forwarder(wan) != node:
+            if kind == "routed":
+                return self.host_standby_routed
             return kind == "anchor" and self.host_anchor_everywhere
         if kind == "anchor":
             return True
@@ -2743,6 +2752,61 @@ class RoutedProbe19050Test(unittest.TestCase):
         self.assertTrue(all(m["host4"]["status"] == "VOID" for m in res["moves"]))
         self.assertTrue(any("host4 probe VOID" in d for d in res["summary"]["disabled_checks"]))
 
+    # -- #19050 review (R14-1, R4 F2): host4 is scored --------------------
+
+    def test_host4_lag_over_budget_is_a_cost_19050(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_route_lag_s=2.0)
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=5.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(verdicts(res), ["COST", "COST"])
+        for m in res["moves"]:
+            self.assertTrue(any("host4 routed lag" in r for r in m["reasons"]), m["reasons"])
+
+    def test_host4_master_shaped_lag_costs_and_fixed_lag_passes_19050(self):
+        # Master (no activation fix) scores COST: its measured lag (udp
+        # median 493-752 ms) is over the 250 ms budget; a fixed build's (the
+        # B spike: median 0 ms) is not. Re-scoring the recorded master lab
+        # logs gives 40/40 WAN moves COST (docs/log/19050.md).
+        for lag, want in ((0.75, "COST"), (0.0, "PASS")):
+            with self.subTest(lag=lag):
+                clock = FakeClock()
+                c = FakeCluster(clock, {1: 0, 2: 0}, host_route_lag_s=lag)
+                rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=5.0, routed=[R4], host4=True)
+                self.assertEqual(rc, 0)
+                self.assertEqual(verdicts(res), [want, want], [m["host4"] for m in res["moves"]])
+
+    def test_host4_no_routed_reply_in_the_window_fails_19050(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_route_lag_s=100.0)
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=3.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(verdicts(res), ["FAIL", "FAIL"])
+        for m in res["moves"]:
+            self.assertTrue(any("got no routed reply in the window" in r for r in m["reasons"]), m["reasons"])
+
+    def test_host4_wan_move_whose_new_owner_never_reaches_its_gateway_is_void_19050(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_anchor_dead=(1,))
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=3.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 2)
+        to1 = res["moves"][0]
+        self.assertEqual(to1["host4"]["status"], "VOID", to1["host4"])
+        self.assertEqual(to1["verdict"], "VOID")
+        self.assertTrue(any("host4 VOID" in r for r in to1["reasons"]), to1["reasons"])
+
+    def test_host4_standby_routed_reply_at_baseline_fails_every_move_19050(self):
+        clock = FakeClock()
+        c = FakeCluster(clock, {1: 0, 2: 0}, host_standby_routed=True)
+        rc, res, _ = run_fake(c, clock, moves=2, rgs="1", sleep_s=3.0, routed=[R4], host4=True)
+        self.assertEqual(rc, 1)
+        self.assertEqual(verdicts(res), ["FAIL", "FAIL"])
+        for m in res["moves"]:
+            self.assertEqual(m["host4"]["status"], "LEAK")
+            self.assertTrue(any("routed reply from a node without the WAN address" in r and "at baseline" in r
+                                for r in m["reasons"]), m["reasons"])
+        self.assertEqual(res["summary"]["host4"]["leak"], 2)
+
     def test_host4_probes_run_on_both_nodes_and_are_stopped(self):
         clock = FakeClock()
         c = FakeCluster(clock, {1: 0, 2: 0})
@@ -2755,6 +2819,46 @@ class RoutedProbe19050Test(unittest.TestCase):
 
 
 class RoutedProbePure19050Test(unittest.TestCase):
+    @staticmethod
+    def _ticks(a, b, step=0.01):
+        n = int(round((b - a) / step))
+        return [a + i * step for i in range(n)]
+
+    def test_host4_move_flags_a_new_owner_routed_reply_before_its_gateway(self):
+        t0, t1 = 100.0, 110.0
+        anchor_t = self._ticks(t0 + 2.0, t1)
+        routed_t = self._ticks(t0 + 0.1, t1)  # routed answers 1.9 s before the gateway
+        anchor_o = self._ticks(t0 - 1.0, t0 + 1.8)
+        h = soak.host4_move(anchor_t, routed_t, t0, t1, anchor_o, [], t0, t1)
+        self.assertEqual(h["status"], "LEAK", h)
+        self.assertIn("new owner", h["detail"])
+
+    def test_host4_move_flags_an_old_owner_that_keeps_a_default(self):
+        t0, t1 = 100.0, 110.0
+        anchor_t = self._ticks(t0 + 2.0, t1)
+        routed_t = self._ticks(t0 + 2.0, t1)
+        anchor_o = self._ticks(t0 - 1.0, t0 + 1.8)
+        routed_o = self._ticks(t0 - 1.0, t1)  # keeps answering after its gateway stopped
+        h = soak.host4_move(anchor_t, routed_t, t0, t1, anchor_o, routed_o, t0, t1)
+        self.assertEqual(h["status"], "LEAK", h)
+        self.assertIn("old owner", h["detail"])
+
+    def test_host4_move_tolerates_ping_phase_within_the_grace(self):
+        t0, t1 = 100.0, 110.0
+        anchor_t = self._ticks(t0 + 2.0, t1)
+        routed_t = self._ticks(t0 + 1.95, t1)  # 50 ms ahead: ping phase, not a leak
+        anchor_o = self._ticks(t0 - 1.0, t0 + 1.8)
+        routed_o = self._ticks(t0 - 1.0, t0 + 1.8)
+        h = soak.host4_move(anchor_t, routed_t, t0, t1, anchor_o, routed_o, t0, t1)
+        self.assertEqual(h["status"], "MEASURED", h)
+        self.assertEqual(h["lag_ms"], 0.0)
+
+    def test_routed_target4_is_set_in_every_userspace_cluster_env_19050(self):
+        for filename in ("loss-userspace-cluster.env", "tcp-userspace-cluster.env", "udp-userspace-cluster.env"):
+            with self.subTest(filename=filename):
+                env = IperfTargetManagedness._fresh_cluster_env(filename)
+                self.assertEqual(env.get("ROUTED_TARGET4"), "172.16.100.200")
+
     def test_parse_host_ping_keeps_replies_across_restarts_and_errors(self):
         text = ("ping: connect: Invalid argument\n"
                 "PING 172.16.100.200 (172.16.100.200) 56(84) bytes of data.\n"
