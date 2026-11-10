@@ -1275,8 +1275,16 @@ impl Coordinator {
         // only the static table carried all change what a flow-cache seed
         // resolved without moving a dynamic row. Master never bumped for
         // those. The next refresh's bump of every manager key hid it, and
-        // #19034 removed that bump. Bumped after the publish, so a seed that
-        // reads the advanced epoch also reads the new static table.
+        // #19034 removed that bump.
+        //
+        // Order: publish first, bump second (Release). The ordering alone does
+        // not protect a seed. A worker loads its view once per tick, so a seed
+        // reading the epoch per packet could pair the advanced epoch with the
+        // view its tick loaded before this publish, and this push moves no
+        // part of the flow-cache generation pair (R4 review of b5a55949e3).
+        // The worker therefore stamps from a snapshot taken BEFORE its tick's
+        // view load (`BindingWorker::tick_neighbor_epochs`, Acquire). A stamp
+        // that shows this bump implies a view at or after this publish.
         let changed: FastSet<(i32, IpAddr)> = resolved_before
             .into_iter()
             .filter(|&(key, before)| {

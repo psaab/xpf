@@ -547,20 +547,36 @@ impl ShardedNeighborMap {
     /// TOCTOU fix per shard: the snapshot cannot already reflect a mapping
     /// change that lands during/after the resolve, so the live shard epoch
     /// advances past the stamp and the entry is evicted on its next hit.
-    /// NUM_SHARDS relaxed loads, on the cold cache-miss path only.
+    /// NUM_SHARDS loads.
+    ///
+    /// #19034 (R4 review of b5a55949e3): the worker loop takes this once per
+    /// tick, BEFORE the tick's `RuntimeView` load, and every descriptor of
+    /// the tick stamps from it (`BindingWorker::tick_neighbor_epochs`). The
+    /// loads are Acquire and every bump is Release. So a stamp that already
+    /// shows a bump made after a coordinator publish implies the tick's view
+    /// load came after that publish, and the seed resolved through the new
+    /// static table and fabric links. A per-descriptor snapshot let a seed
+    /// pair a post-bump epoch with the pre-publish view the tick had already
+    /// loaded. That entry was never evicted, because the neighbor push and
+    /// `refresh_fabric_links` do not move the generation pair the flow cache
+    /// checks. An older snapshot is only more conservative for the #3918
+    /// dynamic-map case.
     #[inline]
     pub(crate) fn snapshot_shard_epochs(&self) -> ShardEpochSnapshot {
         ShardEpochSnapshot(std::array::from_fn(|i| {
-            self.shard_mac_epochs[i].load(Ordering::Relaxed)
+            self.shard_mac_epochs[i].load(Ordering::Acquire)
         }))
     }
 
     /// #5147: advance the neighbor-resolution epoch of the shard that holds
     /// `key`. Called under the shard lock on a MAC replacement or actual
     /// removal so a concurrent fast-path hit cannot retain a stale decision.
+    /// Release: pairs with the Acquire tick snapshot
+    /// (`snapshot_shard_epochs`), so everything the writer published before
+    /// the bump is visible to a worker whose snapshot saw it (#19034).
     #[inline]
     fn bump_shard_epoch(&self, shard: usize) {
-        self.shard_mac_epochs[shard].fetch_add(1, Ordering::Relaxed);
+        self.shard_mac_epochs[shard].fetch_add(1, Ordering::Release);
     }
 
     fn lock_shard(&self, idx: usize) -> MutexGuard<'_, FastMap<(i32, IpAddr), NeighborRecord>> {
@@ -1371,6 +1387,7 @@ impl Default for ShardedNeighborMap {
 /// removal that lands during/after the resolve cannot already be reflected
 /// in this snapshot, so the entry's stamped epoch is < the live shard epoch
 /// and is evicted on its next hit rather than using the stale mapping.
+#[derive(Clone, Copy)]
 pub(crate) struct ShardEpochSnapshot([u32; NUM_SHARDS]);
 
 impl ShardEpochSnapshot {

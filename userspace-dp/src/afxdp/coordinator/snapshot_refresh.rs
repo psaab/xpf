@@ -180,8 +180,10 @@ impl super::Coordinator {
             self.publish_runtime_view();
         }
         // #19034: a replaced or pruned link invalidates the FabricRedirect
-        // flows cached from it, after the publish (a no-op when neither
-        // branch above changed the set).
+        // flows cached from it (a no-op when neither branch above changed the
+        // set). This path moves no part of the flow-cache generation pair, so
+        // it relies on the publish-then-bump order plus the worker's
+        // pre-view-load tick snapshot (`BindingWorker::tick_neighbor_epochs`).
         self.neighbors
             .dynamic
             .bump_resolution_changed(&fabric_changed_neighbor_keys(
@@ -651,8 +653,10 @@ impl super::Coordinator {
         // stamps the `(parent_ifindex, peer_addr)` shard. The neighbor
         // comparison above cannot see a fabric peer MAC change, and before
         // #19034 only the removal of every present manager row covered it,
-        // incidentally. Bumped after the publish, so a seed that reads the
-        // advanced epoch also reads the new links.
+        // incidentally. Publish first, bump second (Release); the worker
+        // stamps from its tick's pre-view-load snapshot
+        // (`BindingWorker::tick_neighbor_epochs`), so a stamp that shows this
+        // bump implies the new links (R4 review of b5a55949e3).
         self.neighbors
             .dynamic
             .bump_resolution_changed(&fabric_changed_neighbor_keys(
@@ -791,6 +795,14 @@ pub(super) fn resolved_neighbor_mac(
 /// MACs and `up` state, so a withdrawn link counts too. A new link with no
 /// old twin does not: no cached flow used it. `link_authenticated` gates
 /// fabric ingress, not this resolution, so it is not compared.
+///
+/// `up` covers failover: when the preferred link (fab0) goes down, its key
+/// advances and the flows cached on it re-resolve to fab1. Failback does not
+/// move them back. When fab0 recovers, fab0's own key advances (its old
+/// tuple had `up = false`), but fab1's tuple is unchanged, so flows cached on
+/// fab1 stay there until something else invalidates them. That is not
+/// fail-open: fab1 is up and still a valid redirect target. It is only not
+/// the preferred one (R4 review of b5a55949e3).
 pub(super) fn fabric_changed_neighbor_keys(
     old_fabrics: &[FabricLink],
     new_fabrics: &[FabricLink],

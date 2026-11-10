@@ -732,3 +732,171 @@ fn refresh_changing_the_fabric_local_mac_advances_its_shard_19034() {
         "a fabric local MAC change must advance the stamped shard"
     );
 }
+
+/// #19034 (R4 review of b5a55949e3), the `refresh_fabric_links` straddle.
+/// That writer moves no part of the flow-cache generation pair. A worker tick
+/// that took its epoch snapshot and loaded its view before the refresh may
+/// still seed a FabricRedirect from the old links later in the tick, and the
+/// seed's live-MAC check exempts FabricRedirect. The stamp the worker uses is
+/// the tick's pre-view-load snapshot (`BindingWorker::tick_neighbor_epochs`,
+/// pinned in `tick_epoch_snapshot_precedes_the_view_load_19034`), so it must
+/// already be behind the shard the refresh bumps. A FabricRedirect pass-level
+/// fixture needs a peer-synced session on a demoted RG. This harness does not
+/// build one; the push writer's straddle is end to end
+/// (`seed_straddling_a_neighbor_push_cannot_keep_the_old_mac_19034`).
+#[test]
+fn fabric_refresh_straddling_a_tick_leaves_its_seed_stale_19034() {
+    let (mut coordinator, snapshot) = fabric_coordinator();
+    let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
+    // The worker's tick: the epoch snapshot first, then the view's links.
+    let tick = dynamic.snapshot_shard_epochs();
+    let v0_links = coordinator.forwarding.fabrics.clone();
+
+    let mut fabric = snapshot.fabrics[0].clone();
+    fabric.peer_mac = FABRIC_PEER_MAC_B.to_string();
+    coordinator.refresh_fabric_links(&[fabric]);
+
+    // Later in the tick, a FabricRedirect seed resolves through V0's links.
+    let v0 = crate::afxdp::forwarding::resolve_fabric_redirect_from_list(&v0_links)
+        .expect("premise: V0 redirects");
+    assert_eq!(
+        v0.neighbor_mac,
+        Some([0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee]),
+        "premise: the straddling seed resolves the old peer MAC"
+    );
+    let stamped = (
+        crate::afxdp::forwarding::outer_neighbor_ifindex(&coordinator.forwarding, None, &v0),
+        v0.next_hop.expect("premise: the redirect carries the peer address"),
+    );
+    assert_ne!(
+        tick.epoch_for(&stamped),
+        dynamic.mac_change_epoch_for(&stamped),
+        "the seed's stamp (the tick's snapshot) must already be stale once the refresh bumped"
+    );
+}
+
+const GW6_LL: &str = "fe80::1";
+
+fn gw6() -> IpAddr {
+    GW6_LL.parse().expect("link-local gateway")
+}
+
+fn key6() -> (i32, IpAddr) {
+    (GW_IFINDEX, gw6())
+}
+
+/// R4 F2: a snapshot naming an IPv6 link-local gateway with `mac`. Keys are
+/// `(ifindex, IpAddr)` for both families, so the link-local next hop is keyed
+/// on its egress ifindex like any other.
+fn snap6(mac: Option<[u8; 6]>, generation: u64) -> crate::ConfigSnapshot {
+    let mut snapshot = snap(None, generation);
+    if let Some(mac) = mac {
+        snapshot.neighbors.push(NeighborSnapshot {
+            interface: "ge-0-0-2".to_string(),
+            ifindex: GW_IFINDEX,
+            family: "inet6".to_string(),
+            ip: GW6_LL.to_string(),
+            mac: mac_str(mac),
+            state: "reachable".to_string(),
+            router: true,
+            link_local: true,
+            ..Default::default()
+        });
+    }
+    snapshot
+}
+
+fn epoch6(coordinator: &Coordinator) -> u32 {
+    coordinator.dynamic_neighbors_ref().mac_change_epoch_for(&key6())
+}
+
+/// The IPv6 link-local twin of the defect cell: a same-MAC republish keeps
+/// the gateway's row and its shard epoch.
+#[test]
+fn refresh_naming_the_same_link_local_v6_mac_keeps_the_neighbor_epoch_19034() {
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap6(Some(MAC_A), 1))
+        .expect("first apply");
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(GW_IFINDEX, gw6(), NeighborEntry { mac: MAC_A })]),
+        "premise: the neighbor push is accepted"
+    );
+    let before = epoch6(&coordinator);
+
+    coordinator
+        .refresh_runtime_snapshot(&snap6(Some(MAC_A), 2))
+        .expect("routes-only republish");
+
+    assert_eq!(epoch6(&coordinator), before, "a same-MAC v6 refresh must not advance the shard epoch");
+    assert_eq!(
+        coordinator.dynamic_neighbors_ref().get(&key6()).map(|entry| entry.mac),
+        Some(MAC_A),
+        "the unchanged v6 manager row stays"
+    );
+}
+
+/// The IPv6 link-local twin of `refresh_changing_the_resolved_mac_advances_its_epoch_19034`.
+#[test]
+fn refresh_changing_a_link_local_v6_mac_advances_its_epoch_19034() {
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap6(Some(MAC_A), 1))
+        .expect("first apply");
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(GW_IFINDEX, gw6(), NeighborEntry { mac: MAC_A })]),
+        "premise: the neighbor push is accepted"
+    );
+    assert!(
+        coordinator
+            .dynamic_neighbors_ref()
+            .insert_if_changed(key6(), NeighborEntry { mac: MAC_B }),
+        "premise: the monitor (NDP) installs MAC_B"
+    );
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(GW_IFINDEX, gw6()),
+        Some(MAC_A),
+        "premise: the static table still names the old MAC"
+    );
+    let before = epoch6(&coordinator);
+
+    coordinator
+        .refresh_runtime_snapshot(&snap6(Some(MAC_B), 2))
+        .expect("refresh naming the new MAC");
+
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(GW_IFINDEX, gw6()),
+        Some(MAC_B),
+        "premise: the dynamic-confirmed new MAC replaces the static row"
+    );
+    assert_ne!(epoch6(&coordinator), before, "a v6 refresh that changes the resolved MAC must advance the shard epoch");
+}
+
+/// The IPv6 link-local twin of `manager_push_changing_the_static_mac_advances_its_epoch_19034`.
+#[test]
+fn manager_push_changing_a_link_local_v6_static_mac_advances_its_epoch_19034() {
+    let mut coordinator = Coordinator::new();
+    coordinator
+        .refresh_runtime_snapshot(&snap6(Some(MAC_A), 1))
+        .expect("first apply");
+    let before = epoch6(&coordinator);
+    assert!(
+        coordinator
+            .dynamic_neighbors_ref()
+            .insert_if_changed(key6(), NeighborEntry { mac: MAC_B }),
+        "premise: the monitor (NDP) installs MAC_B"
+    );
+    assert_eq!(epoch6(&coordinator), before, "premise: a fresh dynamic row behind the static entry does not bump");
+
+    assert!(
+        coordinator.apply_manager_neighbors(true, 1, &[(GW_IFINDEX, gw6(), NeighborEntry { mac: MAC_B })]),
+        "premise: the push is accepted"
+    );
+
+    assert_eq!(
+        coordinator.static_neighbor_mac_for_test(GW_IFINDEX, gw6()),
+        Some(MAC_B),
+        "premise: the dynamic-confirmed MAC replaces the static row"
+    );
+    assert_ne!(epoch6(&coordinator), before, "a v6 push that changes the resolved MAC must advance the shard epoch");
+}

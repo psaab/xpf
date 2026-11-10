@@ -715,6 +715,18 @@ pub(crate) fn worker_loop(
         }
         let loop_now_secs = loop_now_ns / 1_000_000_000;
         let mut rebuild_cos_fast_interfaces = false;
+        // #19034 (R4 review of b5a55949e3): the tick's neighbor-epoch
+        // snapshot, taken BEFORE the view load below. Writers that change a
+        // resolution without moving the generation pair (the neighbor push,
+        // `refresh_fabric_links`) publish first and bump second (Release),
+        // and this snapshot loads Acquire. So a seed stamped from it with a
+        // post-bump epoch also resolved through the published view. A
+        // per-descriptor snapshot could pair that epoch with the view this
+        // tick had already loaded, and the entry would never be evicted.
+        let tick_neighbor_epochs = dynamic_neighbors.snapshot_shard_epochs();
+        for binding in bindings.iter_mut() {
+            binding.tick_neighbor_epochs = Some(tick_neighbor_epochs);
+        }
         // #6592: ONE load for both halves. The coordinator publishes
         // validation and forwarding in a single `RuntimeView`, so whichever
         // view this observes gives a coherent pair — neither torn orientation

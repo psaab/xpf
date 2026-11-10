@@ -2807,7 +2807,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                     binding.scratch.scratch_recycle.push(desc.addr);
                     continue;
                 }
-                let neighbor_epoch_snapshot = worker_ctx.dynamic_neighbors.snapshot_shard_epochs();
+                // #19034: the tick's snapshot, taken before the view load
+                // (`BindingWorker::tick_neighbor_epochs`); a per-descriptor
+                // snapshot only where no tick has set one.
+                let neighbor_epoch_snapshot = binding
+                    .tick_neighbor_epochs
+                    .unwrap_or_else(|| worker_ctx.dynamic_neighbors.snapshot_shard_epochs());
                 // Per-packet proof consumed by the filtered reinject
                 // chokepoint below. It is set only by the host-inbound gate
                 // pass arms (or the owner-only solicited-reply exemption);

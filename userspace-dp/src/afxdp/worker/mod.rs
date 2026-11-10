@@ -159,6 +159,15 @@ pub(crate) struct BindingWorker {
     /// before it drains the prefix it consumed, so the length can reach
     /// 2 * RX_BATCH_SIZE - 1 and parking never allocates on the hot path.
     pub(in crate::afxdp) view_held: Vec<(XdpDesc, UserspaceDpMeta)>,
+    /// #19034 (R4 review of b5a55949e3): the shard-epoch snapshot the worker
+    /// loop took BEFORE this tick's `RuntimeView` load. Every flow-cache seed
+    /// of the tick stamps from it, so an epoch that already reflects a
+    /// publish-then-bump writer (the neighbor push, `refresh_fabric_links`)
+    /// implies the tick resolved through the published view. `None` (a
+    /// binding no tick has reached yet, and test harnesses) falls back to a
+    /// per-descriptor snapshot. A snapshot left over from an earlier tick is
+    /// older, so it can only evict sooner, never keep a stale entry.
+    pub(in crate::afxdp) tick_neighbor_epochs: Option<crate::afxdp::sharded_neighbor::ShardEpochSnapshot>,
     /// #18560: an ordinary pass has validated a native RX packet carrying the
     /// worker's CURRENT stamp since the worker last adopted a view. In native
     /// mode the ring has one producer, so no packet stamped with an older
@@ -623,6 +632,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
+            tick_neighbor_epochs: None,
             seen_current_stamp: false,
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
@@ -786,6 +796,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
+            tick_neighbor_epochs: None,
             seen_current_stamp: false,
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
@@ -915,6 +926,7 @@ impl BindingWorker {
             },
             scratch: WorkerScratch::pre_sized(ring_entries),
             view_held: Vec::with_capacity(2 * RX_BATCH_SIZE as usize),
+            tick_neighbor_epochs: None,
             seen_current_stamp: false,
             wg_scratch: crate::afxdp::wg::WgWorkerScratch::new(UMEM_FRAME_SIZE as usize),
             gre_reassembler: crate::afxdp::gre_reassembly::GreReassembler::new(),
