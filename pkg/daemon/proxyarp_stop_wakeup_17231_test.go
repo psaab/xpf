@@ -5,7 +5,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -51,6 +53,10 @@ const proxyARP17231InnerEnv = "XPF_17231_PROXYARP_INNER"
 // enterPrivateNetns17231, for responder goroutines to enter (below).
 var testNetnsFD17231 = -1
 
+// testOrigNetns17231 is the test thread's netns (the /proc ns link) as
+// enterPrivateNetns17231 found it, before it entered the private one.
+var testOrigNetns17231 string
+
 func enterPrivateNetns17231(t *testing.T) {
 	t.Helper()
 	runtime.LockOSThread()
@@ -59,6 +65,12 @@ func enterPrivateNetns17231(t *testing.T) {
 		runtime.UnlockOSThread()
 		t.Skipf("cannot read current netns (%v)", err)
 	}
+	origLink, err := os.Readlink("/proc/thread-self/ns/net")
+	if err != nil {
+		orig.Close()
+		runtime.UnlockOSThread()
+		t.Skipf("cannot read current netns link (%v)", err)
+	}
 	ns, err := netns.New()
 	if err != nil {
 		orig.Close()
@@ -66,8 +78,10 @@ func enterPrivateNetns17231(t *testing.T) {
 		t.Skipf("cannot create private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
 	}
 	testNetnsFD17231 = int(ns)
+	testOrigNetns17231 = origLink
 	t.Cleanup(func() {
 		testNetnsFD17231 = -1
+		testOrigNetns17231 = ""
 		_ = netns.Set(orig)
 		ns.Close()
 		orig.Close()
@@ -81,15 +95,89 @@ func enterPrivateNetns17231(t *testing.T) {
 // the veth names do not resolve (measured: InterfaceByName returns
 // "no such network interface" off the locked thread). Entering by fd
 // keeps the socket open inside the private netns.
+//
+// #19049: the thread goes back to its original netns BEFORE it is
+// unlocked. Unlocking it while it is still in the private netns hands
+// the scheduler a thread whose loopback is down, and any later goroutine
+// that lands on it, in any test, reads 127.0.0.1 as "network is
+// unreachable" and ::1 as "cannot assign requested address". If the
+// original netns cannot be read or restored, the goroutine exits still
+// locked and the runtime discards the thread instead of reusing it.
 func runResponder17231(d *Daemon, ctx context.Context, ifName string, r *proxyARPResponder) {
 	go func() {
 		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		if testNetnsFD17231 >= 0 {
-			_ = netns.Set(netns.NsHandle(testNetnsFD17231))
+		if testNetnsFD17231 < 0 {
+			defer runtime.UnlockOSThread()
+			d.runProxyARPResponder(ctx, ifName, r)
+			return
 		}
+		orig, origErr := netns.Get()
+		_ = netns.Set(netns.NsHandle(testNetnsFD17231))
+		defer func() {
+			if origErr != nil {
+				return
+			}
+			restored := netns.Set(orig) == nil
+			orig.Close()
+			if restored {
+				runtime.UnlockOSThread()
+			}
+		}()
 		d.runProxyARPResponder(ctx, ifName, r)
 	}()
+}
+
+// assertNoThreadLeftInPrivateNetns17231 is the #19049 cell. Once every
+// responder has returned, no thread of this process other than the
+// test's own (locked into the private netns by enterPrivateNetns17231)
+// may still be in that namespace. Threads leave it asynchronously after
+// done closes, so the census polls up to a deadline. The precondition
+// that the test thread is NOT in the netns it started in keeps the
+// census from comparing a namespace with itself. (/proc/self/ns/net is
+// not that baseline: it is the thread-group leader's link, and the test
+// goroutine can be running on the leader.)
+func assertNoThreadLeftInPrivateNetns17231(t *testing.T) {
+	t.Helper()
+	privateNS, err := os.Readlink("/proc/thread-self/ns/net")
+	if err != nil {
+		t.Fatalf("read the test thread's netns: %v", err)
+	}
+	if privateNS == testOrigNetns17231 || testOrigNetns17231 == "" {
+		t.Fatalf("precondition: the test thread's netns %s is not a private one (it started in %q)",
+			privateNS, testOrigNetns17231)
+	}
+	self := strconv.Itoa(unix.Gettid())
+	var left []string
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		left = left[:0]
+		tasks, err := filepath.Glob("/proc/self/task/*")
+		if err != nil {
+			t.Fatalf("list this process's threads: %v", err)
+		}
+		for _, task := range tasks {
+			tid := filepath.Base(task)
+			if tid == self {
+				continue
+			}
+			// A thread that exits between the Glob and the Readlink has
+			// left the namespace; the error is that, not a census gap.
+			if ns, err := os.Readlink(task + "/ns/net"); err == nil && ns == privateNS {
+				left = append(left, tid)
+			}
+		}
+		if len(left) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("thread(s) %v of this process are still in the private netns %s after every "+
+		"responder returned: a responder unlocked its thread without restoring the namespace, "+
+		"so a later goroutine scheduled there sees a namespace with loopback down (#19049)",
+		left, privateNS)
 }
 
 // TestQ53ProxyARPCloseDoesNotUnblockRecv is the namespace-gated
@@ -268,6 +356,8 @@ func runQ53ProxyARP(t *testing.T) {
 	if got := replies.Load(); got != before {
 		t.Fatalf("after cancel the stopped responder sent %d more repl(ies), want 0 (#17231)", got-before)
 	}
+
+	assertNoThreadLeftInPrivateNetns17231(t)
 }
 
 // TestProxyARPResponderStopJoinsParkedRecv17231 is the deterministic
