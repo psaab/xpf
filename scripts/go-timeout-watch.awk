@@ -37,12 +37,20 @@
 #
 # Exit 3 with a banner on stderr naming every timed-out package; 0 otherwise.
 #
-# #19070: also NAMES a package whose test binary was killed by a signal: cmd/go
-# prints the column-0 "signal: <name>" line and then the package's
-# "FAIL<TAB><pkg>" line. Such a run is an ordinary FAIL (go test already exits
-# nonzero), so this changes no exit status; it prints a TRUNCATED banner,
-# because every test after the one running at the death never ran, and a
-# by-name census of the results cannot see a test that never reported.
+# #19070: also NAMES a package whose test binary was killed by a signal. cmd/go
+# appends "signal: <name>" (os/exec's text: "killed", "hangup", "segmentation
+# fault (core dumped)", "user defined signal 1", ...) and then prints the
+# package's "FAIL<TAB><pkg>" line. It does not insert a newline first, so a
+# death during a partial write reads "working...signal: killed". The signal
+# text therefore counts at the END of a line, and only when (a) the very next
+# line is the package FAIL line and (b) the binary printed no summary line of
+# its own ("PASS" or "FAIL" alone) since the package's previous terminal line:
+# a binary that reached its summary was not killed mid-run, even if its
+# TestMain then printed a bare "signal: killed" (Codex F2). Such a run is an
+# ordinary FAIL (go test already exits nonzero), so this changes no exit
+# status; it prints a TRUNCATED banner, because every test after the one
+# running at the death never ran, and a by-name census of the results cannot
+# see a test that never reported.
 function hit(k, s) { if (!pending[k]) shape[k] = s; pending[k] = 1 }
 function record(k, name) {
 	if (!(name in named)) { named[name] = 1; order[++n] = name; why[name] = shape[k] }
@@ -60,14 +68,15 @@ function record(k, name) {
 	}
 	if (armedC[k]) { armedC[k] = 0; if (line ~ /^FAIL\t/) hit(k, "C") }
 	if (sigline[k] != "") {
-		if (line ~ /^FAIL[ \t]+[^ \t]/) {
+		if (line ~ /^FAIL[ \t]+[^ \t]/ && !summary[k]) {
 			split(line, g, /[ \t]+/)
 			tname = TAGGED ? k : g[2]
 			if (!(tname in truncated)) { truncated[tname] = sigline[k]; torder[++tn] = tname }
 		}
 		sigline[k] = ""
 	}
-	if (line ~ /^signal: [a-z][a-z ]*$/) sigline[k] = substr(line, 9)
+	if (line == "PASS" || line == "FAIL") summary[k] = 1
+	if (match(line, /signal: [A-Za-z][^\t]*$/)) sigline[k] = substr(line, RSTART + 8)
 	# Alarm shapes A and B share the dump sequence; only A has the running-test
 	# list. An adjacent printed panic+list pair is not enough: a failing test
 	# can print both. Keep the candidate until the alarm goroutine's first frame,
@@ -103,6 +112,7 @@ function record(k, name) {
 	# Name a pending timeout from it, then reset the stream state so one
 	# package's panic line can never pair with the next package's output.
 	if (line ~ /^(FAIL|ok)[ \t]+[^ \t]/) {
+		summary[k] = 0
 		split(line, f, /[ \t]+/)
 		if (pending[k]) record(k, TAGGED ? k : f[2])
 		st[k] = 0

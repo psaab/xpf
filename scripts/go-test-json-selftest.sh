@@ -432,6 +432,39 @@ wout=$(bash "$here/go-test-watch.sh" "$SG/killed" test ./... 2>&1); wrc=$?
 check "signal death: go-test-watch keeps the ordinary FAIL (exit 1)" "$wrc" "1"
 case "$wout" in *"go-test TRUNCATED: fake/pkg"*) ok "signal death: go-test-watch names it too";;
 	*) bad "signal death: go-test-watch printed no TRUNCATED banner: $wout";; esac
+# R8 N2 / Codex F1: os/exec names that are not one lower-case word, and a
+# death during a partial write ("working...signal: killed").
+i=0
+for sig in "segmentation fault (core dumped)" "aborted (core dumped)" "user defined signal 1" "CPU time limit exceeded" "trace/breakpoint trap"; do
+	i=$((i+1))
+	printf '#!/bin/sh\nprintf %s\nexit 1\n' "'=== RUN   TestB\\nsignal: $sig\\nFAIL\\tfake/pkg\\t0.012s\\n'" > "$SG/named$i"
+	chmod +x "$SG/named$i"
+	out=$(bash "$here/go-test-json.sh" "" "$SG/named$i" ./... 2>&1); rc=$?
+	check "signal death \"$sig\": ordinary FAIL (exit 1)" "$rc" "1"
+	case "$out" in *"go-test TRUNCATED: fake/pkg: the test binary was killed by signal $sig;"*) ok "signal death \"$sig\": named";;
+		*) bad "signal death \"$sig\": no TRUNCATED banner in: $out";; esac
+done
+cat > "$SG/partial" <<'EOT'
+#!/bin/sh
+printf '=== RUN   TestB\nworking...signal: killed\nFAIL\tfake/pkg\t0.012s\n'
+exit 1
+EOT
+chmod +x "$SG/partial"
+out=$(bash "$here/go-test-json.sh" "" "$SG/partial" ./... 2>&1); rc=$?
+case "$out" in *"go-test TRUNCATED: fake/pkg: the test binary was killed by signal killed;"*) ok "signal death after a partial write: named";;
+	*) bad "signal death after a partial write: no TRUNCATED banner in: $out";; esac
+# Codex F2: the binary reached its own summary ("FAIL") and THEN printed a
+# bare "signal: killed" (a TestMain reporting a child's death): not a death.
+cat > "$SG/summary" <<'EOT'
+#!/bin/sh
+printf '=== RUN   TestA\n--- FAIL: TestA (0.00s)\nFAIL\nsignal: killed\nFAIL\tfake/pkg\t0.012s\n'
+exit 1
+EOT
+chmod +x "$SG/summary"
+out=$(bash "$here/go-test-json.sh" "" "$SG/summary" ./... 2>&1); rc=$?
+check "summary control: an ordinary failing exit stays exit 1" "$rc" "1"
+case "$out" in *"TRUNCATED"*) bad "summary control: a binary that reached its summary was named as killed: $out";;
+	*) ok "summary control: no TRUNCATED banner once the binary printed its summary";; esac
 out=$(bash "$here/go-test-json.sh" "" "$SG/logged" ./... 2>&1); rc=$?
 check "signal control: an indented log line is not cmd/go's report (exit 1)" "$rc" "1"
 case "$out" in *"TRUNCATED"*) bad "signal control: a logged 'signal: hangup' was read as a death: $out";;
@@ -449,9 +482,10 @@ import (
 )
 
 func TestA(t *testing.T)              {}
-func TestKillsItsOwnBinary(t *testing.T) { _ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL) }
+func TestKillsItsOwnBinary(t *testing.T) { fmt.Print("working..."); _ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL) }
 func TestZNeverRuns(t *testing.T)     {}
 EOT
+sed -i 's/^import (/import (\n\t"fmt"/' "$SG/m/s_test.go"
 out=$(cd "$SG/m" && bash "$here/go-test-json.sh" "" go -count=1 ./... 2>&1); rc=$?
 check "real signal death, text path: ordinary FAIL (exit 1)" "$rc" "1"
 case "$out" in *"go-test TRUNCATED: sigdeath: the test binary was killed by signal killed"*) ok "real signal death, text path: named";;
@@ -462,6 +496,34 @@ check "real signal death, side-file path: ordinary FAIL (exit 1)" "$rc" "1"
 case "$out" in *"go-test TRUNCATED: sigdeath:"*) ok "real signal death, side-file path: named";;
 	*) bad "real signal death, side-file path: no TRUNCATED banner in: $out";; esac
 if grep -q '"Test":"TestZNeverRuns"' "$SJ"; then bad "real signal death: a test after the death reported"; else ok "real signal death: the test after the death never reported (what the banner warns of)"; fi
+# Codex F2 as a REAL module: every test finishes (one fails), then TestMain
+# prints a bare "signal: killed" and exits with m.Run's code. Not a death.
+mkdir -p "$SG/n"
+printf 'module sigsummary\n\ngo 1.21\n' > "$SG/n/go.mod"
+cat > "$SG/n/n_test.go" <<'EOT'
+package sigsummary
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	fmt.Fprintln(os.Stderr, "signal: killed")
+	os.Exit(code)
+}
+
+func TestOrdinaryFailure(t *testing.T) { t.Error("ordinary failure") }
+EOT
+for mode in text json; do
+	jf=""; [ "$mode" = json ] && { jf="$SG/n.json"; : > "$jf"; }
+	out=$(cd "$SG/n" && bash "$here/go-test-json.sh" "$jf" go -count=1 ./... 2>&1); rc=$?
+	check "real summary control, $mode path: ordinary FAIL (exit 1)" "$rc" "1"
+	case "$out" in *"TRUNCATED"*) bad "real summary control, $mode path: a completed binary was named as killed: $out";;
+		*) ok "real summary control, $mode path: no TRUNCATED banner";; esac
+done
 rm -rf "$SG"
 
 printf '\ngo-test-json-selftest: passed=%d failed=%d\n' "$pass" "$fail"

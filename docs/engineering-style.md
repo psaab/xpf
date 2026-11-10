@@ -1891,10 +1891,19 @@ they repeatedly bite:
     FAIL is indistinguishable from test-printed text and is not classified as
     VOID; the run remains an ordinary failure rather than a false timeout.
 
-    **A test binary killed by a signal is NAMED (#19070).** cmd/go reports it
-    as a column-0 `signal: <name>` line immediately followed by the package's
-    `FAIL<TAB><pkg>` line. The same watcher prints `go-test TRUNCATED: <pkg>:
-    the test binary was killed by signal <name>` on stderr. The status stays the
+    **A test binary killed by a signal is NAMED (#19070).** cmd/go appends
+    os/exec's `signal: <name>` (`killed`, `hangup`, `segmentation fault (core
+    dumped)`, `user defined signal 1`, ...) without a newline of its own, so
+    after a partial write it ends a line such as `working...signal: killed`,
+    and then prints the package's `FAIL<TAB><pkg>` line. The watcher counts
+    the signal text at the end of a line only when the very next line is that
+    FAIL line AND the binary printed no summary line of its own (`PASS` or
+    `FAIL` alone) since the package's previous terminal line; a binary that
+    reached its summary was not killed mid-run, even if its TestMain then
+    printed a bare `signal: killed`. It then prints `go-test TRUNCATED: <pkg>:
+    the test binary was killed by signal <name>` on stderr. Text alone cannot
+    rule out a TestMain that prints that line and exits BEFORE its summary;
+    the banner is a strong diagnostic, not proof. The status stays the
     ordinary FAIL (not VOID): the death is a real failure, but every test after
     the one running at that moment never ran, and a by-name census of the
     results cannot see a test that never reported. #19070's SIGHUP deaths, at
