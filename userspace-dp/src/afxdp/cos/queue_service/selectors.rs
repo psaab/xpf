@@ -73,6 +73,8 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
         };
         let head_len = cos_item_len(head);
         if root.tokens < head_len {
+            // #18748: whether this queue parks still demanding its reservation.
+            let parks_with_demand = queue.config.exact && queue.hot.tokens >= head_len;
             if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                 root.tokens,
                 root.shaping_rate_bytes,
@@ -83,6 +85,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
                 queue.config.exact,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                record_exact_park_demand(root, queue_idx, parks_with_demand);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -99,6 +102,7 @@ pub(in crate::afxdp) fn select_cos_guarantee_batch_with_fast_path(
                     true,
                 ) {
                     count_park_reason(root, queue_idx, ParkReason::QueueTokenStarvation);
+                    record_exact_park_demand(root, queue_idx, false);
                     park_cos_queue(root, queue_idx, wake_tick);
                 }
             }
@@ -183,6 +187,7 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
     if queue_count == 0 {
         return None;
     }
+    let per_batch = cos_root_credit_per_batch(root);
     let start = root.exact_guarantee_rr % queue_count;
     for offset in 0..queue_count {
         let queue_idx = (start + offset) % queue_count;
@@ -206,7 +211,18 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
             continue;
         };
         let head_len = cos_item_len(head);
-        if root.tokens < head_len {
+        // #18748 review cycle 3 (Rule 2): on a per-batch root, root credit
+        // for this visit only once the queue's own tokens cover its head.
+        let root_gate = acquire_exact_visit_root(
+            &mut root.tokens,
+            per_batch_root_lease(per_batch, &root.shared_root_lease),
+            queue.hot.tokens,
+            head_len,
+            now_ns,
+        );
+        if root_gate && root.tokens < head_len {
+            // #18748: whether this queue parks still demanding its reservation.
+            let parks_with_demand = queue.hot.tokens >= head_len;
             // #760 instrumentation: record the per-queue observation
             // that the interface shaper held it back. Written
             // regardless of whether the wakeup-tick estimator
@@ -244,6 +260,7 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
                 true,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                record_exact_park_demand(root, queue_idx, parks_with_demand);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -287,6 +304,7 @@ pub(super) fn select_exact_cos_guarantee_queue_with_lease_telemetry(
                 true,
             ) {
                 count_park_reason(root, queue_idx, ParkReason::QueueTokenStarvation);
+                record_exact_park_demand(root, queue_idx, false);
                 park_cos_queue(root, queue_idx, wake_tick);
             }
             continue;
@@ -340,6 +358,7 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch(
         root,
         queue_fast_path,
         now_ns,
+        RootGrantLimit::FULL,
         &mut local_scratch,
         &mut prepared_scratch,
     )
@@ -350,6 +369,7 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch_into(
     root: &mut CoSInterfaceRuntime,
     queue_fast_path: &[WorkerCoSQueueFastPath],
     now_ns: u64,
+    root_limit: RootGrantLimit,
     local_scratch: &mut VecDeque<TxRequest>,
     prepared_scratch: &mut VecDeque<PreparedTxRequest>,
 ) -> Option<CoSBatch> {
@@ -357,6 +377,7 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch_into(
     if queue_count == 0 {
         return None;
     }
+    let per_batch = cos_root_credit_per_batch(root);
     let start = root.nonexact_guarantee_rr % queue_count;
     for offset in 0..queue_count {
         let queue_idx = (start + offset) % queue_count;
@@ -388,6 +409,26 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch_into(
             continue;
         };
         let head_len = cos_item_len(head);
+        if per_batch {
+            // #18748 (Rule 2 and the pool floor): root for this visit only
+            // once the guarantee's own tokens cover its head, leaving the
+            // pool floor (`root_limit`).
+            if queue.hot.tokens < head_len {
+                continue;
+            }
+            let visit = queue
+                .hot
+                .tokens
+                .min(cos_guarantee_visit_cap_bytes())
+                .max(head_len);
+            acquire_root_for_batch(
+                &mut root.tokens,
+                root.shared_root_lease.as_deref(),
+                visit,
+                root_limit,
+                now_ns,
+            );
+        }
         if root.tokens < head_len {
             if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                 root.tokens,
@@ -448,6 +489,7 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
         now_ns,
         true,
         None,
+        RootGrantLimit::FULL,
         &mut local_scratch,
         &mut prepared_scratch,
     )
@@ -459,9 +501,11 @@ pub(super) fn select_cos_surplus_batch_filtered(
     now_ns: u64,
     allow_nonexact: bool,
     nonexact_surplus_budget: Option<u64>,
+    root_limit: RootGrantLimit,
     local_scratch: &mut VecDeque<TxRequest>,
     prepared_scratch: &mut VecDeque<PreparedTxRequest>,
 ) -> Option<CoSBatch> {
+    let per_batch = cos_root_credit_per_batch(root);
     for priority in 0..COS_PRIORITY_LEVELS {
         let indices_len = root.queue_indices_by_priority[priority].len();
         if indices_len == 0 {
@@ -497,7 +541,47 @@ pub(super) fn select_cos_surplus_batch_filtered(
                 continue;
             };
             let head_len = cos_item_len(head);
+            if per_batch {
+                // #18748 (Rule 2 and the pool floor): surplus takes root per
+                // batch, leaving the pool floor (`root_limit`), and only for a
+                // batch it can build: a non-exact queue needs the residual
+                // budget to cover its head, and a visit needs its deficit
+                // (after this visit's quantum) to.
+                if !queue.config.exact
+                    && nonexact_surplus_budget.is_some_and(|budget| budget < head_len)
+                {
+                    continue;
+                }
+                let deficit = if queue.hot.surplus_deficit < head_len {
+                    queue
+                        .hot
+                        .surplus_deficit
+                        .saturating_add(cos_surplus_quantum_bytes(queue))
+                } else {
+                    queue.hot.surplus_deficit
+                };
+                if deficit < head_len {
+                    // The visit cannot send: bank its quantum, as the deficit
+                    // step below does when root is held, without taking root.
+                    queue.hot.surplus_deficit = deficit;
+                    continue;
+                }
+                let budget = if queue.config.exact {
+                    deficit
+                } else {
+                    deficit.min(nonexact_surplus_budget.unwrap_or(u64::MAX))
+                };
+                acquire_root_for_batch(
+                    &mut root.tokens,
+                    root.shared_root_lease.as_deref(),
+                    budget.min(cos_guarantee_visit_cap_bytes()).max(head_len),
+                    root_limit,
+                    now_ns,
+                );
+            }
             if root.tokens < head_len {
+                // #18748: whether this queue parks still demanding its reservation.
+                let parks_with_demand = queue.config.exact && queue.hot.tokens >= head_len;
                 if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
                     root.tokens,
                     root.shaping_rate_bytes,
@@ -508,6 +592,7 @@ pub(super) fn select_cos_surplus_batch_filtered(
                     false,
                 ) {
                     count_park_reason(root, queue_idx, ParkReason::RootTokenStarvation);
+                    record_exact_park_demand(root, queue_idx, parks_with_demand);
                     park_cos_queue(root, queue_idx, wake_tick);
                 }
                 continue;

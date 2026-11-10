@@ -12,7 +12,7 @@ use super::*;
 
 /// 1 Gbps shared_exact guarantee class — the LOWEST rate, so the Phase-1
 /// ascending walk honors it first every epoch.
-fn vmin_skip_exact_queue(queue_id: u8, transmit_rate_bytes: u64) -> CoSQueueConfig {
+pub(super) fn vmin_skip_exact_queue(queue_id: u8, transmit_rate_bytes: u64) -> CoSQueueConfig {
     CoSQueueConfig {
         queue_id,
         forwarding_class: "exact".into(),
@@ -33,7 +33,7 @@ fn vmin_skip_exact_queue(queue_id: u8, transmit_rate_bytes: u64) -> CoSQueueConf
 /// Non-exact guaranteed class for the fall-through probe: with every exact
 /// queue V_min-skipped, `drain_shaped_tx` must service THIS queue via
 /// `build_nonexact_cos_batch` instead of aborting the pass.
-fn vmin_skip_nonexact_queue(queue_id: u8) -> CoSQueueConfig {
+pub(super) fn vmin_skip_nonexact_queue(queue_id: u8) -> CoSQueueConfig {
     CoSQueueConfig {
         queue_id,
         forwarding_class: "best-effort".into(),

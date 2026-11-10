@@ -139,6 +139,7 @@ pub(in crate::afxdp) fn build_cos_interface_runtime(
         tokens: initial_root_tokens,
         nonexact_surplus_under_exact_tokens: 0,
         nonexact_surplus_under_exact_last_refill_ns: 0,
+        parked_exact_demand: ExactDemandQueueMask::EMPTY,
         default_queue: config.default_queue,
         nonempty_queues: 0,
         runnable_queues: 0,

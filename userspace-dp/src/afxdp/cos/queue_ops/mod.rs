@@ -5,7 +5,9 @@
 
 use std::collections::VecDeque;
 
-use crate::afxdp::types::{CoSPendingTxItem, CoSQueuePopSnapshot, CoSQueueRuntime, FlowFairState};
+use crate::afxdp::types::{
+    CoSPendingTxItem, CoSQueuePopSnapshot, CoSQueueRuntime, ExactDemandQueueMask, FlowFairState,
+};
 use crate::afxdp::TX_BATCH_SIZE;
 use crate::session::SessionKey;
 
@@ -190,11 +192,37 @@ pub(in crate::afxdp) fn cos_queue_front(queue: &CoSQueueRuntime) -> Option<&CoSP
         .flow_fair_state
         .as_ref()
         .expect("cos_queue_front: flow_fair queue without flow_fair_state");
+    #[cfg(test)]
+    front_scan_probe::bump();
     // #785 Phase 3 — MQFQ: return the head of the bucket with the
     // smallest virtual-finish-time, not the DRR-rotation head. This
     // is the byte-rate-fair dequeue order (classical SFQ / WFQ).
     let bucket = usize::from(cos_queue_min_finish_bucket(ff, u64::MAX)?);
     ff.flow_bucket_items[bucket].front()
+}
+
+/// #18748 review (R6 P3), test builds only: counts the flow-bucket head
+/// searches `cos_queue_front` runs, so a cell can pin that a parked exact
+/// queue's demand check does not walk its buckets.
+#[cfg(test)]
+pub(in crate::afxdp) mod front_scan_probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static SCANS: Cell<u64> = const { Cell::new(0) };
+    }
+
+    pub(super) fn bump() {
+        SCANS.with(|c| c.set(c.get() + 1));
+    }
+
+    pub(in crate::afxdp) fn reset() {
+        SCANS.with(|c| c.set(0));
+    }
+
+    pub(in crate::afxdp) fn count() -> u64 {
+        SCANS.with(|c| c.get())
+    }
 }
 
 /// #1229 v7: cap-aware variant of `cos_queue_front` for the drain
@@ -369,32 +397,68 @@ pub(in crate::afxdp) fn cos_item_len(item: &CoSPendingTxItem) -> u64 {
     }
 }
 
-/// #hb166 T-6(b): a guaranteed exact queue counts as REAL (serviceable)
-/// demand for the surplus-reservation masks only when it can actually ship
-/// its head packet right now — runnable, non-empty, and both the root and
-/// per-queue token buckets cover the head length. A v8-starved /
-/// token-parked exact class that ships zero bytes is NOT serviceable, so it
-/// must release its reserved rate to best-effort (work conservation)
-/// instead of zeroing the BE residual while the link idles.
+/// Whether a guaranteed exact queue DEMANDS its reserved rate: it is
+/// backlogged and its OWN token bucket covers the head packet, so the only
+/// thing that can hold it back is the shared root. Callers still apply the
+/// `exact && guarantee_enabled` config gate separately.
 ///
-/// This is exactly the per-queue predicate the shared_exact backlog already
-/// publishes as `serviceable_exact_backlog_bytes`; gating the demand MASKS
-/// on it makes the reservation consistent with the published serviceability
-/// signal. Callers still apply the `exact && guarantee_enabled` config
-/// gate separately.
+/// #hb166 T-6(b) introduced the release rule this keeps: an exact class
+/// that is backlogged but ships zero bytes because it is limited by ITSELF
+/// (its own rate is spent and it parked on queue tokens, or its v8 lease is
+/// not granting) must not reserve its rate, or best-effort is held to the
+/// residual while the link idles. A runnable queue in such a state has
+/// `tokens <` its current head; a parked one recorded "no demand" when it
+/// parked (below).
+///
+/// #18748 narrowed what counts as "limited by itself". T-6(b) required the
+/// queue to be serviceable right now: runnable and holding ROOT tokens for
+/// its head as well. Every exact selector checks the root before the queue
+/// tokens. The guarantee selectors park a root-short queue on
+/// `RootTokenStarvation`; waterfill phase 2 and surplus-sharing exact queues
+/// skip it without parking. Either way a queue that lost the root race
+/// dropped out of the local and the published demand masks. Peers'
+/// non-exact surplus then ran unconstrained, the greedy root lease gave its
+/// worker about 1/N of the root, and the exact queue spent that share ahead
+/// of the colocated non-exact queue: the exact class was capped near one
+/// worker's share and the colocated non-exact instance got about nothing, a
+/// loop that sustained itself. The root is the resource the reservation
+/// protects, so a queue short only of root keeps its demand; reserving
+/// makes peers yield the root and the reserved rate is spent, not idled.
+///
+/// A PARKED queue's demand was decided where it parked and is read from
+/// `parked_demand` (`CoSInterfaceRuntime::parked_exact_demand`, written by
+/// `record_exact_park_demand` at every exact park site): a root park with
+/// its own tokens covering the head demands, an own-token park does not.
+/// Nothing tops a parked queue up until it wakes, so the decision holds while
+/// it is parked; an enqueue that changes the MQFQ head while it is parked
+/// (a short packet in a lower-finish bucket) does not flip it. Reading the
+/// recorded decision keeps the check O(1): re-deciding would run the MQFQ
+/// head search, which walks every active flow bucket, on each publish
+/// (every exact enqueue) and each surplus build and settle (#18748 review
+/// R4 F1, R6 P3). A queue with no own tokens cannot cover any head, parked
+/// or not, and is checked before the cached decision; otherwise a runnable
+/// queue's head is searched, as the selector itself does.
 #[inline]
-pub(in crate::afxdp) fn cos_exact_queue_serviceable(
-    root_tokens: u64,
+pub(in crate::afxdp) fn cos_exact_queue_demands_reservation(
+    parked_demand: ExactDemandQueueMask,
+    queue_idx: usize,
     queue: &CoSQueueRuntime,
 ) -> bool {
-    if !queue.hot.runnable {
+    if cos_queue_is_empty(queue) {
         return false;
     }
-    let Some(head) = cos_queue_front(queue) else {
+    // Own tokens first, before the cached park decision (#18748 review cycle
+    // 2, Codex F2): a live lease-set replacement returns a parked queue's
+    // tokens to its lease (`release_all_cos_queue_leases`) and leaves the
+    // queue parked with its wake tick, so the demand recorded at the park
+    // was decided on credit the queue no longer holds.
+    if queue.hot.tokens == 0 {
         return false;
-    };
-    let head_len = cos_item_len(head);
-    root_tokens >= head_len && queue.hot.tokens >= head_len
+    }
+    if queue.hot.parked {
+        return parked_demand.counts(queue_idx);
+    }
+    cos_queue_front(queue).is_some_and(|head| queue.hot.tokens >= cos_item_len(head))
 }
 
 #[cfg(test)]

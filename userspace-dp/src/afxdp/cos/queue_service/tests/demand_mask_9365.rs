@@ -1,11 +1,13 @@
 // #9365: the exact-demand queue mask past queue index 64.
 //
-// The mask reserves best-effort surplus for exact guarantee queues that are
-// serviceable (#hb166 T-6(b)). It is keyed by the index into `root.queues`,
-// which counts ALL of the interface's queues. As a `u64` it could not name
-// index 64: a serviceable queue there saturated the mask, and the consumers
-// counted every exact queue at index >= 64, so idle exact classes kept their
-// rate reserved and a pure best-effort class lost its only service path.
+// The mask reserves best-effort surplus for exact guarantee queues that
+// demand their reservation (#hb166 T-6(b), #18748:
+// `cos_exact_queue_demands_reservation`). It is keyed by the index into
+// `root.queues`, which counts ALL of the interface's queues. As a `u64` it
+// could not name index 64: a demanding queue there saturated the mask, and
+// the consumers counted every exact queue at index >= 64, so idle exact
+// classes kept their rate reserved and a pure best-effort class lost its
+// only service path.
 //
 // The issue's fixture: one interface shaped at 1 Gbit/s with 65 queues.
 // Indices 0..=62 are residual-only best-effort, 63 is a 100 Mbit/s exact
@@ -13,7 +15,6 @@
 // queues, so the `builders.rs` >64-exact-queue warning never fires.
 
 use super::*;
-use crate::afxdp::cos::queue_ops::cos_exact_queue_serviceable;
 
 const SHAPING_BYTES: u64 = 1_000_000_000 / 8;
 const EXACT_63_BYTES: u64 = 100_000_000 / 8;
@@ -48,8 +49,9 @@ fn sixty_five_queue_root() -> CoSInterfaceRuntime {
     root
 }
 
-/// Runnable, non-empty, and holding tokens for its head: what
-/// `cos_exact_queue_serviceable` requires.
+/// Runnable, non-empty, and holding tokens for its head: serviceable, so
+/// it demands its rate under both the #hb166 T-6(b) predicate and the
+/// #18748 one (`cos_exact_queue_demands_reservation`).
 fn make_serviceable(root: &mut CoSInterfaceRuntime, queue_idx: usize) {
     let queue = &mut root.queues[queue_idx];
     queue.hot.runnable = true;
@@ -66,7 +68,7 @@ fn local_demand_mask_names_each_exact_queue_past_index_63() {
         let mut root = sixty_five_queue_root();
         make_serviceable(&mut root, serviceable);
 
-        let mask = serviceable_exact_demand_mask(&root);
+        let mask = local_exact_demand_mask(&root);
         assert!(
             mask.counts(serviceable),
             "serviceable exact queue {serviceable} must count as demand"
@@ -95,12 +97,11 @@ fn published_peer_demand_mask_names_each_exact_queue_past_index_63() {
         let mut peer_root = sixty_five_queue_root();
         make_serviceable(&mut peer_root, serviceable);
         let backlog = SharedCoSExactBacklog::new(1);
-        backlog.publish_with_serviceable(1, 1500, 1500, serviceable_exact_demand_mask(&peer_root));
+        backlog.publish_demand(1, 1500, local_exact_demand_mask(&peer_root));
 
         // The local worker has no exact backlog of its own; all demand is the peer's.
         let local_root = sixty_five_queue_root();
-        let mask =
-            serviceable_exact_demand_mask(&local_root) | backlog.peer_exact_demand_queue_mask(0);
+        let mask = local_exact_demand_mask(&local_root) | backlog.peer_exact_demand_queue_mask(0);
         let rate = exact_demand_rate_bytes_for_mask(&local_root, mask);
         assert_eq!(
             rate, want_rate,
@@ -182,13 +183,12 @@ fn exact_demand_mask_has_a_bit_for_every_u8_queue_id() {
 #[test]
 fn shared_backlog_carries_every_mask_word() {
     let backlog = SharedCoSExactBacklog::new(2);
-    backlog.publish_with_serviceable(
+    backlog.publish_demand(
         1,
-        1500,
         1500,
         ExactDemandQueueMask::EMPTY.with_queue(64).with_queue(255),
     );
-    backlog.publish_with_serviceable(2, 1500, 1500, ExactDemandQueueMask::EMPTY.with_queue(130));
+    backlog.publish_demand(2, 1500, ExactDemandQueueMask::EMPTY.with_queue(130));
 
     let seen_by_0 = backlog.peer_exact_demand_queue_mask(0);
     assert!(seen_by_0.counts(64) && seen_by_0.counts(255) && seen_by_0.counts(130));
@@ -213,17 +213,18 @@ fn shared_backlog_carries_every_mask_word() {
     );
 }
 
-/// The pre-#9365 producer and consumer, apart from names, as the reference for
-/// every interface a `u64` could represent.
-fn reference_u64_mask(root: &CoSInterfaceRuntime) -> u64 {
-    let root_tokens = root.tokens;
+/// The pre-#9365 producer, apart from names, as the reference for every
+/// interface a `u64` could represent. #18748 review cycle 3 (Codex): the
+/// per-queue demand is NOT recomputed with the production predicate
+/// (`cos_exact_queue_demands_reservation`), which would make a wrong
+/// predicate agree with itself; it is the `expected` demand the test wrote
+/// down when it built each queue's state (`QueueState::demands`).
+fn reference_u64_mask(root: &CoSInterfaceRuntime, expected: &[bool]) -> u64 {
     root.queues
         .iter()
         .enumerate()
-        .filter(|(_, queue)| {
-            queue.config.exact
-                && queue.config.guarantee_enabled
-                && cos_exact_queue_serviceable(root_tokens, queue)
+        .filter(|(queue_idx, queue)| {
+            queue.config.exact && queue.config.guarantee_enabled && expected[*queue_idx]
         })
         .fold(0u64, |acc, (queue_idx, _)| {
             if queue_idx < u64::BITS as usize {
@@ -232,6 +233,65 @@ fn reference_u64_mask(root: &CoSInterfaceRuntime) -> u64 {
                 u64::MAX
             }
         })
+}
+
+/// The states a queue can be in when the demand masks are built, and
+/// whether each demands its reservation by the #18748 contract: a queue
+/// demands while it is backlogged and its own tokens cover its head, whether
+/// it is runnable or parked on ROOT with them; a queue that is empty, short
+/// of its own tokens, or parked on its own tokens demands nothing.
+#[derive(Clone, Copy, Debug)]
+enum QueueState {
+    Empty,
+    Serviceable,
+    ShortOfOwnTokens,
+    NoOwnTokens,
+    ParkedOnRoot,
+    ParkedOnOwnTokens,
+}
+
+impl QueueState {
+    const ALL: [Self; 6] = [
+        Self::Empty,
+        Self::Serviceable,
+        Self::ShortOfOwnTokens,
+        Self::NoOwnTokens,
+        Self::ParkedOnRoot,
+        Self::ParkedOnOwnTokens,
+    ];
+
+    fn demands(self) -> bool {
+        matches!(self, Self::Serviceable | Self::ParkedOnRoot)
+    }
+
+    fn apply(self, root: &mut CoSInterfaceRuntime, queue_idx: usize, short_tokens: u64) {
+        let (backlogged, tokens, parked) = match self {
+            Self::Empty => (false, 10_000, false),
+            Self::Serviceable => (true, 10_000, false),
+            Self::ShortOfOwnTokens => (true, short_tokens, false),
+            Self::NoOwnTokens => (true, 0, false),
+            Self::ParkedOnRoot => (true, 10_000, true),
+            Self::ParkedOnOwnTokens => (true, short_tokens, true),
+        };
+        if parked {
+            // The selectors' park sites record the demand they decided at
+            // the park (a root park with own tokens covering the head).
+            crate::afxdp::cos::tx_completion::record_exact_park_demand(
+                root,
+                queue_idx,
+                matches!(self, Self::ParkedOnRoot),
+            );
+        }
+        let queue = &mut root.queues[queue_idx];
+        queue.hot.runnable = !parked;
+        queue.hot.parked = parked;
+        queue.hot.next_wakeup_tick = if parked { 7 } else { 0 };
+        queue.hot.tokens = tokens;
+        if backlogged {
+            queue.hot.items.push_back(test_cos_item(1500));
+            queue.hot.queued_bytes = 1500;
+        }
+    }
 }
 
 fn reference_u64_rate(root: &CoSInterfaceRuntime, mask: u64) -> u64 {
@@ -273,10 +333,11 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
             .collect();
         let mut root = test_cos_runtime_with_queues(SHAPING_BYTES, queues);
         root.tokens = 100_000;
-        for queue_idx in 0..queue_count {
-            if next() % 2 == 0 {
-                make_serviceable(&mut root, queue_idx);
-            }
+        let mut expected = vec![false; queue_count];
+        for (queue_idx, demands) in expected.iter_mut().enumerate() {
+            let state = QueueState::ALL[(next() % QueueState::ALL.len() as u64) as usize];
+            state.apply(&mut root, queue_idx, 1 + next() % 1_499);
+            *demands = state.demands();
         }
         let peer_bits = next()
             & if queue_count == 64 {
@@ -290,19 +351,16 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
                 mask.with_queue(queue_idx)
             });
 
-        let want_local = reference_u64_rate(&root, reference_u64_mask(&root));
-        let got_local =
-            exact_demand_rate_bytes_for_mask(&root, serviceable_exact_demand_mask(&root));
+        let want_local = reference_u64_rate(&root, reference_u64_mask(&root, &expected));
+        let got_local = exact_demand_rate_bytes_for_mask(&root, local_exact_demand_mask(&root));
         assert_eq!(
             got_local, want_local,
             "local reservation changed for a {queue_count}-queue interface"
         );
 
-        let want = reference_u64_rate(&root, reference_u64_mask(&root) | peer_bits);
-        let got = exact_demand_rate_bytes_for_mask(
-            &root,
-            serviceable_exact_demand_mask(&root) | peer_mask,
-        );
+        let want = reference_u64_rate(&root, reference_u64_mask(&root, &expected) | peer_bits);
+        let got =
+            exact_demand_rate_bytes_for_mask(&root, local_exact_demand_mask(&root) | peer_mask);
         assert_eq!(
             got, want,
             "local+peer reservation changed for a {queue_count}-queue interface"
@@ -317,8 +375,10 @@ fn up_to_64_queues_the_wide_mask_reserves_exactly_what_the_u64_mask_did() {
     );
 }
 
-/// `publish_cos_exact_backlog` is the only producer of the peer-visible mask.
-/// It must publish the serviceable set, not every queue: a peer reading ALL
+/// `publish_cos_exact_backlog` is the only producer of the peer-visible mask
+/// on the enqueue and completion paths (#18748 adds a republish after a
+/// no-progress drain, same mask). It must publish the demanding set, not
+/// every queue: a peer reading ALL
 /// would reserve every exact class's rate and starve best-effort, which is the
 /// defect this issue fixed for the local side.
 #[test]
