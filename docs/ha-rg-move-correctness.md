@@ -558,10 +558,13 @@ the FRR render (#15734), so its kernel default is the cluster Null0. After
 an RG move, the new WAN owner's kernel default stays that Null0 until the
 next FRR render installs the static, 1.4-4.8 s after promotion in lane G's
 loss FIB dumps (#19050). The #19050 D1 change renders address-only RETH
-hops on the standby too (direct mode), where zebra's next-hop tracking holds
-them inactive until the VIP lands. It still needs this probe to confirm it
-on a cluster. So the soak also probes destinations that no connected subnet
-covers:
+hops on the standby too (direct mode). zebra's next-hop tracking holds such
+a hop inactive only while nothing but the RETH's own connected prefix covers
+its gateway (the default static cannot resolve through itself). A covering
+route, or the default for a non-default static, activates it on the standby.
+This was lab-confirmed on udp on 2026-11-10; see the precondition in
+`pkg/frr/README.md`. The soak therefore also probes destinations that no
+connected subnet covers:
 
 - `r4`, `r6`, `s6` (LAN host): scored per move like the connected ping.
   The probe must cover the window, and a window with no reply in its tail
@@ -572,10 +575,33 @@ covers:
 - `host4` (each node): the delay between the new WAN owner's first reply
   from its connected WAN gateway and its first reply from `r4`, both on
   that node's own clock. It is the routed window host-originated traffic
-  (probes, syslog, IKE) sees. A standby reaches neither target; a move
-  that does not hand the target the WAN RG is `N/A`. It is recorded per move
-  (`host4` in `result.json`, the `routed probes` table, `summary.host4`) and
-  does not change a verdict.
+  (probes, syslog, IKE) sees. A move that does not hand the target the WAN
+  RG is `N/A`. It is SCORED (#19050 review R14-1 / R4 F2):
+  - a WAN-handing move with no routed reply from the new owner FAILs;
+  - a lag over `SOAK_MAX_HOST4_LAG_MS` (default 250 ms) is a COST. Master
+    measured 544-1184 ms, so it scores COST on every WAN move; D1 measured
+    0-28 ms;
+  - a routed reply from a node that does not hold the WAN address FAILs
+    (`LEAK`). That covers the standby at baseline, the new owner more than
+    250 ms before its gateway first answers, and the old owner after its
+    gateway stopped answering. Such a node's only default is the cluster
+    Null0, so a reply means another route resolved it. The check sees only
+    leaks that deliver replies: an activation that resolves to a blackhole
+    or a loop is silent to ping;
+  - a move that took the WAN off the other node but whose target never
+    reached its gateway is VOID.
+
+  `ROUTED_TARGET4` is set in the loss, tcp and udp env files, so a default
+  `make test-rg-move-soak` runs `r4` and `host4`.
+- **xpfd crash-restart with D1 (R14-3).** An xpfd crash (not a VM stop)
+  leaves the stamped VIP in the kernel while FRR keeps running. On master,
+  the first render after the restart filtered the static. With D1 it stays
+  rendered (gated) and ACTIVE until the HA reconcile safety net removes the
+  VIP (`reconcileDirectVIPOwnership` from `reconcileRGStateLoop`). That loop
+  runs once at startup and then every 2 s, so the bound is one reconcile
+  pass. The dual VIP a crash-restart leaves meanwhile is the larger,
+  pre-existing problem. An H10 crash run with host4 on is still owed, and
+  depends on the #19050 design decision.
 - **Same-run positive control.** Before any move, every routed probe must
   answer. For `host4`, exactly one node must reach the anchor, and that node
   must also reach `r4`. A probe that fails its control is VOID for the whole

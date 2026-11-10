@@ -1002,13 +1002,41 @@ step. Both are required — neither sees the other's case:
   prefix. They are address-only: no interface qualifier, no inferred IPv6
   interface, no qualified-next-hop metric or preference. The managed
   section renders them right after the statics (in the instance's table for
-  an instance), and zebra's next-hop tracking holds them inactive until the
-  RETH VIP gives the gateway a connected route. That makes the
-  promotion-time route switch make-before-break instead of waiting for an
-  HA render plus frr-reload. They are render-only: the DHCP default and
-  classless suppression (`renderDHCPDefaults`, `dhcpClasslessCoveredByStatic`)
-  read only the owned `StaticRoutes`, so an inactive gated static never
-  suppresses a DHCP route.
+  an instance). zebra's next-hop tracking then activates them when the RETH
+  VIP gives the gateway a connected route, so the promotion-time route switch
+  needs no HA render plus frr-reload. They are render-only: the DHCP default
+  and classless suppression (`renderDHCPDefaults`,
+  `dhcpClasslessCoveredByStatic`) read only the owned `StaticRoutes`, so a
+  gated static never suppresses a DHCP route.
+  - **Precondition (review R4 F1 / R14-2, lab-confirmed on udp
+    2026-11-10).** zebra resolves an address-only next hop RECURSIVELY through
+    ANY route covering the gateway. A gated static stays inactive on the
+    standby ONLY when nothing but the RETH's own connected prefix covers its
+    gateway. The default static is the one exception: it cannot resolve
+    through itself. Measured on a D1 standby, each of these turned a gated
+    static ACTIVE:
+    - a NON-default static via the RETH gateway resolves through the cluster
+      Null0 default and installs as a blackhole for its prefix;
+    - a covering discard (`172.16.50.0/23`) activates the gated default as a
+      static blackhole;
+    - a covering route the standby owns (`172.16.50.0/23` via the LAN host,
+      with RG2 on the standby) activates the gated default as
+      `default via 10.0.63.102 dev ge-7-0-1`.
+
+    Other sources work the same way: IGP-learned prefixes on a non-RETH link,
+    DHCP classless routes, rib-group or kernel leaks, and a foreign address
+    left on the RETH netdev. An active gated static is also exported by
+    `redistribute static`, since its tag is not 2500. Whether D1 narrows or
+    is replaced is decided on #19050 (issuecomment-6762612766).
+  - **FRR profile dependency (R4 F3).** Resolution through the default route
+    is governed by `ip nht resolve-via-default`. xpf renders neither it nor
+    `frr defaults`, so the package default applies. The lab nodes run FRR
+    10.5.1 with `frr defaults traditional`, where resolve-via-default is ON
+    (zebra YANG: "true by default for traditional profile"). That is why case
+    (a) above activates through the cluster Null0. A profile or image change
+    to `datacenter` would flip it silently. Pinning the setting in the render
+    is deferred to the #19050 design decision, because the pinned value
+    depends on the design.
 - **A DHCP route's `vrf` clause names the KERNEL namespace, not the Junos
   one (#9136).** `DHCPRoute.VRF` carries the BARE routing-instance name —
   the suppression maps in `renderDHCPDefaults` key on it and are internally

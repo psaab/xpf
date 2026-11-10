@@ -44,7 +44,14 @@ What this harness does, per move:
     connected subnet covers (the default route, a non-default static), and
     records the new WAN owner's host-originated routed-path lag on its own
     clock. Every routed probe must answer before the first move, or its
-    cells are VOID for the run.
+    cells are VOID for the run. The host-originated probe (host4) is SCORED
+    (#19050 review R4 F2 / R14-1): a WAN-handing move with no routed reply
+    from the new owner FAILs; a lag over SOAK_MAX_HOST4_LAG_MS is a COST; a
+    routed reply from a node that does not hold the WAN address (the
+    standby at baseline, the new owner before its gateway answers, the old
+    owner after it stopped answering) FAILs, because that is a default the
+    node must not have; and a WAN move whose new owner never reaches its
+    gateway is VOID, never PASS.
 
 It never touches a clock. The preflight measures inter-node skew and reports
 it, because a skewed cluster is exactly what the operator's loop hit.
@@ -510,6 +517,10 @@ class Budget:
     # untargeted form on the owner as a transfer, so a plain "triggered"
     # local-resign reply on an away-move is a FAIL.
     expect_transfer: bool = False
+    # #19050 (R14-1): the new WAN owner's host-originated routed lag over
+    # this is a COST. Master measured 544-1184 ms (udp/loss, no D1); D1
+    # measured 0-28 ms, so the default separates the two.
+    max_host4_lag_ms: float = 250.0
 
 
 @dataclass
@@ -703,6 +714,49 @@ def host_route_lag(anchor: List[float], routed: List[float], t0: float, t1: floa
     return out
 
 
+# A routed reply this far ahead of the gateway reply is a leak, not ping
+# phase: both loops run at 10 ms, and a node that gains its address and its
+# default together answers both within a few intervals (D1: 0-28 ms).
+HOST4_LEAK_GRACE_S = 0.25
+
+
+def host4_move(anchor_t: List[float], routed_t: List[float], t0_t: float, t1_t: float,
+               anchor_o: List[float], routed_o: List[float], t0_o: float, t1_o: float,
+               pre_s: float = 1.0, tail_s: float = 1.0) -> Dict:
+    """#19050 (R4 F2): the host-originated facts for one move. `_t` is the
+    move's target node and `_o` the other node, each on its own clock.
+
+    A node that does not hold the WAN address must not reach a routed
+    destination: its only default is the cluster Null0. A routed reply from
+    one means some other route resolved its default (R4 F1): LEAK, which
+    FAILs the move. Checked for the target before its gateway first answers,
+    and for the old owner after its gateway stops answering. A move that
+    took the WAN off the other node but whose target never reached its
+    gateway is VOID: the window has no evidence either way."""
+    out = host_route_lag(anchor_t, routed_t, t0_t, t1_t, pre_s)
+    if out["status"] == "MEASURED":
+        a = t0_t + out["anchor_s"]
+        early = next((x for x in routed_t if t0_t <= x < a - HOST4_LEAK_GRACE_S), None)
+        if early is not None:
+            return {"status": "LEAK", "anchor_s": out["anchor_s"], "routed_s": round(early - t0_t, 3),
+                    "detail": f"the new owner got a routed reply {a - early:.2f}s before its WAN gateway answered: "
+                              "it had a usable default before it held the WAN address"}
+    owned_before = any(t0_o - pre_s <= x < t0_o for x in anchor_o)
+    in_window = [x for x in anchor_o if t0_o - pre_s <= x < t1_o]
+    lost = owned_before and not any(t1_o - tail_s <= x < t1_o for x in anchor_o)
+    if lost:
+        last = max(in_window)
+        late = next((x for x in routed_o if last + HOST4_LEAK_GRACE_S < x < t1_o), None)
+        if late is not None:
+            return {"status": "LEAK", "routed_s": round(late - t0_o, 3),
+                    "detail": f"the old owner got a routed reply {late - last:.2f}s after its WAN gateway stopped "
+                              "answering: it kept a usable default after losing the WAN address"}
+        if out["status"] == "N/A" and "never reached" in out.get("detail", ""):
+            return {"status": "VOID", "detail": "the WAN left the other node but the target never reached its WAN "
+                                                "gateway in the window: no host-originated evidence for this move"}
+    return out
+
+
 def follow_reasons(r: RGMoveResult, budget: Budget) -> List[str]:
     """Did the TRAFFIC move with the RG? Status and helper views say who
     should forward; these readings say who did (#18587 review B1)."""
@@ -834,6 +888,18 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
     # for this move. Like a VOID UDP probe, it never lets the move PASS.
     routed_void = [f"routed probe {n} VOID: {t['void']}" for n, t in sorted((rec.routed or {}).items())
                    if t.get("void")] if traffic_enabled else []
+    # #19050 (R14-1, R4 F2): host4 is scored, not reported.
+    h4 = (rec.host4 or {}) if traffic_enabled else {}
+    h4_status = h4.get("status")
+    if h4_status == "LEAK":
+        reasons.append(f"host4 routed reply from a node without the WAN address: {h4.get('detail')}")
+    elif h4_status == "MEASURED" and h4.get("lag_ms") is None:
+        reasons.append("host4: the new WAN owner got no routed reply in the window (its kernel default never "
+                       "became usable)")
+    elif h4_status == "MEASURED" and h4["lag_ms"] > budget.max_host4_lag_ms:
+        costs.append(f"host4 routed lag {h4['lag_ms']:g} ms > {budget.max_host4_lag_ms:g} ms on the new WAN owner")
+    if h4_status == "VOID":
+        routed_void.append(f"host4 VOID: {h4.get('detail')}")
     if reasons:
         if udp_void_reason:
             reasons.append(f"UDP probe evidence VOID: {udp_void_reason}")
@@ -927,6 +993,8 @@ def summarize(moves: List[MoveRecord], traffic_enabled: bool, disabled: List[str
             out["host4"] = {"measured": len(measured),
                             "no_routed_reply": sum(1 for h in measured if h.get("lag_ms") is None),
                             "not_applicable": sum(1 for h in host if h.get("status") == "N/A"),
+                            "leak": sum(1 for h in host if h.get("status") == "LEAK"),
+                            "void": sum(1 for h in host if h.get("status") == "VOID"),
                             "lag_ms": _dist(lags)}
     reasons: Dict[str, int] = {}
     for m in moves:
@@ -1357,6 +1425,7 @@ class Soak:
         # probe's window bounds.
         self.routed_void: Dict[str, str] = {}
         self.host4_void: Optional[str] = None
+        self.host4_leak: Optional[str] = None
         self.node_offset: Dict[int, float] = {0: 0.0, 1: 0.0}
         self.node_procs: List = []
 
@@ -1580,6 +1649,12 @@ class Soak:
         elif got[owners[0]][1] < 20:
             self.host4_void = (f"host4 routed ping to {self.cfg.host4_target} from the WAN owner node{owners[0]} "
                                f"answered {got[owners[0]][1]} times at baseline: its positive control failed")
+        elif got[1 - owners[0]][1] != 0:
+            # R4 F2: the standby holds no WAN address, so its routed ping
+            # must stay silent. A reply means another route resolved its
+            # default (R4 F1): a defect, not a missing control.
+            self.host4_leak = (f"the standby node{1 - owners[0]} answered {got[1 - owners[0]][1]} routed pings to "
+                               f"{self.cfg.host4_target} at baseline without holding the WAN address")
 
     def start_udp_probe(self) -> Optional[str]:
         """Start one long-lived datagram socket and prove its pre-move baseline."""
@@ -2088,13 +2163,19 @@ class Soak:
             for m in moves:
                 m.host4 = {"status": "VOID", "detail": self.host4_void}
             return
+        if self.host4_leak:
+            for m in moves:
+                m.host4 = {"status": "LEAK", "detail": self.host4_leak}
+            return
         anchor = {n: parse_host_ping(self._read(self._path("host", f"{n}-anchor"))) for n in (0, 1)}
         routed = {n: parse_host_ping(self._read(self._path("host", f"{n}-routed"))) for n in (0, 1)}
         for m in moves:
-            t = m.target
-            # LAN clock -> this host's clock -> the target node's clock.
-            shift = self.node_offset[t] - self.lan_offset
-            m.host4 = host_route_lag(anchor[t], routed[t], m.t_issue_lan + shift, m.t_next_lan + shift)
+            t, o = m.target, 1 - m.target
+            # LAN clock -> this host's clock -> each node's clock.
+            st = self.node_offset[t] - self.lan_offset
+            so = self.node_offset[o] - self.lan_offset
+            m.host4 = host4_move(anchor[t], routed[t], m.t_issue_lan + st, m.t_next_lan + st,
+                                 anchor[o], routed[o], m.t_issue_lan + so, m.t_next_lan + so)
 
     def _write(self, obj):
         if self.cfg.outdir:
@@ -2174,6 +2255,7 @@ def main(argv=None) -> int:
         tail_s=_env_float("SOAK_TAIL_S", 1.0),
         follow_min_pkts=int(_env_float("SOAK_FOLLOW_MIN_PKTS", 500)),
         max_cost_stall_ms=_env_float("SOAK_MAX_COST_STALL_MS", 10000.0),
+        max_host4_lag_ms=_env_float("SOAK_MAX_HOST4_LAG_MS", 250.0),
         expect_transfer=os.environ.get("SOAK_EXPECT_TRANSFER", "0") == "1",
     )
     v6 = os.environ.get("SOAK_IPV6", "1") != "0"

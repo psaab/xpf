@@ -20,8 +20,9 @@ type frrHADemotionState struct {
 	peerIGPConfig  *config.Config
 	// nhtGatesAddressHops (#19050): RETH addresses are owner-only VIPs,
 	// so an address-only static hop into an inactive RG's RETH prefix is
-	// held inactive by zebra's next-hop tracking and may be rendered
-	// ahead of activation. True in the compiler-default direct mode
+	// rendered ahead of activation for zebra's next-hop tracking to gate.
+	// That gate holds ONLY while no other route covers the gateway (review
+	// R4 F1, lab-confirmed): see nhtGatedStaticRoutes. True in the compiler-default direct mode
 	// (private-RG election / no-reth-vrrp), whose non-owner deletes every
 	// configured RETH VIP (direct_vip_reconcile_18573.go). False in legacy
 	// VRRP-backed RETH mode, which keeps the #15734 filter unchanged.
@@ -440,10 +441,18 @@ func (s *frrHADemotionState) filterStaticRoutes(cfg *config.Config, routes []*co
 // after an RG move the new owner's kernel default is the cluster Null0
 // until the next HA render plus frr-reload installs the static — 1.4-4.8 s
 // on loss (lane G's #19034 FIB dumps). Rendered on the standby, an
-// address-only hop stays inactive there because its gateway lies in a
-// connected prefix the standby does not hold (RETH addresses are
-// owner-only VIPs in direct mode), and zebra activates it the moment the
-// VIP lands on promotion, with no render or reload in the critical path.
+// address-only hop stays inactive there ONLY while nothing but the RETH's
+// own connected prefix covers its gateway (RETH addresses are owner-only
+// VIPs in direct mode); zebra activates it the moment the VIP lands, with
+// no render or reload in the critical path.
+//
+// Precondition (review R4 F1 / R14-2, lab-confirmed on udp 2026-11-10):
+// zebra resolves the gateway RECURSIVELY through ANY covering route. A
+// non-default gated static resolves through the cluster Null0 default
+// (frr defaults traditional: resolve-via-default on), and a covering
+// static, IGP or DHCP-classless route activates even the gated default,
+// with a forwardable next hop when the standby owns the cover's egress.
+// This function does not check the RIB; see pkg/frr/README.md.
 //
 // A hop qualifies ONLY when, as rendered, it carries no interface: no
 // operator interface and no inferred IPv6 next-hop interface. An

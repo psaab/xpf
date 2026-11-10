@@ -469,7 +469,8 @@ type FullConfig struct {
 	Inet6StaticRoutes []*config.StaticRoute // rib inet6.0 static routes
 	// NHTGatedStaticRoutes (#19050) are static next-hops this node does not
 	// own yet (their gateway lies in an inactive RG's RETH prefix) that
-	// zebra's next-hop tracking holds inactive until the RETH VIP lands.
+	// zebra's next-hop tracking activates when the RETH VIP lands, and holds
+	// inactive only while no other route covers the gateway (#19050 R4 F1).
 	// They are RENDERED ONLY: every other reader of StaticRoutes (the DHCP
 	// default and classless suppression) sees the owned set, as before.
 	// Either family; address-only by construction (no interface qualifier).
@@ -883,7 +884,8 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 	}
 
 	// 3b. #19050: statics rendered ahead of RG activation; zebra holds them
-	// inactive until the RETH VIP gives their gateway a connected route.
+	// inactive until the RETH VIP gives their gateway a connected route,
+	// unless another route covers the gateway (#19050 R4 F1).
 	if len(fc.NHTGatedStaticRoutes) > 0 {
 		for _, sr := range fc.NHTGatedStaticRoutes {
 			b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, "", 0, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, fc.ISIS))
