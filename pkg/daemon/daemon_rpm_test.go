@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1182,20 +1183,84 @@ func TestProbePinCarrierLossTriggersIPMonFailover12088(t *testing.T) {
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
+		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+			t.Fatal("carrier-loss acceptance did not run: unshare is not available (XPF_REQUIRE_NETNS is set)")
+		}
 		t.Skip("carrier-loss acceptance skipped: unshare is not available")
 	}
 	cmd := exec.Command(unshare, append(probePinCarrierLossUnshareFlags12088(os.Geteuid()), os.Args[0], "-test.run",
-		"^TestProbePinCarrierLossTriggersIPMonFailover12088$", "-test.v")...)
+		"^"+carrierLossTest12088+"$", "-test.v")...)
 	cmd.Env = append(os.Environ(), probePinCarrierLoss12088InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("private-netns carrier-loss output:\n%s", out)
-	if err != nil {
-		if strings.Contains(string(out), "Operation not permitted") ||
-			strings.Contains(string(out), "unshare:") {
-			t.Skipf("carrier-loss acceptance skipped: cannot create private namespace: %v", err)
-		}
-		t.Fatalf("private-netns carrier-loss acceptance failed: %v", err)
+	switch verdict, reason := judgeCarrierLossChild12088(out, err); verdict {
+	case carrierLossChildPassed12088:
+	case carrierLossChildSkipped12088:
+		skipOrRequireNetns12088(t, reason)
+	default:
+		t.Fatalf("private-netns carrier-loss acceptance failed: %s", reason)
 	}
+}
+
+const carrierLossTest12088 = "TestProbePinCarrierLossTriggersIPMonFailover12088"
+
+// skipOrRequireNetns12088 reports an acceptance that could not run. It is a
+// SKIP, or a failure under XPF_REQUIRE_NETNS (#16470), as in the #9813 cells.
+func skipOrRequireNetns12088(t *testing.T, reason string) {
+	t.Helper()
+	if os.Getenv("XPF_REQUIRE_NETNS") != "" {
+		t.Fatalf("carrier-loss acceptance did not run: %s (XPF_REQUIRE_NETNS is set)", reason)
+	}
+	t.Skipf("carrier-loss acceptance skipped: %s", reason)
+}
+
+type carrierLossChildVerdict12088 int
+
+const (
+	carrierLossChildFailed12088 carrierLossChildVerdict12088 = iota
+	carrierLossChildPassed12088
+	carrierLossChildSkipped12088
+)
+
+var (
+	carrierLossChildLine12088 = func(kind string) *regexp.Regexp {
+		return regexp.MustCompile(`(?m)^--- ` + kind + `: ` + regexp.QuoteMeta(carrierLossTest12088) + ` \(`)
+	}
+	carrierLossChildPass12088 = carrierLossChildLine12088("PASS")
+	carrierLossChildSkip12088 = carrierLossChildLine12088("SKIP")
+	carrierLossChildFail12088 = carrierLossChildLine12088("FAIL")
+	carrierLossChildLog12088  = regexp.MustCompile(`(?m)^\s+\S+_test\.go:\d+: (.*)$`)
+)
+
+// judgeCarrierLossChild12088 reads the re-executed child's -test.v output.
+// Its exit status cannot judge it (R16 on #19058): Go exits 0 for a test that
+// SKIPs and for a -test.run pattern that matches nothing ("testing: warning:
+// no tests to run"), so a parent that trusted the status reported PASS having
+// examined nothing. Only the child's own "--- PASS: <exact name> (" line, with
+// a zero exit, is a pass. Its "--- SKIP: <exact name> (" line is a skip that
+// carries the child's reason, and so is an unshare that failed before the
+// child test started. Everything else is a failure, including an EPERM from
+// inside a child that did start: that is the acceptance failing, not the
+// namespace being unavailable.
+func judgeCarrierLossChild12088(out []byte, runErr error) (carrierLossChildVerdict12088, string) {
+	s := string(out)
+	started := strings.Contains(s, "=== RUN   "+carrierLossTest12088+"\n")
+	switch {
+	case !started && runErr != nil &&
+		(strings.Contains(s, "Operation not permitted") || strings.Contains(s, "unshare:")):
+		return carrierLossChildSkipped12088, fmt.Sprintf("cannot create private namespace: %v: %s", runErr, strings.TrimSpace(s))
+	case carrierLossChildFail12088.MatchString(s):
+		return carrierLossChildFailed12088, fmt.Sprintf("the child reported FAIL (exit: %v)", runErr)
+	case carrierLossChildSkip12088.MatchString(s):
+		reason := "the child skipped"
+		if m := carrierLossChildLog12088.FindAllStringSubmatch(s, -1); len(m) > 0 {
+			reason += ": " + m[len(m)-1][1]
+		}
+		return carrierLossChildSkipped12088, reason
+	case carrierLossChildPass12088.MatchString(s) && runErr == nil:
+		return carrierLossChildPassed12088, ""
+	}
+	return carrierLossChildFailed12088, fmt.Sprintf("the child did not report \"--- PASS: %s\" (exit: %v)", carrierLossTest12088, runErr)
 }
 
 // probePinCarrierLossUnshareFlags12088 picks how the re-executed child gets
