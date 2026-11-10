@@ -512,7 +512,11 @@ func webMgmtVRFBindNetnsChild16709(t *testing.T) {
 	// listenAddr takes the production scoped path.
 	cfg := fxp0WebMgmtCfg16709(t)
 	d := &Daemon{}
-	m := newManagementReconciler(d, api.Config{Addr: "127.0.0.1:8080"})
+	// #19066 R18 F1: TLSSelfSignedDir is set. Empty means the production
+	// /etc/xpf/tls, and a uid-0 child is real root on a root leg: its private
+	// mount namespace does not keep a file it creates off the shared root
+	// filesystem, so the cell minted cert.pem/key.pem into the runner's /etc.
+	m := newManagementReconciler(d, api.Config{Addr: "127.0.0.1:8080", TLSSelfSignedDir: t.TempDir()})
 	desired := m.desired(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer func() { cancel(); m.wait() }()

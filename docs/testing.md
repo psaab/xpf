@@ -271,6 +271,20 @@ nested user namespace the guard refuses then makes the cell itself fail.
 Shell-script children (`unshare -rn bash -c …`) are out of scope: they are
 not guarded binaries.
 
+**A uid-0 child has the caller's full credentials.** Without the nested user
+namespace, a child re-executed by a uid-0 caller keeps that caller's
+credentials: uid 0 in testguard's user namespace on a non-root run, and REAL
+root on a root leg (`vm-test-run.sh --root`, or `make vm-test-root`). Only
+its new namespaces confine it, and a private mount namespace does not keep a
+file it creates off the shared root filesystem. A child must therefore never
+use a production default path. #19066 R18 found one:
+`TestWebMgmtVRFBind16709Netns`'s child built its HTTPS server without
+`TLSSelfSignedDir`, whose empty value is the production `/etc/xpf/tls`, and
+every root leg minted `cert.pem`/`key.pem` into the runner's `/etc`. The
+host-residue snapshot that `testguard-run.sh` takes before and after a run now
+lists `/etc/xpf`, `/var/lib/xpf`, `/etc/frr` and `/etc/systemd/network`, so a
+write there shows up in its HOST RESIDUE DIFFERENCE report.
+
 Because those cells now run, `pkg/daemon` under testguard takes longer: about
 4 more minutes, measured at 691 s at runner load 4-8. That is above go test's
 10-minute default `-timeout`, which aborts the package mid-run like a panic.
