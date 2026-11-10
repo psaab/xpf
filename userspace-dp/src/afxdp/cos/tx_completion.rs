@@ -500,7 +500,8 @@ pub(in crate::afxdp) fn exact_root_frame_bytes(cap: u64) -> u64 {
 /// Gating the floor on exact work keeps a root whose exact classes are idle
 /// at full best-effort rate (an always-on floor cost 12 KB roots 10x, 1.68
 /// against master's 11.63 Gb/s). While an exact class is active the floor
-/// still costs a small explicit burst some best-effort rate (CoS README;
+/// is a net gain for best-effort from 16 KB up; its net cost is confined to
+/// roots where `F` plus a head reaches `C`, the 12 KB class (CoS README;
 /// #19074). A reserve on outstanding credit, cycle 3's Rule 1, was split out
 /// to #19073: the serial simulation cannot exercise it, and its review found
 /// it starved non-exact guarantees and small-cap best-effort.
@@ -667,7 +668,10 @@ fn exact_backlog_bytes(root: &CoSInterfaceRuntime) -> u64 {
 /// published. `queued_bytes` counts an exact item from `enqueue_cos_item`,
 /// the only path that adds one, until its bytes are sent or dropped (pops
 /// and restores leave it alone), and that enqueue publishes the backlog
-/// before it returns, so neither reads "idle" while exact work is queued.
+/// before it returns. So this binding's own accounting never reads "idle"
+/// while it has exact work queued, and a peer sees that work from the
+/// publish on. A peer that sampled "idle" just before the publish acquires
+/// with the limit it already chose (CoS README, the stated limits).
 /// Credit outstanding on an exact queue lease adds nothing: a queue tops its
 /// lease up only while it is non-empty and returns the credit at the settle
 /// that empties it.

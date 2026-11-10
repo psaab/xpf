@@ -664,6 +664,19 @@ pub(super) fn assert_every_seed(
     arm: &Arm,
     property: impl Fn(&Outcome) -> Result<(), String>,
 ) {
+    if let Err(failure) = check_every_seed(name, arm, property) {
+        panic!("{failure}");
+    }
+}
+
+/// `assert_every_seed` without the panic: `Err` carries every failing seed's
+/// report and reason and every seed's report, so a cell can check several
+/// arms and report every arm that failed.
+pub(super) fn check_every_seed(
+    name: &str,
+    arm: &Arm,
+    property: impl Fn(&Outcome) -> Result<(), String>,
+) -> Result<(), String> {
     let mut failures = Vec::new();
     let mut reports = Vec::new();
     for seed in SEEDS {
@@ -682,12 +695,14 @@ pub(super) fn assert_every_seed(
         }
         reports.push(report);
     }
-    assert!(
-        failures.is_empty(),
+    if failures.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
         "{name}: {} of {} seeds failed:\n  {}\nall seeds:\n  {}",
         failures.len(),
         SEEDS.len(),
         failures.join("\n  "),
         reports.join("\n  ")
-    );
+    ))
 }

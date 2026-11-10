@@ -188,30 +188,47 @@ fn an_idle_exact_class_waking_beside_saturating_best_effort_is_served_at_once_18
     }
 }
 
-/// The hold of the demand-gated pool floor. An exact class running below its
-/// rate (8 Gb/s of a 24 Gb/s class on a 10 Gb/s worker) empties its queue
-/// between frames. Without the hold the floor dropped each time, best-effort
-/// drained the pool, and the next frame turned the floor back on with the
-/// pool to refill past `F` first, so best-effort lost the refill on every
-/// toggle: 9.78-9.96 Gb/s at a 24 KB root and 8.73-9.41 at 32 KB, against
-/// 11.91-12.14 and 14.06-14.31 with the floor always on. The 1 ms hold
-/// carries 10.89-12.09 and 12.81-13.86, so best-effort must carry at least
-/// 10.5 and 12.0 Gb/s there; the exact class its 8 Gb/s at every burst, with
-/// no root park. Mutant: no hold.
+/// The demand-gated pool floor and its hold while an exact class is active.
+/// An exact class running below its rate (8 Gb/s of a 24 Gb/s class on a
+/// 10 Gb/s worker) empties its queue between frames. Best-effort Gb/s,
+/// shipped / floor without the hold / no floor (R5 on #18748 at
+/// 85bf4e2155; exact 8.00 in every column):
+/// - 12 KB: 3.63-3.66 / 8.30-8.63 / 4.83-5.11;
+/// - 16 KB: 9.86-11.14 / 13.14-13.17 / 5.33-6.23;
+/// - 24 KB: 10.89-12.09 / 9.78-9.96 / 5.75-6.20;
+/// - 32 KB: 12.81-13.86 / 8.73-9.41 / 6.92-7.46;
+/// - 96 KB: 16.97-16.98 / 16.96-16.97 / 13.24-13.41.
+/// Without the hold the floor dropped at each gap, best-effort drained the
+/// pool, and the next frame turned the floor back on with the pool to refill
+/// past `F` first. Without the floor exact root-parked 185-291 times a run
+/// and each park cut surplus to the residual. So best-effort must carry at
+/// least 3.0 Gb/s at 12 KB, 9.0 at 16 KB, 10.5 at 24 KB, 12.0 at 32 KB and
+/// 16.0 at 96 KB, and the exact class its 8 Gb/s at every burst with no root
+/// park. Mutants: no hold (24 KB); no floor (16 KB, roughly halved); a floor
+/// 7x the frame (12 KB, zeroed).
 #[test]
 fn a_steady_exact_class_below_its_rate_keeps_the_floor_through_its_gaps_18748() {
+    let mut failures = Vec::new();
     for (root_burst, label, best_effort) in [
-        (16_000u64, "16k", 0.0),
+        (12_000u64, "12k", 3.0),
+        (16_000, "16k", 9.0),
         (24_000, "24k", 10.5),
         (32_000, "32k", 12.0),
-        (96_000, "96k", 0.0),
+        (96_000, "96k", 16.0),
     ] {
         let mut arm = Arm::new(4, 10, 24, &[8]);
         arm.root_burst_bytes = root_burst;
-        assert_every_seed(
+        // Every burst is checked, so a red run names every row it breaks.
+        let checked = check_every_seed(
             &format!("steady exact 8 of 24, root burst {label}"),
             &arm,
             |o| {
+                if o.nonexact_total_gbps() < best_effort {
+                    return Err(format!(
+                        "best-effort carried {:.2} Gb/s, under {best_effort}",
+                        o.nonexact_total_gbps()
+                    ));
+                }
                 if o.exact_class_gbps(0) < 0.95 * 8.0 {
                     return Err(format!(
                         "the exact class carried {:.2} of its 8 Gb/s",
@@ -224,16 +241,14 @@ fn a_steady_exact_class_below_its_rate_keeps_the_floor_through_its_gaps_18748() 
                         o.exact_root_parks
                     ));
                 }
-                if o.nonexact_total_gbps() < best_effort {
-                    return Err(format!(
-                        "best-effort carried {:.2} Gb/s, under {best_effort}",
-                        o.nonexact_total_gbps()
-                    ));
-                }
                 Ok(())
             },
         );
+        if let Err(failure) = checked {
+            failures.push(failure);
+        }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 /// The demand-gated pool floor under an exact class whose demand flips
@@ -463,14 +478,15 @@ fn no_root_credit_is_held_between_drains_on_an_exact_root_18748() {
 ///   22.98-23.22 Gb/s. A pool floor left on with the exact class idle cost
 ///   these roots 1.68 (10x below master), 20.81-21.47 and 24.00 Gb/s; the
 ///   demand-gated floor takes the whole pool and carries 12.33-12.39, 23.52
-///   and 24.78. So at least 45%, 90% and 97% of the root.
+///   and 24.78. So at least 48% (12.0 Gb/s, at or above master), 90% and
+///   97% of the root.
 ///
 /// Mutants: prime and hold on a root with an exact class (16 KB); the floor
 /// left on with every exact class idle (12, 24 and 32 KB).
 #[test]
 fn best_effort_beside_an_idle_exact_class_fills_the_root_18748() {
     for (root_burst, share) in [
-        (12_000, 0.45),
+        (12_000, 0.48),
         (16_000, 0.75),
         (24_000, 0.90),
         (32_000, 0.97),

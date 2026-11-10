@@ -2167,15 +2167,33 @@ Each carries a RED-on-revert unit test.
     beside an idle exact class at 12 KB, best-effort carried 1.68 Gb/s
     against master's 11.63 (R4 C3-2), and it lost 2.0–2.7 Gb/s at 24 KB.
     Gated, an idle exact class costs nothing (12 KB: 12.33–12.39 Gb/s). A
-    waking class is served in the step its first frame arrives: the
-    enqueue publishes the backlog, which turns the peers' floor on. The
-    1 ms hold bridges the gaps of a class running below its rate, whose
-    queue empties between frames; without it best-effort lost 2–5 Gb/s at
-    24 and 32 KB to refilling the pool past `F` on every toggle. 0.25, 1
-    and 4 ms were measured, and 1 ms kept. While an exact class is active,
-    the floor still costs a small explicit burst best-effort rate (at 32 KB,
-    12.8–13.9 Gb/s beside an 8 Gb/s exact class); bounding `F` relative to
-    `C` for that case is #19074.
+    waking class is served in the step its first frame arrives in the
+    serial simulation: the enqueue publishes the backlog, which turns the
+    peers' floor on. Concurrently, a peer that sampled "idle" just before
+    the publish can still take the pool, which costs the first frame up to
+    one 50 µs wheel tick (the gate is a policy on observed demand, not an
+    atomic enqueue-to-grant invariant). The 1 ms hold bridges the gaps of a
+    class running below its rate, whose queue empties between frames;
+    without it best-effort lost 2–5 Gb/s at 24 and 32 KB to refilling the
+    pool past `F` on every toggle. 0.25, 1 and 4 ms were measured, and 1 ms
+    kept.
+  - While an exact class is active, best-effort beside an 8-of-24 Gb/s
+    exact class (Gb/s; exact 8.00 everywhere):
+    | root burst | shipped (floor, 1 ms hold) | floor, no hold | no floor |
+    |---|---|---|---|
+    | 12 KB | 3.63–3.66 | 8.30–8.63 | 4.83–5.11 (185–198 exact root parks) |
+    | 16 KB | 9.86–11.14 | 13.14–13.17 | 5.33–6.23 |
+    | 24 KB | 10.89–12.09 | 9.78–9.96 | 5.75–6.20 |
+    | 32 KB | 12.81–13.86 | 8.73–9.41 | 6.92–7.46 |
+    | 96 KB | 16.97–16.98 | 16.96–16.97 | 13.24–13.41 |
+    The floor is a net gain from 16 KB up: without it exact root-parks
+    hundreds of times a run and each park cuts surplus to the residual. Its
+    net cost is confined to roots where `F` plus a head reaches `C` (the
+    12 KB class: 4.8–5.1 → 3.6), which is #19074. The hold is a deliberate
+    trade: it costs 12 and 16 KB 4.6–5.0 and 2.0–3.3 Gb/s to buy 24 and
+    32 KB and the on/off shapes. The remaining gap below 17 Gb/s at
+    16–32 KB is the residual budget reserving the class's configured
+    24 Gb/s while it is backlogged (#19023), not the floor.
   - Cycle 3 also reserved the demanding exact classes' share `R` of the
     outstanding cap against non-exact grants ("Rule 1"). It is not part of
     #18748: it gave a configured non-exact transmit-rate guarantee nothing
