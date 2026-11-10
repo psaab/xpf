@@ -86,7 +86,16 @@ scan_dirs = sys.argv[3:]
 
 # t.Skip( / t.Skipf( / t.SkipNow( on any receiver spelled t, tb, b, or f —
 # the four names this tree uses for a *testing.T/B/F or a testing.TB.
-CALL = re.compile(r'\b(?:t|tb|b|f)\.(Skipf|SkipNow|Skip)\s*\(')
+# Two testguard helpers are skip sites too (#19066), so routing a t.Skip
+# through them must not make the site vanish from this census:
+#   - testguard.NetnsUnavailable(t, "..."): skips unless XPF_REQUIRE_NETNS is
+#     set (testguard-run.sh sets it, a plain `go test` does not). Its message
+#     literal follows the receiver argument.
+#   - testguard.RequireChildPass(t, ...): skips when the re-executed child
+#     skipped or its namespace could not be created. It carries no message
+#     of its own and is always a namespace condition, so it is counted as
+#     privilege-absent.
+CALL = re.compile(r'\b(?:(?:t|tb|b|f)\.(Skipf|SkipNow|Skip)\s*\(|testguard\.(NetnsUnavailable)\s*\(\s*(?:t|tb|b|f)\s*,|testguard\.(RequireChildPass)\s*\()')
 # A literal first argument, single or back-quoted, possibly concatenated.
 LITERAL = re.compile(r'^\s*(?:"((?:[^"\\]|\\.)*)"|`([^`]*)`)')
 
@@ -149,7 +158,10 @@ for d in scan_dirs:
                 site = f"{path}:{line}"
                 pkg = dirpath
                 per_pkg[pkg] = per_pkg.get(pkg, 0) + 1
-                kind = m.group(1)
+                kind = m.group(1) or m.group(2) or m.group(3)
+                if kind == "RequireChildPass":
+                    buckets["priv-absent"].append((site, "re-executed child skipped or its netns was unavailable (testguard.RequireChildPass)"))
+                    continue
                 if kind == "SkipNow":
                     # No message by construction: it cannot be classified, and
                     # saying so is the point.
