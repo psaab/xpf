@@ -189,7 +189,7 @@ func TestFindBinaryDeduplicatesBareArgv0CwdCandidate12196(t *testing.T) {
 
 func TestFindBinarySkipsNoexecCwdCandidate12196(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		testguard.NetnsUnavailable(t, "noexec tmpfs regression requires Linux")
+		t.Skip("noexec tmpfs regression requires Linux")
 	}
 	unshare, err := exec.LookPath("unshare")
 	if err != nil {
@@ -211,7 +211,7 @@ func TestFindBinarySkipsNoexecCwdCandidate12196(t *testing.T) {
 	// unshare, uid_map/setgroups, or mount denial (e.g. AppArmor-restricted
 	// CI runners) — so skip; fail only when the sentinel is present.
 	script := `mount -t tmpfs -o noexec,size=4m tmpfs "$1" || exit 77; echo NOEXEC_NS_READY; FIND_BINARY_NOEXEC_DIR="$1" exec "$2" -test.run=^TestFindBinaryNoexecNamespaceHelper12196$ -test.v`
-	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rm"), "sh", "-c", script, "sh", mountpoint, binary)...)
+	cmd := testguard.ReexecCommand(t, unshare, append(testguard.UnshareFlags("-rm"), "sh", "-c", script, "sh", mountpoint, binary)...)
 	output, err := cmd.CombinedOutput()
 	text := string(output)
 	if !strings.Contains(text, "NOEXEC_NS_READY") {

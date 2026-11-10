@@ -32,7 +32,7 @@ func TestRIMemberSecureTunnelUnitBindsToVRF12087(t *testing.T) {
 		}
 		testguard.NetnsUnavailable(t, "cannot run the isolated MasterIndex cell: unshare not found: %v", err)
 	}
-	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestRIMemberSecureTunnelUnitBindsToVRF12087$", "-test.count=1", "-test.v")...)
+	cmd := testguard.ReexecCommand(t, unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run", "^TestRIMemberSecureTunnelUnitBindsToVRF12087$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), riMemberSecureTunnelNetnsChild12087+"=1")
 	out, err := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "NETNS-CHILD-STARTED-12087") {

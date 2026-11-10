@@ -110,18 +110,12 @@ func TestQ53ProxyARPCloseDoesNotUnblockRecv(t *testing.T) {
 	if err != nil {
 		testguard.NetnsUnavailable(t, "acceptance skipped: unshare is not available")
 	}
-	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run",
+	cmd := testguard.ReexecCommand(t, unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run",
 		"^TestQ53ProxyARPCloseDoesNotUnblockRecv$", "-test.v", "-test.count=1")...)
 	cmd.Env = append(os.Environ(), proxyARP17231InnerEnv+"=1")
 	out, err := cmd.CombinedOutput()
 	t.Logf("private-netns proxyarp output:\n%s", out)
-	if err != nil {
-		if strings.Contains(string(out), "Operation not permitted") ||
-			strings.Contains(string(out), "unshare:") {
-			testguard.NetnsUnavailable(t, "acceptance skipped: cannot create private namespace: %v", err)
-		}
-		t.Fatalf("private-netns proxyarp acceptance failed: %v", err)
-	}
+	testguard.RequireChildPass(t, "TestQ53ProxyARPCloseDoesNotUnblockRecv", out, err)
 }
 
 func htons17231(v uint16) uint16 { return v<<8 | v>>8 }

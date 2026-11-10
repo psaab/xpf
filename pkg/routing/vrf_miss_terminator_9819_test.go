@@ -422,7 +422,7 @@ func TestVRFMissTerminatorOnRealKernel9819(t *testing.T) {
 			testguard.NetnsUnavailable(t, "%s not available", tool)
 		}
 	}
-	cmd := exec.Command("unshare", append(testguard.UnshareFlags("-rn"), os.Args[0],
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0],
 		"-test.run", "^TestVRFMissTerminatorOnRealKernel9819$", "-test.count=1", "-test.v")...)
 	cmd.Env = append(os.Environ(), netnsChild9819+"=1")
 	out, err := cmd.CombinedOutput()

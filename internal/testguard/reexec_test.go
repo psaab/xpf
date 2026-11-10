@@ -27,6 +27,9 @@ func TestStripUserNamespaceFlags19066(t *testing.T) {
 		{[]string{"--user", "--map-root-user", "--net"}, []string{"--net"}},
 		{[]string{"--map-users=0:1000:1", "-n"}, []string{"-n"}},
 		{[]string{"-n"}, []string{"-n"}},
+		// R18 N2: a cluster carrying an attached argument is left alone.
+		{[]string{"-w/srv/run", "-rn"}, []string{"-w/srv/run", "-n"}},
+		{[]string{"-n/run/netns/x"}, []string{"-n/run/netns/x"}},
 	} {
 		if got := stripUserNamespaceFlags(tc.in); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("stripUserNamespaceFlags(%q) = %q, want %q", tc.in, got, tc.want)
@@ -90,9 +93,23 @@ var userNSFlag19066 = regexp.MustCompile(`^(-[A-Za-z]*[rU][A-Za-z]*|--user|--map
 // function that runs `unshare` and re-executes a test binary (it references
 // os.Args[0] or calls os.Executable) and either
 //   - carries a literal user-namespace flag outside testguard.UnshareFlags
-//     (the nested-userns child the package guard refuses), or
+//     (the nested-userns child the package guard refuses);
 //   - calls t.Skip/Skipf/SkipNow instead of testguard.NetnsUnavailable (a
-//     skip that never fails under XPF_REQUIRE_NETNS).
+//     skip that never fails under XPF_REQUIRE_NETNS), unless the skip sits in
+//     an `if` on runtime.GOOS, which is a platform guard, not a netns one;
+//   - has no child-success witness: a testguard.RequireChildPass call, or a
+//     string literal naming the child's own success ("--- PASS: " or a
+//     "...PASSED..." sentinel). Exit status alone reads a skipped child, or a
+//     -test.run that matched nothing, as a PASS (#19066 R2 F1);
+//   - builds the re-exec with exec.Command/CommandContext instead of
+//     testguard.ReexecCommand, so the child has no deadline of its own
+//     (#19066 R18 N1).
+//
+// Reach (#19066 R2 NIT): the census reads one function's literals. Flags held
+// in a package-level var, or a re-exec split across a helper that receives the
+// binary path, escape it. The backstop for those shapes is forcing mode:
+// testguard-run.sh exports XPF_REQUIRE_NETNS, so a nested user namespace the
+// guard refuses makes the cell itself FAIL rather than skip.
 func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 	var out []string
 	for _, decl := range file.Decls {
@@ -116,6 +133,13 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 							}
 						}
 					}
+					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "testguard" && sel.Sel.Name == "ReexecCommand" {
+						for _, a := range e.Args {
+							if isUnshareArg19066(a) {
+								runsUnshare = true
+							}
+						}
+					}
 					if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" && sel.Sel.Name == "Executable" {
 						reexecs = true
 					}
@@ -131,6 +155,80 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 		})
 		if !runsUnshare || !reexecs {
 			continue
+		}
+		// A skip inside `if <cond on runtime.GOOS> { ... }` is a platform
+		// guard, exempt from the netns-skip rule (#19066 R2 NIT 3, R18 N3).
+		platformGuarded := map[token.Pos]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			ifs, ok := n.(*ast.IfStmt)
+			if !ok || !mentionsGOOS19066(ifs.Cond) {
+				return true
+			}
+			ast.Inspect(ifs.Body, func(m ast.Node) bool {
+				if c, ok := m.(*ast.CallExpr); ok {
+					platformGuarded[c.Pos()] = true
+				}
+				return true
+			})
+			return true
+		})
+		// Idents assigned from an expression that holds os.Args[0]: the
+		// `args := append(..., os.Args[0], ...)` then exec.Command(unshare,
+		// args...) shape.
+		argVars := map[string]bool{}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			for i, rhs := range as.Rhs {
+				if i < len(as.Lhs) && holdsOSArgs0_19066(rhs, nil) {
+					if id, ok := as.Lhs[i].(*ast.Ident); ok {
+						argVars[id.Name] = true
+					}
+				}
+			}
+			return true
+		})
+		witness := false
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch e := n.(type) {
+			case *ast.BasicLit:
+				if e.Kind == token.STRING && (strings.Contains(e.Value, "--- PASS: ") || strings.Contains(e.Value, "PASSED")) {
+					witness = true
+				}
+			case *ast.CallExpr:
+				sel, ok := e.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := sel.X.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				if pkg.Name == "testguard" && sel.Sel.Name == "RequireChildPass" {
+					witness = true
+				}
+				if pkg.Name == "exec" && (sel.Sel.Name == "Command" || sel.Sel.Name == "CommandContext") &&
+					len(e.Args) > 0 && isUnshareArg19066(e.Args[0]) || pkg.Name == "exec" && sel.Sel.Name == "CommandContext" &&
+					len(e.Args) > 1 && isUnshareArg19066(e.Args[1]) {
+					reexecCall := false
+					for _, a := range e.Args {
+						if holdsOSArgs0_19066(a, argVars) {
+							reexecCall = true
+						}
+					}
+					if reexecCall {
+						out = append(out, fmt.Sprintf("%s: %s re-executes a test binary with exec.%s; use testguard.ReexecCommand so the child has a deadline of its own (#19066)",
+							fset.Position(e.Pos()), fn.Name.Name, sel.Sel.Name))
+					}
+				}
+			}
+			return true
+		})
+		if !witness {
+			out = append(out, fmt.Sprintf("%s: %s judges its re-executed child without a child-success witness; call testguard.RequireChildPass (or require the child's \"--- PASS: <name>\" line or a PASSED sentinel), because exit status alone reads a skipped child as a PASS (#19066)",
+				fset.Position(fn.Pos()), fn.Name.Name))
 		}
 		// Literals that are arguments of testguard.UnshareFlags are fine.
 		allowed := map[*ast.BasicLit]bool{}
@@ -164,6 +262,9 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 				if !ok || (sel.Sel.Name != "Skip" && sel.Sel.Name != "Skipf" && sel.Sel.Name != "SkipNow") {
 					return true
 				}
+				if platformGuarded[e.Pos()] {
+					return true
+				}
 				if id, ok := sel.X.(*ast.Ident); ok {
 					out = append(out, fmt.Sprintf("%s: %s calls %s.%s in a netns re-exec cell; use testguard.NetnsUnavailable so the cell FAILS under %s instead of skipping silently (#19066)",
 						fset.Position(e.Pos()), fn.Name.Name, id.Name, sel.Sel.Name, RequireNetnsEnv))
@@ -175,9 +276,55 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 	return out
 }
 
+// isUnshareArg19066 reports whether a call argument names unshare: the
+// conventional `unshare` variable from exec.LookPath, or the literal.
+func isUnshareArg19066(a ast.Expr) bool {
+	if id, ok := a.(*ast.Ident); ok && id.Name == "unshare" {
+		return true
+	}
+	lit, ok := a.(*ast.BasicLit)
+	return ok && lit.Value == `"unshare"`
+}
+
+// holdsOSArgs0_19066 reports whether e contains os.Args[0] (or an ident in
+// vars, which was assigned from one).
+func holdsOSArgs0_19066(e ast.Expr, vars map[string]bool) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.IndexExpr:
+			if sel, ok := x.X.(*ast.SelectorExpr); ok {
+				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "os" && sel.Sel.Name == "Args" {
+					found = true
+				}
+			}
+		case *ast.Ident:
+			if vars[x.Name] {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// mentionsGOOS19066 reports whether an if condition reads runtime.GOOS.
+func mentionsGOOS19066(e ast.Expr) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "GOOS" {
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "runtime" {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 func TestNetnsReexecCensusCatchesBothShapes19066(t *testing.T) {
 	src := `package p
-import ("os"; "os/exec"; "testing"; "github.com/psaab/xpf/internal/testguard")
+import ("os"; "os/exec"; "runtime"; "testing"; "github.com/psaab/xpf/internal/testguard")
 func TestBad(t *testing.T) {
 	unshare, _ := exec.LookPath("unshare")
 	out, err := exec.Command(unshare, "-rn", os.Args[0]).CombinedOutput()
@@ -188,9 +335,24 @@ func TestBadSlice(t *testing.T) {
 	_ = exec.Command("unshare", args...)
 }
 func TestGood(t *testing.T) {
+	if runtime.GOOS != "linux" { t.Skip("requires Linux") }
 	unshare, _ := exec.LookPath("unshare")
-	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-rn"), os.Args[0])...)
-	if _, err := cmd.CombinedOutput(); err != nil { testguard.NetnsUnavailable(t, "netns unavailable") }
+	cmd := testguard.ReexecCommand(t, unshare, append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.run=^TestGood$", "-test.v")...)
+	out, err := cmd.CombinedOutput()
+	testguard.RequireChildPass(t, "TestGood", out, err)
+}
+func TestGoodSentinel(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	if out, err := cmd.CombinedOutput(); err != nil || !strings.Contains(string(out), "NETNS-CHILD-PASSED-1") { testguard.NetnsUnavailable(t, "no") }
+}
+func TestNoWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	if _, err := cmd.CombinedOutput(); err != nil { t.Fatal(err) }
+}
+func TestPlainCommand(t *testing.T) {
+	args := append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.v")
+	out, err := exec.Command("unshare", args...).CombinedOutput()
+	testguard.RequireChildPass(t, "TestPlainCommand", out, err)
 }
 func TestScriptChildIsOutOfScope(t *testing.T) {
 	_ = exec.Command("unshare", "-rn", "bash", "-c", "ip link")
@@ -201,13 +363,29 @@ func TestScriptChildIsOutOfScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := netnsReexecViolations19066(fset, f)
-	want := []string{"TestBad passes", "TestBad calls t.Skipf", "TestBadSlice passes"}
+	want := []string{
+		"TestBad re-executes a test binary with exec.Command",
+		"TestBad judges its re-executed child without a child-success witness",
+		"TestBad passes the user-namespace flag",
+		"TestBad calls t.Skipf",
+		"TestBadSlice re-executes a test binary with exec.Command",
+		"TestBadSlice judges its re-executed child without a child-success witness",
+		"TestBadSlice passes the user-namespace flag",
+		"TestNoWitness judges its re-executed child without a child-success witness",
+		"TestPlainCommand re-executes a test binary with exec.Command",
+	}
 	if len(got) != len(want) {
 		t.Fatalf("census found %d violations, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
 	}
-	for i, w := range want {
-		if !strings.Contains(got[i], w) {
-			t.Errorf("violation %d = %q, want it to mention %q", i, got[i], w)
+	for _, w := range want {
+		n := 0
+		for _, g := range got {
+			if strings.Contains(g, w) {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("want exactly one violation mentioning %q, got %d in:\n%s", w, n, strings.Join(got, "\n"))
 		}
 	}
 }

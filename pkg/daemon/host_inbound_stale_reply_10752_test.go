@@ -704,7 +704,7 @@ func TestHostInboundStaleReplyPacketPath10752And10764(t *testing.T) {
 	if err != nil {
 		testguard.NetnsUnavailable(t, "unshare is not installed; packet-path proof needs an isolated network namespace")
 	}
-	cmd := exec.Command(unshare, append(testguard.UnshareFlags("-Urn"), os.Args[0], "-test.run=^TestHostInboundStaleReplyPacketPath10752And10764$", "-test.v")...)
+	cmd := testguard.ReexecCommand(t, unshare, append(testguard.UnshareFlags("-Urn"), os.Args[0], "-test.run=^TestHostInboundStaleReplyPacketPath10752And10764$", "-test.v")...)
 	cmd.Env = append(os.Environ(), childEnv+"=1")
 	output, err := cmd.CombinedOutput()
 	if strings.Contains(string(output), "XPF-NETNS-SKIP:") {
