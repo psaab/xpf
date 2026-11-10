@@ -1897,13 +1897,21 @@ they repeatedly bite:
     after a partial write it ends a line such as `working...signal: killed`,
     and then prints the package's `FAIL<TAB><pkg>` line. The watcher counts
     the signal text at the end of a line only when the very next line is that
-    FAIL line AND the binary printed no summary line of its own (`PASS` or
-    `FAIL` alone) since the package's previous terminal line; a binary that
-    reached its summary was not killed mid-run, even if its TestMain then
-    printed a bare `signal: killed`. It then prints `go-test TRUNCATED: <pkg>:
-    the test binary was killed by signal <name>` on stderr. Text alone cannot
-    rule out a TestMain that prints that line and exits BEFORE its summary;
-    the banner is a strong diagnostic, not proof. The status stays the
+    FAIL line, and picks the banner from the binary's FINAL line only. An
+    earlier `PASS`/`FAIL` line proves nothing: a test can print a bare `PASS`
+    (a re-executed child's summary) and a TestMain can call `m.Run` twice, so
+    the run may still have died later. Text before `signal: ` on the same
+    line, or a line before it that does not end in `PASS`/`FAIL`, gives
+    `go-test TRUNCATED: <pkg>: the test binary was killed by signal <name>` on
+    stderr. A bare `signal: <name>` line right after a line ending in `PASS`
+    or `FAIL` (`FAIL`, or `working...PASS` when the last passing test left its
+    output unterminated) is genuinely ambiguous: a binary killed right after
+    its summary and a TestMain that printed the line after every test
+    finished produce the same text. That gets `go-test SIGNAL-AMBIGUOUS:
+    <pkg>: ...`, which names the package and says it cannot tell, never the
+    TRUNCATED claim. Text alone also cannot rule out a TestMain that prints
+    that line and exits BEFORE its summary; TRUNCATED is a strong diagnostic,
+    not proof. The status stays the
     ordinary FAIL (not VOID): the death is a real failure, but every test after
     the one running at that moment never ran, and a by-name census of the
     results cannot see a test that never reported. #19070's SIGHUP deaths, at
