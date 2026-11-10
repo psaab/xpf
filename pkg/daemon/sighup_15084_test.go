@@ -79,13 +79,26 @@ func TestDaemonSignalsExcludeSIGHUP15084(t *testing.T) {
 // in 10 of 23 full pkg/daemon runs. deliverSIGHUPsUnderCapture19070
 // waits until the capture has logged each HUP before the next kill and
 // before stop(), and reports how many it saw.
+//
+// The delivery runs in a re-executed child (R8 F1 on #19070), as the #16801
+// cells do: if this sequence ever regresses to kill-then-release, a late HUP
+// kills the child and this parent reports a named FAIL, instead of the whole
+// test binary dying at a random later test. TestNoInProcessSelfSignal19070
+// pins, from the source, that the child still uses the helper.
 func TestIgnoreSIGHUPSurvivesDelivery15084(t *testing.T) {
-	seen := countSIGHUPWarnings19070(t)
-	// Two HUPs: a second one must be equally inert.
-	if got := deliverSIGHUPsUnderCapture19070(t, seen, 2); got != 2 {
-		t.Fatalf("the capture observed %d of 2 SIGHUPs before it was released, want 2", got)
+	if os.Getenv(sighupDeliveryChild15084Env) == "1" {
+		seen := countSIGHUPWarnings19070(t)
+		// Two HUPs: a second one must be equally inert.
+		// < not !=: a capture leaked from another test can log too.
+		if got := deliverSIGHUPsUnderCapture19070(t, seen, 2); got < 2 {
+			t.Fatalf("the capture observed %d of 2 SIGHUPs before it was released, want 2", got)
+		}
+		return
 	}
+	runSIGHUPChild19070(t, "TestIgnoreSIGHUPSurvivesDelivery15084", sighupDeliveryChild15084Env)
 }
+
+const sighupDeliveryChild15084Env = "XPF_15084_SIGHUP_DELIVERY_CHILD"
 
 // TestUnitRestartForceExitStatus15084 pins the supervisor leg: the
 // shipped unit must declare SIGHUP (and SIGPIPE, the same default-clean

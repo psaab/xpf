@@ -3424,10 +3424,15 @@ never lock an operator out of a remote box it manages.
     mid-run (10 of 23 full pkg/daemon runs). The same window exists
     when `Run` returns and its deferred `stopSIGHUP()` runs, but the
     process exits right after, so a HUP landing there only changes the
-    exit status of a daemon that is already stopping.
-    `TestSIGHUPCaptureReleasedOnlyAfterDelivery19070` repeats the
-    sequence 200 times in a re-executed child and fails if any release
-    happens with a HUP unobserved or the child dies by a signal.
+    exit status of a daemon that is already stopping. The delivery cell
+    itself runs in a re-executed child, so a regression there kills the
+    child and fails the cell by name rather than the whole test binary.
+    Two more cells guard it: `TestSIGHUPCaptureReleasedOnlyAfterDelivery19070`
+    pins the HELPER (200 rounds in a child; a helper that releases before
+    observing fails at round 1), and `TestNoInProcessSelfSignal19070` pins
+    the CALLERS from the source: a self-signal in a pkg/daemon test is
+    allowed only in the helper or in a re-executed child's branch, and
+    the #15084 cell must still call the helper.
   - **Second shutdown signal during the shutdown sequence is absorbed
     (#16801).** `runShutdownSequence` called the signal context's
     `stop()` before `wg.Wait()` and the fail-closed block;

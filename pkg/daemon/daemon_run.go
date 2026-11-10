@@ -1173,6 +1173,12 @@ func daemonSignals(interactive bool) []os.Signal {
 // the CLI has its own SIGINT handling for that. The capture is
 // installed at the TOP of Run, before the mutating startup phases, for
 // the same reason #5807 captures the shutdown set there.
+// sighupIgnoredWarning is the line ignoreSIGHUP logs per received HUP. A const
+// so the #19070 delivery cells, which count these records to know a HUP was
+// consumed before releasing the capture, match the text the daemon logs:
+// rewording it must not read as a signal regression.
+const sighupIgnoredWarning = "SIGHUP received and ignored: xpfd has no reload-on-HUP; use commit to apply configuration changes (#15084)"
+
 func ignoreSIGHUP() (stop func()) {
 	sighupCh := make(chan os.Signal, 1)
 	signal.Notify(sighupCh, syscall.SIGHUP)
@@ -1181,7 +1187,7 @@ func ignoreSIGHUP() (stop func()) {
 		for {
 			select {
 			case <-sighupCh:
-				slog.Warn("SIGHUP received and ignored: xpfd has no reload-on-HUP; use commit to apply configuration changes (#15084)")
+				slog.Warn(sighupIgnoredWarning)
 			case <-done:
 				return
 			}
