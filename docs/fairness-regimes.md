@@ -2230,7 +2230,8 @@ Each carries a RED-on-revert unit test.
   What this does not fix: the amount reserved is unchanged (configured
   rate), which over-reserves when an exact class is held below it by its
   worker's TX capacity (#19023); a non-exact instance colocated with a
-  self-limited exact class still gets a small share (#19025); exact classes
+  self-limited exact class still gets a small share (#19025, fixed by the
+  colocated turn below); exact classes
   whose demanding rates sum past the root leave best-effort surplus nothing
   (`exact_classes_summing_past_the_root_leave_best_effort_nothing_18748`;
   `guarantee-rate` splits the root between exact classes and reserves
@@ -2242,6 +2243,77 @@ Each carries a RED-on-revert unit test.
   (#19051); and a root WITHOUT an exact class still primes and holds, so a
   small cap split across workers into sub-frame holdings sends nothing
   (0.00 Gb/s for four best-effort workers at a 16 KB root, #19075).
+
+- **#19025 / #19023 — the colocated non-exact turn.** With #18748's
+  reservation holding, a non-exact instance on a worker that also carried an
+  exact class still got a small fraction of its peers' share (#19025:
+  0.21-1.46 Gb/s against a 4.25 Gb/s equal part in the simulation; live X1
+  two colocated flows at 0.07 Gbit/s with 10-11 s stalls) and nothing beside
+  a TX-capped exact class (#19023: 0 Gb/s for the whole window). Two layers:
+  the drain served a worker's exact guarantee before anything else
+  (`drain_shaped_tx` returns on any exact progress, and
+  `service_shaped_until_noop` repeats it), and the interface-wide
+  first-come residual bucket was drained by peers that polled it on every
+  pass while the busy exact worker polled it only when its exact class had
+  nothing to send.
+  Contract now: after each exact service that made progress on a binding
+  (`nonexact_turn`), while that binding has exact demand of its own and
+  non-exact backlog, ONE non-exact surplus batch goes before the next exact
+  service (`build_colocated_nonexact_turn_batch`). **Semantics change:** this
+  relaxes strict guarantee-before-surplus on the worker, but the turn draws
+  on the same interface-wide residual bucket as every other non-exact batch,
+  so non-exact traffic stays within the residual (the exact reservation is
+  unchanged interface-wide), and a turn is one surplus quantum, so the exact
+  class keeps at least every other service on its own worker. **Local loss
+  bound:** on a worker whose TX capacity holds the exact class, the turns
+  take at most one surplus quantum (`surplus_weight` frames) per exact
+  service there, and the non-exact class as a whole never more than the
+  residual; the exact class loses at most the smaller of the residual and
+  that per-service share of the worker (pinned by
+  `tx_capped_exact_class_loses_at_most_the_residual_19025` at weights 1 and
+  8, and by `exact_keeps_its_rate_when_the_residual_exceeds_its_worker_19025`,
+  where the residual is larger than the worker and the exact class still
+  gets its rate). A turn that sends nothing falls through to exact service
+  in the same drain. On #18748 the turn is ordinary non-exact surplus for
+  root credit: on a root with an exact class it acquires per batch leaving
+  the pool floor `F` (always on for a turn, which needs local exact
+  demand) and holds nothing after the drain. It is bounded by both the
+  binding's residual budget and that floor
+  (`the_colocated_turn_never_sends_past_the_residual_budget_19025`,
+  `the_colocated_turn_leaves_the_pool_floor_19025`). The pool
+  alone is first-come, and peers that poll it on every pass drained it before
+  a busy exact worker's turn came (simulation R1: 0.41 Gb/s), so each
+  binding that asks in a 1 ms epoch (a binding asks only while it has
+  non-exact backlog) also reserves an equal claim on that epoch's residual (`SharedCoSExactBacklog::nonexact_surplus_budget`): it
+  may spend its own unspent claim plus the pool beyond every current claim,
+  and claims lapse after their epoch. A claim accrues over its epoch: others
+  may not spend the accrued, unspent part of it, so a binding that asks
+  rarely finds its part however often its peers poll. On #18748 cycle 3,
+  where no root is held, peers polled about 20 times as often, and without
+  accrual the R2 colocated instance fell to 0.067 Gb/s. The turn's gate is
+  now an empty budget, and the selector skips a head the budget cannot
+  cover; before, the turn waited for a full UMEM frame. Claims order who
+  may spend and never
+  add credit, so conservation stays the pool's; a lapsed claim is back in
+  the pool within one epoch, so the residual stays work-conserving and an
+  idle or dead binding cannot hold a part.
+  A first version (f15d2f08bd) metered each binding with a private
+  `residual / n` part instead (n = bindings publishing non-exact backlog).
+  Review (Codex, #19025) found it was not a sound replacement for the shared
+  bucket: refilling over the whole interval at the CURRENT n credited the
+  same interval twice when n fell (up to 1.5 x the residual), a slow
+  binding's part could not be lent to a fast one (not work-conserving), a
+  part larger than the worker could take the exact class's whole worker
+  (0.00 Gb/s in the simulation), an unsendable turn blocked exact service,
+  and a panic-dead binding's flag shrank everyone's part. The shared bucket
+  is back (with its #7206 generation guard), and a dead worker's backlog
+  slots are now cleared by the coordinator's dead-worker sweep, which also
+  removes a pre-existing phantom exact reservation. Cells:
+  `cos/queue_service/tests/colocated_share_19025.rs` (membership changes,
+  unequal capacity, a residual larger than the worker, the unsendable turn)
+  and `coordinator/cos_backlog_dead_worker_19025_tests.rs`. Not addressed:
+  the reserved amount is still the configured rate, so a TX-capped exact
+  class still over-reserves (#19023's other half).
 
 - **T-6(e) — V_min publish on the CoSBatch settle path.** The CoSBatch
   submit path (`submit_local`/`submit_prepared`) was the 5th of 5 V_min

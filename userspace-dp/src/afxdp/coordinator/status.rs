@@ -1702,6 +1702,27 @@ impl super::Coordinator {
         vacated
     }
 
+    /// #19025 review (Codex F3): clear, in every interface's
+    /// `SharedCoSExactBacklog`, the slots of the bindings `worker_id` owns.
+    /// Returns how many slots held something.
+    fn clear_worker_cos_backlog_slots(&self, worker_id: u32) -> usize {
+        let backlogs = self.cos.exact_backlogs.load();
+        let mut cleared = 0usize;
+        for identity in self
+            .workers
+            .identities
+            .values()
+            .filter(|identity| identity.worker_id == worker_id)
+        {
+            for backlog in backlogs.values() {
+                if backlog.clear_slot(identity.slot) {
+                    cleared += 1;
+                }
+            }
+        }
+        cleared
+    }
+
     pub(crate) fn retire_all_worker_holders(&self) -> usize {
         self.retire_worker_holders_where(|_| true)
     }
@@ -1795,6 +1816,17 @@ impl super::Coordinator {
                     );
                 }
                 let vacated = self.vacate_worker_v_min_slots(id);
+                // #19025 review (Codex F3): a panic-dead worker never ran its
+                // CoS teardown, so its bindings' published exact backlog and
+                // demand would keep reserving their rates on every surviving
+                // binding for the life of the backlog object.
+                let cos_slots_cleared = self.clear_worker_cos_backlog_slots(id);
+                if cos_slots_cleared > 0 {
+                    eprintln!(
+                        "xpf-dp: cleared {cos_slots_cleared} CoS exact-backlog slot(s) stranded \
+                         by dead worker {id}"
+                    );
+                }
                 // #15149 (B12-01): the D11 IPsec-inner transport was never
                 // enrolled in this sweep. Without retire+join here the router
                 // keeps hashing flows to the dead worker, its 128-deep queue

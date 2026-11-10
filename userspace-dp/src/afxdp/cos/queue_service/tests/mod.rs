@@ -110,6 +110,7 @@ mod fairness;
 mod exact_starvation_18748;
 mod root_reservation_18748;
 mod cos_drain_sim;
+mod colocated_share_19025;
 
 // #13065 (source finding D1-14) FAIL-ON-REVERT modularity guard: every
 // production .rs file at the top level of cos/queue_service/ must stay

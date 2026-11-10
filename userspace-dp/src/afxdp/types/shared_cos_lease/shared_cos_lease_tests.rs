@@ -3044,3 +3044,150 @@ fn newly_active_worker_is_excluded_not_class_wide_fail_open_9117() {
 // What DOES bound the mutation today: the discriminator is one line, it is
 // commented with its reason, and the fail-open it narrows is still reached by
 // every worker whose share is non-zero or absent.
+
+// ===========================================================================
+// #19025: the residual pool's per-epoch claims
+// (`SharedCoSExactBacklog::nonexact_surplus_budget`).
+// ===========================================================================
+
+const CLAIM_EPOCH_19025: u64 = super::backlog::NONEXACT_CLAIM_EPOCH_NS;
+
+/// Conservation as a property: whatever the claims do, what the bindings are
+/// granted and spend never exceeds what the single-clock pool accrued. Varied
+/// over binding count, residual rate and burst; the set of asking bindings
+/// changes every epoch and bindings join and leave mid-epoch; spends are
+/// whole, partial or nothing, so claims lapse unspent. Checked at every step
+/// (cumulative) and per epoch.
+#[test]
+fn residual_pool_grants_never_exceed_the_residual_as_claimants_change_19025() {
+    for slots in [2usize, 4, 8] {
+        for rate in [125_000_000u64, 625_000_000] {
+            for burst in [rate / 100, 16_000] {
+                let backlog = SharedCoSExactBacklog::new(slots - 1);
+                let mut rng: u64 = 0x1902_5000 ^ (slots as u64) ^ rate ^ burst;
+                let mut next = || {
+                    rng ^= rng << 13;
+                    rng ^= rng >> 7;
+                    rng ^= rng << 17;
+                    rng
+                };
+                let start = 1_000_000_000u64;
+                // Open the pool's refill epoch; it starts closed.
+                let _ = backlog.residual_surplus_budget(start, rate, burst);
+                let mut active = vec![false; slots];
+                let mut spent_total = 0u64;
+                let mut spent_in_epoch = 0u64;
+                let step = 20_000u64;
+                let mut now = start;
+                for _ in 0..(300 * CLAIM_EPOCH_19025 / step) {
+                    now += step;
+                    if now % CLAIM_EPOCH_19025 < step {
+                        // A new epoch: a fresh random membership, and the
+                        // previous epoch's grants are checked.
+                        assert!(
+                            spent_in_epoch <= rate * CLAIM_EPOCH_19025 / 1_000_000_000 + burst,
+                            "slots {slots} rate {rate} burst {burst}: {spent_in_epoch} bytes \
+                             granted in one epoch"
+                        );
+                        spent_in_epoch = 0;
+                        for slot in active.iter_mut() {
+                            *slot = next() % 3 != 0;
+                        }
+                    } else if next() % 50 == 0 {
+                        // A join or leave mid-epoch.
+                        let slot = (next() % slots as u64) as usize;
+                        active[slot] = !active[slot];
+                    }
+                    for slot in 0..slots {
+                        if !active[slot] || next() % 4 == 0 {
+                            continue;
+                        }
+                        let available = backlog.nonexact_surplus_budget(slot as u32, now, rate, burst);
+                        let spend = match next() % 3 {
+                            0 => available,
+                            1 => available / 2,
+                            _ => 0,
+                        };
+                        backlog.consume_residual_surplus_budget(spend);
+                        backlog.consume_nonexact_claim(slot as u32, spend);
+                        spent_total += spend;
+                        spent_in_epoch += spend;
+                    }
+                    let accrued = (now - start) as u128 * rate as u128 / 1_000_000_000u128;
+                    assert!(
+                        spent_total as u128 <= accrued + burst as u128,
+                        "slots {slots} rate {rate} burst {burst}: {spent_total} bytes granted \
+                         against {accrued} accrued plus a {burst}-byte burst"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Work conservation: a binding that stops asking reserves nothing one epoch
+/// after its last ask, so the others can spend its part. The positive
+/// control first shows its claim does reserve while it is fresh.
+#[test]
+fn a_lapsed_claim_is_usable_by_others_within_one_epoch_19025() {
+    let rate = 125_000_000u64;
+    let burst = 10_000_000u64;
+    let backlog = SharedCoSExactBacklog::new(1);
+    let start = 1_000_000_000u64;
+    let _ = backlog.residual_surplus_budget(start, rate, burst);
+    // Halfway into an epoch, so half of a claim has accrued.
+    let now = start + 50 * CLAIM_EPOCH_19025 + CLAIM_EPOCH_19025 / 2;
+    // Binding 0 asks once and then goes quiet.
+    let _ = backlog.nonexact_surplus_budget(0, now, rate, burst);
+    let pool = backlog.residual_surplus_budget(now, rate, burst);
+    let fresh = backlog.nonexact_surplus_budget(1, now, rate, burst);
+    assert!(
+        fresh < pool,
+        "control: a fresh claim must reserve part of the pool ({fresh} of {pool})"
+    );
+    let later = now + CLAIM_EPOCH_19025 + 1;
+    let pool_later = backlog.residual_surplus_budget(later, rate, burst);
+    assert_eq!(
+        backlog.nonexact_surplus_budget(1, later, rate, burst),
+        pool_later,
+        "one epoch after binding 0's last ask its part must be usable by binding 1"
+    );
+}
+
+/// #19025: a claim accrues over its epoch, and what has accrued is the
+/// claimant's whatever its peers do. Binding 0 last asked in the previous
+/// epoch (so it has not asked yet in this one); the pool starts this epoch
+/// empty. Halfway through, the pool has refilled half an epoch's residual,
+/// and binding 1 asks first and spends all it may: binding 0 must still find
+/// the half of its claim that has accrued. Without accrual a claim reserved
+/// only accounting: binding 1, holding its whole unspent claim, took the
+/// whole pool, and a binding that asks rarely (one busy with its own exact
+/// class) found less than a frame for most of each epoch.
+#[test]
+fn the_first_asker_in_an_epoch_cannot_take_a_peers_accrued_claim_19025() {
+    let rate = 125_000_000u64;
+    let burst = 10_000_000u64;
+    let backlog = SharedCoSExactBacklog::new(1);
+    let start = 1_000_000_000u64;
+    let _ = backlog.residual_surplus_budget(start, rate, burst);
+    let epoch_start = start + 50 * CLAIM_EPOCH_19025
+        - (start + 50 * CLAIM_EPOCH_19025) % CLAIM_EPOCH_19025;
+    // Both bindings asked late in the previous epoch.
+    let _ = backlog.nonexact_surplus_budget(0, epoch_start - 10, rate, burst);
+    let _ = backlog.nonexact_surplus_budget(1, epoch_start - 10, rate, burst);
+    // The pool starts the epoch empty.
+    let _ = backlog.residual_surplus_budget(epoch_start, rate, burst);
+    backlog.consume_residual_surplus_budget(u64::MAX);
+    // Halfway through, binding 1 asks first and spends all it may.
+    let now = epoch_start + CLAIM_EPOCH_19025 / 2;
+    let first = backlog.nonexact_surplus_budget(1, now, rate, burst);
+    backlog.consume_residual_surplus_budget(first);
+    backlog.consume_nonexact_claim(1, first);
+    let claim = rate * CLAIM_EPOCH_19025 / 1_000_000_000 / 2;
+    let second = backlog.nonexact_surplus_budget(0, now, rate, burst);
+    assert!(
+        second >= claim * 45 / 100,
+        "binding 0 must still find the half of its {claim}-byte claim that has accrued after \
+         binding 1 asked first (binding 1 took {first}, binding 0 got {second})"
+    );
+}

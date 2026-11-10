@@ -2657,6 +2657,10 @@ mod ipsec_inner_dead_worker_15149_tests;
 mod forwarding_publish_epoch_18534_tests;
 
 #[cfg(test)]
+#[path = "cos_backlog_dead_worker_19025_tests.rs"]
+mod cos_backlog_dead_worker_19025_tests;
+
+#[cfg(test)]
 #[allow(unused_must_use)] // #17144: fixture setup discards; dedicated cells assert outcomes.
 #[path = "tests.rs"]
 mod tests;

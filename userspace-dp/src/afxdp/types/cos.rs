@@ -689,6 +689,11 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// build on this root saw an exact class with work (0 = never). The pool
     /// floor stays on for `COS_EXACT_FLOOR_HOLD_NS` after it.
     pub(in crate::afxdp) exact_work_seen_ns: u64,
+    /// #19025: this binding's exact class was just served, so its colocated
+    /// non-exact queue may take one turn ahead of the next exact service
+    /// (`queue_service::build_colocated_nonexact_turn_batch`). Set by an
+    /// exact service that made progress, cleared by the turn.
+    pub(in crate::afxdp) nonexact_turn: bool,
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,

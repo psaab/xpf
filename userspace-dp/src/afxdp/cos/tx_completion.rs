@@ -1152,6 +1152,7 @@ pub(in crate::afxdp) fn apply_cos_send_result(
         if debit_nonexact_surplus_budget {
             if let Some(backlog) = shared_exact_backlog {
                 backlog.consume_residual_surplus_budget(sent_bytes);
+                backlog.consume_nonexact_claim(binding_slot, sent_bytes);
             } else {
                 root.nonexact_surplus_under_exact_tokens = root
                     .nonexact_surplus_under_exact_tokens
@@ -1275,6 +1276,7 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
         if debit_nonexact_surplus_budget {
             if let Some(backlog) = shared_exact_backlog {
                 backlog.consume_residual_surplus_budget(sent_bytes);
+                backlog.consume_nonexact_claim(binding_slot, sent_bytes);
             } else {
                 root.nonexact_surplus_under_exact_tokens = root
                     .nonexact_surplus_under_exact_tokens

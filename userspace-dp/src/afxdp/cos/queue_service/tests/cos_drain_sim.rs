@@ -16,9 +16,10 @@
 //! backlogged (open loop); exact arrivals are open loop at an offered rate,
 //! spread round-robin over each worker's flows.
 //!
-//! The root lease starts DRAINED, so the window measures the root's rate and
-//! not its initial 1%-of-rate burst; `assert_every_seed` checks every arm
-//! delivers at most 1.01 x the shaping rate.
+//! The root lease starts DRAINED, and the root lease and the residual pool
+//! are drained again when the window opens, so the window measures the
+//! root's rate and not burst banked before it; `assert_every_seed` checks
+//! every arm delivers at most 1.01 x the shaping rate.
 
 use super::*;
 use crate::afxdp::cos::builders::build_cos_interface_runtime;
@@ -224,6 +225,18 @@ pub(super) struct Arm {
     pub(super) exact_arrivals: Arrivals,
     /// The measured window (the production cells use `WINDOW_NS`).
     pub(super) window_ns: u64,
+    /// The non-exact class's `surplus_weight` (#19025: a weight above 1
+    /// makes one surplus batch several frames, so a pass that is not bounded
+    /// by its budget shows up as rate, not just as burst).
+    pub(super) nonexact_surplus_weight: u32,
+    /// #19025 review: a worker's own TX capacity when it differs from
+    /// `worker_tx_cap_bytes` (bytes/s), for unequal-capacity shapes.
+    pub(super) worker_tx_cap_override: Vec<Option<u64>>,
+    /// #19025 review: an open-loop non-exact arrival rate (bytes/s) for a
+    /// worker whose `nonexact_backlogged` is set, instead of keeping its
+    /// queue full. A rate below what the worker gets lets the queue empty,
+    /// so the set of backlogged non-exact bindings changes mid-window.
+    pub(super) nonexact_offered_bytes: Vec<Option<u64>>,
 }
 
 impl Arm {
@@ -250,6 +263,9 @@ impl Arm {
             nonexact_guarantee_bytes: None,
             exact_arrivals: Arrivals::Always,
             window_ns: WINDOW_NS,
+            nonexact_surplus_weight: 1,
+            worker_tx_cap_override: vec![None; workers],
+            nonexact_offered_bytes: vec![None; workers],
         }
     }
 
@@ -420,6 +436,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                     runtime.queues[c].config.buffer_bytes = buffer;
                 }
             }
+            runtime.queues[nonexact_idx].config.surplus_weight = arm.nonexact_surplus_weight;
             runtime.shared_root_lease = fast_path.shared_root_lease.clone();
             if let Some(guarantee) = arm.nonexact_guarantee_bytes {
                 let config = &mut runtime.queues[nonexact_idx].config;
@@ -449,7 +466,13 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
     let mut class_last_progress = vec![0u64; classes];
     let mut longest_class_stall = vec![0u64; classes];
     let mut order: Vec<usize> = (0..workers).collect();
-    let cap_per_step = (arm.worker_tx_cap_bytes * STEP_NS / 1_000_000_000) as i64;
+    let cap_per_step: Vec<i64> = (0..workers)
+        .map(|w| {
+            let cap = arm.worker_tx_cap_override[w].unwrap_or(arm.worker_tx_cap_bytes);
+            (cap * STEP_NS / 1_000_000_000) as i64
+        })
+        .collect();
+    let mut nonexact_credit = vec![0u64; workers];
     let mut tx_credit = vec![0i64; workers];
     let mut rng: u64 = seed | 1;
     let measure_ns = start_ns + WARMUP_NS;
@@ -497,7 +520,16 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                 }
             }
             if arm.nonexact_backlogged[w] {
+                if let Some(rate) = arm.nonexact_offered_bytes[w] {
+                    nonexact_credit[w] += rate * STEP_NS / 1_000_000_000;
+                }
                 while queued_bytes(&bindings[w], nonexact_idx) < (NONEXACT_DEPTH * FRAME) as u64 {
+                    if arm.nonexact_offered_bytes[w].is_some() {
+                        if nonexact_credit[w] < FRAME as u64 {
+                            break;
+                        }
+                        nonexact_credit[w] -= FRAME as u64;
+                    }
                     nonexact_port[w] = 40_000 + (w as u16) * 100 + ((nonexact_port[w] + 1) % 4);
                     let item = sim_item(NONEXACT_QUEUE, nonexact_port[w], now);
                     if !sim_enqueue(&mut bindings[w], NONEXACT_QUEUE, item) {
@@ -520,7 +552,7 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
             if (step + w as u64 * 7) % period != 0 {
                 continue;
             }
-            let poll_cap = cap_per_step * period as i64;
+            let poll_cap = cap_per_step[w] * period as i64;
             tx_credit[w] = (tx_credit[w] + poll_cap).min(TX_CREDIT_MAX.max(poll_cap));
             let binding = &mut bindings[w];
             for _ in 0..MAX_PASSES {
@@ -545,6 +577,30 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
             }
         }
         if now == measure_ns {
+            // The window starts with empty interface pools: root or residual
+            // credit banked while warm-up ramped up (the residual starts
+            // closed, so non-exact sends nothing at first and the root banks)
+            // would otherwise be spent inside the window as rate above the
+            // shaping rate.
+            // Credit the workers hold locally goes back to the lease first,
+            // then the lease's available credit is spent: the window starts
+            // with no root credit anywhere.
+            for binding in bindings.iter_mut() {
+                if let Some(root) = binding.cos.cos_interfaces.get_mut(&IFX) {
+                    let held = core::mem::take(&mut root.tokens);
+                    if held > 0 {
+                        root_lease.release_unused(held);
+                    }
+                }
+            }
+            loop {
+                let granted = root_lease.acquire(now, u64::MAX);
+                if granted == 0 {
+                    break;
+                }
+                root_lease.consume(granted);
+            }
+            backlog.consume_residual_surplus_budget(u64::MAX);
             for (w, binding) in bindings.iter().enumerate() {
                 base_nonexact[w] = queue_sent(binding, nonexact_idx);
                 base_exact[w] = tx_total(binding) - base_nonexact[w];
