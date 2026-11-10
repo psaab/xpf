@@ -1230,12 +1230,15 @@ fn reverse_only_service_on_another_worker_keeps_the_session_19063() {
     assert!(f.workers[2].table.entry_with_origin(&reverse).is_some(), "the serving row survives");
 }
 
-/// Codex review of 9a599d0900 (P2a): a surviving reverse row of an OLDER
-/// incarnation A at the derived companion key of forward B is not B's
-/// service. Neither the fence's own evidence nor the publisher may relabel
-/// A's reply time with B's id.
+/// Fold cycle 2 (R7's key-consistency rule on 695c270b4d). This replaces
+/// the cycle-1 cell `old_reverse_service_is_not_new_forward_service_19063`,
+/// which was built on the Codex P2a premise. Forward B replaced A on worker
+/// 0, and A's reverse row survived at B's derived reverse key. That row's own
+/// forward key IS B's key, so a reply it forwards is a reply to B's tuple.
+/// The wire carries no session id. The reply counts as B's service in the
+/// fence's own evidence and in the publisher, under B's id.
 #[test]
-fn old_reverse_service_is_not_new_forward_service_19063() {
+fn a_reply_at_the_forwards_derived_reverse_key_is_its_service_19063() {
     let mut f = Fixture::with_key(0, udp_v4_key());
     let t0 = f.t0;
     f.activate(t0);
@@ -1249,6 +1252,7 @@ fn old_reverse_service_is_not_new_forward_service_19063() {
         true
     ));
     assert_eq!(f.workers[0].table.session_id_for(&reverse), a, "FIXTURE: reverse A survives");
+    assert_eq!(f.workers[0].table.session_id_for(&key), a + 1, "FIXTURE: forward B replaced A");
     crate::afxdp::shared_ops::publish_shared_session(
         &f.shared_sessions,
         &f.shared_nat,
@@ -1256,18 +1260,18 @@ fn old_reverse_service_is_not_new_forward_service_19063() {
         &f.indexes,
         &b,
     );
-    f.serve_reverse(0, t0 + 2 * SEC, false);
-    let foreign = t0 + 2 * SEC;
-    assert_ne!(
+    let reply = t0 + 2 * SEC;
+    f.serve_reverse(0, reply, false);
+    assert_eq!(
         f.workers[0].table.packet_counts_and_last_packet_seen_for(&key).2,
-        foreign,
-        "the fence's own evidence for B excludes A's reply"
+        reply,
+        "the fence's own evidence for B counts the reply on B's tuple"
     );
     let mut pairs = Vec::new();
     f.workers[0].table.ct_slice_forward_pairs(0, usize::MAX, &mut pairs);
     assert!(
-        pairs.iter().all(|p| p.0 != key || p.4 != foreign),
-        "the publisher does not carry A's reply as B's service"
+        pairs.iter().any(|p| p.0 == key && p.4 == reply && p.5 == a + 1),
+        "the publisher carries the reply as B's service, under B's id"
     );
     crate::afxdp::shared_ops::restamp_shared_packet_counts_batch(
         &f.shared_sessions,
@@ -1276,7 +1280,9 @@ fn old_reverse_service_is_not_new_forward_service_19063() {
         &pairs,
     );
     let rows = crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions);
-    assert_ne!(rows.get(&key).expect("B").last_served_ns, foreign, "B's evidence excludes A's reply");
+    let row = rows.get(&key).expect("B");
+    assert_eq!(row.session_id, a + 1);
+    assert_eq!(row.last_served_ns, reply, "B's evidence includes the reply on its tuple");
 }
 
 /// Codex review of 9a599d0900 (P2b): an unknown id (0) is not "the same
@@ -1380,14 +1386,19 @@ fn time_wait_and_reset_pairs_publish_no_service_19063() {
     }
 }
 
-/// The REACHABLE mixed pair (Codex review of 9a599d0900, P2a): forward B
-/// replaced A while A's reverse stayed. A's later reply is excluded, AND what
-/// #18722/#18742 protect still holds for B: B's own forward service is still
-/// published, both as the sibling packet recency (#18742: real packet time,
-/// from a non-minting worker) and as `last_served_ns`. Worker 1 holds the
-/// pair, so its namespace differs from B's minting namespace.
+/// Fold cycle 2: the reachable mixed pair on a non-minting worker. This
+/// replaces the cycle-1 cell
+/// `a_replaced_forward_keeps_publishing_its_own_service_beside_a_stale_reverse_19063`,
+/// which was built on the Codex P2a premise. Forward B replaced A while A's
+/// reverse stayed. What #18722/#18742 protect still holds for B: its own
+/// forward packet is its service. The later reply through A's surviving
+/// reverse row is also its service, because that row's own forward key is
+/// B's key. The newer of the two is published as `last_served_ns` and as
+/// the #18742 sibling recency, a real packet time from a non-minting worker.
+/// Worker 1 holds the pair, so its namespace differs from B's minting
+/// namespace.
 #[test]
-fn a_replaced_forward_keeps_publishing_its_own_service_beside_a_stale_reverse_19063() {
+fn a_replaced_forward_publishes_its_own_and_its_tuples_reply_service_19063() {
     let mut f = Fixture::with_key(0, udp_v4_key());
     let t0 = f.t0;
     f.activate(t0);
@@ -1410,29 +1421,35 @@ fn a_replaced_forward_keeps_publishing_its_own_service_beside_a_stale_reverse_19
         &b,
     );
     let own = t0 + 2 * SEC;
-    let foreign = t0 + 3 * SEC;
+    let reply = t0 + 3 * SEC;
     f.serve(w, own, false);
-    f.serve_reverse(w, foreign, false);
     assert_eq!(
         f.workers[w].table.packet_counts_and_last_packet_seen_for(&key).2,
         own,
-        "B's pair time is its own forward packet, not A's later reply"
+        "B's own forward packet is its service"
+    );
+    f.serve_reverse(w, reply, false);
+    assert_eq!(
+        f.workers[w].table.packet_counts_and_last_packet_seen_for(&key).2,
+        reply,
+        "the later reply on B's tuple is its service too"
     );
     f.restamp(w);
     let rows = crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions);
     let row = rows.get(&key).expect("B");
     assert_eq!(row.session_id, a + 1);
-    assert_eq!(row.last_served_ns, own, "B's own service is published as its evidence");
+    assert_eq!(row.last_served_ns, reply, "B's newest service is published as its evidence");
     assert_eq!(
-        row.sibling_last_seen_ns, own,
-        "#18742: the sibling recency is B's real packet time, not A's reply"
+        row.sibling_last_seen_ns, reply,
+        "#18742: the sibling recency is a real packet time on B's tuple"
     );
 }
 
 /// The production pair whose halves have DIFFERENT ids: an import with a
 /// wire id of 0 (a legacy peer, a tunnel replica) allocates a fresh id per
-/// half. The reverse was installed after the forward, so it is the forward's
-/// companion, and its reply still counts as the pair's service.
+/// half. The reverse row's own forward key is the forward's key, so it is
+/// the forward's companion, and its reply still counts as the pair's
+/// service.
 #[test]
 fn a_fresh_id_import_companion_still_counts_its_reply_19063() {
     let f = Fixture::with_key(0, udp_v4_key());
@@ -1456,6 +1473,274 @@ fn a_fresh_id_import_companion_still_counts_its_reply_19063() {
     assert_eq!(
         table.packet_counts_and_last_packet_seen_for(&key).2,
         t0 + 5 * SEC,
-        "a companion installed after its forward counts, whatever its id"
+        "a companion whose own forward is this key counts, whatever its id"
     );
+}
+
+/// Fold cycle 2 (R7's caveat on 695c270b4d: no cell told key consistency
+/// from "any reverse row counts"). Forward K is under SNAT, so its replies
+/// arrive on `R = reverse_session_key(K, N)`. Two kinds of row can sit at R:
+/// - K's companion, whose own forward key is K (its decision is N reversed).
+///   It counts whatever its id and install order; here it is installed
+///   BEFORE K, with a different id.
+/// - another flow's reverse row after NAT tuple reuse, whose own forward key
+///   is not K. It never counts, though it is installed after K.
+#[test]
+fn a_reverse_row_counts_only_when_its_own_forward_is_this_key_19063() {
+    let f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    let key = f.row.key.clone();
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some("172.16.80.8".parse().expect("v4")),
+        rewrite_src_port: Some(40_000),
+        ..crate::nat::NatDecision::default()
+    };
+    let reverse_key = crate::session::reverse_session_key(&key, nat);
+    let companion_nat = nat.reverse(key.src_ip, key.dst_ip, key.src_port, key.dst_port);
+    let reused_nat = crate::nat::NatDecision::default();
+    assert_eq!(
+        crate::session::reverse_session_key(&reverse_key, companion_nat),
+        key,
+        "FIXTURE: the companion's own forward key is K"
+    );
+    assert_ne!(
+        crate::session::reverse_session_key(&reverse_key, reused_nat),
+        key,
+        "FIXTURE: the reused tuple's own forward key is another session's"
+    );
+    let own = t0 + 2 * SEC;
+    let reply = t0 + 4 * SEC;
+    for (case, reverse_nat, reverse_first, want) in [
+        ("companion", companion_nat, true, reply),
+        ("reused tuple", reused_nat, false, own),
+    ] {
+        let mut table = SessionTable::new();
+        table.set_session_id_namespace(0, 2);
+        let mut forward = f.row.clone();
+        forward.decision.nat = nat;
+        let mut reverse = f.row.clone();
+        reverse.key = reverse_key.clone();
+        reverse.metadata.is_reverse = true;
+        reverse.decision.nat = reverse_nat;
+        reverse.session_id = forward.session_id + 1;
+        let order = if reverse_first { [&reverse, &forward] } else { [&forward, &reverse] };
+        for row in order {
+            assert!(
+                table.upsert_synced_with_origin(row.clone().into_session_install(t0), true),
+                "FIXTURE ({case}): install {:?}",
+                row.key
+            );
+        }
+        assert!(table.lookup_with_origin(&key, own, 0).is_some(), "FIXTURE ({case}): K serves");
+        table.account_packet(&key, 64, 0, 0);
+        assert!(table.lookup_with_origin(&reverse_key, reply, 0).is_some(), "FIXTURE ({case}): R serves");
+        table.account_packet(&reverse_key, 64, 0, 0);
+        assert_eq!(
+            table.packet_counts_and_last_packet_seen_for(&reverse_key).2,
+            reply,
+            "FIXTURE ({case}): the row at R recorded the reply"
+        );
+        assert_eq!(
+            table.packet_counts_and_last_packet_seen_for(&key).2,
+            want,
+            "{case}: K's pair time counts the row at R only when R's own forward is K"
+        );
+        let mut pairs = Vec::new();
+        table.ct_slice_forward_pairs(0, usize::MAX, &mut pairs);
+        assert!(
+            pairs.iter().any(|p| p.0 == key && p.4 == want),
+            "{case}: the publisher carries the same pair time"
+        );
+    }
+}
+
+/// Fold cycle 2 (Codex F2 / R7-2 / R14 S1 on 695c270b4d): a reverse-only
+/// row that saw a terminal event publishes no service, through the writer.
+/// It covers the reverse's own RST and both FINs, each followed by a
+/// straggler ACK the lookup may still admit inside the fixed fuse. The
+/// single-FIN half-close is the control: its reverse-only service is
+/// live and still published.
+#[test]
+fn a_terminal_reverse_only_row_publishes_no_service_19063() {
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+    let rst = crate::tcp_flags::TCP_RST | crate::tcp_flags::TCP_ACK;
+    let ack = crate::tcp_flags::TCP_ACK;
+    for case in ["reverse RST", "both FINs", "single FIN (control)"] {
+        let mut f = Fixture::new(0);
+        let t0 = f.t0;
+        f.activate(t0);
+        let key = f.row.key.clone();
+        let reverse = crate::session::reverse_session_key(&key, f.row.decision.nat);
+        let served = |f: &Fixture| {
+            crate::afxdp::shared_ops::lock_shared_recover(&f.shared_sessions)
+                .get(&key)
+                .map(|row| row.last_served_ns)
+        };
+        let base = served(&f);
+        let table = &mut f.workers[2].table;
+        let (class, straggler_at) = match case {
+            "reverse RST" => {
+                let _ = table.lookup_with_origin(&reverse, t0 + SEC, rst);
+                table.account_packet_at(&reverse, 64, rst, 0, t0 + SEC);
+                (crate::session::TcpCloseClass::Reset.to_wire(), t0 + 2 * SEC)
+            }
+            "both FINs" => {
+                assert!(table.lookup_with_origin(&key, t0 + SEC, fin).is_some());
+                table.account_packet_at(&key, 64, fin, 0, t0 + SEC);
+                let _ = table.lookup_with_origin(&reverse, t0 + 2 * SEC, fin);
+                table.account_packet_at(&reverse, 64, fin, 0, t0 + 2 * SEC);
+                (crate::session::TcpCloseClass::TimeWait.to_wire(), t0 + 5 * SEC)
+            }
+            _ => {
+                let _ = table.lookup_with_origin(&reverse, t0 + SEC, fin);
+                table.account_packet_at(&reverse, 64, fin, 0, t0 + SEC);
+                (crate::session::TcpCloseClass::Closing.to_wire(), t0 + 2 * SEC)
+            }
+        };
+        let straggler = table.lookup_with_origin(&reverse, straggler_at, ack).is_some();
+        if straggler {
+            table.account_packet_at(&reverse, 64, ack, 0, straggler_at);
+        }
+        table.delete(&key);
+        assert!(
+            table.entry_with_origin(&key).is_none() && table.entry_with_origin(&reverse).is_some(),
+            "FIXTURE ({case}): only the reverse half remains"
+        );
+        assert_eq!(table.close_class_wire_for(&reverse), class, "FIXTURE ({case}): the reverse's close class");
+        let mut extras = Vec::new();
+        table.ct_slice_last_served_extras(0, usize::MAX, &mut extras);
+        crate::afxdp::shared_ops::restamp_shared_last_served_batch(&f.shared_sessions, &extras);
+        let tuple = extras.iter().find(|e| e.0 == key).map(|e| e.2);
+        eprintln!("#19063 terminal reverse-only {case}: straggler_admitted={straggler} tuple={tuple:?}");
+        if case == "single FIN (control)" {
+            assert!(tuple.is_some(), "control: a half-closed reverse-only row's service is published");
+            assert_ne!(served(&f), base, "control: the writer raised last_served_ns");
+        } else {
+            assert_eq!(tuple, None, "{case}: a terminal reverse-only row publishes no tuple");
+            assert_eq!(served(&f), base, "{case}: the shared last_served_ns does not move");
+        }
+    }
+}
+
+/// Fold cycle 2 (Codex F3 / R7-3 on 695c270b4d): the extras pass probes the
+/// absent forward of a reverse-only row. That is not a packet-path lookup
+/// miss, so the #7919 `lookup_miss_no_handle` counter must not move.
+#[test]
+fn the_extras_pass_moves_no_packet_lookup_miss_counter_19063() {
+    let mut f = Fixture::with_key(0, udp_v4_key());
+    let t0 = f.t0;
+    f.activate(t0);
+    let key = f.row.key.clone();
+    f.serve_reverse(2, t0 + SEC, false);
+    f.workers[2].table.delete(&key);
+    let table = &f.workers[2].table;
+    let before = table.lookup_miss_counts();
+    let mut extras = Vec::new();
+    for _ in 0..10 {
+        extras.clear();
+        table.ct_slice_last_served_extras(0, usize::MAX, &mut extras);
+    }
+    assert!(extras.iter().any(|e| e.0 == key), "FIXTURE: the reverse-only row was visited");
+    assert_eq!(
+        table.lookup_miss_counts(),
+        before,
+        "an evidence pass is not a packet-path lookup miss"
+    );
+}
+
+/// Fold cycle 2 (R14 S2 on 695c270b4d): a restored copy that saw RST or both
+/// FINs keeps the #10885/#14935 FIXED fuse. It observed the terminal event
+/// itself, so its Close is the legitimate one and the fence does not hold
+/// it. Each case runs with no packet after the terminal event and with a
+/// stray reply every second. A stray never slides the fuse.
+#[test]
+fn a_terminal_restored_copy_closes_on_its_fixed_fuse_19063() {
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+    let rst = crate::tcp_flags::TCP_RST | crate::tcp_flags::TCP_ACK;
+    let ack = crate::tcp_flags::TCP_ACK;
+    let mut late = Vec::new();
+    for case in ["RST", "both FINs"] {
+        for stray in [false, true] {
+            let mut f = Fixture::new(0);
+            let t0 = f.t0;
+            f.activate(t0);
+            let key = f.row.key.clone();
+            let reverse = crate::session::reverse_session_key(&key, f.row.decision.nat);
+            let table = &mut f.workers[2].table;
+            let t_term = match case {
+                "RST" => {
+                    assert!(table.lookup_with_origin(&key, t0 + SEC, rst).is_some());
+                    table.account_packet_at(&key, 64, rst, 0, t0 + SEC);
+                    t0 + SEC
+                }
+                _ => {
+                    assert!(table.lookup_with_origin(&key, t0 + SEC, fin).is_some());
+                    table.account_packet_at(&key, 64, fin, 0, t0 + SEC);
+                    let _ = table.lookup_with_origin(&reverse, t0 + 2 * SEC, fin);
+                    table.account_packet_at(&reverse, 64, fin, 0, t0 + 2 * SEC);
+                    t0 + 2 * SEC
+                }
+            };
+            let fuse_s = u64::from(table.timeout_secs_for(&key));
+            assert!(fuse_s > 0, "FIXTURE ({case}): the copy is on its close fuse");
+            let mut now = t_term;
+            let mut gone = None;
+            while now < t_term + (fuse_s + 60) * SEC {
+                now += SEC;
+                if stray && f.has_row(2) {
+                    let _ = f.workers[2].table.lookup_with_origin(&reverse, now, ack);
+                }
+                f.round(now);
+                if !f.has_row(2) {
+                    gone = Some((now - t_term) / SEC);
+                    break;
+                }
+            }
+            eprintln!("#19063 terminal fuse: {case} stray={stray} fuse_s={fuse_s} removed_after_s={gone:?}");
+            if !gone.is_some_and(|s| s <= fuse_s + 3) {
+                late.push((case, stray, fuse_s, gone));
+            }
+        }
+    }
+    assert!(
+        late.is_empty(),
+        "R14 S2: a terminal restored copy closes on its fixed fuse (+GC), not after the fence's hold: {late:?}"
+    );
+}
+
+/// The other side of the terminal exemption: a single-FIN half-close is NOT
+/// terminal, so its copy stays fenced. Worker 2's copy sees one FIN and then
+/// goes idle, while worker 1 serves the replies every second. Worker 1's
+/// production ct-slice publishes that service, and worker 2's idle half-closed
+/// copy must not close the live session when its closing window ends.
+#[test]
+fn a_half_closed_copy_idle_while_another_worker_serves_stays_fenced_19063() {
+    let mut f = Fixture::new(0);
+    let t0 = f.t0;
+    f.activate(t0);
+    let key = f.row.key.clone();
+    let id = f.row.session_id;
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+    assert!(f.workers[2].table.lookup_with_origin(&key, t0 + SEC, fin).is_some());
+    f.workers[2].table.account_packet_at(&key, 64, fin, 0, t0 + SEC);
+    assert_eq!(
+        f.workers[2].table.close_class_wire_for(&key),
+        crate::session::TcpCloseClass::Closing.to_wire(),
+        "FIXTURE: worker 2's copy is half-closed"
+    );
+    let closing_s = u64::from(f.workers[2].table.timeout_secs_for(&key));
+    let end = t0 + SEC + (closing_s + 60) * SEC;
+    let mut now = t0 + SEC;
+    while now < end {
+        now += SEC;
+        f.serve_reverse(1, now, false);
+        f.round_with_ct_slice(now);
+        assert_eq!(
+            (f.ha_closes(), f.rt_flow_closes(id)),
+            (0, 0),
+            "a Close of the session worker 1 serves, from worker 2's idle half-closed copy (t=t0+{}s)",
+            (now - t0) / SEC
+        );
+    }
+    assert!(f.has_row(2), "the half-closed copy stays fenced while the session is served");
 }

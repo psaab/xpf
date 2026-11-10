@@ -521,10 +521,17 @@ impl SessionTable {
                     // re-stamped to the newest packet time; an idle-looking
                     // copy is held for one evidence cadence. Only `Close`
                     // falls through, to master's ordinary AGE + Close.
+                    // A copy that saw RST or both FINs observed the terminal
+                    // event itself, so its Close is the legitimate one: it
+                    // keeps the #10885/#14935 FIXED fuse and skips the fence
+                    // (fold cycle 2, R14 S2 on 695c270b4d: the hold delayed
+                    // a RST Close from 2 s to 18 s).
                     if companion_eligible
                         && let Some(ha) = ha
                         && e_origin == SessionOrigin::SharedPromote
                         && !e_is_reverse
+                        && !e_reset
+                        && !(e_fin_own && e_fin_peer)
                         && (ha.forwards_rg)(e_owner_rg)
                     {
                         // This copy's own service in EITHER direction: the

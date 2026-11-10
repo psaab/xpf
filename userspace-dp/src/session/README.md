@@ -1835,6 +1835,12 @@ other copies AGE one window after the activation re-stamp.
   that forwards the row's owner RG, after every existing keep-alive arm
   (#18722 for TCP). Off the RG the standby arms govern (#19065 tracks their
   fabric-ingress and whole-node-standby bypass).
+- **Where it does not run: a copy that saw RST or both FINs.** That copy
+  observed the terminal event itself, so its Close is the legitimate one.
+  It keeps the #10885/#14935 FIXED fuse (RST 2 s, TIME_WAIT) and takes
+  master's AGE + Close. Fold cycle 2 (R14 S2 on 695c270b4d): the fence's
+  hold had delayed a RST'd copy's Close from 2 s to 18 s. Idle copies on
+  other workers never saw the terminal packet, so they stay fenced.
 - **Its rules, in order:**
 
 | order | condition | result |
@@ -1867,31 +1873,48 @@ other copies AGE one window after the activation re-stamp.
       non-FINed direction keeps flowing (Codex P1);
     - a reverse row whose forward half is not in that worker's table (R7
       F1). Its id is the forward's (#18718), so it stamps the shared
-      FORWARD row.
+      FORWARD row. Fold cycle 2 (Codex F2 / R7-2 / R14 S1 on 695c270b4d):
+      the same terminal filter as the forward arm applies, so a reverse
+      row that saw RST or both FINs publishes nothing. The probe for the
+      absent forward is quiet (`entry_by_key_quiet`): it is not a
+      packet-path lookup miss, so the #7919 `lookup_miss_no_handle`
+      counter does not move (Codex F3 / R7-3).
 
     Counters, stages and the #18742 sibling recency do not move for these,
     so neither the handshake promotion nor the RST/TIME_WAIT refresh policy
     widens.
-- **The companion's reverse time only** (Codex P2a). The pair's packet time
-  takes the reverse row's time only when that row is a reverse half that
-  belongs to the forward. It belongs when either:
-  - it carries the forward's id (#18718), or
-  - it was installed AFTER the forward (`install_epoch`, which is
-    write-once per incarnation, #9856).
-
-  **Writer census of reverse halves:**
-  - local companions (`poll_descriptor` reverse install): the forward's id;
-  - the synced companion synthesis (`shared_ops/reverse_synth.rs`): the
-    forward's id;
-  - peer imports: the wire id, which is the peer companion's, so the
-    forward's id;
-  - imports with a wire id of 0 (a legacy peer, a tunnel replica): a fresh
-    id per half.
-
-  Only the last path yields different ids. Its reverse is installed after
-  its forward and still counts. The excluded case is the reachable mixed
-  pair: a forward B that replaced A while A's promoted reverse refused
-  replacement. That reverse has A's id and predates B.
+- **The companion's reverse time, by key** (fold cycle 2: R7's
+  key-consistency rule, replacing cycle 1's id-or-install-order rule). The
+  pair's packet time for forward `K` takes the time of the row at K's
+  derived reverse key `R` only when that row is a reverse half whose OWN
+  forward key, derived from its own NAT decision, is `K`
+  (`reverse_session_key(R, its nat) == K`).
+  - **Why the key.** `R` is the complete post-NAT 5-tuple of K's replies. A
+    reverse row at `R` whose own forward is `K` forwards exactly those
+    replies, whatever its session id or install order: ids and incarnations
+    never appear on the wire. `account_packet` already credits a reverse hit
+    to `reverse_session_key(R, nat)` by key alone, and the fence counts that
+    counter change as evidence.
+  - **Excluded:** a reverse row at `R` whose own forward key is another
+    session's, after NAT tuple reuse. Its replies are that other flow's.
+  - **Included,** whatever the ids: the fresh-id import companion (a wire
+    id of 0 allocates a fresh id per half), and a companion installed
+    before its forward.
+  - **Why not install order (cycle 1).** `install_epoch` is NOT write-once
+    for imports: `upsert_synced_with_origin` re-takes a fresh epoch on
+    every accepted upsert, a same-id resend included (`install.rs`). The
+    order was a proxy for identity; the key is the identity the wire
+    carries.
+  - **Disputed premise, recorded.** Codex (P2a on 9a599d0900, F1 on
+    695c270b4d) treats a reply served through an older incarnation A's
+    reverse row at B's derived key as foreign to B. R7 measured otherwise
+    on 695c270b4d: that traffic is B's tuple's reply traffic, the counter
+    channel already credits it to B, and the end-to-end outcome of a
+    reply-only stream over the mixed pair is unchanged with the timestamp
+    rule removed. This change follows R7.
+  - **Residual:** TCP stragglers of an old connection after its 5-tuple is
+    reused arrive on the same `R`. The wire cannot tell them apart, as for
+    `account_packet`. They stop after about 2MSL.
 - **Who stamps it.** `last_served_ns` is set by every worker's ct-slice
   restamp, the minting worker included, through both
   `restamp_shared_packet_counts_batch` and the single-pair
