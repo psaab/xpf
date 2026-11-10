@@ -6,11 +6,11 @@ import (
 )
 
 // TestCarrierLossChildVerdict12088 pins how the 12088 carrier-loss parent
-// judges its re-executed child (R16 F1 on #19058). Before, the parent read
-// only the child's exit status, and Go exits 0 both for a test that SKIPs and
-// for a -test.run that matches nothing, so either was reported as a PASS. The
-// rows are real -test.v shapes; each non-PASS row is one the old judgment
-// scored as a pass or a skip.
+// judges its re-executed child (R16 F1 on #19058, and N1 on 3eb2111624).
+// Before, the parent read only the child's exit status, and Go exits 0 both
+// for a test that SKIPs and for a -test.run that matches nothing, so either
+// was reported as a PASS. The rows are real -test.v shapes; each non-PASS row
+// is one the old judgment scored as a pass or a skip.
 func TestCarrierLossChildVerdict12088(t *testing.T) {
 	exit1 := errors.New("exit status 1")
 	const run = "=== RUN   " + carrierLossTest12088 + "\n"
@@ -23,6 +23,9 @@ func TestCarrierLossChildVerdict12088(t *testing.T) {
 		{"child passed", run + "--- PASS: " + carrierLossTest12088 + " (9.20s)\nPASS\n", nil, carrierLossChildPassed12088},
 		{"child skipped exits 0", run + "    daemon_rpm_test.go:1241: carrier-loss acceptance skipped: cannot create veth pair: operation not permitted\n" +
 			"--- SKIP: " + carrierLossTest12088 + " (0.01s)\nPASS\n", nil, carrierLossChildSkipped12088},
+		// R16 N1 on 3eb2111624: a crash after the skip must not read as a skip.
+		{"skip then panic", run + "--- SKIP: " + carrierLossTest12088 + " (0.01s)\npanic: boom [recovered]\n", errors.New("exit status 2"), carrierLossChildFailed12088},
+		{"skip then nonzero exit", run + "--- SKIP: " + carrierLossTest12088 + " (0.01s)\nPASS\ntestguard: TestMain failed after the run\n", exit1, carrierLossChildFailed12088},
 		{"no tests to run exits 0", "testing: warning: no tests to run\nPASS\n", nil, carrierLossChildFailed12088},
 		{"pass line for another name", "=== RUN   " + carrierLossTest12088 + "X\n--- PASS: " + carrierLossTest12088 + "X (0.01s)\nPASS\n", nil, carrierLossChildFailed12088},
 		{"pass line but nonzero exit", run + "--- PASS: " + carrierLossTest12088 + " (9.20s)\nFAIL\n", exit1, carrierLossChildFailed12088},

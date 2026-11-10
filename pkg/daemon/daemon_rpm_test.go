@@ -1237,9 +1237,9 @@ var (
 // SKIPs and for a -test.run pattern that matches nothing ("testing: warning:
 // no tests to run"), so a parent that trusted the status reported PASS having
 // examined nothing. Only the child's own "--- PASS: <exact name> (" line, with
-// a zero exit, is a pass. Its "--- SKIP: <exact name> (" line is a skip that
-// carries the child's reason, and so is an unshare that failed before the
-// child test started. Everything else is a failure, including an EPERM from
+// a zero exit, is a pass. Its "--- SKIP: <exact name> (" line, also with a
+// zero exit, is a skip that carries the child's reason, and so is an unshare
+// that failed before the child test started. Everything else is a failure, including an EPERM from
 // inside a child that did start: that is the acceptance failing, not the
 // namespace being unavailable.
 func judgeCarrierLossChild12088(out []byte, runErr error) (carrierLossChildVerdict12088, string) {
@@ -1251,6 +1251,10 @@ func judgeCarrierLossChild12088(out []byte, runErr error) (carrierLossChildVerdi
 		return carrierLossChildSkipped12088, fmt.Sprintf("cannot create private namespace: %v: %s", runErr, strings.TrimSpace(s))
 	case carrierLossChildFail12088.MatchString(s):
 		return carrierLossChildFailed12088, fmt.Sprintf("the child reported FAIL (exit: %v)", runErr)
+	case carrierLossChildSkip12088.MatchString(s) && runErr != nil:
+		// A skip followed by a nonzero exit is a crash after the skip (a
+		// panic, or TestMain failing): reading it as a skip would hide it.
+		return carrierLossChildFailed12088, fmt.Sprintf("the child skipped and then exited nonzero (exit: %v)", runErr)
 	case carrierLossChildSkip12088.MatchString(s):
 		reason := "the child skipped"
 		if m := carrierLossChildLog12088.FindAllStringSubmatch(s, -1); len(m) > 0 {
