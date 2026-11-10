@@ -178,16 +178,26 @@
 # These floors already include the separately attributed #18751 fabric
 # netns site, #18728's three lo0 kernel/tool sites, and #18846-G58's one
 # SO_SNDBUF site; they are not counted again in this update.
-total        = 656
+# #19066 counts testguard.NetnsUnavailable(t, "...") and
+# testguard.RequireChildPass(t, ...) as skip sites. Before, #19066's routing of
+# re-exec skips through NetnsUnavailable made 49 sites vanish (656 -> 607)
+# with no condition removed. Measured with both counted: 657 (143/18/495/1).
+# Six parent sites ("cannot create private namespace/netns" and the 12088
+# verdict skip: 3 priv-absent, 3 other) became RequireChildPass calls, and
+# seven RequireChildPass calls count as priv-absent: the six plus the 12168
+# helper, whose child-skip check gained a pre-start refusal skip path. Net
+# +1 total, +4 priv-absent, -3 other. findbinary's GOOS guard moved from
+# NetnsUnavailable back to t.Skip with the same message: net zero.
+total        = 657
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 139
+priv-absent  = 143
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
-other        = 498
+other        = 495
 
 # Skips this census counted but could NOT classify: `t.SkipNow()` (no message
 # by construction) and non-literal messages. Deliberately a REPORTED bucket

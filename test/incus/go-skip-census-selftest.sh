@@ -198,6 +198,36 @@ echo "$out" | grep -q "1 skip call sites" && ok "only the real delta call is cou
 echo "$out" | grep -qE "^ +priv-absent +1( |$)" && ok "the real call's message still classifies from the original source" ||
 	bad "the real call behind blanked strings was misclassified: $out"
 
+# ── 9. The testguard skip helpers are skip sites (#19066) ──
+# testguard.NetnsUnavailable(t, "...") skips outside XPF_REQUIRE_NETNS, and
+# testguard.RequireChildPass(t, ...) skips when the re-executed child did.
+# Routing a t.Skip through either must not make the site vanish: before this
+# cell's census change, #19066's routing dropped 49 sites with no condition
+# removed. The definition shape (no receiver argument first) is not a site.
+mkdir -p "$WORK/pkg/eps"
+cat > "$WORK/pkg/eps/e_test.go" <<'GO'
+package eps
+func TestE(t *testing.T) {
+	testguard.NetnsUnavailable(t, "netns child never started: %v", err)
+	testguard.NetnsUnavailable(t, "mount unavailable: %v", err)
+	testguard.RequireChildPass(t, "TestE", out, err)
+}
+func NetnsUnavailable(t testing.TB, format string, args ...any) {}
+GO
+cat > "$WORK/efloors" <<'F'
+total = 3
+priv-absent = 2
+priv-present = 0
+other = 1
+unparsed = 0
+F
+out=$( GO_SKIP_ROOT="$WORK" GO_SKIP_DIRS=pkg/eps GO_SKIP_FLOORS="$WORK/efloors" \
+	sh "$ROOT/scripts/go-skip-census.sh" 2>&1 ); rc=$?
+[ "$rc" = "0" ] && ok "testguard.NetnsUnavailable and RequireChildPass are counted as skip sites" ||
+	bad "the testguard skip helpers were not counted as expected: $out"
+echo "$out" | grep -qE "^ +priv-absent +2( |$)" && ok "NetnsUnavailable classifies by its message; RequireChildPass is privilege-absent" ||
+	bad "testguard skip helpers misclassified: $out"
+
 echo "  go-skip census selftest: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1
 # An empty sweep is not a pass: if the cells stopped executing, PASS is 0 and
