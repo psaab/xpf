@@ -2391,29 +2391,29 @@ impl SessionTable {
         }
         if end >= cap { 0 } else { end }
     }
-    /// #19063 (Codex review of 9a599d0900, P2a): the newest admitted packet
-    /// time of a forward row and its reverse COMPANION. The reverse row counts
-    /// only when it is a reverse half that belongs to this forward:
-    /// - it carries the forward's full id (#18718: local companions,
-    ///   poll_descriptor's reverse install, and the synced companion
-    ///   synthesis), or
-    /// - it was installed AFTER the forward (`install_epoch`, write-once per
-    ///   incarnation, #9856). That covers the production pair whose halves
-    ///   have different ids: an import with a wire id of 0 (a legacy peer
-    ///   that predates the field, or a tunnel replica) allocates a fresh id
-    ///   per half (install.rs `upsert_synced_with_origin`).
+    /// #19063: the newest admitted packet time of a forward row `K` and its
+    /// reverse COMPANION. The row at K's derived reverse key `R` counts only
+    /// when it is a reverse half whose OWN forward key, derived from its own
+    /// NAT decision, is `K` (fold cycle 2: R7's key-consistency rule,
+    /// replacing cycle 1's id-or-install-order rule).
     ///
-    /// The reachable mixed pair Codex named is excluded: a forward B that
-    /// REPLACED A while A's promoted reverse refused replacement (the import
-    /// queues the halves separately; the active-RG guard keeps the local
-    /// row). That reverse has A's id AND predates B.
+    /// Why the key, not the id or the install order: `R` is the complete
+    /// post-NAT 5-tuple of K's replies. A reverse row at `R` whose own forward
+    /// is `K` forwards exactly those replies; session ids and incarnations
+    /// never appear on the wire. `account_packet` already credits a reverse
+    /// hit to `reverse_session_key(R, nat)` by key alone. Install order was a
+    /// proxy: a same-id re-import re-takes the epoch (`upsert_synced_with_origin`),
+    /// and a fresh-id import companion has a different id.
+    ///
+    /// Excluded: a reverse row at `R` whose own forward key is another
+    /// session's (NAT tuple reuse: `reverse_session_key(R, its nat) != K`).
+    /// Its replies belong to that other flow.
     fn pair_last_packet_seen_ns(&self, key: &SessionKey, forward: &SessionEntry) -> u64 {
         let reverse_key = reverse_session_key(key, forward.decision.nat);
         self.entry_by_key(&reverse_key)
             .filter(|reverse| {
                 reverse.metadata.is_reverse
-                    && (reverse.session_id == forward.session_id
-                        || reverse.install_epoch > forward.install_epoch)
+                    && reverse_session_key(&reverse_key, reverse.decision.nat) == *key
             })
             .map_or(forward.last_packet_seen_ns, |reverse| {
                 reverse.last_packet_seen_ns.max(forward.last_packet_seen_ns)
@@ -2430,7 +2430,11 @@ impl SessionTable {
     ///   refreshes the non-FINed direction (Codex review of 9a599d0900, P1).
     /// - A REVERSE row whose forward half is not in this table. Its id is the
     ///   forward's (#18718), so the writer binds it to the shared forward row
-    ///   (R7 review of 9a599d0900, F1).
+    ///   (R7 review of 9a599d0900, F1). The same terminal filter applies: a
+    ///   reverse row that saw RST or both FINs publishes nothing (fold cycle
+    ///   2: Codex F2 / R7-2 / R14 S1 on 695c270b4d). The forward probe is
+    ///   quiet: an absent forward is expected here, not a packet-path lookup
+    ///   miss (#7919; Codex F3 / R7-3).
     pub(crate) fn ct_slice_last_served_extras(
         &self,
         cursor: usize,
@@ -2462,8 +2466,11 @@ impl SessionTable {
                 }
                 continue;
             }
+            if entry.reset || (entry.fin_own && entry.fin_peer) {
+                continue;
+            }
             let forward_key = reverse_session_key(&record.key, entry.decision.nat);
-            if self.entry_by_key(&forward_key).is_none() && entry.last_packet_seen_ns != 0 {
+            if self.entry_by_key_quiet(&forward_key).is_none() && entry.last_packet_seen_ns != 0 {
                 out.push((
                     forward_key,
                     entry.decision.nat,
