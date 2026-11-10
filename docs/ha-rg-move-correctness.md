@@ -443,6 +443,12 @@ to the moment the next one is issued, on the LAN host's clock.
   (#19054 review, round 3: a reader 150 ms late once made a stream reset
   at 9.910 look alive at 10.05). An iperf3 with no start timestamp voids
   the run at the traffic preflight.
+  Because those times can be early, a stall is charged to every window
+  its start could fall in. The true interval epoch is at most the
+  smallest (arrival - interval end) over the run, and the stall's start is
+  somewhere between the two. Moving it early can never leave a stall in no
+  window. Coverage stays on the early time (final commit, D1: a 10.1 s
+  stall moved 0.6 s before its move once PASSed).
   The worst per-stream stall is the longest run of 100 ms intervals under
   1 Mbit/s. A stream that disappears from the output counts as stalled from
   that point on; one that is still stalled at the end of the run never
@@ -670,9 +676,13 @@ One verdict per move:
       end. That end is recorded before ping starts, and ping's `-w` runs
       60 s past iperf3's `-t`, so a running ping prints past it.
     - The soak's own stop and the watchdog both run the same LAN-host
-      stop: record the time, record which generator pids answer `kill -0`,
+      stop: record the time, record which generators are still running,
       then SIGINT. That proves who was running at the stop, instead of
-      inferring it from output cadence. The soak's stop prints `STOPPED
+      inferring it from output cadence. Running means the generator's
+      identity: each launch records its PID and the kernel start time
+      (`/proc/<pid>/stat` field 22), and at the stop that PID must be a
+      live, non-zombie process with the same start time. A reused PID or
+      an exited, unreaped one is not the generator (final commit, D2). The soak's stop prints `STOPPED
       <time> <running>...`; `result.json` keeps it as
       `traffic_stopped_lan` and `traffic_running_at_stop`.
     A harness-ended window is VOID, with the cause. Anything else stopped
@@ -718,8 +728,8 @@ detached watchdog on the LAN host:
 
 - The soak touches `/tmp/r-soak-<run>.alive` after every move. The
   watchdog checks it every 10 s. If it is older than the limit, the
-  watchdog records the LAN time and which generator pids answer `kill -0`,
-  SIGINTs them and stops the UDP probe. It writes
+  watchdog records the LAN time and which generators are still running
+  (the same identity check), SIGINTs them and stops the UDP probe. It writes
   `/tmp/r-soak-<run>.watchdog` (`<time> <age> <run token> <running>...`),
   and exits.
 - The limit is 4 × (`SOAK_SLEEP` + RGs per move × `SOAK_CONVERGE_S`) + 120 s,

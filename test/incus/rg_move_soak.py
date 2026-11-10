@@ -370,18 +370,29 @@ def ping_last_seen(text: str) -> Optional[float]:
     return last
 
 
+def pid_record_command(path: str) -> str:
+    """POSIX sh that writes to `path` this shell's PID and its kernel start
+    time (/proc/<pid>/stat field 22), before the shell execs a generator.
+    The pair is the generator's identity, which exec keeps: a reused PID
+    has another start time (#19054 review, final commit, D2)."""
+    return 'read -r l < /proc/$$/stat; s=${l##*") "}; set -- $s; echo "$$ ${20}" > ' + path + '; '
+
+
 def generator_stop_script(run_id: str, root: str = "/tmp") -> str:
     """POSIX sh that stops the soak's generators and leaves, in `$t` and
     `$up`, the LAN time it did so and the generators (`pingv4`, `iperfv6`,
-    ...) whose pid still answered `kill -0` at that instant (#19054 review,
-    round 3). Liveness at the stop is proved there, not inferred from
-    output cadence."""
+    ...) still running at that instant (#19054 review, round 3). Running
+    means the PID recorded at launch is a live, non-zombie process with
+    the start time recorded at launch (pid_record_command). A reused PID
+    or an unreaped exit is not the generator (final commit, D2)."""
     base = f"{root}/r-soak-{run_id}"
     return (f't=$(date +%s.%N); up=""; '
             f'for p in {base}.*.pid; do [ -f "$p" ] || continue; '
             f'n=${{p##*/}}; n=${{n#r-soak-{run_id}.}}; n=${{n%.pid}}; '
-            f'kill -0 "$(cat "$p")" 2>/dev/null && up="$up $n"; done; '
-            f'for p in {base}.*.pid; do [ -f "$p" ] && kill -INT "$(cat "$p")" 2>/dev/null; done; ')
+            f'read pid st < "$p" || continue; l=""; read -r l 2>/dev/null < "/proc/$pid/stat"; '
+            f's=${{l##*") "}}; set -- $s; '
+            f'[ -n "$l" ] && [ "$1" != Z ] && [ "${{20}}" = "$st" ] && up="$up $n"; done; '
+            f'for p in {base}.*.pid; do [ -f "$p" ] && read pid st < "$p" && kill -INT "$pid" 2>/dev/null; done; ')
 
 
 def traffic_watchdog_script(run_id: str, limit_s: int, token: str, poll_s: float = WATCHDOG_POLL_S,
@@ -551,6 +562,34 @@ def iperf_generator_anchor(text: str) -> Optional[float]:
             return None
         return None
     return None
+
+
+def iperf_epoch_slack(text: str) -> float:
+    """How much LATER than iperf_generator_anchor() iperf3's true interval
+    epoch can be (#19054 review, final commit, D1). An interval reached the
+    LAN reader no earlier than it ended, so its arrival minus its end offset
+    bounds the epoch from above; the smallest such bound, less the connect
+    stamp, is the epoch's measured uncertainty. 0 with no anchor or no
+    interval."""
+    anchor = iperf_generator_anchor(text)
+    if anchor is None:
+        return 0.0
+    upper = None
+    for line in (text or "").splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            arrival = float(parts[0])
+            ev = json.loads(parts[1])
+            summ = ev["data"]["sum"] if ev.get("event") == "interval" else None
+            if summ is None or summ.get("omitted"):
+                continue
+            bound = arrival - float(summ["end"])
+        except (ValueError, KeyError, TypeError, AttributeError, json.JSONDecodeError):
+            continue
+        upper = bound if upper is None else min(upper, bound)
+    return max(0.0, upper - anchor) if upper is not None else 0.0
 
 
 def parse_iperf_stream(text: str) -> Tuple[List[Tuple[float, float, Dict[int, float], float]], bool, bool]:
@@ -739,8 +778,14 @@ class MoveRecord:
 def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[Tuple[float, int]],
                        stalls: List[StreamRun], agg: List[StreamRun], intervals,
                        budget: Budget, ping_alive_until: Optional[float] = None,
-                       iperf_alive_until: Optional[float] = None) -> Dict:
+                       iperf_alive_until: Optional[float] = None, stall_slack: float = 0.0) -> Dict:
     """The traffic facts for one family in one move window [t0, t1) on the LAN clock.
+
+    A stall belongs to the window its start falls in. iperf3's times are a
+    lower bound whose true value can be up to `stall_slack` later
+    (iperf_epoch_slack), so a stall is charged to EVERY window its start
+    could fall in, [start, start + stall_slack]: shifting it early can
+    never leave it in no window (#19054 review, final commit, D1).
 
     #19054 review: a window is covered only if each GENERATOR was alive at
     or after the window's end (`*_alive_until`, LAN clock, from the
@@ -754,7 +799,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     max_gap = max((g.end - g.start for g in win_gaps), default=None)
     tail0 = max(t0, t1 - budget.tail_s)
     tail_replies = sum(1 for ts, _ in replies if tail0 <= ts < t1)
-    win_stalls = [s for s in stalls if t0 <= s.start < t1]
+    win_stalls = [s for s in stalls if t0 - stall_slack <= s.start < t1]
     worst = max(win_stalls, key=lambda s: s.seconds, default=None)
     # #19062: a stall still open when the traffic data ends either lasted
     # past the COST cap (it did not recover: died) or was cut short by the
@@ -764,7 +809,7 @@ def traffic_for_window(t0: float, t1: float, gaps: List[PingGap], replies: List[
     # Every stream whose stall in this window exceeds the per-stream budget:
     # COST is ONE stream backing off, never several (seat AF).
     over = sorted({s.stream for s in win_stalls if s.seconds * 1000.0 > budget.max_stall_ms})
-    win_agg = [s for s in agg if t0 <= s.start < t1]
+    win_agg = [s for s in agg if t0 - stall_slack <= s.start < t1]
     agg_zero = sum(s.seconds for s in win_agg)
     agg_worst = max((s.seconds for s in win_agg), default=0.0)
     tail_iv = [iv for iv in intervals if iv[0] >= tail0 and iv[1] <= t1 + 1e-6]
@@ -842,10 +887,12 @@ def family_traffic(windows: List[Tuple[int, float, float]], ping_text: str, iper
                                    planned_end)}
     charged: Dict[str, int] = {}
     out: List[Dict] = []
+    epoch_slack = iperf_epoch_slack(iperf_text)  # D1: how much later iperf3's true times can be
     for n, t0, t1 in windows:
         t = traffic_for_window(t0, t1, gaps, replies, stalls, agg, intervals, budget,
                                ping_alive_until=last["ping"] if last["ping"] is not None else float("-inf"),
-                               iperf_alive_until=last["iperf"] if last["iperf"] is not None else float("-inf"))
+                               iperf_alive_until=last["iperf"] if last["iperf"] is not None else float("-inf"),
+                               stall_slack=epoch_slack)
         for kind, label in (("ping", "ping"), ("iperf", "iperf3")):
             if t[f"{kind}_covered"]:
                 continue
@@ -1657,10 +1704,11 @@ class Soak:
         for fam, target, port, streams in self.families():
             t = shlex.quote(target)
             v = "-6" if fam == "v6" else "-4"
-            iperf = (f"sh -c 'echo $$ > /tmp/r-soak-{rid}.iperf{fam}.pid; exec iperf3 {v} -c {t} -p {port}"
+            iperf = (f"sh -c '{pid_record_command(f'/tmp/r-soak-{rid}.iperf{fam}.pid')}exec iperf3 {v} -c {t} -p {port}"
                      f" -P {streams} -t {duration_s} -i 0.1 --json-stream --forceflush'"
                      f" | python3 -u -c {shlex.quote(stamp)}")
-            ping = f"echo $$ > /tmp/r-soak-{rid}.ping{fam}.pid; exec ping {v} -D -O -i 0.01 -W 1 -w {duration_s + PING_DEADLINE_EXTRA_S} {t}"
+            ping = (f"{pid_record_command(f'/tmp/r-soak-{rid}.ping{fam}.pid')}"
+                    f"exec ping {v} -D -O -i 0.01 -W 1 -w {duration_s + PING_DEADLINE_EXTRA_S} {t}")
             self.procs.append(self.c.popen_lan(ping, self._path("ping", fam)))
             self.procs.append(self.c.popen_lan(iperf, self._path("iperf", fam)))
         self.traffic_started = True

@@ -3389,18 +3389,25 @@ RESET = "error - unable to receive results: Connection reset by peer"
 SIGINT = "interrupt - the client has terminated by signal Interrupt(2)"  # iperf3 3.22
 
 
-def iperf_text(until, error_at=None, error=RESET, start=0.0, reader_delay=0.002, end_at=None):
+def iperf_text(until, error_at=None, error=RESET, start=0.0, reader_delay=0.002, end_at=None,
+               connect=None, stall=None):
     """`iperf3 --json-stream` output as the LAN reader stamps it, every line
     arriving `reader_delay` after iperf3 wrote it: the start event (iperf3's
-    own connect stamp `start`), healthy 100 ms intervals ending start+0.1 ..
-    `until`, an error event at `error_at`, and an end event at `end_at`."""
-    lines = [f"{start + reader_delay:.6f} " + json.dumps({"event": "start", "data": {"timestamp": {
-        "timesecs": int(start), "timemillisecs": int(round(start * 1000))}}})]
+    own connect stamp, `connect`, default `start`), healthy 100 ms intervals
+    from the epoch `start`, ending start+0.1 .. `until`, an error event at
+    `error_at`, and an end event at `end_at`. `stall`: (stream, from, to)
+    carries nothing in relative time [from, to)."""
+    connect = start if connect is None else connect
+    lines = [f"{connect + reader_delay:.6f} " + json.dumps({"event": "start", "data": {"timestamp": {
+        "timesecs": int(connect), "timemillisecs": int(round(connect * 1000))}}})]
     i = 0
     while round(start + (i + 1) * 0.1, 6) <= until:
-        st = [{"socket": s, "start": i * 0.1, "end": (i + 1) * 0.1, "bits_per_second": 2e9} for s in (5, 7, 9)]
+        st = [{"socket": s, "start": i * 0.1, "end": (i + 1) * 0.1,
+               "bits_per_second": 0.0 if stall and s == stall[0] and stall[1] <= round(i * 0.1, 6) < stall[2]
+               else 2e9} for s in (5, 7, 9)]
         ev = {"event": "interval", "data": {"streams": st, "sum": {
-            "start": i * 0.1, "end": (i + 1) * 0.1, "bits_per_second": 6e9, "omitted": False}}}
+            "start": i * 0.1, "end": (i + 1) * 0.1, "bits_per_second": sum(x["bits_per_second"] for x in st),
+            "omitted": False}}}
         lines.append(f"{start + (i + 1) * 0.1 + reader_delay:.6f} {json.dumps(ev)}")
         i += 1
     if error_at is not None:
@@ -3481,6 +3488,27 @@ class HarnessInstants19054(unittest.TestCase):
         got = self.score([(0.0, 10.0), (10.0, 20.0)], ping_text(20.5), stopped_iperf(20.5, reader_delay=0.15),
                          stop=(20.5, BOTH))
         self.assertEqual([g[0] for g in got], [soak.PASS, soak.PASS], [g[1] for g in got])
+
+    def test_a_stall_is_charged_wherever_iperf3s_epoch_puts_it(self):
+        # Codex final review, D1: iperf3 connected at 100.000 but its
+        # intervals count from 100.600. Stream 7 carries nothing for
+        # relative [4.5, 14.6): really [105.1, 115.2), 10.1 s inside the
+        # move [105, 125), past the 10 s COST cap. On the connect stamp
+        # alone it starts at 104.5, in no window, and the move PASSed. The
+        # arrivals bound the epoch at 100.602, so the stall is charged here.
+        iperf = iperf_text(137.0, start=100.6, connect=100.0, stall=(7, 4.5, 14.6), error_at=137.0, error=SIGINT,
+                           end_at=137.0)
+        got = self.score([(105.0, 125.0)], ping_text(137.0, start=100.0), iperf, stop=(137.0, BOTH))
+        v, why, f = got[0]
+        self.assertTrue(f["iperf_covered"], f)  # coverage stays on the lower bound
+        self.assertEqual(v, soak.FAIL, why)
+        self.assertTrue(any("stream 7 stalled 10100 ms" in w for w in why), why)
+        self.assertAlmostEqual(soak.iperf_epoch_slack(iperf), 0.602, places=3)
+        # Healthy twin: the same clocks with no stall PASS.
+        got = self.score([(105.0, 125.0)], ping_text(137.0, start=100.0),
+                         iperf_text(137.0, start=100.6, connect=100.0, error_at=137.0, error=SIGINT, end_at=137.0),
+                         stop=(137.0, BOTH))
+        self.assertEqual(got[0][0], soak.PASS, got[0][1])
 
     def test_a_later_window_names_the_charged_moves_actual_verdict(self):
         # Codex round 3: "which FAILed for it" was written before the
@@ -3681,14 +3709,26 @@ class TrafficWatchdog19054(unittest.TestCase):
         self.assertEqual([seq for _, seq in replies], [1, 2, 3], p.stdout)
         self.assertEqual(soak.ping_last_seen(p.stdout), replies[-1][0])
 
+    def _launch(self, d, name, then):
+        # Launch a stand-in the way the soak launches a generator: the shell
+        # records its pid file (pid_record_command; before the final commit,
+        # a bare `echo $$`), then runs `then`. SIGINT has its default action
+        # (a background job of a non-interactive shell inherits it ignored).
+        path = os.path.join(d, f"r-soak-wd.{name}.pid")
+        record = getattr(soak, "pid_record_command", lambda p: f"echo $$ > {p}; ")
+        proc = subprocess.Popen(["sh", "-c", record(path) + then],
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            if os.path.exists(path):
+                with open(path) as f:
+                    if f.read().endswith("\n"):
+                        break
+            time.sleep(0.01)
+        return proc, path
+
     def _generator(self, d):
-        # A stand-in generator with the default SIGINT action (a background
-        # job of a non-interactive shell inherits SIGINT ignored).
-        gen = subprocess.Popen(["sleep", "60"],
-                               preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
-        with open(os.path.join(d, "r-soak-wd.iperfv4.pid"), "w") as f:
-            f.write(str(gen.pid))
-        return gen
+        return self._launch(d, "iperfv4", "exec sleep 60")[0]
 
     def test_the_watchdog_stops_a_generator_whose_controller_went_away(self):
         # The real script, in a scratch root: no heartbeat after its start.
@@ -3738,10 +3778,8 @@ class TrafficWatchdog19054(unittest.TestCase):
         # listed (#19054 review, round 3).
         with tempfile.TemporaryDirectory() as d:
             gen = self._generator(d)
-            gone = subprocess.Popen(["true"])
+            gone, _ = self._launch(d, "pingv4", "exit 0")
             gone.wait()
-            with open(os.path.join(d, "r-soak-wd.pingv4.pid"), "w") as f:
-                f.write(str(gone.pid))
             try:
                 p = subprocess.run(["sh", "-c", soak.generator_stop_script("wd", root=d) + 'echo "STOPPED $t$up"'],
                                    capture_output=True, text=True, timeout=10)
@@ -3753,6 +3791,51 @@ class TrafficWatchdog19054(unittest.TestCase):
                 if gen.poll() is None:
                     gen.kill()
                     gen.wait()
+
+    def test_a_reused_or_unreaped_ping_pid_does_not_certify_a_dead_ping(self):
+        # Codex final review, D2: the soak's real stop, then its scoring.
+        # The ping covered the window [0,10) and stopped by itself at 12,
+        # before the soak's stop at 22. Its pid file then names either
+        # another live process (its PID reused) or an exited but unreaped
+        # process (a zombie). `kill -0` answers for both, and the stop
+        # listed pingv4 as running, so the move PASSed. Identity (the PID
+        # and its start time) and the zombie state say it was not.
+        for case in ("reused", "zombie"):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as d:
+                held = []
+                try:
+                    if case == "reused":
+                        old, path = self._launch(d, "pingv4", "exit 0")
+                        old.wait()
+                        other = subprocess.Popen(["sleep", "60"])  # the PID's new owner
+                        held.append(other)
+                        with open(path) as f:
+                            fields = f.read().split()
+                        with open(path, "w") as f:
+                            f.write(" ".join([str(other.pid)] + fields[1:]) + "\n")
+                    else:
+                        zombie, _ = self._launch(d, "pingv4", "exit 0")
+                        held.append(zombie)
+                        deadline = time.monotonic() + 5
+                        while time.monotonic() < deadline:
+                            with open(f"/proc/{zombie.pid}/stat") as f:
+                                if f.read().rsplit(")", 1)[1].split()[0] == "Z":
+                                    break
+                            time.sleep(0.01)
+                    p = subprocess.run(["sh", "-c", soak.generator_stop_script("wd", root=d) + 'echo "STOPPED $t$up"'],
+                                       capture_output=True, text=True, timeout=10)
+                    at, up = soak.parse_stop_record(p.stdout)
+                    self.assertIsNotNone(at, p.stdout + p.stderr)
+                    self.assertNotIn("pingv4", up, p.stdout)
+                    got = HarnessInstants19054("score").score(
+                        [(0.0, 10.0)], ping_text(12.0), stopped_iperf(22.0), stop=(22.0, set(up) | {"iperfv4"}))
+                    self.assertEqual(got[0][0], soak.FAIL, got[0][1])
+                    self.assertTrue(any("ping stopped by itself in the final tail" in w for w in got[0][1]), got[0][1])
+                finally:
+                    for proc in held:
+                        if proc.poll() is None:
+                            proc.kill()
+                        proc.wait()
 
 if __name__ == "__main__":
     unittest.main()
