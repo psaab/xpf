@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -127,6 +129,10 @@ func runResponder17231(d *Daemon, ctx context.Context, ifName string, r *proxyAR
 	}()
 }
 
+// readThreadNetns17231 reads one thread's netns link. A var so a mutant can
+// make the observation fail.
+var readThreadNetns17231 = func(task string) (string, error) { return os.Readlink(task + "/ns/net") }
+
 // assertNoThreadLeftInPrivateNetns17231 is the #19049 cell. Once every
 // responder has returned, no thread of this process other than the
 // test's own (locked into the private netns by enterPrivateNetns17231)
@@ -155,16 +161,32 @@ func assertNoThreadLeftInPrivateNetns17231(t *testing.T) {
 		if err != nil {
 			t.Fatalf("list this process's threads: %v", err)
 		}
+		inspected := 0
 		for _, task := range tasks {
 			tid := filepath.Base(task)
 			if tid == self {
 				continue
 			}
-			// A thread that exits between the Glob and the Readlink has
-			// left the namespace; the error is that, not a census gap.
-			if ns, err := os.Readlink(task + "/ns/net"); err == nil && ns == privateNS {
+			ns, err := readThreadNetns17231(task)
+			if err != nil {
+				// A thread that exits between the Glob and the Readlink has
+				// left the namespace (ENOENT/ESRCH). Any other error means
+				// the census could not observe the thread: that is a FAIL,
+				// never "no leak" (#19049 Codex P2).
+				if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
+					continue
+				}
+				t.Fatalf("read thread %s's netns: %v; the census cannot tell whether it is still in the private netns", tid, err)
+			}
+			inspected++
+			if ns == privateNS {
 				left = append(left, tid)
 			}
+		}
+		// A Go process always runs more threads than the test's own, so a
+		// census that inspected none observed nothing.
+		if inspected == 0 {
+			t.Fatalf("the census inspected no thread besides the test's own (%d listed); it observed nothing", len(tasks))
 		}
 		if len(left) == 0 {
 			return
