@@ -1002,7 +1002,7 @@ class FakeCluster:
             self.gen_end[(kind, fam)] = self.planned_end[(kind, fam)] = t0 + int(m.group(1))
         if kind == "iperf" and self.busy_iperf:
             with open(outfile, "a") as f:
-                f.write(f"{self.clock_.t + self.lan_off:.6f} " + json.dumps(
+                f.write(f"{self._stamp(self.clock_.t)} " + json.dumps(
                     {"event": "error", "data": "error - the server is busy running a test. try again later"}) + "\n")
         return Proc(alive=lambda k=kind, f=fam: self._gen_alive(k, f)), open(os.devnull, "w")
 
@@ -1011,10 +1011,19 @@ class FakeCluster:
             return False
         return self.clock_.t < self.gen_end.get((kind, fam), float("inf"))
 
+    def _stamp(self, at):
+        """The LAN reader's stamp for a line written at fake time `at`: its
+        wall clock (the LAN clock), then its monotonic clock (the fake clock)
+        read just before and after."""
+        m = at + self.reader_delay
+        if not hasattr(soak, "parse_arrival"):
+            return f"{m + self.lan_off:.6f}"  # the reader before the D1 correction (for RED)
+        return f"{m + self.lan_off:.6f}@{m:.6f}:{m:.6f}"
+
     def _iperf_event(self, fam, at, event, data):
         """Write an iperf3 event that happened at fake time `at`."""
         with open(self.files[("iperf", fam)], "a") as f:
-            f.write(f"{at + self.lan_off + self.reader_delay:.6f} " + json.dumps({"event": event, "data": data}) + "\n")
+            f.write(f"{self._stamp(at)} " + json.dumps({"event": event, "data": data}) + "\n")
 
     def sigint(self, kinds, at):
         """The harness's SIGINT at fake time `at`: iperf3 reports it and its
@@ -1102,7 +1111,7 @@ class FakeCluster:
                         ev = {"event": "interval", "data": {"streams": st, "sum": {
                             "start": i * 0.1, "end": (i + 1) * 0.1,
                             "bits_per_second": sum(s["bits_per_second"] for s in st), "omitted": False}}}
-                        f.write(f"{t0 + (i + 1) * 0.1 + self.lan_off + self.reader_delay:.6f} {json.dumps(ev)}\n")
+                        f.write(f"{self._stamp(t0 + (i + 1) * 0.1)} {json.dumps(ev)}\n")
                         i += 1
                     self.iv_index[fam] = i
             end = self.planned_end.get((kind, fam))
@@ -3389,16 +3398,30 @@ RESET = "error - unable to receive results: Connection reset by peer"
 SIGINT = "interrupt - the client has terminated by signal Interrupt(2)"  # iperf3 3.22
 
 
+def reader_stamp(at, step_at=None, step=0.0):
+    """The LAN reader's stamp for a line it read at `at`: wall@mono:mono.
+    From `step_at` on, its wall clock has stepped by `step`."""
+    wall = at + (step if step_at is not None and at >= step_at else 0.0)
+    if not hasattr(soak, "parse_arrival"):
+        return f"{wall:.6f}"  # the reader before the D1 correction (for RED)
+    return f"{wall:.6f}@{at:.6f}:{at:.6f}"
+
+
 def iperf_text(until, error_at=None, error=RESET, start=0.0, reader_delay=0.002, end_at=None,
-               connect=None, stall=None):
+               connect=None, stall=None, step_at=None, step=0.0, mono=True):
     """`iperf3 --json-stream` output as the LAN reader stamps it, every line
     arriving `reader_delay` after iperf3 wrote it: the start event (iperf3's
     own connect stamp, `connect`, default `start`), healthy 100 ms intervals
     from the epoch `start`, ending start+0.1 .. `until`, an error event at
     `error_at`, and an end event at `end_at`. `stall`: (stream, from, to)
-    carries nothing in relative time [from, to)."""
+    carries nothing in relative time [from, to). The reader's wall clock
+    steps by `step` for lines read from `step_at` on; `mono=False` drops
+    its monotonic stamps."""
     connect = start if connect is None else connect
-    lines = [f"{connect + reader_delay:.6f} " + json.dumps({"event": "start", "data": {"timestamp": {
+
+    def stamp(at):
+        return reader_stamp(at, step_at, step) if mono else f"{at:.6f}"
+    lines = [f"{stamp(connect + reader_delay)} " + json.dumps({"event": "start", "data": {"timestamp": {
         "timesecs": int(connect), "timemillisecs": int(round(connect * 1000))}}})]
     i = 0
     while round(start + (i + 1) * 0.1, 6) <= until:
@@ -3408,12 +3431,12 @@ def iperf_text(until, error_at=None, error=RESET, start=0.0, reader_delay=0.002,
         ev = {"event": "interval", "data": {"streams": st, "sum": {
             "start": i * 0.1, "end": (i + 1) * 0.1, "bits_per_second": sum(x["bits_per_second"] for x in st),
             "omitted": False}}}
-        lines.append(f"{start + (i + 1) * 0.1 + reader_delay:.6f} {json.dumps(ev)}")
+        lines.append(f"{stamp(start + (i + 1) * 0.1 + reader_delay)} {json.dumps(ev)}")
         i += 1
     if error_at is not None:
-        lines.append(f"{error_at + reader_delay:.6f} " + json.dumps({"event": "error", "data": error}))
+        lines.append(f"{stamp(error_at + reader_delay)} " + json.dumps({"event": "error", "data": error}))
     if end_at is not None:
-        lines.append(f"{end_at + reader_delay:.6f} " + json.dumps({"event": "end", "data": {}}))
+        lines.append(f"{stamp(end_at + reader_delay)} " + json.dumps({"event": "end", "data": {}}))
     return "\n".join(lines) + "\n"
 
 
@@ -3509,6 +3532,30 @@ class HarnessInstants19054(unittest.TestCase):
                          iperf_text(137.0, start=100.6, connect=100.0, error_at=137.0, error=SIGINT, end_at=137.0),
                          stop=(137.0, BOTH))
         self.assertEqual(got[0][0], soak.PASS, got[0][1])
+
+    def test_a_reader_clock_step_voids_the_stall_timing(self):
+        # Codex D1 correction: the reader's wall clock steps back 0.200 s
+        # just before it reads the last interval (rel 36.4, emitted at
+        # 137.000; stamped 136.802). min(arrival - end) falls to 100.402 and
+        # the slack to 0.402, so the 10.1 s stall at 104.5 left the window
+        # [105,125) and the move PASSed. The monotonic stamps show the step:
+        # the timing is not certifiable, so the move is VOID.
+        def run(step):
+            iperf = iperf_text(137.0, start=100.6, connect=100.0, stall=(7, 4.5, 14.6), error_at=137.05,
+                               error=SIGINT, end_at=137.05, step_at=137.0, step=step)
+            return self.score([(105.0, 125.0)], ping_text(137.0, start=100.0), iperf, stop=(137.1, BOTH))[0]
+        v, why, f = run(-0.2)
+        self.assertEqual(v, soak.VOID, why)
+        self.assertTrue(any("reader clock stepped; timing not certifiable" in w for w in why), why)
+        # No-step twin: the stall is placed, and the move FAILs.
+        v, why, _ = run(0.0)
+        self.assertEqual(v, soak.FAIL, why)
+        self.assertTrue(any("stream 7 stalled 10100 ms" in w for w in why), why)
+        # A reader with no monotonic stamps cannot be checked: VOID too.
+        iperf = iperf_text(137.0, start=100.6, connect=100.0, error_at=137.05, error=SIGINT, end_at=137.05,
+                           mono=False)
+        v, why, _ = self.score([(105.0, 125.0)], ping_text(137.0, start=100.0), iperf, stop=(137.1, BOTH))[0]
+        self.assertEqual(v, soak.VOID, why)
 
     def test_a_later_window_names_the_charged_moves_actual_verdict(self):
         # Codex round 3: "which FAILed for it" was written before the
@@ -3807,10 +3854,20 @@ class TrafficWatchdog19054(unittest.TestCase):
                     if case == "reused":
                         old, path = self._launch(d, "pingv4", "exit 0")
                         old.wait()
-                        other = subprocess.Popen(["sleep", "60"])  # the PID's new owner
-                        held.append(other)
                         with open(path) as f:
                             fields = f.read().split()
+                        # The PID's new owner. Start times count clock ticks,
+                        # and a real reuse comes much later than its first
+                        # owner; one started in the same tick would look like
+                        # it, so wait for the next tick.
+                        while True:
+                            other = subprocess.Popen(["sleep", "60"])
+                            held.append(other)
+                            with open(f"/proc/{other.pid}/stat") as f:
+                                if f.read().rsplit(")", 1)[1].split()[19] != fields[1]:
+                                    break
+                            other.kill()
+                            time.sleep(0.02)
                         with open(path, "w") as f:
                             f.write(" ".join([str(other.pid)] + fields[1:]) + "\n")
                     else:

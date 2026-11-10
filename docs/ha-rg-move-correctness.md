@@ -449,6 +449,30 @@ to the moment the next one is issued, on the LAN host's clock.
   somewhere between the two. Moving it early can never leave a stall in no
   window. Coverage stays on the early time (final commit, D1: a 10.1 s
   stall moved 0.6 s before its move once PASSed).
+  - That upper bound holds only while the reader's wall clock runs
+    forward with no step. A backward step makes one arrival look earlier
+    than it was, the minimum too small, and a stall can fall out of its
+    window again: Codex's 0.2 s step gave a bound of 100.402 against a
+    true 100.600, and PASS.
+  - So the reader stamps `time.monotonic()` before and after each
+    `time.time()` arrival (`<wall>@<mono>:<mono>`). CLOCK_MONOTONIC is
+    slewed with the wall clock but never stepped, so wall - monotonic stays
+    constant unless the clock stepped. If it moves by more than the
+    stamps' resolution (their 1 µs printing, plus the time between the
+    reads), every window of that family is VOID: "reader clock stepped;
+    timing not certifiable". The bound is one minimum over the whole run,
+    so all of them depend on it. The same holds for stamps with no
+    monotonic time. This fails closed: VOID, never PASS (D1 correction).
+  - Charging a stall to every window it could fall in is conservative,
+    and it can over-attribute. Take a connect stamp of 100, a true epoch
+    of 100.6, a 0.2 s reader delay (slack 0.802), and windows [105,125)
+    and [125,145). Stream 5 recovers from a 3 s stall at true 124.9, and
+    stream 7 from one at 130.6. Exact timing gives one COST stream in each
+    window. Placed at 124.3 with slack 0.802, stream 5's stall can reach
+    125.102, so the second window is charged with it as well. That window
+    then has two stalled streams and FAILs the multiple-stream rule. This
+    COST-to-FAIL over-attribution is accepted: it can add a FAIL, never
+    hide one.
   The worst per-stream stall is the longest run of 100 ms intervals under
   1 Mbit/s. A stream that disappears from the output counts as stalled from
   that point on; one that is still stalled at the end of the run never

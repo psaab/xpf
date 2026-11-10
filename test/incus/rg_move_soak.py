@@ -564,6 +564,49 @@ def iperf_generator_anchor(text: str) -> Optional[float]:
     return None
 
 
+STAMP_RESOLUTION_S = 1e-6  # the reader prints each clock to the microsecond
+
+
+def parse_arrival(token: str) -> Tuple[float, Optional[Tuple[float, float]]]:
+    """A LAN reader stamp: `<wall>`, or `<wall>@<mono before>:<mono after>`."""
+    wall, _, mono = token.partition("@")
+    if not mono:
+        return float(wall), None
+    before, _, after = mono.partition(":")
+    return float(wall), (float(before), float(after or before))
+
+
+def iperf_reader_step(text: str) -> Optional[str]:
+    """Why the reader's arrival stamps are not one time coordinate, or None
+    (#19054 review, D1 correction).
+
+    iperf_epoch_slack() trusts the arrivals as a clock that never runs
+    backward. The reader takes time.time() between two time.monotonic()
+    reads. CLOCK_MONOTONIC is slewed with the wall clock but never stepped,
+    so wall - monotonic stays constant unless the wall clock STEPPED. Each
+    line bounds that offset to [wall - mono after, wall - mono before],
+    widened by the printing resolution. If the bounds of all lines share no
+    point, the clock stepped. A line with no monotonic stamp cannot be
+    checked at all. Either way the timing is not certifiable."""
+    lo, hi = float("-inf"), float("inf")
+    for line in (text or "").splitlines():
+        parts = line.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            wall, mono = parse_arrival(parts[0])
+        except ValueError:
+            continue
+        if mono is None:
+            return "reader stamps carry no monotonic time; timing not certifiable"
+        lo = max(lo, wall - mono[1] - STAMP_RESOLUTION_S)
+        hi = min(hi, wall - mono[0] + STAMP_RESOLUTION_S)
+        if lo > hi:
+            return (f"reader clock stepped; timing not certifiable (its wall clock moved at least "
+                    f"{lo - hi:.6f} s against its monotonic clock, at LAN {wall:.3f})")
+    return None
+
+
 def iperf_epoch_slack(text: str) -> float:
     """How much LATER than iperf_generator_anchor() iperf3's true interval
     epoch can be (#19054 review, final commit, D1). An interval reached the
@@ -580,7 +623,7 @@ def iperf_epoch_slack(text: str) -> float:
         if len(parts) != 2:
             continue
         try:
-            arrival = float(parts[0])
+            arrival = parse_arrival(parts[0])[0]
             ev = json.loads(parts[1])
             summ = ev["data"]["sum"] if ev.get("event") == "interval" else None
             if summ is None or summ.get("omitted"):
@@ -608,7 +651,7 @@ def parse_iperf_stream(text: str) -> Tuple[List[Tuple[float, float, Dict[int, fl
         if len(parts) != 2:
             continue
         try:
-            arrival = float(parts[0])
+            arrival = parse_arrival(parts[0])[0]
             ev = json.loads(parts[1])
         except (ValueError, json.JSONDecodeError):
             continue
@@ -888,6 +931,10 @@ def family_traffic(windows: List[Tuple[int, float, float]], ping_text: str, iper
     charged: Dict[str, int] = {}
     out: List[Dict] = []
     epoch_slack = iperf_epoch_slack(iperf_text)  # D1: how much later iperf3's true times can be
+    # The slack is one minimum over every arrival, so a reader clock step
+    # anywhere in the run can make it too small for every window: fail
+    # closed, all of this family's windows (D1 correction).
+    reader_problem = iperf_reader_step(iperf_text)
     for n, t0, t1 in windows:
         t = traffic_for_window(t0, t1, gaps, replies, stalls, agg, intervals, budget,
                                ping_alive_until=last["ping"] if last["ping"] is not None else float("-inf"),
@@ -909,6 +956,8 @@ def family_traffic(windows: List[Tuple[int, float, float]], ping_text: str, iper
                          f", {t1 - last[kind]:.1f} s before this window closed")
                 cause = f"{why}{where}"
             t[f"{kind}_uncovered_by"], t[f"{kind}_uncovered_cause"] = by, cause
+        if reader_problem:
+            t["iperf_timing_void"] = reader_problem
         if ends["iperf"][0] != "harness" and t.get("cut_streams"):
             # The data ended because iperf3 stopped by itself, not because
             # the harness stopped it: the stall never recovered.
@@ -1049,6 +1098,9 @@ def move_verdict(rec: MoveRecord, budget: Budget, traffic_enabled: bool) -> Tupl
                 if t.get(f"{kind}_tail_death"):
                     reasons.append(f"{fam} {label} stopped by itself in the final tail, after this last move's "
                                    f"window and before the soak's stop: {t[f'{kind}_tail_death']} (#19054)")
+            if t.get("iperf_timing_void"):
+                uncovered.append(f"{fam} iperf3 {t['iperf_timing_void']}; its stalls cannot be placed in windows, "
+                                 "so the move is unscored unless other evidence FAILs it (#19054)")
             if t.get("cut_streams"):
                 uncovered.append(f"{fam} stream(s) {t['cut_streams']} were still stalled when the traffic stopped, "
                                  f"before the {budget.max_cost_stall_ms:g} ms COST cap; their recovery was not "
@@ -1697,9 +1749,12 @@ class Soak:
 
     def start_traffic(self, duration_s: int):
         rid = self.cfg.run_id
+        # Each line: `<wall>@<monotonic before>:<monotonic after> <json>`. The
+        # monotonic reads let the soak see a wall-clock step (iperf_reader_step).
         stamp = ("import sys,time\n"
                  "for l in sys.stdin:\n"
-                 "    sys.stdout.write('%.6f %s' % (time.time(), l)); sys.stdout.flush()\n")
+                 "    m1 = time.monotonic(); w = time.time(); m2 = time.monotonic()\n"
+                 "    sys.stdout.write('%.6f@%.6f:%.6f %s' % (w, m1, m2, l)); sys.stdout.flush()\n")
         self.procs = []
         for fam, target, port, streams in self.families():
             t = shlex.quote(target)
