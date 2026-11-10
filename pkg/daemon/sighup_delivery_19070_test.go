@@ -134,24 +134,33 @@ func runSIGHUPChild19070(t *testing.T, name, env string) {
 	}
 }
 
-// TestNoInProcessSelfSignal19070 is a source pin (R8 F1/N1, Codex F3/F4 on
-// #19070). The REAL protection is the re-exec: the #15084 delivery runs in a
-// child, so a late HUP kills the child and fails that cell by name. This pin
-// catches the common ways a pkg/daemon test could signal the test binary
-// itself OUTSIDE such a child:
-//   - syscall/unix .Kill or .Tgkill whose pid is syscall/os.Getpid(), a local
-//     variable assigned from one, or 0 (the process group, the test binary
-//     included);
-//   - os.FindProcess(<that pid>) followed by .Signal on the result;
-//   - those functions, or the helper, taken as a VALUE (an alias).
+// TestNoInProcessSelfSignal19070 is a source pin (R8 F1/N1, Codex F3/F4/D1/D2
+// on #19070). The REAL protection is the re-exec: the #15084 delivery runs in
+// a child, so a late HUP kills the child and fails that cell by name. This
+// pin is a tripwire for a few spellings, and claims nothing beyond them.
 //
-// Such a call is allowed only inside deliverSIGHUPsUnderCapture19070, inside
-// a known child body (childBodies19070, each of whose call sites must itself
-// be gated), or inside an `if os.Getenv(<env>) == "1"` branch. An inverted
-// gate (!= "1"), another comparison, or a function's NAME does not count.
-// The helper must be called only in such a gated branch, and the #15084 cell
-// must still call it. Not covered: import aliases of syscall/unix/os and
-// signals sent by a child process the test spawns.
+// It scans the bodies of FUNCTION DECLARATIONS in this package's *_test.go
+// files and checks exactly these forms:
+//   - a direct call to syscall.Kill, unix.Kill, syscall.Tgkill or unix.Tgkill
+//     whose pid argument is a syscall/os/unix.Getpid() call, an identifier
+//     assigned from one by := or = earlier in the same function, or the
+//     literal 0 (the process group, the test binary included);
+//   - a .Signal call on an identifier assigned from os.FindProcess(<such a
+//     pid>) in the same function, or directly on that FindProcess call.
+//
+// Each must sit inside deliverSIGHUPsUnderCapture19070, inside a listed child
+// body (childBodies19070), or inside a gated branch: an if whose whole
+// condition, parentheses aside, is `os.Getenv(X) == "1"` or has it as a
+// top-level && conjunct (isChildGate19070). Calls to the helper and to the
+// child bodies must also sit in a gated branch, and the #15084 cell must still
+// call the helper. Separately, the four Kill/Tgkill functions and the helper
+// referenced as a VALUE are rejected everywhere, even in a gated branch.
+//
+// Known forms it does NOT check: a pid from a declaration (`var pid =
+// os.Getpid()`), a conversion (`syscall.Kill(int(os.Getpid()), ...)`), a
+// package-level function literal (`var f = func() { syscall.Kill(...) }`),
+// import aliases of syscall/unix/os, a bound method value (`p.Signal`), any
+// other dataflow, and a child process that signals its parent.
 func TestNoInProcessSelfSignal19070(t *testing.T) {
 	files, err := filepath.Glob("*_test.go")
 	if err != nil {
@@ -306,16 +315,29 @@ func selfSignalViolations19070(fset *token.FileSet, files []*ast.File) []string 
 	return out
 }
 
-// isChildGate19070 accepts only `os.Getenv(X) == "1"` (either operand order),
-// the gate every re-exec child here sets. An inverted (!=) or other
-// comparison is not a child gate.
+// isChildGate19070 accepts an if-condition only when, parentheses aside, it
+// IS `os.Getenv(X) == "1"` (either operand order), the gate every re-exec
+// child here sets, or has that equality as a top-level `&&` conjunct: in both
+// shapes the branch runs only when the gate holds. The equality anywhere else
+// does not count (#19070 Codex D1): under a negation (`!(... == "1")`) or in a
+// disjunction (`... == "1" || true`) the branch also runs in the parent. An
+// inverted (!=) or other comparison is not a gate either.
 func isChildGate19070(e ast.Expr) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		be, ok := n.(*ast.BinaryExpr)
-		if !ok || be.Op != token.EQL {
-			return true
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			break
 		}
+		e = p.X
+	}
+	be, ok := e.(*ast.BinaryExpr)
+	if !ok {
+		return false
+	}
+	switch be.Op {
+	case token.LAND:
+		return isChildGate19070(be.X) || isChildGate19070(be.Y)
+	case token.EQL:
 		isGetenv := func(x ast.Expr) bool {
 			c, ok := x.(*ast.CallExpr)
 			return ok && selName19070(c.Fun, "os", "Getenv")
@@ -324,12 +346,9 @@ func isChildGate19070(e ast.Expr) bool {
 			l, ok := x.(*ast.BasicLit)
 			return ok && l.Value == `"1"`
 		}
-		if (isGetenv(be.X) && isOne(be.Y)) || (isGetenv(be.Y) && isOne(be.X)) {
-			found = true
-		}
-		return !found
-	})
-	return found
+		return (isGetenv(be.X) && isOne(be.Y)) || (isGetenv(be.Y) && isOne(be.X))
+	}
+	return false
 }
 
 func selName19070(e ast.Expr, pkg, name string) bool {
@@ -389,12 +408,16 @@ func mustProc(p *os.Process, err error) *os.Process { return p }
 func F(t *testing.T) { q, _ := os.FindProcess(syscall.Getpid()); q.Signal(syscall.SIGHUP) }`, "F signals the test process itself through os.FindProcess"},
 		{"inverted gate", `func E(t *testing.T) { if os.Getenv("X") != "1" { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) } }`, "E signals the test process itself"},
 		{"other env comparison", `func E(t *testing.T) { if os.Getenv("PATH") != "" { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) } }`, "E signals the test process itself"},
+		{"negated gate", `func E(t *testing.T) { if !(os.Getenv("X") == "1") { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) } }`, "E signals the test process itself"},
+		{"gate in a disjunction", `func E(t *testing.T) { if os.Getenv("X") == "1" || true { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) } }`, "E signals the test process itself"},
+		{"negated gate around the helper", `func E(t *testing.T) { if !(os.Getenv("X") == "1") { deliverSIGHUPsUnderCapture19070(t, nil, 2) } }`, "E calls deliverSIGHUPsUnderCapture19070 outside"},
 		{"Child in the name only", `func TestChildSignal(t *testing.T) { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) }`, "TestChildSignal signals the test process itself"},
 		{"Kill as a value", `func E(t *testing.T) { kill := syscall.Kill; _ = kill }`, "E takes syscall.Kill as a value"},
 		{"helper as a value", `func E(t *testing.T) { d := deliverSIGHUPsUnderCapture19070; _ = d }`, "E takes deliverSIGHUPsUnderCapture19070 as a value"},
 		{"helper ungated", `func E(t *testing.T) { deliverSIGHUPsUnderCapture19070(t, nil, 2) }`, "E calls deliverSIGHUPsUnderCapture19070 outside"},
 		{"child body ungated", `func E(t *testing.T) { runSecondSignalChild16801(t) }`, "E calls the child body runSecondSignalChild16801 outside"},
 		{"gated kill is fine", `func E(t *testing.T) { if os.Getenv("X") == "1" { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) } }`, ""},
+		{"gate as a top-level conjunct is fine", `func E(t *testing.T) { if len(os.Args) > 0 && (os.Getenv("X") == "1") { _ = syscall.Kill(syscall.Getpid(), syscall.SIGHUP) } }`, ""},
 		{"signal to another pid is fine", `func E(t *testing.T, pid int) { _ = syscall.Kill(pid, syscall.SIGHUP) }`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

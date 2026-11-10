@@ -42,15 +42,28 @@
 # fault (core dumped)", "user defined signal 1", ...) and then prints the
 # package's "FAIL<TAB><pkg>" line. It does not insert a newline first, so a
 # death during a partial write reads "working...signal: killed". The signal
-# text therefore counts at the END of a line, and only when (a) the very next
-# line is the package FAIL line and (b) the binary printed no summary line of
-# its own ("PASS" or "FAIL" alone) since the package's previous terminal line:
-# a binary that reached its summary was not killed mid-run, even if its
-# TestMain then printed a bare "signal: killed" (Codex F2). Such a run is an
-# ordinary FAIL (go test already exits nonzero), so this changes no exit
-# status; it prints a TRUNCATED banner, because every test after the one
-# running at the death never ran, and a by-name census of the results cannot
-# see a test that never reported.
+# text therefore counts at the END of a line, and only when the very next line
+# is the package FAIL line. Such a run is an ordinary FAIL (go test already
+# exits nonzero), so this changes no exit status; it prints a banner, because
+# every test after the one running at a death never ran, and a by-name census
+# of the results cannot see a test that never reported.
+#
+# Which banner depends on the binary's FINAL line only, never on an earlier
+# PASS/FAIL line (#19070 Codex D3/D4): a test can print a bare "PASS" (a
+# re-executed child's summary), and a TestMain can call m.Run twice, so an
+# earlier summary-looking line does not show that the run finished.
+#   - Text before "signal: " on the same line ("working...signal: killed"):
+#     cmd/go appended its report to the binary's unterminated last write, and
+#     a summary line is always terminated, so the binary did not end on its
+#     summary. Definitive: TRUNCATED.
+#   - "signal: <name>" alone on its line, and the line before it is not a
+#     summary (does not end in PASS or FAIL): TRUNCATED.
+#   - "signal: <name>" alone, right after a line ending in PASS or FAIL
+#     ("FAIL", or "working...PASS" when the last passing test left its output
+#     unterminated): the text cannot tell a binary killed right after its
+#     summary from a TestMain that printed the line itself after every test
+#     finished (Codex F2/D3). That gets a separate SIGNAL-AMBIGUOUS banner that
+#     names the package and says so, never the TRUNCATED claim.
 function hit(k, s) { if (!pending[k]) shape[k] = s; pending[k] = 1 }
 function record(k, name) {
 	if (!(name in named)) { named[name] = 1; order[++n] = name; why[name] = shape[k] }
@@ -68,15 +81,22 @@ function record(k, name) {
 	}
 	if (armedC[k]) { armedC[k] = 0; if (line ~ /^FAIL\t/) hit(k, "C") }
 	if (sigline[k] != "") {
-		if (line ~ /^FAIL[ \t]+[^ \t]/ && !summary[k]) {
+		if (line ~ /^FAIL[ \t]+[^ \t]/) {
 			split(line, g, /[ \t]+/)
 			tname = TAGGED ? k : g[2]
-			if (!(tname in truncated)) { truncated[tname] = sigline[k]; torder[++tn] = tname }
+			if (sigafter[k]) {
+				if (!(tname in ambiguous)) { ambiguous[tname] = sigline[k]; aorder[++an] = tname }
+			} else if (!(tname in truncated)) { truncated[tname] = sigline[k]; torder[++tn] = tname }
 		}
 		sigline[k] = ""
 	}
-	if (line == "PASS" || line == "FAIL") summary[k] = 1
-	if (match(line, /signal: [A-Za-z][^\t]*$/)) sigline[k] = substr(line, RSTART + 8)
+	if (match(line, /signal: [A-Za-z][^\t]*$/)) {
+		sigline[k] = substr(line, RSTART + 8)
+		# Ambiguous only when the signal text starts its line AND the line
+		# before it is a summary: the binary's final line, nothing earlier.
+		sigafter[k] = (RSTART == 1 && prev[k] ~ /(PASS|FAIL)$/)
+	}
+	prev[k] = line
 	# Alarm shapes A and B share the dump sequence; only A has the running-test
 	# list. An adjacent printed panic+list pair is not enough: a failing test
 	# can print both. Keep the candidate until the alarm goroutine's first frame,
@@ -112,7 +132,6 @@ function record(k, name) {
 	# Name a pending timeout from it, then reset the stream state so one
 	# package's panic line can never pair with the next package's output.
 	if (line ~ /^(FAIL|ok)[ \t]+[^ \t]/) {
-		summary[k] = 0
 		split(line, f, /[ \t]+/)
 		if (pending[k]) record(k, TAGGED ? k : f[2])
 		st[k] = 0
@@ -127,6 +146,10 @@ END {
 	if (tn > 0) {
 		for (j = 1; j <= tn; j++)
 			print "go-test TRUNCATED: " torder[j] ": the test binary was killed by signal " truncated[torder[j]] "; every test after the one running at that moment NEVER RAN (#19070)." > "/dev/stderr"
+	}
+	if (an > 0) {
+		for (j = 1; j <= an; j++)
+			print "go-test SIGNAL-AMBIGUOUS: " aorder[j] ": a \"signal: " ambiguous[aorder[j]] "\" line came right after the binary's summary line; the output cannot tell a binary killed just after its summary from a TestMain that printed that line after its tests finished. If it was a kill, the tests after it never ran (#19070)." > "/dev/stderr"
 	}
 	for (k in pending) {
 		if (pending[k]) record(k, (TAGGED && k != "") ? k : "(package not named in the output)")

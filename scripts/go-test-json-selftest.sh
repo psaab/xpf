@@ -523,7 +523,125 @@ for mode in text json; do
 	check "real summary control, $mode path: ordinary FAIL (exit 1)" "$rc" "1"
 	case "$out" in *"TRUNCATED"*) bad "real summary control, $mode path: a completed binary was named as killed: $out";;
 		*) ok "real summary control, $mode path: no TRUNCATED banner";; esac
+	case "$out" in *"go-test SIGNAL-AMBIGUOUS: sigsummary:"*) ok "real summary control, $mode path: the ambiguity is named";;
+		*) bad "real summary control, $mode path: no SIGNAL-AMBIGUOUS banner in: $out";; esac
 done
+# Codex D3/D4 (#19070 cycle 3): the banner depends on the binary's FINAL line
+# only. D3: the last passing test left "working..." unterminated, so the
+# summary reads "working...PASS"; a TestMain line after it is not a death
+# (ambiguous, never TRUNCATED). D4: an EARLIER bare PASS line (a test's own
+# output, or a first m.Run) must not hide a later death.
+stub() { printf '#!/bin/sh
+printf %s
+exit 1
+' "'$2'" > "$SG/$1"; chmod +x "$SG/$1"; }
+stub d3 '=== RUN   TestDone\nworking...PASS\nsignal: killed\nFAIL\tfake/pkg\t0.012s\n'
+stub d4 '=== RUN   TestA\nPASS\n=== RUN   TestB\nsignal: killed\nFAIL\tfake/pkg\t0.012s\n'
+stub d4adj '=== RUN   TestA\nPASS\nsignal: killed\nFAIL\tfake/pkg\t0.012s\n'
+out=$(bash "$here/go-test-json.sh" "" "$SG/d3" ./... 2>&1); rc=$?
+check "D3 stub: ordinary FAIL (exit 1)" "$rc" "1"
+case "$out" in *"TRUNCATED"*) bad "D3 stub: a signal line after \"working...PASS\" was named as a death: $out";;
+	*"go-test SIGNAL-AMBIGUOUS: fake/pkg:"*) ok "D3 stub: ambiguous, not TRUNCATED";;
+	*) bad "D3 stub: no SIGNAL-AMBIGUOUS banner in: $out";; esac
+out=$(bash "$here/go-test-json.sh" "" "$SG/d4" ./... 2>&1); rc=$?
+check "D4 stub: ordinary FAIL (exit 1)" "$rc" "1"
+case "$out" in *"go-test TRUNCATED: fake/pkg: the test binary was killed by signal killed;"*) ok "D4 stub: an earlier PASS line does not hide the death";;
+	*) bad "D4 stub: an earlier PASS line hid the death: $out";; esac
+out=$(bash "$here/go-test-json.sh" "" "$SG/d4adj" ./... 2>&1); rc=$?
+case "$out" in *"TRUNCATED"*) bad "D4 adjacent stub: text-only ambiguity claimed as a death: $out";;
+	*"go-test SIGNAL-AMBIGUOUS: fake/pkg:"*) ok "D4 adjacent stub: a death right after a PASS line is named as ambiguous, not hidden";;
+	*) bad "D4 adjacent stub: hidden, no banner: $out";; esac
+# D3 as a real module (Codex's stand-in): every test passes, the last leaves
+# "working..." unterminated, TestMain prints "signal: killed" and exits 1.
+mkdir -p "$SG/d3m"
+printf 'module sigd3\n\ngo 1.21\n' > "$SG/d3m/go.mod"
+cat > "$SG/d3m/d_test.go" <<'EOT'
+package sigd3
+
+import (
+	"fmt"
+	"os"
+	"testing"
+)
+
+func TestDone(t *testing.T) { fmt.Print("working...") }
+
+func TestMain(m *testing.M) {
+	m.Run()
+	fmt.Println("signal: killed") // stand-in for a cleanup child's error
+	os.Exit(1)
+}
+EOT
+for mode in text json; do
+	jf=""; [ "$mode" = json ] && { jf="$SG/d3m.json"; : > "$jf"; }
+	out=$(cd "$SG/d3m" && bash "$here/go-test-json.sh" "$jf" go -count=1 ./... 2>&1); rc=$?
+	check "D3 real module, $mode path: ordinary FAIL (exit 1)" "$rc" "1"
+	case "$out" in *"TRUNCATED"*) bad "D3 real module, $mode path: a completed binary was named as killed: $out";;
+		*"go-test SIGNAL-AMBIGUOUS: sigd3:"*) ok "D3 real module, $mode path: ambiguous, not TRUNCATED";;
+		*) bad "D3 real module, $mode path: no SIGNAL-AMBIGUOUS banner in: $out";; esac
+done
+# D4 as real modules: (1) a test prints a bare "PASS" line, then dies blocked
+# mid-write; (2) TestMain runs m.Run twice and the SECOND run dies after a
+# full line. Each must be TRUNCATED, and the test after the death must not
+# report.
+mkdir -p "$SG/d4m" "$SG/d4r"
+printf 'module sigd4\n\ngo 1.21\n' > "$SG/d4m/go.mod"
+cat > "$SG/d4m/d_test.go" <<'EOT'
+package sigd4
+
+import (
+	"fmt"
+	"syscall"
+	"testing"
+)
+
+func TestA(t *testing.T) {}
+func TestForwardsPassThenDies(t *testing.T) {
+	fmt.Println("PASS") // e.g. a re-executed child's summary, forwarded
+	fmt.Print("working...")
+	_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
+	select {}
+}
+func TestZNeverRuns(t *testing.T) {}
+EOT
+printf 'module sigd4r\n\ngo 1.21\n' > "$SG/d4r/go.mod"
+cat > "$SG/d4r/d_test.go" <<'EOT'
+package sigd4r
+
+import (
+	"fmt"
+	"os"
+	"syscall"
+	"testing"
+)
+
+var round int
+
+func TestMain(m *testing.M) {
+	m.Run()
+	round++
+	os.Exit(m.Run())
+}
+
+func TestSecondRunDies(t *testing.T) {
+	if round == 1 {
+		fmt.Println("second run")
+		_ = syscall.Kill(syscall.Getpid(), syscall.SIGKILL)
+		select {}
+	}
+}
+EOT
+for d in d4m:sigd4 d4r:sigd4r; do
+	dir=${d%%:*} pkg=${d#*:}
+	for mode in text json; do
+		jf=""; [ "$mode" = json ] && { jf="$SG/$dir.json"; : > "$jf"; }
+		out=$(cd "$SG/$dir" && bash "$here/go-test-json.sh" "$jf" go -count=1 ./... 2>&1); rc=$?
+		check "D4 real module $pkg, $mode path: ordinary FAIL (exit 1)" "$rc" "1"
+		case "$out" in *"go-test TRUNCATED: $pkg: the test binary was killed by signal killed"*) ok "D4 real module $pkg, $mode path: named TRUNCATED";;
+			*) bad "D4 real module $pkg, $mode path: an earlier PASS line hid the death: $out";; esac
+	done
+done
+if grep -q '"Test":"TestZNeverRuns"' "$SG/d4m.json"; then bad "D4 real module: a test after the death reported"; else ok "D4 real module: the test after the death never reported"; fi
 rm -rf "$SG"
 
 printf '\ngo-test-json-selftest: passed=%d failed=%d\n' "$pass" "$fail"

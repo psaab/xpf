@@ -3430,13 +3430,26 @@ never lock an operator out of a remote box it manages.
     The re-exec is the real protection. Two more cells back it:
     `TestSIGHUPCaptureReleasedOnlyAfterDelivery19070` pins the HELPER
     (200 rounds in a child; a helper that releases before observing fails
-    at round 1), and `TestNoInProcessSelfSignal19070` is a source pin over
-    the common self-signal forms (syscall/unix `Kill`/`Tgkill` at
-    `Getpid()`, a pid local or 0, `os.FindProcess(...).Signal`, and those
-    or the helper taken as a value): each must sit in the helper, a listed
-    child body, or an `os.Getenv(X) == "1"` branch, and the #15084 cell
-    must still call the helper. It does not see import aliases or a child
-    process that signals its parent.
+    at round 1), and `TestNoInProcessSelfSignal19070` is a source
+    tripwire for a few spellings only. It scans function-declaration
+    bodies in this package's `*_test.go` files and checks: direct calls
+    to `syscall`/`unix` `Kill`/`Tgkill` whose pid is a `Getpid()` call,
+    an identifier assigned (`:=`/`=`) from one in the same function, or
+    the literal `0`; and `.Signal` on an `os.FindProcess(<such a pid>)`
+    result held in an identifier or called directly. Each must sit in
+    the helper, a listed child body, or a gated branch: an `if` whose
+    whole condition (parentheses aside) is `os.Getenv(X) == "1"` or has
+    it as a top-level `&&` conjunct; a negated or `||` condition does not
+    count. Calls to the helper and to the child bodies must be gated, and
+    the #15084 cell must still call the helper. The four `Kill`/`Tgkill`
+    functions and the helper referenced as a value are rejected
+    everywhere, even in a gated branch. Known forms it does NOT check: a
+    pid from a declaration (`var pid = os.Getpid()`), a conversion
+    (`Kill(int(os.Getpid()), ...)`), a package-level function literal
+    (`var f = func() { ... }`), import aliases of `syscall`/`unix`/`os`,
+    a bound method value (`p.Signal`), other dataflow, and a child
+    process that signals its parent. The fixture rows in
+    `TestSelfSignalPinCatchesTheEscapes19070` list what it does catch.
   - **Second shutdown signal during the shutdown sequence is absorbed
     (#16801).** `runShutdownSequence` called the signal context's
     `stop()` before `wg.Wait()` and the fail-closed block;
