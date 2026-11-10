@@ -3,7 +3,6 @@ package nftables
 import (
 	"context"
 	"net"
-	"runtime"
 	"strconv"
 	"syscall"
 	"testing"
@@ -12,6 +11,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // TestHostInboundGapRetainedBackstop11577 proves the later-priority gap table
@@ -301,49 +302,39 @@ func listenTCPOnDevice11577(t *testing.T, network, address string, port int, dev
 	return tcpListener
 }
 
-func sendRIPMulticastFromPeer11577(ns netns.NsHandle) (result error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	original, err := netns.Get()
-	if err != nil {
-		return err
-	}
-	defer original.Close()
-	if err := netns.Set(ns); err != nil {
-		return err
-	}
-	defer func() {
-		if err := netns.Set(original); err != nil && result == nil {
-			result = err
+// sendRIPMulticastFromPeer11577 sends one RIP multicast from inside ns.
+// #19088: testguard.InNetns restores the thread before it unlocks it and keeps
+// it locked if it cannot; the deferred restore here used to run before an
+// unconditional unlock.
+func sendRIPMulticastFromPeer11577(ns netns.NsHandle) error {
+	return testguard.InNetns(ns, func() error {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
+		if err != nil {
+			return err
 		}
-	}()
-
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.1")})
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-	rawConn, err := conn.SyscallConn()
-	if err != nil {
-		return err
-	}
-	var optionErr error
-	if err := rawConn.Control(func(fd uintptr) {
-		optionErr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, "vpeer0")
+		defer conn.Close()
+		rawConn, err := conn.SyscallConn()
+		if err != nil {
+			return err
+		}
+		var optionErr error
+		if err := rawConn.Control(func(fd uintptr) {
+			optionErr = unix.SetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE, "vpeer0")
+			if optionErr != nil {
+				return
+			}
+			optionErr = unix.SetsockoptInet4Addr(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_IF, [4]byte{192, 0, 2, 1})
+			if optionErr != nil {
+				return
+			}
+			optionErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_TTL, 1)
+		}); err != nil {
+			return err
+		}
 		if optionErr != nil {
-			return
+			return optionErr
 		}
-		optionErr = unix.SetsockoptInet4Addr(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_IF, [4]byte{192, 0, 2, 1})
-		if optionErr != nil {
-			return
-		}
-		optionErr = unix.SetsockoptInt(int(fd), unix.IPPROTO_IP, unix.IP_MULTICAST_TTL, 1)
-	}); err != nil {
+		_, err = conn.WriteToUDP([]byte("rip"), &net.UDPAddr{IP: net.ParseIP("224.0.0.9"), Port: 520})
 		return err
-	}
-	if optionErr != nil {
-		return optionErr
-	}
-	_, err = conn.WriteToUDP([]byte("rip"), &net.UDPAddr{IP: net.ParseIP("224.0.0.9"), Port: 520})
-	return err
+	})
 }

@@ -7,17 +7,16 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	xnft "github.com/psaab/xpf/pkg/nftables"
-	"golang.org/x/sys/unix"
 )
 
 const netnsChild12034 = "XPF_12034_NETNS_CHILD"
@@ -108,7 +107,7 @@ func hostInboundSharedVRFNetnsChild12034(t *testing.T) {
 		}
 		return string(out)
 	}
-	selfNS, err := os.Readlink("/proc/self/ns/net")
+	selfNS, err := os.Readlink("/proc/thread-self/ns/net")
 	if err != nil {
 		t.Fatalf("read own netns: %v", err)
 	}
@@ -453,22 +452,12 @@ func hostInboundSharedVRFNetnsChild12034(t *testing.T) {
 	}
 }
 
+// inNetns12034 runs fn on the calling goroutine's thread inside pid's network
+// namespace. #19088: it used to restore the thread to /proc/self/ns/net, which
+// is the thread-group LEADER's namespace, not this thread's, and to unlock the
+// thread even when that restore failed. testguard.InNetnsPath records the
+// calling thread's own namespace, restores it, and keeps the thread locked
+// (so the runtime discards it) if it cannot.
 func inNetns12034(pid string, fn func() error) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	current, err := os.Open("/proc/self/ns/net")
-	if err != nil {
-		return err
-	}
-	defer current.Close()
-	target, err := os.Open("/proc/" + pid + "/ns/net")
-	if err != nil {
-		return err
-	}
-	defer target.Close()
-	if err := unix.Setns(int(target.Fd()), unix.CLONE_NEWNET); err != nil {
-		return err
-	}
-	defer func() { _ = unix.Setns(int(current.Fd()), unix.CLONE_NEWNET) }()
-	return fn()
+	return testguard.InNetnsPath("/proc/"+pid+"/ns/net", fn)
 }

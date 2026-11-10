@@ -66,7 +66,9 @@ func TestMain(m *testing.M) {
 	// the process egid as service gid (pure-preserve tightening, no
 	// root/host group needed). Per-test stubs restore via the seam.
 	_ = frr.SetFRRGroupResolverForTest(func() (int, bool) { return os.Getegid(), true })
-	code := m.Run()
+	// #19088: after the tests, no OS thread may be left outside the
+	// package's network namespace (testguard.Run).
+	code := testguard.Run(m)
 	os.RemoveAll(dir)
 	os.Exit(code)
 }

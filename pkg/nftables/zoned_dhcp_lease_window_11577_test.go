@@ -2,7 +2,6 @@ package nftables
 
 import (
 	"net"
-	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -11,6 +10,8 @@ import (
 	"github.com/vishvananda/netlink/nl"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // TestZonedDHCPLeaseAppearanceWindow11577 probes a benign TCP/22 connection
@@ -368,54 +369,27 @@ func TestZonedDHCPBareMemberVLANVRFLeaseWindow11577(t *testing.T) {
 
 }
 
+// tcpDialFromNetns11577Network dials from inside ns on the calling goroutine's
+// thread. #19088: testguard.InNetns restores the thread before it unlocks it
+// and keeps it locked if it cannot; this used to unlock after a failed
+// restore.
 func tcpDialFromNetns11577Network(ns netns.NsHandle, network, address string, timeout time.Duration) error {
-	runtime.LockOSThread()
-	original, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
+	var dialErr error
+	if err := testguard.InNetns(ns, func() error {
+		conn, err := net.DialTimeout(network, address, timeout)
+		if conn != nil {
+			_ = conn.Close()
+		}
+		dialErr = err
+		return nil
+	}); err != nil {
 		return err
-	}
-	if err := netns.Set(ns); err != nil {
-		original.Close()
-		runtime.UnlockOSThread()
-		return err
-	}
-	conn, dialErr := net.DialTimeout(network, address, timeout)
-	if conn != nil {
-		_ = conn.Close()
-	}
-	restoreErr := netns.Set(original)
-	original.Close()
-	runtime.UnlockOSThread()
-	if restoreErr != nil {
-		return restoreErr
 	}
 	return dialErr
 }
 
 func tcpDialFromNetns11577(ns netns.NsHandle, address string, timeout time.Duration) error {
-	runtime.LockOSThread()
-	original, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
-		return err
-	}
-	if err := netns.Set(ns); err != nil {
-		original.Close()
-		runtime.UnlockOSThread()
-		return err
-	}
-	conn, dialErr := net.DialTimeout("tcp4", address, timeout)
-	if conn != nil {
-		_ = conn.Close()
-	}
-	restoreErr := netns.Set(original)
-	original.Close()
-	runtime.UnlockOSThread()
-	if restoreErr != nil {
-		return restoreErr
-	}
-	return dialErr
+	return tcpDialFromNetns11577Network(ns, "tcp4", address, timeout)
 }
 func bindTCPListenerToDevice11577(t *testing.T, listener *net.TCPListener, device string) {
 	t.Helper()

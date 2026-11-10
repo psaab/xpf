@@ -3,18 +3,16 @@ package daemon
 import (
 	"context"
 	"errors"
-	"fmt"
-	"io/fs"
 	"net"
 	"os"
 	"os/exec"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/linuxsock"
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
@@ -61,33 +59,18 @@ var testOrigNetns17231 string
 
 func enterPrivateNetns17231(t *testing.T) {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
+	// #19088: EnterNewNetnsFrom restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot. It
+	// reads the starting namespace on the locked thread.
+	ns, origLink, err := testguard.EnterNewNetnsFrom(t)
 	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current netns (%v)", err)
-	}
-	origLink, err := os.Readlink("/proc/thread-self/ns/net")
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current netns link (%v)", err)
-	}
-	ns, err := netns.New()
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
-		t.Skipf("cannot create private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
+		t.Skipf("cannot enter a private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
 	}
 	testNetnsFD17231 = int(ns)
 	testOrigNetns17231 = origLink
 	t.Cleanup(func() {
 		testNetnsFD17231 = -1
 		testOrigNetns17231 = ""
-		_ = netns.Set(orig)
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
 	})
 }
 
@@ -107,24 +90,22 @@ func enterPrivateNetns17231(t *testing.T) {
 // locked and the runtime discards the thread instead of reusing it.
 func runResponder17231(d *Daemon, ctx context.Context, ifName string, r *proxyARPResponder) {
 	go func() {
-		runtime.LockOSThread()
 		if testNetnsFD17231 < 0 {
-			defer runtime.UnlockOSThread()
 			d.runProxyARPResponder(ctx, ifName, r)
 			return
 		}
-		orig, origErr := netns.Get()
+		// #19088: testguard.LockThreadNetns/Release is #19049's
+		// restore-or-discard, shared: Release restores the netns before it
+		// unlocks, and keeps the thread locked if the namespace cannot be
+		// restored. If the thread's own netns cannot even be read, nothing
+		// is switched.
+		n, err := testguard.LockThreadNetns()
+		if err != nil {
+			d.runProxyARPResponder(ctx, ifName, r)
+			return
+		}
+		defer func() { _ = n.Release() }()
 		_ = netns.Set(netns.NsHandle(testNetnsFD17231))
-		defer func() {
-			if origErr != nil {
-				return
-			}
-			restored := netns.Set(orig) == nil
-			orig.Close()
-			if restored {
-				runtime.UnlockOSThread()
-			}
-		}()
 		d.runProxyARPResponder(ctx, ifName, r)
 	}()
 }
@@ -142,45 +123,17 @@ var readThreadNetns17231 = func(task string) (string, error) { return os.Readlin
 var readTaskDir17231 = os.ReadDir
 
 // threadsInNetns17231 is one census pass: the ids of this process's threads,
-// other than self, whose netns link is netnsLink. It returns an error, never
+// other than self, whose netns link is netnsLink. #19088: the census itself
+// is testguard.ThreadCensus, which the package-wide guard (testguard.Run in
+// TestMain) shares; this cell keeps its two seams. It returns an error, never
 // a partial answer, when it could not observe every thread: the listing
 // failed (even with entries returned), a read failed other than because the
 // thread exited, or no thread besides self was inspected.
 func threadsInNetns17231(netnsLink, self string) ([]string, error) {
-	entries, err := readTaskDir17231("/proc/self/task")
-	if err != nil {
-		return nil, fmt.Errorf("list this process's threads (%d entries before the error): %w; "+
-			"a partial listing can omit the stranded thread", len(entries), err)
-	}
-	var left []string
-	inspected := 0
-	for _, e := range entries {
-		tid := e.Name()
-		if tid == self {
-			continue
-		}
-		ns, err := readThreadNetns17231("/proc/self/task/" + tid)
-		if err != nil {
-			// A thread that exits between the listing and the Readlink has
-			// left the namespace (ENOENT/ESRCH). Any other error means the
-			// census could not observe the thread: that is a FAIL, never
-			// "no leak" (#19049 Codex P2).
-			if errors.Is(err, fs.ErrNotExist) || errors.Is(err, unix.ESRCH) {
-				continue
-			}
-			return nil, fmt.Errorf("read thread %s's netns: %w; the census cannot tell whether it is still in the private netns", tid, err)
-		}
-		inspected++
-		if ns == netnsLink {
-			left = append(left, tid)
-		}
-	}
-	// A Go process always runs more threads than the test's own, so a
-	// census that inspected none observed nothing.
-	if inspected == 0 {
-		return nil, fmt.Errorf("the census inspected no thread besides the test's own (%d listed); it observed nothing", len(entries))
-	}
-	return left, nil
+	return testguard.ThreadCensus{
+		ReadTaskDir:     readTaskDir17231,
+		ReadThreadNetns: readThreadNetns17231,
+	}.ThreadsIn(netnsLink, self)
 }
 
 // assertNoThreadLeftInPrivateNetns17231 is the #19049 cell. Once every
@@ -233,8 +186,13 @@ func assertNoThreadLeftInPrivateNetns17231(t *testing.T) {
 // the failure is the error's doing, not the namespace argument or the
 // zero-inspected guard.
 func TestThreadCensusFailsOnPartialListing19049(t *testing.T) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
+	// Pin this goroutine's thread so self stays its tid (#19088: through
+	// the testguard lock, as everywhere in a file that switches netns).
+	thread, err := testguard.LockThreadNetns()
+	if err != nil {
+		t.Fatalf("lock the test thread: %v", err)
+	}
+	defer func() { _ = thread.Release() }()
 	self := strconv.Itoa(unix.Gettid())
 	const noSuchNetns = "net:[0]"
 

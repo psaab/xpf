@@ -316,7 +316,7 @@ func hostInboundIngressNetnsChild9637(t *testing.T) {
 			t.Fatalf("%s %s: %v: %s", name, strings.Join(args, " "), err, out)
 		}
 	}
-	selfNS, err := os.Readlink("/proc/self/ns/net")
+	selfNS, err := os.Readlink("/proc/thread-self/ns/net")
 	if err != nil {
 		t.Fatalf("read own netns: %v", err)
 	}
@@ -515,7 +515,7 @@ func hostInboundUnzonedIngressNetnsChild11409(t *testing.T) {
 			t.Fatalf("%s %s: %v: %s", name, strings.Join(args, " "), err, out)
 		}
 	}
-	selfNS, err := os.Readlink("/proc/self/ns/net")
+	selfNS, err := os.Readlink("/proc/thread-self/ns/net")
 	if err != nil {
 		t.Fatalf("read own netns: %v", err)
 	}

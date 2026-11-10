@@ -3,13 +3,13 @@ package nftables
 import (
 	"bytes"
 	"net"
-	"runtime"
 	"testing"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
-	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // netlink_kernel_test.go exercises the netlink installer against the REAL kernel
@@ -31,24 +31,11 @@ import (
 // operate on an isolated, empty ruleset. It SKIPs when netns creation is denied.
 func enterPrivateNetns(t *testing.T) {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current netns (%v)", err)
+	// #19088: EnterNewNetns restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	if _, err := testguard.EnterNewNetns(t); err != nil {
+		t.Skipf("cannot enter a private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
 	}
-	ns, err := netns.New()
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
-		t.Skipf("cannot create private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = netns.Set(orig)
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 }
 
 // TestNetlinkInstallLoadsInKernel installs every ruleset variant and asserts the

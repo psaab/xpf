@@ -3,7 +3,6 @@ package nftables
 import (
 	"fmt"
 	"net"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +12,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 func TestHostInboundScreenFloodRulesCoalesceZoneViews11087(t *testing.T) {
@@ -333,19 +334,19 @@ func TestHostInboundEstablishedUDPFloodDropsAboveThreshold11087(t *testing.T) {
 	seedReady := make(chan error, 1)
 	sendErr := make(chan error, 1)
 	go func() {
-		runtime.LockOSThread()
-		defer runtime.UnlockOSThread()
-		oldNS, err := netns.Get()
+		// #19088: Release restores the thread before it unlocks it and keeps
+		// it locked if it cannot; the restore here used to be ignored ahead
+		// of an unconditional unlock.
+		thread, err := testguard.LockThreadNetns()
 		if err != nil {
 			seedReady <- fmt.Errorf("read sender netns: %w", err)
 			return
 		}
-		defer oldNS.Close()
+		defer func() { _ = thread.Release() }()
 		if err := netns.Set(clientNS); err != nil {
 			seedReady <- fmt.Errorf("enter client netns: %w", err)
 			return
 		}
-		defer func() { _ = netns.Set(oldNS) }()
 		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("192.0.2.2")})
 		if err != nil {
 			seedReady <- fmt.Errorf("bind client UDP socket: %w", err)

@@ -220,6 +220,64 @@ Privileged kernel tests belong only in `make vm-test-root` inside a disposable V
 
 Incus cluster cells pass through `test/incus/with-cluster.sh`, which checks both firewall targets are virtual machines before invoking the cell. Direct provisioning paths use the shared `vm-target-guard.sh`; it checks Incus's instance type before installing the guest-side shims and a systemd boot service that refreshes the boot-ID proof after every VM restart. The census registry `test/host-mutation-census.tsv` records each discovered source's mutation class, namespace boundary, and proof. The scanner rejects unregistered or stale paths and enforces the class floors; update the registry and floors whenever a mutation-bearing test source is intentionally added or removed.
 
+### No test may hand back a thread in another network namespace (#19088)
+
+The rule in the paragraph above (put a thread back before
+`runtime.UnlockOSThread`) is enforced, not just stated. #19049 fixed one
+site; a census of pkg/daemon, pkg/nftables and pkg/routing found the same
+error-path class in 14 files: a helper that unlocked after a failed restore,
+after `netns.New` had unshared but failed to open the new namespace, or that
+restored to `/proc/self/ns/net` (the thread-group LEADER's namespace, not the
+calling thread's, `inNetns12034`).
+
+- **The helpers** (`internal/testguard/netns_thread.go`).
+  `LockThreadNetns` locks the thread and records its own namespace
+  (`/proc/thread-self`). `Release` puts it back and unlocks only once it reads
+  back as that namespace; otherwise it leaves the thread locked, so the
+  goroutine's exit makes the runtime discard it. `InNetns`/`InNetnsPath` run a
+  function inside a namespace. `EnterNewNetns`/`EnterNewNetnsFrom` move a
+  test's thread into a fresh namespace until its cleanup, and their error arm
+  restores a partial create instead of just unlocking. `EnterNetns` joins an
+  existing one (a subtest joining its parent's).
+- **The runtime guard** (`testguard.Run`, called from the TestMain of
+  pkg/daemon, pkg/nftables and pkg/routing). After the tests it requires
+  every OS thread of the test binary to be back in the namespace the package
+  started in, polling up to 5 s, and fails the package otherwise, naming each
+  thread and its namespace. New sites are caught by what they do, not by a
+  list. It shares one census, `testguard.ThreadCensus`, with the Q53 cell,
+  including #19049's contract: a listing that failed (even part-way), a read
+  that failed for any reason but the thread exiting, or a census that
+  inspected no thread is an error, never "clean".
+- **The static guard** (`testguard.CheckNetnsThreadDiscipline`, one
+  `TestNetnsThreadDiscipline19088` cell per package). The runtime guard sees
+  only the paths a run took; the error arms run only when a restore or an
+  open fails. So a `_test.go` file that switches a thread's namespace
+  (`netns.New/NewNamed/Set/Setns`, `unix.Setns/Unshare`, `syscall.Unshare`,
+  under any import alias) may not call `runtime.LockOSThread` or
+  `runtime.UnlockOSThread` directly, and no test file may name
+  `/proc/self/ns/`. A switch made while a helper already holds the thread (an
+  inner `netns.Set` under `EnterNewNetns`) is allowed: the helper's `Release`
+  restores whatever it left.
+
+Other packages that switch namespaces in tests (pkg/dataplane/userspace,
+pkg/flowexport, pkg/lldp, pkg/nfqueue, pkg/snmp) are not yet under either
+guard.
+
+### A test that arms a commit-confirmed window must disarm it (#19089)
+
+`configstore.CommitConfirmed` arms a `time.AfterFunc` rollback at least a
+minute out. A test that returns with the window still armed leaves that timer
+in the package process. It fires inside whatever test runs a minute later,
+runs the rollback executor against a store whose temp dir is gone, and logs
+an ERROR into that test's capture. That is how
+`TestFirstCommitRollbackServiceFailureIsDegraded16678` failed
+`TestBootstrapLifelineRetainsMACFormLink12156` in 1 of 10 full runs. Before
+it fires it is a pending timer, not a goroutine, so a goroutine-count leak
+check cannot see it. The #16678 fixture now cancels the window in its
+cleanup (`CancelConfirmTimerForTesting`) and then requires
+`IsConfirmPending()` to be false, so the cell goes red if the cancel is
+removed.
+
 ### The go-skip census, and the thing it found
 
 `make go-skip-census` counts skip call sites into four **named** buckets and
