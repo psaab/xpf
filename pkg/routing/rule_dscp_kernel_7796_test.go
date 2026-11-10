@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -12,6 +11,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // rule_dscp_kernel_7796_test.go is the APPLY LEG for #7796.
@@ -34,24 +35,11 @@ import (
 // netlink sockets open in the caller's namespace (#12518).
 func enterPrivateNetns7796(t *testing.T) netns.NsHandle {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
+	// #19088: EnterNewNetns restores the thread before it unlocks it.
+	ns, err := testguard.EnterNewNetns(t)
 	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current netns (%v)", err)
-	}
-	ns, err := netns.New()
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
 		t.Skipf("cannot create private netns — needs CAP_NET_ADMIN (run under `unshare -rn` or as root): %v", err)
 	}
-	t.Cleanup(func() {
-		_ = netns.Set(orig)
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 	return ns
 }
 
@@ -80,24 +68,11 @@ func liveDSCPOps(t *testing.T) dscpRuleOps {
 // false-reds on repeated -cpu runs (#12518).
 func joinPrivateNetns7796(t *testing.T, ns netns.NsHandle) {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
-		t.Fatalf("cannot read subtest netns: %v", err)
-	}
-	if err := netns.Set(ns); err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
+	// #19088: EnterNetns restores the subtest's thread before it unlocks it
+	// and keeps it locked if it cannot.
+	if err := testguard.EnterNetns(t, ns); err != nil {
 		t.Fatalf("cannot join private netns: %v", err)
 	}
-	t.Cleanup(func() {
-		if err := netns.Set(orig); err != nil {
-			t.Errorf("subtest: restore original netns: %v", err)
-		}
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 }
 
 // delRuleDSCP7796 removes a rule previously installed through ops. Every

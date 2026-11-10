@@ -76,10 +76,22 @@ func newFirstCommitRollbackDaemon16678(t *testing.T, dhcp *rollbackDHCPRecorder1
 	if err != nil {
 		t.Fatal(err)
 	}
+	// #19089: registered first, so it runs after every cleanup below. A
+	// commit-confirmed window still armed here means its rollback timer fires
+	// about a minute later, inside whatever test runs then: the DEGRADED cell
+	// left one, and its rollback logged an ERROR (a persist into this test's
+	// removed temp dir) into TestBootstrapLifelineRetainsMACFormLink12156.
+	t.Cleanup(func() {
+		if s.IsConfirmPending() {
+			t.Errorf("#19089: a commit-confirmed window is still armed after the test; its rollback timer would fire inside a later test")
+		}
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
 	d := &Daemon{
 		applySem:   semaphore.NewWeighted(1),
 		store:      s,
-		daemonCtx:  context.Background(),
+		daemonCtx:  ctx,
 		dhcpRelay:  dhcprelay.NewManager(),
 		dhcpServer: dhcp,
 	}
@@ -94,6 +106,10 @@ func newFirstCommitRollbackDaemon16678(t *testing.T, dhcp *rollbackDHCPRecorder1
 		}
 	})
 	t.Cleanup(d.dhcpRelay.Stop)
+	// #19089: the join. A cell that ends with the window still armed (the
+	// DEGRADED cell drives enterBootstrapMode directly and never fires the
+	// timer) has its timer stopped before the test returns.
+	t.Cleanup(s.CancelConfirmTimerForTesting)
 	s.SetRollbackExecutor(d.executeConfirmedRollback)
 	return d, s
 }

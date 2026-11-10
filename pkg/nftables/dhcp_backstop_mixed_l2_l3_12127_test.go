@@ -5,13 +5,14 @@ import (
 	"encoding/binary"
 	"net"
 	"os"
-	"runtime"
 	"testing"
 	"time"
 
 	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 const (
@@ -318,34 +319,25 @@ func assertMixedFrameDelivery12127(t *testing.T, receiver *net.UDPConn, want boo
 	t.Fatalf("receive %s: %v", probe, err)
 }
 
-func sendMixedFrame12127(ns netns.NsHandle, ifname string, frame []byte) (result error) {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-	original, err := netns.Get()
-	if err != nil {
-		return err
-	}
-	defer original.Close()
-	if err := netns.Set(ns); err != nil {
-		return err
-	}
-	defer func() {
-		if err := netns.Set(original); err != nil && result == nil {
-			result = err
+// sendMixedFrame12127 sends frame out of ifname inside ns. #19088:
+// testguard.InNetns restores the thread before it unlocks it and keeps it
+// locked if it cannot; the deferred restore here used to run before an
+// unconditional unlock.
+func sendMixedFrame12127(ns netns.NsHandle, ifname string, frame []byte) error {
+	return testguard.InNetns(ns, func() error {
+		link, err := netlink.LinkByName(ifname)
+		if err != nil {
+			return err
 		}
-	}()
-	link, err := netlink.LinkByName(ifname)
-	if err != nil {
-		return err
-	}
-	fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htonsMixedFrame12127(unix.ETH_P_ALL)))
-	if err != nil {
-		return err
-	}
-	defer unix.Close(fd)
-	sa := &unix.SockaddrLinklayer{Ifindex: link.Attrs().Index, Protocol: htonsMixedFrame12127(unix.ETH_P_ALL), Halen: 6}
-	copy(sa.Addr[:], frame[:6])
-	return unix.Sendto(fd, frame, 0, sa)
+		fd, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, int(htonsMixedFrame12127(unix.ETH_P_ALL)))
+		if err != nil {
+			return err
+		}
+		defer unix.Close(fd)
+		sa := &unix.SockaddrLinklayer{Ifindex: link.Attrs().Index, Protocol: htonsMixedFrame12127(unix.ETH_P_ALL), Halen: 6}
+		copy(sa.Addr[:], frame[:6])
+		return unix.Sendto(fd, frame, 0, sa)
+	})
 }
 
 func mixedFrameUDP12127(ethType uint16, sourceMAC, destinationMAC net.HardwareAddr, sourceIP, destinationIP net.IP, sourcePort, destinationPort, id uint16, payload []byte) []byte {

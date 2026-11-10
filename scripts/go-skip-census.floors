@@ -205,12 +205,21 @@
 # same message: net zero. Rebased onto master bd1a23d3fe, that delta is
 # applied to master's floors above (664/147/18/498 -> 665/151/18/495).
 # #19104's unbanked drift is still not banked.
-total        = 665
+# #19088 (integration resolution, integ/test-only-2026-11-15-r2): its thread
+# helpers (testguard.EnterNewNetns*, LockThreadNetns, InNetns) replace raw
+# netns helper skips ("cannot read current netns", "cannot create private
+# netns", ...). Measured at its first commit: -5 priv-absent, -5 total, so
+# the floors move 665/151 -> 660/146.
+# Master's floors are unchanged at b96d977c6e, where this census reds by
+# #19104's priv-absent site and by one "other" site added since bd1a23d3fe;
+# neither is banked here, so this tree reds by exactly those two, as master
+# does.
+total        = 660
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 151
+priv-absent  = 146
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.

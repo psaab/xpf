@@ -1,13 +1,13 @@
 package routing
 
 import (
-	"runtime"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 func TestRibGroupClearPreservesSelectorlessCharonRules12035(t *testing.T) {
@@ -190,26 +190,12 @@ func TestRuleClearOwnershipOnKernel12035(t *testing.T) {
 
 func privateRuleOps12035(t *testing.T) dscpRuleOps {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
-		t.Skipf("cannot read current netns: %v", err)
-	}
-	ns, err := netns.New()
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
+	// #19088: EnterNewNetns restores the thread before it unlocks it and
+	// keeps it locked if it cannot; this used to report a failed restore
+	// and unlock anyway.
+	if _, err := testguard.EnterNewNetns(t); err != nil {
 		t.Skipf("cannot create private netns (needs CAP_NET_ADMIN): %v", err)
 	}
-	t.Cleanup(func() {
-		if err := netns.Set(orig); err != nil {
-			t.Errorf("restore original netns: %v", err)
-		}
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 	handle, err := netlink.NewHandle()
 	if err != nil {
 		t.Fatalf("open netlink handle in private netns: %v", err)

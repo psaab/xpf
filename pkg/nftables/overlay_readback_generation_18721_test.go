@@ -3,7 +3,6 @@ package nftables
 import (
 	"errors"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -11,8 +10,9 @@ import (
 	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
 	"github.com/mdlayher/netlink/nltest"
-	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // #18721 (review round 2): the overlay readback makes several separate reads.
@@ -170,22 +170,11 @@ func TestVerifyHostInboundOverlayReturnsTheStablePassVerdict18721(t *testing.T) 
 // without CAP_NET_ADMIN, unless XPF_REQUIRE_NETNS is set, where it fails.
 func requirePrivateNetns18721(t *testing.T) {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
+	// #19088: EnterNewNetns restores the thread before it unlocks it.
+	_, err := testguard.EnterNewNetns(t)
 	if err == nil {
-		var ns netns.NsHandle
-		if ns, err = netns.New(); err == nil {
-			t.Cleanup(func() {
-				_ = netns.Set(orig)
-				ns.Close()
-				orig.Close()
-				runtime.UnlockOSThread()
-			})
-			return
-		}
-		orig.Close()
+		return
 	}
-	runtime.UnlockOSThread()
 	if os.Getenv("XPF_REQUIRE_NETNS") != "" {
 		t.Fatalf("cannot create a private netns (run under `unshare -rn`): %v (XPF_REQUIRE_NETNS is set)", err)
 	}

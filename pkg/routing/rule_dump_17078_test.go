@@ -3,7 +3,6 @@ package routing
 import (
 	"encoding/binary"
 	"net"
-	"runtime"
 	"syscall"
 	"testing"
 
@@ -12,6 +11,8 @@ import (
 	"github.com/vishvananda/netlink/nl"
 	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // ruleDumpMessage17078 builds one synthetic RTM_NEWRULE dump row with
@@ -342,32 +343,20 @@ func TestRuleListFullRoundTrip17078(t *testing.T) {
 // host rule table.
 func enterPrivateNetns17078(t *testing.T) netns.NsHandle {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
+	// Refuse to run in the initial namespace when we can prove it:
+	// creating a NEW namespace is the isolation, so compare the thread's
+	// namespace identity before and after rather than trusting the caller.
+	// #19088: EnterNewNetns restores the thread before it unlocks it.
+	before, err := testguard.ThreadNetnsLink()
 	if err != nil {
-		runtime.UnlockOSThread()
 		t.Skipf("cannot read current netns (%v)", err)
 	}
-	// Refuse to run in the initial namespace when we can prove it:
-	// creating a NEW namespace is the isolation, so compare the new
-	// handle against the original rather than trusting the caller.
-	ns, err := netns.New()
+	ns, err := testguard.EnterNewNetns(t)
 	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
 		t.Skipf("cannot create private netns — needs CAP_NET_ADMIN (run under `unshare -rn`): %v", err)
 	}
-	if ns == orig {
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-		t.Fatal("new netns handle equals original; refusing host-netns execution")
+	if after, err := testguard.ThreadNetnsLink(); err != nil || after == before {
+		t.Fatalf("the thread's netns after entering a new one is %q (%v), the same as before; refusing host-netns execution", after, err)
 	}
-	t.Cleanup(func() {
-		_ = netns.Set(orig)
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 	return ns
 }

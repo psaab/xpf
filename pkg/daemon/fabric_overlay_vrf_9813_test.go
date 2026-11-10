@@ -7,13 +7,12 @@ import (
 	"go/token"
 	"net"
 	"os"
-	"runtime"
 	"sync"
 	"testing"
 
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
 
+	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/routing"
 )
 
@@ -188,30 +187,14 @@ func TestApplyFabricIPVLANDefersThroughTheBindingCreator_9813(t *testing.T) {
 // (#16470), matching the tool-absent arms of the #15241 kernel cells.
 func enterPrivateNetns9813(t *testing.T) {
 	t.Helper()
-	runtime.LockOSThread()
-	orig, err := netns.Get()
-	if err != nil {
-		runtime.UnlockOSThread()
+	// #19088: EnterNewNetns restores the thread before it unlocks it, at
+	// cleanup and on a partial create, and keeps it locked if it cannot.
+	if _, err := testguard.EnterNewNetns(t); err != nil {
 		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
-			t.Fatalf("cannot read the current netns (%v) (XPF_REQUIRE_NETNS is set)", err)
+			t.Fatalf("cannot enter a private netns; needs CAP_NET_ADMIN (run under `unshare -rn`): %v (XPF_REQUIRE_NETNS is set)", err)
 		}
-		t.Skipf("cannot read the current netns (%v)", err)
+		t.Skipf("cannot enter a private netns; needs CAP_NET_ADMIN (run under `unshare -rn`): %v", err)
 	}
-	ns, err := netns.New()
-	if err != nil {
-		orig.Close()
-		runtime.UnlockOSThread()
-		if os.Getenv("XPF_REQUIRE_NETNS") != "" {
-			t.Fatalf("cannot create a private netns; needs CAP_NET_ADMIN (run under `unshare -rn`): %v (XPF_REQUIRE_NETNS is set)", err)
-		}
-		t.Skipf("cannot create a private netns; needs CAP_NET_ADMIN (run under `unshare -rn`): %v", err)
-	}
-	t.Cleanup(func() {
-		_ = netns.Set(orig)
-		ns.Close()
-		orig.Close()
-		runtime.UnlockOSThread()
-	})
 }
 
 // The acceptance cell from the issue, against the kernel: the real
