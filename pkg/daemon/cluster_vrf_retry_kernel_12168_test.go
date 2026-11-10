@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -93,10 +94,64 @@ func isolateXPFStateDir12168(dir string) error {
 	return unix.Mount(dir, xpfState, "", unix.MS_BIND, "")
 }
 
+// isolateHostConfig12168 keeps the real apply tail off the host's /etc
+// (#19066 Codex F1). The fixture calls the real applyTailReconciles, and its
+// empty desired state REMOVES xpf-managed files: /etc/ssh/ssh_known_hosts
+// with the xpf header, /etc/chrony/{sources,conf}.d/xpf-*, /etc/rsyslog.d/
+// 10-xpf-*, /etc/ssh/sshd_config.d/{00-xpf,xpf}.conf. The child runs at uid
+// 0, which on a root leg is real root, and its private mount namespace does
+// not keep an unlink off the shared root filesystem.
+//
+// Two layers. The known seams are pointed at a temp dir, so the reconcilers
+// work on files the test owns. And /etc itself is covered by an overlay in
+// the child's private mount namespace, so a seam nobody has listed yet writes
+// or unlinks in the overlay's upper layer, never in the host's /etc. Without
+// the overlay the cell refuses to run (it never falls back to the host's
+// /etc).
+func isolateHostConfig12168(t *testing.T) {
+	t.Helper()
+	seams := t.TempDir()
+	for _, p := range []*string{&chronySourcesPath, &chronyThresholdPath, &chronyAcquisitionPath,
+		&sshKnownHostsPath, &rsyslogConfDir, &sshdConfPath} {
+		prev := *p
+		*p = filepath.Join(seams, strings.TrimPrefix(prev, "/"))
+		if err := os.MkdirAll(filepath.Dir(*p), 0o755); err != nil {
+			t.Fatalf("create seam dir for %s: %v", prev, err)
+		}
+		t.Cleanup(func() { *p = prev })
+	}
+	if err := os.MkdirAll(rsyslogConfDir, 0o755); err != nil {
+		t.Fatalf("create rsyslog seam dir: %v", err)
+	}
+
+	base := t.TempDir()
+	upper, work := filepath.Join(base, "upper"), filepath.Join(base, "work")
+	for _, d := range []string{upper, work} {
+		if err := os.Mkdir(d, 0o755); err != nil {
+			t.Fatalf("create overlay dir %s: %v", d, err)
+		}
+	}
+	opts := "lowerdir=/etc,upperdir=" + upper + ",workdir=" + work
+	if err := unix.Mount("overlay", "/etc", "overlay", 0, opts); err != nil {
+		// Inside a user namespace overlayfs keeps its metadata in user.*
+		// xattrs and needs userxattr to say so.
+		if err2 := unix.Mount("overlay", "/etc", "overlay", 0, opts+",userxattr"); err2 != nil {
+			t.Fatalf("cannot cover /etc with a private overlay (%v; with userxattr: %v); refusing to run the apply tail against the host's /etc at uid %d",
+				err, err2, os.Geteuid())
+		}
+	}
+	t.Cleanup(func() {
+		if err := unix.Unmount("/etc", unix.MNT_DETACH); err != nil {
+			t.Errorf("unmount the private /etc overlay: %v", err)
+		}
+	})
+}
+
 func newKernelVRFRetryFixture12168(t *testing.T) (*Daemon, *config.Config, netlink.Link, netlink.Link) {
 	t.Helper()
 	installFakeNetworkctl(t)
 	useTemporaryDNSReconciler12168(t)
+	isolateHostConfig12168(t)
 	stateDir := t.TempDir()
 	if err := isolateXPFStateDir12168(stateDir); err != nil {
 		t.Fatalf("cannot isolate keyed heartbeat epoch state: %v", err)
@@ -688,6 +743,7 @@ var dualFabricVRFLines12168 = []string{
 func newDualFabricVRFFixture12168(t *testing.T, includeFab1 bool) *Daemon {
 	t.Helper()
 	installFakeNetworkctl(t)
+	isolateHostConfig12168(t)
 	stateDir := t.TempDir()
 	if err := isolateXPFStateDir12168(stateDir); err != nil {
 		t.Fatalf("cannot isolate keyed heartbeat epoch state: %v", err)
