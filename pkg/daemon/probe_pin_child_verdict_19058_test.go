@@ -6,7 +6,8 @@ import (
 )
 
 // TestCarrierLossChildVerdict12088 pins how the 12088 carrier-loss parent
-// judges its re-executed child (R16 F1 on #19058, and N1 on 3eb2111624).
+// judges its re-executed child (R16 F1 on #19058, N1 on 3eb2111624, and
+// Codex F1/F2 on 5c84aeba3d).
 // Before, the parent read only the child's exit status, and Go exits 0 both
 // for a test that SKIPs and for a -test.run that matches nothing, so either
 // was reported as a PASS. The rows are real -test.v shapes; each non-PASS row
@@ -36,6 +37,20 @@ func TestCarrierLossChildVerdict12088(t *testing.T) {
 		{"unshare refused before the child started", "unshare: unshare failed: Operation not permitted\n", exit1, carrierLossChildSkipped12088},
 		{"guard refused the child", "testguard: refusing to run: readlink /proc/1/ns/net: permission denied\n", exit1, carrierLossChildFailed12088},
 		{"empty output exits 0", "", nil, carrierLossChildFailed12088},
+		// Codex F1 on 5c84aeba3d: a result record outranks the pre-start
+		// refusal exception, and CRLF output still reads as started.
+		{"CRLF EPERM inside a child that started", "=== RUN   " + carrierLossTest12088 + "\r\n    daemon_rpm_test.go:1250: ip link set xpf12088ca up: exit status 2: RTNETLINK answers: Operation not permitted\r\n--- FAIL: " + carrierLossTest12088 + " (0.01s)\r\nFAIL\r\n", exit1, carrierLossChildFailed12088},
+		{"CRLF started, refusal text, no record", "=== RUN   " + carrierLossTest12088 + "\r\n    daemon_rpm_test.go:1250: unshare: nested call failed\r\nFAIL\r\n", exit1, carrierLossChildFailed12088},
+		{"no RUN, exact FAIL plus refusal text", "unshare: unshare failed: Operation not permitted\n--- FAIL: " + carrierLossTest12088 + " (0.01s)\nFAIL\n", exit1, carrierLossChildFailed12088},
+		{"no RUN, SKIP then crash plus refusal text", "unshare: unshare failed: Operation not permitted\n--- SKIP: " + carrierLossTest12088 + " (0.01s)\npanic: boom\n", errors.New("exit status 2"), carrierLossChildFailed12088},
+		{"no RUN, exact PASS plus refusal text, nonzero exit", "Operation not permitted\n--- PASS: " + carrierLossTest12088 + " (0.01s)\n", exit1, carrierLossChildFailed12088},
+		// Codex F2: one witness row per parser rule (R16's attack rows).
+		{"mid-line exact PASS exits 0", run + "noise--- PASS: " + carrierLossTest12088 + " (0.01s)\nPASS\n", nil, carrierLossChildFailed12088},
+		{"exact FAIL plus exact PASS exits 0", run + "--- FAIL: " + carrierLossTest12088 + " (0.01s)\n--- PASS: " + carrierLossTest12088 + " (0.01s)\n", nil, carrierLossChildFailed12088},
+		{"refusal text exits 0 without RUN", "unshare: unshare failed: Operation not permitted\n", nil, carrierLossChildFailed12088},
+		{"started, unshare text, no record", run + "    daemon_rpm_test.go:1250: unshare: nested call failed\nFAIL\n", exit1, carrierLossChildFailed12088},
+		{"refusal token Operation not permitted alone", "unshare failed: Operation not permitted\n", exit1, carrierLossChildSkipped12088},
+		{"refusal token unshare: alone", "unshare: write failed /proc/self/uid_map\n", exit1, carrierLossChildSkipped12088},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, reason := judgeCarrierLossChild12088([]byte(tc.out), tc.err)
