@@ -733,19 +733,26 @@ fn refresh_changing_the_fabric_local_mac_advances_its_shard_19034() {
     );
 }
 
-/// #19034 (R4 review of b5a55949e3), the `refresh_fabric_links` straddle.
-/// That writer moves no part of the flow-cache generation pair. A worker tick
-/// that took its epoch snapshot and loaded its view before the refresh may
-/// still seed a FabricRedirect from the old links later in the tick, and the
-/// seed's live-MAC check exempts FabricRedirect. The stamp the worker uses is
-/// the tick's pre-view-load snapshot (`BindingWorker::tick_neighbor_epochs`,
-/// pinned in `tick_epoch_snapshot_precedes_the_view_load_19034`), so it must
-/// already be behind the shard the refresh bumps. A FabricRedirect pass-level
-/// fixture needs a peer-synced session on a demoted RG. This harness does not
-/// build one; the push writer's straddle is end to end
-/// (`seed_straddling_a_neighbor_push_cannot_keep_the_old_mac_19034`).
+/// #19034 (R4 reviews of b5a55949e3 and 57dbf877ff): what the
+/// `refresh_fabric_links` half of the straddle fix pins at this level. The
+/// writer advances the shard that a FabricRedirect resolved through the OLD
+/// links stamps (`(parent_ifindex, peer_addr)`). So any stamp taken before
+/// the refresh is stale afterwards, including the tick snapshot a worker
+/// took before loading the old view.
+///
+/// This cell does NOT run a seed. It computes the stamp itself, so it stays
+/// green if the seed site stops stamping from the tick snapshot (arm T1).
+/// The T1 guard for that shared stamp site, which FabricRedirect seeds use
+/// too, is the end-to-end push cell
+/// `seed_straddling_a_neighbor_push_cannot_keep_the_old_mac_19034`.
+///
+/// A pass-level FabricRedirect straddle was judged disproportionate. It
+/// needs a session that resolves FabricRedirect (a peer-owned RG), seeded in
+/// one pass and hit in a later one on the same binding and neighbor map.
+/// The only pass-level FabricRedirect harness (`tests_split_rg_failback_18531`)
+/// builds fresh bindings and its own neighbor map for every packet.
 #[test]
-fn fabric_refresh_straddling_a_tick_leaves_its_seed_stale_19034() {
+fn fabric_refresh_bumps_the_shard_its_old_links_stamped_19034() {
     let (mut coordinator, snapshot) = fabric_coordinator();
     let dynamic = Arc::clone(coordinator.dynamic_neighbors_ref());
     // The worker's tick: the epoch snapshot first, then the view's links.

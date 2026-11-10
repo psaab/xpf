@@ -522,9 +522,21 @@ Actual deletions use the same targeted invalidation:
   its runtime-view adoption (`worker/loop_body/reconcile.rs`) also copy
   neighbor and fabric state, but they only consume what those writers
   published, and they rely on the writers' bumps instead of bumping
-  themselves (Codex review of b5a55949e3). So a cached
-  flow whose stamped epoch is current holds the current resolution, and a
-  refresh that leaves the resolution alone has nothing to invalidate. The
+  themselves (Codex review of b5a55949e3).
+
+  So a cached flow whose stamped epoch is current holds the resolution of
+  the published view, and a refresh that leaves the resolution alone has
+  nothing to invalidate. This holds only because every writer also bumps
+  AFTER its publish.
+  - The snapshot refresh bumps its changed keys twice: early, together
+    with the row removals (a removed row must never leave silently), and
+    again after the view is published.
+  - A worker tick between the two loads the old view and can seed the old
+    resolution with the early-bump epoch. Without the second bump, that G
+    entry would stay current and serve a #18560 held pass under the
+    retained old view for up to `MATCHED_VIEW_GRACE_NS`. An ordinary G+1
+    pass never hits it. (Codex review of 57dbf877ff, F6-1;
+    `held_pass_drops_a_seed_that_straddled_a_refresh_publish_19034`.) The
   refresh's old blanket bump had been hiding the push's missing static-table
   bump. Without the push fix, a gateway moving A→B through the push and
   then a refresh naming B would leave flows on MAC A
@@ -577,8 +589,9 @@ current epoch and was never evicted.
 - The worker therefore snapshots the epoch vector once per tick, BEFORE the
   tick's view load (`worker/loop_body/reconcile.rs`,
   `snapshot_epochs_then_refresh_view`). It stores the snapshot on each
-  binding (`BindingWorker::tick_neighbor_epochs`), and every seed of the tick
-  stamps from it.
+  binding (`BindingWorker::tick_neighbor_epochs`), and every
+  neighbor-dependent forwarding seed of the tick stamps from it. Deny seeds
+  carry no neighbor epoch (`NEIGHBOR_SHARD_NONE`).
 - The bump is Release and the snapshot loads are Acquire. So a snapshot
   that shows a post-publish bump implies a view load at or after that
   publish.
