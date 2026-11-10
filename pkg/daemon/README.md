@@ -3469,7 +3469,21 @@ never lock an operator out of a remote box it manages.
     a blocked `wg`, delivers a second `SIGTERM`+`SIGINT` during
     `wg.Wait`, and must still print `completed-fail-closed=true`
     (SIGHUP control unchanged); a second child proves the released
-    guard restores the default disposition.
+    guard restores the default disposition, by dying of the
+    post-release `SIGTERM` itself. Both children observe rather than
+    sleep (#19087): after each self-signal they wait until the capture
+    or the guard has logged it (`sighupIgnoredWarning`,
+    `shutdownSignalAbsorbedWarning`, counted by message), and the
+    second `SIGTERM`/`SIGINT` is sent only once the sequence has
+    called the `stop()` it was handed (observed through a wrapper), not
+    after a fixed sleep. At the parent's 60 s deadline the parent logs
+    the child's `/proc` state (scheduler state, CPU time, `SigCgt`,
+    wait channel) with the runner's load, CPU pressure, steal ticks and
+    the share of CPU ticks the runner accounted over the child's life
+    (far below 100% means the VM was paused, e.g. by a gate cell, while
+    its clock kept running), then sends `SIGQUIT`, so a stalled child
+    leaves its goroutine stacks or the reason it never ran instead of
+    empty output.
   - **Wiring (the part that makes this actually fire on `systemctl stop`).**
     `applyCancelCtx` deliberately does **not** return `d.daemonCtx`. In
     production `cmd/xpfd` passes `context.Background()` into `Run`, and that
