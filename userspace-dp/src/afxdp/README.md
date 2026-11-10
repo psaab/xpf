@@ -2525,6 +2525,13 @@ own view's flow-cache entry:
       b5a55949e3).
     - A genuine MAC change or removal still bumps, and a held pass still
       drops the backlog of a flow whose next hop really moved.
+    - Residual, pre-existing and not changed by #19034 (#19078): a tunnel
+      flow whose OUTER route is ECMP with only one member's neighbor in the
+      dynamic map stamps the shard of the member a static-only re-resolution
+      picks (`outer_neighbor_ifindex(.., None, ..)`), not the member the
+      decision used. A MAC change or withdrawal on the used member then
+      does not evict it. Probe cells: `n1_probe_*` in `flow_cache_tests.rs`,
+      ignored until #19078 lands.
   - This describes the ordinary flow-cache route, not every pre-cache arm.
     An admitted IPsec passthrough can reinject before the cache, and a
     pending reverse PMech packet can be deferred before it; those paths are

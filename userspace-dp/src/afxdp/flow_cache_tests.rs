@@ -4298,3 +4298,140 @@ fn eviction_arm_labels_match_go_collector_18656() {
         assert_eq!(*arm as usize, i, "ALL is in ordinal order");
     }
 }
+
+// ── #19078 (N1 in Codex's review of b5a55949e3; pre-existing on master): a tunnel
+// whose OUTER route is IPv6 link-local ECMP over two interfaces, with only one
+// member's neighbor in the dynamic map. The live resolver picks the live
+// member; the seed (`flow_cache_seed.rs`) and the entry (`flow_cache.rs`)
+// re-resolve the outer route STATIC-ONLY (`outer_neighbor_ifindex(.., None,
+// ..)`) and may stamp the other member's shard. Expected behaviour asserted.
+// RED on master 93d699ce62 and on the #19034 branch (runner, 2026-11-10):
+// static-only picks ifindex 13, the decision uses ifindex 12, the entry
+// stamps shard 37 instead of 55, and it stays valid after the live member's
+// MAC is replaced or deleted. Ignored until #19078 lands.
+fn n1_ecmp_tunnel_probe() -> (
+    ForwardingState,
+    Arc<crate::afxdp::sharded_neighbor::ShardedNeighborMap>,
+    FlowCacheEntry,
+    (i32, IpAddr),
+    (i32, IpAddr),
+) {
+    use crate::afxdp::sharded_neighbor::ShardedNeighborMap;
+    use crate::afxdp::types::NeighborEntry;
+    let nh: IpAddr = "fe80::1".parse().unwrap();
+    let b_ifindex = (13..300)
+        .find(|i| *i != 362 && ShardedNeighborMap::shard_index(&(*i, nh)) != ShardedNeighborMap::shard_index(&(12, nh)))
+        .unwrap();
+    let mut snapshot = crate::afxdp::test_fixtures::native_gre_snapshot(false);
+    let mut b_iface = snapshot.interfaces[0].clone();
+    b_iface.name = "reth0.81".to_string();
+    b_iface.linux_name = "ge-0-0-2.81".to_string();
+    b_iface.ifindex = b_ifindex;
+    b_iface.vlan_id = 81;
+    b_iface.addresses[0].address = "2001:559:8585:81::8/64".to_string();
+    snapshot.interfaces.push(b_iface);
+    let route = snapshot
+        .routes
+        .iter_mut()
+        .find(|route| route.table == "inet6.0")
+        .unwrap();
+    route.next_hops = vec!["fe80::1@reth0.80".to_string(), "fe80::1@reth0.81".to_string()];
+    let forwarding = crate::afxdp::forwarding_build::build_forwarding_state(&snapshot);
+
+    let static_pick = crate::afxdp::forwarding::resolve_tunnel_outer(&forwarding, None, 1, 0)
+        .expect("premise: the outer route resolves static-only")
+        .resolution
+        .egress_ifindex;
+    assert!(static_pick == 12 || static_pick == b_ifindex, "premise: static-only picks a member ({static_pick})");
+    let live_member = if static_pick == 12 { b_ifindex } else { 12 };
+    let dynamic = Arc::new(ShardedNeighborMap::new());
+    assert!(dynamic.insert_if_changed((live_member, nh), NeighborEntry { mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55] }));
+
+    let live = crate::afxdp::forwarding::resolve_tunnel_forwarding_resolution(&forwarding, Some(&dynamic), 1, 0);
+    assert_eq!(live.disposition, ForwardingDisposition::ForwardCandidate, "premise: the tunnel forwards");
+    assert_eq!(live.neighbor_mac, Some([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]), "premise: via the live member's MAC");
+    assert_eq!(
+        crate::afxdp::forwarding::resolve_tunnel_outer(&forwarding, Some(&dynamic), 1, 0)
+            .unwrap()
+            .resolution
+            .egress_ifindex,
+        live_member,
+        "premise: the live resolver picks the live member"
+    );
+    eprintln!(
+        "N1 probe: static-only pick ifindex {static_pick}, live member ifindex {live_member}, \
+         shards {} vs {}",
+        ShardedNeighborMap::shard_index(&(static_pick, nh)),
+        ShardedNeighborMap::shard_index(&(live_member, nh))
+    );
+
+    // The seed's own stamp (flow_cache_seed.rs): the pre-resolve snapshot,
+    // indexed by `outer_neighbor_ifindex(.., None, ..)`.
+    let (flow, meta, validation, mut decision, _direct, ha_state) = make_v4_round_trip_inputs();
+    decision.resolution = live;
+    let seed_key = (
+        crate::afxdp::forwarding::outer_neighbor_ifindex(&forwarding, None, &decision.resolution),
+        nh,
+    );
+    let epoch = dynamic.snapshot_shard_epochs().epoch_for(&seed_key);
+    let rg_epochs = default_rg_epochs();
+    let entry = FlowCacheEntry::from_forward_decision(
+        &flow,
+        meta,
+        validation,
+        decision,
+        1,
+        Some(3),
+        Some(7),
+        None,
+        crate::filter::CachedFilterCounters::default(),
+        &forwarding,
+        &ha_state,
+        false,
+        &rg_epochs,
+        epoch,
+    )
+    .expect("premise: the tunnel decision is cacheable");
+    assert!(!entry.neighbor_mac_epoch_stale(&dynamic), "premise: a fresh entry is not stale");
+    (forwarding, dynamic, entry, (static_pick, nh), (live_member, nh))
+}
+
+#[test]
+#[ignore = "#19078: dynamic-only outer ECMP stamps the static-only member's shard"]
+fn n1_probe_replacing_the_live_outer_member_mac_evicts() {
+    use crate::afxdp::types::NeighborEntry;
+    let (_forwarding, dynamic, entry, static_key, live_key) = n1_ecmp_tunnel_probe();
+    eprintln!(
+        "N1 probe: entry stamps shard {} (static-only key {:?}); the decision used {:?} (shard {})",
+        entry.neighbor_shard,
+        static_key,
+        live_key,
+        crate::afxdp::sharded_neighbor::ShardedNeighborMap::shard_index(&live_key)
+    );
+    assert!(dynamic.insert_if_changed(live_key, NeighborEntry { mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x66] }));
+    eprintln!(
+        "N1 probe (replace): cached outer MAC {:?}, stale={}",
+        entry.decision.resolution.neighbor_mac,
+        entry.neighbor_mac_epoch_stale(&dynamic)
+    );
+    assert!(
+        entry.neighbor_mac_epoch_stale(&dynamic),
+        "replacing the MAC of the outer member the decision used must evict the entry"
+    );
+}
+
+#[test]
+#[ignore = "#19078: dynamic-only outer ECMP stamps the static-only member's shard"]
+fn n1_probe_deleting_the_live_outer_member_evicts() {
+    let (_forwarding, dynamic, entry, _static_key, live_key) = n1_ecmp_tunnel_probe();
+    assert!(dynamic.remove_if_present(&live_key), "premise: DELNEIGH removes the live member's row");
+    eprintln!(
+        "N1 probe (delete): cached outer MAC {:?}, stale={}",
+        entry.decision.resolution.neighbor_mac,
+        entry.neighbor_mac_epoch_stale(&dynamic)
+    );
+    assert!(
+        entry.neighbor_mac_epoch_stale(&dynamic),
+        "withdrawing the outer member the decision used must evict the entry"
+    );
+}
