@@ -74,9 +74,13 @@ use submit_prepared::submit_prepared;
 // into flat sibling files, mirroring drain.rs / service.rs /
 // submit_*.rs. mod.rs keeps the shared batch/selection types and the
 // drain_shaped_tx orchestration. Pure code motion: no logic changed.
+mod residual;
 mod selectors;
 mod settle;
 mod waterfill;
+use residual::{build_colocated_nonexact_turn_batch, nonexact_surplus_budget_under_exact_demand};
+#[cfg(test)]
+use residual::residual_rate_and_burst;
 
 use selectors::{
     select_cos_surplus_batch_filtered, select_exact_cos_guarantee_queue_with_lease_telemetry,
@@ -325,6 +329,28 @@ fn drain_primed_cos_root(
     now_ns: u64,
     shared_recycles: &mut Vec<(u32, u64)>,
 ) -> PrimedRootStep {
+    // #19025: after this binding's exact class has been served, its
+    // colocated non-exact queue gets one turn ahead of the next exact
+    // service (`build_colocated_nonexact_turn_batch`).
+    if let Some(batch) = build_colocated_nonexact_turn_batch(binding, root_ifindex, now_ns) {
+        let located = cos_batch_queue_ref(binding, root_ifindex, &batch);
+        let sent = submit_cos_batch(binding, root_ifindex, batch, now_ns, shared_recycles);
+        if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+            root.nonexact_turn = false;
+        }
+        if sent {
+            return PrimedRootStep::Serviced(located.map(|(queue_idx, queue_id)| {
+                DrainedQueueRef {
+                    root_ifindex,
+                    queue_idx,
+                    queue_id,
+                }
+            }));
+        }
+        // #19025 review (Codex F2): the turn sent nothing (a Local batch
+        // with no free TX frame, for one); exact service must not wait
+        // behind it, so fall through to the exact pass.
+    }
     let mut lease_telemetry = CoSQueueLeaseAcquireTelemetry::default();
     if let Some(serviced) = service_exact_guarantee_queue_direct_with_info(
         binding,
@@ -334,6 +360,11 @@ fn drain_primed_cos_root(
         &mut lease_telemetry,
     ) {
         record_cos_queue_lease_acquire(binding, lease_telemetry);
+        if serviced.is_some()
+            && let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex)
+        {
+            root.nonexact_turn = true;
+        }
         return PrimedRootStep::Serviced(serviced);
     }
     record_cos_queue_lease_acquire(binding, lease_telemetry);
@@ -424,8 +455,9 @@ fn build_nonexact_cos_batch_with_demand(
         .cos_fast_interfaces
         .get(&root_ifindex)
         .and_then(|iface_fast| iface_fast.shared_exact_backlog.as_ref());
+    let binding_slot = binding.slot;
     let peer_exact_demand_mask = shared_exact_backlog
-        .map(|backlog| backlog.peer_exact_demand_queue_mask(binding.slot))
+        .map(|backlog| backlog.peer_exact_demand_queue_mask(binding_slot))
         .unwrap_or(ExactDemandQueueMask::EMPTY);
     // #4265 (R-2): the non-exact guarantee refill now routes through the
     // shared queue lease (when the coordinator built one for a sharded
@@ -495,6 +527,7 @@ fn build_nonexact_cos_batch_with_demand(
                 // guarantee rates are reserved.
                 let nonexact_budget = nonexact_surplus_budget_under_exact_demand(
                     root,
+                    binding_slot,
                     now_ns,
                     exact_demand_rate,
                     shared_exact_backlog.map(|backlog| &**backlog),
@@ -502,7 +535,7 @@ fn build_nonexact_cos_batch_with_demand(
                 select_cos_surplus_batch_filtered(
                     root,
                     now_ns,
-                    true,
+                    false,
                     nonexact_budget,
                     root_limit,
                     local_scratch,
@@ -562,68 +595,6 @@ fn per_batch_root_lease(
     } else {
         None
     }
-}
-
-#[inline]
-fn reset_nonexact_surplus_under_exact_budget(
-    root: &mut CoSInterfaceRuntime,
-    now_ns: u64,
-    shared_exact_backlog: Option<&SharedCoSExactBacklog>,
-) {
-    root.nonexact_surplus_under_exact_tokens = 0;
-    root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
-    if let Some(backlog) = shared_exact_backlog {
-        backlog.reset_residual_surplus_budget(now_ns);
-    }
-}
-
-#[inline]
-fn residual_rate_and_burst(
-    root: &CoSInterfaceRuntime,
-    exact_demand_rate: u64,
-) -> Option<(u64, u64)> {
-    if exact_demand_rate == 0 || root.shaping_rate_bytes == 0 {
-        return None;
-    }
-    let residual_rate = root.shaping_rate_bytes.saturating_sub(exact_demand_rate);
-    if residual_rate == 0 {
-        return Some((0, 0));
-    }
-    let residual_burst = (residual_rate / 100)
-        .max(COS_MIN_BURST_BYTES)
-        .min(cos_effective_burst_bytes(root.burst_bytes));
-    Some((residual_rate, residual_burst))
-}
-
-#[inline]
-fn nonexact_surplus_budget_under_exact_demand(
-    root: &mut CoSInterfaceRuntime,
-    now_ns: u64,
-    exact_demand_rate: u64,
-    shared_exact_backlog: Option<&SharedCoSExactBacklog>,
-) -> Option<u64> {
-    let Some((residual_rate, residual_burst)) = residual_rate_and_burst(root, exact_demand_rate)
-    else {
-        reset_nonexact_surplus_under_exact_budget(root, now_ns, shared_exact_backlog);
-        return None;
-    };
-    if residual_rate == 0 {
-        reset_nonexact_surplus_under_exact_budget(root, now_ns, shared_exact_backlog);
-        return Some(0);
-    }
-    if let Some(backlog) = shared_exact_backlog {
-        root.nonexact_surplus_under_exact_tokens = 0;
-        root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
-        return Some(backlog.residual_surplus_budget(now_ns, residual_rate, residual_burst));
-    }
-    refill_cos_tokens(
-        &mut root.nonexact_surplus_under_exact_tokens,
-        residual_rate,
-        residual_burst,
-        &mut root.nonexact_surplus_under_exact_last_refill_ns,
-        now_ns,
-    );
-    Some(root.nonexact_surplus_under_exact_tokens)
 }
 
 /// #751: variant that additionally reports which queue was actually

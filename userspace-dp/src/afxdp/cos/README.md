@@ -262,11 +262,68 @@ mod.rs for further file-level breakdown.
   guarantee rate once. Cross-binding demand is imported through
   `SharedCoSExactBacklog` as an exact-queue mask, not a per-worker
   rate, so one shared exact queue does not multiply its reservation by
-  the number of workers. Shared interfaces also use a shared residual
-  token bucket for non-exact surplus; private/local fallbacks use the
-  per-root residual bucket. Exact queues that explicitly enable
+  the number of workers. Exact queues that explicitly enable
   `surplus-sharing` remain eligible for surplus service outside the
   non-exact residual budget.
+- **The colocated non-exact turn (#19025, #19023).** Shared interfaces
+  meter all non-exact surplus under exact demand with ONE interface-wide
+  residual token bucket in `SharedCoSExactBacklog` (private interfaces use
+  the per-root bucket), so non-exact traffic stays within the residual
+  whichever bindings send it and residual one binding cannot use stays
+  available to the others. So that a binding busy with its own exact class
+  does not lose that pool to peers that poll it more often, each binding
+  that asks for non-exact budget in a 1 ms epoch reserves an equal claim on
+  the epoch's residual (`rate x epoch / n`, n = bindings that asked this
+  epoch or the last); it may spend its own unspent claim plus whatever the
+  pool holds beyond every current claim, and a claim lapses after its epoch,
+  so a binding that stops asking (idle, slow, dead) gives its part back
+  within one epoch (`SharedCoSExactBacklog::nonexact_surplus_budget`). A
+  binding asks only while it has non-exact backlog: one that asked with
+  nothing to send (an exact-only worker whose exact pass fell through)
+  reserved a part nobody spent, and the best-effort worker beside it got
+  about half the residual (#18748's Codex P1 cell).
+  A claim accrues over its epoch: a binding may spend what the pool holds
+  beyond the part of every OTHER binding's claim that has accrued and is
+  still unspent. The pool refills at the rate the claims accrue, so a
+  binding that asks rarely, one busy with its own exact class, finds its
+  accrued part whenever it asks, however often its peers poll. Before
+  accrual a claim reserved only accounting. On #18748 cycle 3, peers that
+  hold no root poll many times more often, and in the R2 simulation they
+  spent their claims as fast as the pool refilled. The busy binding's turns
+  then found less than a frame (521 of 906 turns), and its colocated
+  instance fell to 0.067 Gb/s against a 0.125 floor.
+  Claims only order who may spend; they never add credit. On a binding whose exact class was just served
+  (`CoSInterfaceRuntime::nonexact_turn`, set by an exact service that made
+  progress) and that has exact demand of its own and non-exact backlog, the
+  drain serves ONE non-exact surplus batch, drawn from that same bucket,
+  before the next exact service (`queue_service::build_colocated_nonexact_turn_batch`).
+  A turn is one surplus quantum, so the exact class keeps at least every
+  other service on its own worker. If the turn sends nothing (a Local batch
+  with no free TX frame), the same drain falls through to exact service.
+  The turn's batch is bounded twice:
+  - by the residual budget the binding holds;
+  - on a root that takes root credit per batch (#18748 Rule 2, every root
+    with an exact class), by the same `RootGrantLimit::nonexact` as every
+    other non-exact batch: the pool floor, which is always on for a turn
+    because a turn needs local exact demand. It holds no root after the
+    drain either.
+  The residual-budget and turn functions live in `queue_service/residual.rs`.
+  This relaxes the strict guarantee-before-surplus order on the worker:
+  before it, a colocated non-exact queue beside a TX-capped exact class was
+  never visited (#19023: 0 Gb/s), and beside a busy exact class it polled
+  the shared residual far less often than its peers (#19025: 0.25 Gb/s
+  against 5.7). A first version gave each binding a private `residual / n`
+  part instead; it double-credited intervals when n changed, stranded parts
+  a slow binding could not spend and let a part larger than the worker
+  starve the exact class, so it was replaced (docs/log/19025.md). Not
+  addressed: the reserved amount is still the configured rate, so a
+  TX-capped exact class still over-reserves (#19023's other half). A
+  worker that dies by panic never runs its CoS teardown, so the
+  coordinator's dead-worker sweep clears its bindings' backlog slots
+  (`clear_worker_cos_backlog_slots`); otherwise their last published exact
+  demand would keep its rate reserved on every surviving binding. Cells:
+  `queue_service/tests/colocated_share_19025.rs`,
+  `coordinator/cos_backlog_dead_worker_19025_tests.rs`.
 - **What counts as exact demand (#hb166 T-6(b), #18748).** An exact
   guarantee queue is in the demand mask (`exact_demand.rs`
   `local_exact_demand_mask`, published by `publish_cos_exact_backlog` through

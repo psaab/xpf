@@ -10,6 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(in crate::afxdp) const EXACT_DEMAND_MASK_WORDS: usize = 4;
 
+/// #19025: the claim epoch of the residual pool (1 ms). A binding's claim is
+/// sized per epoch and reserves nothing once an epoch has passed since the
+/// binding last asked; the pool's burst (at least 1/100 s of the residual)
+/// covers several epochs, so credit a lapsed claim left unspent is still in
+/// the pool for the other bindings.
+pub(in crate::afxdp) const NONEXACT_CLAIM_EPOCH_NS: u64 = 1_000_000;
+
 /// #9365: which exact guarantee queues on one CoS interface have demand, one
 /// bit per index into `CoSInterfaceRuntime::queues`.
 ///
@@ -96,11 +103,21 @@ impl std::ops::BitOr for ExactDemandQueueMask {
 #[repr(align(64))]
 struct PaddedBacklogSlot {
     queued_bytes: AtomicU64,
-    /// #9365: one `AtomicU64` per `ExactDemandQueueMask` word. One byte
-    /// counter plus four words is 40 bytes, inside the 64-byte alignment.
-    /// (#18748 dropped the write-only `serviceable_bytes` counter: its only
-    /// reader was a test.)
+    /// #9365: one `AtomicU64` per `ExactDemandQueueMask` word. With the
+    /// byte counter and the #19025 claim pair below the slot is exactly 64
+    /// bytes. (#18748 dropped the write-only `serviceable_bytes` counter: its
+    /// only reader was a test.)
     demand_queue_mask: [AtomicU64; EXACT_DEMAND_MASK_WORDS],
+    /// #19025: this binding's reserved claim on the residual pool for
+    /// `nonexact_claim_epoch` (bytes still unspent). See
+    /// `SharedCoSExactBacklog::nonexact_surplus_budget`.
+    nonexact_claim_bytes: AtomicU64,
+    /// #19025: the claim epoch (`now / NONEXACT_CLAIM_EPOCH_NS + 1`; 0 =
+    /// never claimed) the claim belongs to.
+    nonexact_claim_epoch: AtomicU64,
+    /// #19025: when this binding last asked for budget. Its claim reserves
+    /// nothing once `NONEXACT_CLAIM_EPOCH_NS` has passed since then.
+    nonexact_last_ask_ns: AtomicU64,
 }
 
 const _: () = assert!(std::mem::size_of::<PaddedBacklogSlot>() == 64);
@@ -128,7 +145,9 @@ struct PaddedResidualBudget {
 ///   * the mask of exact queues that demand their reservation (#18748:
 ///     backlogged with their own tokens covering the head), used to reserve
 ///     each exact queue's aggregate guarantee rate once when bounding peer
-///     residual surplus.
+///     residual surplus; and
+///   * its claim on the residual pool for the current epoch (#19025, see
+///     `nonexact_surplus_budget`).
 ///
 /// The demand mask uses release/acquire ordering so transitions are visible
 /// across bindings without putting a locked operation in the forwarding loop.
@@ -145,6 +164,9 @@ impl SharedCoSExactBacklog {
                 .map(|_| PaddedBacklogSlot {
                     queued_bytes: AtomicU64::new(0),
                     demand_queue_mask: std::array::from_fn(|_| AtomicU64::new(0)),
+                    nonexact_claim_bytes: AtomicU64::new(0),
+                    nonexact_claim_epoch: AtomicU64::new(0),
+                    nonexact_last_ask_ns: AtomicU64::new(0),
                 })
                 .collect::<Vec<_>>()
                 .into_boxed_slice(),
@@ -209,6 +231,25 @@ impl SharedCoSExactBacklog {
             .unwrap_or(ExactDemandQueueMask::EMPTY)
     }
 
+    /// #19025 review (Codex F3): zero a binding's slot on behalf of a worker
+    /// that can no longer do it (a panic-dead worker never runs its CoS
+    /// teardown). Returns whether the slot held anything.
+    pub(in crate::afxdp) fn clear_slot(&self, binding_slot: u32) -> bool {
+        let Some(slot) = self.worker_bytes.get(binding_slot as usize) else {
+            return false;
+        };
+        let held = slot.queued_bytes.load(Ordering::Relaxed) != 0
+            || slot
+                .demand_queue_mask
+                .iter()
+                .any(|word| word.load(Ordering::Acquire) != 0);
+        self.publish(binding_slot, 0);
+        slot.nonexact_claim_bytes.store(0, Ordering::Relaxed);
+        slot.nonexact_claim_epoch.store(0, Ordering::Release);
+        slot.nonexact_last_ask_ns.store(0, Ordering::Release);
+        held
+    }
+
     #[inline]
     pub(in crate::afxdp) fn has_peer_backlog(&self, binding_slot: u32) -> bool {
         self.worker_bytes
@@ -250,6 +291,111 @@ impl SharedCoSExactBacklog {
         self.residual_budget
             .last_refill_ns
             .store(now_ns, Ordering::Release);
+    }
+
+    /// #19025: what `binding_slot` may spend of the residual pool now.
+    ///
+    /// The pool (`residual_surplus_budget`, one refill clock for the whole
+    /// interface) is the only source of non-exact credit under exact demand,
+    /// so every byte any binding sends comes out of it: the residual is
+    /// conserved however the set of sending bindings changes. To keep one
+    /// binding from losing the pool to peers that poll it more often (the
+    /// #19025 starvation: a worker busy with its exact class), every binding
+    /// that has asked within the last `NONEXACT_CLAIM_EPOCH_NS` (a binding
+    /// asks only while it has non-exact backlog,
+    /// `queue_service::nonexact_surplus_budget_under_exact_demand`) holds an
+    /// equal claim on an epoch's residual, `rate x epoch / n` with n those
+    /// bindings: its unspent claim for the current epoch, or a fresh claim
+    /// if it has not asked yet in this one. A claim ACCRUES over its epoch:
+    /// at a fraction `f` of the way through, a binding reserves its unspent
+    /// claim less the `1 - f` share of a claim not yet accrued (a binding
+    /// that has not asked yet this epoch reserves `f` of a fresh claim). A
+    /// binding may spend what the pool holds beyond every OTHER binding's
+    /// reservation, and never more than the pool. The pool refills at the
+    /// rate the reservations accrue, so a binding that asks rarely (one busy
+    /// with its own exact class) finds its accrued part in the pool whenever
+    /// it asks, however often its peers poll and spend (#19025 on #18748
+    /// cycle 3: without accrual a claim reserved only accounting, the peers
+    /// spent their claims as fast as the pool refilled, and the busy
+    /// binding's turns found less than a frame for most of each epoch). A
+    /// binding that stops asking (idle, slow, or dead) reserves nothing one
+    /// epoch after its last ask, so its part is usable by the others within
+    /// one epoch and no published flag can go stale. Claims only order who
+    /// may spend; the result never exceeds the pool.
+    pub(in crate::afxdp) fn nonexact_surplus_budget(
+        &self,
+        binding_slot: u32,
+        now_ns: u64,
+        residual_rate_bytes: u64,
+        residual_burst_bytes: u64,
+    ) -> u64 {
+        let pool = self.residual_surplus_budget(now_ns, residual_rate_bytes, residual_burst_bytes);
+        let Some(mine) = self.worker_bytes.get(binding_slot as usize) else {
+            return pool;
+        };
+        let epoch = now_ns / NONEXACT_CLAIM_EPOCH_NS + 1;
+        let epoch_residual = ((residual_rate_bytes as u128) * (NONEXACT_CLAIM_EPOCH_NS as u128)
+            / 1_000_000_000u128) as u64;
+        let is_claimant = |slot_idx: usize, slot: &PaddedBacklogSlot| {
+            if slot_idx == binding_slot as usize {
+                return false;
+            }
+            let last_ask = slot.nonexact_last_ask_ns.load(Ordering::Acquire);
+            last_ask != 0 && now_ns.saturating_sub(last_ask) <= NONEXACT_CLAIM_EPOCH_NS
+        };
+        // Claimants: this binding and every other that asked within one
+        // epoch (first pass), each with an equal fresh claim.
+        let claimants = 1 + self
+            .worker_bytes
+            .iter()
+            .enumerate()
+            .filter(|(slot_idx, slot)| is_claimant(*slot_idx, slot))
+            .count() as u64;
+        let fresh_claim = epoch_residual / claimants;
+        // The part of a claim not yet accrued this far into the epoch.
+        let unaccrued = ((fresh_claim as u128)
+            * ((NONEXACT_CLAIM_EPOCH_NS - now_ns % NONEXACT_CLAIM_EPOCH_NS) as u128)
+            / NONEXACT_CLAIM_EPOCH_NS as u128) as u64;
+        // Others' reservations (second pass): a current-epoch claim reserves
+        // its unspent part less what has not accrued yet; one that has not
+        // asked yet this epoch reserves the accrued share of a fresh claim,
+        // so whoever asks first in an epoch cannot take it.
+        let others_reserved = self
+            .worker_bytes
+            .iter()
+            .enumerate()
+            .filter(|(slot_idx, slot)| is_claimant(*slot_idx, slot))
+            .fold(0u64, |acc, (_, slot)| {
+                let unspent = if slot.nonexact_claim_epoch.load(Ordering::Acquire) == epoch {
+                    slot.nonexact_claim_bytes.load(Ordering::Relaxed)
+                } else {
+                    fresh_claim
+                };
+                acc.saturating_add(unspent.saturating_sub(unaccrued))
+            });
+        if mine.nonexact_claim_epoch.load(Ordering::Relaxed) != epoch {
+            mine.nonexact_claim_bytes
+                .store(fresh_claim, Ordering::Relaxed);
+            mine.nonexact_claim_epoch.store(epoch, Ordering::Release);
+        }
+        mine.nonexact_last_ask_ns
+            .store(now_ns.max(1), Ordering::Release);
+        let my_reserved = mine
+            .nonexact_claim_bytes
+            .load(Ordering::Relaxed)
+            .saturating_sub(unaccrued);
+        let unreserved = pool.saturating_sub(others_reserved.saturating_add(my_reserved));
+        pool.min(my_reserved.saturating_add(unreserved))
+    }
+
+    /// #19025: debit a send against `binding_slot`'s claim (the pool itself
+    /// is debited by `consume_residual_surplus_budget`).
+    pub(in crate::afxdp) fn consume_nonexact_claim(&self, binding_slot: u32, bytes: u64) {
+        if let Some(mine) = self.worker_bytes.get(binding_slot as usize) {
+            let claim = mine.nonexact_claim_bytes.load(Ordering::Relaxed);
+            mine.nonexact_claim_bytes
+                .store(claim.saturating_sub(bytes), Ordering::Relaxed);
+        }
     }
 
     pub(in crate::afxdp) fn residual_surplus_budget(
