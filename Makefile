@@ -514,10 +514,10 @@ test-race-dp:
 		$(GO) test -list "^Test.*($$alt)" ./pkg/daemon/ | grep -q '^Test' || { echo "test-race-dp: pkg/daemon -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
 	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|ConnectedDrain|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
-	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease; do \
+	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease RSSBootKeyFIFOAtThePathNeverBlocks; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/dataplane/ | grep -q '^Test' || { echo "test-race-dp: pkg/dataplane -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease|RSSBootKeyFIFOAtThePathNeverBlocks' -count=2
 	@for alt in DoesNotRaceUpdateGroups6550 DoesNotHoldMuAcrossManagerCallback6550 DoesNotRaceStopHeartbeat7257 StartHeartbeatSupersededByStopDoesNotPublish7257; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
@@ -1220,10 +1220,11 @@ test-close-keyword-lint-lib:
 	python3 -m unittest scripts/test_close_keyword_lint.py
 
 # #19072: pin, verify and record the RSS hash key on the cluster's data
-# interfaces (test/incus/rss-pin.sh). xpfd installs a new random key at every
-# start and re-applies its own on every config commit, so pin after the last
-# config change and record around each placement-sensitive cell. Pin takes
-# the cluster lock; record and verify are read-only.
+# interfaces (test/incus/rss-pin.sh). xpfd writes its own random key (one per
+# boot with the #19072 fix, one per process before it) at every start and
+# every config commit, overwriting a pin, so pin after the last config change
+# and verify after each placement-sensitive cell. Pin takes the cluster lock;
+# record and verify are read-only.
 .PHONY: cluster-rss-pin cluster-rss-verify cluster-rss-record test-rss-pin-lib
 cluster-rss-pin:
 	BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" ./test/incus/rss-pin.sh pin
@@ -1234,7 +1235,9 @@ cluster-rss-record:
 
 # Hermetically test rss-pin.sh (#19072): mocked incus and ethtool over a fake
 # netdev tree, including a driver that accepts the key write but keeps its own
-# key (only a read-back catches it) and a mutation leg.
+# key (only a read-back catches it), a required VF that fails or vanishes, the
+# post-cell verdict, the XPF_RSS_PIN wiring of cluster-deploy-and-gate through
+# to the gate (a stubbed copy of this Makefile), and a mutation leg.
 test-rss-pin-lib:
 	bash ./test/incus/rss-pin-selftest.sh </dev/null
 
@@ -2161,12 +2164,15 @@ endif
 # must not be papered over as a valid attestation.
 # #19072: the gate path pins the RSS key after the deploy (rss-pin.sh), so
 # A/B arms get the same flow-to-worker placement. XPF_RSS_PIN=0 opts out.
+# The policy is exported to the WHOLE cell, deploy and gate alike (review
+# F1): `?=` does not export, so passing it only to the deploy's env left the
+# gate's own preflight and post-cell check unarmed by default.
 .PHONY: cluster-deploy-and-gate
 CLUSTER_GATE ?= test-connectivity
 XPF_RSS_PIN ?= 1
 cluster-deploy-and-gate: $(CLUSTER_DEPLOY_PREREQS) $(CLUSTER_DEPLOY_ORDER_ONLY)
 	./test/incus/with-cluster.sh "cluster deploy + $(CLUSTER_GATE)" -- \
-		bash -c 'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" XPF_RSS_PIN="$(XPF_RSS_PIN)" $(if $(filter 1,$(XPF_DEPLOY_FAST)),,XPF_CLUSTER_SKIP_BUILD=1) $(if $(DEB_VERSION_EXPLICIT),XPF_DEPLOY_DEB_VERSION="$(DEB_VERSION)",) ./test/incus/cluster-setup.sh deploy "$(NODE)"' -- "$(CLUSTER_GATE)"
+		env XPF_RSS_PIN="$(XPF_RSS_PIN)" bash -c 'source ./test/incus/deploy-lib.sh; deploy_gate_wave "$$PWD" "$$1" "$(MAKE)" env BPFRX_CLUSTER_ENV="$(CLUSTER_ENV)" $(if $(filter 1,$(XPF_DEPLOY_FAST)),,XPF_CLUSTER_SKIP_BUILD=1) $(if $(DEB_VERSION_EXPLICIT),XPF_DEPLOY_DEB_VERSION="$(DEB_VERSION)",) ./test/incus/cluster-setup.sh deploy "$(NODE)"' -- "$(CLUSTER_GATE)"
 
 cluster-deploy: $(CLUSTER_DEPLOY_PREREQS) $(CLUSTER_DEPLOY_ORDER_ONLY)
 # prepare-deb already built (or reused) the deb, so the deb branch skips

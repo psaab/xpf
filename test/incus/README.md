@@ -14,6 +14,7 @@ this index changes; every census below keys on the paths listed here.
 | Canonical live-cluster gate | `make cluster-deploy-and-gate CLUSTER_GATE=<make-target>` under `with-cluster.sh`; gate rows are recorded through `harness-result.sh` into `test/results/ledger.d/` and compared by `ledger_compare.py` |
 | Standalone single VM | `make test-env-init`, `test-vm`, `test-ct`, `test-deploy`, `test-ssh` (drives `setup.sh`) |
 | Which single gate | The layer map and table below, then that harness's own header |
+| Is the RSS key pinned for a placement-sensitive A/B? | `test/incus/rss-pin.sh` (`make cluster-rss-pin` / `cluster-rss-verify` / `cluster-rss-record LABEL=`; header has the contract) and "RSS key pinning in gate cells" below |
 
 ## Layer map
 
@@ -318,6 +319,28 @@ Never hardcode a node: source `cluster-env.sh` (directly or via
 measurement, resolve the active node with `active_fw_detect` from
 `active-fw.sh`; it returns 1 when no candidate is primary, and callers
 must fail closed rather than fall back to a hardcoded node.
+
+## RSS key pinning in gate cells (#19072)
+
+Flow-to-worker placement is the NIC's RSS hash key, and xpfd writes its own
+random key on every start and config commit. That is one key per boot with
+the #19072 fix (`pkg/dataplane/README.md`), and one key per process before
+it.
+
+- `rss-pin.sh` pins a fixed key and stores each node's keyed data VFs as the
+  required set, then verifies them and records them. Records are redacted:
+  they never hold a node's key.
+- `cluster-deploy-and-gate` exports `XPF_RSS_PIN=1` (the default) to both the
+  deploy and the gate.
+- `rg-move-soak.sh` verifies the pin before and after the cell
+  (`rss_post_cell_verdict`).
+- Its self-test is `rss-pin-selftest.sh` (`make test-rss-pin-lib`). It covers
+  the Makefile wiring through to the gate, with stubs.
+
+The canonical rules (when to pin, what VOIDs, and what a before/after check
+cannot see) are in `docs/regression-test-matrix.md`, "RSS key and flow
+placement". The inventory counts in this README are not updated here: they
+had already drifted on master, and the census is the live count.
 
 ## Deb deploys in A/B gate cells (#18772, #18764)
 

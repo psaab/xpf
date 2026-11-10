@@ -2374,20 +2374,37 @@ compares verdicts, so the resolvable length is measured on both sides.
   travels in journal metadata (`_BOOT_ID`). An unkeyed derivation would be
   predictable, and a keyed one would need a long-lived secret at rest.
 - **Trust.** A stored file that is not a regular file owned by xpfd's user,
-  or that has group or other permissions, is ignored and replaced: a planted
-  key is a known key. The unit keeps `/run/xpf` across stops
-  (`RuntimeDirectoryPreserve=yes`, `test/incus/xpfd.service`).
+  that has group or other permissions, or that holds anything but exactly
+  one record, is ignored and replaced: a planted key is a known key. The
+  checks run on the OPENED descriptor (`O_NOFOLLOW|O_NONBLOCK`, then
+  `f.Stat()`), so the file judged is the file read, a final symlink is
+  refused, and a FIFO planted at the path cannot block the apply, which
+  runs inside `CompileConfig` before XDP attach. Hardening against a hostile
+  parent directory is a tracked residual (#19095): `/run/xpf` is root-owned
+  0750 on a correct install, so writing it is already root-equivalent. The
+  unit keeps `/run/xpf` across stops (`RuntimeDirectoryPreserve=yes`,
+  `test/incus/xpfd.service`).
 - **Fallbacks.** With no readable `boot_id`, or no writable `/run/xpf`, the
   process uses a fresh key of its own, which was the behaviour before #19072.
   It is never a fixed key.
 - **Trade-off, accepted.** Placement that an attacker infers through a side
   channel now holds until the next reboot instead of the next xpfd restart. A
   restart was never a designed rotation.
+- **Re-rolling an unlucky placement** (two elephant flows on one worker): a
+  restart no longer changes it. Delete `/run/xpf/rss-hash-key`, then restart
+  xpfd, and the next start draws a new key.
 - **Tests.** The package `TestMain` points `rssBootKeyPath` at a temporary
   directory, so no test writes `/run/xpf`.
-  `compiler_rss_boot_key_19072_test.go` pins the key as the same across
-  starts in one boot and different across boots, plus the trust and fallback
-  rules.
+  `compiler_rss_boot_key_19072_test.go` pins:
+  - the same key across starts in one boot, and a different key across
+    boots;
+  - every trust predicate: mode, owner (root only, and it fails rather than
+    skips without root), a symlink, a FIFO with and without a writer (each
+    bounded at 5 s), and exact-record format;
+  - the fallbacks.
+
+  Each predicate has a mutant that only its own cell kills (#19072
+  validation in `docs/log/19072.md`).
 
 ## Flow export ownership
 

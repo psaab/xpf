@@ -84,8 +84,11 @@ OUT="${SOAK_OUT:-/var/tmp/rg-move-soak-$(date -u +%Y%m%dT%H%M%SZ)}"
 mkdir -p "$OUT"
 echo "rg-move-soak: env=${BPFRX_CLUSTER_ENV:-} fw0=$FW0 fw1=$FW1 lan=$CLUSTER_LAN_HOST target=$IPERF_TARGET4"
 # #19072: per-stream stalls depend on flow-to-worker placement, which is the
-# RSS key xpfd randomizes per process. Record it before and after; in the gate
-# path (XPF_RSS_PIN=1) a cell that starts unpinned is VOID.
+# NIC's RSS key. xpfd writes its own random key (one per boot with the #19072
+# fix, one per process before it) on every start and config commit. Record it
+# before and after the cell. In the gate path (XPF_RSS_PIN=1) a cell that
+# starts unpinned is VOID, and one whose pin did not hold to the end turns a
+# PASS into VOID (rss_post_cell_verdict; a FAIL stays FAIL).
 XPF_RSS_RECORD="${XPF_RSS_RECORD:-$OUT/rss.txt}" rss_record pre-h11 "$FW0" "$FW1" || true
 if [[ "${XPF_RSS_PIN:-}" == "1" ]] && ! rss_verify "$FW0" "$FW1"; then
 	echo "rg-move-soak: VOID: XPF_RSS_PIN=1 but the RSS key is not pinned on every data interface (run rss-pin.sh pin after the last config change)"
@@ -102,6 +105,10 @@ python3 -u "${SCRIPT_DIR}/rg_move_soak.py" \
 	--outdir "$OUT" 2>&1 | tee "$OUT/soak.log"
 rc=${PIPESTATUS[0]}
 XPF_RSS_RECORD="${XPF_RSS_RECORD:-$OUT/rss.txt}" rss_record post-h11 "$FW0" "$FW1"
+if [[ "${XPF_RSS_PIN:-}" == "1" ]]; then
+	rss_post_cell_verdict "$rc" "$OUT/result.json" "$FW0" "$FW1"
+	rc=$?
+fi
 set -e
 echo "rg-move-soak: exit $rc (exit codes: 0 = every move PASS/COST, 1 = a FAIL, 2 = VOID); artefacts in $OUT"
 exit "$rc"

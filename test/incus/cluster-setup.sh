@@ -818,12 +818,13 @@ cmd_deploy() {
 }
 
 # deploy_rss_after <0|1|all> (#19072): the restarted xpfd has just programmed
-# a fresh per-process random RSS key, so flow-to-worker placement changed
-# with this deploy. Record the key per data interface every time. With
-# XPF_RSS_PIN=1 (the gate path), pin the fixed key (rss-pin.sh) and verify
-# it; a pin that does not hold fails the deploy, so the gate cannot measure
-# with uncontrolled placement. A later config commit (CoS apply, canonical
-# reset) re-applies xpfd's own key: pin again after it.
+# its own random RSS key (the boot's key with the #19072 fix, a new
+# per-process key on older builds), overwriting any earlier pin. Record the
+# key per data interface every time. With XPF_RSS_PIN=1 (the gate path), pin
+# the fixed key (rss-pin.sh) and verify it; a pin that does not hold fails
+# the deploy, so the gate cannot measure with uncontrolled placement. A later
+# config commit (CoS apply, canonical reset) re-applies xpfd's own key: pin
+# again after it.
 deploy_rss_after() {
 	local target="$1" idx insts=()
 	case "$target" in
