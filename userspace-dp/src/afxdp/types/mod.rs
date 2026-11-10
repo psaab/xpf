@@ -11,6 +11,8 @@ pub(super) use shared_cos_lease::{
     V8RateMode,
 
 };
+#[cfg(test)]
+pub(super) use shared_cos_lease::lease_cas_probe;
 
 // Issue 68.1: CoS shaper / queue / flow-fair / runtime types extracted
 // into types/cos.rs. Re-exported here so call sites that reach

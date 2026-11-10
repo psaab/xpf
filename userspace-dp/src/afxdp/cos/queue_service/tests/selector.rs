@@ -69,9 +69,11 @@ fn nonexact_guarantee_skips_residual_only_scheduler_map_queue() {
 }
 
 // #hb166 T-6(b): the exact-demand mask that reserves best-effort surplus
-// must count only SERVICEABLE exact guarantee queues (can ship their head
-// right now), not merely non-empty ones. A v8-starved / token-parked exact
-// class that ships zero bytes must release its reserved rate to best-effort.
+// must count only exact guarantee queues that DEMAND their reservation
+// (`cos_exact_queue_demands_reservation`: backlogged, own tokens cover the
+// head; #18748 keeps a root-short queue), not merely non-empty ones. A
+// v8-starved / token-parked exact class that ships zero bytes must release
+// its reserved rate to best-effort.
 //
 // FAIL-ON-REVERT: restoring the `!cos_queue_is_empty` predicate re-includes
 // the starved queue, flipping the `!mask.counts(1)` assertion.
@@ -97,7 +99,7 @@ fn exact_demand_mask_excludes_starved_exact_queue() {
         vec![queue(0, "iperf-a"), queue(1, "iperf-b")],
     );
     root.tokens = 100_000;
-    // Queue 0: serviceable — runnable, tokens cover the head, non-empty.
+    // Queue 0: demanding — runnable, own tokens cover the head, non-empty.
     root.queues[0].hot.runnable = true;
     root.queues[0].hot.tokens = 10_000;
     root.queues[0].hot.items.push_back(test_cos_item(1500));
@@ -109,8 +111,8 @@ fn exact_demand_mask_excludes_starved_exact_queue() {
     root.queues[1].hot.items.push_back(test_cos_item(1500));
     root.queues[1].hot.queued_bytes = 1500;
 
-    let mask = serviceable_exact_demand_mask(&root);
-    assert!(mask.counts(0), "serviceable exact queue counts as demand");
+    let mask = local_exact_demand_mask(&root);
+    assert!(mask.counts(0), "a demanding exact queue counts as demand");
     assert!(
         !mask.counts(1),
         "a token-starved (ships-zero) exact queue must NOT reserve BE surplus",
@@ -276,12 +278,7 @@ fn build_nonexact_allows_residual_surplus_when_peer_exact_budget_refills() {
     root.runnable_queues = 1;
 
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
-    shared_exact_backlog.publish_with_serviceable(
-        1,
-        1500,
-        0,
-        ExactDemandQueueMask::EMPTY.with_queue(1),
-    );
+    shared_exact_backlog.publish_demand(1, 1500, ExactDemandQueueMask::EMPTY.with_queue(1));
     let fast_interfaces = residual_and_exact_fast_interfaces(Some(shared_exact_backlog));
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);
@@ -306,12 +303,7 @@ fn build_nonexact_allows_residual_surplus_when_peer_exact_budget_refills() {
 fn build_nonexact_counts_shared_exact_queue_once_across_bindings() {
     let root = residual_and_exact_test_root(false);
     let shared_exact_backlog = Arc::new(SharedCoSExactBacklog::new(1));
-    shared_exact_backlog.publish_with_serviceable(
-        1,
-        1500,
-        0,
-        ExactDemandQueueMask::EMPTY.with_queue(1),
-    );
+    shared_exact_backlog.publish_demand(1, 1500, ExactDemandQueueMask::EMPTY.with_queue(1));
     let fast_interfaces = residual_and_exact_fast_interfaces(Some(shared_exact_backlog));
     let fast_path = fast_interfaces.get(&42).expect("test fast path").clone();
     let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, 42, root, fast_path);

@@ -1554,3 +1554,33 @@ fn device_queue_rings_for_create(
 #[cfg(test)]
 #[path = "xsk_ffi_tests.rs"]
 mod tests;
+
+/// #18748: test-only kernel side of the TX ring. It lives in a `#[cfg(test)]`
+/// child module (a descendant may reach `RingTx`'s private ring) so the
+/// #16187 unsafe ratchet, which blanks inline test-module bodies, does not
+/// count fixture `unsafe` as production surface.
+#[cfg(test)]
+mod ring_tx_kernel_side_for_test {
+    use super::{RingTx, XdpDesc};
+
+    impl RingTx {
+        /// Play the kernel side of the TX ring in hermetic tests: take every
+        /// descriptor the producer has submitted since the last call and
+        /// release their slots (advance the consumer index). The caller
+        /// completes them through [`super::DeviceQueue::push_comp_for_test`]
+        /// so the frames recycle, which multi-step drain simulations need.
+        pub(crate) fn take_submitted_for_test(&mut self, out: &mut Vec<XdpDesc>) {
+            let prod = unsafe { *self.ring.producer };
+            let mut cons = unsafe { *self.ring.consumer };
+            while cons != prod {
+                let idx = cons & self.ring.mask;
+                let slot = unsafe { (self.ring.ring as *const XdpDesc).add(idx as usize) };
+                out.push(unsafe { *slot });
+                cons = cons.wrapping_add(1);
+            }
+            unsafe {
+                *self.ring.consumer = cons;
+            }
+        }
+    }
+}
