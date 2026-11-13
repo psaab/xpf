@@ -56,6 +56,12 @@ func redirectProductionStatePaths19084(dir string) {
 	defaultSNMPBootsPath = filepath.Join(state, "snmp-engineboots")
 	defaultSNMPEngineIDPath = filepath.Join(state, "snmp-engine-id")
 	ipsecQuarantineIdentityPath9506 = filepath.Join(state, "ipsec-quarantine-identity")
+	// Codex B1/B2 on 42fed1d182, kept as defence in depth under the root
+	// view: the no-redirects capture (an ICMP fixture's inactive reconcile
+	// unlinked the host's), and event mode's security log (created or
+	// chmodded to 0600 by the syslog fixtures).
+	redirectKnobSnapshotFile = filepath.Join(state, "no-redirects-capture.json")
+	eventModeSecurityLogPath = filepath.Join(dir, "var-log-xpf", "security.log")
 	_ = api.SetDefaultTLSSelfSignedDirForTesting(filepath.Join(etc, "xpf/tls"))
 }
 
