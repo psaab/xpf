@@ -226,21 +226,29 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
     - **Residual: the parked retry is O(parked) per call** (R13 N8 on
       661d9cb6ba; split to #19064). Each pass walks the whole slot twice,
       before and after the drains, so a large parked backlog costs time on
-      every tick: R13 measured about 29 ms a tick for 16,000 parked Closes,
-      and up to about 36 ms. The trigger is many Closes whose permits stay
-      held past the 1 ms bound at once, so they park and stay parked: a
-      long-held tuple gate across thousands of tuples. Fold 3 bounded the
+      every tick. R13 measured, for 16,000 parked Closes, about 29 ms a
+      tick while their permits stayed held and about 36 ms in the one tick
+      in which they all freed and retired. The runner's load rose from 6 to
+      27 during that run, so both figures are order of magnitude only. The
+      trigger is many Closes whose permits stay held past the 1 ms bound at
+      once, so they park and stay parked: a long-held tuple gate across
+      thousands of tuples. Fold 3 bounded the
       walk with a 256-try cursor and `swap_remove`. That broke two things
       (Codex review of b62a36e29d): with stable permits, a key's newer Close
       retired before its older one, and refilled newer arrivals could
       starve an eligible old Close forever. It was REMOVED rather than
       repaired a fourth time. The restored walk is fold 2's: in order, with
       survivors kept in order. A bounded, per-key FIFO, fair retry is the
-      design item #19064. Under CHANGING permit availability the walk can
-      still skip an older blocked Close and retire a later one (the
-      pre-existing residual). A key's Closes check the same tuple permit,
-      so they reorder only if that permit frees during the walk, between
-      the older Close's check and the newer one's.
+      design item #19064. The walk preserves survivor order, but does not
+      enforce strict per-key retirement FIFO: an older Close can be skipped
+      while a later same-key Close becomes eligible, either because
+      availability changes or because their required permit sets differ
+      (the pre-existing residual). Same-key Closes need not share every
+      permit (`close_install_keys` in `afxdp/session_delta.rs`): an
+      ordinary Close also fences the reverse key derived from its own
+      captured NAT decision, so two incarnations with different translated
+      source ports fence different reverse keys, while a purge-retirement
+      Close fences only its forward key (Codex review of 05947834e1).
 
     The cost: with more blocked work than one budget, the Closes left in
     the ring, the deferred overflow suffix and the parked Closes all wait
