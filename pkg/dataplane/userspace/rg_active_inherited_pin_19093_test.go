@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"testing"
 	"time"
 
@@ -31,6 +32,10 @@ import (
 // the first-apply HA tail (refresh then publish, manager_compile.go), the
 // replay, the helper-departure reset shared by stop and crash
 // (resetAfterHelperGoneLocked), UpdateRGActive, and the pre-activation API.
+// Every operation must produce a NEW request, and the verdict is read from
+// the requests that operation produced (code review: an assertion of the form
+// "no request said active" passes vacuously when nothing was published, which
+// is exactly what a change that suppresses publication would do).
 //
 // The maps are REAL kernel arrays shaped like the shim's (Array,
 // MaxRedundancyGroups entries): a fixed array is what makes an unconfigured
@@ -59,18 +64,24 @@ func (p *rgActivePublish19093) at(i int) map[int]HAGroupStatus {
 	return out
 }
 
-func (p *rgActivePublish19093) last(t *testing.T) map[int]HAGroupStatus {
+// published runs op and returns the inventory of the LAST request op produced.
+// It fails the cell when op produced none: a verdict about what the helper was
+// told needs the helper to have been told something.
+func (p *rgActivePublish19093) published(t *testing.T, what string, op func()) map[int]HAGroupStatus {
 	t.Helper()
-	if len(p.reqs) == 0 {
-		t.Fatal("no update_ha_state reached the helper; the cell cannot judge what it was told")
+	before := len(p.reqs)
+	op()
+	if len(p.reqs) <= before {
+		t.Fatalf("%s published no update_ha_state (requests %d -> %d); the cell cannot judge what the helper was told",
+			what, before, len(p.reqs))
 	}
 	return p.at(len(p.reqs) - 1)
 }
 
-// everActive reports the index of the first request that told the helper rg
-// was active, or -1.
-func (p *rgActivePublish19093) everActive(rg int) int {
-	for i := range p.reqs {
+// activeSince reports the index of the first request at or after from that
+// told the helper rg was active, or -1.
+func (p *rgActivePublish19093) activeSince(from, rg int) int {
+	for i := from; i < len(p.reqs); i++ {
 		if p.at(i)[rg].Active {
 			return i
 		}
@@ -163,31 +174,36 @@ func helperGone19093(m *Manager) {
 }
 
 // firstApplyHA19093 runs the clustered HA tail of the first apply exactly as
-// applyCompiledSnapshot orders it: refresh from the maps, then publish.
-func firstApplyHA19093(t *testing.T, m *Manager) {
+// applyCompiledSnapshot orders it — refresh from the maps, then publish — and
+// returns the inventory that publish handed the helper.
+func firstApplyHA19093(t *testing.T, m *Manager, p *rgActivePublish19093) map[int]HAGroupStatus {
 	t.Helper()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if err := m.refreshHAStateFromMapsLocked(); err != nil {
-		t.Fatalf("refreshHAStateFromMapsLocked: %v", err)
-	}
-	if err := m.syncHAStateLocked(); err != nil {
-		// The inventory was already handed to the helper (captured);
-		// later steps of the tail are not under test here.
-		t.Logf("syncHAStateLocked tail after the publish: %v", err)
-	}
+	return p.published(t, "the first-apply HA tail", func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if err := m.refreshHAStateFromMapsLocked(); err != nil {
+			t.Fatalf("refreshHAStateFromMapsLocked: %v", err)
+		}
+		if err := m.syncHAStateLocked(); err != nil {
+			// Steps of the tail AFTER the request are not under test; the
+			// request itself is required by published().
+			t.Logf("syncHAStateLocked tail: %v", err)
+		}
+	})
 }
 
 // replayHA19093 runs the production replay (helper respawn / debt
 // convergence): refresh from the maps, then a full-inventory publish.
-func replayHA19093(t *testing.T, m *Manager) {
+func replayHA19093(t *testing.T, m *Manager, p *rgActivePublish19093) map[int]HAGroupStatus {
 	t.Helper()
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.pendingHAStateReplay = true
-	if err := m.retryPendingHAStateReplayLocked(); err != nil {
-		t.Logf("replay tail after the publish: %v", err)
-	}
+	return p.published(t, "the HA replay", func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.pendingHAStateReplay = true
+		if err := m.retryPendingHAStateReplayLocked(); err != nil {
+			t.Logf("replay tail: %v", err)
+		}
+	})
 }
 
 func rgActiveSlot19093(t *testing.T, rg *ebpf.Map, k uint32) uint8 {
@@ -201,8 +217,8 @@ func rgActiveSlot19093(t *testing.T, rg *ebpf.Map, k uint32) uint8 {
 
 // M1: the issue's shape. The previous process owned RG0-2 and left them 1; the
 // unconfigured last slot is 1 as well. The restarted node is secondary for
-// every RG. No request may tell the helper any of them is active, and the
-// inherited slots — including the unconfigured one — must be cleared.
+// every RG. The first publish must tell the helper none of them is active, and
+// the inherited slots — including the unconfigured one — must be cleared.
 //
 // RED at master: the first publish carries RG0-2 Active=true and no slot is
 // cleared.
@@ -215,11 +231,13 @@ func TestRGActiveInheritedPinNotPublished19093(t *testing.T) {
 	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pub := attachHelper19093(m, nil)
 
-	firstApplyHA19093(t, m)
+	got := firstApplyHA19093(t, m, pub)
 
-	_ = pub.last(t)
 	for _, g := range []int{0, 1, 2} {
-		if i := pub.everActive(g); i >= 0 {
+		if _, ok := got[g]; !ok {
+			t.Errorf("the first publish omitted configured RG%d", g)
+		}
+		if i := pub.activeSince(0, g); i >= 0 {
 			t.Errorf("update_ha_state #%d told the new helper RG%d is ACTIVE from a pin the "+
 				"previous process left; this process never decided it owns RG%d (#19093)", i, g, g)
 		}
@@ -235,7 +253,7 @@ func TestRGActiveInheritedPinNotPublished19093(t *testing.T) {
 // M2: an inherited 1 in a slot that is NOT configured now must not become
 // authority when that RG is configured later — even when clearing the pin is
 // impossible (the map is frozen, so every userspace write fails), so only the
-// import can refuse it.
+// import can refuse it. Both publishes must happen.
 //
 // RED at master: the later refresh imports the inherited 1.
 func TestRGActiveInheritedUnconfiguredSlotStaysInactiveWhenAdded19093(t *testing.T) {
@@ -249,17 +267,23 @@ func TestRGActiveInheritedUnconfiguredSlotStaysInactiveWhenAdded19093(t *testing
 	}
 	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pub := attachHelper19093(m, nil)
-	firstApplyHA19093(t, m)
+	firstApplyHA19093(t, m, pub)
 
 	// A later commit adds the RG whose slot the previous process left at 1.
 	m.mu.Lock()
 	m.haGroups[last] = HAGroupStatus{RGID: last}
 	m.mu.Unlock()
-	firstApplyHA19093(t, m)
+	from := len(pub.reqs)
+	got := firstApplyHA19093(t, m, pub)
 
-	if i := pub.everActive(last); i >= 0 {
-		t.Errorf("RG%d, configured after the restart, was published ACTIVE (request #%d) from "+
-			"the previous process's pin while its clear was impossible (#19093)", last, i)
+	if g, ok := got[last]; !ok {
+		t.Errorf("the publish after configuring RG%d omitted it", last)
+	} else if g.Active {
+		t.Errorf("RG%d, configured after the restart, was published ACTIVE from the previous "+
+			"process's pin while its clear was impossible (#19093)", last)
+	}
+	if i := pub.activeSince(from, last); i >= 0 {
+		t.Errorf("request #%d after configuring RG%d carried it ACTIVE (#19093)", i, last)
 	}
 }
 
@@ -277,8 +301,13 @@ func TestRGActiveOwnWriteSurvivesHelperDepartureAndReplay19093(t *testing.T) {
 	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pub := attachHelper19093(m, nil)
 
-	if err := m.UpdateRGActive(1, true); err != nil {
-		t.Logf("UpdateRGActive tail after the publish: %v", err)
+	direct := pub.published(t, "UpdateRGActive(1,true)", func() {
+		if err := m.UpdateRGActive(1, true); err != nil {
+			t.Logf("UpdateRGActive tail: %v", err)
+		}
+	})
+	if !direct[1].Active {
+		t.Fatal("fixture: UpdateRGActive(1,true)'s own publish did not carry RG1 active")
 	}
 	if v := rgActiveSlot19093(t, rg, 1); v != 1 {
 		t.Fatalf("fixture: UpdateRGActive(1,true) left rg_active[1]=%d", v)
@@ -286,13 +315,9 @@ func TestRGActiveOwnWriteSurvivesHelperDepartureAndReplay19093(t *testing.T) {
 
 	helperGone19093(m)
 	attachHelper19093(m, pub) // respawned helper
-	before := len(pub.reqs)
-	replayHA19093(t, m)
+	got := replayHA19093(t, m, pub)
 
-	if len(pub.reqs) == before {
-		t.Fatal("the replay after the helper respawn published nothing")
-	}
-	if !pub.last(t)[1].Active {
+	if !got[1].Active {
 		t.Error("the replay after a helper departure and respawn published RG1 INACTIVE although " +
 			"THIS process wrote it active: the restart barrier must not be reset with the helper")
 	}
@@ -301,48 +326,124 @@ func TestRGActiveOwnWriteSurvivesHelperDepartureAndReplay19093(t *testing.T) {
 	}
 }
 
-// M4: the publication race. A cluster event lands THIS process's true write
-// after Start published the registry and before the first apply's publish,
-// with a helper already reachable, so UpdateRGActive's own direct publish
-// ({1:true,2:false} even at master) is captured first. The full sequence must
-// carry RG1 true and must NEVER carry the inherited RG2.
-//
-// RED at master (the post-refresh publish carries RG2 inherited). Red for an
-// implementation that zeroes every slot at the first refresh (RG1 lost).
+// M4: the publication race, in two shapes.
 func TestRGActiveWriteBeforeFirstPublishIsKeptInheritedIsNot19093(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("creating a BPF map needs privilege (memlock rlimit / CAP_BPF): %v", err)
 	}
-	rg, wd := newRGActiveArrays19093(t, map[uint32]uint8{2: 1})
-	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
-	pub := attachHelper19093(m, nil)
 
-	if err := m.UpdateRGActive(1, true); err != nil {
-		t.Logf("UpdateRGActive tail after the publish: %v", err)
-	}
-	direct := len(pub.reqs)
-	firstApplyHA19093(t, m)
-	if len(pub.reqs) <= direct {
-		t.Fatalf("fixture: the first apply published nothing after the direct publish (%d requests)", len(pub.reqs))
-	}
+	// M4a: a cluster event lands THIS process's true write after Start
+	// published the registry and before the first apply's publish. With a
+	// helper reachable, UpdateRGActive's own direct publish ({1:true,2:false}
+	// even at master) comes first; the full sequence must carry RG1 true and
+	// must NEVER carry the inherited RG2. RED at master (the post-refresh
+	// publish carries RG2). Red for an implementation that zeroes every slot
+	// at the first refresh (RG1 lost).
+	t.Run("write before the first publish", func(t *testing.T) {
+		rg, wd := newRGActiveArrays19093(t, map[uint32]uint8{2: 1})
+		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
+		pub := attachHelper19093(m, nil)
 
-	if i := pub.everActive(2); i >= 0 {
-		t.Errorf("update_ha_state #%d of %d carried RG2 ACTIVE from the previous process's pin "+
-			"(#19093)", i, len(pub.reqs))
-	}
-	if !pub.last(t)[1].Active {
-		t.Error("the post-refresh publish dropped RG1, which THIS process wrote active before the " +
-			"first apply; a true first seed is legitimate when this process authorized it")
-	}
-	if v := rgActiveSlot19093(t, rg, 1); v != 1 {
-		t.Errorf("rg_active[1] = %d after the first apply; this process wrote 1", v)
-	}
+		pub.published(t, "UpdateRGActive(1,true)", func() {
+			if err := m.UpdateRGActive(1, true); err != nil {
+				t.Logf("UpdateRGActive tail: %v", err)
+			}
+		})
+		got := firstApplyHA19093(t, m, pub)
+
+		if i := pub.activeSince(0, 2); i >= 0 {
+			t.Errorf("update_ha_state #%d of %d carried RG2 ACTIVE from the previous process's pin "+
+				"(#19093)", i, len(pub.reqs))
+		}
+		if !got[1].Active {
+			t.Error("the post-refresh publish dropped RG1, which THIS process wrote active before " +
+				"the first apply; a true first seed is legitimate when this process authorized it")
+		}
+		if v := rgActiveSlot19093(t, rg, 1); v != 1 {
+			t.Errorf("rg_active[1] = %d after the first apply; this process wrote 1", v)
+		}
+	})
+
+	// M4c: a PRODUCTION refresh (import + clear) races UpdateRGActive. The
+	// writer is parked inside its m.mu+sessionMu hold, before the map write;
+	// the refresher must be seen to contend for m.mu (a failed TryLock) while
+	// the writer is parked, and only then is the writer released. The refresh
+	// can only run after the write and its bit land, so it must import RG1 as
+	// this process's ownership and must not clear the slot as inherited.
+	t.Run("production refresh racing the write", func(t *testing.T) {
+		rg, wd := newRGActiveArrays19093(t, map[uint32]uint8{2: 1})
+		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
+		attachHelper19093(m, nil)
+
+		parked := make(chan struct{})
+		release := make(chan struct{})
+		m.haRGActiveSessionHoldHook = func() {
+			close(parked)
+			<-release
+		}
+		writerDone := make(chan struct{})
+		go func() {
+			defer close(writerDone)
+			_ = m.UpdateRGActive(1, true)
+		}()
+		<-parked
+
+		contended := make(chan struct{})
+		refreshDone := make(chan error, 1)
+		go func() {
+			signalled := false
+			for !m.mu.TryLock() {
+				if !signalled {
+					close(contended)
+					signalled = true
+				}
+				runtime.Gosched()
+			}
+			if !signalled {
+				close(contended)
+			}
+			err := m.refreshHAStateFromMapsLocked()
+			m.mu.Unlock()
+			refreshDone <- err
+		}()
+		<-contended
+		select {
+		case err := <-refreshDone:
+			t.Fatalf("the refresh completed while UpdateRGActive was parked holding m.mu (err=%v): "+
+				"m.mu does not serialize the refresh with the write", err)
+		default:
+		}
+		close(release)
+		<-writerDone
+		if err := <-refreshDone; err != nil {
+			t.Fatalf("refreshHAStateFromMapsLocked: %v", err)
+		}
+
+		m.mu.Lock()
+		rg1 := m.haGroups[1].Active
+		rg2 := m.haGroups[2].Active
+		m.mu.Unlock()
+		if !rg1 {
+			t.Error("the racing refresh imported RG1 inactive after this process's write landed: " +
+				"it saw the 1 without its written bit")
+		}
+		if rg2 {
+			t.Error("the racing refresh imported the inherited RG2 as ACTIVE (#19093)")
+		}
+		if v := rgActiveSlot19093(t, rg, 1); v != 1 {
+			t.Errorf("rg_active[1] = %d after the racing refresh: this process's fresh 1 was cleared as inherited", v)
+		}
+		if v := rgActiveSlot19093(t, rg, 2); v != 0 {
+			t.Errorf("inherited rg_active[2] = %d after the racing refresh, want it cleared", v)
+		}
+	})
 }
 
-// M5: clearing an inherited slot fails (the map is frozen). Every publish must
-// still say inactive, across retries.
+// M5: clearing an inherited slot fails (the map is frozen). Each refresh must
+// still PUBLISH, and say inactive.
 //
-// RED at master.
+// RED at master. Red for an implementation that suppresses publication after
+// a failed clear.
 func TestRGActiveInheritedSlotMaskedWhenClearFails19093(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("creating a BPF map needs privilege (memlock rlimit / CAP_BPF): %v", err)
@@ -354,11 +455,12 @@ func TestRGActiveInheritedSlotMaskedWhenClearFails19093(t *testing.T) {
 	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pub := attachHelper19093(m, nil)
 
-	firstApplyHA19093(t, m)
-	firstApplyHA19093(t, m)
-	if i := pub.everActive(1); i >= 0 {
-		t.Errorf("update_ha_state #%d published RG1 ACTIVE from an inherited pin whose clear "+
-			"failed; a failed clear must change nothing the helper is told (#19093)", i)
+	for pass := 1; pass <= 2; pass++ {
+		got := firstApplyHA19093(t, m, pub)
+		if g, ok := got[1]; !ok || g.Active {
+			t.Errorf("refresh %d published RG1 %+v (present=%v): an inherited pin whose clear "+
+				"failed must be published inactive (#19093)", pass, g, ok)
+		}
 	}
 	if v := rgActiveSlot19093(t, rg, 1); v != 1 {
 		t.Fatalf("fixture: the frozen slot changed to %d; the cell needs the clear to fail", v)
@@ -380,9 +482,11 @@ func TestRGActiveAuthorityIsPerProcessNotPerHandle19093(t *testing.T) {
 
 	a := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pubA := attachHelper19093(a, nil)
-	if err := a.UpdateRGActive(1, true); err != nil {
-		t.Logf("A: UpdateRGActive tail after the publish: %v", err)
-	}
+	pubA.published(t, "A: UpdateRGActive(1,true)", func() {
+		if err := a.UpdateRGActive(1, true); err != nil {
+			t.Logf("A: UpdateRGActive tail: %v", err)
+		}
+	})
 	helperGone19093(a)
 	reopened, err := rg.Clone()
 	if err != nil {
@@ -391,8 +495,7 @@ func TestRGActiveAuthorityIsPerProcessNotPerHandle19093(t *testing.T) {
 	t.Cleanup(func() { reopened.Close() })
 	injectShimMap(t, a.bpfShim, "rg_active", reopened)
 	attachHelper19093(a, pubA)
-	firstApplyHA19093(t, a)
-	if !pubA.last(t)[1].Active {
+	if gotA := firstApplyHA19093(t, a, pubA); !gotA[1].Active {
 		t.Error("process A lost its own RG1=active across a helper stop and a re-opened pin " +
 			"handle; authority must follow the process, not the helper or the handle")
 	}
@@ -400,10 +503,8 @@ func TestRGActiveAuthorityIsPerProcessNotPerHandle19093(t *testing.T) {
 	// A dies uncleanly; process B starts over the pin A left.
 	b := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pubB := attachHelper19093(b, nil)
-	firstApplyHA19093(t, b)
-	if i := pubB.everActive(1); i >= 0 {
-		t.Errorf("a new process published RG1 ACTIVE (request #%d) from the pin a dead process "+
-			"left (#19093)", i)
+	if gotB := firstApplyHA19093(t, b, pubB); gotB[1].Active {
+		t.Error("a new process published RG1 ACTIVE from the pin a dead process left (#19093)")
 	}
 }
 
@@ -431,10 +532,9 @@ func TestRGActiveOwnershipFollowsLandedWritesOnly19093(t *testing.T) {
 					"needs the map write to fail", tc.active)
 			}
 			pub := attachHelper19093(m, nil)
-			firstApplyHA19093(t, m)
-			if i := pub.everActive(1); i >= 0 {
-				t.Errorf("RG1 was published ACTIVE (request #%d) from the inherited pin after this "+
-					"process's own %s FAILED; only a landed write is ownership (#19093)", i, tc.name)
+			if got := firstApplyHA19093(t, m, pub); got[1].Active {
+				t.Errorf("RG1 was published ACTIVE from the inherited pin after this process's own "+
+					"%s FAILED; only a landed write is ownership (#19093)", tc.name)
 			}
 		})
 	}
@@ -455,8 +555,7 @@ func TestRGActiveOwnershipFollowsLandedWritesOnly19093(t *testing.T) {
 			t.Fatalf("fixture: the map write did not land (rg_active[1]=%d)", v)
 		}
 		pub.failNow = false
-		replayHA19093(t, m)
-		if !pub.last(t)[1].Active {
+		if got := replayHA19093(t, m, pub); !got[1].Active {
 			t.Error("a landed rg_active=1 whose helper publish failed was not republished on the " +
 				"replay: the write is this process's ownership even though the call returned an error")
 		}
@@ -473,8 +572,7 @@ func TestRGActiveOwnershipFollowsLandedWritesOnly19093(t *testing.T) {
 				t.Logf("UpdateRGActive(1,%v) tail: %v", v, err)
 			}
 		}
-		replayHA19093(t, m)
-		if pub.last(t)[1].Active {
+		if got := replayHA19093(t, m, pub); got[1].Active {
 			t.Error("the replay published RG1 active after this process's last landed write was false")
 		}
 		if v := rgActiveSlot19093(t, rg, 1); v != 0 {
@@ -499,26 +597,31 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		rg, wd := newRGActiveArrays19093(t, map[uint32]uint8{1: 1})
 		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 		pub := attachHelper19093(m, nil)
-		firstApplyHA19093(t, m)
+		firstApplyHA19093(t, m, pub)
 
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
-		if err := m.PublishTransferPreActivation(); err != nil {
-			t.Logf("pre-activation publish tail: %v", err)
-		}
-		if !pub.last(t)[1].Active {
+		opened := pub.published(t, "PublishTransferPreActivation", func() {
+			if err := m.PublishTransferPreActivation(); err != nil {
+				t.Logf("pre-activation publish tail: %v", err)
+			}
+		})
+		if !opened[1].Active {
 			t.Fatal("the pre-activation did not open RG1 for the transfer; the overlay must keep working over an inherited pin")
 		}
-		changed, err := m.EndTransferPreActivation([]int{1})
-		if err != nil {
-			t.Logf("release publish tail: %v", err)
-		}
+		var changed bool
+		released := pub.published(t, "EndTransferPreActivation (a reverted transfer must republish)", func() {
+			var err error
+			changed, err = m.EndTransferPreActivation([]int{1})
+			if err != nil {
+				t.Logf("release publish tail: %v", err)
+			}
+		})
 		if !changed {
 			t.Error("releasing the pre-activation reported no change: BASE still says RG1 is active, " +
 				"which only the previous process's pin could have made true (#19093)")
 		}
-		if pub.last(t)[1].Active {
-			t.Error("after the abandoned transfer was released, the helper's last inventory still " +
-				"has RG1 ACTIVE — it was never told to stop (#19093)")
+		if released[1].Active {
+			t.Error("the publish after the abandoned transfer was released still has RG1 ACTIVE (#19093)")
 		}
 	})
 
@@ -527,7 +630,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		rg, wd := newRGActiveArrays19093(t, map[uint32]uint8{1: 1})
 		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 		pub := attachHelper19093(m, nil)
-		firstApplyHA19093(t, m)
+		firstApplyHA19093(t, m, pub)
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
 		if err := m.UpdateRGActive(1, true); err != nil {
 			t.Logf("promotion tail: %v", err)
@@ -535,8 +638,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		if got := m.TransferPreActiveRGs(); len(got) != 0 {
 			t.Errorf("the promotion did not supersede the pre-activation: still pre-active %v", got)
 		}
-		replayHA19093(t, m)
-		if !pub.last(t)[1].Active {
+		if got := replayHA19093(t, m, pub); !got[1].Active {
 			t.Error("after the real promotion landed, the replay published RG1 inactive")
 		}
 	})
@@ -552,8 +654,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 		pub := attachHelper19093(m, nil)
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(-time.Second))
-		firstApplyHA19093(t, m)
-		if pub.last(t)[1].Active {
+		if got := firstApplyHA19093(t, m, pub); got[1].Active {
 			t.Error("with the pre-activation lapsed, the publish showed RG1 ACTIVE: BASE came from " +
 				"the previous process's pin (#19093)")
 		}
