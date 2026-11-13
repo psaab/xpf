@@ -79,17 +79,20 @@ func baseInputs19050(t *testing.T, d *Daemon) fastInstallInputs19050 {
 		epoch:    d.bumpDirectVIPEpoch19050(1),
 		cfg:      d.store.ActiveConfig(),
 		writeGen: d.frr.UnconditionalWriteGeneration(),
+		owners:   newOwnershipRecorder19050(d.cluster),
 	}
-	in.mastership = d.contributingMastership19050(in.cfg, 1)
+	in.owners.IsLocalPrimary(1)
+	d.assembleFRRConfigForActiveConfigOwned(in.cfg, nil, in.owners) // the render records its reads
 	if !d.fastInstallPrecheck19050(in) {
-		t.Fatalf("premise: the unperturbed pre-check must pass (mastership=%v)", in.mastership)
+		t.Fatalf("premise: the unperturbed pre-check must pass (reads=%v)", in.owners.reads)
 	}
 	return in
 }
 
-// baseABAInputs19050 is baseInputs19050 on the two-data-RG fixture: RG1
-// primary (the trigger), RG2 secondary and CONTRIBUTING (it owns reth1, whose
-// static the render reads), RG0 primary and not contributing.
+// baseABAInputs19050 is baseInputs19050 on the multi-RG fixture: RG1 primary
+// (the trigger), RG2 secondary and read by the render (it owns reth1), RG0
+// primary and read by the render (globalActive), RG3 owning nothing and so
+// never read.
 func baseABAInputs19050(t *testing.T) (*Daemon, *cluster.Manager, fastInstallInputs19050) {
 	t.Helper()
 	d, _, cm := newABADaemon19050(t)
@@ -99,13 +102,20 @@ func baseABAInputs19050(t *testing.T) (*Daemon, *cluster.Manager, fastInstallInp
 		epoch:    d.bumpDirectVIPEpoch19050(1),
 		cfg:      d.store.ActiveConfig(),
 		writeGen: d.frr.UnconditionalWriteGeneration(),
+		owners:   newOwnershipRecorder19050(cm),
 	}
-	in.mastership = d.contributingMastership19050(in.cfg, 1)
-	if _, ok := in.mastership[2]; !ok {
-		t.Fatalf("premise: RG2 must be a contributing RG, snapshot=%v", in.mastership)
+	in.owners.IsLocalPrimary(1)
+	d.assembleFRRConfigForActiveConfigOwned(in.cfg, nil, in.owners)
+	for _, rg := range []int{0, 1, 2} {
+		if _, ok := in.owners.reads[rg]; !ok {
+			t.Fatalf("premise: the render must read RG%d, reads=%v", rg, in.owners.reads)
+		}
+	}
+	if _, ok := in.owners.reads[3]; ok {
+		t.Fatalf("premise: the render must not read RG3, which owns nothing, reads=%v", in.owners.reads)
 	}
 	if !d.fastInstallPrecheck19050(in) {
-		t.Fatalf("premise: the unperturbed pre-check must pass (mastership=%v)", in.mastership)
+		t.Fatalf("premise: the unperturbed pre-check must pass (reads=%v)", in.owners.reads)
 	}
 	return d, cm, in
 }
@@ -136,7 +146,8 @@ func TestFastInstallPrecheckTerms19050(t *testing.T) {
 		d, _ := newFastDaemon19050(t)
 		in := baseInputs19050(t, d)
 		d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
-		in.mastership = d.contributingMastership19050(in.cfg, 1) // the snapshot agrees; only the primary term catches it
+		in.owners = newOwnershipRecorder19050(d.cluster)
+		in.owners.IsLocalPrimary(1) // the recorded reads agree; only the primary term catches it
 		if d.fastInstallPrecheck19050(in) {
 			t.Fatal("pre-check passed for an RG this node is not primary for")
 		}
@@ -184,11 +195,26 @@ func TestFastInstallPrecheckTerms19050(t *testing.T) {
 			t.Fatal("pre-check passed after another contributing RG moved and moved back (ABA)")
 		}
 	})
-	t.Run("non-contributing-rg-moves", func(t *testing.T) { // scope: RG0 owns no RETH
+	t.Run("rg0-mastership", func(t *testing.T) { // Codex on 11e4c6f47e: RG0 reaches statics via IS-IS
 		d, cm, in := baseABAInputs19050(t)
 		cm.SetGroupStateForTesting(0, cluster.StateSecondary)
+		if d.fastInstallPrecheck19050(in) {
+			t.Fatal("pre-check passed after RG0, which the render read, moved")
+		}
+	})
+	t.Run("rg0-mastership-aba", func(t *testing.T) {
+		d, cm, in := baseABAInputs19050(t)
+		cm.SetGroupStateForTesting(0, cluster.StateSecondary)
+		cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+		if d.fastInstallPrecheck19050(in) {
+			t.Fatal("pre-check passed after RG0 moved and moved back (ABA)")
+		}
+	})
+	t.Run("unread-rg-moves", func(t *testing.T) { // scope: RG3 owns nothing; the render never read it
+		d, cm, in := baseABAInputs19050(t)
+		cm.SetGroupStateForTesting(3, cluster.StateSecondary)
 		if !d.fastInstallPrecheck19050(in) {
-			t.Fatal("pre-check refused because RG0, which no static line depends on, moved")
+			t.Fatal("pre-check refused because RG3, which the render never read, moved")
 		}
 	})
 }
@@ -343,8 +369,9 @@ func TestDirectVIPAddPrimitiveCensus19050(t *testing.T) {
 	}
 }
 
-// abaClusterSet19050 is a two-data-RG cluster: reth0 (RG1, the WAN default)
-// and reth1 (RG2, a LAN static). reth1 carries a bandwidth so the render
+// abaClusterSet19050 is a multi-RG cluster: reth0 (RG1, the WAN default),
+// reth1 (RG2, a LAN static), and RG3, which owns nothing. reth1 carries a
+// bandwidth so the render
 // consults frrTunnelNameMapFn, which the ABA cell uses as a hook inside the
 // render, AFTER the render has read RG ownership.
 const abaClusterSet19050 = "" +
@@ -357,6 +384,8 @@ const abaClusterSet19050 = "" +
 	"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
 	"set chassis cluster redundancy-group 2 node 0 priority 200\n" +
 	"set chassis cluster redundancy-group 2 node 1 priority 100\n" +
+	"set chassis cluster redundancy-group 3 node 0 priority 200\n" +
+	"set chassis cluster redundancy-group 3 node 1 priority 100\n" +
 	"set chassis cluster authentication-key test-cluster-psk-6611\n" +
 	"set chassis cluster control-interface em0\n" +
 	"set chassis cluster peer-address 10.99.0.2\n" +
@@ -397,6 +426,7 @@ func newABADaemon19050(t *testing.T) (*Daemon, *frr.RecordingExecutor, *cluster.
 	cm.SetGroupStateForTesting(0, cluster.StatePrimary)
 	cm.SetGroupStateForTesting(1, cluster.StateSecondary)
 	cm.SetGroupStateForTesting(2, cluster.StateSecondary)
+	cm.SetGroupStateForTesting(3, cluster.StatePrimary)
 	if err := d.frr.ApplyFullIfCurrent(d.assembleFRRConfig(cfg, nil), func() bool { return true }); err != nil {
 		t.Fatalf("settled standby apply: %v", err)
 	}
@@ -488,15 +518,15 @@ func TestFastInstallRefusesAnotherRGsABA19050(t *testing.T) {
 
 // TestFastInstallNotFencedByNonContributingRG19050: the positive control for
 // the cell above, and the scope claim. With no ABA the install reaches FRR
-// and installs A's line only. RG0 owns no RETH and the static render never
-// reads it (staticHopActive), so RG0 moving during the render must not cost
-// a takeover its fast install.
+// and installs A's line only. RG3 owns nothing and the render never reads its
+// ownership, so RG3 moving during the render must not cost A its fast install.
+// (RG0 IS read, through globalActive: see the IS-IS cell below.)
 func TestFastInstallNotFencedByNonContributingRG19050(t *testing.T) {
 	d, rec, cm := newABADaemon19050(t)
 	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
 	epoch := d.bumpDirectVIPEpoch19050(1)
 	hookRender19050(t, func() {
-		cm.SetGroupStateForTesting(0, cluster.StateSecondary) // a net move, not an ABA
+		cm.SetGroupStateForTesting(3, cluster.StateSecondary) // a net move, not an ABA
 	})
 	got := runFastInstallAfter19050(t, d, 1, epoch, func() {})
 	if got != frr.FastInstalled || !fastInstalled19050(rec, abaRG1Line19050) {
@@ -538,5 +568,250 @@ func TestFastInstallNeverCallsTransferReadiness19050(t *testing.T) {
 	}
 	if n := calls.Load(); n != 0 {
 		t.Fatalf("the fast install invoked the transfer-readiness callback %d times", n)
+	}
+}
+
+// isisRG0Config19050 is the review's lenient shape (Codex on 11e4c6f47e): a
+// non-RETH IS-IS interface (ge-0/0/3, following RG0 through globalActive) and
+// a preference-50 static via the RG1 RETH gateway. Strict commit rejects a
+// static between Junos IS-IS 15/18 and FRR's fixed 115 (#17735); a lenient
+// load keeps it, and the render withholds the static exactly while IS-IS has
+// an interface, that is while RG0 is primary here. ge-0/0/3 carries a
+// bandwidth so the render consults frrTunnelNameMapFn (the hook).
+const isisRG0Config19050 = `chassis {
+    cluster {
+        cluster-id 1;
+        node 0;
+        reth-count 1;
+        redundancy-group 0 {
+            node 0 priority 200;
+            node 1 priority 100;
+        }
+        redundancy-group 1 {
+            node 0 priority 200;
+            node 1 priority 100;
+        }
+        authentication-key test-cluster-psk-6611;
+        control-interface em0;
+        peer-address 10.99.0.2;
+    }
+}
+interfaces {
+    em0 {
+        unit 0 {
+            family inet {
+                address 10.99.0.1/24;
+            }
+        }
+    }
+    ge-0/0/2 {
+        gigether-options {
+            redundant-parent reth0;
+        }
+    }
+    ge-0/0/3 {
+        bandwidth 1g;
+        unit 0 {
+            family inet {
+                address 192.0.2.1/24;
+            }
+        }
+    }
+    reth0 {
+        redundant-ether-options {
+            redundancy-group 1;
+        }
+        unit 0 {
+            family inet {
+                address 172.16.50.8/24;
+            }
+        }
+    }
+}
+routing-options {
+    static {
+        route 198.51.100.0/24 {
+            next-hop 172.16.50.1;
+            preference 50;
+        }
+    }
+}
+protocols {
+    isis {
+        net 49.0001.0100.0000.0001.00;
+        interface ge-0/0/3;
+    }
+}
+`
+
+const isisGuardedLine19050 = "ip route 198.51.100.0/24 172.16.50.1 50"
+
+// TestFastInstallFencesRG0ThroughISISDistanceGuard19050 is the review's
+// interleaving (Codex on 11e4c6f47e). RG1 promotes and triggers with RG0
+// secondary, so its fast render keeps the preference-50 static (IS-IS has no
+// interface). During that render RG0 promotes and RG0's reload completes: IS-IS
+// gains ge-0/0/3 and the reload withholds the static. RG0 owns no RETH, so a
+// fence of RETH owners passes, and the fast install re-installs the static the
+// authoritative render withheld, with nothing left to remove it.
+func TestFastInstallFencesRG0ThroughISISDistanceGuard19050(t *testing.T) {
+	d, rec := newFastDaemon19050(t)
+	d.store = newConfigStore(t, filepath.Join(t.TempDir(), "xpf.conf"))
+	if _, err := d.store.SyncApply(isisRG0Config19050, nil); err != nil {
+		t.Fatalf("lenient load: %v", err)
+	}
+	cfg := d.store.ActiveConfig()
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(cfg.Chassis.Cluster)
+	for drained := true; drained; {
+		select {
+		case <-cm.Events():
+		default:
+			drained = false
+		}
+	}
+	d.cluster = cm
+	cm.SetGroupStateForTesting(0, cluster.StateSecondary)
+	cm.SetGroupStateForTesting(1, cluster.StateSecondary)
+	if err := d.frr.ApplyFullIfCurrent(d.assembleFRRConfig(cfg, nil), func() bool { return true }); err != nil {
+		t.Fatalf("settled apply: %v", err)
+	}
+	// Positive control on the render: with RG0 primary the guard withholds the
+	// static, with RG0 secondary it renders.
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+	if lines := strings.Join(d.frr.RenderStaticLines(d.assembleFRRConfig(cfg, nil)), "|"); strings.Contains(lines, isisGuardedLine19050) {
+		t.Fatalf("premise: with RG0 primary the IS-IS guard must withhold %q, got %q", isisGuardedLine19050, lines)
+	}
+	cm.SetGroupStateForTesting(0, cluster.StateSecondary)
+	if lines := strings.Join(d.frr.RenderStaticLines(d.assembleFRRConfig(cfg, nil)), "|"); !strings.Contains(lines, isisGuardedLine19050) {
+		t.Fatalf("premise: with RG0 secondary the static must render, got %q", lines)
+	}
+	epoch := d.bumpDirectVIPEpoch19050(1)
+	var renderSawRG0Secondary bool
+	fired := hookRender19050(t, func() {
+		renderSawRG0Secondary = !cm.IsLocalPrimary(0)
+		cm.SetGroupStateForTesting(0, cluster.StatePrimary) // RG0 promotes
+		// ... and RG0's HA reload completes, withholding the static.
+		if err := d.frr.ApplyFullIfCurrent(d.assembleFRRConfig(cfg, nil), func() bool { return true }); err != nil {
+			t.Errorf("RG0's reload: %v", err)
+		}
+	})
+	got := d.frrFastInstall19050(1, epoch)
+	if !fired.Load() || !renderSawRG0Secondary {
+		t.Fatalf("premise: the render must run the hook (%v) with RG0 secondary (%v)", fired.Load(), renderSawRG0Secondary)
+	}
+	if fastInstalled19050(rec, "ip route 198.51.100.0/24") {
+		t.Fatalf("outcome %v: the static RG0's authoritative render withholds was fast-installed: %q", got, rec.FastInstalls)
+	}
+}
+
+// TestMastershipGenerationKnown19050 pins the cluster property the recorder's
+// LocalGroupPrimary relies on: a known group's mastership generation is never
+// 0 and an unknown group's always is, so (primary, gen != 0) is exactly
+// cluster.LocalGroupPrimary's (primary, known), read under one lock.
+func TestMastershipGenerationKnown19050(t *testing.T) {
+	d, _, cm := newABADaemon19050(t)
+	_ = d
+	for _, rg := range []int{0, 1, 2, 3, 7} {
+		primary, gen := cm.LocalMastershipSnapshot(rg)
+		p2, known := cm.LocalGroupPrimary(rg)
+		if (gen != 0) != known || primary != p2 {
+			t.Errorf("RG%d: snapshot (primary=%v gen=%d) disagrees with LocalGroupPrimary (primary=%v known=%v)", rg, primary, gen, p2, known)
+		}
+	}
+	if _, known := cm.LocalGroupPrimary(7); known {
+		t.Fatal("premise: RG7 must be unknown")
+	}
+}
+
+// TestFRRRenderOwnershipReadsCensus19050: the fast install's fence is the set
+// of ownership reads recorded during its render, so the render must read
+// cluster ownership ONLY through frrHAOwnership. Inside the render body
+// (assembleFRRConfigOwned), newFRRHADemotionStateFrom and every
+// *frrHADemotionState method, nothing may touch d.cluster or call an ownership
+// accessor on anything but the frrHAOwnership parameter.
+func TestFRRRenderOwnershipReadsCensus19050(t *testing.T) {
+	accessors := map[string]bool{
+		"IsLocalPrimary": true, "LocalGroupPrimary": true, "IsLocalPrimaryAny": true,
+		"GroupState": true, "GroupStates": true, "LocalMastershipSnapshot": true,
+		"IsPeerPrimary": true, "LocalPriorities": true,
+	}
+	checked := map[string]bool{}
+	for _, f := range []string{"daemon_ipmon.go", "daemon_frr_rg_shutdown_11415.go"} {
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			inScope := fn.Name.Name == "assembleFRRConfigOwned" || fn.Name.Name == "newFRRHADemotionStateFrom"
+			if fn.Recv != nil && len(fn.Recv.List) == 1 {
+				if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
+					if id, ok := star.X.(*ast.Ident); ok && id.Name == "frrHADemotionState" {
+						inScope = true
+					}
+				}
+			}
+			if !inScope {
+				continue
+			}
+			checked[fn.Name.Name] = true
+			nilChecks := map[*ast.SelectorExpr]bool{} // `d.cluster != nil` reads no ownership
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				if be, ok := n.(*ast.BinaryExpr); ok && (be.Op == token.EQL || be.Op == token.NEQ) {
+					for _, pair := range [][2]ast.Expr{{be.X, be.Y}, {be.Y, be.X}} {
+						if id, ok := pair[1].(*ast.Ident); ok && id.Name == "nil" {
+							if sel, ok := pair[0].(*ast.SelectorExpr); ok {
+								nilChecks[sel] = true
+							}
+						}
+					}
+				}
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				if sel.Sel.Name == "cluster" && !nilChecks[sel] {
+					t.Errorf("%s: %s touches .cluster; the render must read ownership only through frrHAOwnership (#19050)", fset.Position(sel.Pos()), fn.Name.Name)
+				}
+				if accessors[sel.Sel.Name] {
+					if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "own" {
+						t.Errorf("%s: %s calls %s outside frrHAOwnership (#19050)", fset.Position(sel.Pos()), fn.Name.Name, sel.Sel.Name)
+					}
+				}
+				return true
+			})
+		}
+	}
+	for _, name := range []string{"assembleFRRConfigOwned", "newFRRHADemotionStateFrom", "staticHopActive", "filterISIS"} {
+		if !checked[name] {
+			t.Errorf("census scope lost %s; the census rotted", name)
+		}
+	}
+}
+
+// TestOwnershipRecorderFirstReadWins19050: an RG read twice at different
+// states (it moved between the reads, so one render saw two ownerships) must
+// fail the fence even when the second read matches the present. Recording the
+// LAST read would pass it. An end-to-end render cannot stage a flip between
+// two reads of one RG, so the recorder's rule is pinned here.
+func TestOwnershipRecorderFirstReadWins19050(t *testing.T) {
+	_, _, cm := newABADaemon19050(t)
+	r := newOwnershipRecorder19050(cm)
+	r.IsLocalPrimary(2) // secondary
+	cm.SetGroupStateForTesting(2, cluster.StatePrimary)
+	cm.SetGroupStateForTesting(2, cluster.StateSecondary)
+	r.IsLocalPrimary(2) // secondary again, at a newer generation
+	if r.current() {
+		t.Fatal("an RG read at two generations passed the fence")
+	}
+	fresh := newOwnershipRecorder19050(cm)
+	fresh.IsLocalPrimary(2)
+	if !fresh.current() {
+		t.Fatal("premise: an unmoved RG must pass the fence")
 	}
 }

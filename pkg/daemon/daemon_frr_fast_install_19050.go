@@ -3,9 +3,9 @@ package daemon
 import (
 	"context"
 	"log/slog"
-	"maps"
 	"time"
 
+	"github.com/psaab/xpf/pkg/cluster"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/frr"
 )
@@ -23,9 +23,10 @@ import (
 // The fast path changes WHEN, never WHAT: every line it installs is a line the
 // next HA render contains verbatim, because the pre-check (under the FRR
 // manager's reloadMu) requires every input of that render to be unchanged:
-// the RG's ownership epoch, the cluster mastership generation of every RG the
-// static render reads, the active config, the FRR unconditional write
-// generation, and no factory reset in progress.
+// the RG's ownership epoch, the cluster mastership generation of every RG
+// whose ownership the render READ (recorded during the render itself), the
+// active config, the FRR unconditional write generation, and no factory reset
+// in progress.
 
 // fastRenderSemTimeout19050 bounds the wait for applySem around the render. A
 // commit holding applySem longer means the fast path simply skips: the
@@ -66,60 +67,88 @@ func (d *Daemon) triggerFRRFastInstall19050(rgID int, epoch uint64) {
 }
 
 // rgMastership19050 is one RG's local ownership and its cluster mastership
-// generation (cluster.Manager.LocalMastershipSnapshot). The generation is
-// monotonic and moves, under the cluster lock, on EVERY local primary edge
-// (setLocalRGStateLocked), and a group created or deleted changes it too
-// (a fresh generation, or 0 for an unknown RG). So two equal snapshots of an
-// RG prove its IsLocalPrimary answer did not change in between, which
-// comparing the answers alone cannot: an RG that went secondary -> primary ->
-// secondary reads the same at both ends (review Codex P1-1, the ABA).
+// generation (cluster.Manager.LocalMastershipSnapshot, one read lock, no
+// callback). The generation is monotonic and moves, under the cluster lock,
+// on EVERY local primary edge (setLocalRGStateLocked); a group created gets a
+// fresh non-zero one, and an unknown group reads 0. So an RG whose generation
+// is equal at two instants did not change ownership in between, which
+// comparing the answers alone cannot show: an RG that went secondary ->
+// primary -> secondary reads the same at both ends (review Codex P1-1, the
+// ABA).
 type rgMastership19050 struct {
 	primary bool
 	gen     uint64
 }
 
-// contributingMastership19050 snapshots the mastership of every RG whose
-// ownership the static render reads, plus the trigger RG. The static render
-// reads ownership only through newFRRHADemotionState, which keys
-// IsLocalPrimary by cfg.RethRGOwners(); RG0 and IsLocalPrimaryAny never demote
-// a static hop (staticHopActive), so an RG that owns no RETH cannot change a
-// static line and is not fenced: a peer-loss takeover that promotes RG0 beside
-// the data RG must not cost the data RG its fast install.
+// ownershipRecorder19050 serves the fast render's cluster-ownership reads
+// (frrHAOwnership) and records, per RG, the FIRST answer with its generation.
+// The pre-check then requires every recorded RG to be unchanged, so the fence
+// is exactly the render's own dependency set: an RG the render never read
+// cannot change a line, and one it did read, directly or not, is fenced. The
+// first version listed the RGs it judged able to change a static line (RETH
+// owners) and missed RG0, which reaches statics through the IS-IS distance
+// guard (globalActive -> filterISIS -> renderStaticRouteWithISISDistanceGuard,
+// review Codex on 11e4c6f47e).
 //
-// It takes the cluster read lock per RG and NOTHING else: no GroupStates(),
-// whose transfer-readiness callback can import routes and query FRR, and no
-// other I/O (review Codex P2-4). The pre-check runs it under the FRR
-// manager's reloadMu. Per-RG reads suffice without one coherent cut: each
-// RG's generation is monotonic, so equal values at the capture and at the
-// pre-check prove that RG constant over the whole render between them.
-func (d *Daemon) contributingMastership19050(cfg *config.Config, rgID int) map[int]rgMastership19050 {
-	out := map[int]rgMastership19050{}
-	if d.cluster == nil {
-		return out
+// Recording the FIRST read is enough when an RG is read more than once: if
+// any later read saw another state, the RG changed after the first read, so
+// its generation now differs from the recorded one. The "any RG primary" read
+// (the RG0-unknown fallback) needs no record of its own: the capture records
+// the trigger RG, and the pre-check requires it primary at that same
+// generation, so it was primary throughout and "any" was true throughout.
+//
+// Every method uses only callback-free cluster reads: never GroupStates(),
+// whose transfer-readiness callback can import routes and query FRR, and
+// which would run under reloadMu at the pre-check (review Codex P2-4). One
+// goroutine renders and then runs the pre-check, so it needs no lock.
+type ownershipRecorder19050 struct {
+	c     *cluster.Manager
+	reads map[int]rgMastership19050
+}
+
+func newOwnershipRecorder19050(c *cluster.Manager) *ownershipRecorder19050 {
+	return &ownershipRecorder19050{c: c, reads: map[int]rgMastership19050{}}
+}
+
+func (r *ownershipRecorder19050) read(rgID int) rgMastership19050 {
+	primary, gen := r.c.LocalMastershipSnapshot(rgID)
+	m := rgMastership19050{primary: primary, gen: gen}
+	if _, seen := r.reads[rgID]; !seen {
+		r.reads[rgID] = m
 	}
-	add := func(rg int) {
-		if _, ok := out[rg]; ok {
-			return
+	return m
+}
+
+func (r *ownershipRecorder19050) IsLocalPrimary(rgID int) bool { return r.read(rgID).primary }
+
+// LocalGroupPrimary answers known from the generation: a known group's is
+// never 0 and an unknown group's always is (TestMastershipGenerationKnown19050).
+func (r *ownershipRecorder19050) LocalGroupPrimary(rgID int) (bool, bool) {
+	m := r.read(rgID)
+	return m.primary, m.gen != 0
+}
+
+// IsLocalPrimaryAny is fenced by the trigger RG's record (see the type).
+func (r *ownershipRecorder19050) IsLocalPrimaryAny() bool { return r.c.IsLocalPrimaryAny() }
+
+// current reports whether every ownership answer the render read still holds.
+func (r *ownershipRecorder19050) current() bool {
+	for rgID, m := range r.reads {
+		primary, gen := r.c.LocalMastershipSnapshot(rgID)
+		if (rgMastership19050{primary: primary, gen: gen}) != m {
+			return false
 		}
-		primary, gen := d.cluster.LocalMastershipSnapshot(rg)
-		out[rg] = rgMastership19050{primary: primary, gen: gen}
 	}
-	add(rgID)
-	if cfg != nil {
-		for _, rg := range cfg.RethRGOwners() {
-			add(rg)
-		}
-	}
-	return out
+	return true
 }
 
 // fastInstallInputs19050 is every input of the render the fast set came from.
 type fastInstallInputs19050 struct {
-	rgID       int
-	epoch      uint64
-	cfg        *config.Config
-	writeGen   uint64
-	mastership map[int]rgMastership19050
+	rgID     int
+	epoch    uint64
+	cfg      *config.Config
+	writeGen uint64
+	owners   *ownershipRecorder19050
 }
 
 // fastInstallPrecheck19050 runs under the FRR manager's reloadMu, right
@@ -139,11 +168,13 @@ func (d *Daemon) fastInstallPrecheck19050(in fastInstallInputs19050) bool {
 	if d.frr == nil || d.frr.UnconditionalWriteGeneration() != in.writeGen { // C1 belt: a Clear or commit write
 		return false
 	}
-	now := d.contributingMastership19050(in.cfg, in.rgID)
-	if !now[in.rgID].primary { // the render's own predicate (R4 B3)
+	if d.cluster == nil || in.owners == nil {
 		return false
 	}
-	return maps.Equal(now, in.mastership) // no contributing RG moved, not even and back (Codex P1-1)
+	if primary, _ := d.cluster.LocalMastershipSnapshot(in.rgID); !primary { // the render's own predicate (R4 B3)
+		return false
+	}
+	return in.owners.current() // no RG the render read moved, not even and back (Codex P1-1)
 }
 
 // frrFastInstall19050 renders and fast-installs; it returns the outcome
@@ -158,8 +189,8 @@ func (d *Daemon) frrFastInstall19050(rgID int, epoch uint64) frr.FastInstallOutc
 		return frr.FastSkipped
 	}
 	in.writeGen = d.frr.UnconditionalWriteGeneration()
-	in.mastership = d.contributingMastership19050(in.cfg, rgID)
-	if !in.mastership[rgID].primary {
+	in.owners = newOwnershipRecorder19050(d.cluster)
+	if !in.owners.IsLocalPrimary(rgID) { // records the trigger RG's generation
 		return frr.FastSkipped
 	}
 	d.fastInstallTestHook19050("captured")
@@ -171,7 +202,7 @@ func (d *Daemon) frrFastInstall19050(rgID int, epoch uint64) frr.FastInstallOutc
 		slog.Debug("frr fast install skipped: applySem busy (#19050)", "rg", rgID, "err", err)
 		return frr.FastSkipped
 	}
-	fc := d.assembleFRRConfigForActiveConfig(in.cfg, d.commitOverlayForConfig(in.cfg))
+	fc := d.assembleFRRConfigForActiveConfigOwned(in.cfg, d.commitOverlayForConfig(in.cfg), in.owners)
 	d.applySem.Release(1)
 	want := d.frr.RenderStaticLines(fc)
 	d.fastInstallTestHook19050("rendered")

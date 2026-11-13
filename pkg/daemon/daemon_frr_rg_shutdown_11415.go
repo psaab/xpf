@@ -20,8 +20,30 @@ type frrHADemotionState struct {
 	peerIGPConfig  *config.Config
 }
 
+// frrHAOwnership is EVERY cluster-ownership read the FRR render makes. The
+// render reads ownership only through newFRRHADemotionStateFrom, and only
+// through this interface, so a recorder of it sees the render's complete
+// ownership dependency set: the #19050 fast install fences exactly the reads
+// recorded during its own render, never a separately maintained list of the
+// RGs a static line "can" depend on (two such lists missed a dependency in
+// review: the ABA, then RG0 through the IS-IS distance guard).
+// TestFRRRenderOwnershipReadsCensus19050 pins that no other render code reads
+// cluster ownership.
+type frrHAOwnership interface {
+	IsLocalPrimary(rgID int) bool
+	LocalGroupPrimary(rgID int) (primary, known bool)
+	IsLocalPrimaryAny() bool
+}
+
 func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
-	if d == nil || d.cluster == nil || cfg == nil || cfg.Chassis.Cluster == nil {
+	if d == nil || d.cluster == nil {
+		return nil
+	}
+	return newFRRHADemotionStateFrom(d.cluster, cfg)
+}
+
+func newFRRHADemotionStateFrom(own frrHAOwnership, cfg *config.Config) *frrHADemotionState {
+	if own == nil || cfg == nil || cfg.Chassis.Cluster == nil {
 		return nil
 	}
 	state := &frrHADemotionState{
@@ -30,7 +52,7 @@ func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
 	}
 	owners := cfg.RethRGOwners()
 	for name, rgID := range owners {
-		state.active[rgID] = d.cluster.IsLocalPrimary(rgID)
+		state.active[rgID] = own.IsLocalPrimary(rgID)
 		if state.rethInterfaces[rgID] == nil {
 			state.rethInterfaces[rgID] = make(map[string]struct{})
 		}
@@ -44,10 +66,10 @@ func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
 	// A global/loopback peering has no data-RETH address from which to infer a
 	// group. It follows RG0 when configured; clusters without RG0 retain the
 	// established "primary for any group" ownership fallback.
-	if primary, known := d.cluster.LocalGroupPrimary(0); known {
+	if primary, known := own.LocalGroupPrimary(0); known {
 		state.globalActive = primary
 	} else {
-		state.globalActive = d.cluster.IsLocalPrimaryAny()
+		state.globalActive = own.IsLocalPrimaryAny()
 	}
 	return state
 }

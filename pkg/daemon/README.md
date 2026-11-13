@@ -2183,27 +2183,34 @@ never blocks the VIP path.
   - the same epoch;
   - the same active config pointer;
   - the same FRR `UnconditionalWriteGeneration`;
-  - the trigger RG still primary, and the same cluster mastership generation
-    (`cluster.Manager.LocalMastershipSnapshot`) for the trigger RG and every
-    RG that owns a RETH in that config (`contributingMastership19050`).
+  - the trigger RG still primary;
+  - the same cluster mastership generation
+    (`cluster.Manager.LocalMastershipSnapshot`) for every RG whose ownership
+    the fast render itself READ.
 
-  The generation is monotonic and moves, under the cluster lock, on every
-  local primary edge, so equal values at the capture and at the pre-check
-  prove the RG's ownership did not change during the render. Comparing the
-  ownership BOOLEANS (the first version) could not see an RG that went
-  secondary -> primary -> secondary while the render ran: the render then
-  included that RG's static, its demotion reload removed it, and the fast
-  set re-installed it with nothing left to remove it (review Codex P1-1).
-  Only RETH-owning RGs are fenced because the static render reads ownership
-  only through `newFRRHADemotionState` (`cfg.RethRGOwners()`); RG0 never
-  demotes a static hop, so a takeover that promotes RG0 beside the data RG
-  keeps its fast install.
+  **How the read set is collected.** The render reads ownership only
+  through the `frrHAOwnership` interface (`newFRRHADemotionStateFrom`), and
+  the fast install serves those reads from an `ownershipRecorder19050`. The
+  recorder records each RG's FIRST answer together with its generation. The
+  generation is monotonic and moves under the cluster lock on every local
+  primary edge, so equal values prove the RG unchanged.
 
-  The snapshot takes the cluster read lock per RG and nothing else. It must
-  never call `GroupStates()`, whose transfer-readiness callback can import
-  routes and query FRR: that would run under `reloadMu`, outside the fast
-  install's bound (review Codex P2-4,
-  `TestFastInstallNeverCallsTransferReadiness19050`).
+  **Why the fence is the recorded set, not a list.** Two hand-kept lists of
+  "the RGs a static line can depend on" each missed a dependency in review:
+  - ownership booleans could not see secondary -> primary -> secondary
+    (Codex P1-1);
+  - RETH owners only missed RG0, which reaches statics through
+    `globalActive` -> `filterISIS` -> the static renderer's IS-IS
+    distance guard (#17735, Codex on 11e4c6f47e).
+
+  `TestFRRRenderOwnershipReadsCensus19050` pins that no other render code
+  reads cluster ownership. An RG the render never read cannot change a
+  line, so it is not fenced.
+
+  **Every read is callback-free.** The capture and the pre-check never call
+  `GroupStates()`, whose transfer-readiness callback can import routes and
+  query FRR: that would run under `reloadMu`, outside the fast install's
+  bound (review Codex P2-4, `TestFastInstallNeverCallsTransferReadiness19050`).
 
   The lock order is `reloadMu` -> cluster lock / `directVIPEpochMu`. The fast
   path never takes `applySem` while holding `reloadMu`, and never touches
