@@ -309,26 +309,43 @@ func TestFastInDoubtClearsDespiteUnrelatedOverlayDrift19050(t *testing.T) {
 // --- the F2 matcher, pinned with frr-reload.py --test output -------------
 //
 // R4's implementation condition: the matcher is pinned with REAL output
-// (testdata/frr_reload_test_<form>-<frr version>_19050.txt). The 10.6.0 pair
-// was captured on loss fw1 (standby) on 2026-11-10; loss runs FRR 10.6.0, udp
-// and tcp run 10.5.1. Each file is the raw combined output of
-// `frr-reload.py --test` (the INFO log lines come first; production passes
-// --stdout, which moves those lines but not the diff). The two forms:
+// (testdata/frr_reload_test_<form>-<frr version>_19050.txt). Loss runs FRR
+// 10.6.0 and udp/tcp run 10.5.1, and both are captured: 10.6.0 on loss fw1
+// (standby) on 2026-11-10, 10.5.1 on udp fw1 (standby) on 2026-11-13. Each
+// file is the raw combined output of `frr-reload.py --test` (the INFO log
+// lines come first; production passes --stdout, which moves those lines but
+// not the diff: the 10.5.1 capture ran both and the diffs are identical).
+// The two forms:
 //   - add: the lines are absent from running config. They print under
 //     "Lines To Add", the VRF line as a `vrf NAME` block (an empty block, then
 //     the block holding the indented line, each closed by `exit`).
 //   - delete: the lines are present in running config only. FRR prints their
 //     removal as `no ...` lines under "Lines To ADD", not "Lines To Delete";
-//     the VRF one indented inside a `vrf NAME` block.
+//     the VRF one indented inside a `vrf NAME` block. Same on both versions.
+//
 // Both carry real unrelated drift (`no hostname ...` under "Lines To Delete").
-
+//
+// The 10.5.1 capture also staged two lines in a NON-canonical spelling (review
+// Codex P1-2): `203.0.113.77/24` (host bits) and the gateway
+// `2001:0559:8585:0050:0000:0000:0000:0001`. FRR printed both canonically in
+// BOTH forms (`203.0.113.0/24`, `2001:559:8585:50::1`): frr-reload masks and
+// normalizes the file side too, not only the running side. So a managed
+// section that keeps an operator's spelling can never be matched by string.
 func TestReloadTestDiffMentionsMatcher19050(t *testing.T) {
 	v6q := "ipv6 route 2001:db8:1905:50::/64 2001:559:8585:50::1 ge-7-0-2.50 254"
 	vrf := "ip route 198.51.100.128/25 Null0 254 vrf vrf-mgmt"
 	v4 := "ip route 198.51.100.0/24 172.16.50.1 254"
-	absent := "ip route 203.0.113.0/24 172.16.50.1 254"
+	absent := "ip route 192.0.2.0/24 172.16.50.1 254"
+	// The lines as the managed section would spell them, which FRR printed
+	// canonically (captured on 10.5.1 only).
+	spelled := map[string][]string{"10.5.1": {
+		"ip route 203.0.113.77/24 172.16.50.1 254",
+		"ipv6 route 2001:db8:1905:51::/64 2001:0559:8585:0050:0000:0000:0000:0001 ge-7-0-2.50 254",
+	}}
+	versions := map[string]bool{}
 	for _, fx := range readFixtures19050(t) {
-		for _, line := range []string{v4, v6q, vrf} {
+		versions[fx.version] = true
+		for _, line := range append([]string{v4, v6q, vrf}, spelled[fx.version]...) {
 			if !reloadTestDiffMentions19050(fx.out, []string{line}) {
 				t.Errorf("%s: matcher missed %q in:\n%s", fx.name, line, fx.out)
 			}
@@ -352,11 +369,18 @@ func TestReloadTestDiffMentionsMatcher19050(t *testing.T) {
 	if reloadTestDiffMentions19050([]byte(v4+"\n"), []string{v4}) {
 		t.Error("a line outside any Lines To Add/Delete section was matched")
 	}
+	// Both FRR versions the labs run must be pinned.
+	for _, v := range []string{"10.5.1", "10.6.0"} {
+		if !versions[v] {
+			t.Errorf("no --test fixture captured on FRR %s", v)
+		}
+	}
 }
 
 type fixture19050 struct {
-	name string
-	out  []byte
+	name    string
+	version string
+	out     []byte
 }
 
 func readFixtures19050(t *testing.T) []fixture19050 {
@@ -380,7 +404,7 @@ func readFixtures19050(t *testing.T) []fixture19050 {
 		if !strings.Contains(name, "-"+string(m[1])+"_19050") {
 			t.Fatalf("%s: captured on FRR %s, but the name does not say so", name, m[1])
 		}
-		out = append(out, fixture19050{name: name, out: b})
+		out = append(out, fixture19050{name: name, version: string(m[1]), out: b})
 	}
 	if len(out) == 0 {
 		t.Fatal("no frr-reload --test fixtures (testdata/frr_reload_test_*_19050.txt)")
