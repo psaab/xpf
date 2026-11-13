@@ -536,8 +536,40 @@ v2.1-v2.3 addenda):
   - Only a successful barrier (a fresh `configure terminal` through mgmtd),
     followed by a `frr-reload.py --test` whose diff names none of the
     in-doubt lines, clears it (`resolveFastInDoubtLocked`).
+  - When the diff does name one, the resolution runs the authoritative
+    reload and restores the QNH overlay. A failure of either is recorded
+    through `noteReloadOutcomeLocked`, exactly as an apply's failure is, so
+    the manager goes degraded. The next iteration takes the retry's
+    degraded branch: a primary reload plus overlay readback. Only after that
+    succeeds does the in-doubt check run again (review Codex P1-3).
+    Logging the failure alone lost the obligation. The failed reload could
+    remove the stale static and then fail elsewhere, or drop the overlay
+    and fail to restore it. The next `--test` was then clean for the
+    in-doubt lines (frr.conf never holds the overlay), so the episode
+    cleared and stopped with the metric gone.
   - Unrelated drift does not block the clear; the memory-only QNH overlay
     (#15183) is the case that matters.
+  - **A diff line names an in-doubt line when both parse to the same
+    canonical route identity** (`parseRouteIdentity19050`). The identity
+    is:
+    - the address family, VRF and table;
+    - the MASKED prefix;
+    - the canonical gateway address, or the interface/keyword target when
+      the route has no gateway.
+
+    FRR's reload parser rewrites IPv6 addresses into canonical form, and
+    staticd masks the prefix, while the managed section keeps the
+    operator's spelling. A string compare missed `2001:0559:...` printed as
+    `2001:559:...`, cleared the doubt, and left the stale line installed
+    (review Codex P1-2).
+    - The identity omits the distance, the tag, and a gateway's qualifying
+      interface. Omitting a field can only over-match, which delays the
+      clear; spelling a field differently from FRR can under-match, which
+      leaks.
+    - A static-route diff line that does not parse, or an in-doubt line
+      that does not parse, counts as a mention (fail-closed).
+    - A route in another VRF or table does not count, so drift there
+      cannot hold the episode open.
   - The diff matcher is pinned with real `--test` output in
     `testdata/frr_reload_test_<form>-<frr version>_19050.txt`. The fixture
     loader checks that each file's `frr version` line matches its name.
@@ -550,7 +582,12 @@ v2.1-v2.3 addenda):
       inline `... vrf NAME` form.
 - **Shutdown.** `fastStopped` and `fastWG.Add` are both taken under
   `retryMu`, the `retryEnabled` pattern. `Stop` sets the flag, cancels the
-  lifetime context (which kills an in-flight batch), and joins.
+  lifetime context (which kills an in-flight batch), and joins. It removes
+  NOTHING: a fast line FRR accepted before `Stop` stays installed after a
+  graceful stop. That is the #19083 class (owned statics survive a
+  graceful stop), and B can add a line to it that master never installed.
+  #19083's fix is therefore a landing dependency of #19050; see
+  pkg/daemon/README.md.
 
 ## Callers
 
