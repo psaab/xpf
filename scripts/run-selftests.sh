@@ -363,6 +363,10 @@ run_shell test/debian/preinst-implicit-discard-test.sh
 # code is untested.
 run_bash scripts/mutate-selftest.sh
 run_bash scripts/go-test-json-selftest.sh
+# #19084: a root run under testguard-run.sh covers the production trees with
+# a throwaway overlay. Root only: a non-root run SKIPs (77) with that reason;
+# `make vm-test-root` runs it as root (test-testguard-overlay).
+run_bash scripts/testguard-overlay-selftest.sh
 # #17154: prove the deadcode gate reds on a new dead function, a stale
 # row and malformed rows, and greens on an exact fixture match. Hermetic
 # (recorded analyser output via DEADCODE_OUTPUT); no toolchain.

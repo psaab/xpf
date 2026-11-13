@@ -594,6 +594,13 @@ func appliedSnapshotGenerationOf(rt dataplane.RuntimeDataPlane) uint64 {
 	return provider.AppliedSnapshotGeneration()
 }
 
+// eventModeSecurityLogPath is the local security log of event mode. Empty
+// (production) means logging.NewLocalLogWriter's default,
+// /var/log/xpf/security.log. A test seam (#19084 Codex B2): pkg/daemon's
+// TestMain points it at a temp file, so an event-mode fixture cannot create
+// or chmod the host's security log on a root run.
+var eventModeSecurityLogPath string
+
 func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) {
 	if er == nil {
 		return
@@ -659,7 +666,7 @@ func (d *Daemon) applySyslogConfig(er *logging.EventReader, cfg *config.Config) 
 		d.syslogClearCache15231()
 		d.syslogHashSet = false
 		d.setSyslogRetryOwed(false)
-		lw, err := logging.NewLocalLogWriter(logging.LocalLogConfig{})
+		lw, err := logging.NewLocalLogWriter(logging.LocalLogConfig{Path: eventModeSecurityLogPath})
 		if err != nil {
 			slog.Warn("failed to create local log writer", "err", err)
 		} else {

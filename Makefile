@@ -242,12 +242,16 @@ test-xfrm-lifecycle:
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp XPF_REQUIRE_XFRM_LIFECYCLE=1 $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
 		--bins --tests -- --test-threads=1
 
-# #19084: a root run under testguard-run.sh covers /etc, /var/lib, /var/log
-# and /run with a throwaway overlay, so a test cannot change host state there
-# and still reads back its own writes. Root only (refuses otherwise); both
-# root paths (user namespace, VM proof) are exercised.
+# #19084: a root run under testguard-run.sh executes in a throwaway
+# copy-on-write view of the whole root filesystem
+# (scripts/testguard-root-view.sh), so a test cannot change host state outside
+# the pass-through allowlist and still reads back its own writes. Root only
+# (refuses otherwise) and VM only (the selftest refuses on a non-VM before
+# touching anything); both root paths (user namespace, VM proof) are
+# exercised.
 .PHONY: test-testguard-overlay
 test-testguard-overlay:
+	@[ "$$(id -u)" = 0 ] || { echo "test-testguard-overlay: needs root (make vm-test-root)" >&2; exit 1; }
 	@bash scripts/testguard-overlay-selftest.sh
 
 .PHONY: vm-test-root

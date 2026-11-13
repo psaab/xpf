@@ -22,6 +22,17 @@ else
 	PATH="$shim_dir"
 fi
 export PATH
+# #19084 Codex F3: the effective UID decides whether the run gets the root
+# view below, so it is resolved ONCE and validated. An `id` that fails, prints
+# nothing or disagrees with the shell's own EUID is not read as "unprivileged":
+# that would run a real-root command with no protection at all.
+euid=$(id -u 2>/dev/null) || euid=
+if [[ ! $euid =~ ^[0-9]+$ || $euid != "$EUID" ]]; then
+	echo "testguard-run: REFUSED: cannot determine the effective UID (id -u gave '$euid', the shell says $EUID); refusing rather than treat the run as unprivileged (#19084)" >&2
+	exit 2
+fi
+# The caller's working directory, re-established inside the root view.
+cwd=$(pwd -P 2>/dev/null) || cwd=
 # #19066: inside these namespaces a further private namespace is always
 # creatable, so a test that could not get one has a broken mechanism, not an
 # unlucky environment. Netns cells report that through
@@ -65,57 +76,77 @@ fi
 # to the namespace, so isolation from the host is unchanged. A failure to
 # raise it is reported, not hidden.
 inner='ip link set lo up 2>/dev/null || echo "testguard-run: could not bring loopback up in the test namespace" >&2; exec "$@"'
-# #19084: on a ROOT run, the production trees are covered by a throwaway
-# overlay in a private mount namespace before the command runs. A private
-# mount namespace alone isolates nothing on disk: a root test that writes or
-# unlinks /etc/... does it on the host's root filesystem. Every enumeration of
-# production paths (TestMain redirects, seams) has missed some (#19084: 7 of
-# R18's 46 seeded files still deleted or rewritten after the redirects), so
-# the trees themselves are covered instead. The lower layer is the host's real
-# tree, so tests still READ it; every write, unlink, rename or chmod lands in
-# an upper layer on a tmpfs that exists only in this namespace and is
-# discarded when the run ends. The test namespaces below are created inside
-# this one, so the command and every child it starts see the overlay and read
-# back what they just wrote. Host daemons are outside it and keep the real
-# trees: nothing a test writes reaches them, which is the point.
+# #19084: a ROOT run executes inside a throwaway view of the WHOLE root
+# filesystem (scripts/testguard-root-view.sh). A private mount namespace alone
+# isolates nothing on disk: a root test that writes or unlinks /etc/... does it
+# on the host's root filesystem. Redirecting production paths one by one
+# missed some (R18's 46-file seeded probe: 7 deleted or rewritten after the
+# redirects), and so did covering a fixed list of trees: a directory symlink
+# in a covered tree that resolved outside it, or any uncovered tree (/srv,
+# /opt, /root, /tmp, ...), still reached the host (Codex F1, R18 R2 on
+# 11eaccc637). So "/" itself is an overlay whose lower layer is the host's
+# root filesystem and whose upper layer is a tmpfs that exists only in this
+# namespace; every other mount is overlaid too, bound in read-only, bound in
+# as a pseudo filesystem, or the run is refused (exit 2). Tests still READ
+# the host's files and read back what they write, in-process and from child
+# processes. The only writable host storage is the pass-through allowlist
+# below. Host daemons are outside the namespace and keep the real files.
 #
-# The overlay is mounted by real root BEFORE any user namespace exists. Inside
-# the user namespace (the root path without the VM proof) mounts inherited
-# from the host are locked, and overlayfs cannot clone a lower tree that has
-# locked submounts (/run has several: "failed to clone lowerpath"). A tree
-# that cannot be covered FAILS the run before the command starts (exit 2): a
-# root run without the overlay is exactly the destructive run this prevents.
-# Non-root runs are unchanged: they cannot write these trees anyway. The
-# residue check below stays as the detector: on a root run it should report
-# nothing.
-overlay_trees="/etc /var/lib /var/log /run"
+# The view is built by real root BEFORE any user namespace exists: inside the
+# user namespace of the no-VM-proof path the inherited mounts are locked, and
+# overlayfs cannot clone a lower tree with locked submounts (/run has several).
+# Non-root runs are unchanged: they cannot write the host's system trees.
+# The residue check below stays as the detector.
 cover=()
-if [[ $(id -u) == 0 ]]; then
+inner_cmd=$inner
+if [[ $euid == 0 ]]; then
+	[[ -n $cwd ]] || { echo "testguard-run: REFUSED: cannot resolve the working directory for the root view (#19084)" >&2; exit 2; }
+	# The writable pass-through: the checkout, the TMPDIR scratch (and this
+	# run's work dir in it), and Go's build cache, module cache and build
+	# temp. Nothing else on the host is writable from inside the view.
+	pass_raw=("$root" "$scratch")
+	go_vars=()
+	if gobin=$(PATH="$real_path" command -v go 2>/dev/null); then
+		mapfile -t go_vars < <(PATH="$real_path" "$gobin" env GOCACHE GOMODCACHE GOTMPDIR 2>/dev/null)
+	fi
+	pass_raw+=("${GOCACHE:-${go_vars[0]:-}}" "${GOMODCACHE:-${go_vars[1]:-}}" "${GOTMPDIR:-${go_vars[2]:-}}")
+	pass=()
+	for p in "${pass_raw[@]}"; do
+		[[ -n $p && $p != off ]] || continue
+		mkdir -p "$p" 2>/dev/null && p=$(realpath -e "$p" 2>/dev/null) || {
+			echo "testguard-run: REFUSED: cannot resolve the pass-through directory '$p' (#19084)" >&2
+			exit 2
+		}
+		case $p in
+		/ | /etc | /usr | /var | /var/lib | /var/log | /run | /boot | /proc | /sys | /dev | /home | /root | /srv | /opt | /bin | /sbin | /lib | /lib64 | /mnt | /media | /proc/* | /sys/* | /dev/* | /run/*)
+			echo "testguard-run: REFUSED: pass-through directory $p would expose a host system tree; point TMPDIR/GOCACHE/GOMODCACHE/GOTMPDIR elsewhere (#19084)" >&2
+			exit 2
+			;;
+		esac
+		pass+=("$p")
+	done
 	mkdir -p "$work/overlay"
-	cover=(unshare -m --propagation private sh -c '
-s=$0; t=$1; shift
-mount -t tmpfs -o mode=0700 testguard-overlay "$s" || { echo "testguard-run: FATAL: cannot mount the overlay scratch tmpfs on $s; refusing a root run that could write host state (#19084)" >&2; exit 2; }
-for d in $t; do
-	n=$(printf %s "$d" | tr / _)
-	mkdir -p "$s/$n.upper" "$s/$n.work" || exit 2
-	mount -t overlay testguard-overlay -o "lowerdir=$d,upperdir=$s/$n.upper,workdir=$s/$n.work" "$d" || {
-		echo "testguard-run: FATAL: cannot cover $d with a throwaway overlay; refusing a root run that could write host state (#19084)" >&2
-		exit 2
-	}
-done
-exec "$@"' "$work/overlay" "$overlay_trees")
+	cover=(unshare -m --propagation private bash "$root/scripts/testguard-root-view.sh" "$work/overlay" "$cwd" "${pass[@]}" --)
+	# R18 R1: in the VM-proof branch the command keeps real root, so it can
+	# detach mounts in its own namespace. The host's root filesystem is not
+	# attached there (the view pivoted away from it), but a detached view is
+	# no longer the run's view, so after the command the run's namespace must
+	# still have the testguard root overlay at "/", or the run FAILS.
+	# Detection only: a command with real root can also mount host block
+	# devices or enter host namespaces, which no check here can stop.
+	inner_cmd='ip link set lo up 2>/dev/null || echo "testguard-run: could not bring loopback up in the test namespace" >&2; "$@"; rc=$?; grep -qE "^[^ ]+ [^ ]+ [^ ]+ / / .* - overlay testguard-root( |\$)" /proc/self/mountinfo 2>/dev/null || { echo "testguard-run: FAIL: the root view is no longer mounted at / in the run'"'"'s namespace after the command (the command detached it?); its writes may not have been contained (#19084 R18 R1)" >&2; [ "$rc" -eq 0 ] && rc=1; }; exit "$rc"'
 fi
-if [[ $(id -u) == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]; then
+if [[ $euid == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]; then
 	# The VM proof permits the privileged lane to retain its VM capabilities
 	# (for BPF/memlock tests); namespace identity is still independently
 	# checked by testguard in the child.
 	XPF_SACRIFICIAL_HOST=1 "${cover[@]}" \
-		unshare -pf --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner" "$@"
+		unshare -pf --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner_cmd" "$@"
 else
 	# A caller-supplied intent sentinel is not proof; do not propagate it on
 	# the workstation path.
 	env -u XPF_SACRIFICIAL_HOST "${cover[@]}" \
-		unshare -Urp --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner" "$@"
+		unshare -Urp --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner_cmd" "$@"
 fi
 rc=$?
 set -e

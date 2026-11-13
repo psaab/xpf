@@ -23,8 +23,11 @@ func TestProductionStatePathsRedirectedUnderTest19084(t *testing.T) {
 		"defaultSNMPBootsPath":            defaultSNMPBootsPath,
 		"defaultSNMPEngineIDPath":         defaultSNMPEngineIDPath,
 		"ipsecQuarantineIdentityPath9506": ipsecQuarantineIdentityPath9506,
+		"redirectKnobSnapshotFile":        redirectKnobSnapshotFile,
+		"eventModeSecurityLogPath":        eventModeSecurityLogPath,
 	} {
-		if path == "" || strings.HasPrefix(path, "/etc/") || strings.HasPrefix(path, "/var/lib/xpf") {
+		if path == "" || strings.HasPrefix(path, "/etc/") || strings.HasPrefix(path, "/var/lib/xpf") ||
+			strings.HasPrefix(path, "/var/log/") {
 			t.Errorf("%s = %q under test; TestMain must point it at the package temp dir (#19084)", name, path)
 		}
 	}
