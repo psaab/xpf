@@ -434,3 +434,229 @@ func TestRenderStaticLinesByteIdentityUnderRace19050(t *testing.T) {
 		}
 	}
 }
+
+// --- review Codex P1-2: canonical route identity in the matcher -----------
+//
+// FRR's reload parser rewrites IPv6 addresses into canonical form and staticd
+// masks the prefix, while the managed section keeps the operator's spelling.
+// A matcher comparing strings misses the stale line, clears the doubt and
+// stops retrying while the line is still installed. Each row names the field
+// it pins. Over-matching only delays the clear, so a row that expects a match
+// across an attribute the identity omits (distance) pins fail-closed, and a
+// row that expects NO match across a VRF or table pins that unrelated drift in
+// another routing table cannot hold the episode open forever.
+func TestReloadTestDiffMatcherCanonicalIdentity19050(t *testing.T) {
+	add := func(body string) []byte { return []byte("Lines To Add\n============\n" + body + "\n") }
+	cases := []struct {
+		name string
+		line string
+		diff []byte
+		want bool
+	}{
+		{"expanded-v6-gateway", "ipv6 route ::/0 2001:0559:8585:0050:0000:0000:0000:0001 ge-0-0-2.50 5",
+			add("no ipv6 route ::/0 2001:559:8585:50::1 ge-0-0-2.50 5"), true},
+		{"expanded-v6-prefix", "ipv6 route 2001:0db8:1905:0050::/64 2001:559:8585:50::1 ge-7-0-2.50 254",
+			add("no ipv6 route 2001:db8:1905:50::/64 2001:559:8585:50::1 ge-7-0-2.50 254"), true},
+		{"v4-prefix-host-bits", "ip route 198.51.100.7/24 172.16.50.1 254",
+			add("no ip route 198.51.100.0/24 172.16.50.1 254"), true},
+		{"expanded-v6-in-vrf-context", "ipv6 route 2001:db8::/32 2001:0db8:0000:0000:0000:0000:0000:0001 254 vrf vrf-mgmt",
+			add("vrf vrf-mgmt\n no ipv6 route 2001:db8::/32 2001:db8::1 254\nexit"), true},
+		{"distance-omitted-fails-closed", "ip route 198.51.100.0/24 172.16.50.1 5",
+			add("no ip route 198.51.100.0/24 172.16.50.1 254"), true},
+		{"same-table", "ip route 203.0.113.0/24 192.0.2.10 5 table 101",
+			add("no ip route 203.0.113.0/24 192.0.2.10 5 table 101"), true},
+		{"other-table", "ip route 203.0.113.0/24 192.0.2.10 5 table 101",
+			add("no ip route 203.0.113.0/24 192.0.2.10 5 table 102"), false},
+		{"other-vrf-context", "ip route 198.51.100.128/25 Null0 254 vrf vrf-a",
+			add("vrf vrf-b\n no ip route 198.51.100.128/25 Null0 254\nexit"), false},
+		{"other-vrf-inline", "ip route 198.51.100.128/25 Null0 254 vrf vrf-a",
+			add("no ip route 198.51.100.128/25 Null0 254 vrf vrf-b"), false},
+		{"default-vrf-vs-vrf", "ip route 198.51.100.128/25 Null0 254",
+			add("vrf vrf-b\n no ip route 198.51.100.128/25 Null0 254\nexit"), false},
+		{"gateway-vs-null0-default", "ip route 0.0.0.0/0 172.16.50.1 5",
+			add("ip route 0.0.0.0/0 Null0 tag 1 250"), false},
+		{"unparseable-diff-static-fails-closed", "ip route 10.9.0.0/16 192.0.2.1 5",
+			add("no ip route 198.51.100.0 255.255.255.0 172.16.50.1"), true},
+		{"unparseable-in-doubt-line-fails-closed", "ip route not-a-prefix 192.0.2.1 5",
+			add("no ip route 198.51.100.0/24 172.16.50.1 254"), true},
+		{"unparseable-in-doubt-line-ignores-non-static-drift", "ip route not-a-prefix 192.0.2.1 5",
+			add("route-map xpf-qnh-metric-1 permit 10\n set metric 20"), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := reloadTestDiffMentions19050(c.diff, []string{c.line}); got != c.want {
+				t.Fatalf("reloadTestDiffMentions19050(%q) = %v, want %v; diff:\n%s", c.line, got, c.want, c.diff)
+			}
+		})
+	}
+}
+
+// TestFastInDoubtExpandedIPv6LineResolvedBeforeClear19050 is review Codex
+// P1-2's probe: a fast install with an EXPANDED IPv6 next hop is killed after
+// FRR applied it, and --test reports its removal in FRR's canonical spelling.
+// The doubt must not clear until the authoritative reload has removed the
+// line.
+func TestFastInDoubtExpandedIPv6LineResolvedBeforeClear19050(t *testing.T) {
+	const expanded = "ipv6 route ::/0 2001:0559:8585:0050:0000:0000:0000:0001 ge-0-0-2.50 5"
+	const canonicalDelete = "Lines To Add\n============\nno ipv6 route ::/0 2001:559:8585:50::1 ge-0-0-2.50 5\n"
+	fake := &fastFake19050{fakeExecutor: &fakeExecutor{}, installErr: errors.New("signal: killed")}
+	var mu sync.Mutex
+	present := false
+	fake.afterInstall = func() { mu.Lock(); present = true; mu.Unlock() } // FRR applied it; the client died
+	fake.testOut = func() []byte {
+		mu.Lock()
+		defer mu.Unlock()
+		if present {
+			return []byte(canonicalDelete)
+		}
+		return nil
+	}
+	fake.fakeExecutor.frrReloadPyHook = func(int) error { mu.Lock(); present = false; mu.Unlock(); return nil }
+	m := newFastTestManager19050(t, fake)
+	if outcome, _ := m.FastInstallStatics([]string{expanded}, func() bool { return true }); outcome != FastInDoubt {
+		t.Fatalf("outcome = %v, want in-doubt", outcome)
+	}
+	waitFor(t, "in-doubt resolution", 3*time.Second, func() bool { return !m.FastInDoubt() })
+	mu.Lock()
+	defer mu.Unlock()
+	if present {
+		t.Fatal("the doubt cleared while the expanded-IPv6 line was still installed: the matcher missed FRR's canonical spelling")
+	}
+}
+
+// qnhFastExec19050 adds the #19050 fast-path surface to the #15183 ospfd
+// route-map model, so the in-doubt resolution runs against a manager whose
+// memory-only QNH overlay a reload deletes.
+type qnhFastExec19050 struct {
+	*qnhFailedReloadExecutor15183
+	stale string
+	// present: the killed batch's line is in the running config.
+	present bool
+	// reloadFailures: FrrReloadPy calls still to fail AFTER removing the line
+	// (a reload that converged the static and then hit a rejected line).
+	reloadFailures int
+	// loadFailures: QNH overlay loads (VtyshLoadDaemon) still to fail.
+	loadFailures int
+	// primaryOK counts FrrReloadPy successes since the last failure.
+	primaryOK, primaryFailed int
+}
+
+func (e *qnhFastExec19050) VtyshConfigLines(_ context.Context, lines []string) ([]byte, error) {
+	if len(lines) == 0 {
+		return nil, nil // the barrier
+	}
+	e.present = true // FRR applied the batch; the client was killed
+	return nil, errors.New("signal: killed")
+}
+
+func (e *qnhFastExec19050) FrrReloadPyTestOutput(context.Context, string) ([]byte, error) {
+	if e.present {
+		return []byte("Lines To Add\n============\nno " + e.stale + "\n"), nil
+	}
+	return nil, nil // the overlay is never in frr.conf, so its loss is no diff
+}
+
+func (e *qnhFastExec19050) FrrReloadPy(ctx context.Context, conf string) error {
+	e.present = false
+	if err := e.qnhFailedReloadExecutor15183.FrrReloadPy(ctx, conf); err != nil {
+		return err
+	}
+	if e.reloadFailures > 0 {
+		e.reloadFailures--
+		e.primaryOK, e.primaryFailed = 0, e.primaryFailed+1
+		return errors.New("frr-reload.py rejected a line")
+	}
+	e.primaryOK++
+	return nil
+}
+
+func (e *qnhFastExec19050) VtyshLoadDaemon(ctx context.Context, daemon, conf string) ([]byte, error) {
+	if e.loadFailures > 0 {
+		e.loadFailures--
+		return []byte("% ospfd refused the overlay"), errors.New("ospfd overlay load refused")
+	}
+	return e.qnhFailedReloadExecutor15183.VtyshLoadDaemon(ctx, daemon, conf)
+}
+
+// qnhInDoubt19050 applies the QNH config (overlay present), then leaves one
+// fast line in doubt and present in the running config. The retry loop is
+// disabled; the cell drives retryReloadOnce itself, one iteration at a time.
+func qnhInDoubt19050(t *testing.T) (*Manager, *qnhFastExec19050, string) {
+	t.Helper()
+	m, base, fc, routeMap := qnhFailedReloadFixture15183(t)
+	exec := &qnhFastExec19050{qnhFailedReloadExecutor15183: base, stale: "ip route 198.51.100.0/24 172.16.50.1 5"}
+	m.exec = exec
+	if err := m.ApplyFull(fc); err != nil {
+		t.Fatalf("initial ApplyFull: %v", err)
+	}
+	wantQNHMetric15183(t, base, routeMap)
+	if outcome, _ := m.FastInstallStatics([]string{exec.stale}, func() bool { return true }); outcome != FastInDoubt {
+		t.Fatalf("outcome = %v, want in-doubt", outcome)
+	}
+	return m, exec, routeMap
+}
+
+// runRetryUntilStop19050 drives the retry body until it reports stop.
+func runRetryUntilStop19050(t *testing.T, m *Manager, after func(i int)) {
+	t.Helper()
+	for i := 0; i < 10; i++ {
+		stop, _ := m.retryReloadOnce(context.Background())
+		if after != nil {
+			after(i)
+		}
+		if stop {
+			return
+		}
+	}
+	t.Fatal("the retry never stopped in 10 iterations")
+}
+
+// TestFastInDoubtQNHRestoreFailureKeepsRetrying19050 is review Codex P1-3's
+// probe: the in-doubt resolution's authoritative reload removes the stale
+// static (and, like every reload, the memory-only QNH overlay), then the
+// overlay restore fails once. The next --test is clean (frr.conf never holds
+// the overlay), so an episode that only LOGGED the failure cleared and
+// stopped with the metric gone. The failure must keep the retry going until
+// the overlay readback succeeds.
+func TestFastInDoubtQNHRestoreFailureKeepsRetrying19050(t *testing.T) {
+	m, exec, routeMap := qnhInDoubt19050(t)
+	exec.loadFailures = 1
+	runRetryUntilStop19050(t, m, nil)
+	if exec.present {
+		t.Fatal("premise: the stale line must be gone when the episode stops")
+	}
+	if m.FastInDoubt() {
+		t.Fatal("the episode stopped with lines still in doubt")
+	}
+	wantQNHMetric15183(t, exec.qnhFailedReloadExecutor15183, routeMap)
+}
+
+// TestFastInDoubtReloadFailureRecordsDegraded19050 (review Codex P1-3, the
+// reload arm): the in-doubt resolution's authoritative reload removes the
+// stale static and THEN fails. The failure must be recorded in the degraded
+// state machine, and the episode may stop only after a primary reload has
+// succeeded since: the failed one may have left other config unconverged,
+// which the in-doubt --test (it looks only for the in-doubt lines) cannot see.
+func TestFastInDoubtReloadFailureRecordsDegraded19050(t *testing.T) {
+	m, exec, routeMap := qnhInDoubt19050(t)
+	exec.reloadFailures = 1
+	degradedSeen := false
+	runRetryUntilStop19050(t, m, func(int) {
+		if exec.primaryFailed > 0 && m.ReloadDegraded() {
+			degradedSeen = true
+		}
+	})
+	if exec.primaryFailed != 1 {
+		t.Fatalf("premise: the in-doubt reload must have failed once, failed=%d", exec.primaryFailed)
+	}
+	if !degradedSeen {
+		t.Fatal("the failed in-doubt reload was not recorded as degraded")
+	}
+	if exec.primaryOK == 0 {
+		t.Fatal("the episode stopped without a successful primary reload after the failed one")
+	}
+	if m.ReloadDegraded() || m.FastInDoubt() {
+		t.Fatalf("episode stopped with degraded=%v inDoubt=%v", m.ReloadDegraded(), m.FastInDoubt())
+	}
+	wantQNHMetric15183(t, exec.qnhFailedReloadExecutor15183, routeMap)
+}

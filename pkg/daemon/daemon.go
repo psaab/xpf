@@ -1883,10 +1883,13 @@ type Daemon struct {
 	// #19050 B: per-RG ownership epoch, bumped (under directVIPMu, then this
 	// leaf lock) only on a real ownership edge. The fast FRR install captures
 	// it at the promotion edge and re-checks it under the FRR manager's
-	// reloadMu. frrFastInstallFn is a test seam that replaces the launch.
-	directVIPEpochMu sync.Mutex
-	directVIPEpoch   map[int]uint64
-	frrFastInstallFn func(rgID int, epoch uint64)
+	// reloadMu. frrFastInstallFn is a test seam that replaces the launch;
+	// frrFastInstallHook is a test seam called at named points of the
+	// install (fastInstallTestHook19050).
+	directVIPEpochMu   sync.Mutex
+	directVIPEpoch     map[int]uint64
+	frrFastInstallFn   func(rgID int, epoch uint64)
+	frrFastInstallHook func(stage string)
 	// garpClampWarned dedups the #5695 per-RG "gratuitous-arp-count clamped"
 	// warning so directSendGARPs (per-failover path) logs it at most once per
 	// RG, not per send. Guarded by garpClampWarnMu.

@@ -2181,10 +2181,29 @@ never blocks the VIP path.
   requires every render input to be unchanged:
   - no factory reset in progress;
   - the same epoch;
-  - `IsLocalPrimary(rg)`, the render's own predicate;
   - the same active config pointer;
   - the same FRR `UnconditionalWriteGeneration`;
-  - the same local ownership vector.
+  - the trigger RG still primary, and the same cluster mastership generation
+    (`cluster.Manager.LocalMastershipSnapshot`) for the trigger RG and every
+    RG that owns a RETH in that config (`contributingMastership19050`).
+
+  The generation is monotonic and moves, under the cluster lock, on every
+  local primary edge, so equal values at the capture and at the pre-check
+  prove the RG's ownership did not change during the render. Comparing the
+  ownership BOOLEANS (the first version) could not see an RG that went
+  secondary -> primary -> secondary while the render ran: the render then
+  included that RG's static, its demotion reload removed it, and the fast
+  set re-installed it with nothing left to remove it (review Codex P1-1).
+  Only RETH-owning RGs are fenced because the static render reads ownership
+  only through `newFRRHADemotionState` (`cfg.RethRGOwners()`); RG0 never
+  demotes a static hop, so a takeover that promotes RG0 beside the data RG
+  keeps its fast install.
+
+  The snapshot takes the cluster read lock per RG and nothing else. It must
+  never call `GroupStates()`, whose transfer-readiness callback can import
+  routes and query FRR: that would run under `reloadMu`, outside the fast
+  install's bound (review Codex P2-4,
+  `TestFastInstallNeverCallsTransferReadiness19050`).
 
   The lock order is `reloadMu` -> cluster lock / `directVIPEpochMu`. The fast
   path never takes `applySem` while holding `reloadMu`, and never touches
@@ -2195,9 +2214,17 @@ never blocks the VIP path.
   - the hook;
   - link-cycle recovery's re-add of an OWNED RG, which writes neither
     `directVIPOwned` nor the epoch.
-- **Graceful shutdown.** It removes VIPs with the raw `directRemoveVIPs` and
-  leaves owned statics in FRR. That is the pre-existing #19083; the fast path
-  refuses once the FRR manager is stopping, so it cannot widen it.
+- **Graceful shutdown: B widens #19083, so #19083 is a landing
+  dependency.** A graceful stop removes VIPs with the raw
+  `directRemoveVIPs` and leaves owned statics in FRR (#19083, confirmed in
+  the loss lab: a non-default static stays ACTIVE as a kernel blackhole).
+  The fast path refusing once the FRR manager is stopping does NOT keep B
+  out of that class. A node can promote, complete a fast install, and then
+  be stopped before the first coalesced promotion render: shutdown cancels
+  the pending apply, and `frr.Manager.Stop` joins the fast install but
+  removes nothing. FRR is then left holding a static that master's same
+  timeline never installed (review Codex P2-5). So #19050 does not land
+  before #19083's fix covers fast-installed lines too.
 
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`

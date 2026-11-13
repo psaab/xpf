@@ -2130,7 +2130,7 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 		if m.fastInDoubt == nil {
 			return true, false
 		}
-		return m.resolveFastInDoubtLocked(ctx), false
+		return m.resolveFastInDoubtLocked(ctx)
 	}
 	gen := m.confGen
 	rctx, rcancel := context.WithTimeout(ctx, reloadTimeout)
