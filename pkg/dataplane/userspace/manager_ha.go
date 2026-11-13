@@ -222,9 +222,12 @@ func (m *Manager) refreshHAStateFromMapsLocked() error {
 	if wdMap == nil {
 		return errors.New("ha_watchdog map not loaded")
 	}
-	merged, err := mergeHAStateFromMaps(rgMap, wdMap, m.haGroups)
+	merged, inherited, err := mergeHAStateFromMaps(rgMap, wdMap, m.haGroups, &m.rgActiveWritten)
 	if err != nil {
 		return err
+	}
+	if len(inherited) > 0 {
+		m.clearInheritedRGActiveLocked(rgMap, inherited)
 	}
 	if len(merged) == 0 {
 		return nil
@@ -319,40 +322,81 @@ func (m *Manager) refreshHAWatchdogOnlyFromMapsLocked() error {
 	return wdIter.Err()
 }
 
-// The existing groups are the manager's config-seeded HA inventory. BPF maps
-// include fixed-array slots for unused groups, so refresh only known entries.
-func mergeHAStateFromMaps(rgMap, wdMap *ebpf.Map, existing map[int]HAGroupStatus) (map[int]HAGroupStatus, error) {
-	seen := make(map[int]HAGroupStatus, len(existing))
-	for rgID, group := range existing {
-		seen[rgID] = group
-	}
-
+// mergeHAStateFromMaps reads the rg_active and ha_watchdog arrays and merges
+// them into the manager's config-seeded HA inventory (see mergeHAState). It is
+// the ONLY production reader of rg_active values (#19093 route audit): the
+// first apply, the replay and the status poll all reach it through
+// refreshHAStateFromMapsLocked.
+func mergeHAStateFromMaps(rgMap, wdMap *ebpf.Map, existing map[int]HAGroupStatus, written *[dataplane.MaxRedundancyGroups]bool) (map[int]HAGroupStatus, []int, error) {
+	rgVals := make(map[int]uint8, dataplane.MaxRedundancyGroups)
 	var (
 		rgKey uint32
 		rgVal uint8
 	)
 	rgIter := rgMap.Iterate()
 	for rgIter.Next(&rgKey, &rgVal) {
-		rgID := int(rgKey)
-		group, configured := seen[rgID]
-		if !configured {
-			continue
-		}
-		group.RGID = rgID
-		group.Active = rgVal != 0
-		seen[rgID] = group
+		rgVals[int(rgKey)] = rgVal
 	}
 	if err := rgIter.Err(); err != nil {
-		return nil, fmt.Errorf("iterate rg_active: %w", err)
+		return nil, nil, fmt.Errorf("iterate rg_active: %w", err)
 	}
 
+	wdVals := make(map[int]uint64, dataplane.MaxRedundancyGroups)
 	var (
 		wdKey uint32
 		wdVal uint64
 	)
 	wdIter := wdMap.Iterate()
 	for wdIter.Next(&wdKey, &wdVal) {
-		rgID := int(wdKey)
+		wdVals[int(wdKey)] = wdVal
+	}
+	if err := wdIter.Err(); err != nil {
+		return nil, nil, fmt.Errorf("iterate ha_watchdog: %w", err)
+	}
+	merged, inherited := mergeHAState(rgVals, wdVals, existing, written)
+	return merged, inherited, nil
+}
+
+// mergeHAState is the pure core of the map refresh. The existing groups are the
+// manager's config-seeded HA inventory; the BPF maps are fixed arrays with a
+// slot for every possible group, so only known entries are refreshed.
+//
+// #19093: a slot's value is OWNERSHIP only if this process wrote it
+// (written[rgID], set by UpdateRGActive after its map write landed). The pin
+// outlives an unclean exit, so a restarted process finds the dead one's 1s in
+// it; importing those told a node that came back SECONDARY that it owned the
+// group, its XSK idle liveness never proved, and failback was refused. A
+// nonzero slot this process never wrote is INHERITED: it is merged as
+// inactive, and it is returned — for every slot, configured or not — so the
+// caller can clear it. Masking here, rather than relying on that clear, is
+// what makes the barrier fail-closed: nothing that can fail sits between the
+// pin and what the helper is told.
+//
+// This is the BASE ownership layer only. The #18559 transfer pre-activation is
+// applied on top, per publish, by effectiveHAGroupLocked.
+func mergeHAState(rgVals map[int]uint8, wdVals map[int]uint64, existing map[int]HAGroupStatus, written *[dataplane.MaxRedundancyGroups]bool) (map[int]HAGroupStatus, []int) {
+	seen := make(map[int]HAGroupStatus, len(existing))
+	for rgID, group := range existing {
+		seen[rgID] = group
+	}
+
+	var inherited []int
+	for rgID, rgVal := range rgVals {
+		owned := rgActiveSlotWritten(written, rgID)
+		if rgVal != 0 && !owned {
+			inherited = append(inherited, rgID)
+		}
+		group, configured := seen[rgID]
+		if !configured {
+			continue
+		}
+		group.RGID = rgID
+		group.Active = rgVal != 0 && owned
+		seen[rgID] = group
+	}
+	sort.Ints(inherited)
+
+	for rgID, wdVal := range wdVals {
 		group, configured := seen[rgID]
 		if !configured {
 			continue
@@ -361,10 +405,71 @@ func mergeHAStateFromMaps(rgMap, wdMap *ebpf.Map, existing map[int]HAGroupStatus
 		group.WatchdogTimestamp = wdVal
 		seen[rgID] = group
 	}
-	if err := wdIter.Err(); err != nil {
-		return nil, fmt.Errorf("iterate ha_watchdog: %w", err)
+	return seen, inherited
+}
+
+// rgActiveSlotWritten reports whether this process has landed a write to
+// rg_active slot rgID (#19093). Out-of-range slots and a nil mask are never
+// written.
+func rgActiveSlotWritten(written *[dataplane.MaxRedundancyGroups]bool, rgID int) bool {
+	return written != nil && rgID >= 0 && rgID < len(written) && written[rgID]
+}
+
+// markRGActiveWrittenLocked records that this process's rg_active write to
+// rgID landed (#19093). Caller holds m.mu and sessionMu, the same hold as the
+// map write it records.
+func (m *Manager) markRGActiveWrittenLocked(rgID int) {
+	if rgID >= 0 && rgID < len(m.rgActiveWritten) {
+		m.rgActiveWritten[rgID] = true
 	}
-	return seen, nil
+}
+
+// clearInheritedRGActiveLocked zeroes rg_active slots a previous process left
+// non-zero (#19093). It is best-effort hygiene, not the barrier: the slots are
+// already merged inactive, so a failed clear changes nothing any helper is
+// told — the slot stays masked and the next refresh retries. Writes happen
+// under sessionMu, the lock UpdateRGActive holds for its own map write, and
+// only ever to slots this process has not written (the caller passes the
+// inherited set computed under the same m.mu hold). Caller holds m.mu.
+func (m *Manager) clearInheritedRGActiveLocked(rgMap *ebpf.Map, inherited []int) {
+	var cleared, failed []int
+	var firstErr error
+	m.sessionMu.Lock()
+	for _, rgID := range inherited {
+		if rgActiveSlotWritten(&m.rgActiveWritten, rgID) {
+			continue
+		}
+		if err := rgMap.Update(uint32(rgID), uint8(0), ebpf.UpdateExist); err != nil {
+			failed = append(failed, rgID)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		cleared = append(cleared, rgID)
+	}
+	m.sessionMu.Unlock()
+
+	if !m.rgActiveInheritedLogged {
+		m.rgActiveInheritedLogged = true
+		slog.Info("userspace: ignoring rg_active slots left by a previous process; "+
+			"they are not this process's ownership and are published inactive",
+			"rgs", inherited, "cleared", cleared)
+	}
+	if firstErr != nil {
+		if msg := firstErr.Error(); msg != m.rgActiveInheritedClearErr {
+			m.rgActiveInheritedClearErr = msg
+			slog.Warn("userspace: could not clear inherited rg_active slots; they stay "+
+				"masked and the clear is retried on the next refresh",
+				"rgs", failed, "err", firstErr)
+		}
+		return
+	}
+	if m.rgActiveInheritedClearErr != "" {
+		m.rgActiveInheritedClearErr = ""
+		slog.Info("userspace: inherited rg_active slots cleared after an earlier failure",
+			"rgs", cleared)
+	}
 }
 
 func (m *Manager) desiredForwardingArmedLocked() bool {
@@ -1459,6 +1564,16 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	if err := updateRGActive(rgID, active); err != nil {
 		m.sessionMu.Unlock()
 		return err
+	}
+	// #19093: the write landed, so slot rgID now holds THIS process's value.
+	// Mark it inside the same m.mu+sessionMu hold — a refresh (which needs
+	// m.mu) can never see the new value without its bit and clear it as
+	// inherited. Set on true AND false: the map holds what this process wrote
+	// either way. A later helper-IPC failure below does not undo it, because
+	// the map write already happened.
+	m.markRGActiveWrittenLocked(rgID)
+	if m.haRGActiveAfterMapWriteHook != nil {
+		m.haRGActiveAfterMapWriteHook()
 	}
 
 	prior, known := m.haGroups[rgID]

@@ -245,6 +245,79 @@ even a comment edit there requires `make generate` and trips
 `TestUserspaceXDPShimObjectMatchesSourceManifest` until you do. That is why this
 pointer lives here rather than in the file it describes.
 
+## Inherited `rg_active` is not ownership (#19093)
+
+`rg_active` is a pinned shared map (`/sys/fs/bpf/xpf/rg_active`,
+`loader_userspace_shim.go`). A fail-closed HA stop clears it and `Teardown`
+removes the pin, but an unclean exit (SIGKILL, OOM, panic, a stop-timeout
+SIGKILL), or a `hitless-restart` stop whose demotion did not land before
+`Close`, leaves the dead process's 1s in it. Before #19093 the next process's
+first apply imported them (`mergeHAStateFromMaps`: `Active = rgVal != 0`) and
+published them to its new helper. A node that came back SECONDARY told its
+helper it owned the groups. Nothing wrote the correcting 0, because the
+daemon's fresh `rgStateMachine` already believed `applied=false`, so XSK idle
+liveness never proved and failback was refused (8m49s on loss).
+
+The barrier sits at that import, which is the only production reader of
+`rg_active` values. The first apply (`manager_compile.go`), the replay
+(`retryPendingHAStateReplayLocked`) and the status poll all reach it through
+`refreshHAStateFromMapsLocked`. Nothing else imports ownership: the snapshot
+carries none, the helper never reloads its `state.json`, and
+helper-reported `HAGroups` are only compared, never adopted.
+
+- **BASE ownership** is `haGroups.Active`. `Manager.rgActiveWritten` records,
+  per slot, whether THIS process's `UpdateRGActive` landed a map write. The
+  pure core `mergeHAState` imports a slot as ownership only if its bit is set.
+  An unset non-zero slot is **inherited**: it is merged inactive, and it is
+  returned for every slot, configured or not.
+- **The bit and the write are one step.** `UpdateRGActive` sets the bit
+  inside its existing `m.mu`+`sessionMu` hold, right after the map write
+  lands, on true and on false. Every refresh holds `m.mu`, so none can see a
+  landed write without its bit. A failed map write sets nothing. A landed
+  write whose helper IPC then fails stays this process's value.
+- **Process lifetime.** There is one Manager per daemon process, and nothing
+  clears the array: not helper exit or respawn (`resetAfterHelperGoneLocked`),
+  not `Close`/`Teardown`, not a re-`Start`. A new process starts with every
+  bit unset.
+- **The clear is hygiene, not the barrier.** `clearInheritedRGActiveLocked`
+  zeroes inherited slots best-effort, under `sessionMu`, and only slots this
+  process never wrote. Its first detection logs
+  `userspace: ignoring rg_active slots left by a previous process` with the
+  slot list; that line is the lab witness. A failed clear (a frozen map, an
+  EPERM) WARNs once per distinct error and is retried by the next refresh. It
+  changes nothing any helper is told, because the slot is already masked.
+- **EFFECTIVE inventory** (what a helper receives) is BASE ∨ a live #18559
+  pre-activation (below). The pre-activation is this process's in-memory,
+  deadline-bounded overlay. It is never persisted or imported, so the
+  barrier does not touch it.
+
+Invariant (at the publication boundary): `BASE[k]` is true only if this
+process's last landed `rg_active` write to slot k was true, and every
+`Active=true` a helper receives was authorized by THIS process, either by a
+BASE write or by a pre-activation this process began. Nothing a previous
+process wrote reaches a helper. A true FIRST seed is legitimate when this
+process wrote it before the first publish, for example after a cluster event
+between `Start` and the first apply.
+
+That is a statement about **provenance**, not about pre-activation expiry.
+Whether every sender honours a pre-activation's deadline is #19103, and it is
+outside this barrier. Two paths predate #19093: the degraded watchdog's
+snapshot carries no deadline, and the status poll skips the all-inactive
+publish while the helper renews its still-active lease. #19093's lapsed
+pre-activation cell (M8c) covers the refresh+sync publish only; it does not
+cover the degraded watchdog or the status poll.
+
+The daemon is unchanged: a fresh `rgStateMachine`'s `applied=false` is now
+true by construction. No extra `rg_active` writes or demotion preps run on
+any boot.
+
+Cells: the real-map cells in `pkg/dataplane/userspace/rg_active_inherited_pin_19093_test.go`
+(privileged, registered in `pkg/memlockcensus`; run by `make test-memlock-guards`)
+and the unprivileged `rg_active_mask_19093_test.go` (the pure merge core, and
+the bit/write atomicity through the `haRGActiveAfterMapWriteHook` seam). The
+daemon half — no false write before an RG's first true on a fresh start — is
+`pkg/daemon/rg_active_stale_pin_19093_test.go`.
+
 ## Transfer pre-activation overlay (#18559)
 
 `Manager.BeginTransferPreActivation` marks data RGs pre-active for a bounded

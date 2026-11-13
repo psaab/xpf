@@ -119,6 +119,15 @@ type rgTransition struct {
 	InvalidateSeq uint64
 }
 
+// newRGStateMachine starts with applied == false and no apply pending. That is
+// a claim about the dataplane: every RG this process has not written is
+// inactive there. #19093: rg_active is pinned and outlives an unclean exit, so
+// the claim is made TRUE by the userspace Manager, which never imports a slot
+// this process did not write. Do not "fix" a stale pin here by starting
+// applied as unknown and re-driving every RG: the helper is seeded before the
+// first reconcile pass, and a held start would show a restarted owner
+// true->false->true (pkg/daemon/README.md, "A restart never inherits
+// rg_active").
 func newRGStateMachine() *rgStateMachine {
 	return &rgStateMachine{
 		vrrpInstances: make(map[string]bool),

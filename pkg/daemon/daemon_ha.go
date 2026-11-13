@@ -1457,7 +1457,12 @@ func (d *Daemon) watchVRRPEvents(ctx context.Context) {
 // Runs every 2s; also wakes immediately on event-drop notifications via
 // reconcileNowCh. Skips if cluster or dataplane is nil.
 func (d *Daemon) reconcileRGStateLoop(ctx context.Context) {
-	// Run immediately on startup to correct stale rg_active from prior run.
+	// Run immediately on startup. This pass drives every RG to its desired
+	// value, but it cannot correct an rg_active a PREVIOUS process left set:
+	// a fresh rgStateMachine has desired == applied == false for a secondary
+	// RG, so nothing is written. That case is handled where the pin is
+	// imported — the userspace Manager treats a slot this process never wrote
+	// as inactive (#19093, pkg/dataplane/README.md).
 	d.reconcileRGStatePass()
 
 	ticker := time.NewTicker(2 * time.Second)
