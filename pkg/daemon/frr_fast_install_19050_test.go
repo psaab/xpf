@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,17 +79,42 @@ func baseInputs19050(t *testing.T, d *Daemon) fastInstallInputs19050 {
 		epoch:    d.bumpDirectVIPEpoch19050(1),
 		cfg:      d.store.ActiveConfig(),
 		writeGen: d.frr.UnconditionalWriteGeneration(),
-		owners:   d.localOwnershipVector19050(),
 	}
+	in.mastership = d.contributingMastership19050(in.cfg, 1)
 	if !d.fastInstallPrecheck19050(in) {
-		t.Fatalf("premise: the unperturbed pre-check must pass (owners=%v)", in.owners)
+		t.Fatalf("premise: the unperturbed pre-check must pass (mastership=%v)", in.mastership)
 	}
 	return in
 }
 
+// baseABAInputs19050 is baseInputs19050 on the two-data-RG fixture: RG1
+// primary (the trigger), RG2 secondary and CONTRIBUTING (it owns reth1, whose
+// static the render reads), RG0 primary and not contributing.
+func baseABAInputs19050(t *testing.T) (*Daemon, *cluster.Manager, fastInstallInputs19050) {
+	t.Helper()
+	d, _, cm := newABADaemon19050(t)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	in := fastInstallInputs19050{
+		rgID:     1,
+		epoch:    d.bumpDirectVIPEpoch19050(1),
+		cfg:      d.store.ActiveConfig(),
+		writeGen: d.frr.UnconditionalWriteGeneration(),
+	}
+	in.mastership = d.contributingMastership19050(in.cfg, 1)
+	if _, ok := in.mastership[2]; !ok {
+		t.Fatalf("premise: RG2 must be a contributing RG, snapshot=%v", in.mastership)
+	}
+	if !d.fastInstallPrecheck19050(in) {
+		t.Fatalf("premise: the unperturbed pre-check must pass (mastership=%v)", in.mastership)
+	}
+	return d, cm, in
+}
+
 // TestFastInstallPrecheckTerms19050: every input of the render is fenced; each
 // subtest perturbs exactly ONE term, so each term's mutant has a cell that
-// goes red.
+// goes red. The mastership subtests cover the review's ABA (Codex P1-1): a
+// contributing RG that moves and moves BACK reads the same boolean, so only
+// its monotonic mastership generation shows the move.
 func TestFastInstallPrecheckTerms19050(t *testing.T) {
 	t.Run("resetting", func(t *testing.T) { // C1 (R14)
 		d, _ := newFastDaemon19050(t)
@@ -110,7 +136,7 @@ func TestFastInstallPrecheckTerms19050(t *testing.T) {
 		d, _ := newFastDaemon19050(t)
 		in := baseInputs19050(t, d)
 		d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
-		in.owners = d.localOwnershipVector19050() // the vector agrees; only IsLocalPrimary catches it
+		in.mastership = d.contributingMastership19050(in.cfg, 1) // the snapshot agrees; only the primary term catches it
 		if d.fastInstallPrecheck19050(in) {
 			t.Fatal("pre-check passed for an RG this node is not primary for")
 		}
@@ -131,26 +157,38 @@ func TestFastInstallPrecheckTerms19050(t *testing.T) {
 			t.Fatal("pre-check passed after an unconditional FRR write")
 		}
 	})
-	t.Run("ownership-vector", func(t *testing.T) {
+	t.Run("trigger-rg-mastership-aba", func(t *testing.T) { // Codex P1-1, the trigger RG itself
 		d, _ := newFastDaemon19050(t)
 		in := baseInputs19050(t, d)
-		other := -1 // another configured RG moves, whichever way it stood
-		for rg := range in.owners {
-			if rg != 1 {
-				other = rg
-				break
-			}
+		d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+		d.cluster.SetGroupStateForTesting(1, cluster.StatePrimary)
+		if d.fastInstallPrecheck19050(in) {
+			t.Fatal("pre-check passed after the trigger RG went primary -> secondary -> primary")
 		}
-		if other < 0 {
-			t.Fatalf("premise: the fixture needs a second RG, owners=%v", in.owners)
+	})
+	t.Run("other-rg-mastership", func(t *testing.T) {
+		d, cm, in := baseABAInputs19050(t)
+		cm.SetGroupStateForTesting(2, cluster.StatePrimary)
+		if d.fastInstallPrecheck19050(in) {
+			t.Fatal("pre-check passed after another contributing RG's ownership changed")
 		}
-		if in.owners[other] {
-			d.cluster.SetGroupStateForTesting(other, cluster.StateSecondary)
-		} else {
-			d.cluster.SetGroupStateForTesting(other, cluster.StatePrimary)
+	})
+	t.Run("other-rg-mastership-aba", func(t *testing.T) { // Codex P1-1: the vector of booleans is blind to this
+		d, cm, in := baseABAInputs19050(t)
+		cm.SetGroupStateForTesting(2, cluster.StatePrimary)
+		cm.SetGroupStateForTesting(2, cluster.StateSecondary) // and back: the boolean reads the same
+		if cm.IsLocalPrimary(2) {
+			t.Fatal("premise: RG2 must read secondary again")
 		}
 		if d.fastInstallPrecheck19050(in) {
-			t.Fatal("pre-check passed after another RG's ownership changed")
+			t.Fatal("pre-check passed after another contributing RG moved and moved back (ABA)")
+		}
+	})
+	t.Run("non-contributing-rg-moves", func(t *testing.T) { // scope: RG0 owns no RETH
+		d, cm, in := baseABAInputs19050(t)
+		cm.SetGroupStateForTesting(0, cluster.StateSecondary)
+		if !d.fastInstallPrecheck19050(in) {
+			t.Fatal("pre-check refused because RG0, which no static line depends on, moved")
 		}
 	})
 }
@@ -302,5 +340,203 @@ func TestDirectVIPAddPrimitiveCensus19050(t *testing.T) {
 		if !got[name] {
 			t.Errorf("census allowlist entry %q no longer calls the primitive; the census rotted (update it)", name)
 		}
+	}
+}
+
+// abaClusterSet19050 is a two-data-RG cluster: reth0 (RG1, the WAN default)
+// and reth1 (RG2, a LAN static). reth1 carries a bandwidth so the render
+// consults frrTunnelNameMapFn, which the ABA cell uses as a hook inside the
+// render, AFTER the render has read RG ownership.
+const abaClusterSet19050 = "" +
+	"set chassis cluster cluster-id 1\n" +
+	"set chassis cluster node 0\n" +
+	"set chassis cluster reth-count 2\n" +
+	"set chassis cluster redundancy-group 0 node 0 priority 200\n" +
+	"set chassis cluster redundancy-group 0 node 1 priority 100\n" +
+	"set chassis cluster redundancy-group 1 node 0 priority 200\n" +
+	"set chassis cluster redundancy-group 1 node 1 priority 100\n" +
+	"set chassis cluster redundancy-group 2 node 0 priority 200\n" +
+	"set chassis cluster redundancy-group 2 node 1 priority 100\n" +
+	"set chassis cluster authentication-key test-cluster-psk-6611\n" +
+	"set chassis cluster control-interface em0\n" +
+	"set chassis cluster peer-address 10.99.0.2\n" +
+	"set interfaces em0 unit 0 family inet address 10.99.0.1/24\n" +
+	"set interfaces ge-0/0/1 gigether-options redundant-parent reth1\n" +
+	"set interfaces ge-0/0/2 gigether-options redundant-parent reth0\n" +
+	"set interfaces reth0 redundant-ether-options redundancy-group 1\n" +
+	"set interfaces reth0 unit 0 family inet address 172.16.50.8/24\n" +
+	"set interfaces reth1 redundant-ether-options redundancy-group 2\n" +
+	"set interfaces reth1 bandwidth 1g\n" +
+	"set interfaces reth1 unit 0 family inet address 10.0.61.1/24\n" +
+	"set routing-options static route 0.0.0.0/0 next-hop 172.16.50.1\n" +
+	"set routing-options static route 198.51.100.0/24 next-hop 10.0.61.254\n"
+
+const (
+	abaRG1Line19050 = "ip route 0.0.0.0/0 172.16.50.1"
+	abaRG2Line19050 = "ip route 198.51.100.0/24 10.0.61.254"
+)
+
+// newABADaemon19050 is a settled standby for RG1 and RG2: both secondary, and
+// a managed section (written by a real conditional HA apply) with neither
+// RETH static. RG0 stays primary.
+func newABADaemon19050(t *testing.T) (*Daemon, *frr.RecordingExecutor, *cluster.Manager) {
+	t.Helper()
+	d, rec := newFastDaemon19050(t)
+	d.store = fenceTestStore(t, abaClusterSet19050)
+	cfg := d.store.ActiveConfig()
+	cm := cluster.NewManager(0, 1)
+	cm.UpdateConfig(cfg.Chassis.Cluster)
+	for drained := true; drained; {
+		select {
+		case <-cm.Events():
+		default:
+			drained = false
+		}
+	}
+	d.cluster = cm
+	cm.SetGroupStateForTesting(0, cluster.StatePrimary)
+	cm.SetGroupStateForTesting(1, cluster.StateSecondary)
+	cm.SetGroupStateForTesting(2, cluster.StateSecondary)
+	if err := d.frr.ApplyFullIfCurrent(d.assembleFRRConfig(cfg, nil), func() bool { return true }); err != nil {
+		t.Fatalf("settled standby apply: %v", err)
+	}
+	return d, rec, cm
+}
+
+func fastInstalled19050(rec *frr.RecordingExecutor, prefix string) bool {
+	for _, batch := range rec.FastInstalls {
+		for _, l := range batch {
+			if strings.HasPrefix(l, prefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hookRender19050 runs fn once, inside the next render that consults
+// frrTunnelNameMapFn (after that render read RG ownership).
+func hookRender19050(t *testing.T, fn func()) *atomic.Bool {
+	t.Helper()
+	orig := frrTunnelNameMapFn
+	var fired atomic.Bool
+	frrTunnelNameMapFn = func(c *config.Config) map[string]string {
+		if fired.CompareAndSwap(false, true) {
+			fn()
+		}
+		return orig(c)
+	}
+	t.Cleanup(func() { frrTunnelNameMapFn = orig })
+	return &fired
+}
+
+// runFastInstallAfter19050 starts the fast install for rg while the test holds
+// applySem, so its inputs are captured first; then runs between() and
+// releases applySem, so the render happens after between().
+func runFastInstallAfter19050(t *testing.T, d *Daemon, rg int, epoch uint64, between func()) frr.FastInstallOutcome {
+	t.Helper()
+	if err := d.applySem.Acquire(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	out := make(chan frr.FastInstallOutcome, 1)
+	go func() { out <- d.frrFastInstall19050(rg, epoch) }()
+	time.Sleep(100 * time.Millisecond) // the install captured its inputs and waits for applySem
+	between()
+	d.applySem.Release(1)
+	select {
+	case got := <-out:
+		return got
+	case <-time.After(10 * time.Second):
+		t.Fatal("fast install did not finish")
+		return frr.FastRefused
+	}
+}
+
+// TestFastInstallRefusesAnotherRGsABA19050 is review Codex P1-1's probe. RG1
+// (A) promotes and triggers with RG2 (B) secondary. B promotes before the
+// render, so the render includes B's static; during the render B demotes
+// again and its HA reload completes (writing A's static, not B's). The
+// ownership booleans now read exactly as at the capture, and A's epoch never
+// moved, so a pre-check comparing them passes and the subtraction selects
+// precisely B's now-removed line, which nothing would remove. B's line must
+// never be fast-installed.
+func TestFastInstallRefusesAnotherRGsABA19050(t *testing.T) {
+	d, rec, cm := newABADaemon19050(t)
+	cfg := d.store.ActiveConfig()
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary) // A promotes: the trigger
+	epoch := d.bumpDirectVIPEpoch19050(1)
+	var renderSawB bool
+	fired := hookRender19050(t, func() {
+		renderSawB = cm.IsLocalPrimary(2)
+		cm.SetGroupStateForTesting(2, cluster.StateSecondary) // B demotes again
+		// ... and B's demotion reload completes before the fast install
+		// reaches reloadMu.
+		if err := d.frr.ApplyFullIfCurrent(d.assembleFRRConfig(cfg, nil), func() bool { return true }); err != nil {
+			t.Errorf("B's demotion reload: %v", err)
+		}
+	})
+	got := runFastInstallAfter19050(t, d, 1, epoch, func() {
+		cm.SetGroupStateForTesting(2, cluster.StatePrimary) // B promotes after the capture
+	})
+	if !fired.Load() || !renderSawB {
+		t.Fatalf("premise: the render must run the hook (%v) and see B primary (%v)", fired.Load(), renderSawB)
+	}
+	if fastInstalled19050(rec, abaRG2Line19050) {
+		t.Fatalf("outcome %v: B's static was fast-installed after B's own demotion reload removed it: %q", got, rec.FastInstalls)
+	}
+}
+
+// TestFastInstallNotFencedByNonContributingRG19050: the positive control for
+// the cell above, and the scope claim. With no ABA the install reaches FRR
+// and installs A's line only. RG0 owns no RETH and the static render never
+// reads it (staticHopActive), so RG0 moving during the render must not cost
+// a takeover its fast install.
+func TestFastInstallNotFencedByNonContributingRG19050(t *testing.T) {
+	d, rec, cm := newABADaemon19050(t)
+	cm.SetGroupStateForTesting(1, cluster.StatePrimary)
+	epoch := d.bumpDirectVIPEpoch19050(1)
+	hookRender19050(t, func() {
+		cm.SetGroupStateForTesting(0, cluster.StateSecondary) // a net move, not an ABA
+	})
+	got := runFastInstallAfter19050(t, d, 1, epoch, func() {})
+	if got != frr.FastInstalled || !fastInstalled19050(rec, abaRG1Line19050) {
+		t.Fatalf("outcome %v installs %q, want A's default fast-installed", got, rec.FastInstalls)
+	}
+	if fastInstalled19050(rec, abaRG2Line19050) {
+		t.Fatalf("B's static installed while B is secondary: %q", rec.FastInstalls)
+	}
+}
+
+// TestFastInstallNeverCallsTransferReadiness19050 is review Codex P2-4's
+// probe. GroupStates() runs the transfer-readiness callback, which in
+// production can import routes and query FRR; the pre-check runs under the
+// FRR manager's reloadMu, outside the fast install's own bound. Capturing and
+// checking ownership must never invoke it.
+func TestFastInstallNeverCallsTransferReadiness19050(t *testing.T) {
+	d, _ := newFastDaemon19050(t)
+	primeRG1Primary(t, d)
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	var calls atomic.Int32
+	d.cluster.SetTransferReadinessFunc(func(int) (bool, []string) {
+		calls.Add(1)
+		<-release
+		return true, nil
+	})
+	out := make(chan frr.FastInstallOutcome, 1)
+	go func() { out <- d.frrFastInstall19050(1, d.bumpDirectVIPEpoch19050(1)) }()
+	select {
+	case got := <-out:
+		if got != frr.FastInstalled && got != frr.FastNothingToDo {
+			t.Fatalf("premise: the install must reach the FRR manager, got %v", got)
+		}
+	case <-time.After(5 * time.Second):
+		unblock()
+		t.Fatalf("the fast install blocked in the transfer-readiness callback (%d calls)", calls.Load())
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the fast install invoked the transfer-readiness callback %d times", n)
 	}
 }

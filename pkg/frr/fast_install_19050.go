@@ -2,7 +2,9 @@ package frr
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"strings"
 	"time"
@@ -37,10 +39,15 @@ import (
 //     the lines IN DOUBT (fastInDoubt, guarded by reloadMu). A normal
 //     successful reload neither clears it nor cancels the retry it armed; only
 //     a successful barrier followed by a frr-reload.py --test whose diff names
-//     none of the in-doubt lines clears it (review R4 B1, F1, F2).
+//     none of the in-doubt lines (by canonical route identity) clears it
+//     (review R4 B1, F1, F2; Codex P1-2). The resolution's own reload and
+//     overlay-restore failures go through the degraded state machine (Codex
+//     P1-3).
 //   - Shutdown: fastStopped and fastWG.Add are both under retryMu, the same
 //     pattern Stop uses for retryEnabled, so no install starts behind Stop's
-//     Wait (review R4 N3, R14).
+//     Wait (review R4 N3, R14). Stop removes nothing: a fast line FRR
+//     accepted stays after a graceful stop, which is #19083's class, and B
+//     can add to it (Codex P2-5); #19083 is a landing dependency.
 
 // FastInstallOutcome reports what FastInstallStatics did.
 type FastInstallOutcome int
@@ -276,11 +283,23 @@ func (m *Manager) writtenStaticLines19050() ([]string, error) {
 // loop. Caller holds reloadMu. It clears fastInDoubt only after a successful
 // barrier and a frr-reload.py --test whose diff names none of the in-doubt
 // lines; otherwise it runs the authoritative reload and asks to be called
-// again. It reports whether the retry episode may stop.
-func (m *Manager) resolveFastInDoubtLocked(ctx context.Context) bool {
+// again. It reports, as retryReloadOnce does, whether the retry episode may
+// stop and whether frr-reload.py is missing.
+//
+// A failure of that authoritative reload, or of the QNH overlay restore after
+// it, is recorded through noteReloadOutcomeLocked exactly as an apply's
+// failure is (review Codex P1-3). Logging it alone lost the obligation: the
+// failed reload can remove the stale static and still leave other config
+// unconverged, or delete the memory-only QNH overlay (#15183) and fail to
+// restore it, and the next --test is then clean for the in-doubt lines
+// (frr.conf never holds the overlay), so the episode cleared and stopped with
+// the overlay missing. Recorded, the manager is degraded, the next iteration
+// takes retryReloadOnce's degraded branch (primary reload plus overlay
+// readback), and only its success hands back to the in-doubt resolution.
+func (m *Manager) resolveFastInDoubtLocked(ctx context.Context) (stop, notFound bool) {
 	fx, ok := m.executor().(fastExecutor19050)
 	if !ok {
-		return false
+		return false, false
 	}
 	rctx, cancel := context.WithTimeout(ctx, reloadTimeout)
 	defer cancel()
@@ -289,49 +308,151 @@ func (m *Manager) resolveFastInDoubtLocked(ctx context.Context) bool {
 	// pinned by the #19050 SIGSTOP lab cell).
 	if out, err := fx.VtyshConfigLines(rctx, nil); err != nil {
 		slog.Warn("frr: in-doubt barrier failed; retrying (#19050)", "err", err, "output", strings.TrimSpace(string(out)))
-		return false
+		return false, false
 	}
 	diff, err := fx.FrrReloadPyTestOutput(rctx, m.frrConf)
 	if err != nil {
 		slog.Warn("frr: in-doubt --test failed; retrying (#19050)", "err", err)
-		return false
+		return false, false
 	}
 	if !reloadTestDiffMentions19050(diff, m.fastInDoubt.lines) {
 		slog.Info("frr: in-doubt fast lines verified (#19050)",
 			"lines", m.fastInDoubt.lines, "since", m.fastInDoubt.since)
 		m.fastInDoubt = nil
-		return !m.degraded.Load()
+		return !m.degraded.Load(), false
 	}
 	if err := m.executor().FrrReloadPy(rctx, m.frrConf); err != nil {
 		slog.Warn("frr: in-doubt authoritative reload failed; retrying (#19050)", "err", err)
+		// The failed reload may already have deleted the memory-only QNH
+		// overlay (#15183): restore it, and keep both causes.
+		if rerr := m.reconcileQNHMetricOverlaysLocked(ctx); rerr != nil {
+			err = fmt.Errorf("%w (additionally, reconciling QNH metric overlays after the failed in-doubt reload: %w)", err, rerr)
+		}
+		m.noteReloadOutcomeLocked(err)
+		return false, isFrrReloadPyMissing(err)
 	}
 	if rerr := m.reconcileQNHMetricOverlaysLocked(ctx); rerr != nil {
-		slog.Warn("frr: in-doubt reload could not reconcile QNH metric overlays", "err", rerr)
+		slog.Warn("frr: in-doubt reload could not reconcile QNH metric overlays; retrying (#19050)", "err", rerr)
+		m.noteReloadOutcomeLocked(fmt.Errorf("reconcile QNH metric overlays after the in-doubt reload: %w", rerr))
+		return false, false
 	}
-	return false
+	return false, false
+}
+
+// routeIdentity19050 is a static route's identity as FRR holds it: the
+// address family, the VRF and table it lives in, the MASKED prefix, and the
+// next hop (the canonical gateway address, or the interface/keyword target
+// when the route has no gateway). It deliberately omits the distance, the tag,
+// a gateway's qualifying interface and every other attribute: leaving a field
+// out can only make two lines match that differ in it, which delays the clear
+// (fail-closed); including a field FRR spells differently would let a stale
+// line go unmatched and the doubt clear while it is still installed.
+type routeIdentity19050 struct {
+	v6      bool
+	vrf     string
+	table   string
+	prefix  netip.Prefix
+	gateway string
+	target  string
+}
+
+// staticRouteArgKeywords19050 are the FRR static-route keywords that take one
+// argument. The argument is consumed with the keyword, so it is never read as
+// a next hop or as another keyword.
+var staticRouteArgKeywords19050 = map[string]bool{
+	"tag": true, "label": true, "color": true, "segments": true,
+	"nexthop-vrf": true, "vrf": true, "table": true,
+}
+
+// parseRouteIdentity19050 parses an `ip route` / `ipv6 route` line (a leading
+// "no " is ignored) into its canonical identity. ctxVRF is the `vrf NAME`
+// context the line is printed under, or "". FRR's reload parser rewrites IPv6
+// addresses into canonical form and staticd masks the prefix, so a line
+// xpf rendered as `2001:0559:8585:0050::1` or `10.1.2.3/8` is printed as
+// `2001:559:8585:50::1` or `10.0.0.0/8`; both spellings parse to one identity
+// (review Codex P1-2). It reports false for a line it cannot parse.
+func parseRouteIdentity19050(line, ctxVRF string) (routeIdentity19050, bool) {
+	var id routeIdentity19050
+	f := strings.Fields(line)
+	if len(f) > 0 && f[0] == "no" {
+		f = f[1:]
+	}
+	if len(f) < 4 || f[1] != "route" {
+		return id, false
+	}
+	switch f[0] {
+	case "ip":
+	case "ipv6":
+		id.v6 = true
+	default:
+		return id, false
+	}
+	p, err := netip.ParsePrefix(f[2])
+	if err != nil || p.Addr().Is6() != id.v6 {
+		return id, false
+	}
+	id.prefix = p.Masked()
+	if a, err := netip.ParseAddr(f[3]); err == nil {
+		id.gateway = a.String()
+	} else {
+		id.target = strings.ToLower(f[3])
+	}
+	for i := 4; i < len(f); i++ {
+		if !staticRouteArgKeywords19050[f[i]] {
+			continue
+		}
+		if i+1 >= len(f) {
+			return id, false
+		}
+		switch f[i] {
+		case "vrf":
+			id.vrf = f[i+1]
+		case "table":
+			id.table = f[i+1]
+		}
+		i++
+	}
+	if ctxVRF != "" {
+		id.vrf = ctxVRF
+	}
+	if id.vrf == "default" {
+		id.vrf = ""
+	}
+	return id, true
 }
 
 // reloadTestDiffMentions19050 reports whether `frr-reload.py --test --stdout`
 // output names any of lines, in either its "Lines To Add" or "Lines To Delete"
-// section. A diff line names an in-doubt line when the two are equal after
-// whitespace normalization, with a leading "no " ignored. FRR prints a VRF
-// static under a `vrf NAME` context, while the managed section renders it
-// inline (`ip route ... vrf NAME`), so an indented line under a `vrf` context
-// is also compared in its inline form. Over-matching only delays the clear
-// (fail-closed); unrelated drift, such as the memory-only QNH metric overlay
-// (#15183), does not block it (review R4 F2). A deletion prints with a
-// leading "no ", and FRR 10.6.0 prints a static's deletion under "Lines To
-// Add", so both sections are scanned. The exact shapes are pinned by testdata
-// fixtures captured from FRR 10.6.0 (loss); udp and tcp run 10.5.1, whose
-// capture is still to come.
+// section. A diff line names an in-doubt line when both parse to the same
+// canonical route identity (parseRouteIdentity19050): a leading "no " is
+// ignored, IPv6 addresses and prefixes compare in canonical form, and an
+// indented line under a `vrf NAME` context belongs to that VRF, while the
+// managed section renders it inline (`ip route ... vrf NAME`).
+//
+// Failing closed: a static-route line in the diff that does not parse, or an
+// in-doubt line that does not parse, counts as a mention, because a line this
+// matcher cannot read may be the stale one. Over-matching only delays the
+// clear; unrelated drift that is not a static route, such as the memory-only
+// QNH metric overlay (#15183), never blocks it (review R4 F2). A deletion
+// prints with a leading "no ", and FRR 10.6.0 prints a static's deletion
+// under "Lines To Add", so both sections are scanned. The exact shapes are
+// pinned by testdata fixtures captured from FRR 10.6.0 (loss); udp and tcp
+// run 10.5.1, whose capture is still to come.
 func reloadTestDiffMentions19050(out []byte, lines []string) bool {
-	want := make(map[string]bool, len(lines))
+	want := make(map[routeIdentity19050]bool, len(lines))
+	unparsedWant := false
 	for _, l := range lines {
-		if n := normalizeRouteLine19050(l); n != "" {
-			want[n] = true
+		if strings.TrimSpace(l) == "" {
+			continue
 		}
+		id, ok := parseRouteIdentity19050(l, "")
+		if !ok {
+			unparsedWant = true
+			continue
+		}
+		want[id] = true
 	}
-	if len(want) == 0 {
+	if len(want) == 0 && !unparsedWant {
 		return false
 	}
 	inSection := false
@@ -356,11 +477,18 @@ func reloadTestDiffMentions19050(out []byte, lines []string) bool {
 				continue
 			}
 		}
-		n := normalizeRouteLine19050(strings.TrimPrefix(t, "no "))
-		if want[n] {
+		if !isStaticRouteLine19050(strings.TrimPrefix(t, "no ")) {
+			continue
+		}
+		if unparsedWant {
 			return true
 		}
-		if indented && vrfContext != "" && want[n+" vrf "+vrfContext] {
+		ctx := ""
+		if indented {
+			ctx = vrfContext
+		}
+		id, ok := parseRouteIdentity19050(t, ctx)
+		if !ok || want[id] {
 			return true
 		}
 	}
