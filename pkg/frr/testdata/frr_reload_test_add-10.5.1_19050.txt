@@ -1,0 +1,22 @@
+2026-11-13 16:19:31,643  INFO: Called via "Namespace(input=None, reload=False, test=True, debug=False, log_level='info', stdout=False, pathspace=None, filename='/root/fx19050/add.conf', overwrite=False, bindir='/usr/bin', confdir='/etc/frr', rundir='/var/run/frr', vty_socket=None, daemon='', test_reset=False, logfmt=False, logfile='/var/log/frr/frr-reload.log')"
+2026-11-13 16:19:31,643  INFO: Loading Config object from file /root/fx19050/add.conf
+2026-11-13 16:19:31,650  INFO: Loading Config object from vtysh show running
+2026-11-13 16:19:31,660  INFO: "frr version 10.5.1" cannot be removed
+2026-11-13 16:19:31,660  INFO: "frr defaults traditional" cannot be removed
+2026-11-13 16:19:31,660  INFO: "service integrated-vtysh-config" cannot be removed
+
+Lines To Delete
+===============
+no hostname xpf-udp-fw1
+
+Lines To Add
+============
+ip route 198.51.100.0/24 172.16.50.1 254
+ipv6 route 2001:db8:1905:50::/64 2001:559:8585:50::1 ge-7-0-2.50 254
+ip route 203.0.113.0/24 172.16.50.1 254
+ipv6 route 2001:db8:1905:51::/64 2001:559:8585:50::1 ge-7-0-2.50 254
+vrf vrf-mgmt
+exit
+vrf vrf-mgmt
+ ip route 198.51.100.128/25 Null0 254
+exit
