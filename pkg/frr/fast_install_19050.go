@@ -436,8 +436,9 @@ func parseRouteIdentity19050(line, ctxVRF string) (routeIdentity19050, bool) {
 // QNH metric overlay (#15183), never blocks it (review R4 F2). A deletion
 // prints with a leading "no ", and FRR 10.6.0 prints a static's deletion
 // under "Lines To Add", so both sections are scanned. The exact shapes are
-// pinned by testdata fixtures captured from FRR 10.6.0 (loss); udp and tcp
-// run 10.5.1, whose capture is still to come.
+// pinned by testdata fixtures captured from FRR 10.6.0 (loss) and 10.5.1
+// (udp, tcp), including FRR's canonical printing of a host-bits prefix and
+// an expanded IPv6 gateway in both the add and the delete form.
 func reloadTestDiffMentions19050(out []byte, lines []string) bool {
 	want := make(map[routeIdentity19050]bool, len(lines))
 	unparsedWant := false

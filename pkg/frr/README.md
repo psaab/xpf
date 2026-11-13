@@ -573,13 +573,19 @@ v2.1-v2.3 addenda):
   - The diff matcher is pinned with real `--test` output in
     `testdata/frr_reload_test_<form>-<frr version>_19050.txt`. The fixture
     loader checks that each file's `frr version` line matches its name.
-    - Captured so far: FRR 10.6.0 (loss).
-    - Still to come: 10.5.1, which udp and tcp run.
-    - On 10.6.0 a static's deletion prints as `no ip route ...` under
-      "Lines To Add", and a VRF static prints inside a `vrf NAME` ...
-      `exit` block. The matcher scans both sections, ignores a leading
-      `no `, and compares an indented line under `vrf NAME` in its
-      inline `... vrf NAME` form.
+    - Captured: FRR 10.6.0 (loss fw1, 2026-11-10) and 10.5.1 (udp fw1,
+      2026-11-13), each on a standby by vtysh staging. The cell requires
+      both versions.
+    - On both versions a static's deletion prints as `no ip route ...`
+      under "Lines To Add", and a VRF static prints inside a `vrf NAME`
+      ... `exit` block. The matcher scans both sections, ignores a leading
+      `no `, and treats an indented line under `vrf NAME` as being in that
+      VRF.
+    - The 10.5.1 capture staged a host-bits prefix (`203.0.113.77/24`)
+      and an expanded IPv6 gateway. FRR printed both canonically in BOTH
+      forms (`203.0.113.0/24`, `2001:559:8585:50::1`). frr-reload
+      normalizes the file side too, so the managed section's spelling can
+      never be matched by string.
 - **Shutdown.** `fastStopped` and `fastWG.Add` are both taken under
   `retryMu`, the `retryEnabled` pattern. `Stop` sets the flag, cancels the
   lifetime context (which kills an in-flight batch), and joins. It removes
