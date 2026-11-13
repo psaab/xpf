@@ -27,19 +27,17 @@ type frrHADemotionState struct {
 // recorded during its own render, never a separately maintained list of the
 // RGs a static line "can" depend on (two such lists missed a dependency in
 // review: the ABA, then RG0 through the IS-IS distance guard).
-// TestFRRRenderOwnershipReadsCensus19050 pins that no other render code reads
-// cluster ownership.
+//
+// newFRRHADemotionStateFrom is the ONLY constructor of frrHADemotionState and
+// its ownership argument the only ownership input; assembleFRRConfigOwned is
+// its only caller and picks the live cluster manager only when no recorder was
+// passed. TestFRRRenderOwnershipReadsCensus19050 pins all of it, following
+// in-package calls from the render's entry points, and its self-test cells
+// pin that the census reports each known bypass shape.
 type frrHAOwnership interface {
 	IsLocalPrimary(rgID int) bool
 	LocalGroupPrimary(rgID int) (primary, known bool)
 	IsLocalPrimaryAny() bool
-}
-
-func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
-	if d == nil || d.cluster == nil {
-		return nil
-	}
-	return newFRRHADemotionStateFrom(d.cluster, cfg)
 }
 
 func newFRRHADemotionStateFrom(own frrHAOwnership, cfg *config.Config) *frrHADemotionState {
