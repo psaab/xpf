@@ -66,6 +66,14 @@ if [[ -f "$proof" && ! -L "$proof" ]] &&
 	[[ $(stat -c '%u %a' "$proof" 2>/dev/null || true) == "0 444" ]]; then
 	proof_boot=$(cat "$proof")
 fi
+# #19084 R19 F3: XPF_TESTGUARD_NO_VM_PROOF=1 makes this run ignore the VM
+# proof and take the user-namespace path. It can only LOWER privilege, so it
+# is honoured from any caller, and a caller that needs the unprivileged path
+# (the overlay selftest) never has to delete the runner's shared proof, which
+# other lanes' root legs depend on.
+if [[ ${XPF_TESTGUARD_NO_VM_PROOF:-} == 1 ]]; then
+	proof_boot=
+fi
 # #18559: inside the private net namespace, bring loopback UP before the
 # command runs. A fresh namespace starts with `lo` DOWN and every package of
 # one `go test ./...` shares it, so before this a cell that serves or dials
@@ -127,18 +135,41 @@ if [[ $euid == 0 ]]; then
 	fi
 	pass_raw+=("${GOCACHE:-${go_vars[0]:-}}" "${GOMODCACHE:-${go_vars[1]:-}}" "${GOTMPDIR:-${go_vars[2]:-}}")
 	pass=()
+	# A pass-through may not be, or lie below, a host system tree (R19 F4:
+	# exact roots alone let /etc/x through): a top-level root itself, or
+	# anything at or below /etc, /usr, /boot, /bin, /sbin, /lib*, /var/lib,
+	# /var/log, /proc, /sys, /dev or /run. Below /home, /root, /srv, /opt,
+	# /var and /mnt is allowed (GOMODCACHE in a home, GOCACHE in
+	# /root/.cache, a /var/tmp scratch), and so is /tmp itself as a declared
+	# TMPDIR scratch. Checked on the lexical path BEFORE the
+	# mkdir, so a refused path is never created on the host, and again after
+	# symlinks resolve.
+	system_tree() {
+		case $1 in
+		/ | /home | /root | /srv | /opt | /var | /mnt | /media | \
+			/etc | /etc/* | /usr | /usr/* | /boot | /boot/* | /bin | /bin/* | /sbin | /sbin/* | \
+			/lib | /lib/* | /lib32 | /lib32/* | /lib64 | /lib64/* | /var/lib | /var/lib/* | \
+			/var/log | /var/log/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/*)
+			return 0
+			;;
+		esac
+		return 1
+	}
 	for p in "${pass_raw[@]}"; do
 		[[ -n $p && $p != off ]] || continue
+		lexical=$(realpath -m "$p" 2>/dev/null) || lexical=
+		if [[ -z $lexical ]] || system_tree "$lexical"; then
+			echo "testguard-run: REFUSED: pass-through directory '$p' would expose a host system tree; point TMPDIR/GOCACHE/GOMODCACHE/GOTMPDIR elsewhere (#19084)" >&2
+			exit 2
+		fi
 		mkdir -p "$p" 2>/dev/null && p=$(realpath -e "$p" 2>/dev/null) || {
 			echo "testguard-run: REFUSED: cannot resolve the pass-through directory '$p' (#19084)" >&2
 			exit 2
 		}
-		case $p in
-		/ | /etc | /usr | /var | /var/lib | /var/log | /run | /boot | /proc | /sys | /dev | /home | /root | /srv | /opt | /bin | /sbin | /lib | /lib64 | /mnt | /media | /proc/* | /sys/* | /dev/* | /run/*)
-			echo "testguard-run: REFUSED: pass-through directory $p would expose a host system tree; point TMPDIR/GOCACHE/GOMODCACHE/GOTMPDIR elsewhere (#19084)" >&2
+		if system_tree "$p"; then
+			echo "testguard-run: REFUSED: pass-through directory $p (after symlinks) would expose a host system tree; point TMPDIR/GOCACHE/GOMODCACHE/GOTMPDIR elsewhere (#19084)" >&2
 			exit 2
-			;;
-		esac
+		fi
 		pass+=("$p")
 	done
 	mkdir -p "$work/overlay"

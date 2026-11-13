@@ -18,8 +18,13 @@
 #  - Every other mount from the host's table is classified by filesystem type
 #    and depth, and NOTHING is left writable by omission:
 #      * /proc, /sys and /dev are bound in recursively (pseudo filesystems);
-#        a mount below them is kept if it is a pseudo filesystem, overlaid if
-#        it is storage (tmpfs such as /dev/shm), and otherwise refused;
+#        a mount below them is kept if it is a pseudo filesystem; if it is
+#        storage (tmpfs such as /dev/shm) its imported copy is detached and
+#        the path overlaid, so no writable host mount sits beneath the view;
+#        anything else is refused;
+#      * every BLOCK device node in the view's /dev is masked (a read-only,
+#        nodev bind of /dev/null), so it cannot be opened;
+#      * a procfs anywhere but /proc (a host-process alias) is refused;
 #      * /run gets its own overlay. Host submounts below /run are NOT carried
 #        into it: their mountpoints read as empty directories (R18 R3);
 #      * any other storage mount (ext4, xfs, btrfs, tmpfs such as /tmp, ...)
@@ -113,13 +118,18 @@ overlay_onto() { # $1 lower (host path), $2 target in the view, $3 source tag
 
 overlay_onto / "$m" testguard-root
 
-while read -r depth mp fstype; do
+while read -r _ mp fstype; do
 	[[ $mp == / ]] && continue
 	skip=0
 	for p in "${pass[@]}"; do under "$mp" "$p" && skip=1; done
 	((skip)) && continue           # below a pass-through: the host's, by intent
 	under "$mp" /run && [[ $mp != /run ]] && continue # hidden by /run's overlay (R18 R3)
 	plain_path "$mp" || refuse "mountpoint '$mp' ($fstype) needs quoting; cannot place it in the view"
+	# A procfs other than /proc itself (an alias such as /srv/hostproc) is
+	# the HOST pid namespace's: /srv/hostproc/1/root/etc reaches the host's
+	# root filesystem past the view (Codex P1 on 41dcb74e6d). The run's own
+	# /proc is replaced by its pid namespace's procfs; an alias would not be.
+	[[ $fstype == proc && $mp != /proc ]] && refuse "$mp is a procfs other than /proc, a host-process alias"
 	case $mp in
 	/proc | /sys | /dev)
 		[[ $pseudo_types == *" $fstype "* ]] || refuse "$mp is $fstype, not a pseudo filesystem"
@@ -133,7 +143,17 @@ while read -r depth mp fstype; do
 		# Below /proc, /sys or /dev it came with the recursive bind.
 		((in_tree)) && continue
 		mount --bind "$mp" "$m$mp" || refuse "cannot bind $mp ($fstype) into the view"
-	elif [[ $overlay_types == *" $fstype "* ]]; then
+		continue
+	fi
+	# Storage below /proc, /sys or /dev (a tmpfs such as /dev/shm, a root-fs
+	# bind) came in with the recursive bind as the HOST's writable mount.
+	# Detach that copy before covering the path, so no writable host storage
+	# sits beneath the view's overlay (Codex P1 on 41dcb74e6d). The lower
+	# layer below is still the host's mount, reached outside the view.
+	if ((in_tree)); then
+		umount -l "$m$mp" || refuse "cannot detach the imported $mp beneath its cover"
+	fi
+	if [[ $overlay_types == *" $fstype "* ]]; then
 		overlay_onto "$mp" "$m$mp" "testguard-$fstype"
 	elif [[ $readonly_types == *" $fstype "* ]]; then
 		mount --bind "$mp" "$m$mp" && mount -o remount,bind,ro "$m$mp" ||
@@ -142,6 +162,17 @@ while read -r depth mp fstype; do
 		refuse "$mp is $fstype, which this wrapper can neither overlay nor bind read-only"
 	fi
 done <<<"$mounts"
+
+# Block devices: every block device node in the view's /dev is masked with a
+# read-only, nodev bind of /dev/null, so opening it fails (EACCES) instead of
+# reaching a disk past every overlay (Codex P1 on 41dcb74e6d). A read-only
+# bind alone would not do: writing a device node ignores the mount's
+# read-only flag, nodev does not. Character devices (null, tun, kvm, ...)
+# stay as they are; no root test needs a block device.
+while IFS= read -r -d '' node; do
+	mount --bind /dev/null "$node" && mount -o remount,bind,ro,nodev "$node" ||
+		refuse "cannot mask the block device ${node#"$m"} in the view"
+done < <(find "$m/dev" -xdev -type b -print0)
 
 # The writable pass-through, parents before children.
 while read -r p; do
@@ -198,7 +229,7 @@ done
 trap - TERM INT HUP
 kill "$sampler" 2>/dev/null
 wait "$sampler" 2>/dev/null
-final=$(used_kib) || final=?
+final=$(used_kib) || final='?'
 peak=$(cat /proc/self/fd/8/.peak-kib 2>/dev/null) || peak=0
 [[ $final =~ ^[0-9]+$ ]] && ((final > peak)) && peak=$final
 echo "testguard-run: root view: tmpfs upper peak ${peak} KiB (sampled every 1 s), ${final} KiB at exit (#19084)" >&2

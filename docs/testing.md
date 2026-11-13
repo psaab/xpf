@@ -325,6 +325,13 @@ R2 on 11eaccc637). So on a root run `testguard-run.sh` builds the view in
 `scripts/testguard-root-view.sh`, as real root and before any user namespace
 exists, and runs the test namespaces inside it.
 
+What it protects against is an ACCIDENTAL host write by a root test: a test
+writing, unlinking or chmodding a production path, through a symlink, a
+relative path or an inherited descriptor, or opening a disk by mistake. It
+is NOT a containment boundary against a test that deliberately sets out to
+escape: on the VM-proof path the command keeps real root (the limits below
+say what that still allows). A runner is a disposable VM for that reason.
+
 What the wrapper enforces on a root run:
 
 - `/` itself is an overlay. Its lower layer is the host's root filesystem; its
@@ -335,20 +342,45 @@ What the wrapper enforces on a root run:
   whatever path or directory symlink reached it. Tests still read the host's
   files and read back their own writes, in-process and from child processes.
 - Every other mount in the host's table is placed by type, never left
-  writable by omission: `/proc`, `/sys` and `/dev` are bound in recursively
-  (pseudo filesystems); `/run` gets its own overlay; any other storage mount
-  (ext4, xfs, btrfs, tmpfs such as `/tmp` and `/dev/shm`) is overlaid like
-  `/`; a filesystem overlayfs cannot take as a lower layer (vfat, as on
-  `/boot/efi`; read-only media) is bound in **read-only**; any other type
-  (ramfs, network and FUSE filesystems, an automount outside `/proc`) makes
-  the run **refuse with exit 2** before the command starts. So does any setup
-  failure.
+  writable by omission:
+  - `/proc`, `/sys` and `/dev` are bound in recursively (pseudo
+    filesystems).
+  - Storage mounted below them (a tmpfs such as `/dev/shm`, a root-fs bind)
+    has its imported host copy DETACHED and is then overlaid, so no writable
+    host mount sits beneath the view (Codex P1 on 41dcb74e6d).
+  - `/run` gets its own overlay.
+  - Any other storage mount (ext4, xfs, btrfs, tmpfs such as `/tmp`) is
+    overlaid like `/`.
+  - A filesystem overlayfs cannot take as a lower layer (vfat, as on
+    `/boot/efi`; read-only media) is bound in **read-only**.
+  - A procfs anywhere but `/proc` (an alias such as `/srv/hostproc`, which
+    would reach host processes' roots past the view) **refuses the run with
+    exit 2**.
+  - So does any other type (ramfs, network and FUSE filesystems, an
+    automount outside `/proc`), and so does any setup failure.
+- Every BLOCK device node in the view's `/dev` is masked with a read-only,
+  `nodev` bind of `/dev/null`, so opening it fails (EACCES) instead of
+  reaching a disk past every overlay (Codex P1). This applies on BOTH paths:
+  on the user-namespace path the namespace's root is kuid 0, so without the
+  mask it could open a host disk read-write (R19 confirmed `/dev/sda2` opens
+  O_RDWR there). `nodev` is what stops it: a device node's writes ignore a
+  mount's read-only flag. Character devices
+  (`null`, `zero`, `urandom`, `net/tun`, `kvm`, ...) stay available; no root
+  test needs a block device (the full root `pkg/daemon` comparison in
+  `docs/log/19084.md` shows none fails).
 - The only writable host storage is a pass-through allowlist, bound in from
   the host: the checkout, the `TMPDIR` scratch, and Go's `GOCACHE`,
   `GOMODCACHE` and `GOTMPDIR` (from the environment or `go env`). Build
   output and `t.TempDir()` therefore land on disk, not in the tmpfs upper. A
-  pass-through that would expose a system tree (`/`, `/etc`, `/var`, `/run`,
-  ...) refuses the run.
+  pass-through that would expose a system tree refuses the run, before
+  anything is created:
+  - a top-level root itself (`/`, `/home`, `/root`, `/srv`, `/opt`, `/var`,
+    `/mnt`, `/media`);
+  - anything at or below `/etc`, `/usr`, `/boot`, `/bin`, `/sbin`, `/lib*`,
+    `/var/lib`, `/var/log`, `/proc`, `/sys`, `/dev` or `/run` (R19 F4).
+
+  Below `/home`, `/root` or `/var/tmp` is allowed (a module cache in a home,
+  `/root/.cache/go-build`), and so is a `/tmp` scratch.
 - The caller's working directory is re-entered inside the view (a refusal if
   it is not reachable there), and every inherited descriptor above 2 is
   closed before the command runs, so neither a cwd nor a descriptor opened on
@@ -376,17 +408,33 @@ Its limits:
   (`/run/user/<uid>`, `/run/credentials/*`, `/run/incus_agent`, ...): `/run`'s
   overlay has only the `/run` tmpfs as its lower layer (R18 R3). A test must
   not depend on them.
-- **The VM-proof path keeps real root** (for the BPF and memlock legs). A
-  command there can detach mounts in its own namespace, mount a host block
-  device, or enter a host namespace through `/proc`; nothing here can stop
-  that. The host's root filesystem is not attached in the view, so a detach
-  alone exposes nothing, and after the command `testguard-run.sh` checks that
-  the run's namespace still has the testguard overlay at `/`, failing the run
-  otherwise (R18 R1). That is detection, not containment. On the
-  user-namespace path the inherited mounts are locked and cannot be detached.
+- **The VM-proof path keeps real root** (for the BPF and memlock legs), so
+  a command there that sets out to do it can:
+  - unmount or remount the view's mounts: detach an overlay, remount a
+    read-only bind (a vfat mount, a block-device mask) read-write, or remove
+    a mask (R19 F2);
+  - create a device node (or a new loop device) and mount a host disk;
+  - enter a host namespace through `/proc` once it has unmounted its own;
+  - write `/sys` and global sysctls (as on either path);
+  - talk to host daemons (as on either path).
+
+  None of that happens by accident, and nothing here can stop it. The host's
+  root filesystem is not attached in the view, so a detach alone exposes
+  nothing. After the command, `testguard-run.sh` checks that the run's
+  namespace still has the testguard overlay at `/`, and fails the run
+  otherwise (R18 R1). That is detection of the simplest case only. On the
+  user-namespace path the inherited mounts, masks included, are locked, and
+  creating a device node needs a capability that path does not have.
 - **Copy-up changes some filesystem semantics** relative to the host (rename
   across separate overlays, inotify and open readers across copy-up, lock
   identity against a host holder). Not measured; tracked in #19102.
+
+`XPF_TESTGUARD_NO_VM_PROOF=1` makes `testguard-run.sh` ignore the VM proof
+and take the user-namespace path. It can only lower privilege, so it is
+honoured from any caller. The overlay selftest uses it instead of deleting
+the runner's shared proof, which it never touches (R19 F3). Its VM-proof
+cases run only on a runner that is already marked, as `make vm-test-root`
+does first.
 
 pkg/daemon's TestMain redirects stay as defence in depth (they keep non-root
 runs off production paths too), including the no-redirects capture and event
@@ -399,8 +447,10 @@ stand-in commands: seeds in `/etc`, `/var/lib`, `/srv`, `/opt`, `/root` and
 `/tmp` stay byte-, mode- and mtime-identical on the host while the command
 sees every change; so does a symlinked directory's target; a relative write
 from a host cwd stays private; inherited descriptors are closed; a write
-under `TMPDIR` does reach the host; `/boot/efi` is read-only; a failing `id`
-and an unplaceable mount each refuse the run; a detach of the view fails a
+under `TMPDIR` does reach the host; a disposable vfat fixture, proven
+writable first, is read-only; `/dev/shm` has no host tmpfs beneath its
+overlay; no host block device can be opened; a failing `id`, an unplaceable
+mount and a procfs alias each refuse the run; a detach of the view fails a
 VM-proof run; and on a non-VM the selftest refuses before touching anything.
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about

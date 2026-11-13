@@ -247,8 +247,9 @@ test-xfrm-lifecycle:
 # (scripts/testguard-root-view.sh), so a test cannot change host state outside
 # the pass-through allowlist and still reads back its own writes. Root only
 # (refuses otherwise) and VM only (the selftest refuses on a non-VM before
-# touching anything); both root paths (user namespace, VM proof) are
-# exercised.
+# touching anything). It never touches the runner's VM proof: the
+# user-namespace path is exercised through XPF_TESTGUARD_NO_VM_PROOF=1, and
+# the VM-proof path when the runner is marked, which vm-test-root does first.
 .PHONY: test-testguard-overlay
 test-testguard-overlay:
 	@[ "$$(id -u)" = 0 ] || { echo "test-testguard-overlay: needs root (make vm-test-root)" >&2; exit 1; }

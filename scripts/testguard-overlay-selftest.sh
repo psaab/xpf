@@ -15,11 +15,19 @@
 #   [F2-fds]       descriptors the caller left open are closed before exec;
 #   [pass-through] writes under TMPDIR do reach the host (build output must
 #                  not land in the tmpfs upper);
-#   [read-only]    a vfat mount (overlayfs cannot take it as a lower layer)
-#                  is read-only in the view; skipped when there is none;
+#   [read-only]    a disposable vfat image, loop-mounted and proven WRITABLE
+#                  first (overlayfs cannot take vfat as a lower layer), is
+#                  read-only in the view; skipped, as coverage unavailable,
+#                  without busybox mkdosfs or a loop device;
+#   [underlay]     a storage mount below /dev (/dev/shm) has ONE mount in
+#                  the view, its overlay: no writable host copy beneath it;
+#   [block-dev]    every host block device node is unopenable in the view;
+#   [procfs-alias] a procfs mounted anywhere but /proc refuses the run;
+#   [pass-through-refused] a pass-through below a system tree (/etc/x)
+#                  refuses the run before it is created;
 #   [F3-id]        an `id` that fails refuses the run (exit 2, no command);
-#   [F4-vm]        on a non-VM this selftest refuses before touching the VM
-#                  proof or seeding anything;
+#   [F4-vm]        on a non-VM this selftest refuses before seeding anything;
+#   [proof-untouched] the runner's shared VM proof is never touched;
 #   [unsupported]  a mount of a type the wrapper cannot place refuses the run;
 #   [R1-detach]    on the VM-proof path, a command that detaches the root
 #                  view FAILS the run; on the user-namespace path it cannot;
@@ -29,9 +37,17 @@
 # Root only. Otherwise it exits 77 (SKIP, with the reason) so a non-root run
 # never reads as a pass: scripts/run-selftests.sh reports it as a named SKIP,
 # and `make vm-test-root` (test-testguard-overlay) runs it as root, where the
-# Makefile target fails on anything but 0. It seeds host trees and rewrites
-# the VM proof (restoring both on exit), so it refuses (exit 2) on anything
-# that is not a VM, checked read-only BEFORE any of that (Codex F4).
+# Makefile target fails on anything but 0. It seeds host trees (removing them
+# on exit), so it refuses (exit 2) on anything that is not a VM, checked
+# read-only BEFORE any of that (Codex F4).
+#
+# It never touches the runner's VM proof, which other lanes' root legs on
+# the same runner depend on (R19 F3 on 41dcb74e6d: deleting it for the first
+# path, with no lock, broke them for that window, and a kill inside it left
+# it deleted). The user-namespace cases ask testguard-run.sh to ignore the
+# proof (XPF_TESTGUARD_NO_VM_PROOF=1, downgrade-only). The VM-proof cases run
+# when the runner is already marked (`make vm-test-root` marks it first) and
+# are reported as skipped, coverage unavailable, otherwise.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 if [ "$(id -u)" != 0 ]; then
@@ -42,7 +58,7 @@ fi
 # scripts/mark-test-vm.sh, which this selftest calls later.
 virt=$(systemd-detect-virt --vm 2>/dev/null || true)
 if [ -z "$virt" ] || [ "$virt" = none ]; then
-	echo "testguard-overlay-selftest: REFUSED: not a virtual machine (systemd-detect-virt --vm: '${virt:-}'); it seeds host trees and rewrites the VM proof, so it runs only in a disposable VM (#19084)" >&2
+	echo "testguard-overlay-selftest: REFUSED: not a virtual machine (systemd-detect-virt --vm: '${virt:-}'); it seeds host trees, so it runs only in a disposable VM (#19084)" >&2
 	exit 2
 fi
 # Every host mutation below is announced here first. The [F4-vm] cell runs
@@ -58,17 +74,13 @@ tag="tg-sel.$$"
 proof=/run/xpf-testguard-vm-boot-id
 W=$(mktemp -d "$TMPDIR/tg-overlay.XXXXXX")
 seeds="/etc/$tag.seed /var/lib/$tag /var/log/$tag.log /run/$tag /srv/$tag /opt/$tag /root/$tag /tmp/$tag
-/etc/$tag.new /var/log/$tag-f1 /srv/$tag-f1 /etc/$tag-cwd /srv/$tag-fd /srv/$tag-unsup /boot/efi/$tag"
-had_proof=0
-trace proof-save
-[ -e "$proof" ] && { had_proof=1; cp -p "$proof" "$W/proof.saved"; }
+/etc/$tag.new /var/log/$tag-f1 /srv/$tag-f1 /etc/$tag-cwd /srv/$tag-fd /srv/$tag-unsup /srv/$tag-vfat /srv/$tag-hostproc /etc/$tag-cache"
+# [proof-untouched]: the runner's VM proof, as other lanes see it, is recorded
+# here and must be byte-, mode- and mtime-identical at the end (R19 F3).
+proof_state() { stat -c '%F %a %U %s %Y' "$proof" 2>&1; cat "$proof" 2>&1; }
+proof_at_start=$(proof_state)
 cleanup() {
 	for p in $seeds; do rm -rf "$p"; done
-	if [ "$had_proof" = 1 ]; then
-		cp -p "$W/proof.saved" "$proof"
-	else
-		rm -f "$proof"
-	fi
 	rm -rf "$W"
 }
 trap cleanup EXIT
@@ -153,10 +165,34 @@ mkfake pass "
 printf 'kept\n' > $W/pass.out && [ \"\$(cat $W/pass.out)\" = kept ] || fail 'cannot write under TMPDIR'"
 
 # ── [read-only] ──────────────────────────────────────────────────────────
-vfat=$(findmnt -rn -t vfat -o TARGET 2>/dev/null | head -n 1)
+# A disposable vfat image, not the host's /boot/efi: an ambient mount that is
+# already read-only would let a view that forgot its remount pass (Codex P2 on
+# 41dcb74e6d). The fixture proves itself writable before each run.
+vfat=/srv/$tag-vfat
+vfat_img=
+if command -v busybox >/dev/null 2>&1; then
+	vfat_img="$W/vfat.img"
+	truncate -s 8M "$vfat_img" && busybox mkdosfs "$vfat_img" >/dev/null 2>&1 || vfat_img=
+fi
 mkfake ro "
 ls '$vfat' >/dev/null || fail 'the vfat mount is not readable'
 if touch '$vfat/$tag' 2>/dev/null; then fail 'the vfat mount is writable in the view'; fi"
+
+# ── [underlay] ───────────────────────────────────────────────────────────
+mkfake underlay "
+n=\$(awk '\$5 == \"/dev/shm\"' /proc/self/mountinfo | wc -l)
+[ \"\$n\" = 1 ] || fail \"/dev/shm has \$n mounts in the view; the imported host tmpfs is still beneath its overlay\"
+awk '\$5 == \"/dev/shm\"' /proc/self/mountinfo | grep -q ' - overlay testguard-tmpfs ' || fail '/dev/shm is not the testguard overlay'"
+
+# ── [block-dev] ──────────────────────────────────────────────────────────
+# The host's block nodes, listed outside the view (inside it they are masked
+# by a character device, so `find -type b` there would find nothing).
+blocknodes=$(find /dev -xdev -type b 2>/dev/null | tr '\n' ' ')
+mkfake blockdev "
+[ -n '$blocknodes' ] || fail 'FIXTURE: the host has no block device node to test'
+for b in $blocknodes; do
+	if ( exec 3>>\"\$b\" ) 2>/dev/null; then fail \"block device \$b can be opened for writing in the view\"; fi
+done"
 
 run_tg() { # $1 cwd, then the command; sets out and rc
 	out=$(cd "$1" && shift && bash "$here/testguard-run.sh" "$@" 2>&1)
@@ -218,22 +254,37 @@ branch_cases() { # $1 label
 		bad "[pass-through] $b: rc $rc, host file: '$(cat "$W/pass.out" 2>&1)': $out"
 	fi
 
-	if [ -n "$vfat" ]; then
-		run_tg / "$W/ro"
-		if [ "$rc" = 0 ] && [ ! -e "$vfat/$tag" ]; then
-			ok "[read-only] $b: $vfat is read-only in the view"
-		else
-			bad "[read-only] $b: rc $rc, host $vfat/$tag exists: $([ -e "$vfat/$tag" ] && echo yes || echo no): $out"
-		fi
-		rm -f "$vfat/$tag"
+	if [ -n "$vfat_img" ]; then
+		mkdir -p "$vfat"
+		# 98: the fixture was not writable before the run (no control);
+		# 97: the command's write reached the fixture; 99: no loop mount.
+		out=$(unshare -m --propagation private bash -c '
+			mount -o loop "$2" "$1" || exit 99
+			touch "$1/writable-before" && rm -f "$1/writable-before" || exit 98
+			bash "$3" "$4"; rc=$?
+			[ -e "$1/$5" ] && exit 97
+			exit "$rc"' _ "$vfat" "$vfat_img" "$here/testguard-run.sh" "$W/ro" "$tag" 2>&1)
+		rc=$?
+		case $rc in
+		0) ok "[read-only] $b: a writable vfat fixture is read-only in the view" ;;
+		99) echo "  skip [read-only] $b: coverage unavailable (no loop mount for the vfat fixture): $out" ;;
+		*) bad "[read-only] $b: exit $rc (97 = the write reached the fixture, 98 = fixture not writable): $out" ;;
+		esac
 	else
-		echo "  skip [read-only] $b: no vfat mount on this host"
+		echo "  skip [read-only] $b: coverage unavailable (no busybox mkdosfs for a vfat fixture)"
 	fi
+
+	run_tg / "$W/underlay"
+	[ "$rc" = 0 ] && ok "[underlay] $b: /dev/shm is only the view's overlay, with no host tmpfs beneath it" ||
+		bad "[underlay] $b: testguard-run exited $rc: $out"
+
+	run_tg / "$W/blockdev"
+	[ "$rc" = 0 ] && ok "[block-dev] $b: no host block device ($blocknodes) can be opened for writing" ||
+		bad "[block-dev] $b: testguard-run exited $rc: $out"
 }
 
-# ── user-namespace path: no VM proof ─────────────────────────────────────
-trace proof-remove
-rm -f "$proof"
+# ── user-namespace path: the proof ignored, never deleted ────────────────
+export XPF_TESTGUARD_NO_VM_PROOF=1
 branch_cases "user-namespace path"
 
 # [R1-detach] control: there the inherited mounts are locked, so the command
@@ -271,6 +322,33 @@ else
 fi
 rm -rf "/srv/$tag-unsup"
 
+# ── [pass-through-refused]: a pass-through below /etc refuses the run ────
+# R19 F4: the system-tree check matches whole trees, not only exact roots,
+# and it runs before the directory is created.
+rm -f "$W/f3.marker"
+out=$(GOCACHE="/etc/$tag-cache" bash "$here/testguard-run.sh" "$W/marker" 2>&1)
+rc=$?
+if [ "$rc" = 2 ] && [ ! -e "$W/f3.marker" ] && [ ! -e "/etc/$tag-cache" ] && [[ $out == *"would expose a host system tree"* ]]; then
+	ok "[pass-through-refused] GOCACHE below /etc refuses the run (exit 2) without creating it"
+else
+	bad "[pass-through-refused] exit $rc (want 2), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no), /etc/$tag-cache created: $([ -e "/etc/$tag-cache" ] && echo yes || echo no): $out"
+fi
+rm -rf "/etc/$tag-cache"
+
+# ── [procfs-alias]: a host procfs alias refuses the run ──────────────────
+trace "seed procfs-alias"
+mkdir -p "/srv/$tag-hostproc"
+rm -f "$W/f3.marker"
+out=$(unshare -m --propagation private bash -c 'mount -t proc proc "$1" || exit 99; shift; exec bash "$@"' _ \
+	"/srv/$tag-hostproc" "$here/testguard-run.sh" "$W/marker" 2>&1)
+rc=$?
+if [ "$rc" = 2 ] && [ ! -e "$W/f3.marker" ] && [[ $out == *"/srv/$tag-hostproc is a procfs other than /proc"* ]]; then
+	ok "[procfs-alias] a procfs alias at /srv refuses the run (exit 2), naming it"
+else
+	bad "[procfs-alias] exit $rc (want 2; 99 = fixture mount failed), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no): $out"
+fi
+rm -rf "/srv/$tag-hostproc"
+
 # ── [F4-vm]: on a non-VM this selftest touches nothing ───────────────────
 if [ -z "${TG_SELFTEST_NESTED:-}" ]; then
 	mkdir -p "$W/nonvm"
@@ -287,10 +365,16 @@ if [ -z "${TG_SELFTEST_NESTED:-}" ]; then
 	fi
 fi
 
-# ── VM-proof path ────────────────────────────────────────────────────────
-trace proof-mark
-bash "$here/mark-test-vm.sh" || bad "could not establish the VM proof for the second path"
-if [ -e "$proof" ]; then
+# ── VM-proof path: only on a runner that is already marked ───────────────
+unset XPF_TESTGUARD_NO_VM_PROOF
+proof_ok=0
+if [ -f "$proof" ] && [ ! -L "$proof" ] && [ "$(stat -c '%u %a' "$proof" 2>/dev/null)" = "0 444" ] &&
+	[ "$(cat "$proof")" = "$(cat /proc/sys/kernel/random/boot_id)" ]; then
+	proof_ok=1
+fi
+if [ "$proof_ok" != 1 ]; then
+	echo "  skip VM-proof path: coverage unavailable, this runner has no VM proof for this boot (make vm-test-root marks it before running this selftest)"
+else
 	branch_cases "VM-proof path"
 	run_tg / "$W/detach"
 	if [ "$rc" = 1 ] && [[ $out == *"root view is no longer mounted"* ]]; then
@@ -308,6 +392,12 @@ XPF_RESIDUE_EXTRA_STATE_PATHS="$W/state" bash "$here/testguard-run.sh" "$W/uncov
 rc=$?
 [ "$rc" = 1 ] && ok "[detector] a root run that deletes a watched state file through the pass-through FAILS (exit 1)" ||
 	bad "[detector] exit $rc, want 1"
+
+if [ "$(proof_state)" = "$proof_at_start" ]; then
+	ok "[proof-untouched] the runner's VM proof is exactly as it was before the selftest"
+else
+	bad "[proof-untouched] the VM proof changed: [$proof_at_start] -> [$(proof_state)]"
+fi
 
 printf '\ntestguard-overlay-selftest: passed=%d failed=%d\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
