@@ -1442,6 +1442,22 @@ func (s *Store) IsConfirmPending() bool {
 // holding s.mu across that would invert the applySem->s.mu lock order).
 // When no executor is registered (tests / non-daemon embedders) it falls
 // back to the self-contained performAutoRollback (store-state only).
+// RetryConfirmedRollback dispatches a retry of the commit-confirmed rollback
+// for gen exactly as the confirm timer dispatches the first attempt
+// (fireConfirmTimer): through the executor registered with
+// SetRollbackExecutor, called outside s.mu, or performAutoRollback when none
+// is registered. The daemon's executor schedules it when a rollback must be
+// retried (#19089). That retry used to call the daemon's executor function
+// directly, so it was the one rollback execution that bypassed whatever the
+// store had registered: a test fixture that wraps the registered executor to
+// admit and join every rollback could not see it. In production the
+// registered executor IS the daemon's executeConfirmedRollback (registered
+// at daemon init, before any commit can be issued), so the retry runs the
+// same function as before.
+func (s *Store) RetryConfirmedRollback(gen uint64) {
+	s.fireConfirmTimer(gen)
+}
+
 func (s *Store) fireConfirmTimer(gen uint64) {
 	s.mu.Lock()
 	exec := s.rollbackExecutor

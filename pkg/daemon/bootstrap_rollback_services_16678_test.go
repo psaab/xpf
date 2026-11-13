@@ -3,9 +3,11 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,8 +78,10 @@ func (f *failingRollbackDHCP16678) Apply(cfg *config.DHCPServerConfig) error {
 // rollback that already started: after PromoteRollback has cleared the
 // pending window, cancellation returns at once while the rollback's service
 // teardown (and its ERROR log) is still to come. The wrapper counts every
-// admitted execution, refuses new ones once closed, and closeAndWait waits for
-// the admitted ones to finish.
+// admitted execution, refuses new ones once closed, and wait waits for the
+// admitted ones to finish. Every rollback execution, including the daemon's
+// retry, is dispatched through the store's registered executor, so this
+// wrapper sees all of them (#19089 fold 2).
 type rollbackJoin16678 struct {
 	mu     sync.Mutex
 	closed bool
@@ -85,6 +89,11 @@ type rollbackJoin16678 struct {
 	// afterRun, when set, runs after an admitted execution and before it
 	// is counted done (a cell holds a promoted rollback here).
 	afterRun func()
+	// teardown is the exact closure the fixture registered with t.Cleanup,
+	// so a cell can run the real cleanup rather than a copy of it.
+	teardown func()
+	// stateDir is the fixture's temp dir (the store's xpf.conf lives there).
+	stateDir string
 }
 
 func (j *rollbackJoin16678) wrap(run func(gen uint64)) func(gen uint64) {
@@ -105,14 +114,40 @@ func (j *rollbackJoin16678) wrap(run func(gen uint64)) func(gen uint64) {
 	}
 }
 
-// closeAndWait refuses every later execution (a timer that fires after the
-// test, including one whose window a manual dispatch already resolved), then
-// waits for the admitted ones to finish.
-func (j *rollbackJoin16678) closeAndWait() {
+// close refuses every later execution (a timer that fires after the test,
+// including one whose window a manual dispatch already resolved).
+func (j *rollbackJoin16678) close() {
 	j.mu.Lock()
 	j.closed = true
 	j.mu.Unlock()
+}
+
+// wait waits for every admitted execution to finish.
+func (j *rollbackJoin16678) wait() {
 	j.wg.Wait()
+}
+
+func (j *rollbackJoin16678) setAfterRun(fn func()) {
+	j.mu.Lock()
+	j.afterRun = fn
+	j.mu.Unlock()
+}
+
+// holdAdmitted parks EVERY admitted execution after it runs, until release.
+// ran is closed once, by the first execution to arrive (a real timer fire can
+// overlap a manual dispatch, so a second arrival must not close it again);
+// parked counts the executions waiting at the barrier. release is idempotent.
+func (j *rollbackJoin16678) holdAdmitted() (ran <-chan struct{}, parked *atomic.Int32, release func()) {
+	ranCh := make(chan struct{})
+	rel := make(chan struct{})
+	var ranOnce, relOnce sync.Once
+	var n atomic.Int32
+	j.setAfterRun(func() {
+		ranOnce.Do(func() { close(ranCh) })
+		n.Add(1)
+		<-rel
+	})
+	return ranCh, &n, func() { relOnce.Do(func() { close(rel) }) }
 }
 
 func newFirstCommitRollbackDaemon16678(t *testing.T, dhcp *rollbackDHCPRecorder16678) (*Daemon, *configstore.Store) {
@@ -166,14 +201,13 @@ func newFirstCommitRollbackDaemonJoined16678(t *testing.T, dhcp *rollbackDHCPRec
 	// (3) waits for every rollback already admitted, including one that has
 	// promoted (window cleared) but not yet torn services down. Stopping the
 	// timer alone did only (2): it cannot wait for a callback that started.
-	join := &rollbackJoin16678{}
-	t.Cleanup(func() {
-		join.mu.Lock()
-		join.closed = true
-		join.mu.Unlock()
+	join := &rollbackJoin16678{stateDir: dir}
+	join.teardown = func() {
+		join.close()
 		s.CancelConfirmTimerForTesting()
-		join.closeAndWait()
-	})
+		join.wait()
+	}
+	t.Cleanup(join.teardown)
 	s.SetRollbackExecutor(join.wrap(d.executeConfirmedRollback))
 	return d, s, join
 }
@@ -343,62 +377,143 @@ func TestBootstrapRelayStopFailureDegrades17693(t *testing.T) {
 // TestRollbackJoinWaitsForAPromotedRollback19089 is the case stopping the
 // timer could not cover (Codex review of 97b646d8fa). A rollback that has
 // already been admitted and has PROMOTED (the pending window is cleared, so
-// IsConfirmPending reads false) is held before it finishes. The fixture's
-// cleanup must not return until it does, and once closed it admits nothing.
+// IsConfirmPending reads false) is held before it finishes, together with a
+// second, overlapping dispatch of the same window (a real timer fire can
+// overlap a manual one; Codex review of 04d3f69679). The fixture's REAL
+// cleanup (the closure it registered with t.Cleanup) must not return until
+// both finish, and once closed it admits nothing.
 func TestRollbackJoinWaitsForAPromotedRollback19089(t *testing.T) {
 	rec := &rollbackDHCPRecorder16678{recordingDHCPApplier9349: &recordingDHCPApplier9349{}}
 	d, s, join := newFirstCommitRollbackDaemonJoined16678(t, rec)
-	promoted := make(chan struct{})
-	release := make(chan struct{})
-	join.afterRun = func() {
-		close(promoted)
-		<-release
-	}
+	ran, parked, release := join.holdAdmitted()
+	defer release()
 	armFirstCommitConfirmed16678(t, s)
-	fired := make(chan struct{})
-	go func() {
-		defer close(fired)
-		s.InvokeRollbackTimerForTesting(s.ConfirmGenForTesting())
-	}()
+	gen := s.ConfirmGenForTesting()
+	var fired sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		fired.Add(1)
+		go func() {
+			defer fired.Done()
+			s.InvokeRollbackTimerForTesting(gen)
+		}()
+	}
 	select {
-	case <-promoted:
+	case <-ran:
 	case <-time.After(10 * time.Second):
-		close(release)
-		t.Fatal("FIXTURE: the admitted rollback never ran")
+		release()
+		t.Fatal("FIXTURE: no admitted rollback ran")
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for parked.Load() < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := parked.Load(); got != 2 {
+		release()
+		t.Fatalf("#19089: an admitted execution did not wait at the release barrier (parked %d of 2)", got)
 	}
 	if s.IsConfirmPending() || !d.inBootstrap() {
-		close(release)
+		release()
 		t.Fatalf("FIXTURE: the held rollback must have promoted (pending=%v, bootstrap=%v)", s.IsConfirmPending(), d.inBootstrap())
 	}
 	joined := make(chan struct{})
 	go func() {
 		defer close(joined)
-		join.closeAndWait()
+		join.teardown()
 	}()
 	select {
 	case <-joined:
-		close(release)
+		release()
 		t.Fatal("#19089: cleanup returned while an admitted rollback was still running")
 	case <-time.After(200 * time.Millisecond):
 	}
-	close(release)
+	release()
 	select {
 	case <-joined:
 	case <-time.After(10 * time.Second):
 		t.Fatal("cleanup never returned after the rollback finished")
 	}
-	<-fired
+	fired.Wait()
 	// The post-cleanup admission check has its own hook. The hold hook is
-	// done with, so it is cleared first: when this check reused it, a
-	// wrapper that never closed admission ran it again, closed `promoted`
-	// twice and panicked, so the cell went red on the panic, not on the
-	// check below. Clearing it makes the check the only thing that can fire.
-	join.mu.Lock()
-	join.afterRun = nil
-	join.mu.Unlock()
+	// done with, so it is cleared first, and a late execution is recorded by
+	// its own run function: the check is the only thing that can fire.
+	join.setAfterRun(nil)
 	lateAdmitted := false
 	join.wrap(func(uint64) { lateAdmitted = true })(0)
 	if lateAdmitted {
 		t.Fatal("#19089: a rollback fired after cleanup was admitted")
+	}
+}
+
+// TestRollbackJoinWaitsForAPromotedRetry19089 covers the rollback RETRY
+// (Codex review of 04d3f69679, MAJOR). A first-commit rollback that cannot
+// persist its host-auth closeout intent leaves the window pending and
+// schedules a retry a second later. That retry used to call
+// executeConfirmedRollback directly, so it was never admitted or joined by
+// the fixture, and once it promoted nothing could see it. It now goes
+// through the store's registered executor. Here the first attempt fails (a
+// non-empty directory sits at the closeout record's path), the storage then
+// recovers, and the retry must arrive through the wrapper, promote, and hold
+// the fixture's real cleanup until it finishes.
+func TestRollbackJoinWaitsForAPromotedRetry19089(t *testing.T) {
+	rec := &rollbackDHCPRecorder16678{recordingDHCPApplier9349: &recordingDHCPApplier9349{}}
+	d, s, join := newFirstCommitRollbackDaemonJoined16678(t, rec)
+	armFirstCommitConfirmed16678(t, s)
+	block := filepath.Join(join.stateDir, ".configdb", "first-commit-hostauth-closeout.json")
+	if err := os.MkdirAll(filepath.Join(block, "keep"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var runs atomic.Int32
+	var pendingAfterFirst atomic.Bool
+	promoted := make(chan struct{})
+	rel := make(chan struct{})
+	var promotedOnce, relOnce sync.Once
+	release := func() { relOnce.Do(func() { close(rel) }) }
+	defer release()
+	join.setAfterRun(func() {
+		if runs.Add(1) == 1 {
+			// The failed first attempt has scheduled its retry. The
+			// storage recovers, so the retry can write its intent.
+			pendingAfterFirst.Store(s.IsConfirmPending())
+			_ = os.RemoveAll(block)
+			return
+		}
+		promotedOnce.Do(func() { close(promoted) })
+		<-rel
+	})
+	go s.InvokeRollbackTimerForTesting(s.ConfirmGenForTesting())
+	select {
+	case <-promoted:
+	case <-time.After(10 * time.Second):
+		release()
+		if runs.Load() >= 1 && !pendingAfterFirst.Load() {
+			t.Fatal("FIXTURE: the closeout fault did not fire; the first attempt promoted")
+		}
+		t.Fatalf("#19089: the rollback retry did not run through the registered executor (admitted %d executions, want 2; pending after the first: %v)",
+			runs.Load(), pendingAfterFirst.Load())
+	}
+	if !pendingAfterFirst.Load() {
+		release()
+		t.Fatal("FIXTURE: the first attempt promoted; there was no retry to cover")
+	}
+	if s.IsConfirmPending() || !d.inBootstrap() {
+		release()
+		t.Fatalf("FIXTURE: the held retry must have promoted (pending=%v, bootstrap=%v)", s.IsConfirmPending(), d.inBootstrap())
+	}
+	joined := make(chan struct{})
+	go func() {
+		defer close(joined)
+		join.teardown()
+	}()
+	select {
+	case <-joined:
+		release()
+		t.Fatal("#19089: cleanup returned while an admitted retry was still running")
+	case <-time.After(200 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-joined:
+	case <-time.After(10 * time.Second):
+		t.Fatal("cleanup never returned after the retry finished")
 	}
 }
