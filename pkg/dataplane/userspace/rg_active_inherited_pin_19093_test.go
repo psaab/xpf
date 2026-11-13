@@ -288,41 +288,49 @@ func TestRGActiveInheritedUnconfiguredSlotStaysInactiveWhenAdded19093(t *testing
 }
 
 // M3: THIS process's ownership survives the real helper departure (the reset
-// stop and crash share) and the respawn's replay. A barrier that is reset with
-// the helper hides the process's own writes and blackholes an owned RG.
+// stop and crash share) and the respawn's replay — for an interior slot and
+// for the array's last slot (R20 review: a bound off-by-one passed every cell
+// that never had this process own RG15). A barrier that is reset with the
+// helper hides the process's own writes and blackholes an owned RG.
 //
 // GREEN at master; red for a mask cleared on helper departure, for a mask that
-// hides everything, and for a clear that also zeroes written slots.
+// hides everything, for a clear that also zeroes written slots, and for an
+// off-by-one bound on either the mark or the import.
 func TestRGActiveOwnWriteSurvivesHelperDepartureAndReplay19093(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("creating a BPF map needs privilege (memlock rlimit / CAP_BPF): %v", err)
 	}
+	last := int(dataplane.MaxRedundancyGroups - 1)
 	rg, wd := newRGActiveArrays19093(t, nil)
-	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
+	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2, last)
 	pub := attachHelper19093(m, nil)
 
-	direct := pub.published(t, "UpdateRGActive(1,true)", func() {
-		if err := m.UpdateRGActive(1, true); err != nil {
-			t.Logf("UpdateRGActive tail: %v", err)
+	for _, g := range []int{1, last} {
+		direct := pub.published(t, "UpdateRGActive(true)", func() {
+			if err := m.UpdateRGActive(g, true); err != nil {
+				t.Logf("UpdateRGActive(%d) tail: %v", g, err)
+			}
+		})
+		if !direct[g].Active {
+			t.Fatalf("fixture: UpdateRGActive(%d,true)'s own publish did not carry RG%d active", g, g)
 		}
-	})
-	if !direct[1].Active {
-		t.Fatal("fixture: UpdateRGActive(1,true)'s own publish did not carry RG1 active")
-	}
-	if v := rgActiveSlot19093(t, rg, 1); v != 1 {
-		t.Fatalf("fixture: UpdateRGActive(1,true) left rg_active[1]=%d", v)
+		if v := rgActiveSlot19093(t, rg, uint32(g)); v != 1 {
+			t.Fatalf("fixture: UpdateRGActive(%d,true) left rg_active[%d]=%d", g, g, v)
+		}
 	}
 
 	helperGone19093(m)
 	attachHelper19093(m, pub) // respawned helper
 	got := replayHA19093(t, m, pub)
 
-	if !got[1].Active {
-		t.Error("the replay after a helper departure and respawn published RG1 INACTIVE although " +
-			"THIS process wrote it active: the restart barrier must not be reset with the helper")
-	}
-	if v := rgActiveSlot19093(t, rg, 1); v != 1 {
-		t.Errorf("rg_active[1] = %d after the replay; this process wrote 1", v)
+	for _, g := range []int{1, last} {
+		if !got[g].Active {
+			t.Errorf("the replay after a helper departure and respawn published RG%d INACTIVE although "+
+				"THIS process wrote it active: the restart barrier hid this process's own write", g)
+		}
+		if v := rgActiveSlot19093(t, rg, uint32(g)); v != 1 {
+			t.Errorf("rg_active[%d] = %d after the replay; this process wrote 1 (cleared as inherited?)", g, v)
+		}
 	}
 }
 
