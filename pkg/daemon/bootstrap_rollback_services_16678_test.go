@@ -86,6 +86,9 @@ type rollbackJoin16678 struct {
 	mu     sync.Mutex
 	closed bool
 	wg     sync.WaitGroup
+	// beforeRun, when set, runs after admission and before the execution
+	// (a cell holds a retry here until its fault has cleared).
+	beforeRun func()
 	// afterRun, when set, runs after an admitted execution and before it
 	// is counted done (a cell holds a promoted rollback here).
 	afterRun func()
@@ -104,9 +107,12 @@ func (j *rollbackJoin16678) wrap(run func(gen uint64)) func(gen uint64) {
 			return
 		}
 		j.wg.Add(1)
-		after := j.afterRun
+		before, after := j.beforeRun, j.afterRun
 		j.mu.Unlock()
 		defer j.wg.Done()
+		if before != nil {
+			before()
+		}
 		run(gen)
 		if after != nil {
 			after()
@@ -130,6 +136,12 @@ func (j *rollbackJoin16678) wait() {
 func (j *rollbackJoin16678) setAfterRun(fn func()) {
 	j.mu.Lock()
 	j.afterRun = fn
+	j.mu.Unlock()
+}
+
+func (j *rollbackJoin16678) setBeforeRun(fn func()) {
+	j.mu.Lock()
+	j.beforeRun = fn
 	j.mu.Unlock()
 }
 
@@ -403,13 +415,18 @@ func TestRollbackJoinWaitsForAPromotedRollback19089(t *testing.T) {
 		release()
 		t.Fatal("FIXTURE: no admitted rollback ran")
 	}
+	// At least the two manual dispatches park. A stall past a minute adds
+	// the store's real timer: manual promotion clears confirmTimer without
+	// stopping its scheduled callback, so a third admitted execution parks
+	// too, and the cleanup below must wait for it as well (Codex review of
+	// a7529824b7).
 	deadline := time.Now().Add(10 * time.Second)
 	for parked.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := parked.Load(); got != 2 {
+	if got := parked.Load(); got < 2 {
 		release()
-		t.Fatalf("#19089: an admitted execution did not wait at the release barrier (parked %d of 2)", got)
+		t.Fatalf("#19089: an admitted execution did not wait at the release barrier (parked %d, want at least 2)", got)
 	}
 	if s.IsConfirmPending() || !d.inBootstrap() {
 		release()
@@ -462,19 +479,39 @@ func TestRollbackJoinWaitsForAPromotedRetry19089(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(block, "keep"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var runs atomic.Int32
+	var admitted, runs atomic.Int32
 	var pendingAfterFirst atomic.Bool
+	var removeErr atomic.Value
+	recovered := make(chan struct{})
 	promoted := make(chan struct{})
 	rel := make(chan struct{})
-	var promotedOnce, relOnce sync.Once
+	var recoveredOnce, promotedOnce, relOnce sync.Once
+	storageRecovered := func() { recoveredOnce.Do(func() { close(recovered) }) }
 	release := func() { relOnce.Do(func() { close(rel) }) }
 	defer release()
+	defer storageRecovered()
+	// A retry is admitted only once the storage has recovered, so it can
+	// never meet the same obstruction again however slow the removal is
+	// (Codex review of a7529824b7).
+	join.setBeforeRun(func() {
+		if admitted.Add(1) >= 2 {
+			<-recovered
+		}
+	})
 	join.setAfterRun(func() {
 		if runs.Add(1) == 1 {
 			// The failed first attempt has scheduled its retry. The
 			// storage recovers, so the retry can write its intent.
 			pendingAfterFirst.Store(s.IsConfirmPending())
-			_ = os.RemoveAll(block)
+			if err := os.RemoveAll(block); err != nil {
+				removeErr.Store(err.Error())
+			}
+			storageRecovered()
+			return
+		}
+		// Only a VERIFIED promotion is held: an execution that left the
+		// window pending is not the promoted retry.
+		if s.IsConfirmPending() {
 			return
 		}
 		promotedOnce.Do(func() { close(promoted) })
@@ -485,15 +522,22 @@ func TestRollbackJoinWaitsForAPromotedRetry19089(t *testing.T) {
 	case <-promoted:
 	case <-time.After(10 * time.Second):
 		release()
+		if err, _ := removeErr.Load().(string); err != "" {
+			t.Fatalf("FIXTURE: clearing the closeout fault failed: %s", err)
+		}
 		if runs.Load() >= 1 && !pendingAfterFirst.Load() {
 			t.Fatal("FIXTURE: the closeout fault did not fire; the first attempt promoted")
 		}
-		t.Fatalf("#19089: the rollback retry did not run through the registered executor (admitted %d executions, want 2; pending after the first: %v)",
-			runs.Load(), pendingAfterFirst.Load())
+		t.Fatalf("#19089: the rollback retry did not run through the registered executor (admitted %d executions, want at least 2; pending after the first: %v)",
+			admitted.Load(), pendingAfterFirst.Load())
 	}
 	if !pendingAfterFirst.Load() {
 		release()
 		t.Fatal("FIXTURE: the first attempt promoted; there was no retry to cover")
+	}
+	if err, _ := removeErr.Load().(string); err != "" {
+		release()
+		t.Fatalf("FIXTURE: clearing the closeout fault failed: %s", err)
 	}
 	if s.IsConfirmPending() || !d.inBootstrap() {
 		release()
