@@ -137,3 +137,55 @@ func TestRGActiveWrittenBitIsAtomicWithTheMapWrite19093(t *testing.T) {
 			"a landed map write is this process's ownership whatever the IPC did")
 	}
 }
+
+// U3: the array's BOUNDARY slots (0 and MaxRedundancyGroups-1) that this
+// process wrote are ownership like any other. R20 review: a bound mutant
+// (`rgID < len(written)-1`) passed every other cell, yet it would mask this
+// process's own RG15 and then clear its pin about a second after takeover — a
+// self-blackhole of the last RG.
+func TestMergeHAStateOwnsBoundarySlotsThisProcessWrote19093(t *testing.T) {
+	last := dataplane.MaxRedundancyGroups - 1
+	var written [dataplane.MaxRedundancyGroups]bool
+	written[0], written[last] = true, true
+	merged, inherited := mergeHAState(
+		map[int]uint8{0: 1, 1: 1, last: 1}, nil,
+		map[int]HAGroupStatus{0: {RGID: 0}, 1: {RGID: 1}, last: {RGID: last}}, &written)
+	if !merged[0].Active {
+		t.Error("slot 0, written 1 by this process, was not imported as ownership")
+	}
+	if !merged[last].Active {
+		t.Errorf("slot %d (the last), written 1 by this process, was not imported as ownership", last)
+	}
+	if merged[1].Active {
+		t.Error("inherited slot 1 was imported as ownership")
+	}
+	if !reflect.DeepEqual(inherited, []int{1}) {
+		t.Errorf("inherited = %v, want [1]: a boundary slot this process wrote must never be "+
+			"reported inherited (and so cleared)", inherited)
+	}
+}
+
+// U4: UpdateRGActive marks the boundary slots too (the write side of U3).
+func TestUpdateRGActiveMarksBoundarySlots19093(t *testing.T) {
+	last := dataplane.MaxRedundancyGroups - 1
+	m := New()
+	m.clusterHA = true
+	m.haGroups = map[int]HAGroupStatus{0: {RGID: 0}, last: {RGID: last}}
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
+	m.controlRequestHook = func(ControlRequest, *ProcessStatus) error {
+		return errors.New("stop after publish (#19093 cell)")
+	}
+	for _, rg := range []int{0, last} {
+		_ = m.UpdateRGActive(rg, true)
+	}
+	m.mu.Lock()
+	w0, wl := m.rgActiveWritten[0], m.rgActiveWritten[last]
+	m.mu.Unlock()
+	if !w0 {
+		t.Error("UpdateRGActive(0, true) landed but slot 0 was not marked as this process's write")
+	}
+	if !wl {
+		t.Errorf("UpdateRGActive(%d, true) landed but the last slot was not marked as this process's write", last)
+	}
+}
