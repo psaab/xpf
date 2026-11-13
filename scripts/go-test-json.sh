@@ -24,7 +24,8 @@
 # which changes no line. That is deliberate: `make test-go` is the shared gate
 # and its default path must not acquire a jq dependency. The selftest asserts
 # the default path's stdout and exit code match a direct text `go test`, except
-# that a go-test timeout exits 3 (VOID).
+# that a go-test timeout exits 3 (VOID), unless the leg also changed
+# production state on the host, which is a FAIL (1) (#19090 R13-a).
 #
 # With a jsonfile it runs `<go> test -json <args>`, APPENDS the raw event stream
 # to that file, and reconstructs the human-readable stream on stdout from the
@@ -50,16 +51,40 @@ shift
 # exits 3, so a cut-off package reads as neither a pass nor an ordinary FAIL.
 here=$(cd "$(dirname "$0")" && pwd)
 timeout_watch() { awk -f "$here/go-timeout-watch.awk"; }
+# #19090 R13-a: a leg that timed out AND changed production state on the host
+# is a FAIL (1), not VOID (3). The state change is real whatever the timeout,
+# and a rerun comes back clean because the files are already gone.
+# testguard-run.sh records a state change in $XPF_TESTGUARD_STATE_VERDICT; a
+# caller's own file is used as is (it reads the verdict too), otherwise this
+# wrapper makes one for the leg, just before the run: the usage and jq
+# refusals above the run must still be the errors a caller sees.
+ensure_state_verdict() {
+	[ -n "${XPF_TESTGUARD_STATE_VERDICT:-}" ] && return 0
+	own_state_verdict=$(mktemp "${TMPDIR:-/tmp}/go-test-json-state.XXXXXX") || {
+		echo "go-test-json.sh: cannot create the state verdict file; refusing to run a leg whose state change could be voided" >&2
+		exit 2
+	}
+	export XPF_TESTGUARD_STATE_VERDICT=$own_state_verdict
+	trap 'rm -f "$own_state_verdict"' EXIT
+}
+exit_void_unless_state_changed() {
+	if grep -qx 'state-changed' "$XPF_TESTGUARD_STATE_VERDICT" 2>/dev/null; then
+		echo "go-test-json.sh: FAIL: the leg timed out AND changed production state on the host; that is a FAIL (1), not VOID (3) (#19090)" >&2
+		exit 1
+	fi
+	exit 3
+}
 
 if [ -z "$json" ]; then
 	# -json in GOFLAGS silently switches this path to JSON, which the
 	# text-mode timeout watcher cannot recognize. Pin the gate's intended
 	# human-readable output at the command line; Go flags are valid after
 	# package arguments too.
+	ensure_state_verdict
 	"$here/testguard-run.sh" "$go_bin" test "$@" -json=false | timeout_watch
 	rc=("${PIPESTATUS[@]}")
 	if [ "${rc[1]}" -eq 3 ]; then
-		exit 3
+		exit_void_unless_state_changed
 	fi
 	exit "${rc[0]}"
 fi
@@ -82,6 +107,7 @@ off=$(stat -c %s "$json" 2>/dev/null || echo 0)
 # stderr is deliberately NOT piped. `go test -json` reports build and setup
 # failures on stderr as plain text, not as JSON events, so folding it into the
 # pipe would both corrupt the event stream and hide the message.
+ensure_state_verdict
 "$here/testguard-run.sh" "$go_bin" test -json "$@" | tee -a "$json" | jq -j 'select(.Output != null) | .Output'
 rc=("${PIPESTATUS[@]}")
 
@@ -113,6 +139,6 @@ if [ "${wrc[1]}" -ne 0 ]; then
 	exit 2
 fi
 if [ "${wrc[2]}" -eq 3 ]; then
-	exit 3
+	exit_void_unless_state_changed
 fi
 exit "${rc[0]}"

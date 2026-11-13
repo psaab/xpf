@@ -40,6 +40,15 @@ cwd=$(pwd -P 2>/dev/null) || cwd=
 # skipping. Before this, 10 re-exec cells skipped as "netns unavailable" on
 # every run while the package guard was refusing their child.
 export XPF_REQUIRE_NETNS=1
+# #19090 R13-a/R4: a caller that names a file in XPF_TESTGUARD_STATE_VERDICT
+# learns whether this run changed production state, independently of the exit
+# status (which a timeout VOID or a baseline comparison would otherwise
+# reinterpret). One line "state-changed" is appended when the state check
+# below fails. The variable is consumed here and NOT passed to the command, so
+# a nested testguard-run.sh records into its own caller's file, never this
+# one's.
+state_verdict=${XPF_TESTGUARD_STATE_VERDICT:-}
+unset XPF_TESTGUARD_STATE_VERDICT
 
 command=$1
 shift
@@ -242,9 +251,15 @@ fi
 rc=$?
 set -e
 "$root/scripts/host-residue-snapshot.sh" "$work/after.txt"
+# #19090 R3: every harness diagnostic goes to STDERR. stdout is the command's
+# own stream, and for go-test-json.sh's side-file path that is the
+# `go test -json` event stream: a plain-text report there corrupted the JSON
+# file, made jq fail and turned the run's verdict into a stream error (2).
 if ! cmp -s "$work/before.txt" "$work/after.txt"; then
-	echo "HOST RESIDUE DIFFERENCE (report-only; no cleanup performed):"
-	diff -u "$work/before.txt" "$work/after.txt" || true
+	{
+		echo "HOST RESIDUE DIFFERENCE (report-only; no cleanup performed):"
+		diff -u "$work/before.txt" "$work/after.txt" || true
+	} >&2
 fi
 # #19066: a difference in the production state paths FAILS the run, with
 # status 1 when the tests themselves passed. NOT 3: go-test-json.sh,
@@ -252,12 +267,21 @@ fi
 # would turn a host mutation into "undetermined", and a rerun would come back
 # clean because the files are already gone (#19066 R18). The rest of the
 # report stays report-only (systemd session scopes come and go with other
-# users of the host); these paths have no other writer on a test host, so a
-# difference there is a test that wrote or deleted production state.
+# users of the host). A difference in these paths is a test that wrote or
+# deleted production state, or another writer on the same host (#19090
+# R13-b): since #19084 a concurrent ROOT run of this wrapper writes only its
+# own copy-on-write view, so on a shared runner the remaining candidates are a
+# process outside any testguard run (a package upgrade, a hand-run test) and
+# paths added through XPF_RESIDUE_EXTRA_STATE_PATHS that sit in a writable
+# pass-through. The diff printed above names what changed; it cannot name
+# whose run changed it.
 state_sections() { awk '/^--- state(-content)? /{on=1} /^--- / && !/^--- state(-content)? /{on=0} on' "$1"; }
 if ! cmp -s <(state_sections "$work/before.txt") <(state_sections "$work/after.txt"); then
 	echo "testguard-run: FAIL: the run changed production state paths on the host (no cleanup performed):" >&2
 	diff -u <(state_sections "$work/before.txt") <(state_sections "$work/after.txt") >&2 || true
 	[[ "$rc" -eq 0 ]] && rc=1
+	if [[ -n $state_verdict ]] && ! printf 'state-changed\n' >>"$state_verdict"; then
+		echo "testguard-run: could not record the state change in $state_verdict; the caller cannot see it apart from the exit status" >&2
+	fi
 fi
 exit "$rc"

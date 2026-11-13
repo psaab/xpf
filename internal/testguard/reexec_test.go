@@ -89,7 +89,9 @@ func TestNetnsUnavailableFailsUnderRequire19066(t *testing.T) {
 // internal/testguard, whose canaries run unshare on purpose, as guarded.
 var guardedTestMain19066 = regexp.MustCompile(`func TestMain\(m \*testing\.M\)\s*\{\s*testguard\.ExitIfUnsafe\(\)`)
 
-var userNSFlag19066 = regexp.MustCompile(`^(-[A-Za-z]*[rU][A-Za-z]*|-[A-Za-z]*c[A-Za-z]*|--user|--map-root-user|--map-current-user)$`)
+// #19090: every util-linux unshare option that creates a user namespace,
+// including the --map-* options that imply --user and the --opt=value forms.
+var userNSFlag19066 = regexp.MustCompile(`^(-[A-Za-z]*[rU][A-Za-z]*|-[A-Za-z]*c[A-Za-z]*|--user(=.*)?|--map-root-user|--map-current-user|--map-auto|--map-(user|group|users|groups)(=.*)?)$`)
 
 // isUserNSFlag19066: a short cluster with c counts only beside an unshare
 // namespace letter ("-cn"), so a shell's "-c" is not mistaken for one.
@@ -111,10 +113,13 @@ func isUserNSFlag19066(s string) bool {
 //   - calls t.Skip/Skipf/SkipNow instead of testguard.NetnsUnavailable (a
 //     skip that never fails under XPF_REQUIRE_NETNS), unless the skip sits in
 //     an `if` on runtime.GOOS, which is a platform guard, not a netns one;
-//   - has no child-success witness: a testguard.RequireChildPass call, or a
-//     string literal naming the child's own success ("--- PASS: " or a
-//     "...PASSED..." sentinel). Exit status alone reads a skipped child, or a
-//     -test.run that matched nothing, as a PASS (#19066 R2 F1);
+//   - has no child-success witness: a testguard.RequireChildPass call, or an
+//     `if !strings.Contains(out, "<success>") { t.Fatal... }` over the
+//     child's captured output, where "<success>" is "--- PASS: " or a
+//     "...PASSED..." sentinel, the negated Contains is reached only through
+//     `||`, and the body fails this test through its own *testing.T
+//     (#19090). Exit status alone reads a skipped child, or a -test.run that
+//     matched nothing, as a PASS (#19066 R2 F1);
 //   - builds the re-exec with exec.Command/CommandContext instead of
 //     testguard.ReexecCommand, so the child has no deadline of its own
 //     (#19066 R18 N1).
@@ -226,9 +231,20 @@ func netnsReexecViolations19066(fset *token.FileSet, file *ast.File) []string {
 		// "...PASSED..." needle and whose body fails the test (t.Fatal*,
 		// t.Error*, t.FailNow, testguard.NetnsUnavailable). A Contains whose
 		// result is logged or discarded checks nothing and does not count.
+		//
+		// #19090 (Codex R1 on #19066): the shape is narrow on purpose. The
+		// Contains must be NEGATED and reached only through `||` (so
+		// `err != nil && !Contains(...)`, which a zero-exit no-run child
+		// satisfies, is not a witness); its subject must be the child's
+		// captured output (CombinedOutput/Output, or string() of it), not a
+		// constant; and the body must fail THIS test through its own
+		// *testing.T (t.Fatal*, t.Error*, t.FailNow, or
+		// testguard.NetnsUnavailable(t, ...)), not any method named Error.
+		tName := testingTParam19090(fn)
+		outVars := childOutputVars19090(fn)
 		witness := false
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
-			if ifs, ok := n.(*ast.IfStmt); ok && holdsSuccessContains19066(ifs.Cond) && failsTheTest19066(ifs.Body) {
+			if ifs, ok := n.(*ast.IfStmt); ok && guardsChildSuccess19090(ifs.Cond, outVars) && failsThisTest19090(ifs.Body, tName) {
 				witness = true
 			}
 			switch e := n.(type) {
@@ -326,32 +342,134 @@ func isUnshareArg19066(a ast.Expr, vars map[string]bool) bool {
 	return ok && lit.Value == `"unshare"`
 }
 
-// holdsSuccessContains19066 reports whether e holds a strings/bytes.Contains
-// call whose needle names a child's success.
-func holdsSuccessContains19066(e ast.Expr) bool {
-	found := false
-	ast.Inspect(e, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Contains" && len(call.Args) == 2 {
-				if pkg, ok := sel.X.(*ast.Ident); ok && (pkg.Name == "strings" || pkg.Name == "bytes") && holdsSuccessLiteral19066(call.Args[1]) {
-					found = true
+// testingTParam19090 returns the name of fn's *testing.T parameter, or "".
+func testingTParam19090(fn *ast.FuncDecl) string {
+	for _, f := range fn.Type.Params.List {
+		star, ok := f.Type.(*ast.StarExpr)
+		if !ok {
+			continue
+		}
+		sel, ok := star.X.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "T" {
+			continue
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "testing" && len(f.Names) == 1 {
+			return f.Names[0].Name
+		}
+	}
+	return ""
+}
+
+// childOutputVars19090 returns the idents that hold a child's captured
+// output: assigned from x.CombinedOutput() or x.Output(), or from string(v)
+// of one of those.
+func childOutputVars19090(fn *ast.FuncDecl) map[string]bool {
+	vars := map[string]bool{}
+	for pass := 0; pass < 3; pass++ {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok || len(as.Rhs) != 1 || len(as.Lhs) == 0 {
+				return true
+			}
+			call, ok := as.Rhs[0].(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			fromOutput := false
+			if sel, ok := call.Fun.(*ast.SelectorExpr); ok && (sel.Sel.Name == "CombinedOutput" || sel.Sel.Name == "Output") && len(call.Args) == 0 {
+				fromOutput = true
+			}
+			if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "string" && len(call.Args) == 1 && refersTo19090(call.Args[0], vars) {
+				fromOutput = true
+			}
+			if fromOutput {
+				if id, ok := as.Lhs[0].(*ast.Ident); ok && id.Name != "_" {
+					vars[id.Name] = true
 				}
 			}
+			return true
+		})
+	}
+	return vars
+}
+
+// refersTo19090 reports whether e mentions an ident in vars.
+func refersTo19090(e ast.Expr, vars map[string]bool) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && vars[id.Name] {
+			found = true
 		}
 		return !found
 	})
 	return found
 }
 
-// failsTheTest19066 reports whether a block calls something that fails the
-// test: t.Fatal/Fatalf/FailNow/Error/Errorf, or testguard.NetnsUnavailable.
-func failsTheTest19066(b *ast.BlockStmt) bool {
+// guardsChildSuccess19090 reports whether cond is `!Contains(out, success)`,
+// or a `||` chain one of whose operands is: the only shapes in which a child
+// output WITHOUT the success marker always makes the condition true.
+func guardsChildSuccess19090(cond ast.Expr, outVars map[string]bool) bool {
+	switch x := cond.(type) {
+	case *ast.ParenExpr:
+		return guardsChildSuccess19090(x.X, outVars)
+	case *ast.BinaryExpr:
+		return x.Op == token.LOR && (guardsChildSuccess19090(x.X, outVars) || guardsChildSuccess19090(x.Y, outVars))
+	case *ast.UnaryExpr:
+		if x.Op != token.NOT {
+			return false
+		}
+		inner := x.X
+		for {
+			p, ok := inner.(*ast.ParenExpr)
+			if !ok {
+				break
+			}
+			inner = p.X
+		}
+		call, ok := inner.(*ast.CallExpr)
+		if !ok || len(call.Args) != 2 {
+			return false
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Contains" {
+			return false
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		return ok && (pkg.Name == "strings" || pkg.Name == "bytes") &&
+			holdsSuccessLiteral19066(call.Args[1]) && refersTo19090(call.Args[0], outVars)
+	}
+	return false
+}
+
+// failsThisTest19090 reports whether a block fails the test whose *testing.T
+// is tName: tName.Fatal/Fatalf/FailNow/Error/Errorf, or
+// testguard.NetnsUnavailable(tName, ...).
+func failsThisTest19090(b *ast.BlockStmt, tName string) bool {
+	if tName == "" {
+		return false
+	}
 	found := false
 	ast.Inspect(b, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok {
-			if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-				switch sel.Sel.Name {
-				case "Fatal", "Fatalf", "FailNow", "Error", "Errorf", "NetnsUnavailable":
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return !found
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return !found
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok {
+			return !found
+		}
+		switch sel.Sel.Name {
+		case "Fatal", "Fatalf", "FailNow", "Error", "Errorf":
+			if recv.Name == tName {
+				found = true
+			}
+		case "NetnsUnavailable":
+			if recv.Name == "testguard" && len(call.Args) > 0 {
+				if a, ok := call.Args[0].(*ast.Ident); ok && a.Name == tName {
 					found = true
 				}
 			}
@@ -404,10 +522,20 @@ func unshareOptionViolations19066(fn *ast.FuncDecl, unshareVars map[string]bool)
 			return true
 		}
 		program := false
+		operand := false
 		var walk func(e ast.Expr, depth int)
 		walk = func(e ast.Expr, depth int) {
 			if program || depth > 4 {
 				return
+			}
+			// #19090 (Codex R2 on #19066): an option that takes a separate
+			// operand ("--propagation", "private") consumes the next word
+			// whatever it is; it is not the program, so the walk goes on.
+			if operand {
+				if _, ok := e.(*ast.CallExpr); !ok || !isAppend19090(e) {
+					operand = false
+					return
+				}
 			}
 			switch x := e.(type) {
 			case *ast.BasicLit:
@@ -415,6 +543,9 @@ func unshareOptionViolations19066(fn *ast.FuncDecl, unshareVars map[string]bool)
 				if x.Kind != token.STRING || !strings.HasPrefix(v, "-") {
 					program = true
 					return
+				}
+				if unshareOptionTakesOperand19090(v) {
+					operand = true
 				}
 				// Spellings that are a user-namespace flag anywhere are
 				// already reported by the literal scan; position adds the
@@ -470,6 +601,29 @@ func holdsSuccessLiteral19066(e ast.Expr) bool {
 	return found
 }
 
+// unshareOptionTakesOperand19090 reports whether an unshare(1) option takes
+// its value as the NEXT argument (util-linux unshare; the "--opt=value" form
+// carries its own value and does not).
+func unshareOptionTakesOperand19090(v string) bool {
+	switch v {
+	case "--propagation", "--setgroups", "-S", "--setuid", "-G", "--setgid",
+		"-R", "--root", "-w", "--wd", "--monotonic", "--boottime",
+		"--map-user", "--map-group", "--map-users", "--map-groups":
+		return true
+	}
+	return false
+}
+
+// isAppend19090 reports whether e is a call to the append builtin.
+func isAppend19090(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Fun.(*ast.Ident)
+	return ok && id.Name == "append"
+}
+
 // packageLevelUserNSFlags19066 reports package-level var/const values in a
 // guarded package's test file that hold a literal user-namespace flag: the
 // census reads function bodies, so flags parked at package level would escape
@@ -490,12 +644,23 @@ func packageLevelUserNSFlags19066(fset *token.FileSet, file *ast.File) []string 
 			// "-c" in it is --map-current-user (#19066 Codex D2). A shell's
 			// []string{"-c", "true"} has a non-option and is left alone.
 			if cl, ok := n.(*ast.CompositeLit); ok && len(cl.Elts) > 0 {
+				// An option's separate operand ("--propagation", "private")
+				// is part of an option list too (#19090, Codex R2 on #19066).
 				allOpts := true
+				operand := false
 				for _, el := range cl.Elts {
 					lit, ok := el.(*ast.BasicLit)
+					if operand {
+						operand = false
+						if ok && lit.Kind == token.STRING {
+							continue
+						}
+					}
 					if !ok || lit.Kind != token.STRING || !strings.HasPrefix(strings.Trim(lit.Value, "`\""), "-") {
 						allOpts = false
+						continue
 					}
+					operand = unshareOptionTakesOperand19090(strings.Trim(lit.Value, "`\""))
 				}
 				if allOpts {
 					for _, el := range cl.Elts {
@@ -621,9 +786,43 @@ func TestStandaloneC(t *testing.T) {
 }
 func TestShellCAfterProgramIsNotAFlag(t *testing.T) {
 	_ = exec.Command("unshare", "-n", "bash", "-c", "ip link")
+	_ = exec.Command("unshare", "--propagation", "private", "-n", "bash", "-c", "ip link")
 	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.v")...)
 	out, err := cmd.CombinedOutput()
 	if err != nil || !strings.Contains(string(out), "NETNS-CHILD-PASSED-X") { t.Fatalf("child failed: %v", err) }
+}
+func TestConjunctionWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	out, err := cmd.CombinedOutput()
+	if err != nil && !strings.Contains(string(out), "child PASSED") { t.Fatal("missing child success") }
+}
+func TestForeignErrorWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	out, err := cmd.CombinedOutput()
+	if err != nil { t.Fatal(err) }
+	if !strings.Contains(string(out), "child PASSED") { logger.Error("missing") }
+}
+func TestConstantWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	if _, err := cmd.CombinedOutput(); err != nil { t.Fatal(err) }
+	if !strings.Contains("child PASSED", "PASSED") { t.Fatal("constant") }
+}
+func TestDerivedOutputWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0], "-test.v")...)
+	output, err := cmd.CombinedOutput()
+	text := string(output)
+	if err != nil { t.Fatalf("child failed: %v", err) }
+	if !strings.Contains(text, "--- PASS: TestDerivedOutputWitness") { t.Fatalf("no pass line") }
+}
+func TestMapUserImpliesUserNS(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", "--map-user", "0", "-n", os.Args[0], "-test.v")
+	out, err := cmd.CombinedOutput()
+	testguard.RequireChildPass(t, "TestMapUserImpliesUserNS", out, err)
+}
+func TestOperandBeforeC(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", "--propagation", "private", "-c", "-n", os.Args[0], "-test.v")
+	out, err := cmd.CombinedOutput()
+	testguard.RequireChildPass(t, "TestOperandBeforeC", out, err)
 }`
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "fixture_test.go", src, 0)
@@ -652,24 +851,43 @@ func TestShellCAfterProgramIsNotAFlag(t *testing.T) {
 		// Codex D2: a standalone "-c" in option position; the shell's "-c"
 		// after the program (TestShellCAfterProgramIsNotAFlag) is not one.
 		"TestStandaloneC passes the user-namespace option \"-c\"",
+		// #19090 (Codex R1 on #19066): a Contains reached through &&, a
+		// failure that is not this test's, and a constant subject are not
+		// witnesses. TestDerivedOutputWitness (string() of the output, then
+		// t.Fatalf) is, and must produce no violation.
+		"TestConjunctionWitness judges its re-executed child without a child-success witness",
+		"TestForeignErrorWitness judges its re-executed child without a child-success witness",
+		"TestConstantWitness judges its re-executed child without a child-success witness",
+		// #19090 (Codex R2 on #19066): an option operand ("private") is not
+		// the program, so the "-c" after it is still an unshare option. The
+		// same shape before "bash -c" (TestShellCAfterProgramIsNotAFlag) is
+		// not one.
+		"TestOperandBeforeC passes the user-namespace option \"-c\"",
+		// #19090: --map-user implies --user.
+		"TestMapUserImpliesUserNS passes the user-namespace flag \"--map-user\"",
 		// TestWrapperSplitIsAKnownEscape: the helper has unshare but no
 		// os.Args, the parent the reverse, so neither is in scope. This is
 		// the documented limit (docs/testing.md); the row pins it so a
 		// census that starts catching it updates the docs too.
 	}
+	// Errorf, not Fatalf: the per-row checks below must still report WHICH
+	// row moved when the count does (#19090).
 	if len(got) != len(want) {
-		t.Fatalf("census found %d violations, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
+		t.Errorf("census found %d violations, want %d:\n%s", len(got), len(want), strings.Join(got, "\n"))
 	}
 	pkgSrc := `package p
 var flags19066 = []string{"-rn"}
 var optsC19066 = []string{"-c", "-n"}
-var shellArgs19066 = []string{"-c", "true"}`
+var shellArgs19066 = []string{"-c", "true"}
+var optsProp19090 = []string{"--propagation", "private", "-c", "-n"}
+var shellProp19090 = []string{"--propagation", "private", "bash", "-c", "true"}`
 	pf, err := parser.ParseFile(fset, "pkgflags_test.go", pkgSrc, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pv := packageLevelUserNSFlags19066(fset, pf); len(pv) != 2 || !strings.Contains(pv[0], `"-rn"`) || !strings.Contains(pv[1], `"-c"`) {
-		t.Errorf("package-level flag census = %q, want the \"-rn\" value and the option-list \"-c\" (a shell's \"-c\", \"true\" is not one)", pv)
+	if pv := packageLevelUserNSFlags19066(fset, pf); len(pv) != 3 || !strings.Contains(pv[0], `"-rn"`) || !strings.Contains(pv[1], `"-c"`) ||
+		!strings.Contains(pv[2], `"-c"`) || !strings.Contains(pv[2], "pkgflags_test.go:5:") {
+		t.Errorf("package-level flag census = %q, want the \"-rn\" value, the option-list \"-c\", and the \"-c\" after an option's operand on line 5 (#19090); a shell's \"-c\" (lines 4 and 6) is not one", pv)
 	}
 	for _, w := range want {
 		n := 0

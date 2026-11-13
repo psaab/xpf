@@ -433,22 +433,102 @@ mk_fakego rewrites "cp -p '$SW/state/xpf.sources' '$SW/ref'; printf 'SEED\\n' > 
 # change (same size, mtime restored) is inside that directory.
 mkdir -p "$SW/real"; ln -s "$SW/real" "$SW/state/linked"
 mk_fakego behindlink "cp -p '$SW/real/f' '$SW/ref'; printf 'SEED\\n' > '$SW/real/f'; touch -r '$SW/ref' '$SW/real/f'"
+# #19090 R3: the side-file path too. Its stdout IS the go test -json event
+# stream, so a harness report printed to stdout corrupted the side file and
+# turned the verdict into a stream error (2). The JSON stand-ins pass with a
+# valid event stream and make the same state changes; the leg must exit 1,
+# leave a side file that parses as JSON, and carry the FAIL on stderr.
+mk_fakejson() { # $1 name, $2 shell action on "$SW/state"
+	cat > "$SW/$1" <<EOT
+#!/bin/sh
+$2
+printf '%s\\n' '{"Action":"output","Package":"example.com/fake","Output":"ok  \\texample.com/fake\\t0.001s\\n"}' '{"Action":"pass","Package":"example.com/fake","Elapsed":0.001}'
+exit 0
+EOT
+	chmod +x "$SW/$1"
+}
+mk_fakejson jclean ':'
+mk_fakejson jwrites "printf 'new\\n' > '$SW/state/xpf.conf'"
+mk_fakejson jdeletes "rm -f '$SW/state/xpf.sources'"
+mk_fakejson jrewrites "cp -p '$SW/state/xpf.sources' '$SW/ref'; printf 'SEED\\n' > '$SW/state/xpf.sources'; touch -r '$SW/ref' '$SW/state/xpf.sources'"
+mk_fakejson jbehindlink "cp -p '$SW/real/f' '$SW/ref'; printf 'SEED\\n' > '$SW/real/f'; touch -r '$SW/ref' '$SW/real/f'"
+reseed() {
+	printf 'seed\n' > "$SW/real/f"; touch -d @1700000000 "$SW/real/f"
+	printf 'seed\n' > "$SW/state/xpf.sources"; rm -f "$SW/state/xpf.conf"
+}
 for case in clean writes deletes rewrites behindlink; do
-	printf 'seed\n' > "$SW/real/f"; touch -d @1700000000 "$SW/real/f"
-	printf 'seed\n' > "$SW/state/xpf.sources"; rm -f "$SW/state/xpf.conf"
+	reseed
 	out=$(XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" bash "$here/go-test-json.sh" "" "$SW/$case" ./... 2>&1); rc=$?
-	printf 'seed\n' > "$SW/real/f"; touch -d @1700000000 "$SW/real/f"
-	printf 'seed\n' > "$SW/state/xpf.sources"; rm -f "$SW/state/xpf.conf"
+	reseed
 	wout=$(XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" bash "$here/go-test-watch.sh" "$SW/$case" test ./... 2>&1); wrc=$?
+	reseed
+	sj="$SW/$case.json"; : > "$sj"
+	jout=$(XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" bash "$here/go-test-json.sh" "$sj" "$SW/j$case" ./... 2>"$SW/jerr"); jrc=$?
+	jerr=$(cat "$SW/jerr")
+	if jq -e -s 'length > 0' "$sj" >/dev/null 2>&1; then jparse=ok; else jparse=bad; fi
 	if [ "$case" = clean ]; then
 		check "state control: a passing run that changes no state path exits 0 (go-test-json)" "$rc" "0"
 		check "state control: a passing run that changes no state path exits 0 (go-test-watch)" "$wrc" "0"
+		check "state control: a passing run that changes no state path exits 0 (go-test-json side file)" "$jrc" "0"
+		check "state control: the side file parses as JSON (go-test-json side file)" "$jparse" "ok"
 		continue
 	fi
 	check "state $case: go-test-json exits 1 (FAIL, not VOID 3)" "$rc" "1"
 	check "state $case: go-test-watch exits 1 (FAIL, not VOID 3)" "$wrc" "1"
 	case "$out" in *"changed production state paths"*) ok "state $case: the FAIL names the production state change";;
 		*) bad "state $case: no production-state FAIL message in: $out";; esac
+	# #19090 R3: the watch wrapper's own output must carry the cause too, or
+	# an unrelated exit 1 would satisfy the row above.
+	case "$wout" in *"changed production state paths"*) ok "state $case: go-test-watch names the production state change";;
+		*) bad "state $case: go-test-watch has no production-state FAIL message in: $wout";; esac
+	check "state $case: go-test-json side-file path exits 1 (FAIL, not a stream error 2)" "$jrc" "1"
+	check "state $case: the side file still parses as JSON" "$jparse" "ok"
+	case "$jerr" in *"changed production state paths"*) ok "state $case: side-file path carries the FAIL on stderr";;
+		*) bad "state $case: side-file path has no production-state FAIL on stderr: $jerr";; esac
+	case "$jout$(cat "$sj")" in *"HOST RESIDUE DIFFERENCE"*|*"testguard-run:"*) bad "state $case: a harness diagnostic reached stdout or the side file";;
+		*) ok "state $case: no harness diagnostic on stdout or in the side file";; esac
+done
+
+# ── #19090 R13-a: a timeout that ALSO changed state is a FAIL (1), not VOID ──
+# The wrappers give a go-test timeout VOID (3). A leg that timed out after
+# changing production state used to read "undetermined", and a rerun comes
+# back clean because the files are already gone. The test removes a watched
+# file, then hangs past -timeout; every wrapper path must exit 1 and say why.
+# The plain timeout module above (no state change) is the control: still 3.
+mkdir -p "$WORK/tos"
+cat > "$WORK/tos/go.mod" <<'EOT'
+module example.com/tos
+
+go 1.21
+EOT
+cat > "$WORK/tos/tos_test.go" <<'EOT'
+package tos
+
+import (
+	"os"
+	"testing"
+	"time"
+)
+
+func TestSlowAfterAStateWrite(t *testing.T) {
+	_ = os.Remove(os.Getenv("TG19090_STATE_FILE"))
+	time.Sleep(30 * time.Second)
+}
+EOT
+for leg in default side watch; do
+	reseed
+	TSJ="$SW/tos-$leg.json"; : > "$TSJ"
+	case $leg in
+	default) ( cd "$WORK/tos" && XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" TG19090_STATE_FILE="$SW/state/xpf.sources" bash "$here/go-test-json.sh" "" go -timeout 2s ./... >/dev/null 2>"$SW/tos.err" ); trc=$? ;;
+	side) ( cd "$WORK/tos" && XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" TG19090_STATE_FILE="$SW/state/xpf.sources" bash "$here/go-test-json.sh" "$TSJ" go -timeout 2s ./... >/dev/null 2>"$SW/tos.err" ); trc=$? ;;
+	watch) ( cd "$WORK/tos" && XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" TG19090_STATE_FILE="$SW/state/xpf.sources" bash "$here/go-test-watch.sh" go test -timeout 2s ./... >/dev/null 2>"$SW/tos.err" ); trc=$? ;;
+	esac
+	check "timeout + state change, $leg: the leg is a FAIL (exit 1), not VOID (3)" "$trc" "1"
+	if grep -q "timed out AND changed production state" "$SW/tos.err" && grep -q "VOID: go test hit its -timeout in example.com/tos\." "$SW/tos.err"; then
+		ok "timeout + state change, $leg: stderr names both the timeout and the state change"
+	else
+		bad "timeout + state change, $leg: stderr lacks the timeout banner or the state FAIL: $(tr '\n' ' ' < "$SW/tos.err" | cut -c1-400)"
+	fi
 done
 rm -rf "$SW"
 

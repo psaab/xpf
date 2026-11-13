@@ -252,7 +252,12 @@ failed. Four rules now apply:
   nonzero exit. A parent that instead requires a `...PASSED...` sentinel the
   child prints after its last assertion also satisfies this. A child body
   reports a missing kernel feature through `NetnsUnavailable` too, so under
-  `XPF_REQUIRE_NETNS` it fails rather than skips (#19066 R2).
+  `XPF_REQUIRE_NETNS` it fails rather than skips (#19066 R2). Limit (#19090,
+  R13-c on #19066): a sentinel-shaped parent that sends a missing
+  "started" sentinel to `NetnsUnavailable` cannot tell a no-run child from an
+  unavailable namespace. Under `testguard-run.sh` (`XPF_REQUIRE_NETNS` set)
+  that FAILS, closed; only a hand-run outside it SKIPs. `RequireChildPass`
+  fails a no-run in both modes and is the preferred shape.
 - **A deadline of its own.** The re-exec is built with
   `testguard.ReexecCommand(t, …)`, which kills the child 30 s before the
   parent's own deadline, or a quarter of the remaining budget before it when
@@ -268,14 +273,24 @@ binary (`os.Args[0]` or `os.Executable()`). It fails on a literal
 user-namespace flag outside `UnshareFlags` (`-r`, `-U`, a `-c` cluster with a
 namespace letter, `--user`, `--map-*`); a `t.Skip*` call (one inside an `if`
 on `runtime.GOOS` is a platform guard and is exempt); a function with no
-child-success witness, which is a `RequireChildPass` call or an `if` whose
-condition holds a `strings`/`bytes.Contains` over the output with a
-`--- PASS: ` or `PASSED` needle and whose body fails the test (a Contains that
-is logged or discarded does not count); and a re-exec built with
-`exec.Command` instead of `ReexecCommand`. A standalone `-c` is caught by its
-position among unshare's options (before the program), so a shell's `-c`
-after the program is not mistaken for one. It also fails on a package-level
-value holding a user-namespace flag, or an option-only list holding `-c`. Its
+child-success witness, which is a `RequireChildPass` call or exactly this
+shape: `if !strings.Contains(out, "--- PASS: X") { t.Fatal… }` (or a
+`PASSED` sentinel), where `out` is the child's captured output
+(`CombinedOutput`/`Output`, or `string()` of it), the negated Contains is
+reached only through `||` (`err != nil || !Contains(…)` qualifies;
+`err != nil && !Contains(…)` does not, because a zero-exit no-run child makes
+it false), and the body fails the test through its own `*testing.T`
+(`t.Fatal*`, `t.Error*`, `t.FailNow`, or `testguard.NetnsUnavailable(t, …)`)
+(#19090, Codex R1 on #19066); and a re-exec built with `exec.Command` instead
+of `ReexecCommand`. A standalone `-c` is caught by its position among
+unshare's options (before the program), so a shell's `-c` after the program
+is not mistaken for one; an option that takes a separate operand
+(`--propagation private`, `--setgroups deny`, `--map-user 0`, …) consumes it
+and the walk goes on, so the `-c` after the operand is still an option
+(#19090, Codex R2). The `--map-user`/`--map-group(s)`/`--map-users`/
+`--map-auto` options imply `--user` and count as user-namespace flags. It
+also fails on a package-level value holding a user-namespace flag, or an
+option-only list (option operands included) holding `-c`. Its
 limit: it reads one function at a time, so a re-exec split across a helper
 that receives the binary path escapes it, and forcing mode does NOT backstop
 that shape when the parent uses a raw `t.Skip`. Keep a re-exec, its flags
@@ -304,7 +319,37 @@ behind a symlinked directory, still shows. A difference in any of them FAILS
 the run with exit 1 when the tests themselves passed, never 3: the wrappers
 read 3 as VOID (a timeout), which would turn a host mutation into
 "undetermined" (pinned end to end in `scripts/go-test-json-selftest.sh`). The
-rest of the residue report stays report-only. A deletion shows as well as a
+rest of the residue report stays report-only.
+
+Three consumers read that FAIL apart from the exit status (#19090).
+`testguard-run.sh` appends `state-changed` to the file named in
+`XPF_TESTGUARD_STATE_VERDICT`. It consumes the variable, so a nested run
+records into its own caller's file only.
+- `go-test-json.sh` and `go-test-watch.sh` read it before VOIDing a
+  timeout. A leg that timed out AND changed production state exits 1, not
+  3, because the state change is real whatever the timeout, and a rerun
+  comes back clean (R13-a on #19066).
+- The CI differential (`scripts/ci_affected_go_tests.sh --packages-file`)
+  reads it right after each run, before any baseline comparison. Exit 1
+  means an attributable package failure there, so a residue-only run read
+  as VOID, and a state change beside a base-red package was waived. It is
+  now `FAIL: host-state contamination` (exit 1) in both cases (Codex R4).
+- Every harness diagnostic, the residue report included, goes to STDERR.
+  stdout is the command's own stream, and on `go-test-json.sh`'s side-file
+  path it is the `go test -json` event stream. The report used to land
+  there, corrupt the side file and turn the verdict into a stream error, 2
+  (Codex R3).
+
+A watched path can also change because another writer on a shared runner
+touched it (R13-b on #19066). Since #19084 a concurrent ROOT run of the
+wrapper writes only its own copy-on-write view, so it is not one of them.
+The remaining candidates are:
+- a process outside any testguard run (a package upgrade, a hand-run
+  test);
+- a path added through `XPF_RESIDUE_EXTRA_STATE_PATHS` that lies in a
+  writable pass-through.
+
+The diff names what changed, not whose run changed it. A deletion shows as well as a
 write, but only for a file that existed before the run, so a host with no xpf
 state cannot show one: validate against pre-populated files. The 12168 kernel
 children run the real apply tail, whose empty desired state removes

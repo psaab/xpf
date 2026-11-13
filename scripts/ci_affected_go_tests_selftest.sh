@@ -271,6 +271,86 @@ case "$out" in
 esac
 git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
 
+# 4f-19090. #19090 R4: a production-state change is a FAIL in the
+#     differential path, never VOID and never waived by a base-red package.
+#     The state path is a temp dir added through XPF_RESIDUE_EXTRA_STATE_PATHS
+#     (it can only add paths); a committed test removes a seeded file in it.
+#     (a) the head's packages all PASS and only the state changed: exit 1
+#         under "host-state contamination" (it used to read as VOID, 2,
+#         "failed without package-level test results");
+#     (b) the package also fails at base (BASELINE-RED) and the head run
+#         changed state: still exit 1 (it used to be waived, exit 0).
+r4state="$tmp/r4state"
+mkdir -p "$r4state"
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+cat > "$tmp/clone/pkg/policymatch/zz_residue_only_19090_test.go" <<'EOF19090'
+package policymatch
+
+import (
+	"os"
+	"testing"
+)
+
+func TestResidueOnly19090(t *testing.T) {
+	if p := os.Getenv("TG19090_STATE_FILE"); p != "" {
+		_ = os.Remove(p)
+	}
+}
+EOF19090
+git -C "$tmp/clone" add pkg/policymatch/zz_residue_only_19090_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: a passing test that changes host state"
+residue_head=$(git -C "$tmp/clone" rev-parse HEAD)
+printf 'seed\n' > "$r4state/xpf.sources"
+out=$(cd "$tmp/clone" && XPF_RESIDUE_EXTRA_STATE_PATHS="$r4state" TG19090_STATE_FILE="$r4state/xpf.sources" \
+  bash "$selector" --packages-file "$guard_packages" "$fixture_base" "$residue_head" 2>&1); rc=$?
+case "$out" in
+  *"FAIL: host-state contamination: the head"*)
+    [ "$rc" -eq 1 ] && ok "R4 (#19090): a residue-only head run is a host-state FAIL (exit 1), not VOID" ||
+      bad "R4 (#19090): residue-only head named the contamination but exited $rc, want 1" ;;
+  *) bad "R4 (#19090): residue-only head was not a host-state FAIL: rc=$rc out=$(printf '%s' "$out" | tail -5)" ;;
+esac
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+cat > "$tmp/clone/pkg/policymatch/zz_red_residue_19090_test.go" <<'EOF19090'
+package policymatch
+
+import "testing"
+
+func TestBaseRedResidue19090(t *testing.T) {
+	t.Fatal("synthetic baseline failure")
+}
+EOF19090
+git -C "$tmp/clone" add pkg/policymatch/zz_red_residue_19090_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: base-red package"
+red_residue_base=$(git -C "$tmp/clone" rev-parse HEAD)
+cat > "$tmp/clone/pkg/policymatch/zz_red_residue_19090_test.go" <<'EOF19090'
+package policymatch
+
+import (
+	"os"
+	"testing"
+)
+
+func TestBaseRedResidue19090(t *testing.T) {
+	if p := os.Getenv("TG19090_STATE_FILE"); p != "" {
+		_ = os.Remove(p)
+	}
+	t.Fatal("synthetic baseline failure")
+}
+EOF19090
+git -C "$tmp/clone" add pkg/policymatch/zz_red_residue_19090_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: base-red package whose head run changes host state"
+red_residue_head=$(git -C "$tmp/clone" rev-parse HEAD)
+printf 'seed\n' > "$r4state/xpf.sources"
+out=$(cd "$tmp/clone" && XPF_RESIDUE_EXTRA_STATE_PATHS="$r4state" TG19090_STATE_FILE="$r4state/xpf.sources" \
+  bash "$selector" --packages-file "$guard_packages" "$red_residue_base" "$red_residue_head" 2>&1); rc=$?
+case "$out" in
+  *"FAIL: host-state contamination: the head"*)
+    [ "$rc" -eq 1 ] && ok "R4 (#19090): a base-red package does not waive a head state change (exit 1)" ||
+      bad "R4 (#19090): base-red + state change named the contamination but exited $rc, want 1" ;;
+  *) bad "R4 (#19090): base-red + state change was waived or misread: rc=$rc out=$(printf '%s' "$out" | tail -5)" ;;
+esac
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+
 # 4g. #16723 fold: the default two-SHA invocation (no --packages-file)
 #     keeps the strict pre-#16723 gate — the base differential must not
 #     run there. Same shape as the base-red canary above, but through the

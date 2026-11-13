@@ -381,9 +381,18 @@ mkdir -p "$TMPDIR"
 repo_root=$(git rev-parse --show-toplevel)
 test_runner="$script_dir/go-test-json.sh"
 head_log=$(mktemp "$TMPDIR/affected-go-head.XXXXXX")
+# #19090 R4: testguard-run.sh records a production-state change here, apart
+# from the exit status. The differential below gives exit 1 a special meaning
+# (an attributable package failure), so a state change has to be read on its
+# own and before any baseline comparison: a residue-only 1 has no failing
+# package (it read as VOID), and a state change beside a base-red package
+# would otherwise be waived as BASELINE-RED.
+head_state=$(mktemp "$TMPDIR/affected-go-head-state.XXXXXX")
+base_state=$(mktemp "$TMPDIR/affected-go-base-state.XXXXXX")
 base_log=
 base_tree=
 cleanup_base_tree() {
+  rm -f "$head_state" "$base_state"
   if [ -n "$head_log" ]; then
     rm -f "$head_log"
   fi
@@ -415,23 +424,34 @@ PY
 run_logged_tests() {
   runner=$1
   log=$2
-  shift 2
-  bash -o pipefail -c '
+  state=$3
+  shift 3
+  XPF_TESTGUARD_STATE_VERDICT=$state bash -o pipefail -c '
     runner=$1
     log=$2
     shift 2
     bash "$runner" "" "$@" 2>&1 | tee "$log"
   ' affected-go-tests "$runner" "$log" "$@"
 }
+# A production-state change is a FAIL whatever the package results: it is
+# never VOID and never waived by a base-red package (#19090 R4).
+fail_on_host_state() { # <state-file> <side> <rev>
+  if grep -qx 'state-changed' "$1" 2>/dev/null; then
+    printf 'FAIL: host-state contamination: the %s %s run changed production state paths on the host (testguard-run diff above); a baseline comparison cannot waive it\n' \
+      "$2" "$3" >&2
+    exit 1
+  fi
+}
 
 set -- $PKGS
 # Run HEAD once across the selected set. The shared runner preserves text
 # output and returns 3 on a timeout, which is VOID rather than a red package.
-if run_logged_tests "$test_runner" "$head_log" go -count=1 "$@"; then
+if run_logged_tests "$test_runner" "$head_log" "$head_state" go -count=1 "$@"; then
   head_rc=0
 else
   head_rc=$?
 fi
+fail_on_host_state "$head_state" head "$HEAD"
 if [ "$head_rc" -eq 0 ]; then
   exit 0
 fi
@@ -480,11 +500,12 @@ done
 
 base_log=$(mktemp "$TMPDIR/affected-go-base.XXXXXX")
 if (cd "$base_tree" && run_logged_tests "$test_runner" "$base_log" \
-  go -count=1 "$@"); then
+  "$base_state" go -count=1 "$@"); then
   base_rc=0
 else
   base_rc=$?
 fi
+fail_on_host_state "$base_state" base "$BASE"
 if [ "$base_rc" -eq 3 ]; then
   printf 'VOID: base Go package tests timed out at %s\n' "$BASE" >&2
   exit 3
