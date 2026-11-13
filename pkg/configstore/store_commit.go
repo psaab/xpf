@@ -1442,6 +1442,17 @@ func (s *Store) IsConfirmPending() bool {
 // holding s.mu across that would invert the applySem->s.mu lock order).
 // When no executor is registered (tests / non-daemon embedders) it falls
 // back to the self-contained performAutoRollback (store-state only).
+func (s *Store) fireConfirmTimer(gen uint64) {
+	s.mu.Lock()
+	exec := s.rollbackExecutor
+	s.mu.Unlock()
+	if exec != nil {
+		exec(gen)
+	} else {
+		s.performAutoRollback(gen)
+	}
+}
+
 // RetryConfirmedRollback dispatches a retry of the commit-confirmed rollback
 // for gen exactly as the confirm timer dispatches the first attempt
 // (fireConfirmTimer): through the executor registered with
@@ -1456,17 +1467,6 @@ func (s *Store) IsConfirmPending() bool {
 // same function as before.
 func (s *Store) RetryConfirmedRollback(gen uint64) {
 	s.fireConfirmTimer(gen)
-}
-
-func (s *Store) fireConfirmTimer(gen uint64) {
-	s.mu.Lock()
-	exec := s.rollbackExecutor
-	s.mu.Unlock()
-	if exec != nil {
-		exec(gen)
-	} else {
-		s.performAutoRollback(gen)
-	}
 }
 
 // PromoteRollback performs ONLY the store-state half of a commit-confirmed
