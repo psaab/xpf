@@ -142,6 +142,28 @@ func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
 	mgmtRouteInventory [2][]netlink.Route,
 	peerIGPConfig *config.Config,
 ) *frr.FullConfig {
+	return d.assembleFRRConfigOwned(cfg, overlay, mgmtRouteInventory, peerIGPConfig, nil)
+}
+
+// assembleFRRConfigForActiveConfigOwned is assembleFRRConfigForActiveConfig
+// with the render's cluster-ownership reads served by own (#19050: the fast
+// install passes a recorder, so its fence is the render's own read set).
+func (d *Daemon) assembleFRRConfigForActiveConfigOwned(cfg *config.Config, overlay []config.RouteOverlayEntry, own frrHAOwnership) *frr.FullConfig {
+	peerCfg, _ := d.peerRAConfig(cfg)
+	current := mgmtStaticRouteConnectedInventory(managementVRFIfaceSet(cfg))
+	return d.assembleFRRConfigOwned(cfg, overlay, current, peerCfg, own)
+}
+
+// assembleFRRConfigOwned is the single FRR render body. own serves its
+// cluster-ownership reads; nil means the live cluster manager (every
+// production render but the #19050 fast install).
+func (d *Daemon) assembleFRRConfigOwned(
+	cfg *config.Config,
+	overlay []config.RouteOverlayEntry,
+	mgmtRouteInventory [2][]netlink.Route,
+	peerIGPConfig *config.Config,
+	own frrHAOwnership,
+) *frr.FullConfig {
 
 	// #11310: the config gate rejects cross-instance IGP interface references,
 	// and this render belt makes tolerant loads inert rather than activating an
@@ -175,7 +197,12 @@ func (d *Daemon) assembleFRRConfigWithPeerIGPAndMgmtRouteInventory(
 	// FRR protocols follow the cluster ownership of their configured RETHs.
 	// The helper clones protocol objects so this runtime filter cannot mutate
 	// the committed config used by other reconcilers.
-	haState := newFRRHADemotionState(d, cfg)
+	var haState *frrHADemotionState
+	if own != nil {
+		haState = newFRRHADemotionStateFrom(own, cfg)
+	} else {
+		haState = newFRRHADemotionState(d, cfg)
+	}
 	if haState != nil {
 		haState.peerIGPConfig = peerIGPConfig
 	}
