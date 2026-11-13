@@ -182,8 +182,10 @@
 # pkg/dataplane/userspace/rg_active_inherited_pin_19093_test.go. They need a
 # kernel BPF array (a fixed array is what makes an unconfigured rg_active slot
 # exist; Freeze() is the only honest way to fail a userspace map write), so
-# they skip without CAP_BPF and are registered in pkg/memlockcensus, where the
-# privileged leg (make test-memlock-guards) fails them instead. The same
+# they skip without CAP_BPF. They are registered in pkg/memlockcensus: the
+# privileged leg (make test-memlock-guards) runs them with the privilege and
+# checks each registered name actually ran, and TestMemlockGuardsAreInertHere's
+# environment probe fails closed when that leg lacks the privilege. The same
 # barrier is also asserted unprivileged by rg_active_mask_19093_test.go. Only
 # these 8 are banked here: master fc315754be already measured 657/140 against
 # 656/139 before this change: one priv-absent site added by ff5707da66 after

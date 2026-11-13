@@ -1,10 +1,13 @@
 package userspace
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -204,6 +207,27 @@ func replayHA19093(t *testing.T, m *Manager, p *rgActivePublish19093) map[int]HA
 			t.Logf("replay tail: %v", err)
 		}
 	})
+}
+
+// captureSlog19093 routes the default logger into a buffer for the rest of the
+// calling (sub)test (the package's established pattern, captureSlog12580).
+func captureSlog19093(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	return &buf
+}
+
+func countLines19093(logs, level, needle string) int {
+	n := 0
+	for _, l := range strings.Split(logs, "\n") {
+		if strings.Contains(l, "level="+level) && strings.Contains(l, needle) {
+			n++
+		}
+	}
+	return n
 }
 
 func rgActiveSlot19093(t *testing.T, rg *ebpf.Map, k uint32) uint8 {
@@ -448,10 +472,14 @@ func TestRGActiveWriteBeforeFirstPublishIsKeptInheritedIsNot19093(t *testing.T) 
 }
 
 // M5: clearing an inherited slot fails (the map is frozen). Each refresh must
-// still PUBLISH, and say inactive.
+// still PUBLISH, and say inactive. The clear's diagnostics are log-ONCE: the
+// status poll refreshes every second, so across two refreshes of a pin whose
+// clear keeps failing there is exactly one INFO naming the inherited slots and
+// exactly one WARN for the (unchanged) clear error (R19 review: deleting the
+// INFO gate survived every other cell).
 //
 // RED at master. Red for an implementation that suppresses publication after
-// a failed clear.
+// a failed clear, and for either log-once gate removed.
 func TestRGActiveInheritedSlotMaskedWhenClearFails19093(t *testing.T) {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		t.Skipf("creating a BPF map needs privilege (memlock rlimit / CAP_BPF): %v", err)
@@ -462,6 +490,7 @@ func TestRGActiveInheritedSlotMaskedWhenClearFails19093(t *testing.T) {
 	}
 	m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 	pub := attachHelper19093(m, nil)
+	logs := captureSlog19093(t)
 
 	for pass := 1; pass <= 2; pass++ {
 		got := firstApplyHA19093(t, m, pub)
@@ -472,6 +501,15 @@ func TestRGActiveInheritedSlotMaskedWhenClearFails19093(t *testing.T) {
 	}
 	if v := rgActiveSlot19093(t, rg, 1); v != 1 {
 		t.Fatalf("fixture: the frozen slot changed to %d; the cell needs the clear to fail", v)
+	}
+	out := logs.String()
+	if n := countLines19093(out, "INFO", "left by a previous process"); n != 1 {
+		t.Errorf("the inherited-slot INFO was logged %d times across two refreshes, want exactly 1 "+
+			"(log-once: the status poll refreshes every second)", n)
+	}
+	if n := countLines19093(out, "WARN", "could not clear inherited rg_active slots"); n != 1 {
+		t.Errorf("the failed-clear WARN was logged %d times across two refreshes with the same "+
+			"error, want exactly 1 (log-once per distinct error)", n)
 	}
 }
 
