@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -724,73 +725,256 @@ func TestMastershipGenerationKnown19050(t *testing.T) {
 	}
 }
 
-// TestFRRRenderOwnershipReadsCensus19050: the fast install's fence is the set
-// of ownership reads recorded during its render, so the render must read
-// cluster ownership ONLY through frrHAOwnership. Inside the render body
-// (assembleFRRConfigOwned), newFRRHADemotionStateFrom and every
-// *frrHADemotionState method, nothing may touch d.cluster or call an ownership
-// accessor on anything but the frrHAOwnership parameter.
-func TestFRRRenderOwnershipReadsCensus19050(t *testing.T) {
-	accessors := map[string]bool{
-		"IsLocalPrimary": true, "LocalGroupPrimary": true, "IsLocalPrimaryAny": true,
-		"GroupState": true, "GroupStates": true, "LocalMastershipSnapshot": true,
-		"IsPeerPrimary": true, "LocalPriorities": true,
+// newFRRHADemotionState is a TEST helper: production builds the render state
+// only through newFRRHADemotionStateFrom, called once from
+// assembleFRRConfigOwned (TestFRRRenderOwnershipReadsCensus19050). Older cells
+// still build it from a daemon's live cluster manager.
+func newFRRHADemotionState(d *Daemon, cfg *config.Config) *frrHADemotionState {
+	if d == nil || d.cluster == nil {
+		return nil
 	}
-	checked := map[string]bool{}
-	for _, f := range []string{"daemon_ipmon.go", "daemon_frr_rg_shutdown_11415.go"} {
-		fset := token.NewFileSet()
-		file, err := parser.ParseFile(fset, f, nil, 0)
+	return newFRRHADemotionStateFrom(d.cluster, cfg)
+}
+
+// ownershipAccessors19050 are the cluster-ownership reads the render could
+// make. Outside the frrHAOwnership argument none may appear in render code.
+var ownershipAccessors19050 = map[string]bool{
+	"IsLocalPrimary": true, "LocalGroupPrimary": true, "IsLocalPrimaryAny": true,
+	"GroupState": true, "GroupStates": true, "LocalMastershipSnapshot": true,
+	"IsPeerPrimary": true, "LocalPriorities": true, "WithLocalMastershipSnapshot": true,
+}
+
+// renderOwnershipViolations19050 checks the package's non-test sources (file
+// name -> content) for every way the FRR render could read cluster ownership
+// other than through its frrHAOwnership argument, so that the #19050 fast
+// install's recorder sees every ownership read its render makes:
+//   - R1: frrHADemotionState is constructed (composite literal) only inside
+//     newFRRHADemotionStateFrom;
+//   - R2: newFRRHADemotionStateFrom is called only from
+//     assembleFRRConfigOwned, with the identifier `own` as its ownership;
+//   - R3: inside assembleFRRConfigOwned, `own` is assigned only from
+//     d.cluster (the nil default);
+//   - R4: following in-package calls by name (an over-approximation: a name
+//     reaches every declaration with it) from the render's entry points, no
+//     reachable function writes an ownership field (active, globalActive)
+//     outside the constructor, touches .cluster other than in a nil check or
+//     the R3 default, or calls an ownership accessor on anything but `own`.
+//     The recorder's own methods are the recording path and are exempt.
+func renderOwnershipViolations19050(srcs map[string]string) ([]string, error) {
+	fset := token.NewFileSet()
+	funcs := map[string][]*ast.FuncDecl{}
+	var violations []string
+	report := func(pos token.Pos, format string, args ...any) {
+		violations = append(violations, fset.Position(pos).String()+": "+fmt.Sprintf(format, args...))
+	}
+	names := make([]string, 0, len(srcs))
+	for name := range srcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		file, err := parser.ParseFile(fset, name, srcs[name], 0)
 		if err != nil {
-			t.Fatal(err)
+			return nil, err
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
 			}
-			inScope := fn.Name.Name == "assembleFRRConfigOwned" || fn.Name.Name == "newFRRHADemotionStateFrom"
-			if fn.Recv != nil && len(fn.Recv.List) == 1 {
-				if star, ok := fn.Recv.List[0].Type.(*ast.StarExpr); ok {
-					if id, ok := star.X.(*ast.Ident); ok && id.Name == "frrHADemotionState" {
-						inScope = true
-					}
-				}
-			}
-			if !inScope {
-				continue
-			}
-			checked[fn.Name.Name] = true
-			nilChecks := map[*ast.SelectorExpr]bool{} // `d.cluster != nil` reads no ownership
+			funcs[fn.Name.Name] = append(funcs[fn.Name.Name], fn)
 			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				if be, ok := n.(*ast.BinaryExpr); ok && (be.Op == token.EQL || be.Op == token.NEQ) {
-					for _, pair := range [][2]ast.Expr{{be.X, be.Y}, {be.Y, be.X}} {
-						if id, ok := pair[1].(*ast.Ident); ok && id.Name == "nil" {
-							if sel, ok := pair[0].(*ast.SelectorExpr); ok {
-								nilChecks[sel] = true
-							}
-						}
+				switch x := n.(type) {
+				case *ast.CompositeLit: // R1
+					t := x.Type
+					if id, ok := t.(*ast.Ident); ok && id.Name == "frrHADemotionState" && fn.Name.Name != "newFRRHADemotionStateFrom" {
+						report(x.Pos(), "R1: %s constructs frrHADemotionState; only newFRRHADemotionStateFrom may", fn.Name.Name)
 					}
-				}
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok {
-					return true
-				}
-				if sel.Sel.Name == "cluster" && !nilChecks[sel] {
-					t.Errorf("%s: %s touches .cluster; the render must read ownership only through frrHAOwnership (#19050)", fset.Position(sel.Pos()), fn.Name.Name)
-				}
-				if accessors[sel.Sel.Name] {
-					if id, ok := sel.X.(*ast.Ident); !ok || id.Name != "own" {
-						t.Errorf("%s: %s calls %s outside frrHAOwnership (#19050)", fset.Position(sel.Pos()), fn.Name.Name, sel.Sel.Name)
+				case *ast.CallExpr: // R2
+					if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "newFRRHADemotionStateFrom" {
+						if fn.Name.Name != "assembleFRRConfigOwned" {
+							report(x.Pos(), "R2: %s calls newFRRHADemotionStateFrom; only assembleFRRConfigOwned may", fn.Name.Name)
+						} else if arg, ok := x.Args[0].(*ast.Ident); !ok || arg.Name != "own" {
+							report(x.Pos(), "R2: newFRRHADemotionStateFrom's ownership is not the `own` argument")
+						}
 					}
 				}
 				return true
 			})
 		}
 	}
-	for _, name := range []string{"assembleFRRConfigOwned", "newFRRHADemotionStateFrom", "staticHopActive", "filterISIS"} {
-		if !checked[name] {
-			t.Errorf("census scope lost %s; the census rotted", name)
+	roots := append(append([]*ast.FuncDecl(nil), funcs["assembleFRRConfigForActiveConfigOwned"]...), funcs["assembleFRRConfigOwned"]...)
+	if len(funcs["assembleFRRConfigOwned"]) != 1 || len(funcs["assembleFRRConfigForActiveConfigOwned"]) != 1 || len(funcs["newFRRHADemotionStateFrom"]) != 1 {
+		return nil, fmt.Errorf("census roots missing: the render entry points or the constructor were renamed")
+	}
+	recorderMethod := func(fn *ast.FuncDecl) bool {
+		if fn.Recv == nil || len(fn.Recv.List) != 1 {
+			return false
 		}
+		star, ok := fn.Recv.List[0].Type.(*ast.StarExpr)
+		if !ok {
+			return false
+		}
+		id, ok := star.X.(*ast.Ident)
+		return ok && id.Name == "ownershipRecorder19050"
+	}
+	seen := map[*ast.FuncDecl]bool{}
+	for queue := roots; len(queue) > 0; {
+		fn := queue[0]
+		queue = queue[1:]
+		if seen[fn] || recorderMethod(fn) {
+			continue
+		}
+		seen[fn] = true
+		allowed := map[*ast.SelectorExpr]bool{} // nil checks and the R3 default
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.BinaryExpr:
+				if x.Op == token.EQL || x.Op == token.NEQ {
+					for _, pair := range [][2]ast.Expr{{x.X, x.Y}, {x.Y, x.X}} {
+						if id, ok := pair[1].(*ast.Ident); ok && id.Name == "nil" {
+							if sel, ok := pair[0].(*ast.SelectorExpr); ok {
+								allowed[sel] = true
+							}
+						}
+					}
+				}
+			case *ast.AssignStmt:
+				for i, lhs := range x.Lhs {
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == "own" && fn.Name.Name == "assembleFRRConfigOwned" {
+						sel, ok := x.Rhs[i].(*ast.SelectorExpr)
+						if !ok || sel.Sel.Name != "cluster" {
+							report(x.Pos(), "R3: `own` is assigned from something other than the d.cluster default")
+						} else {
+							allowed[sel] = true
+						}
+						continue
+					}
+					target := lhs
+					if ix, ok := target.(*ast.IndexExpr); ok {
+						target = ix.X
+					}
+					if sel, ok := target.(*ast.SelectorExpr); ok && (sel.Sel.Name == "active" || sel.Sel.Name == "globalActive") && fn.Name.Name != "newFRRHADemotionStateFrom" {
+						report(x.Pos(), "R4: %s writes the ownership field %s outside the constructor", fn.Name.Name, sel.Sel.Name)
+					}
+				}
+			case *ast.SelectorExpr:
+				if x.Sel.Name == "cluster" && !allowed[x] {
+					report(x.Pos(), "R4: %s (reachable from the render) touches .cluster", fn.Name.Name)
+				}
+			case *ast.CallExpr:
+				name := ""
+				switch f := x.Fun.(type) {
+				case *ast.Ident:
+					name = f.Name
+				case *ast.SelectorExpr:
+					name = f.Sel.Name
+					if ownershipAccessors19050[name] {
+						if id, ok := f.X.(*ast.Ident); !ok || id.Name != "own" {
+							report(x.Pos(), "R4: %s (reachable from the render) calls %s outside frrHAOwnership", fn.Name.Name, name)
+						}
+					}
+				}
+				queue = append(queue, funcs[name]...)
+			case *ast.Ident: // function values passed around
+				queue = append(queue, funcs[x.Name]...)
+			}
+			return true
+		})
+	}
+	if ctor := funcs["newFRRHADemotionStateFrom"][0]; !seen[ctor] {
+		report(ctor.Pos(), "R2: the render no longer builds its state through newFRRHADemotionStateFrom")
+	}
+	return violations, nil
+}
+
+func daemonSources19050(t *testing.T) map[string]string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := map[string]string{}
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out[f] = string(b)
+	}
+	return out
+}
+
+// TestFRRRenderOwnershipReadsCensus19050: the fast install's fence is the set
+// of ownership reads recorded during its render, so the render must read
+// cluster ownership ONLY through its frrHAOwnership argument
+// (renderOwnershipViolations19050 states the rules).
+func TestFRRRenderOwnershipReadsCensus19050(t *testing.T) {
+	v, err := renderOwnershipViolations19050(daemonSources19050(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range v {
+		t.Error(line)
+	}
+}
+
+// TestFRRRenderOwnershipCensusSeesBypasses19050: the census reports each
+// bypass shape the review named (Codex on d80962db72) and its siblings,
+// injected into the real sources. A census that cannot see them is a cell
+// with the right name and no power.
+func TestFRRRenderOwnershipCensusSeesBypasses19050(t *testing.T) {
+	const ctor = "haState := newFRRHADemotionStateFrom(own, cfg)"
+	const ret = "\treturn d.assembleFRRConfigOwned(cfg, overlay, current, peerCfg, own)"
+	cases := []struct {
+		name          string
+		file, old, nw string
+		extra         string // appended to daemon_ipmon.go
+		want          string // the rule that must name it
+	}{
+		{"recorded-branch-calls-live-constructor", "daemon_ipmon.go", ctor,
+			"haState := newFRRHADemotionStateFrom(d.cluster, cfg)", "", "R2: newFRRHADemotionStateFrom's ownership is not"},
+		{"wrapper-reintroduced", "daemon_ipmon.go", ctor, "haState := newFRRHADemotionStateLive(d, cfg)",
+			"\nfunc newFRRHADemotionStateLive(d *Daemon, cfg *config.Config) *frrHADemotionState {\n\treturn newFRRHADemotionStateFrom(d.cluster, cfg)\n}\n", "R2: newFRRHADemotionStateLive calls"},
+		{"caller-precomputed-ownership", "daemon_ipmon.go", ret,
+			"\tif d.cluster.IsLocalPrimary(1) {\n\t\toverlay = nil\n\t}\n" + ret, "", "R4: assembleFRRConfigForActiveConfigOwned (reachable from the render) calls IsLocalPrimary"},
+		{"field-patched-after-construction", "daemon_ipmon.go", ctor,
+			ctor + "\n\tif haState != nil {\n\t\thaState.globalActive = d.renderPrimaryAny19050()\n\t}", "\nfunc (d *Daemon) renderPrimaryAny19050() bool { return true }\n", "R4: assembleFRRConfigOwned writes the ownership field globalActive"},
+		{"helper-reads-ownership", "daemon_ipmon.go", ret,
+			"\t_ = d.renderOwnerHelper19050()\n" + ret,
+			"\nfunc (d *Daemon) renderOwnerHelper19050() bool { return d.cluster.IsLocalPrimaryAny() }\n", "R4: renderOwnerHelper19050 (reachable from the render)"},
+		{"accessor-through-another-variable", "daemon_ipmon.go", ret,
+			"\tc := d.cluster\n\t_ = c\n" + ret, "", "R4: assembleFRRConfigForActiveConfigOwned (reachable from the render) touches .cluster"},
+		{"literal-construction", "daemon_ipmon.go", ctor,
+			"haState := &frrHADemotionState{active: map[int]bool{}}", "", "R1: assembleFRRConfigOwned constructs"},
+		{"own-assigned-from-elsewhere", "daemon_ipmon.go", ctor,
+			"own = d.store\n\t" + ctor, "", "R3:"},
+	}
+	base := daemonSources19050(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			srcs := map[string]string{}
+			for k, v := range base {
+				srcs[k] = v
+			}
+			if n := strings.Count(srcs[c.file], c.old); n != 1 {
+				t.Fatalf("premise: anchor %q occurs %d times in %s", c.old, n, c.file)
+			}
+			srcs[c.file] = strings.Replace(srcs[c.file], c.old, c.nw, 1) + c.extra
+			v, err := renderOwnershipViolations19050(srcs)
+			if err != nil {
+				t.Fatalf("census refused the injected source: %v", err)
+			}
+			if len(v) == 0 {
+				t.Fatal("the census reported nothing for this bypass")
+			}
+			if all := strings.Join(v, "\n"); !strings.Contains(all, c.want) {
+				t.Fatalf("no violation names %q; got:\n%s", c.want, all)
+			}
+		})
 	}
 }
 
