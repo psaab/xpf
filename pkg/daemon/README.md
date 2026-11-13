@@ -2220,7 +2220,25 @@ never blocks the VIP path.
     that catches it: a live constructor on the recorded branch, a
     reintroduced wrapper, caller-precomputed ownership, a field patched
     after construction, a helper that reads ownership, an alias of
-    `d.cluster`, a literal construction, and `own` taken from elsewhere.
+    `d.cluster`, a literal construction, the nil guard dropped from the
+    default (a recorder overwrite), `own = nil` in the wrapper, the wrapper
+    passing `nil`, and an index write through a local alias of
+    `haState.active`.
+  - **Documented limits.** A static census cannot be complete against code
+    written to evade it. It is a regression guard; the behavioural cells
+    (`TestFastInstallFencesRG0ThroughISISDistanceGuard19050` and
+    `TestFastInstallRefusesAnotherRGsABA19050`) are the protection. It does
+    not follow:
+    - function values held in package-level variables (only `FuncDecl`s
+      are indexed);
+    - callbacks captured before the render starts;
+    - bound method values;
+    - reflection;
+    - implementations in other packages;
+    - an ownership map aliased into a helper through a function parameter.
+
+    It reads only the package's own non-test Go files (review Codex on
+    e4af9ca4fc, items 2 and 4).
 
   **Every read is callback-free.** The capture and the pre-check never call
   `GroupStates()`, whose transfer-readiness callback can import routes and
