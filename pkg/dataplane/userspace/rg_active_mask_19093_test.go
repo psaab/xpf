@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"reflect"
-	"sync"
 	"testing"
 
 	"github.com/psaab/xpf/pkg/dataplane"
@@ -72,20 +71,19 @@ func TestMergeHAStateNilMaskOwnsNothing19093(t *testing.T) {
 
 // M4b: the bit and the write are published together. Inside UpdateRGActive's
 // m.mu+sessionMu hold, right after the map write lands, the bit must already
-// be set and m.mu must still be held; and a refresh that tries to run while
-// the write is in flight can only observe the slot after UpdateRGActive
-// returns — so it can never classify this process's fresh 1 as inherited and
-// clear it. Map-free: the write goes through the haRGActiveMapWrite seam.
+// be set and m.mu must still be held — every refresh takes m.mu, so no
+// refresh can observe the landed 1 without its bit. Map-free: the write goes
+// through the haRGActiveMapWrite seam, so this runs unprivileged on every
+// `make test`. The racing PRODUCTION refresh/clear (with demonstrated m.mu
+// contention and post-refresh pin and ownership assertions) is the privileged
+// M4c subtest in rg_active_inherited_pin_19093_test.go.
 func TestRGActiveWrittenBitIsAtomicWithTheMapWrite19093(t *testing.T) {
-	var pinMu sync.Mutex
 	var pin [dataplane.MaxRedundancyGroups]uint8
 
 	m := New()
 	m.clusterHA = true
 	m.haGroups = map[int]HAGroupStatus{0: {RGID: 0}, 1: {RGID: 1}}
 	m.haRGActiveMapWrite = func(rgID int, active bool) error {
-		pinMu.Lock()
-		defer pinMu.Unlock()
 		if active {
 			pin[rgID] = 1
 		} else {
@@ -102,8 +100,10 @@ func TestRGActiveWrittenBitIsAtomicWithTheMapWrite19093(t *testing.T) {
 	}
 
 	var hookRan, bitSetInHook, muHeldInHook bool
+	var pinInHook uint8
 	m.haRGActiveAfterMapWriteHook = func() {
 		hookRan = true
+		pinInHook = pin[1]
 		bitSetInHook = m.rgActiveWritten[1]
 		if m.mu.TryLock() {
 			m.mu.Unlock()
@@ -112,42 +112,13 @@ func TestRGActiveWrittenBitIsAtomicWithTheMapWrite19093(t *testing.T) {
 		}
 	}
 
-	parked := make(chan struct{})
-	release := make(chan struct{})
-	m.haRGActiveSessionHoldHook = func() {
-		close(parked)
-		<-release
-	}
-
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		_ = m.UpdateRGActive(1, true)
-	}()
-	<-parked
-
-	// A refresh needs m.mu. Start one while the write is parked inside
-	// UpdateRGActive's critical section.
-	type observation struct {
-		pinVal  uint8
-		written bool
-	}
-	observed := make(chan observation, 1)
-	go func() {
-		m.mu.Lock()
-		pinMu.Lock()
-		v := pin[1]
-		pinMu.Unlock()
-		observed <- observation{pinVal: v, written: m.rgActiveWritten[1]}
-		m.mu.Unlock()
-	}()
-
-	close(release)
-	<-writerDone
-	obs := <-observed
+	_ = m.UpdateRGActive(1, true)
 
 	if !hookRan {
 		t.Fatal("haRGActiveAfterMapWriteHook never ran: the write did not land, so the cell judged nothing")
+	}
+	if pinInHook != 1 {
+		t.Fatalf("fixture: the hook ran before the map write landed (rg_active[1]=%d)", pinInHook)
 	}
 	if !bitSetInHook {
 		t.Error("right after the rg_active write landed, inside UpdateRGActive's lock hold, the " +
@@ -158,11 +129,11 @@ func TestRGActiveWrittenBitIsAtomicWithTheMapWrite19093(t *testing.T) {
 		t.Error("m.mu was not held when the rg_active write landed; the write and its bit are not " +
 			"serialized with refresh")
 	}
-	if obs.pinVal == 1 && !obs.written {
-		t.Error("a concurrent refresh observed this process's fresh rg_active=1 without its " +
-			"written bit — it would mask it and clear it as inherited (#19093)")
-	}
-	if obs.pinVal != 1 {
-		t.Errorf("fixture: the concurrent refresh saw rg_active[1]=%d; it must run after the write", obs.pinVal)
+	m.mu.Lock()
+	written := m.rgActiveWritten[1]
+	m.mu.Unlock()
+	if !written {
+		t.Error("after UpdateRGActive returned (its helper publish failed), the written bit was unset: " +
+			"a landed map write is this process's ownership whatever the IPC did")
 	}
 }
