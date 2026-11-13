@@ -388,9 +388,17 @@ func TestRollbackJoinWaitsForAPromotedRollback19089(t *testing.T) {
 		t.Fatal("cleanup never returned after the rollback finished")
 	}
 	<-fired
-	ran := false
-	join.wrap(func(uint64) { ran = true })(0)
-	if ran {
+	// The post-cleanup admission check has its own hook. The hold hook is
+	// done with, so it is cleared first: when this check reused it, a
+	// wrapper that never closed admission ran it again, closed `promoted`
+	// twice and panicked, so the cell went red on the panic, not on the
+	// check below. Clearing it makes the check the only thing that can fire.
+	join.mu.Lock()
+	join.afterRun = nil
+	join.mu.Unlock()
+	lateAdmitted := false
+	join.wrap(func(uint64) { lateAdmitted = true })(0)
+	if lateAdmitted {
 		t.Fatal("#19089: a rollback fired after cleanup was admitted")
 	}
 }
