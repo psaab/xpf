@@ -752,14 +752,34 @@ var ownershipAccessors19050 = map[string]bool{
 //     newFRRHADemotionStateFrom;
 //   - R2: newFRRHADemotionStateFrom is called only from
 //     assembleFRRConfigOwned, with the identifier `own` as its ownership;
-//   - R3: inside assembleFRRConfigOwned, `own` is assigned only from
-//     d.cluster (the nil default);
+//   - R3: `own` flows unmodified. The only assignment to it anywhere in the
+//     reachable render is the exact nil-guarded default in
+//     assembleFRRConfigOwned: an `if` whose condition has an `own == nil`
+//     conjunct and whose body is solely `own = d.cluster`. No reachable
+//     function declares another `own`, and the wrapper passes its `own`
+//     through to assembleFRRConfigOwned;
 //   - R4: following in-package calls by name (an over-approximation: a name
 //     reaches every declaration with it) from the render's entry points, no
 //     reachable function writes an ownership field (active, globalActive)
 //     outside the constructor, touches .cluster other than in a nil check or
 //     the R3 default, or calls an ownership accessor on anything but `own`.
 //     The recorder's own methods are the recording path and are exempt.
+//     Writes through a local alias of an ownership field (`a :=
+//     haState.active; a[1] = true`, or `delete(a, k)`) count as writes.
+//
+// DOCUMENTED LIMITS. A static census cannot be complete against code written
+// to evade it; this one is a regression guard against the honest mistakes the
+// reviews found, and the behavioural cells
+// (TestFastInstallFencesRG0ThroughISISDistanceGuard19050,
+// TestFastInstallRefusesAnotherRGsABA19050) are the protection. It does not
+// follow:
+//   - function values held in package-level variables (`var hidden = func(d
+//     *Daemon) bool { ... }` called as `hidden(d)`): only FuncDecls are
+//     indexed (review Codex on e4af9ca4fc, item 2);
+//   - callbacks captured before the render starts, bound method values,
+//     reflection, implementations in other packages, or an ownership map
+//     aliased into a helper through a function parameter; and it reads only
+//     the package's own non-test Go files (same review, item 4).
 func renderOwnershipViolations19050(srcs map[string]string) ([]string, error) {
 	fset := token.NewFileSet()
 	funcs := map[string][]*ast.FuncDecl{}
@@ -818,6 +838,46 @@ func renderOwnershipViolations19050(srcs map[string]string) ([]string, error) {
 		id, ok := star.X.(*ast.Ident)
 		return ok && id.Name == "ownershipRecorder19050"
 	}
+	// R3: the one permitted assignment to `own`, found structurally.
+	var guardedDefault *ast.AssignStmt
+	isOwnEqNil := func(e ast.Expr) bool {
+		be, ok := e.(*ast.BinaryExpr)
+		if !ok || be.Op != token.EQL {
+			return false
+		}
+		x, okx := be.X.(*ast.Ident)
+		y, oky := be.Y.(*ast.Ident)
+		return okx && oky && x.Name == "own" && y.Name == "nil"
+	}
+	var conjuncts func(e ast.Expr) []ast.Expr
+	conjuncts = func(e ast.Expr) []ast.Expr {
+		if be, ok := e.(*ast.BinaryExpr); ok && be.Op == token.LAND {
+			return append(conjuncts(be.X), conjuncts(be.Y)...)
+		}
+		return []ast.Expr{e}
+	}
+	ast.Inspect(funcs["assembleFRRConfigOwned"][0].Body, func(n ast.Node) bool {
+		ifs, ok := n.(*ast.IfStmt)
+		if !ok || ifs.Init != nil || ifs.Else != nil || len(ifs.Body.List) != 1 {
+			return true
+		}
+		guarded := false
+		for _, c := range conjuncts(ifs.Cond) {
+			guarded = guarded || isOwnEqNil(c)
+		}
+		as, ok := ifs.Body.List[0].(*ast.AssignStmt)
+		if !guarded || !ok || as.Tok != token.ASSIGN || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		lhs, okl := as.Lhs[0].(*ast.Ident)
+		sel, oks := as.Rhs[0].(*ast.SelectorExpr)
+		if okl && oks && lhs.Name == "own" && sel.Sel.Name == "cluster" {
+			if id, ok := sel.X.(*ast.Ident); ok && id.Name == "d" {
+				guardedDefault = as
+			}
+		}
+		return true
+	})
 	seen := map[*ast.FuncDecl]bool{}
 	for queue := roots; len(queue) > 0; {
 		fn := queue[0]
@@ -827,6 +887,11 @@ func renderOwnershipViolations19050(srcs map[string]string) ([]string, error) {
 		}
 		seen[fn] = true
 		allowed := map[*ast.SelectorExpr]bool{} // nil checks and the R3 default
+		aliases := map[string]bool{}            // locals bound to an ownership field
+		ownershipField := func(e ast.Expr) bool {
+			sel, ok := e.(*ast.SelectorExpr)
+			return ok && (sel.Sel.Name == "active" || sel.Sel.Name == "globalActive")
+		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.BinaryExpr:
@@ -840,22 +905,40 @@ func renderOwnershipViolations19050(srcs map[string]string) ([]string, error) {
 					}
 				}
 			case *ast.AssignStmt:
+				if x == guardedDefault {
+					allowed[x.Rhs[0].(*ast.SelectorExpr)] = true
+					return true
+				}
 				for i, lhs := range x.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name == "own" && fn.Name.Name == "assembleFRRConfigOwned" {
-						sel, ok := x.Rhs[i].(*ast.SelectorExpr)
-						if !ok || sel.Sel.Name != "cluster" {
-							report(x.Pos(), "R3: `own` is assigned from something other than the d.cluster default")
-						} else {
-							allowed[sel] = true
-						}
+					if id, ok := lhs.(*ast.Ident); ok && id.Name == "own" {
+						report(x.Pos(), "R3: %s assigns `own` other than by the nil-guarded d.cluster default", fn.Name.Name)
 						continue
+					}
+					if fn.Name.Name == "newFRRHADemotionStateFrom" {
+						continue
+					}
+					if id, ok := lhs.(*ast.Ident); ok && len(x.Rhs) == len(x.Lhs) && ownershipField(x.Rhs[i]) {
+						aliases[id.Name] = true
 					}
 					target := lhs
 					if ix, ok := target.(*ast.IndexExpr); ok {
 						target = ix.X
+						if id, ok := target.(*ast.Ident); ok && aliases[id.Name] {
+							report(x.Pos(), "R4: %s writes an ownership field through the alias %s", fn.Name.Name, id.Name)
+							continue
+						}
 					}
-					if sel, ok := target.(*ast.SelectorExpr); ok && (sel.Sel.Name == "active" || sel.Sel.Name == "globalActive") && fn.Name.Name != "newFRRHADemotionStateFrom" {
+					if sel, ok := target.(*ast.SelectorExpr); ok && ownershipField(sel) {
 						report(x.Pos(), "R4: %s writes the ownership field %s outside the constructor", fn.Name.Name, sel.Sel.Name)
+					}
+				}
+			case *ast.ValueSpec:
+				for i, name := range x.Names {
+					if name.Name == "own" {
+						report(x.Pos(), "R3: %s declares another `own`", fn.Name.Name)
+					}
+					if fn.Name.Name != "newFRRHADemotionStateFrom" && i < len(x.Values) && ownershipField(x.Values[i]) {
+						aliases[name.Name] = true
 					}
 				}
 			case *ast.SelectorExpr:
@@ -867,7 +950,17 @@ func renderOwnershipViolations19050(srcs map[string]string) ([]string, error) {
 				switch f := x.Fun.(type) {
 				case *ast.Ident:
 					name = f.Name
+					if name == "delete" && len(x.Args) > 0 && fn.Name.Name != "newFRRHADemotionStateFrom" {
+						if id, ok := x.Args[0].(*ast.Ident); (ok && aliases[id.Name]) || ownershipField(x.Args[0]) {
+							report(x.Pos(), "R4: %s deletes from an ownership field", fn.Name.Name)
+						}
+					}
 				case *ast.SelectorExpr:
+					if f.Sel.Name == "assembleFRRConfigOwned" && fn.Name.Name == "assembleFRRConfigForActiveConfigOwned" {
+						if last, ok := x.Args[len(x.Args)-1].(*ast.Ident); !ok || last.Name != "own" {
+							report(x.Pos(), "R3: the wrapper does not pass its `own` through to the render")
+						}
+					}
 					name = f.Sel.Name
 					if ownershipAccessors19050[name] {
 						if id, ok := f.X.(*ast.Ident); !ok || id.Name != "own" {
@@ -950,8 +1043,13 @@ func TestFRRRenderOwnershipCensusSeesBypasses19050(t *testing.T) {
 			"\tc := d.cluster\n\t_ = c\n" + ret, "", "R4: assembleFRRConfigForActiveConfigOwned (reachable from the render) touches .cluster"},
 		{"literal-construction", "daemon_ipmon.go", ctor,
 			"haState := &frrHADemotionState{active: map[int]bool{}}", "", "R1: assembleFRRConfigOwned constructs"},
-		{"own-assigned-from-elsewhere", "daemon_ipmon.go", ctor,
-			"own = d.store\n\t" + ctor, "", "R3:"},
+		{"guard-dropped-recorder-overwritten", "daemon_ipmon.go", "\tif own == nil && d != nil && d.cluster != nil {",
+			"\tif d != nil && d.cluster != nil {", "", "R3: assembleFRRConfigOwned assigns `own`"},
+		{"own-nil-in-wrapper", "daemon_ipmon.go", ret, "\town = nil\n" + ret, "", "R3: assembleFRRConfigForActiveConfigOwned assigns `own`"},
+		{"wrapper-passes-nil", "daemon_ipmon.go", ret,
+			"\treturn d.assembleFRRConfigOwned(cfg, overlay, current, peerCfg, nil)", "", "R3: the wrapper does not pass"},
+		{"alias-index-write", "daemon_ipmon.go", ctor,
+			ctor + "\n\tif haState != nil {\n\t\ta := haState.active\n\t\ta[1] = true\n\t}", "", "R4: assembleFRRConfigOwned writes an ownership field through the alias a"},
 	}
 	base := daemonSources19050(t)
 	for _, c := range cases {
