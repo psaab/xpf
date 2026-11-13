@@ -1560,6 +1560,29 @@ non-daemon embedders) the timer falls back to the self-contained
 `performAutoRollback`, which promotes store state but does not re-apply
 a dataplane it has no handle on.
 
+The confirm timer is not the only entry point. When the daemon's executor
+must retry a rollback (a first-commit rollback that could not persist its
+host-auth closeout intent leaves the window pending and tries again a
+second later), it schedules the retry through the store's exported
+`RetryConfirmedRollback(gen)`, never by calling itself directly (#19089).
+`RetryConfirmedRollback` is the timer's own dispatch (`fireConfirmTimer`):
+it reads the registered executor under `s.mu` and calls it outside the
+lock with the generation it was given. So the executor registered with
+`SetRollbackExecutor` owns every rollback execution, the retry included.
+That is what lets a test fixture wrap the registered executor to admit and
+join every rollback. In production the registered executor is
+`executeConfirmedRollback`, so the retry runs the same transaction as
+before. A new rollback path must dispatch the same way.
+
+With no executor registered, a retry, like the timer, falls back to
+`performAutoRollback`: a store-only promotion with no durable closeout
+intent and no bootstrap teardown, which is exactly what the retry's own
+guard exists to avoid. That combination is unreachable in production
+today: the retry is scheduled only from inside `executeConfirmedRollback`,
+which runs only as the registered executor. A harness that calls
+`executeConfirmedRollback` directly without registering it, and then hits
+a closeout write failure, would get the store-only promotion.
+
 The first-commit rollback target (#1922 Item 1b) is now implemented: on a
 FRESH-store first `commit confirmed` timeout `PromoteRollback` reverts the
 store to the empty bootstrap tree, persists the **never-committed marker**
