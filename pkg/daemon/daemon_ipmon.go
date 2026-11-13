@@ -156,7 +156,8 @@ func (d *Daemon) assembleFRRConfigForActiveConfigOwned(cfg *config.Config, overl
 
 // assembleFRRConfigOwned is the single FRR render body. own serves its
 // cluster-ownership reads; nil means the live cluster manager (every
-// production render but the #19050 fast install).
+// production render but the #19050 fast install). Picking that default is the
+// render's only touch of d.cluster besides the ClusterMode nil check.
 func (d *Daemon) assembleFRRConfigOwned(
 	cfg *config.Config,
 	overlay []config.RouteOverlayEntry,
@@ -197,12 +198,10 @@ func (d *Daemon) assembleFRRConfigOwned(
 	// FRR protocols follow the cluster ownership of their configured RETHs.
 	// The helper clones protocol objects so this runtime filter cannot mutate
 	// the committed config used by other reconcilers.
-	var haState *frrHADemotionState
-	if own != nil {
-		haState = newFRRHADemotionStateFrom(own, cfg)
-	} else {
-		haState = newFRRHADemotionState(d, cfg)
+	if own == nil && d != nil && d.cluster != nil {
+		own = d.cluster // every production render but the #19050 fast install
 	}
+	haState := newFRRHADemotionStateFrom(own, cfg)
 	if haState != nil {
 		haState.peerIGPConfig = peerIGPConfig
 	}

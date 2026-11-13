@@ -2203,9 +2203,24 @@ never blocks the VIP path.
     `globalActive` -> `filterISIS` -> the static renderer's IS-IS
     distance guard (#17735, Codex on 11e4c6f47e).
 
-  `TestFRRRenderOwnershipReadsCensus19050` pins that no other render code
-  reads cluster ownership. An RG the render never read cannot change a
-  line, so it is not fenced.
+  An RG the render never read cannot change a line, so it is not fenced.
+
+  **What makes the read set complete.**
+  - `newFRRHADemotionStateFrom(own, cfg)` is the render state's only
+    constructor, and `own` is its only ownership input.
+  - `assembleFRRConfigOwned` is its only caller. It picks the live cluster
+    manager only as the default when no recorder was passed.
+  - `TestFRRRenderOwnershipReadsCensus19050` analyzes the package's non-test
+    sources. It follows in-package calls by name from both render entry
+    points, and checks that no reachable function constructs the state,
+    patches an ownership field, touches `d.cluster` (other than a nil check
+    or the default), or calls an ownership accessor except through `own`.
+  - `TestFRRRenderOwnershipCensusSeesBypasses19050` injects each known
+    bypass into the real sources and requires the census to name the rule
+    that catches it: a live constructor on the recorded branch, a
+    reintroduced wrapper, caller-precomputed ownership, a field patched
+    after construction, a helper that reads ownership, an alias of
+    `d.cluster`, a literal construction, and `own` taken from elsewhere.
 
   **Every read is callback-free.** The capture and the pre-check never call
   `GroupStates()`, whose transfer-readiness callback can import routes and
