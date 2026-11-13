@@ -544,6 +544,18 @@ startup-phase and shutdown ordering is untouched:
   Miss either and the peer promotes onto a segment this node is still serving:
   duplicate OFFERs from two lease databases with neither aware of the other.
 
+  **An `rg_active` left set is not inherited (#19093).** The clear in item 2
+  is skipped by a `hitless-restart` stop, and an unclean exit (SIGKILL, OOM,
+  panic, stop-timeout SIGKILL) runs none of this code at all. `rg_active` is
+  pinned, so either path can leave the dead process's 1s for the next one. A
+  hitless stop whose resign demotes the RGs before `Close` does clear them,
+  through the still-live cluster-event watcher; a lone node's resign is a
+  no-op. The next process does not treat those values as ownership: the
+  userspace Manager imports a slot only if that process itself wrote it, and
+  clears the rest (`pkg/dataplane/README.md`, "Inherited `rg_active` is not
+  ownership"). See the #6530 section below for why the daemon needs no
+  start-up write of its own.
+
   **Then the HA stop resigns every RG to the peer (#18540).** Right after the
   Kea stop, `d.cluster.ResignForPlannedShutdown()` installs the full-cost
   `__planned-shutdown__` election debt (weight 0 locally and on the wire) and
@@ -1773,6 +1785,49 @@ Guards: `TestFenceRearmsReconcileRetry` (end-to-end through two real reconcile
 passes) and `TestInvalidateAppliedRearmsAnySecondWriter` /
 `TestInvalidateAppliedKeepsStructInvariant` (the generic second-writer
 contract), all in `rg_state_fence_rearm_6530_test.go`.
+
+### A restart never inherits `rg_active` (#19093)
+
+A fresh `rgStateMachine` starts with `applied=false`. That assumes the
+dataplane holds false for every RG this process has not written, and before
+#19093 the assumption could be false. `rg_active` is pinned, an unclean exit
+leaves the dead process's 1s in it, and the new helper was seeded from them.
+For an RG the restarted node was secondary for, desired and applied were both
+false, so `reconcileRGState`'s `tr.Changed || s.NeedsApply()` never wrote the
+correcting 0, despite the startup-pass comment in `reconcileRGStateLoop`. The
+helper believed it owned the RG. XSK idle liveness never proved, the node was
+never takeover-ready, and failback was refused for 8m49s on loss, until a
+graceful restart.
+
+The fix makes the assumption true **in the userspace Manager**, not here. The
+Manager imports an `rg_active` slot as ownership only if this process's own
+`UpdateRGActive` wrote it, and clears inherited slots best-effort
+(`pkg/dataplane/README.md`, "Inherited `rg_active` is not ownership"). The
+daemon writes nothing extra at start.
+
+That is deliberate. The obvious daemon-side alternative is to start every
+machine "applied UNKNOWN" and re-drive every RG on the first pass. It was
+rejected for three reasons:
+
+- **It is not fail-closed.** The helper is seeded from the pin at the first
+  apply, before the first reconcile pass, so the stale ownership is published
+  first and corrected about a second later.
+- **It blackholes a restarted owner.** In RETH-VRRP mode the sync hold forces
+  desired false on the first pass (`rg_state.go`), so the helper of a node
+  about to own the RG would see true→false→true.
+- **It is not free.** Every clean boot would pay one demotion prep RPC
+  (bounded at 5 s, plus a 10 s prep lease) per secondary RG.
+
+Cells, all in `pkg/daemon/rg_active_stale_pin_19093_test.go`:
+
+- `TestFreshStartSecondaryRGsCostNothing19093`: a fresh start with every RG
+  secondary issues no write and no prep.
+- `TestFreshStartOwnerWritesNoFalseBeforeFirstTrue19093`: in a private-RG
+  held start, no false precedes the RG's single true.
+
+The existing `TestSyncHoldReleaseOnlyReconcileRunsServices16692` and
+`TestSyncHoldReleaseOnlyReconcileAlreadyMaster17821` pin the RETH-VRRP held
+start. All four go red under the "applied UNKNOWN" mutant.
 
 ### A completing apply must not erase a debt armed while it was in flight (#6799)
 
@@ -3149,9 +3204,13 @@ never lock an operator out of a remote box it manages.
     knob while armed.
   - Tests: `pkg/daemon/transit_forwarding_failclosed_5275_test.go`.
 
-- ISSU (in-service software upgrade) preserves sessions across the upgrade
-  by handing the BPF map FDs to the new daemon and timing the cutover
-  against HA failover.
+- ISSU (in-service software upgrade) does not hand BPF map FDs to the new
+  daemon; no such handoff exists. It drains first: `ForceSecondary`
+  demotes every RG to the peer (`pkg/cluster/failover.go`), the rolling
+  upgrade checks the drain predicate before cutting the node
+  (`pkg/upgrade/rolling.go`), and the upgrade itself is a systemd stop and
+  start. Sessions survive on the peer through session sync. Ownership does
+  not survive: a restarted process never inherits `rg_active` (#19093).
 - CoS configuration is wiped on every cluster deploy. Re-apply with
   `test/incus/apply-cos-config.sh` after `cluster-setup.sh deploy`. (See
   CLAUDE.md.)

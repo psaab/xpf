@@ -580,12 +580,18 @@ func TestMergeHAStateFromMaps(t *testing.T) {
 		t.Fatalf("wdMap.Update: %v", err)
 	}
 
-	merged, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{
+	// #19093: this process wrote slot 2, so its value is ownership.
+	var written [dataplane.MaxRedundancyGroups]bool
+	written[2] = true
+	merged, inherited, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{
 		0: {RGID: 0, Active: false},
 		2: {RGID: 2, Active: false},
-	})
+	}, &written)
 	if err != nil {
 		t.Fatalf("mergeHAStateFromMaps: %v", err)
+	}
+	if len(inherited) != 0 {
+		t.Fatalf("slots this process wrote were reported inherited: %v", inherited)
 	}
 	if !merged[2].Active {
 		t.Fatal("merged[2].Active = false, want true")
@@ -639,13 +645,19 @@ func TestMergeHAStateFromMapsUsesConfiguredArrayInventory(t *testing.T) {
 		t.Fatalf("wdMap.Update: %v", err)
 	}
 
-	merged, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{
+	// #19093: this process wrote slots 0 and 1, so their values are ownership.
+	var written [dataplane.MaxRedundancyGroups]bool
+	written[0], written[1] = true, true
+	merged, inherited, err := mergeHAStateFromMaps(rgMap, wdMap, map[int]HAGroupStatus{
 		0: {RGID: 0, Active: false},
 		1: {RGID: 1, Active: false},
 		2: {RGID: 2, Active: false},
-	})
+	}, &written)
 	if err != nil {
 		t.Fatalf("mergeHAStateFromMaps: %v", err)
+	}
+	if len(inherited) != 0 {
+		t.Fatalf("slots this process wrote were reported inherited: %v", inherited)
 	}
 	if len(merged) != 3 {
 		t.Fatalf("merged inventory has %d groups, want configured RG0, RG1, RG2 only: %+v", len(merged), merged)

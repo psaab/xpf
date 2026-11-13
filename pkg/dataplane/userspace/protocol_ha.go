@@ -16,8 +16,8 @@ type HAGroupStatus struct {
 	WatchdogTimestamp uint64 `json:"watchdog_timestamp,omitempty"`
 	// #1642: lease-telemetry fields the Rust helper serializes on
 	// HAGroupStatus (protocol/binding.rs). Observability only — the HA
-	// failover *decision* is taken from BPF maps via mergeHAStateFromMaps,
-	// not from these. JSON tags MUST match the Rust serde rename(...) exactly.
+	// failover *decision* is taken from BPF maps via mergeHAStateFromMaps
+	// (only slots this process wrote, #19093), not from these. JSON tags MUST match the Rust serde rename(...) exactly.
 	ForwardingActive bool   `json:"forwarding_active,omitempty"`
 	LeaseState       string `json:"lease_state,omitempty"`
 	LeaseUntil       uint64 `json:"lease_until,omitempty"`

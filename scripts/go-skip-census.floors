@@ -178,12 +178,22 @@
 # These floors already include the separately attributed #18751 fabric
 # netns site, #18728's three lo0 kernel/tool sites, and #18846-G58's one
 # SO_SNDBUF site; they are not counted again in this update.
-total        = 656
+# #19093 adds 8 privilege-absent sites, the real-map cells in
+# pkg/dataplane/userspace/rg_active_inherited_pin_19093_test.go. They need a
+# kernel BPF array (a fixed array is what makes an unconfigured rg_active slot
+# exist; Freeze() is the only honest way to fail a userspace map write), so
+# they skip without CAP_BPF and are registered in pkg/memlockcensus, where the
+# privileged leg (make test-memlock-guards) fails them instead. The same
+# barrier is also asserted unprivileged by rg_active_mask_19093_test.go. Only
+# these 8 are banked here: master fc315754be already measured 657/140 against
+# 656/139 before this change: one priv-absent site added by ff5707da66 after
+# the 2026-11-07 recount. That drift is #19104 and is not banked here.
+total        = 664
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 139
+priv-absent  = 147
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.

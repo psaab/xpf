@@ -422,6 +422,32 @@ type Manager struct {
 	// helper-facing view only: haGroups and the rg_active BPF map keep the
 	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
 	transferPreActive map[int]time.Time
+	// rgActiveWritten (#19093) records, per rg_active slot, whether THIS
+	// process has landed a write to that slot through UpdateRGActive. The
+	// rg_active map is pinned under /sys/fs/bpf/xpf and outlives an unclean
+	// exit (SIGKILL, OOM, panic, stop-timeout), so a restarted process finds
+	// the dead one's 1s there. mergeHAStateFromMaps imports a slot's value as
+	// ownership only when its bit is set; an unset slot is INHERITED and is
+	// published inactive whatever the pin holds, then cleared best-effort.
+	//
+	// It is the BASE-ownership barrier: haGroups.Active can only become true
+	// from this process's own landed write. The #18559 transfer pre-activation
+	// above is a separate, in-memory overlay of this process and is untouched.
+	//
+	// Process lifetime by construction: there is one Manager per daemon
+	// process (buildRuntimeDataPlane has a single call site) and nothing ever
+	// clears this array — not helper exit or respawn (resetAfterHelperGoneLocked),
+	// not Close/Teardown, not a re-Start. UpdateRGActive is its only writer and
+	// sets a bit inside the same m.mu+sessionMu hold as the map write, right
+	// after the write lands; every refresh holds m.mu, so none can observe a
+	// landed write without its bit. Guarded by m.mu.
+	rgActiveWritten [dataplane.MaxRedundancyGroups]bool
+	// rgActiveInheritedLogged and rgActiveInheritedClearErr are the log-once
+	// state for the inherited-slot clear in refreshHAStateFromMapsLocked: the
+	// status poll refreshes every second, and a clear that keeps failing must
+	// WARN once per distinct error, not every tick. Guarded by m.mu.
+	rgActiveInheritedLogged   bool
+	rgActiveInheritedClearErr string
 	// rgPrimaryProvider reports local RG primacy for the route builder
 	// (#15742). Nil means no provider wired yet (boot window before
 	// applyDataplaneAndHACore, standalone, or tests): the builder then
@@ -797,6 +823,12 @@ type Manager struct {
 	// UpdateRGActive acquires sessionMu. It pauses the mutation while tests
 	// probe ownership of the production mutex.
 	haRGActiveSessionHoldHook func()
+	// haRGActiveAfterMapWriteHook is a test-only rendezvous inside
+	// UpdateRGActive's m.mu+sessionMu hold, immediately after the rg_active map
+	// write landed and its rgActiveWritten bit was set (#19093). It lets a cell
+	// prove the bit and the write are published together, under the lock every
+	// refresh takes.
+	haRGActiveAfterMapWriteHook func()
 
 	// restartBringupHook, when non-nil, replaces ensureProcessLocked in the
 	// binding-plan restart branch of syncSnapshotLocked, so a test can simulate

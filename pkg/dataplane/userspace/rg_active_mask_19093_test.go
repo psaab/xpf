@@ -1,0 +1,168 @@
+package userspace
+
+import (
+	"errors"
+	"os"
+	"os/exec"
+	"reflect"
+	"sync"
+	"testing"
+
+	"github.com/psaab/xpf/pkg/dataplane"
+)
+
+// #19093, the unprivileged half. rg_active_inherited_pin_19093_test.go drives
+// the real map paths and needs the privilege to create a BPF map; these cells
+// pin the same barrier where no privilege is needed, so they run on every
+// ordinary `make test` (the census's preferred remedy, pkg/memlockcensus).
+
+// U1: the pure merge core. A slot's value is BASE ownership only if this
+// process wrote it; every non-zero slot it did not write is reported
+// inherited, configured or not, and never added to the inventory.
+func TestMergeHAStateMasksSlotsThisProcessNeverWrote19093(t *testing.T) {
+	var written [dataplane.MaxRedundancyGroups]bool
+	written[0] = true // this process wrote 1
+	written[3] = true // this process wrote 0
+	last := dataplane.MaxRedundancyGroups - 1
+	rgVals := map[int]uint8{
+		0:    1, // written 1        -> active
+		1:    1, // inherited 1      -> inactive, inherited
+		2:    0, // never written 0  -> inactive, not inherited
+		3:    0, // written 0        -> inactive
+		last: 1, // inherited, unconfigured -> inherited, not added
+		99:   1, // outside the array -> never written, never added
+	}
+	existing := map[int]HAGroupStatus{0: {RGID: 0}, 1: {RGID: 1}, 2: {RGID: 2}, 3: {RGID: 3}}
+
+	merged, inherited := mergeHAState(rgVals, map[int]uint64{1: 77}, existing, &written)
+
+	if !merged[0].Active {
+		t.Error("RG0: a slot this process wrote 1 was not imported as active")
+	}
+	for _, rg := range []int{1, 2, 3} {
+		if merged[rg].Active {
+			t.Errorf("RG%d imported ACTIVE; only a slot this process wrote 1 is ownership", rg)
+		}
+	}
+	if merged[1].WatchdogTimestamp != 77 {
+		t.Errorf("RG1 watchdog = %d, want 77: masking ownership must not drop the watchdog", merged[1].WatchdogTimestamp)
+	}
+	if _, ok := merged[last]; ok {
+		t.Errorf("unconfigured slot %d was added to the inventory", last)
+	}
+	if _, ok := merged[99]; ok {
+		t.Error("an out-of-array key was added to the inventory")
+	}
+	if want := []int{1, last, 99}; !reflect.DeepEqual(inherited, want) {
+		t.Errorf("inherited = %v, want %v (every non-zero slot this process did not write, sorted)", inherited, want)
+	}
+}
+
+// U2: no mask at all is the most defensive reading: nothing is ownership.
+func TestMergeHAStateNilMaskOwnsNothing19093(t *testing.T) {
+	merged, inherited := mergeHAState(map[int]uint8{1: 1}, nil,
+		map[int]HAGroupStatus{1: {RGID: 1}}, nil)
+	if merged[1].Active {
+		t.Error("with no write mask, an rg_active 1 was imported as ownership")
+	}
+	if !reflect.DeepEqual(inherited, []int{1}) {
+		t.Errorf("inherited = %v, want [1]", inherited)
+	}
+}
+
+// M4b: the bit and the write are published together. Inside UpdateRGActive's
+// m.mu+sessionMu hold, right after the map write lands, the bit must already
+// be set and m.mu must still be held; and a refresh that tries to run while
+// the write is in flight can only observe the slot after UpdateRGActive
+// returns — so it can never classify this process's fresh 1 as inherited and
+// clear it. Map-free: the write goes through the haRGActiveMapWrite seam.
+func TestRGActiveWrittenBitIsAtomicWithTheMapWrite19093(t *testing.T) {
+	var pinMu sync.Mutex
+	var pin [dataplane.MaxRedundancyGroups]uint8
+
+	m := New()
+	m.clusterHA = true
+	m.haGroups = map[int]HAGroupStatus{0: {RGID: 0}, 1: {RGID: 1}}
+	m.haRGActiveMapWrite = func(rgID int, active bool) error {
+		pinMu.Lock()
+		defer pinMu.Unlock()
+		if active {
+			pin[rgID] = 1
+		} else {
+			pin[rgID] = 0
+		}
+		return nil
+	}
+	// Stop UpdateRGActive right after its publish attempt: the property under
+	// test is complete by then, and the status tail needs maps this cell does
+	// not load.
+	m.proc = &exec.Cmd{Process: &os.Process{Pid: 1}}
+	m.controlRequestHook = func(ControlRequest, *ProcessStatus) error {
+		return errors.New("stop after publish (#19093 cell)")
+	}
+
+	var hookRan, bitSetInHook, muHeldInHook bool
+	m.haRGActiveAfterMapWriteHook = func() {
+		hookRan = true
+		bitSetInHook = m.rgActiveWritten[1]
+		if m.mu.TryLock() {
+			m.mu.Unlock()
+		} else {
+			muHeldInHook = true
+		}
+	}
+
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	m.haRGActiveSessionHoldHook = func() {
+		close(parked)
+		<-release
+	}
+
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		_ = m.UpdateRGActive(1, true)
+	}()
+	<-parked
+
+	// A refresh needs m.mu. Start one while the write is parked inside
+	// UpdateRGActive's critical section.
+	type observation struct {
+		pinVal  uint8
+		written bool
+	}
+	observed := make(chan observation, 1)
+	go func() {
+		m.mu.Lock()
+		pinMu.Lock()
+		v := pin[1]
+		pinMu.Unlock()
+		observed <- observation{pinVal: v, written: m.rgActiveWritten[1]}
+		m.mu.Unlock()
+	}()
+
+	close(release)
+	<-writerDone
+	obs := <-observed
+
+	if !hookRan {
+		t.Fatal("haRGActiveAfterMapWriteHook never ran: the write did not land, so the cell judged nothing")
+	}
+	if !bitSetInHook {
+		t.Error("right after the rg_active write landed, inside UpdateRGActive's lock hold, the " +
+			"written bit was still unset: a refresh between the two would clear this process's " +
+			"own 1 as inherited (#19093)")
+	}
+	if !muHeldInHook {
+		t.Error("m.mu was not held when the rg_active write landed; the write and its bit are not " +
+			"serialized with refresh")
+	}
+	if obs.pinVal == 1 && !obs.written {
+		t.Error("a concurrent refresh observed this process's fresh rg_active=1 without its " +
+			"written bit — it would mask it and clear it as inherited (#19093)")
+	}
+	if obs.pinVal != 1 {
+		t.Errorf("fixture: the concurrent refresh saw rg_active[1]=%d; it must run after the write", obs.pinVal)
+	}
+}
