@@ -1818,6 +1818,47 @@ rejected for three reasons:
 - **It is not free.** Every clean boot would pay one demotion prep RPC
   (bounded at 5 s, plus a 10 s prep lease) per secondary RG.
 
+**What the fix costs: a lone owner's restart.** When the peer is down,
+nothing hands the RGs over, and a SIGKILLed owner's restarted process must
+re-elect itself. It is a fresh start, so the cluster treats it as a cold
+boot:
+
+- it waits the never-seen grace for a peer (`heartbeatStartupGrace`, 30 s,
+  `pkg/cluster/heartbeat.go`);
+- it passes the cold-boot readiness gate, including the no-RETH startup hold
+  and XSK liveness;
+- only then is it promoted, and only then does this process write
+  `rg_active=1`.
+
+The new helper is seeded inactive, so forwarding resumes at that promotion.
+If readiness never proves, the degraded fallback
+(`DefaultDegradedPromoteTimeout`, 2 m, `pkg/cluster/manager.go`) promotes it,
+so the bound is about 150 s.
+
+Measured on loss on 2026-11-13: mlx5 VFs, the peer's xpfd stopped, the owner
+SIGKILLed under iperf3 `-P16` and a 10 ms ping train. Runs where #19110
+struck (a failed arm, or VFs left in generic mode) are excluded on both
+builds.
+
+| From the kill | Fix (8e859ceb7b) | Master (fc315754be) |
+|---|---|---|
+| Ping replies resume | 34.5, 34.9, 35.1 s | 8.8, 9.0 s |
+| Helper RG1 active | 33.8–34.3 s (6 runs) | 7.1–7.4 s (5 runs), seeded from the pin |
+| Daemon primary transition | 33.7–34.2 s (6 runs) | 33.9–34.0 s (3 runs) |
+| VIPs removed as not-owner | 8.7–9.0 s | 8.7–8.9 s |
+
+Ping is timed on the LAN host from the kill command; the journal rows are on
+the owner's clock from systemd's kill record. In two master runs the journal
+capture ended before the promotion, so that row has three runs.
+
+The daemon timeline is the same on both builds. Master's helper only
+appeared to forward sooner: it acted on the dead process's pin, while its own
+daemon held the node not-owner and removed its VIPs. The R20 review
+predicted that an idle lone owner would be worse on master: the stale
+`Active=true` blocks the idle-standby XSK auto-prove, so readiness would wait
+for the 2 m fallback. That did not happen on loss. Received traffic proved
+liveness, and master promoted at +34 s in the runs with no test traffic too.
+
 Cells, all in `pkg/daemon/rg_active_stale_pin_19093_test.go`:
 
 - `TestFreshStartSecondaryRGsCostNothing19093`: a fresh start with every RG

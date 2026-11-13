@@ -311,6 +311,17 @@ The daemon is unchanged: a fresh `rgStateMachine`'s `applied=false` is now
 true by construction. No extra `rg_active` writes or demotion preps run on
 any boot.
 
+**What it costs: a lone owner's restart.** If the peer is already down when
+the owner is SIGKILLed, nothing hands the RGs over. The restarted process
+must re-elect itself through the cold-boot path, and its helper now forwards
+only from that promotion. On loss (mlx5 VFs, owner SIGKILLed under iperf3 and
+a 10 ms ping train) forwarding resumed 34.5–35.1 s after the kill with the
+fix, against 8.8–9.0 s on master. Master's daemon promoted at the same +34 s;
+its helper had gone active at +7 s on the dead process's pin, while its own
+daemon held the node not-owner. The 26 s difference is authority no layer had
+granted. The timeline and the worst case are in `pkg/daemon/README.md`, "A
+restart never inherits `rg_active`".
+
 Cells: the real-map cells in `pkg/dataplane/userspace/rg_active_inherited_pin_19093_test.go`
 (privileged, registered in `pkg/memlockcensus`; run by `make test-memlock-guards`)
 and the unprivileged `rg_active_mask_19093_test.go` (the pure merge core, and
