@@ -1319,7 +1319,12 @@ func (d *Daemon) executeConfirmedRollback(gen uint64) {
 			// transaction after storage has had a chance to recover.
 			slog.Error("could not persist first-commit host-auth closeout intent before rollback promotion; rollback will retry",
 				"err", err)
-			time.AfterFunc(time.Second, func() { d.executeConfirmedRollback(gen) })
+			// #19089: retry through the store's registered executor, the
+			// same dispatch the confirm timer uses (in production that
+			// executor is this function), never by calling this function
+			// directly: whatever owns rollback executions must own the
+			// retry too.
+			time.AfterFunc(time.Second, func() { d.store.RetryConfirmedRollback(gen) })
 			return
 		}
 		if !written {

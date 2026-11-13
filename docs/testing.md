@@ -291,8 +291,20 @@ closes admission (a timer that fires later runs nothing), stops a window the
 test left armed (`CancelConfirmTimerForTesting`), and waits for every
 admitted rollback to finish, before the relay stops and the temp dir goes. A
 last cleanup then requires `IsConfirmPending()` to be false.
-`TestRollbackJoinWaitsForAPromotedRollback19089` holds a promoted rollback and
-fails if cleanup returns before it finishes.
+`TestRollbackJoinWaitsForAPromotedRollback19089` holds a promoted rollback
+(and an overlapping second dispatch of the same window) and fails if the
+fixture's registered cleanup returns before they finish.
+
+The wrapper can only join what goes through it, so every rollback execution
+must be dispatched through the store's registered executor. The daemon's
+retry after a failed host-auth closeout write used to call
+`executeConfirmedRollback` directly and was never admitted or joined (Codex
+review of 04d3f69679). It now goes through `Store.RetryConfirmedRollback`,
+the confirm timer's own dispatch; in production the registered executor is
+`executeConfirmedRollback`, so the retry runs the same function.
+`TestRollbackJoinWaitsForAPromotedRetry19089` fails that first write, lets
+the retry promote, and holds it against the fixture's cleanup. A new
+rollback path that calls the executor function directly reopens this hole.
 
 ### The go-skip census, and the thing it found
 
