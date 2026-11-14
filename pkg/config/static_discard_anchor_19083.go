@@ -36,7 +36,11 @@ func validateStaticDiscardAnchorWarnings19083(cfg *Config) []string {
 	var routes []covering
 	addStatic := func(list []*StaticRoute) {
 		for _, sr := range list {
-			if sr == nil {
+			// Only a route FRR actually installs can resolve a next hop
+			// (Codex P2 on 959251c9ee): a `no-install` discard, a next-table
+			// route, a family mismatch or a next-hop-less non-discard route
+			// renders nothing, so it is neither an anchor nor a real cover.
+			if sr == nil || !StaticRouteRendersFIB(sr) {
 				continue
 			}
 			p, err := netip.ParsePrefix(sr.Destination)
@@ -132,4 +136,20 @@ func validateStaticDiscardAnchorWarnings19083(cfg *Config) []string {
 		check(sr)
 	}
 	return out
+}
+
+// StaticRouteRendersFIB reports whether FRR installs sr as a FIB route:
+// no-install, next-table and family-mismatched routes render nothing;
+// discard/reject routes render a negative route; any other route needs at
+// least one next hop (#3872, #5519). pkg/frr's render gate
+// (staticRouteRendersFIB) delegates here, so the #19083 anchor search and the
+// render cannot disagree about which routes exist.
+func StaticRouteRendersFIB(sr *StaticRoute) bool {
+	if sr == nil || sr.NoInstall || sr.NextTable != "" {
+		return false
+	}
+	if StaticRouteNextHopFamilyMismatchReason(sr) != "" {
+		return false
+	}
+	return sr.Discard || sr.Reject || len(sr.NextHops) > 0
 }

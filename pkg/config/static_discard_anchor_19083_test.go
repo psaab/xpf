@@ -85,6 +85,30 @@ func TestStaticDiscardAnchorWarnings19083(t *testing.T) {
 			}
 			return c
 		}, false},
+		// Codex P2 on 959251c9ee: a `no-install` discard renders nothing in
+		// FRR (pkg/frr config_render.go), so with a working real default the
+		// next hop resolves through the default and nothing is withdrawn.
+		{"no-install-anchor-with-real-default", func() *Config {
+			c := base()
+			c.RoutingOptions.StaticRoutes = []*StaticRoute{
+				{Destination: "0.0.0.0/0", NextHops: nh("172.16.50.1")},
+				{Destination: "198.18.0.0/16", Discard: true, NoInstall: true},
+				{Destination: "203.0.113.0/24", NextHops: nh("198.18.0.1")},
+			}
+			return c
+		}, false},
+		// The same predicate on the other side: a more-specific REAL route that
+		// is not installed does not cover the next hop, so the installed
+		// discard anchor still decides.
+		{"no-install-real-route-does-not-cover", func() *Config {
+			c := base()
+			c.RoutingOptions.StaticRoutes = []*StaticRoute{
+				{Destination: "198.18.0.0/16", Discard: true},
+				{Destination: "198.18.0.0/24", NextHops: nh("172.16.50.1"), NoInstall: true},
+				{Destination: "203.0.113.0/24", NextHops: nh("198.18.0.1")},
+			}
+			return c
+		}, true},
 		{"standalone", func() *Config {
 			c := base()
 			c.Chassis.Cluster = nil

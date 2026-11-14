@@ -211,9 +211,20 @@ func (d *Daemon) applyDirectVIPOwnershipWith(rgID int, wantFn func(int) bool, re
 	}
 }
 
+// staticNHTReevalDebounce19083 is how long a #19083 re-evaluation waits for
+// the rest of its demotion burst (a var so cells can shorten it).
+var staticNHTReevalDebounce19083 = 100 * time.Millisecond
+
 // triggerStaticNHTReeval19083 forces zebra to re-evaluate static next hops
 // against the #19083 map (frr.Manager.ReevaluateStaticNHT19083) after a VIP
 // removal. frrStaticNHTReevalFn is a test seam that replaces the launch.
+//
+// It is asynchronous (never on the VIP path) and COALESCED (R22 #2): every
+// rebind makes zebra re-evaluate every tracked next hop for every client
+// (staticd re-sends its statics, bgpd re-runs bestpath), so the triggers of
+// one demotion burst (a resign demotes every RG in one pass) share ONE rebind,
+// run staticNHTReevalDebounce19083 after the first. A trigger that arrives
+// after that run has started schedules the next one.
 func (d *Daemon) triggerStaticNHTReeval19083(rgID int) {
 	if fn := d.frrStaticNHTReevalFn; fn != nil {
 		fn(rgID)
@@ -222,12 +233,26 @@ func (d *Daemon) triggerStaticNHTReeval19083(rgID int) {
 	if d.frr == nil {
 		return
 	}
-	go func() {
-		if err := d.frr.ReevaluateStaticNHT19083(); err != nil {
-			slog.Warn("static NHT re-evaluation after VIP removal failed; a static registered since the last NHT event may stay an active blackhole until the next one (#19083)",
-				"rg", rgID, "err", err)
+	d.staticNHTReevalMu.Lock()
+	if d.staticNHTReevalScheduled {
+		d.staticNHTReevalMu.Unlock()
+		return
+	}
+	d.staticNHTReevalScheduled = true
+	d.staticNHTReevalMu.Unlock()
+	time.AfterFunc(staticNHTReevalDebounce19083, func() {
+		d.staticNHTReevalMu.Lock()
+		d.staticNHTReevalScheduled = false
+		d.staticNHTReevalMu.Unlock()
+		f := d.frr
+		if f == nil {
+			return
 		}
-	}()
+		if err := f.ReevaluateStaticNHT19083(); err != nil {
+			slog.Warn("static NHT re-evaluation after VIP removal failed; a static registered since the last NHT event may stay an active blackhole until the next one (#19083)",
+				"first_rg", rgID, "err", err)
+		}
+	})
 }
 
 // directAddVIPs converges rgID's RETH VIPs for the RG OWNER: adds every
