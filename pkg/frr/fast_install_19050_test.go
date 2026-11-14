@@ -684,3 +684,147 @@ func TestFastInDoubtReloadFailureRecordsDegraded19050(t *testing.T) {
 	}
 	wantQNHMetric15183(t, exec.qnhFailedReloadExecutor15183, routeMap)
 }
+
+// staticNHTBound19083 is the #19083 binding line as the cluster render writes
+// it into the managed section.
+var staticNHTBound19083 = staticNHTBindLines19083(clusterStaticNHTRouteMap19083)[0]
+
+// wantStaticNHTRebind19083 is the re-evaluation batch: the alternate map
+// bound for both families, then the primary again.
+func wantStaticNHTRebind19083() []string {
+	return append(staticNHTBindLines19083(clusterStaticNHTRouteMapAlt19083),
+		staticNHTBindLines19083(clusterStaticNHTRouteMap19083)...)
+}
+
+// TestFastInstallReevaluatesStaticNHTAfterBatch19083: zebra answers a newly
+// registered static without the #19083 NHT map, so every fast batch is
+// followed (never preceded) by the rebind that forces zebra to re-evaluate,
+// in that order and in a separate vtysh session. That holds after an
+// in-doubt batch too, because a killed batch may have registered lines. With
+// the map not bound (standalone), nothing is ever run after the batch.
+func TestFastInstallReevaluatesStaticNHTAfterBatch19083(t *testing.T) {
+	rebind := strings.Join(wantStaticNHTRebind19083(), "|")
+	for _, tc := range []struct {
+		name       string
+		bound      bool
+		installErr error
+		outcome    FastInstallOutcome
+		want       []string
+	}{
+		{"installed, bound", true, nil, FastInstalled, []string{v4Default19050, rebind}},
+		{"in doubt, bound", true, errors.New("signal: killed"), FastInDoubt, []string{v4Default19050, rebind}},
+		{"installed, not bound", false, nil, FastInstalled, []string{v4Default19050}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fastFake19050{fakeExecutor: &fakeExecutor{}, installErr: tc.installErr}
+			m := newFastTestManager19050(t, fake)
+			section := []string{other19050}
+			if tc.bound {
+				section = append(section, staticNHTBound19083)
+			}
+			writeManagedStatics19050(t, m, section...)
+			outcome, _ := m.FastInstallStatics([]string{other19050, v4Default19050}, func() bool { return true })
+			if outcome != tc.outcome {
+				t.Fatalf("outcome = %v, want %v", outcome, tc.outcome)
+			}
+			installs, _, _ := fake.snapshot()
+			var got []string
+			for _, b := range installs {
+				got = append(got, strings.Join(b, "|"))
+			}
+			if strings.Join(got, " ;; ") != strings.Join(tc.want, " ;; ") {
+				t.Fatalf("vtysh sessions = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestFastInstallNoReevaluationWithoutBatch19083: no batch, no registration,
+// so no re-evaluation: nothing to do, a failed pre-check, and a stopped
+// manager all run no vtysh session at all.
+func TestFastInstallNoReevaluationWithoutBatch19083(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		want     []string
+		precheck bool
+		stop     bool
+	}{
+		{"nothing to do", []string{other19050}, true, false},
+		{"pre-check fails", []string{other19050, v4Default19050}, false, false},
+		{"stopped", []string{other19050, v4Default19050}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
+			m := newFastTestManager19050(t, fake)
+			writeManagedStatics19050(t, m, other19050, staticNHTBound19083)
+			if tc.stop {
+				m.Stop()
+			}
+			m.FastInstallStatics(tc.want, func() bool { return tc.precheck })
+			if installs, _, _ := fake.snapshot(); len(installs) != 0 {
+				t.Fatalf("vtysh sessions = %q, want none", installs)
+			}
+		})
+	}
+}
+
+// TestFastInstallSkipsReevaluationWhenStoppedMidBatch19083: Stop cancels the
+// lifetime while a batch runs. The batch's outcome stands, and no rebind
+// session is started on a stopping manager.
+func TestFastInstallSkipsReevaluationWhenStoppedMidBatch19083(t *testing.T) {
+	fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
+	m := newFastTestManager19050(t, fake)
+	writeManagedStatics19050(t, m, other19050, staticNHTBound19083)
+	fake.afterInstall = func() { m.mgrCancel() }
+	if outcome, _ := m.FastInstallStatics([]string{other19050, v4Default19050}, func() bool { return true }); outcome != FastInstalled {
+		t.Fatalf("outcome = %v, want installed (the fake batch succeeded)", outcome)
+	}
+	installs, _, _ := fake.snapshot()
+	if len(installs) != 1 || strings.Join(installs[0], "|") != v4Default19050 {
+		t.Fatalf("vtysh sessions = %q, want only the batch", installs)
+	}
+}
+
+// nhtRow19083 renders zebra's `show ip|ipv6 nht route-map` output with name
+// bound to staticd (FRR 10.6.0 layout).
+func nhtRow19083(name string) string {
+	return "VRF: default\nProtocol                  : route-map\n-------------------------------------\n" +
+		"static                    : " + name + "\n"
+}
+
+// TestFastInDoubtAuthoritativeReloadRestoresNHTBindingFirst19083: the
+// in-doubt resolution's authoritative reload is a diff reload too, so with the
+// #19083 alternate map bound (an interrupted rebind) the primary is bound by
+// direct replacement BEFORE frr-reload.py runs.
+func TestFastInDoubtAuthoritativeReloadRestoresNHTBindingFirst19083(t *testing.T) {
+	fake := &fastFake19050{fakeExecutor: &fakeExecutor{vtyshResp: map[string]string{
+		"show ip nht route-map":   nhtRow19083(clusterStaticNHTRouteMapAlt19083),
+		"show ipv6 nht route-map": nhtRow19083(clusterStaticNHTRouteMapAlt19083),
+	}}}
+	m := newFastTestManager19050(t, fake)
+	m.retryEnabled = false
+	writeManagedStatics19050(t, m, other19050, staticNHTBound19083)
+	fake.testOut = func() []byte {
+		return []byte("Lines To Delete\n===============\n\nLines To Add\n============\n" + v4Default19050 + "\n")
+	}
+	reloadsAtRestore := -1
+	fake.afterInstall = func() {
+		_, _, reloads := fake.snapshot()
+		reloadsAtRestore = reloads
+		fake.fakeExecutor.mu.Lock()
+		fake.fakeExecutor.vtyshResp["show ip nht route-map"] = nhtRow19083(clusterStaticNHTRouteMap19083)
+		fake.fakeExecutor.vtyshResp["show ipv6 nht route-map"] = nhtRow19083(clusterStaticNHTRouteMap19083)
+		fake.fakeExecutor.mu.Unlock()
+	}
+	m.reloadMu.Lock()
+	m.staticNHTRestorePending19083 = true
+	m.fastInDoubt = &fastInDoubtState19050{lines: []string{v4Default19050}, since: time.Now()}
+	m.resolveFastInDoubtLocked(context.Background())
+	m.reloadMu.Unlock()
+	installs, _, reloads := fake.snapshot()
+	want := strings.Join(staticNHTBindLines19083(clusterStaticNHTRouteMap19083), "|")
+	if len(installs) != 1 || strings.Join(installs[0], "|") != want || reloadsAtRestore != 0 || reloads != 1 {
+		t.Fatalf("installs %q (restore seen with %d reloads before it), reloads %d: want the primary restore %q, then ONE authoritative reload",
+			installs, reloadsAtRestore, reloads, want)
+	}
+}

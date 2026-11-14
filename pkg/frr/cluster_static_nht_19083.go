@@ -65,7 +65,8 @@ import (
 // already resolves only through a blackhole is unfiltered until the next NHT
 // event for that next hop. ReevaluateStaticNHT19083 forces one; production
 // callers request it through RequestStaticNHTReeval19083, which coalesces a
-// burst into one rebind (the daemon after a demotion's VIP removal). Residual:
+// burst into one rebind (the daemon after a demotion's VIP removal, and #19050's
+// FastInstallStatics after every batch it ran). Residual:
 // (i) FRR
 // restarting without xpfd; (ii) a commit or an FRR/xpfd start that registers a
 // static already blackhole-resolved, notably a non-RETH recursive static kept
