@@ -2293,6 +2293,23 @@ failover blackhole until the stale entry aged out. #2377 fixed the identical
 forced-.1 in `vrrp.sendGARP` but missed this direct-mode site; #3922 routes
 both through the shared `vrrp.GatewayProbeTarget` helper.
 
+**A VIP removal re-evaluates static next-hop tracking (#19083).**
+- In cluster mode the FRR render refuses static next-hop resolution through a
+  blackhole (pkg/frr/README.md, "Cluster mode: a static may not resolve
+  through a blackhole"). An owned static therefore goes inactive when its VIP
+  leaves, on a demotion and on a graceful stop alike, and nothing is written
+  to FRR at shutdown.
+- FRR answers a NEWLY registered static without applying that filter. So the
+  demotion edge of `applyDirectVIPOwnershipWith` (and a safety-net pass that
+  actually removed VIPs) calls `triggerStaticNHTReeval19083`. That launches
+  `frr.Manager.ReevaluateStaticNHT19083` asynchronously, so it never blocks the
+  VIP path. `frrStaticNHTReevalFn` is the test seam.
+- **Not covered:** the graceful-stop VIP removal in `runShutdownSequence`
+  runs after `frr.Stop()`, so it forces no re-evaluation. A static that
+  registers in that window stays unfiltered until FRR's next NHT event, as on
+  master. #19050's fast install, which is not on master yet, is the case that
+  matters; #19050 carries it as an explicit exception.
+
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`
 (`direct_vip_reconcile_18573.go`). Before #18573 both derived their address

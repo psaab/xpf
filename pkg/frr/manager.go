@@ -878,6 +878,10 @@ func (m *Manager) buildManagedSectionWithQNH11447(fc *FullConfig) (string, map[s
 
 	// 5. Cluster mode: blackhole default route as fallback for fabric redirect.
 	renderClusterModeDefaults(&b, fc)
+	// 5b. #19083: in cluster mode staticd may not resolve a next hop through a
+	// blackhole (the cluster default above included), so an owned static
+	// goes inactive when its VIP leaves (cluster_static_nht_19083.go).
+	b.WriteString(renderClusterStaticNHT19083(fc))
 
 	// 6. ip-monitoring preferred routes (admin distance 1, #1827).
 	m.renderPreferredRoutes(&b, fc)

@@ -202,7 +202,32 @@ func (d *Daemon) applyDirectVIPOwnershipWith(rgID int, wantFn func(int) bool, re
 	d.directVIPMu.Unlock()
 	if prev || removed > 0 {
 		d.clearRethServicesForRG(rgID)
+		// #19083: the VIP removal moves every owned static's resolution onto
+		// the cluster Null0 default, where the static-NHT map filters it. A
+		// static that REGISTERED in the meantime bypasses that filter until
+		// the next NHT event (FRR answers a new registration unfiltered), so
+		// force one. Async: never blocks the VIP path.
+		d.triggerStaticNHTReeval19083(rgID)
 	}
+}
+
+// triggerStaticNHTReeval19083 forces zebra to re-evaluate static next hops
+// against the #19083 map (frr.Manager.ReevaluateStaticNHT19083) after a VIP
+// removal. frrStaticNHTReevalFn is a test seam that replaces the launch.
+func (d *Daemon) triggerStaticNHTReeval19083(rgID int) {
+	if fn := d.frrStaticNHTReevalFn; fn != nil {
+		fn(rgID)
+		return
+	}
+	if d.frr == nil {
+		return
+	}
+	go func() {
+		if err := d.frr.ReevaluateStaticNHT19083(); err != nil {
+			slog.Warn("static NHT re-evaluation after VIP removal failed; a static registered since the last NHT event may stay an active blackhole until the next one (#19083)",
+				"rg", rgID, "err", err)
+		}
+	}()
 }
 
 // directAddVIPs converges rgID's RETH VIPs for the RG OWNER: adds every
