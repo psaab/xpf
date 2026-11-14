@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
@@ -22,9 +23,18 @@ import (
 // FRR installed it as an ACTIVE kernel blackhole that redistribution exported
 // from a node that forwards nothing (#19083, measured on loss). Nothing is
 // written at shutdown; instead the render binds staticd's next-hop tracking
-// to a route-map that denies resolution through any blackhole next hop, so the
-// static goes inactive by itself the moment its gateway's connected route
-// leaves.
+// to a route-map that denies resolution through any blackhole next hop, so a
+// static rendered as a PLAIN gateway goes inactive by itself the moment its
+// gateway's connected route leaves.
+//
+// Coverage boundary (R22 #1, TestStaticNHTMapCoverageBoundary19083): staticd
+// consults next-hop tracking only for a plain gateway; a gateway WITH an
+// interface, or an interface alone, installs whenever the interface exists
+// (FRR 10.5.1 staticd/static_zebra.c:479-497). The default v4 shape is a plain
+// gateway (covered); the default v6 shape on a RETH subnet is interface-
+// qualified by inference and goes inactive through zebra's connected check
+// instead. Operator-qualified v4, interface-only and v6 link-local next hops
+// stay active after a graceful stop: the residual filed as #19122.
 //
 // FRR mechanism (read at tag frr-10.5.1, zebra/zebra_rnh.c and
 // zebra_routemap.c): zebra applies a client protocol's NHT route-map to a COPY
@@ -40,8 +50,11 @@ import (
 //
 // Scope: cluster mode only (the cluster default and VIP ownership are cluster
 // constructs), the DEFAULT VRF only (the top-level binding is per VRF and the
-// cluster defaults exist only in the default VRF; VRF statics are unchanged),
-// and staticd only (BGP and every other NHT client are untouched). Recursion
+// cluster defaults exist only in the default VRF; virtual-router `vrf NAME`
+// statics are unchanged, while forwarding-instance `table N` statics are
+// default-VRF statics and ARE filtered), and the map filters staticd only (BGP
+// and every other NHT client keep their own resolution; a REBIND re-evaluates
+// every client, see ReevaluateStaticNHT19083). Recursion
 // through a real gateway route — a real default included, #12613's contract —
 // is unchanged. A static whose gateway resolves only through an operator
 // discard/reject or a generate-route aggregate also goes inactive: that
@@ -53,8 +66,12 @@ import (
 // (zebra_add_rnh_client), so a static that registers while its gateway
 // already resolves only through a blackhole is unfiltered until the next NHT
 // event for that next hop. ReevaluateStaticNHT19083 forces one (after a
-// demotion's VIP removal); FRR restarting without xpfd, and a registration
-// racing the shutdown VIP removal (which runs after frr.Stop), stay residual.
+// demotion's VIP removal, coalesced by the daemon). Residual: (i) FRR
+// restarting without xpfd; (ii) a commit or an FRR/xpfd start that registers a
+// static already blackhole-resolved, notably a non-RETH recursive static kept
+// on both nodes, on the standby; (iii) a registration completing after the
+// shutdown VIP removal (which runs after frr.Stop). An interrupted rebind is
+// restored before the next diff reload (restoreStaticNHTBindingLocked19083).
 
 const (
 	// clusterStaticNHTRouteMap19083 is the bound map. The reserved
@@ -68,9 +85,11 @@ const (
 	// bound NAME changes; unbinding would re-install the filtered statics
 	// for a moment).
 	clusterStaticNHTRouteMapAlt19083 = "xpf-static-nht-b" + config.ReservedRedistSuffix
-	// staticNHTReevalTimeout19083 bounds the rebind batch.
-	staticNHTReevalTimeout19083 = 5 * time.Second
 )
+
+// staticNHTReevalTimeout19083 bounds the rebind batch and the binding restore
+// (a var so cells can shorten it).
+var staticNHTReevalTimeout19083 = 5 * time.Second
 
 func clusterStaticNHTMapBody19083(name string) string {
 	n := frrName(name)
@@ -116,6 +135,12 @@ type vtyshConfigExecutor19083 interface {
 // writer, never touches confGen/writeGen, and is a no-op when the managed
 // section as last written does not bind the map (not cluster mode) or the
 // manager is stopping.
+//
+// Cost (R22 #2): each bound-name change makes zebra re-evaluate EVERY tracked
+// next hop of that family for EVERY client (zebra_evaluate_rnh with force):
+// staticd re-sends its statics and bgpd re-runs bestpath for the paths on
+// those next hops. A rebind is two such evaluations per family. The daemon
+// therefore coalesces its triggers (triggerStaticNHTReeval19083).
 func (m *Manager) ReevaluateStaticNHT19083() error {
 	ex, ok := m.executor().(vtyshConfigExecutor19083)
 	if !ok {
@@ -126,24 +151,138 @@ func (m *Manager) ReevaluateStaticNHT19083() error {
 	if m.lifetimeCtx().Err() != nil {
 		return nil
 	}
-	data, err := os.ReadFile(m.frrConf)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
-		}
+	return m.reevaluateStaticNHTLocked19083(ex)
+}
+
+// reevaluateStaticNHTLocked19083 is the rebind itself. Caller holds reloadMu
+// and has checked the lifetime. It runs under its own bound, so a caller whose
+// own context expired can still force the re-evaluation.
+//
+// Any partial application (a rejected line, a kill, a timeout) can leave the
+// ALTERNATE map bound. Filtering is identical, but frr-reload.py's delete pass
+// runs before its add pass, so the next diff reload would unbind the alternate
+// before binding the primary: an unbound window in which every filtered static
+// re-installs as an active, exportable blackhole (Codex P1 / R22 #5 on
+// 959251c9ee). So the binding restore is PENDING from before the batch until
+// the whole batch is known applied; restoreStaticNHTBindingLocked19083 settles
+// it before any diff reload.
+func (m *Manager) reevaluateStaticNHTLocked19083(ex vtyshConfigExecutor19083) error {
+	bound, err := m.writtenSectionBindsStaticNHT19083()
+	if err != nil || !bound {
 		return err
-	}
-	if !strings.Contains(string(data), staticNHTBindLines19083(clusterStaticNHTRouteMap19083)[0]+"\n") {
-		return nil
 	}
 	lines := append(staticNHTBindLines19083(clusterStaticNHTRouteMapAlt19083),
 		staticNHTBindLines19083(clusterStaticNHTRouteMap19083)...)
 	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReevalTimeout19083)
 	defer cancel()
+	m.staticNHTRestorePending19083 = true
 	if out, err := ex.VtyshConfigLines(ctx, lines); err != nil {
 		return fmt.Errorf("re-evaluate static NHT (#19083): %w: %s", err, strings.TrimSpace(string(out)))
 	}
+	m.staticNHTRestorePending19083 = false
 	return nil
+}
+
+// writtenSectionBindsStaticNHT19083 reports whether frr.conf as last written
+// binds the primary map (cluster mode). Caller holds reloadMu.
+func (m *Manager) writtenSectionBindsStaticNHT19083() (bool, error) {
+	data, err := os.ReadFile(m.frrConf)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return strings.Contains(string(data), staticNHTBindLines19083(clusterStaticNHTRouteMap19083)[0]+"\n"), nil
+}
+
+// restoreStaticNHTBindingLocked19083 runs before every diff reload
+// (reloadLocked, retryReloadOnce). Caller holds reloadMu. While a restore is
+// pending (an interrupted rebind, or a new Manager: a previous xpfd may have
+// been killed mid-rebind) and the section being applied binds the primary
+// map, it reads zebra's static NHT bindings and, if either family has any
+// other map bound (the alternate), binds the primary by DIRECT replacement:
+// one name change, no unbound moment. It then verifies zebra reports the
+// primary. A positively observed failure is returned and the reload is not
+// started (fail closed; the caller's degraded retry repeats it). Unreadable
+// bindings are logged and not written blind: the alternate is only ever bound
+// alongside both definitions, so an unreadable state is not evidence of one.
+func (m *Manager) restoreStaticNHTBindingLocked19083() error {
+	if !m.staticNHTRestorePending19083 {
+		return nil
+	}
+	bound, err := m.writtenSectionBindsStaticNHT19083()
+	if err != nil {
+		return fmt.Errorf("restore static NHT binding (#19083): %w", err)
+	}
+	if !bound {
+		// The section no longer binds the map (standalone): the reload removes
+		// every binding and both maps, which is the wanted end state.
+		m.staticNHTRestorePending19083 = false
+		return nil
+	}
+	ex, ok := m.executor().(vtyshConfigExecutor19083)
+	if !ok {
+		return nil
+	}
+	if m.lifetimeCtx().Err() != nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReevalTimeout19083)
+	defer cancel()
+	want := frrName(clusterStaticNHTRouteMap19083)
+	v4, v6, known := m.readStaticNHTBindings19083(ctx)
+	if !known {
+		slog.Warn("frr: could not read zebra's static NHT bindings before the reload; not rewriting them (#19083)")
+		return nil
+	}
+	if (v4 == "" || v4 == want) && (v6 == "" || v6 == want) {
+		// The primary, or nothing yet (a fresh FRR: the reload adds it).
+		m.staticNHTRestorePending19083 = false
+		return nil
+	}
+	if out, err := ex.VtyshConfigLines(ctx, staticNHTBindLines19083(clusterStaticNHTRouteMap19083)); err != nil {
+		return fmt.Errorf("restore static NHT binding (#19083): bound %q/%q: %w: %s", v4, v6, err, strings.TrimSpace(string(out)))
+	}
+	if a4, a6, ok := m.readStaticNHTBindings19083(ctx); ok && (a4 != want || a6 != want) {
+		return fmt.Errorf("restore static NHT binding (#19083): zebra reports %q/%q after binding %q", a4, a6, want)
+	}
+	slog.Info("frr: restored the static NHT binding before the reload (#19083)", "was_v4", v4, "was_v6", v6, "now", want)
+	m.staticNHTRestorePending19083 = false
+	return nil
+}
+
+// readStaticNHTBindings19083 reads the map bound to staticd's next-hop
+// tracking per family from zebra (`show ip|ipv6 nht route-map`: a
+// "%-24s  : %-10s" row per protocol, "none" when unset; FRR 10.6.0
+// zebra_routemap.c show_vrf_nht_rm). "" means none. known is false when either
+// read fails or has no static row.
+func (m *Manager) readStaticNHTBindings19083(ctx context.Context) (v4, v6 string, known bool) {
+	parse := func(cmd string) (string, bool) {
+		out, err := m.executor().Vtysh(ctx, cmd)
+		if err != nil {
+			return "", false
+		}
+		return parseStaticNHTBinding19083(out)
+	}
+	v4, ok4 := parse("show ip nht route-map")
+	v6, ok6 := parse("show ipv6 nht route-map")
+	return v4, v6, ok4 && ok6
+}
+
+// parseStaticNHTBinding19083 returns the default VRF's static row of a
+// `show ip|ipv6 nht route-map` output.
+func parseStaticNHTBinding19083(out string) (string, bool) {
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 3 && f[0] == "static" && f[1] == ":" {
+			if f[2] == "none" {
+				return "", true
+			}
+			return f[2], true
+		}
+	}
+	return "", false
 }
 
 // VtyshConfigLines runs one vtysh process:

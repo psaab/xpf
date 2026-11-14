@@ -2082,8 +2082,13 @@ generate aggregate. That static is no longer installed or exported in cluster
 mode, because pkg/frr refuses static next-hop resolution through a blackhole.
 The userspace helper already treats it as unresolved.
 - **Migration:** configure the prefix as a discard route.
-- **Scope of the check:** cluster mode only, the default routing table only.
-  It warns and never refuses (#1960).
+- **Which covering routes count:** only routes FRR installs, per
+  `StaticRouteRendersFIB` (the predicate pkg/frr's render gate delegates to).
+  A `no-install`, next-table, family-mismatched or next-hop-less route is
+  neither an anchor nor a real cover (Codex P2 on 959251c9ee).
+- **Scope of the check:** cluster mode only, and the top-level static lists
+  only. Forwarding-instance (`table N`) statics are filtered by the map too,
+  but are not checked. It warns and never refuses (#1960).
 - **What it cannot see:** learned routes. A learned more-specific route can
   still resolve the next hop at runtime, which is why the warning says
   "configured".

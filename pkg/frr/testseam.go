@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 )
 
 // This file exposes a narrow, EXPORTED test seam so packages outside pkg/frr
@@ -30,6 +31,38 @@ type RecordingExecutor struct {
 	TestErr error
 	// TestCalls counts FrrReloadPyTest invocations.
 	TestCalls int
+
+	// ConfigBatches records every non-empty VtyshConfigLines batch (the
+	// #19083 static-NHT rebind and restore); ConfigBatchErr fails them. When
+	// ConfigBatchGate is non-nil a batch waits for it before returning, so a
+	// cell can hold a re-evaluation in flight. Guarded by mu: the #19083
+	// re-evaluation runs on its own goroutine. Read with ConfigBatchesSnapshot.
+	mu              sync.Mutex
+	ConfigBatches   [][]string
+	ConfigBatchErr  error
+	ConfigBatchGate chan struct{}
+}
+
+// VtyshConfigLines records a configuration batch.
+func (r *RecordingExecutor) VtyshConfigLines(_ context.Context, lines []string) ([]byte, error) {
+	if len(lines) == 0 {
+		return nil, nil
+	}
+	r.mu.Lock()
+	r.ConfigBatches = append(r.ConfigBatches, append([]string(nil), lines...))
+	err, gate := r.ConfigBatchErr, r.ConfigBatchGate
+	r.mu.Unlock()
+	if gate != nil {
+		<-gate
+	}
+	return nil, err
+}
+
+// ConfigBatchesSnapshot returns a copy of the recorded configuration batches.
+func (r *RecordingExecutor) ConfigBatchesSnapshot() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([][]string(nil), r.ConfigBatches...)
 }
 
 func (r *RecordingExecutor) Vtysh(context.Context, string) (string, error) { return "", nil }

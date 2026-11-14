@@ -219,3 +219,92 @@ func TestReevaluateStaticNHTNoopWhenUnboundOrStopped19083(t *testing.T) {
 		t.Fatal("re-evaluation on a stopped manager hung")
 	}
 }
+
+// TestStaticNHTMapCoverageBoundary19083 pins WHICH owned-static renderings the
+// #19083 map can act on (R22 #1). staticd consults next-hop tracking only for
+// a plain gateway (STATIC_IPV4/IPV6_GATEWAY); a gateway with an interface
+// (*_GATEWAY_IFNAME) or an interface alone (STATIC_IFNAME) installs whenever
+// the interface exists, so the map has no effect on it.
+//   - The DEFAULT v4 shape (`next-hop A`) renders a plain gateway: covered.
+//   - The default v6 shape on a RETH subnet is interface-qualified by
+//     inference: not covered by the map; it goes inactive through zebra's
+//     connected-on-that-interface check once the VIP's subnet leaves.
+//   - Operator `qualified-next-hop ... interface`, an interface-only next hop,
+//     and a v6 link-local gateway stay active after a graceful stop: the
+//     documented residual.
+//
+// A change that starts interface-qualifying the default v4 shape fails here.
+func TestStaticNHTMapCoverageBoundary19083(t *testing.T) {
+	nh := func(a, ifc string) []config.NextHopEntry { return []config.NextHopEntry{{Address: a, Interface: ifc}} }
+	fc := &FullConfig{
+		ClusterMode: true,
+		RethMap:     map[string]string{"reth0": "ge-0-0-2"},
+		// The v4 key is a canary: were the inference ever applied to v4, the
+		// default v4 shape would become interface-qualified and leave the map.
+		IPv6NextHopInterfaces: map[string]map[string]string{"": {"2001:db8:50::1": "reth0.50", "172.16.50.1": "reth0.50"}},
+		StaticRoutes: []*config.StaticRoute{
+			{Destination: "198.51.100.0/24", NextHops: nh("172.16.50.1", "")},
+			{Destination: "198.51.100.64/26", NextHops: nh("172.16.50.1", "reth0.50")},
+			{Destination: "198.51.100.128/26", NextHops: nh("", "reth0.50")},
+		},
+		Inet6StaticRoutes: []*config.StaticRoute{
+			{Destination: "2001:db8:1::/64", NextHops: nh("2001:db8:50::1", "")},
+			{Destination: "2001:db8:2::/64", NextHops: nh("fe80::1", "reth0.50")},
+		},
+	}
+	m := &Manager{}
+	var b strings.Builder
+	for _, sr := range append(append([]*config.StaticRoute(nil), fc.StaticRoutes...), fc.Inet6StaticRoutes...) {
+		b.WriteString(renderStaticRouteWithISISDistanceGuard17735(m, sr, "", 0, fc.RethMap, fc.IPv6NextHopInterfaces, fc.DeclaredNetdevs, nil))
+	}
+	lines := map[string]string{}
+	for _, l := range strings.Split(strings.TrimSpace(b.String()), "\n") {
+		f := strings.Fields(l)
+		if len(f) >= 3 {
+			lines[f[2]] = l
+		}
+	}
+	class := func(dest string) string {
+		f := strings.Fields(lines[dest])
+		if len(f) < 4 {
+			return "missing"
+		}
+		hop := f[3:]
+		if n := len(hop); n > 0 && isAllDigits19083(hop[n-1]) {
+			hop = hop[:n-1] // admin distance
+		}
+		gw := strings.ContainsAny(hop[0], ".:") && !strings.HasPrefix(hop[0], "ge-")
+		switch {
+		case gw && len(hop) == 1:
+			return "gateway (map applies)"
+		case gw && len(hop) == 2:
+			return "gateway+ifname (map bypassed)"
+		case !gw && len(hop) == 1:
+			return "ifname (no NHT)"
+		}
+		return "unknown " + lines[dest]
+	}
+	for dest, want := range map[string]string{
+		"198.51.100.0/24":   "gateway (map applies)",
+		"198.51.100.64/26":  "gateway+ifname (map bypassed)",
+		"198.51.100.128/26": "ifname (no NHT)",
+		"2001:db8:1::/64":   "gateway+ifname (map bypassed)",
+		"2001:db8:2::/64":   "gateway+ifname (map bypassed)",
+	} {
+		if got := class(dest); got != want {
+			t.Errorf("%s: rendered %q, class %q, want %q", dest, lines[dest], got, want)
+		}
+	}
+}
+
+func isAllDigits19083(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}

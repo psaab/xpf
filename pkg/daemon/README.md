@@ -2166,14 +2166,27 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
 **A VIP removal re-evaluates static next-hop tracking (#19083).**
 - In cluster mode the FRR render refuses static next-hop resolution through a
   blackhole (pkg/frr/README.md, "Cluster mode: a static may not resolve
-  through a blackhole"). An owned static therefore goes inactive when its VIP
-  leaves, on a demotion and on a graceful stop alike, and nothing is written
-  to FRR at shutdown.
+  through a blackhole"). An owned static rendered as a PLAIN gateway (the
+  default v4 shape) therefore goes inactive when its VIP leaves, on a
+  demotion and on a graceful stop alike, and nothing is written to FRR at
+  shutdown.
+  - A default v6 static on a RETH subnet is interface-qualified, and goes
+    inactive through zebra's interface check instead.
+  - Operator-qualified v4 next hops, interface-only next hops and v6
+    link-local gateways stay ACTIVE: the map cannot act on them (#19122,
+    pkg/frr/README.md "Coverage boundary").
 - FRR answers a NEWLY registered static without applying that filter. So the
   demotion edge of `applyDirectVIPOwnershipWith` (and a safety-net pass that
-  actually removed VIPs) calls `triggerStaticNHTReeval19083`. That launches
-  `frr.Manager.ReevaluateStaticNHT19083` asynchronously, so it never blocks the
-  VIP path. `frrStaticNHTReevalFn` is the test seam.
+  actually removed VIPs) calls `triggerStaticNHTReeval19083`.
+  - **Asynchronous:** it never blocks the VIP path.
+  - **Coalesced:** every rebind makes zebra re-evaluate every tracked next
+    hop for every client, so one demotion burst (a resign demotes every RG
+    in one pass) shares ONE `frr.Manager.ReevaluateStaticNHT19083`, run
+    `staticNHTReevalDebounce19083` (100 ms) after the first trigger. A trigger
+    that arrives once that run has started schedules the next one.
+  - **Seam:** `frrStaticNHTReevalFn` replaces the launch.
+    `TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083` drives the
+    production launch instead.
 - **Not covered:** the graceful-stop VIP removal in `runShutdownSequence`
   runs after `frr.Stop()`, so it forces no re-evaluation. A static that
   registers in that window stays unfiltered until FRR's next NHT event, as on
