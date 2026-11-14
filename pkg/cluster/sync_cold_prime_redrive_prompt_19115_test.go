@@ -275,8 +275,14 @@ func TestSweepWakesDoNotPostponeAnOwedColdPrime19115(t *testing.T) {
 // NO bulk attempt at all. When the restarted peer's priming BulkStart arrives
 // on the alternate fabric slot carrying a new boot id, classifyPrimeLocked
 // switches the incarnation and arms the debt (sync_conn.go, #6910/#7762), and
-// leaves it to the sweep's re-drive. That is the rolling-upgrade shape. A fix
-// that schedules a retry only where a bulk FAILS never sees this debt.
+// leaves it to the sweep's re-drive. A fix that schedules a retry only where a
+// bulk FAILS never sees this debt.
+//
+// The edge needs a CORPSE: the old peer process's connection still installed
+// here when the new process primes on the other fabric. A clean restart closes
+// the old sockets, so the reconnect goes through installConn, which drives the
+// cold prime at once. The corpse comes from a stop that sends no FIN, such as a
+// crash of the peer host or a power loss.
 func TestPeerRebootArmedColdPrimeIsDrivenPromptly19115(t *testing.T) {
 	for _, p := range sweepProfiles19115 {
 		t.Run(p.name, func(t *testing.T) {
