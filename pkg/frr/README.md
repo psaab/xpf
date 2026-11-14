@@ -831,9 +831,9 @@ ipv6 nht static route-map xpf-static-nht-xpf-redist
 gone. An owned static's gateway, on the RETH subnet, then resolves
 recursively through the cluster `Null0` default (`renderClusterModeDefaults`).
 FRR kept it as an ACTIVE kernel blackhole that redistribution exported from a
-node that forwards nothing (#19083, measured on loss). With the map, the
-static goes inactive by itself when its gateway's connected route leaves.
-Nothing is written to FRR at shutdown: two earlier designs did that, and their
+node that forwards nothing (#19083, measured on loss). With the map, a static
+rendered as a PLAIN gateway goes inactive by itself when its gateway's
+connected route leaves (the coverage boundary is below). Nothing is written to FRR at shutdown: two earlier designs did that, and their
 review findings (budget, partial apply, overlay loss, lock order) are why this
 one does not.
 
@@ -856,10 +856,33 @@ real interface route stayed.
 - **Cluster mode only.** The cluster default and VIP ownership are cluster
   constructs; standalone renders nothing.
 - **The default VRF only.** The top-level binding is per VRF, and the cluster
-  defaults exist only in the default VRF, so VRF statics are unchanged.
-- **staticd only.** BGP and every other NHT client are untouched.
+  defaults exist only in the default VRF. Statics of `virtual-router`
+  instances (`vrf NAME`) are unchanged. Statics of `instance-type forwarding`
+  instances render as `ip route ... table N`: they ARE default-VRF statics
+  whose next hops resolve in the main table, so the map applies to them too,
+  and the discard-anchor warning does not cover them (R22 #6).
+- **The map filters staticd only.** It never filters another client's next
+  hops. The re-evaluation below is not as narrow (see "Cost").
 - **Recursion is otherwise unchanged.** Recursion through a real gateway route
   (a real default included: #12613's contract) still works.
+
+**Coverage boundary: plain gateways only** (R22 #1;
+`TestStaticNHTMapCoverageBoundary19083`). staticd consults next-hop
+tracking only for a plain gateway. It installs a gateway WITH an interface,
+or an interface alone, whenever the interface exists, so the map has no
+effect on those (FRR 10.5.1 `staticd/static_zebra.c:479-497`).
+- **Default v4** (`next-hop A`) renders a plain gateway: covered.
+- **Default v6** on a RETH subnet is interface-qualified by inference
+  (`inferIPv6StaticNextHopInterfaces`). The map does not act on it. It goes
+  inactive through zebra's connected-on-that-interface check once the VIP's
+  subnet leaves (udp 10.5.1, row Q6).
+- **Operator shapes that stay ACTIVE and exportable after a graceful stop:**
+  - `qualified-next-hop A interface <reth unit>` (v4): the RETH /32
+    placeholder keeps the unit numbered, so zebra goes on-link (row Q4);
+  - an interface-only next hop;
+  - a v6 link-local gateway (`fe80::/64` stays connected).
+
+  These are the documented residual, filed with fix options as #19122.
 
 **Changed behaviour, by design.** A static whose gateway resolves only
 through an operator discard/reject route or a generate-route aggregate also
@@ -880,21 +903,66 @@ goes inactive. It is no longer installed or exported as an active blackhole.
   write.
 
 **Residual: a fresh registration bypasses the map.** zebra answers a NEWLY
-registering client without applying the map (`zebra_add_rnh_client`). A static
-that registers while its gateway already resolves only through a blackhole is
-therefore unfiltered until the next NHT event for that next hop (measured on
-udp).
+registering client without applying the map (`zebra_add_rnh_client`). The same
+holds when the next hop is already tracked by another client (bgpd): the new
+client gets the unfiltered state. A static that registers while its gateway
+already resolves only through a blackhole is therefore unfiltered until the
+next NHT event for that next hop (measured on udp).
 - `ReevaluateStaticNHT19083` forces such an event. It rebinds to the
   identical, normally unbound `xpf-static-nht-b-xpf-redist` and back, because
   `ip_nht_rm_add` re-evaluates only when the bound name changes, and
   unbinding would briefly re-install the filtered statics. It runs under
   `reloadMu` and writes no `frr.conf`.
-- The daemon calls it after a demotion's VIP removal.
+- The daemon calls it after a demotion's VIP removal, coalesced to one rebind
+  per demotion burst (`triggerStaticNHTReeval19083`, 100 ms).
+  - On master nothing registers a static inside that window. The demotion
+    render only prunes, so the trigger closes little there.
+  - Its real target is #19050's fast install, which also rebinds after each
+    batch.
 - **What stays residual:**
-  - FRR restarting without xpfd while the owner render is on disk;
-  - a registration that races the graceful-stop VIP removal, which runs
-    after `frr.Stop()`. This includes a #19050 fast-installed line, B's
-    explicit exception.
+  - **(i)** FRR restarting without xpfd while the owner render is on disk.
+  - **(ii)** A commit, or an FRR or xpfd start, that registers a static whose
+    gateway already resolves only through a blackhole. The case that matters
+    is a non-RETH recursive static kept on BOTH nodes (`staticHopActive`):
+    on the standby its gateway resolves through the cluster `Null0` default,
+    so it registers as an active, exported blackhole and stays one until
+    that node's next NHT event for the gateway (a demotion, or any change at
+    0/0). That is history-dependent, and not worse than master, where it
+    stays one forever.
+    - One option, not implemented: also rebind after a cluster-mode reload
+      that added static lines, at one more re-evaluation per such apply.
+  - **(iii)** A registration that FRR completes after the graceful-stop VIP
+    removal, which runs after `frr.Stop()`.
+
+**Cost of a rebind** (R22 #2). Each bound-name change runs zebra's forced
+evaluation of EVERY tracked next hop of that family, for EVERY client:
+- staticd re-sends its statics;
+- bgpd re-runs bestpath for the paths on those next hops.
+
+A rebind is two such evaluations per family. That is why the daemon coalesces
+its triggers, and why the loss lab measures zebra, staticd and bgpd across
+one RG move.
+
+**An interrupted rebind is restored before the next diff reload** (Codex P1 /
+R22 #5).
+- **The window.** A partial rebind (a rejected line, a kill, a deadline) can
+  leave the ALTERNATE map bound. Filtering is unchanged. But frr-reload.py's
+  delete pass runs before its add pass, so a diff reload would unbind the
+  alternate before binding the primary. In that window every filtered static
+  re-installs as an active, exported blackhole.
+- **The flag.** `staticNHTRestorePending19083` (under `reloadMu`) is set:
+  - from before every rebind batch, until the batch fully applies;
+  - by `New`, because a previous xpfd may have been killed mid-rebind.
+- **The restore.** `reloadLocked` and `retryReloadOnce` first run
+  `restoreStaticNHTBindingLocked19083`. It reads zebra's bindings
+  (`show ip|ipv6 nht route-map`):
+  - the primary, or nothing (a fresh FRR, which the reload binds), settles
+    with no write;
+  - anything else is replaced by the primary DIRECTLY (one name change, no
+    unbound moment) and verified;
+  - a failed or unverified restore does not start the reload. It returns an
+    error, and the degraded retry repeats it;
+  - unreadable bindings are logged, not written blind.
 
 ## Gotchas
 

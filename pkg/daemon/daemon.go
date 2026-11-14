@@ -1883,6 +1883,10 @@ type Daemon struct {
 	// frrStaticNHTReevalFn is a #19083 test seam that replaces the launch of
 	// the static-NHT re-evaluation after a VIP removal.
 	frrStaticNHTReevalFn func(rgID int)
+	// staticNHTReevalMu guards staticNHTReevalScheduled: a coalesced #19083
+	// re-evaluation is scheduled and has not started yet.
+	staticNHTReevalMu        sync.Mutex
+	staticNHTReevalScheduled bool
 	// garpClampWarned dedups the #5695 per-RG "gratuitous-arp-count clamped"
 	// warning so directSendGARPs (per-failover path) logs it at most once per
 	// RG, not per send. Guarded by garpClampWarnMu.

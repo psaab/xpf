@@ -122,6 +122,13 @@ type Manager struct {
 	buildMu  sync.Mutex
 	reloadMu sync.Mutex
 	confGen  uint64
+	// staticNHTRestorePending19083 (under reloadMu): zebra's static NHT
+	// binding may be the #19083 ALTERNATE map, so the next diff reload must
+	// first restore the primary by direct replacement
+	// (restoreStaticNHTBindingLocked19083). Set from before a rebind batch
+	// until it fully applies, and by New (a previous xpfd may have been killed
+	// mid-rebind).
+	staticNHTRestorePending19083 bool
 	// writeGen mirrors confGen for lock-free readers (#18561): a caller
 	// rendering under its own lock captures it and passes a predicate to
 	// ApplyFullIfCurrent, so only a write that actually happened (not a
@@ -209,11 +216,12 @@ type Manager struct {
 func New() *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
-		frrConf:      DefaultFRRConf,
-		exec:         realExecutor{},
-		retryEnabled: true,
-		mgrCtx:       ctx,
-		mgrCancel:    cancel,
+		frrConf:                      DefaultFRRConf,
+		exec:                         realExecutor{},
+		retryEnabled:                 true,
+		mgrCtx:                       ctx,
+		mgrCancel:                    cancel,
+		staticNHTRestorePending19083: true,
 	}
 }
 
@@ -1846,6 +1854,12 @@ var resolveFRRGroup = func() (gid int, ok bool) {
 // still see exec.ErrNotFound / fs ENOENT for the pythontools-missing
 // classification).
 func (m *Manager) reloadLocked() error {
+	// #19083 (Codex P1): frr-reload.py deletes before it adds, so a running
+	// ALTERNATE static NHT binding must become the primary by direct
+	// replacement first, or the reload opens an unbound window.
+	if err := m.restoreStaticNHTBindingLocked19083(); err != nil {
+		return fmt.Errorf("FRR reload not started: %w", err)
+	}
 	pctx, pcancel := context.WithTimeout(m.lifetimeCtx(), reloadTimeout)
 	perr := m.executor().FrrReloadPy(pctx, m.frrConf)
 	pcancel()
@@ -2108,6 +2122,10 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 		return true, false
 	}
 	gen := m.confGen
+	if err := m.restoreStaticNHTBindingLocked19083(); err != nil {
+		slog.Warn("FRR degraded-retry reload not started", "err", err)
+		return false, false
+	}
 	rctx, rcancel := context.WithTimeout(ctx, reloadTimeout)
 	defer rcancel()
 	if err := m.executor().FrrReloadPy(rctx, m.frrConf); err != nil {

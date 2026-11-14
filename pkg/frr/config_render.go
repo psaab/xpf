@@ -219,13 +219,7 @@ func (m *Manager) generateInterfaceSettings(fc *FullConfig) string {
 // default was deleted, #3872) renders nothing and must not suppress the
 // DHCP-learned fallback (#5519).
 func staticRouteRendersFIB(sr *config.StaticRoute) bool {
-	if sr.NoInstall || sr.NextTable != "" {
-		return false
-	}
-	if config.StaticRouteNextHopFamilyMismatchReason(sr) != "" {
-		return false
-	}
-	return sr.Discard || sr.Reject || len(sr.NextHops) > 0
+	return config.StaticRouteRendersFIB(sr)
 }
 
 const (
