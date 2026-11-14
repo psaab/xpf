@@ -343,37 +343,59 @@ What the wrapper enforces on a root run:
   files and read back their own writes, in-process and from child processes.
 - Every other mount in the host's table is placed by type, never left
   writable by omission:
-  - `/proc`, `/sys` and `/dev` are bound in recursively (pseudo
-    filesystems).
-  - Storage mounted below them (a tmpfs such as `/dev/shm`, a root-fs bind)
-    has its imported host copy DETACHED and is then overlaid, so no writable
-    host mount sits beneath the view (Codex P1 on 41dcb74e6d).
+  - A procfs anywhere but `/proc` (an alias such as `/srv/hostproc`, which
+    would reach host processes' roots past the view) **refuses the run with
+    exit 2**. This is checked first, before the pass-through and `/run`
+    skips: a procfs chosen as a pass-through (`GOCACHE=/srv/hostproc`) used
+    to be skipped as "the host's, by intent" and bound in writable (Codex P1
+    on 468f7d2371).
+  - `/proc` and `/sys` are bound in recursively (pseudo filesystems).
+    Storage mounted below them has its imported host copy DETACHED and is
+    then overlaid, so no writable host mount sits beneath the view (Codex P1
+    on 41dcb74e6d).
+  - The host's `/dev` and everything mounted below it are not carried in;
+    `/dev` is private (below).
   - `/run` gets its own overlay.
   - Any other storage mount (ext4, xfs, btrfs, tmpfs such as `/tmp`) is
     overlaid like `/`.
   - A filesystem overlayfs cannot take as a lower layer (vfat, as on
     `/boot/efi`; read-only media) is bound in **read-only**.
-  - A procfs anywhere but `/proc` (an alias such as `/srv/hostproc`, which
-    would reach host processes' roots past the view) **refuses the run with
-    exit 2**.
   - So does any other type (ramfs, network and FUSE filesystems, an
     automount outside `/proc`), and so does any setup failure.
-- Every BLOCK device node in the view's `/dev` is masked with a read-only,
-  `nodev` bind of `/dev/null`, so opening it fails (EACCES) instead of
-  reaching a disk past every overlay (Codex P1). This applies on BOTH paths:
-  on the user-namespace path the namespace's root is kuid 0, so without the
-  mask it could open a host disk read-write (R19 confirmed `/dev/sda2` opens
-  O_RDWR there). `nodev` is what stops it: a device node's writes ignore a
-  mount's read-only flag. Character devices
-  (`null`, `zero`, `urandom`, `net/tun`, `kvm`, ...) stay available; no root
-  test needs a block device (the full root `pkg/daemon` comparison in
-  `docs/log/19084.md` shows none fails).
+  - Every overlay and read-only bind is mounted `nodev`, so a device node on
+    the host's storage outside `/dev` cannot be opened in the view.
+- **`/dev` is a private, minimal tree** (Codex P1 on 468f7d2371): a fresh
+  `nodev` tmpfs holding only an allowlist. The previous design bound the
+  host's `/dev` in and masked the block nodes present at setup. That was an
+  enumeration: a node devtmpfs or udev creates LATER (loop, device-mapper,
+  NVMe) appeared in the shared tree unmasked, and the mask's `find -xdev`
+  skipped submounts. Now:
+  - the character devices `null`, `zero`, `full`, `random`, `urandom`,
+    `tty` and `net/tun` (when the host has it) are read-only binds of the
+    host's nodes. A device's reads and writes ignore the read-only flag;
+    chmod, chown and utimes on the host inode do not go through;
+  - `/dev/pts` is a fresh `devpts` instance, and `/dev/ptmx` links to its
+    `ptmx`, so a test's pty is allocated there and not in the host's
+    instance;
+  - `/dev/shm` is a fresh tmpfs;
+  - `/dev/fd`, `stdin`, `stdout` and `stderr` are the usual `/proc/self/fd`
+    links.
+
+  No block node is carried, and `nodev` makes any node created in `/dev`
+  later, by anyone, unopenable. Everything else is absent: `kvm`, `mqueue`,
+  `hugepages`, `kmsg`, `log`, the `loop-control` and `mapper/control`
+  devices that can create block devices, and the watchdog. This applies on
+  BOTH paths: on the user-namespace path the namespace's root is kuid 0,
+  which could open a host disk read-write (R19 confirmed `/dev/sda2` opens
+  O_RDWR there). The allowlist is what a full root `pkg/daemon` run needs
+  (`docs/log/19084.md`).
 - The only writable host storage is a pass-through allowlist, bound in from
   the host: the checkout, the `TMPDIR` scratch, and Go's `GOCACHE`,
   `GOMODCACHE` and `GOTMPDIR` (from the environment or `go env`). Build
   output and `t.TempDir()` therefore land on disk, not in the tmpfs upper. A
   pass-through that would expose a system tree refuses the run, before
-  anything is created:
+  anything is created (the `TMPDIR` scratch, which is created first of all,
+  is checked before that creation too, Codex P2 on 468f7d2371):
   - a top-level root itself (`/`, `/home`, `/root`, `/srv`, `/opt`, `/var`,
     `/mnt`, `/media`);
   - anything at or below `/etc`, `/usr`, `/boot`, `/bin`, `/sbin`, `/lib*`,
@@ -396,9 +418,10 @@ What the wrapper enforces on a root run:
 Its limits:
 
 - **`/sys`, global sysctls and other kernel state are not virtualised.**
-  sysfs, `/proc/sys` outside the network namespace, cgroupfs, bpffs and
-  devtmpfs are the host's, and a root test that writes them changes the host.
-  Only the network namespace is private.
+  sysfs, `/proc/sys` outside the network namespace, cgroupfs and bpffs are
+  the host's, and a root test that writes them changes the host. So is the I/O of
+  the allowlisted character devices behind their read-only binds. Only the network namespace is private,
+  and so are `/dev`'s own tree, its devpts and its `/dev/shm`.
 - **IPC with host daemons is not blocked.** The view makes host files
   copy-on-write; it installs no socket policy. A pathname socket in a lower
   layer (for example below `/run`) may still connect to the host daemon that
@@ -410,9 +433,9 @@ Its limits:
   not depend on them.
 - **The VM-proof path keeps real root** (for the BPF and memlock legs), so
   a command there that sets out to do it can:
-  - unmount or remount the view's mounts: detach an overlay, remount a
-    read-only bind (a vfat mount, a block-device mask) read-write, or remove
-    a mask (R19 F2);
+  - unmount or remount the view's mounts: detach an overlay, or remount a
+    read-only bind (a vfat mount, a character-device bind) read-write or
+    without `nodev` (R19 F2);
   - create a device node (or a new loop device) and mount a host disk;
   - enter a host namespace through `/proc` once it has unmounted its own;
   - write `/sys` and global sysctls (as on either path);
@@ -423,8 +446,8 @@ Its limits:
   nothing. After the command, `testguard-run.sh` checks that the run's
   namespace still has the testguard overlay at `/`, and fails the run
   otherwise (R18 R1). That is detection of the simplest case only. On the
-  user-namespace path the inherited mounts, masks included, are locked, and
-  creating a device node needs a capability that path does not have.
+  user-namespace path the inherited mounts are locked, and creating a device
+  node needs a capability that path does not have.
 - **Copy-up changes some filesystem semantics** relative to the host (rename
   across separate overlays, inotify and open readers across copy-up, lock
   identity against a host holder). Not measured; tracked in #19102.
@@ -448,9 +471,14 @@ stand-in commands: seeds in `/etc`, `/var/lib`, `/srv`, `/opt`, `/root` and
 sees every change; so does a symlinked directory's target; a relative write
 from a host cwd stays private; inherited descriptors are closed; a write
 under `TMPDIR` does reach the host; a disposable vfat fixture, proven
-writable first, is read-only; `/dev/shm` has no host tmpfs beneath its
-overlay; no host block device can be opened; a failing `id`, an unplaceable
-mount and a procfs alias each refuse the run; a detach of the view fails a
+writable first, is read-only; `/dev` is the private nodev tmpfs with only
+the allowlisted devices, and every overlay is nodev; a block node the host
+creates AFTER the view is built is not visible in it; a block node created
+inside the view's `/dev`, or kept on host storage outside `/dev`, cannot be
+opened; the allowlisted devices work while the host inode cannot be changed;
+`/dev/pts` and `/dev/shm` are fresh instances; a failing `id`, an
+unplaceable mount, a procfs alias (also as a pass-through) and a `TMPDIR`
+below `/etc` each refuse the run, the last without creating it; a detach of the view fails a
 VM-proof run; and on a non-VM the selftest refuses before touching anything.
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about

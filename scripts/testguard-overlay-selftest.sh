@@ -19,12 +19,27 @@
 #                  first (overlayfs cannot take vfat as a lower layer), is
 #                  read-only in the view; skipped, as coverage unavailable,
 #                  without busybox mkdosfs or a loop device;
-#   [underlay]     a storage mount below /dev (/dev/shm) has ONE mount in
-#                  the view, its overlay: no writable host copy beneath it;
-#   [block-dev]    every host block device node is unopenable in the view;
+#   [dev-private]  the view's /dev is the private nodev tmpfs, holding no
+#                  device node outside the allowlist, and every overlay in
+#                  the view is nodev (Codex P1 on 468f7d2371);
+#   [dev-late-block] a block node created on the HOST after the view was
+#                  built is not visible in it, and no block node is (the old
+#                  mask covered only the nodes present at setup);
+#   [dev-nodev]    a block node created INSIDE the view's /dev cannot be
+#                  opened;
+#   [nodev-overlay] a block node on host storage outside /dev, backed by a
+#                  disposable loop device, cannot be opened in the view;
+#   [dev-chardev]  the allowlisted character devices work, and the host
+#                  inode of one cannot be changed (utimes) from the view;
+#   [dev-pts]      /dev/pts is a fresh devpts instance, not the host's;
+#   [dev-shm]      /dev/shm is a fresh tmpfs: a write there stays private;
 #   [procfs-alias] a procfs mounted anywhere but /proc refuses the run;
+#   [procfs-pass-through] so does one selected as a pass-through
+#                  (GOCACHE=/srv/hostproc), checked before the skip;
 #   [pass-through-refused] a pass-through below a system tree (/etc/x)
 #                  refuses the run before it is created;
+#   [tmpdir-refused] so does a TMPDIR below /etc, which is created first of
+#                  all the pass-through, so it is checked first too;
 #   [F3-id]        an `id` that fails refuses the run (exit 2, no command);
 #   [F4-vm]        on a non-VM this selftest refuses before seeding anything;
 #   [proof-untouched] the runner's shared VM proof is never touched;
@@ -74,13 +89,16 @@ tag="tg-sel.$$"
 proof=/run/xpf-testguard-vm-boot-id
 W=$(mktemp -d "$TMPDIR/tg-overlay.XXXXXX")
 seeds="/etc/$tag.seed /var/lib/$tag /var/log/$tag.log /run/$tag /srv/$tag /opt/$tag /root/$tag /tmp/$tag
-/etc/$tag.new /var/log/$tag-f1 /srv/$tag-f1 /etc/$tag-cwd /srv/$tag-fd /srv/$tag-unsup /srv/$tag-vfat /srv/$tag-hostproc /etc/$tag-cache"
+/etc/$tag.new /var/log/$tag-f1 /srv/$tag-f1 /etc/$tag-cwd /srv/$tag-fd /srv/$tag-unsup /srv/$tag-vfat /srv/$tag-hostproc /etc/$tag-cache
+/etc/$tag-tmp /srv/$tag-blk /dev/$tag-late /dev/$tag-inside /dev/shm/$tag.shm"
 # [proof-untouched]: the runner's VM proof, as other lanes see it, is recorded
 # here and must be byte-, mode- and mtime-identical at the end (R19 F3).
 proof_state() { stat -c '%F %a %U %s %Y' "$proof" 2>&1; cat "$proof" 2>&1; }
 proof_at_start=$(proof_state)
+loopdev=
 cleanup() {
 	for p in $seeds; do rm -rf "$p"; done
+	[ -z "$loopdev" ] || losetup -d "$loopdev" 2>/dev/null
 	rm -rf "$W"
 }
 trap cleanup EXIT
@@ -178,21 +196,85 @@ mkfake ro "
 ls '$vfat' >/dev/null || fail 'the vfat mount is not readable'
 if touch '$vfat/$tag' 2>/dev/null; then fail 'the vfat mount is writable in the view'; fi"
 
-# ── [underlay] ───────────────────────────────────────────────────────────
-mkfake underlay "
-n=\$(awk '\$5 == \"/dev/shm\"' /proc/self/mountinfo | wc -l)
-[ \"\$n\" = 1 ] || fail \"/dev/shm has \$n mounts in the view; the imported host tmpfs is still beneath its overlay\"
-awk '\$5 == \"/dev/shm\"' /proc/self/mountinfo | grep -q ' - overlay testguard-tmpfs ' || fail '/dev/shm is not the testguard overlay'"
+# ── the private /dev (Codex P1 on 468f7d2371) ────────────────────────────
+# mountinfo as "mountpoint options fstype source", one line per mount.
+mounts_awk='{for (i = 7; i <= NF; i++) if ($i == "-") break; print $5, $6, $(i + 1), $(i + 2)}'
+mkfake devprivate "
+mi=\$(awk '$mounts_awk' /proc/self/mountinfo)
+echo \"\$mi\" | grep -q '^/dev [^ ]* tmpfs testguard-dev\$' || fail '/dev is not the private testguard tmpfs'
+echo \"\$mi\" | awk '\$1 == \"/dev\" {print \$2}' | tr , '\n' | grep -qx nodev || fail 'the private /dev is not nodev'
+for n in \$(find /dev \( -type b -o -type c \) -print); do
+	case \$n in
+	/dev/null | /dev/zero | /dev/full | /dev/random | /dev/urandom | /dev/tty | /dev/net/tun | /dev/pts/*) ;;
+	*) fail \"\$n is a device node outside the allowlist\" ;;
+	esac
+done
+echo \"\$mi\" | awk '\$3 == \"overlay\"' | grep -q . || fail 'FIXTURE: no overlay in the view'
+echo \"\$mi\" | awk '\$3 == \"overlay\" {print \$1, \$2}' | while read -r mp opts; do
+	echo \",\$opts,\" | grep -q ',nodev,' || fail \"the overlay at \$mp is not nodev\"
+done || exit 7"
 
-# ── [block-dev] ──────────────────────────────────────────────────────────
-# The host's block nodes, listed outside the view (inside it they are masked
-# by a character device, so `find -type b` there would find nothing).
-blocknodes=$(find /dev -xdev -type b 2>/dev/null | tr '\n' ' ')
-mkfake blockdev "
-[ -n '$blocknodes' ] || fail 'FIXTURE: the host has no block device node to test'
-for b in $blocknodes; do
-	if ( exec 3>>\"\$b\" ) 2>/dev/null; then fail \"block device \$b can be opened for writing in the view\"; fi
-done"
+# A disposable loop device backs the block nodes below, so a node that could
+# be opened reaches only this image. Without one these cells are skipped as
+# coverage unavailable.
+blk_maj='' blk_min=''
+if command -v losetup >/dev/null 2>&1; then
+	truncate -s 1M "$W/blk.img"
+	trace "loop device"
+	loopdev=$(losetup -f --show "$W/blk.img" 2>/dev/null) || loopdev=
+	if [ -n "$loopdev" ]; then
+		blk_maj=$((16#$(stat -c %t "$loopdev")))
+		blk_min=$((16#$(stat -c %T "$loopdev")))
+	fi
+fi
+
+# [dev-late-block]: the command signals that the view is up, the host then
+# creates a block node in ITS /dev, and the command looks for it.
+mkfake latedev "
+touch $W/late.ready
+i=0
+while [ ! -e $W/late.go ]; do
+	sleep 0.1; i=\$((i + 1)); [ \$i -lt 600 ] || fail 'FIXTURE: the host never created the late node'
+done
+[ ! -e /dev/$tag-late ] || fail '/dev/$tag-late, created on the host after the view was built, is visible in the view'
+[ ! -e '${loopdev:-/nonexistent}' ] || fail 'the host loop device ${loopdev} is visible in the view'
+[ ! -e /dev/block ] || fail '/dev/block, the host udev alias tree, is visible in the view'
+b=\$(find /dev -type b 2>/dev/null | tr '\n' ' ')
+[ -z \"\$b\" ] || fail \"block nodes in the view's /dev: \$b\""
+
+# [dev-nodev]: a block node made inside the view's /dev for the loop device.
+mkfake devnodev "
+mknod /dev/$tag-inside b $blk_maj $blk_min 2>/dev/null || exit 5 # no CAP_MKNOD (user namespace): nothing to open
+if ( exec 3<>/dev/$tag-inside ) 2>/dev/null; then fail 'a block node created in the view /dev can be opened'; fi
+rm -f /dev/$tag-inside"
+
+# [nodev-overlay]: a block node the host keeps on its root filesystem.
+mkfake nodevov "
+[ -b /srv/$tag-blk ] || fail 'FIXTURE: the host block node /srv/$tag-blk is not visible'
+if ( exec 3<>/srv/$tag-blk ) 2>/dev/null; then fail 'a block node on host storage outside /dev opens read-write in the view'; fi
+if ( exec 3</srv/$tag-blk ) 2>/dev/null; then fail 'a block node on host storage outside /dev opens read-only in the view'; fi"
+
+# [dev-chardev]
+mkfake devchar "
+echo x >/dev/null || fail 'cannot write /dev/null'
+[ \"\$(head -c 16 /dev/zero | wc -c)\" = 16 ] || fail 'cannot read /dev/zero'
+[ \"\$(head -c 16 /dev/urandom | wc -c)\" = 16 ] || fail 'cannot read /dev/urandom'
+if (echo x >/dev/full) 2>/dev/null; then fail '/dev/full accepted a write'; fi
+[ -L /dev/fd ] && [ -e /dev/stdin ] || fail '/dev/fd or /dev/stdin is missing'
+if touch -m -d @0 /dev/full 2>/dev/null; then fail 'the view changed the times of the host inode of /dev/full'; fi"
+
+# [dev-pts]: the host's devpts device number, read outside the view.
+host_pts_dev=$(stat -c %d /dev/pts)
+mkfake devpts "
+( exec 5<>/dev/ptmx ) || fail 'cannot open /dev/ptmx'
+[ \"\$(stat -c %d /dev/pts)\" != '$host_pts_dev' ] || fail '/dev/pts is the host devpts instance'"
+
+# [dev-shm]
+mkfake devshm "
+mi=\$(awk '$mounts_awk' /proc/self/mountinfo)
+[ \"\$(echo \"\$mi\" | awk '\$1 == \"/dev/shm\"' | wc -l)\" = 1 ] || fail '/dev/shm has more than one mount in the view'
+echo \"\$mi\" | grep -q '^/dev/shm [^ ]* tmpfs testguard-shm\$' || fail '/dev/shm is not the private testguard tmpfs'
+printf 'shm\n' >/dev/shm/$tag.shm && [ \"\$(cat /dev/shm/$tag.shm)\" = shm ] || fail 'cannot write /dev/shm'"
 
 run_tg() { # $1 cwd, then the command; sets out and rc
 	out=$(cd "$1" && shift && bash "$here/testguard-run.sh" "$@" 2>&1)
@@ -274,13 +356,72 @@ branch_cases() { # $1 label
 		echo "  skip [read-only] $b: coverage unavailable (no busybox mkdosfs for a vfat fixture)"
 	fi
 
-	run_tg / "$W/underlay"
-	[ "$rc" = 0 ] && ok "[underlay] $b: /dev/shm is only the view's overlay, with no host tmpfs beneath it" ||
-		bad "[underlay] $b: testguard-run exited $rc: $out"
+	run_tg / "$W/devprivate"
+	[ "$rc" = 0 ] && ok "[dev-private] $b: /dev is the private nodev tmpfs with only allowlisted devices, and every overlay is nodev" ||
+		bad "[dev-private] $b: testguard-run exited $rc: $out"
 
-	run_tg / "$W/blockdev"
-	[ "$rc" = 0 ] && ok "[block-dev] $b: no host block device ($blocknodes) can be opened for writing" ||
-		bad "[block-dev] $b: testguard-run exited $rc: $out"
+	if [ -n "$loopdev" ]; then
+		rm -f "$W/late.ready" "$W/late.go"
+		(cd / && bash "$here/testguard-run.sh" "$W/latedev") >"$W/late.out" 2>&1 &
+		lpid=$!
+		i=0
+		while [ ! -e "$W/late.ready" ] && kill -0 "$lpid" 2>/dev/null && [ $i -lt 600 ]; do
+			sleep 0.1
+			i=$((i + 1))
+		done
+		trace "seed late block node $b"
+		mknod "/dev/$tag-late" b "$blk_maj" "$blk_min" 2>/dev/null
+		late_made=$([ -b "/dev/$tag-late" ] && echo yes || echo no)
+		touch "$W/late.go"
+		wait "$lpid"
+		rc=$?
+		rm -f "/dev/$tag-late"
+		if [ "$late_made" != yes ]; then
+			bad "[dev-late-block] $b: FIXTURE: the host could not create /dev/$tag-late"
+		elif [ "$rc" = 0 ]; then
+			ok "[dev-late-block] $b: a block node created on the host after setup is not in the view, and no block node is"
+		else
+			bad "[dev-late-block] $b: testguard-run exited $rc: $(cat "$W/late.out")"
+		fi
+
+		run_tg / "$W/devnodev"
+		case $rc in
+		0) ok "[dev-nodev] $b: a block node created inside the view's /dev cannot be opened" ;;
+		5) echo "  skip [dev-nodev] $b: this path cannot create a device node (no CAP_MKNOD in its user namespace), so there is nothing to open" ;;
+		*) bad "[dev-nodev] $b: testguard-run exited $rc: $out" ;;
+		esac
+
+		trace "seed host block node $b"
+		mknod "/srv/$tag-blk" b "$blk_maj" "$blk_min"
+		run_tg / "$W/nodevov"
+		[ "$rc" = 0 ] && ok "[nodev-overlay] $b: a block node on host storage outside /dev cannot be opened" ||
+			bad "[nodev-overlay] $b: testguard-run exited $rc: $out"
+		rm -f "/srv/$tag-blk"
+	else
+		echo "  skip [dev-late-block] [dev-nodev] [nodev-overlay] $b: coverage unavailable (no loop device for a disposable block node)"
+	fi
+
+	before=$(stat -c '%a %X %Y %Z' /dev/full)
+	run_tg / "$W/devchar"
+	after=$(stat -c '%a %X %Y %Z' /dev/full)
+	if [ "$rc" = 0 ] && [ "$before" = "$after" ]; then
+		ok "[dev-chardev] $b: the allowlisted devices work, and the host inode of /dev/full is unchanged"
+	else
+		bad "[dev-chardev] $b: exit $rc, host /dev/full [$before] -> [$after]: $out"
+	fi
+
+	run_tg / "$W/devpts"
+	[ "$rc" = 0 ] && ok "[dev-pts] $b: /dev/pts is a fresh devpts instance, and /dev/ptmx opens" ||
+		bad "[dev-pts] $b: testguard-run exited $rc: $out"
+
+	rm -f "/dev/shm/$tag.shm"
+	run_tg / "$W/devshm"
+	if [ "$rc" = 0 ] && [ ! -e "/dev/shm/$tag.shm" ]; then
+		ok "[dev-shm] $b: /dev/shm is a fresh tmpfs, and a write there did not reach the host"
+	else
+		bad "[dev-shm] $b: exit $rc, host /dev/shm/$tag.shm: $([ -e "/dev/shm/$tag.shm" ] && echo present || echo absent): $out"
+	fi
+	rm -f "/dev/shm/$tag.shm"
 }
 
 # ── user-namespace path: the proof ignored, never deleted ────────────────
@@ -347,7 +488,32 @@ if [ "$rc" = 2 ] && [ ! -e "$W/f3.marker" ] && [[ $out == *"/srv/$tag-hostproc i
 else
 	bad "[procfs-alias] exit $rc (want 2; 99 = fixture mount failed), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no): $out"
 fi
+
+# ── [procfs-pass-through]: the same alias, selected as GOCACHE ───────────
+# Codex P1 on 468f7d2371: the pass-through skip ran before the procfs check,
+# so the alias was bound in writable with the pass-through.
+rm -f "$W/f3.marker"
+out=$(unshare -m --propagation private bash -c 'mount -t proc proc "$1" || exit 99; GOCACHE=$1 exec bash "$2" "$3"' _ \
+	"/srv/$tag-hostproc" "$here/testguard-run.sh" "$W/marker" 2>&1)
+rc=$?
+if [ "$rc" = 2 ] && [ ! -e "$W/f3.marker" ] && [[ $out == *"/srv/$tag-hostproc is a procfs other than /proc"* ]]; then
+	ok "[procfs-pass-through] a procfs alias selected as GOCACHE refuses the run (exit 2), naming it"
+else
+	bad "[procfs-pass-through] exit $rc (want 2; 99 = fixture mount failed), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no): $out"
+fi
 rm -rf "/srv/$tag-hostproc"
+
+# ── [tmpdir-refused]: a TMPDIR below /etc refuses before it is created ───
+# Codex P2 on 468f7d2371: the scratch was created before any check.
+rm -f "$W/f3.marker"
+out=$(TMPDIR="/etc/$tag-tmp" bash "$here/testguard-run.sh" "$W/marker" 2>&1)
+rc=$?
+if [ "$rc" = 2 ] && [ ! -e "$W/f3.marker" ] && [ ! -e "/etc/$tag-tmp" ] && [[ $out == *"would expose a host system tree"* ]]; then
+	ok "[tmpdir-refused] TMPDIR below /etc refuses the run (exit 2) without creating it"
+else
+	bad "[tmpdir-refused] exit $rc (want 2), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no), /etc/$tag-tmp created: $([ -e "/etc/$tag-tmp" ] && echo yes || echo no): $out"
+fi
+rm -rf "/etc/$tag-tmp"
 
 # ── [F4-vm]: on a non-VM this selftest touches nothing ───────────────────
 if [ -z "${TG_SELFTEST_NESTED:-}" ]; then

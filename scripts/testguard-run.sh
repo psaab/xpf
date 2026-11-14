@@ -52,7 +52,36 @@ if [[ "$command" == go || "$command" == "$shim_dir/go" ]]; then
 else
 	set -- "$command" "$@"
 fi
+# #19084: a root run's pass-through (the TMPDIR scratch among it) may not be,
+# or lie below, a host system tree (R19 F4: exact roots alone let /etc/x
+# through): a top-level root itself, or anything at or below /etc, /usr,
+# /boot, /bin, /sbin, /lib*, /var/lib, /var/log, /proc, /sys, /dev or /run.
+# Below /home, /root, /srv, /opt, /var and /mnt is allowed (GOMODCACHE in a
+# home, GOCACHE in /root/.cache, a /var/tmp scratch), and so is /tmp itself as
+# a declared TMPDIR scratch.
+system_tree() {
+	case $1 in
+	/ | /home | /root | /srv | /opt | /var | /mnt | /media | \
+		/etc | /etc/* | /usr | /usr/* | /boot | /boot/* | /bin | /bin/* | /sbin | /sbin/* | \
+		/lib | /lib/* | /lib32 | /lib32/* | /lib64 | /lib64/* | /var/lib | /var/lib/* | \
+		/var/log | /var/log/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/*)
+		return 0
+		;;
+	esac
+	return 1
+}
 scratch=${TMPDIR:-/var/worktrees/.cache/tmpdir}
+# The scratch is created HERE, long before the pass-through loop below checks
+# it, so a root run checks it first: TMPDIR=/etc/new-cache was refused, but
+# only after this mkdir had left /etc/new-cache on the host (Codex P2 on
+# 468f7d2371).
+if [[ $euid == 0 ]]; then
+	lexical=$(realpath -m "$scratch" 2>/dev/null) || lexical=
+	if [[ -z $lexical ]] || system_tree "$lexical"; then
+		echo "testguard-run: REFUSED: pass-through directory '$scratch' (TMPDIR) would expose a host system tree; point TMPDIR elsewhere (#19084)" >&2
+		exit 2
+	fi
+fi
 mkdir -p "$scratch"
 work=$(mktemp -d "$scratch/testguard-run.XXXXXX")
 cleanup() { rm -rf "$work"; }
@@ -135,26 +164,10 @@ if [[ $euid == 0 ]]; then
 	fi
 	pass_raw+=("${GOCACHE:-${go_vars[0]:-}}" "${GOMODCACHE:-${go_vars[1]:-}}" "${GOTMPDIR:-${go_vars[2]:-}}")
 	pass=()
-	# A pass-through may not be, or lie below, a host system tree (R19 F4:
-	# exact roots alone let /etc/x through): a top-level root itself, or
-	# anything at or below /etc, /usr, /boot, /bin, /sbin, /lib*, /var/lib,
-	# /var/log, /proc, /sys, /dev or /run. Below /home, /root, /srv, /opt,
-	# /var and /mnt is allowed (GOMODCACHE in a home, GOCACHE in
-	# /root/.cache, a /var/tmp scratch), and so is /tmp itself as a declared
-	# TMPDIR scratch. Checked on the lexical path BEFORE the
-	# mkdir, so a refused path is never created on the host, and again after
-	# symlinks resolve.
-	system_tree() {
-		case $1 in
-		/ | /home | /root | /srv | /opt | /var | /mnt | /media | \
-			/etc | /etc/* | /usr | /usr/* | /boot | /boot/* | /bin | /bin/* | /sbin | /sbin/* | \
-			/lib | /lib/* | /lib32 | /lib32/* | /lib64 | /lib64/* | /var/lib | /var/lib/* | \
-			/var/log | /var/log/* | /proc | /proc/* | /sys | /sys/* | /dev | /dev/* | /run | /run/*)
-			return 0
-			;;
-		esac
-		return 1
-	}
+	# A pass-through may not be, or lie below, a host system tree
+	# (system_tree, above). Checked on the lexical path BEFORE the mkdir, so a
+	# refused path is never created on the host, and again after symlinks
+	# resolve.
 	for p in "${pass_raw[@]}"; do
 		[[ -n $p && $p != off ]] || continue
 		lexical=$(realpath -m "$p" 2>/dev/null) || lexical=

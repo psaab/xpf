@@ -17,14 +17,14 @@
 #    11eaccc637: a four-tree enumeration let /var/log/xpf -> /srv/... escape).
 #  - Every other mount from the host's table is classified by filesystem type
 #    and depth, and NOTHING is left writable by omission:
-#      * /proc, /sys and /dev are bound in recursively (pseudo filesystems);
-#        a mount below them is kept if it is a pseudo filesystem; if it is
-#        storage (tmpfs such as /dev/shm) its imported copy is detached and
-#        the path overlaid, so no writable host mount sits beneath the view;
-#        anything else is refused;
-#      * every BLOCK device node in the view's /dev is masked (a read-only,
-#        nodev bind of /dev/null), so it cannot be opened;
-#      * a procfs anywhere but /proc (a host-process alias) is refused;
+#      * a procfs anywhere but /proc (a host-process alias) is refused, even
+#        below a pass-through or /run (checked before either skip);
+#      * /proc and /sys are bound in recursively (pseudo filesystems); a
+#        mount below them is kept if it is a pseudo filesystem; if it is
+#        storage, its imported copy is detached and the path overlaid, so no
+#        writable host mount sits beneath the view; anything else is refused;
+#      * the host's /dev and everything mounted below it are NOT carried in
+#        (see /dev below);
 #      * /run gets its own overlay. Host submounts below /run are NOT carried
 #        into it: their mountpoints read as empty directories (R18 R3);
 #      * any other storage mount (ext4, xfs, btrfs, tmpfs such as /tmp, ...)
@@ -32,6 +32,23 @@
 #      * filesystems overlayfs cannot use as a lower layer (vfat, as on
 #        /boot/efi; read-only media) are bound in READ-ONLY;
 #      * any other type is REFUSED (exit 2) before the command runs.
+#    Every overlay and read-only bind is mounted nodev, so a device node on
+#    the host's storage outside /dev cannot be opened in the view either.
+#  - /dev is PRIVATE: a fresh nodev tmpfs holding only an allowlist (Codex P1
+#    on 468f7d2371). The previous design bound the host's /dev in and masked
+#    the block nodes present at setup. That was an enumeration: a node that
+#    devtmpfs or udev creates LATER (loop, dm, NVMe) appeared in the shared
+#    tree unmasked, and the mask's `find -xdev` skipped submounts. Now:
+#      * the allowlisted CHARACTER devices (null, zero, full, random,
+#        urandom, tty, net/tun) are read-only binds of the host's nodes. A
+#        device's reads and writes ignore the read-only flag; chmod, chown
+#        and utimes on the host inode do not;
+#      * /dev/pts is a fresh devpts instance, with /dev/ptmx -> pts/ptmx, so
+#        a pty is allocated there and not in the host's instance;
+#      * /dev/shm is a fresh tmpfs;
+#      * /dev/fd, stdin, stdout and stderr are the usual /proc/self/fd links.
+#    No block node is carried, and nodev makes any node created in /dev
+#    later, by anyone, unopenable.
 #  - The PASS-THROUGH directories (the checkout, the TMPDIR scratch, GOCACHE,
 #    GOMODCACHE, GOTMPDIR; chosen by testguard-run.sh) are bound in from the
 #    host, writable. They are the only writable host storage in the view, so
@@ -112,7 +129,7 @@ n=0
 overlay_onto() { # $1 lower (host path), $2 target in the view, $3 source tag
 	n=$((n + 1))
 	mkdir "$S/$n.upper" "$S/$n.work" || refuse "cannot create the upper for $1"
-	mount -t overlay "$3" -o "lowerdir=$1,upperdir=$S/$n.upper,workdir=$S/$n.work" "$2" ||
+	mount -t overlay "$3" -o "nodev,lowerdir=$1,upperdir=$S/$n.upper,workdir=$S/$n.work" "$2" ||
 		refuse "cannot cover $1 with a throwaway overlay"
 }
 
@@ -120,33 +137,39 @@ overlay_onto / "$m" testguard-root
 
 while read -r _ mp fstype; do
 	[[ $mp == / ]] && continue
+	# A procfs other than /proc itself (an alias such as /srv/hostproc) is
+	# the HOST pid namespace's: /srv/hostproc/1/root/etc reaches the host's
+	# root filesystem past the view (Codex P1 on 41dcb74e6d). The run's own
+	# /proc is replaced by its pid namespace's procfs; an alias would not be.
+	# Checked BEFORE the skips below: a procfs selected as a pass-through
+	# (GOCACHE=/srv/hostproc) was skipped as "the host's, by intent" and then
+	# bound in writable with the pass-through (Codex P1 on 468f7d2371).
+	[[ $fstype == proc && $mp != /proc ]] && refuse "$mp is a procfs other than /proc, a host-process alias"
+	# The host's /dev and its submounts (/dev/pts, /dev/shm, /dev/mqueue,
+	# /dev/hugepages, ...) are replaced by the private /dev built below.
+	under "$mp" /dev && continue
 	skip=0
 	for p in "${pass[@]}"; do under "$mp" "$p" && skip=1; done
 	((skip)) && continue           # below a pass-through: the host's, by intent
 	under "$mp" /run && [[ $mp != /run ]] && continue # hidden by /run's overlay (R18 R3)
 	plain_path "$mp" || refuse "mountpoint '$mp' ($fstype) needs quoting; cannot place it in the view"
-	# A procfs other than /proc itself (an alias such as /srv/hostproc) is
-	# the HOST pid namespace's: /srv/hostproc/1/root/etc reaches the host's
-	# root filesystem past the view (Codex P1 on 41dcb74e6d). The run's own
-	# /proc is replaced by its pid namespace's procfs; an alias would not be.
-	[[ $fstype == proc && $mp != /proc ]] && refuse "$mp is a procfs other than /proc, a host-process alias"
 	case $mp in
-	/proc | /sys | /dev)
+	/proc | /sys)
 		[[ $pseudo_types == *" $fstype "* ]] || refuse "$mp is $fstype, not a pseudo filesystem"
 		mount --rbind "$mp" "$m$mp" || refuse "cannot bind $mp into the view"
 		continue
 		;;
 	esac
 	in_tree=0
-	under "$mp" /proc || under "$mp" /sys || under "$mp" /dev && in_tree=1
+	under "$mp" /proc || under "$mp" /sys && in_tree=1
 	if [[ $pseudo_types == *" $fstype "* ]] || { ((in_tree)) && [[ $tree_only_types == *" $fstype "* ]]; }; then
-		# Below /proc, /sys or /dev it came with the recursive bind.
+		# Below /proc or /sys it came with the recursive bind.
 		((in_tree)) && continue
 		mount --bind "$mp" "$m$mp" || refuse "cannot bind $mp ($fstype) into the view"
 		continue
 	fi
-	# Storage below /proc, /sys or /dev (a tmpfs such as /dev/shm, a root-fs
-	# bind) came in with the recursive bind as the HOST's writable mount.
+	# Storage below /proc or /sys (a root-fs bind) came in with the recursive
+	# bind as the HOST's writable mount.
 	# Detach that copy before covering the path, so no writable host storage
 	# sits beneath the view's overlay (Codex P1 on 41dcb74e6d). The lower
 	# layer below is still the host's mount, reached outside the view.
@@ -156,23 +179,38 @@ while read -r _ mp fstype; do
 	if [[ $overlay_types == *" $fstype "* ]]; then
 		overlay_onto "$mp" "$m$mp" "testguard-$fstype"
 	elif [[ $readonly_types == *" $fstype "* ]]; then
-		mount --bind "$mp" "$m$mp" && mount -o remount,bind,ro "$m$mp" ||
+		mount --bind "$mp" "$m$mp" && mount -o remount,bind,ro,nodev "$m$mp" ||
 			refuse "cannot bind $mp ($fstype) into the view read-only"
 	else
 		refuse "$mp is $fstype, which this wrapper can neither overlay nor bind read-only"
 	fi
 done <<<"$mounts"
 
-# Block devices: every block device node in the view's /dev is masked with a
-# read-only, nodev bind of /dev/null, so opening it fails (EACCES) instead of
-# reaching a disk past every overlay (Codex P1 on 41dcb74e6d). A read-only
-# bind alone would not do: writing a device node ignores the mount's
-# read-only flag, nodev does not. Character devices (null, tun, kvm, ...)
-# stay as they are; no root test needs a block device.
-while IFS= read -r -d '' node; do
-	mount --bind /dev/null "$node" && mount -o remount,bind,ro,nodev "$node" ||
-		refuse "cannot mask the block device ${node#"$m"} in the view"
-done < <(find "$m/dev" -xdev -type b -print0)
+# The private /dev (Codex P1 on 468f7d2371; see the header). nodev on the
+# tmpfs: a node created in it later, by anyone, cannot be opened. The
+# allowlisted character devices are binds of the host's nodes, so their own
+# mounts keep the host devtmpfs's dev permission, and they are remounted
+# read-only so the host inode's mode, owner and times cannot change.
+d=$m/dev
+mount -t tmpfs -o mode=0755,nosuid,nodev,size=1m testguard-dev "$d" || refuse "cannot mount the private /dev"
+for name in null zero full random urandom tty net/tun; do
+	if [[ ! -c /dev/$name || -L /dev/$name ]]; then
+		[[ $name == net/tun ]] && continue # no tun module: nothing to carry
+		refuse "the host has no character device /dev/$name for the private /dev"
+	fi
+	mkdir -p "$(dirname "$d/$name")" && : >"$d/$name" &&
+		mount --bind "/dev/$name" "$d/$name" && mount -o remount,bind,ro "$d/$name" ||
+		refuse "cannot carry /dev/$name into the private /dev"
+done
+tty_gid=$(getent group tty | cut -d: -f3)
+mkdir "$d/pts" "$d/shm" &&
+	mount -t devpts -o "newinstance,ptmxmode=0666,mode=0620${tty_gid:+,gid=$tty_gid},nosuid,noexec" testguard-devpts "$d/pts" &&
+	ln -s pts/ptmx "$d/ptmx" ||
+	refuse "cannot mount a private devpts"
+mount -t tmpfs -o mode=1777,nosuid,nodev testguard-shm "$d/shm" || refuse "cannot mount a private /dev/shm"
+ln -s /proc/self/fd "$d/fd" && ln -s /proc/self/fd/0 "$d/stdin" &&
+	ln -s /proc/self/fd/1 "$d/stdout" && ln -s /proc/self/fd/2 "$d/stderr" ||
+	refuse "cannot create the /dev/fd links"
 
 # The writable pass-through, parents before children.
 while read -r p; do
