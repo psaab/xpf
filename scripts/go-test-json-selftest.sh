@@ -261,6 +261,7 @@ check "inherited GOFLAGS=-json, default path: a timeout is still VOID (exit 3)" 
 TJ2="$WORK/to2.json"; : > "$TJ2"
 ( cd "$WORK/to" && GOFLAGS=-json bash "$here/go-test-json.sh" "$TJ2" go -timeout 2s ./... >/dev/null 2>"$to_err" ); gfj_rc=$?
 check "inherited GOFLAGS=-json, side-file path: a timeout is still VOID (exit 3)" "$gfj_rc" "3"
+[ "$gfj_rc" = 3 ] || echo "    stderr: $(tr '\n' ' ' < "$to_err" | cut -c1-900)"
 ( cd "$WORK/to" && GOFLAGS=-json bash "$here/go-test-watch.sh" go test -timeout 2s ./... >/dev/null 2>"$to_err" ); gft_rc=$?
 check "inherited GOFLAGS=-json, go-test-watch.sh: a timeout is still VOID (exit 3)" "$gft_rc" "3"
 # #18778 seat AC: three timeouts the first watcher missed.
@@ -530,6 +531,142 @@ for leg in default side watch; do
 		bad "timeout + state change, $leg: stderr lacks the timeout banner or the state FAIL: $(tr '\n' ' ' < "$SW/tos.err" | cut -c1-400)"
 	fi
 done
+
+# ── #19090 (Codex on 37c57fe8ac): the state verdict FAILS CLOSED ──────────
+# testguard-run.sh appends exactly one completed verdict per run, through a
+# descriptor the command does not inherit; every reader reads only an
+# explicit clean (or not-run) as clean.
+. "$here/testguard-state-verdict.sh"
+VD=$(mktemp -d "${TMPDIR:-/tmp}/gtj-verdict.XXXXXX")
+vrow() { # $1 label, $2 want, $3 content (printf %b) or @absent / @dir
+	rm -rf "$VD/v"
+	case $3 in
+	@absent) ;;
+	@dir) mkdir "$VD/v" ;;
+	*) printf '%b' "$3" > "$VD/v" ;;
+	esac
+	check "verdict reader: $1" "$(testguard_state_verdict "$VD/v")" "$2"
+}
+vrow "no file is incomplete" incomplete @absent
+vrow "an empty file is incomplete" incomplete ''
+vrow "an unreadable verdict (a directory) is incomplete" incomplete @dir
+vrow "clean" clean 'clean\n'
+vrow "not-run reads as clean" clean 'not-run\n'
+vrow "two clean runs" clean 'clean\nclean\n'
+vrow "clean without a final newline" clean 'clean'
+vrow "state-changed" state-changed 'state-changed\n'
+vrow "state-changed beside clean" state-changed 'clean\nstate-changed\n'
+vrow "interrupted is incomplete" incomplete 'interrupted\n'
+vrow "interrupted beside clean is incomplete" incomplete 'clean\ninterrupted\n'
+vrow "an unknown line is incomplete" incomplete 'CLEAN\n'
+
+# What testguard-run.sh records.
+: > "$VD/run"
+XPF_TESTGUARD_STATE_VERDICT="$VD/run" bash "$here/testguard-run.sh" true >/dev/null 2>&1; r=$?
+check "testguard-run: a clean run exits 0" "$r" 0
+check "testguard-run: a clean run records clean" "$(cat "$VD/run")" clean
+reseed; : > "$VD/run"
+XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" XPF_TESTGUARD_STATE_VERDICT="$VD/run" bash "$here/testguard-run.sh" "$SW/deletes" >/dev/null 2>&1; r=$?
+check "testguard-run: a state change exits 1" "$r" 1
+check "testguard-run: a state change records state-changed" "$(cat "$VD/run")" state-changed
+mkdir -p "$VD/badid"; printf '#!/bin/sh\nexit 1\n' > "$VD/badid/id"; chmod +x "$VD/badid/id"
+: > "$VD/run"
+PATH="$VD/badid:$PATH" XPF_TESTGUARD_STATE_VERDICT="$VD/run" bash "$here/testguard-run.sh" true >/dev/null 2>&1; r=$?
+check "testguard-run: a refusal (a failing id) exits 2" "$r" 2
+check "testguard-run: a run refused before its command records not-run" "$(cat "$VD/run")" not-run
+: > "$VD/run"; rm -f "$VD/started"
+XPF_TESTGUARD_STATE_VERDICT="$VD/run" bash "$here/testguard-run.sh" sh -c "touch '$VD/started'; sleep 3" >/dev/null 2>"$VD/int.err" &
+tpid=$!
+i=0; while [ ! -e "$VD/started" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+kill -TERM "$tpid"; wait "$tpid"; r=$?
+check "testguard-run: TERM while the command runs exits 143" "$r" 143
+check "testguard-run: a run interrupted before its check records interrupted" "$(cat "$VD/run")" interrupted
+grep -q "interrupted before the production-state check completed" "$VD/int.err" &&
+	ok "testguard-run: an interrupted run says so on stderr" ||
+	bad "testguard-run: no interrupted message: $(tr '\n' ' ' < "$VD/int.err" | cut -c1-300)"
+# The command neither inherits the verdict descriptor nor diverts the write
+# by replacing the pathname (Codex: a /dev/null symlink made the append
+# succeed silently into nothing).
+: > "$VD/run"; exec {vrfd}<"$VD/run"
+XPF_TESTGUARD_STATE_VERDICT="$VD/run" TG_VERDICT_PATH="$VD/run" bash "$here/testguard-run.sh" \
+	sh -c 'for f in /proc/self/fd/*; do [ "$(readlink "$f")" = "$TG_VERDICT_PATH" ] && echo LEAK; done; rm -f "$TG_VERDICT_PATH"; ln -s /dev/null "$TG_VERDICT_PATH"' \
+	{vrfd}<&- > "$VD/leak.out" 2>&1
+check "testguard-run: the command does not inherit the verdict descriptor" "$(grep -c LEAK "$VD/leak.out")" 0
+check "testguard-run: a swapped verdict path does not divert the write" "$(testguard_state_verdict "/proc/self/fd/$vrfd")" clean
+check "testguard-run: the swapped path itself reads incomplete, never clean" "$(testguard_state_verdict "$VD/run")" incomplete
+exec {vrfd}<&-
+rm -f "$VD/run"
+
+# The wrappers on the timeout path: an interrupted check and a swapped path.
+mkdir -p "$WORK/tos2"
+cat > "$WORK/tos2/go.mod" <<'EOT'
+module example.com/tos2
+
+go 1.21
+EOT
+cat > "$WORK/tos2/tos2_test.go" <<'EOT'
+package tos2
+
+import (
+	"os"
+	"testing"
+	"time"
+)
+
+func TestInterruptedLeg19090(t *testing.T) {
+	if f := os.Getenv("TG19090_STARTED"); f != "" {
+		_ = os.WriteFile(f, nil, 0o644)
+	}
+	time.Sleep(30 * time.Second)
+}
+
+func TestSwapsTheVerdictPath19090(t *testing.T) {
+	_ = os.Remove(os.Getenv("TG19090_STATE_FILE"))
+	if p := os.Getenv("TG19090_VERDICT_PATH"); p != "" {
+		_ = os.Remove(p)
+		_ = os.Symlink("/dev/null", p)
+	}
+	time.Sleep(30 * time.Second)
+}
+EOT
+for leg in default watch; do
+	rm -f "$SW/started"
+	case $leg in
+	default) ( cd "$WORK/tos2" && TG19090_STARTED="$SW/started" bash "$here/go-test-json.sh" "" go -timeout 6s -run '^TestInterruptedLeg19090$' ./... >/dev/null 2>"$SW/int.err" ) & ;;
+	watch) ( cd "$WORK/tos2" && TG19090_STARTED="$SW/started" bash "$here/go-test-watch.sh" go test -timeout 6s -run '^TestInterruptedLeg19090$' ./... >/dev/null 2>"$SW/int.err" ) & ;;
+	esac
+	lpid=$!
+	i=0; while [ ! -e "$SW/started" ] && kill -0 "$lpid" 2>/dev/null && [ $i -lt 1200 ]; do sleep 0.1; i=$((i+1)); done
+	tg=$(pgrep -o -f 'testguard-run\.sh .*TestInterruptedLeg19090')
+	if [ -z "$tg" ]; then
+		bad "interrupted timeout leg, $leg: FIXTURE: no testguard-run process to interrupt"
+		wait "$lpid"
+		continue
+	fi
+	kill -TERM "$tg"
+	wait "$lpid"; irc=$?
+	check "interrupted timeout leg, $leg: a FAIL (1), not VOID (3)" "$irc" 1
+	grep -q "production-state check did not complete" "$SW/int.err" &&
+		ok "interrupted timeout leg, $leg: stderr says the check did not complete" ||
+		bad "interrupted timeout leg, $leg: no incomplete-check FAIL: $(tr '\n' ' ' < "$SW/int.err" | cut -c1-400)"
+done
+for leg in default side watch; do
+	reseed; : > "$SW/verdict"; : > "$SW/swap.json"
+	set -- XPF_TESTGUARD_STATE_VERDICT="$SW/verdict" TG19090_VERDICT_PATH="$SW/verdict" \
+		XPF_RESIDUE_EXTRA_STATE_PATHS="$SW/state" TG19090_STATE_FILE="$SW/state/xpf.sources"
+	case $leg in
+	default) ( cd "$WORK/tos2" && env "$@" bash "$here/go-test-json.sh" "" go -timeout 2s -run '^TestSwapsTheVerdictPath19090$' ./... >/dev/null 2>"$SW/swap.err" ); src=$? ;;
+	side) ( cd "$WORK/tos2" && env "$@" bash "$here/go-test-json.sh" "$SW/swap.json" go -timeout 2s -run '^TestSwapsTheVerdictPath19090$' ./... >/dev/null 2>"$SW/swap.err" ); src=$? ;;
+	watch) ( cd "$WORK/tos2" && env "$@" bash "$here/go-test-watch.sh" go test -timeout 2s -run '^TestSwapsTheVerdictPath19090$' ./... >/dev/null 2>"$SW/swap.err" ); src=$? ;;
+	esac
+	set --
+	check "swapped verdict path, $leg: timeout + state change is still a FAIL (1)" "$src" 1
+	grep -q "timed out AND changed production state" "$SW/swap.err" &&
+		ok "swapped verdict path, $leg: the state change is still read (through the descriptor opened first)" ||
+		bad "swapped verdict path, $leg: the state change was not read: $(tr '\n' ' ' < "$SW/swap.err" | cut -c1-400)"
+	rm -f "$SW/verdict"
+done
+rm -rf "$VD"
 rm -rf "$SW"
 
 printf '\ngo-test-json-selftest: passed=%d failed=%d\n' "$pass" "$fail"

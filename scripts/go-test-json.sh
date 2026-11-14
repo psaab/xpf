@@ -54,25 +54,41 @@ timeout_watch() { awk -f "$here/go-timeout-watch.awk"; }
 # #19090 R13-a: a leg that timed out AND changed production state on the host
 # is a FAIL (1), not VOID (3). The state change is real whatever the timeout,
 # and a rerun comes back clean because the files are already gone.
-# testguard-run.sh records a state change in $XPF_TESTGUARD_STATE_VERDICT; a
-# caller's own file is used as is (it reads the verdict too), otherwise this
-# wrapper makes one for the leg, just before the run: the usage and jq
-# refusals above the run must still be the errors a caller sees.
+# testguard-run.sh records its production-state verdict in
+# $XPF_TESTGUARD_STATE_VERDICT; a caller's own file is used as is (it reads the
+# verdict too), otherwise this wrapper makes one for the leg, just before the
+# run: the usage and jq refusals above the run must still be the errors a
+# caller sees. The verdict FAILS CLOSED (Codex on 37c57fe8ac): a timeout is
+# VOID only on an explicit clean verdict; an interrupted, missing or unreadable
+# one is a FAIL too. It is read through a descriptor opened before the run, so
+# a child that replaces the pathname changes nothing read here.
+. "$here/testguard-state-verdict.sh"
 ensure_state_verdict() {
-	[ -n "${XPF_TESTGUARD_STATE_VERDICT:-}" ] && return 0
-	own_state_verdict=$(mktemp "${TMPDIR:-/tmp}/go-test-json-state.XXXXXX") || {
-		echo "go-test-json.sh: cannot create the state verdict file; refusing to run a leg whose state change could be voided" >&2
+	if [ -z "${XPF_TESTGUARD_STATE_VERDICT:-}" ]; then
+		own_state_verdict=$(mktemp "${TMPDIR:-/tmp}/go-test-json-state.XXXXXX") || {
+			echo "go-test-json.sh: cannot create the state verdict file; refusing to run a leg whose state change could be voided" >&2
+			exit 2
+		}
+		export XPF_TESTGUARD_STATE_VERDICT=$own_state_verdict
+		trap 'rm -f "$own_state_verdict"' EXIT
+	fi
+	exec {state_rfd}<"$XPF_TESTGUARD_STATE_VERDICT" || {
+		echo "go-test-json.sh: cannot open the state verdict file $XPF_TESTGUARD_STATE_VERDICT; refusing to run a leg whose state change could be voided" >&2
 		exit 2
 	}
-	export XPF_TESTGUARD_STATE_VERDICT=$own_state_verdict
-	trap 'rm -f "$own_state_verdict"' EXIT
 }
 exit_void_unless_state_changed() {
-	if grep -qx 'state-changed' "$XPF_TESTGUARD_STATE_VERDICT" 2>/dev/null; then
+	case $(testguard_state_verdict "/proc/self/fd/$state_rfd") in
+	clean) exit 3 ;;
+	state-changed)
 		echo "go-test-json.sh: FAIL: the leg timed out AND changed production state on the host; that is a FAIL (1), not VOID (3) (#19090)" >&2
 		exit 1
-	fi
-	exit 3
+		;;
+	*)
+		echo "go-test-json.sh: FAIL: the leg timed out and its production-state check did not complete (interrupted, or no verdict recorded); that is a FAIL (1), not VOID (3) (#19090)" >&2
+		exit 1
+		;;
+	esac
 }
 
 if [ -z "$json" ]; then
@@ -81,7 +97,7 @@ if [ -z "$json" ]; then
 	# human-readable output at the command line; Go flags are valid after
 	# package arguments too.
 	ensure_state_verdict
-	"$here/testguard-run.sh" "$go_bin" test "$@" -json=false | timeout_watch
+	"$here/testguard-run.sh" "$go_bin" test "$@" -json=false {state_rfd}<&- | timeout_watch
 	rc=("${PIPESTATUS[@]}")
 	if [ "${rc[1]}" -eq 3 ]; then
 		exit_void_unless_state_changed
@@ -108,7 +124,7 @@ off=$(stat -c %s "$json" 2>/dev/null || echo 0)
 # failures on stderr as plain text, not as JSON events, so folding it into the
 # pipe would both corrupt the event stream and hide the message.
 ensure_state_verdict
-"$here/testguard-run.sh" "$go_bin" test -json "$@" | tee -a "$json" | jq -j 'select(.Output != null) | .Output'
+"$here/testguard-run.sh" "$go_bin" test -json "$@" {state_rfd}<&- | tee -a "$json" | jq -j 'select(.Output != null) | .Output'
 rc=("${PIPESTATUS[@]}")
 
 # rc[0] is the verdict. tee and jq are reported separately because a failure in

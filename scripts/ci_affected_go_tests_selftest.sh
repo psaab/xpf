@@ -351,6 +351,52 @@ case "$out" in
 esac
 git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
 
+# 4f-19090b. #19090 (Codex on 37c57fe8ac): the verdict FAILS CLOSED. A head
+#     run whose testguard-run.sh is interrupted (TERM) before its post-run
+#     check records "interrupted"; the differential must FAIL it as an
+#     incomplete check (exit 1), not read the missing verdict as clean.
+cat > "$tmp/clone/pkg/policymatch/zz_interrupted_19090_test.go" <<'EOF19090'
+package policymatch
+
+import (
+	"os"
+	"testing"
+	"time"
+)
+
+func TestInterruptedHead19090(t *testing.T) {
+	if p := os.Getenv("TG19090_STARTED"); p != "" {
+		_ = os.WriteFile(p, nil, 0o644)
+		time.Sleep(8 * time.Second)
+	}
+}
+EOF19090
+git -C "$tmp/clone" add pkg/policymatch/zz_interrupted_19090_test.go
+git -C "$tmp/clone" commit --quiet -m "selftest: a head run interrupted before its state check"
+interrupted_head=$(git -C "$tmp/clone" rev-parse HEAD)
+rm -f "$tmp/started19090"
+(cd "$tmp/clone" && TG19090_STARTED="$tmp/started19090" \
+  bash "$selector" --packages-file "$guard_packages" "$fixture_base" "$interrupted_head" >"$tmp/int19090.out" 2>&1) &
+ipid=$!
+i=0
+while [ ! -e "$tmp/started19090" ] && kill -0 "$ipid" 2>/dev/null && [ "$i" -lt 1800 ]; do sleep 0.1; i=$((i + 1)); done
+tg=$(pgrep -o -f 'testguard-run\.sh .*policymatch')
+if [ -z "$tg" ]; then
+  bad "R4b (#19090): FIXTURE: no head testguard-run process to interrupt"
+  wait "$ipid"
+else
+  kill -TERM "$tg"
+  wait "$ipid"; rc=$?
+  out=$(cat "$tmp/int19090.out")
+  case "$out" in
+    *"FAIL: host-state check incomplete: the head"*)
+      [ "$rc" -eq 1 ] && ok "R4b (#19090): a head run interrupted before its state check is an incomplete-check FAIL (exit 1)" ||
+        bad "R4b (#19090): named the incomplete check but exited $rc, want 1" ;;
+    *) bad "R4b (#19090): an interrupted head run was not an incomplete-check FAIL: rc=$rc out=$(printf '%s' "$out" | tail -5)" ;;
+  esac
+fi
+git -C "$tmp/clone" reset --quiet --hard "$fixture_base"
+
 # 4g. #16723 fold: the default two-SHA invocation (no --packages-file)
 #     keeps the strict pre-#16723 gate — the base differential must not
 #     run there. Same shape as the base-red canary above, but through the

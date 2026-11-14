@@ -442,41 +442,57 @@ func guardsChildSuccess19090(cond ast.Expr, outVars map[string]bool) bool {
 }
 
 // failsThisTest19090 reports whether a block fails the test whose *testing.T
-// is tName: tName.Fatal/Fatalf/FailNow/Error/Errorf, or
-// testguard.NetnsUnavailable(tName, ...).
+// is tName ON ITS OWN PATH: a statement of the block itself (or of a plain
+// nested block) calls tName.Fatal/Fatalf/FailNow/Error/Errorf or
+// testguard.NetnsUnavailable(tName, ...), before any statement that leaves
+// the block.
+//
+// #19090 (Codex D1 on 37c57fe8ac): a failure nested in a further condition is
+// not a failure on the missing-success path. `if !strings.Contains(out,
+// "PASSED") { if err != nil { t.Fatal(err) } }` passes a child that exited 0
+// without running, so it is not a witness; neither is a failure after a
+// return or a branch statement.
 func failsThisTest19090(b *ast.BlockStmt, tName string) bool {
-	if tName == "" {
+	if tName == "" || b == nil {
 		return false
 	}
-	found := false
-	ast.Inspect(b, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return !found
-		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
-		if !ok {
-			return !found
-		}
-		recv, ok := sel.X.(*ast.Ident)
-		if !ok {
-			return !found
-		}
-		switch sel.Sel.Name {
-		case "Fatal", "Fatalf", "FailNow", "Error", "Errorf":
-			if recv.Name == tName {
-				found = true
+	for _, st := range b.List {
+		switch x := st.(type) {
+		case *ast.ExprStmt:
+			if call, ok := x.X.(*ast.CallExpr); ok && failCall19090(call, tName) {
+				return true
 			}
-		case "NetnsUnavailable":
-			if recv.Name == "testguard" && len(call.Args) > 0 {
-				if a, ok := call.Args[0].(*ast.Ident); ok && a.Name == tName {
-					found = true
-				}
+		case *ast.BlockStmt:
+			if failsThisTest19090(x, tName) {
+				return true
 			}
+		case *ast.ReturnStmt, *ast.BranchStmt:
+			return false
 		}
-		return !found
-	})
-	return found
+	}
+	return false
+}
+
+// failCall19090 reports whether call fails the test whose *testing.T is tName.
+func failCall19090(call *ast.CallExpr, tName string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	recv, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	switch sel.Sel.Name {
+	case "Fatal", "Fatalf", "FailNow", "Error", "Errorf":
+		return recv.Name == tName
+	case "NetnsUnavailable":
+		if recv.Name == "testguard" && len(call.Args) > 0 {
+			a, ok := call.Args[0].(*ast.Ident)
+			return ok && a.Name == tName
+		}
+	}
+	return false
 }
 
 // unshareOptionViolations19066 finds user-namespace options by POSITION: in
@@ -487,13 +503,26 @@ func failsThisTest19090(b *ast.BlockStmt, tName string) bool {
 // testguard.UnshareFlags are allowed; a shell's "-c" after the program is not
 // an unshare option.
 func unshareOptionViolations19066(fn *ast.FuncDecl, unshareVars map[string]bool) []*ast.BasicLit {
-	local := map[string]ast.Expr{}
+	// A local slice is its defining expression plus every later
+	// `x = append(x, more...)`, in source order (#19090 Codex D2 on
+	// 37c57fe8ac): before, the last assignment alone stood for the variable.
+	local := map[string][]ast.Expr{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
-		if as, ok := n.(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 {
-			if id, ok := as.Lhs[0].(*ast.Ident); ok {
-				local[id.Name] = as.Rhs[0]
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		id, ok := as.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if call, ok := as.Rhs[0].(*ast.CallExpr); ok && isAppend19090(call) && len(call.Args) > 0 && len(local[id.Name]) > 0 {
+			if base, ok := call.Args[0].(*ast.Ident); ok && base.Name == id.Name {
+				local[id.Name] = append(local[id.Name], &ast.CompositeLit{Elts: call.Args[1:]})
+				return true
 			}
 		}
+		local[id.Name] = []ast.Expr{as.Rhs[0]}
 		return true
 	})
 	var out []*ast.BasicLit
@@ -521,66 +550,80 @@ func unshareOptionViolations19066(fn *ast.FuncDecl, unshareVars map[string]bool)
 		if at < 0 {
 			return true
 		}
-		program := false
-		operand := false
-		var walk func(e ast.Expr, depth int)
-		walk = func(e ast.Expr, depth int) {
-			if program || depth > 4 {
+		// #19090 (Codex D2 on 37c57fe8ac): EXPAND first, then consume. The
+		// arguments after the unshare path are flattened into the words
+		// unshare will see (composite literals, append arguments and spread
+		// slices, local slice variables), and only then walked as options and
+		// operands. Before, an option that takes an operand ("--propagation")
+		// consumed the whole next argument, so in
+		// append([]string{"--propagation"}, []string{"private", "-c", ...}...)
+		// the second slice, and the "-c" in it, was skipped as one operand.
+		var words []ast.Expr
+		var flatten func(e ast.Expr, depth int)
+		flatten = func(e ast.Expr, depth int) {
+			if depth > 8 {
+				words = append(words, e) // opaque: read as the program
 				return
 			}
-			// #19090 (Codex R2 on #19066): an option that takes a separate
-			// operand ("--propagation", "private") consumes the next word
-			// whatever it is; it is not the program, so the walk goes on.
-			if operand {
-				if _, ok := e.(*ast.CallExpr); !ok || !isAppend19090(e) {
-					operand = false
-					return
-				}
-			}
 			switch x := e.(type) {
-			case *ast.BasicLit:
-				v := strings.Trim(x.Value, "`\"")
-				if x.Kind != token.STRING || !strings.HasPrefix(v, "-") {
-					program = true
-					return
-				}
-				if unshareOptionTakesOperand19090(v) {
-					operand = true
-				}
-				// Spellings that are a user-namespace flag anywhere are
-				// already reported by the literal scan; position adds the
-				// standalone "-c", which only its place makes an unshare
-				// option.
-				if v == "-c" {
-					out = append(out, x)
+			case *ast.ParenExpr:
+				flatten(x.X, depth+1)
+			case *ast.CompositeLit:
+				for _, a := range x.Elts {
+					flatten(a, depth+1)
 				}
 			case *ast.CallExpr:
 				if s2, ok := x.Fun.(*ast.SelectorExpr); ok && s2.Sel.Name == "UnshareFlags" {
 					return // allowed: rewritten for uid 0
 				}
-				if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "append" {
+				if isAppend19090(x) {
 					for _, a := range x.Args {
-						walk(a, depth+1)
+						flatten(a, depth+1)
 					}
 					return
 				}
-				program = true
-			case *ast.CompositeLit:
-				for _, a := range x.Elts {
-					walk(a, depth+1)
-				}
+				words = append(words, e)
 			case *ast.Ident:
-				if rhs, ok := local[x.Name]; ok {
-					walk(rhs, depth+1)
+				if defs, ok := local[x.Name]; ok {
+					for _, d := range defs {
+						flatten(d, depth+1)
+					}
 					return
 				}
-				program = true
+				words = append(words, e)
 			default:
-				program = true
+				words = append(words, e)
 			}
 		}
 		for _, a := range call.Args[at+1:] {
-			walk(a, 0)
+			flatten(a, 0)
+		}
+		operand := false
+		for _, w := range words {
+			// An option that takes a separate operand ("--propagation",
+			// "private") consumes the next word whatever it is; it is not
+			// the program, so the walk goes on (Codex R2 on #19066).
+			if operand {
+				operand = false
+				continue
+			}
+			lit, ok := w.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				break // the program, or a word this census cannot read
+			}
+			v := strings.Trim(lit.Value, "`\"")
+			if !strings.HasPrefix(v, "-") || v == "--" {
+				break // the program, or the end of unshare's options
+			}
+			if unshareOptionTakesOperand19090(v) {
+				operand = true
+			}
+			// Spellings that are a user-namespace flag anywhere are already
+			// reported by the literal scan; position adds the standalone
+			// "-c", which only its place makes an unshare option.
+			if v == "-c" {
+				out = append(out, lit)
+			}
 		}
 		return true
 	})
@@ -823,6 +866,33 @@ func TestOperandBeforeC(t *testing.T) {
 	cmd := testguard.ReexecCommand(t, "unshare", "--propagation", "private", "-c", "-n", os.Args[0], "-test.v")
 	out, err := cmd.CombinedOutput()
 	testguard.RequireChildPass(t, "TestOperandBeforeC", out, err)
+}
+func TestNestedConditionalWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	out, err := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "child PASSED") { if err != nil { t.Fatal(err) } }
+}
+func TestFailAfterReturnWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	out, _ := cmd.CombinedOutput()
+	if !strings.Contains(string(out), "child PASSED") { return; t.Fatal("unreachable") }
+}
+func TestPlainBlockWitness(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append(testguard.UnshareFlags("-rn"), os.Args[0])...)
+	out, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(out), "child PASSED") { { t.Fatalf("child: %v", err) } }
+}
+func TestSpreadSliceOperand(t *testing.T) {
+	cmd := testguard.ReexecCommand(t, "unshare", append([]string{"--propagation"}, []string{"private", "-c", "-n", os.Args[0]}...)...)
+	out, err := cmd.CombinedOutput()
+	testguard.RequireChildPass(t, "TestSpreadSliceOperand", out, err)
+}
+func TestSelfAppendC(t *testing.T) {
+	args := []string{"--propagation", "private"}
+	args = append(args, "-c", "-n", os.Args[0])
+	cmd := testguard.ReexecCommand(t, "unshare", args...)
+	out, err := cmd.CombinedOutput()
+	testguard.RequireChildPass(t, "TestSelfAppendC", out, err)
 }`
 	fset := token.NewFileSet()
 	f, err := parser.ParseFile(fset, "fixture_test.go", src, 0)
@@ -865,6 +935,15 @@ func TestOperandBeforeC(t *testing.T) {
 		"TestOperandBeforeC passes the user-namespace option \"-c\"",
 		// #19090: --map-user implies --user.
 		"TestMapUserImpliesUserNS passes the user-namespace flag \"--map-user\"",
+		// #19090 (Codex D1 on 37c57fe8ac): a failure nested in a further
+		// condition, or after a return, is not on the missing-success path.
+		// A plain nested block is (TestPlainBlockWitness: no violation).
+		"TestNestedConditionalWitness judges its re-executed child without a child-success witness",
+		"TestFailAfterReturnWitness judges its re-executed child without a child-success witness",
+		// #19090 (Codex D2 on 37c57fe8ac): slices are expanded before an
+		// operand is consumed, and a local slice includes its self-appends.
+		"TestSpreadSliceOperand passes the user-namespace option \"-c\"",
+		"TestSelfAppendC passes the user-namespace option \"-c\"",
 		// TestWrapperSplitIsAKnownEscape: the helper has unshare but no
 		// os.Args, the parent the reverse, so neither is in scope. This is
 		// the documented limit (docs/testing.md); the row pins it so a

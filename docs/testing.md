@@ -281,13 +281,24 @@ reached only through `||` (`err != nil || !Contains(…)` qualifies;
 `err != nil && !Contains(…)` does not, because a zero-exit no-run child makes
 it false), and the body fails the test through its own `*testing.T`
 (`t.Fatal*`, `t.Error*`, `t.FailNow`, or `testguard.NetnsUnavailable(t, …)`)
-(#19090, Codex R1 on #19066); and a re-exec built with `exec.Command` instead
+(#19090, Codex R1 on #19066) ON ITS OWN PATH: a statement of the body itself,
+or of a plain nested block, before any `return` or branch. A failure nested
+in a further condition does not count (`if !Contains(…) { if err != nil {
+t.Fatal(err) } }` passes a zero-exit no-run child; Codex D1 on 37c57fe8ac);
+and a re-exec built with `exec.Command` instead
 of `ReexecCommand`. A standalone `-c` is caught by its position among
 unshare's options (before the program), so a shell's `-c` after the program
 is not mistaken for one; an option that takes a separate operand
 (`--propagation private`, `--setgroups deny`, `--map-user 0`, …) consumes it
 and the walk goes on, so the `-c` after the operand is still an option
-(#19090, Codex R2). The `--map-user`/`--map-group(s)`/`--map-users`/
+(#19090, Codex R2). The arguments are EXPANDED into the words unshare will
+see before any operand is consumed: composite literals, `append` arguments
+and spread slices, and local slice variables together with their later
+`x = append(x, …)` self-appends. So
+`append([]string{"--propagation"}, []string{"private", "-c", …}...)` no
+longer hides its `-c` inside a slice consumed whole as one operand (Codex D2
+on 37c57fe8ac). A slice built in another function, or passed in as a
+parameter, is opaque: the walk reads it as the program and stops. The `--map-user`/`--map-group(s)`/`--map-users`/
 `--map-auto` options imply `--user` and count as user-namespace flags. It
 also fails on a package-level value holding a user-namespace flag, or an
 option-only list (option operands included) holding `-c`. Its
@@ -322,18 +333,40 @@ read 3 as VOID (a timeout), which would turn a host mutation into
 rest of the residue report stays report-only.
 
 Three consumers read that FAIL apart from the exit status (#19090).
-`testguard-run.sh` appends `state-changed` to the file named in
-`XPF_TESTGUARD_STATE_VERDICT`. It consumes the variable, so a nested run
-records into its own caller's file only.
+`testguard-run.sh` appends ONE completed verdict per run to the file named in
+`XPF_TESTGUARD_STATE_VERDICT`:
+
+| verdict | meaning |
+|---|---|
+| `clean` | the post-run check ran and found no change |
+| `state-changed` | it found a change (the run also exits 1) |
+| `not-run` | the run stopped before the command started (a refusal) |
+| `interrupted` | the command started and the check never completed: HUP, INT or TERM (exit 129/130/143), or a failure in the check itself |
+
+The verdict FAILS CLOSED (Codex on 37c57fe8ac). The one reader,
+`scripts/testguard-state-verdict.sh`, reads only `clean` and `not-run` as
+clean. Every other content is an incomplete check, never clean: no file, an
+unreadable or empty file, an `interrupted` line, an unknown line.
+`testguard-run.sh` consumes the variable, so a nested run records into its own
+caller's file only. It writes through a descriptor it opened before the
+command and that the command does not inherit, and every reader reads through
+a descriptor it opened before the run. A child that replaces the pathname,
+with a `/dev/null` symlink say, therefore diverts neither the write nor the
+read. Limit: this is accidental-write protection, not tamper-proofing. A
+process that survives the command and rewrites the open file after the
+verdict is written could still forge it.
 - `go-test-json.sh` and `go-test-watch.sh` read it before VOIDing a
-  timeout. A leg that timed out AND changed production state exits 1, not
-  3, because the state change is real whatever the timeout, and a rerun
-  comes back clean (R13-a on #19066).
+  timeout. A timeout is VOID (3) only on an explicit clean verdict. A leg
+  that timed out AND changed production state exits 1, because the state
+  change is real whatever the timeout, and a rerun comes back clean (R13-a
+  on #19066). A leg that timed out with an incomplete check also exits 1:
+  "the production-state check did not complete".
 - The CI differential (`scripts/ci_affected_go_tests.sh --packages-file`)
   reads it right after each run, before any baseline comparison. Exit 1
   means an attributable package failure there, so a residue-only run read
   as VOID, and a state change beside a base-red package was waived. It is
-  now `FAIL: host-state contamination` (exit 1) in both cases (Codex R4).
+  now `FAIL: host-state contamination` (exit 1) in both cases (Codex R4),
+  and an incomplete check is `FAIL: host-state check incomplete` (exit 1).
 - Every harness diagnostic, the residue report included, goes to STDERR.
   stdout is the command's own stream, and on `go-test-json.sh`'s side-file
   path it is the `go test -json` event stream. The report used to land

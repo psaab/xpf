@@ -8,6 +8,66 @@ if (($# == 0)); then
 	echo "usage: testguard-run.sh command [args...]" >&2
 	exit 2
 fi
+# #19090 R13-a/R4: a caller that names a file in XPF_TESTGUARD_STATE_VERDICT
+# learns what this run's production-state check concluded, apart from the
+# exit status (which a timeout VOID or a baseline comparison would otherwise
+# reinterpret). The verdict FAILS CLOSED (Codex on 37c57fe8ac): every run
+# appends exactly one line,
+#   clean          the post-run check ran and found no change;
+#   state-changed  it found a change (and the run exits 1);
+#   not-run        the run stopped before the command started (a refusal);
+#   interrupted    the command started and the check never completed (HUP,
+#                  INT or TERM, or a failure in the check itself),
+# and a reader (scripts/testguard-state-verdict.sh) reads only clean and
+# not-run as clean; anything else, no line included, is an incomplete check.
+# The file is opened HERE and written through that descriptor, which the
+# command does not inherit: a child that replaces the pathname (a /dev/null
+# symlink) cannot redirect the write. The variable is consumed here and NOT
+# passed to the command, so a nested testguard-run.sh records into its own
+# caller's file, never this one's.
+state_verdict=${XPF_TESTGUARD_STATE_VERDICT:-}
+unset XPF_TESTGUARD_STATE_VERDICT
+verdict_fd=
+if [[ -n $state_verdict ]]; then
+	exec {verdict_fd}>>"$state_verdict" || {
+		echo "testguard-run: REFUSED: cannot open the state verdict file $state_verdict (#19090)" >&2
+		exit 2
+	}
+fi
+verdict_phase=setup # setup -> running -> recorded
+work=
+record_verdict() { # clean | state-changed | not-run | interrupted
+	[[ $verdict_phase == recorded ]] && return 0
+	verdict_phase=recorded
+	[[ -n $verdict_fd ]] || return 0
+	printf '%s\n' "$1" 1>&"$verdict_fd" 2>/dev/null ||
+		echo "testguard-run: could not record the state verdict '$1'; the caller reads the missing line as an incomplete check (#19090)" >&2
+}
+on_exit() {
+	case $verdict_phase in
+	setup) record_verdict not-run ;;
+	running) record_verdict interrupted ;;
+	esac
+	[[ -z $work ]] || rm -rf "$work"
+}
+on_signal() { # $1: exit status
+	[[ $verdict_phase == running ]] &&
+		echo "testguard-run: interrupted before the production-state check completed; the state verdict is 'interrupted' (#19090)" >&2
+	exit "$1"
+}
+trap on_exit EXIT
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
+# The command runs without the verdict descriptor.
+launch() {
+	if [[ -n $verdict_fd ]]; then
+		"$@" {verdict_fd}>&-
+	else
+		"$@"
+	fi
+}
+
 root=$(cd "$(dirname "$0")/.." && pwd)
 shim_dir="$root/test/support/host-bin-shims"
 real_path=
@@ -40,16 +100,6 @@ cwd=$(pwd -P 2>/dev/null) || cwd=
 # skipping. Before this, 10 re-exec cells skipped as "netns unavailable" on
 # every run while the package guard was refusing their child.
 export XPF_REQUIRE_NETNS=1
-# #19090 R13-a/R4: a caller that names a file in XPF_TESTGUARD_STATE_VERDICT
-# learns whether this run changed production state, independently of the exit
-# status (which a timeout VOID or a baseline comparison would otherwise
-# reinterpret). One line "state-changed" is appended when the state check
-# below fails. The variable is consumed here and NOT passed to the command, so
-# a nested testguard-run.sh records into its own caller's file, never this
-# one's.
-state_verdict=${XPF_TESTGUARD_STATE_VERDICT:-}
-unset XPF_TESTGUARD_STATE_VERDICT
-
 command=$1
 shift
 if [[ "$command" == go || "$command" == "$shim_dir/go" ]]; then
@@ -98,8 +148,6 @@ if [[ $euid == 0 ]]; then
 fi
 mkdir -p "$scratch"
 work=$(mktemp -d "$scratch/testguard-run.XXXXXX")
-cleanup() { rm -rf "$work"; }
-trap cleanup EXIT
 "$root/scripts/host-residue-snapshot.sh" "$work/before.txt"
 set +e
 proof=/run/xpf-testguard-vm-boot-id
@@ -240,12 +288,14 @@ if [[ $euid == 0 && -n "$current_boot" && "$proof_boot" == "$current_boot" ]]; t
 	# The VM proof permits the privileged lane to retain its VM capabilities
 	# (for BPF/memlock tests); namespace identity is still independently
 	# checked by testguard in the child.
-	XPF_SACRIFICIAL_HOST=1 "${cover[@]}" \
+	verdict_phase=running
+	launch env XPF_SACRIFICIAL_HOST=1 "${cover[@]}" \
 		unshare -pf --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner_cmd" "$@"
 else
 	# A caller-supplied intent sentinel is not proof; do not propagate it on
 	# the workstation path.
-	env -u XPF_SACRIFICIAL_HOST "${cover[@]}" \
+	verdict_phase=running
+	launch env -u XPF_SACRIFICIAL_HOST "${cover[@]}" \
 		unshare -Urp --fork --mount-proc sh -c '(unshare -nm sh -c "$0" testguard-run "$@")' "$inner_cmd" "$@"
 fi
 rc=$?
@@ -280,8 +330,8 @@ if ! cmp -s <(state_sections "$work/before.txt") <(state_sections "$work/after.t
 	echo "testguard-run: FAIL: the run changed production state paths on the host (no cleanup performed):" >&2
 	diff -u <(state_sections "$work/before.txt") <(state_sections "$work/after.txt") >&2 || true
 	[[ "$rc" -eq 0 ]] && rc=1
-	if [[ -n $state_verdict ]] && ! printf 'state-changed\n' >>"$state_verdict"; then
-		echo "testguard-run: could not record the state change in $state_verdict; the caller cannot see it apart from the exit status" >&2
-	fi
+	record_verdict state-changed
+else
+	record_verdict clean
 fi
 exit "$rc"

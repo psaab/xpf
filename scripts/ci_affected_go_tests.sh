@@ -389,6 +389,11 @@ head_log=$(mktemp "$TMPDIR/affected-go-head.XXXXXX")
 # would otherwise be waived as BASELINE-RED.
 head_state=$(mktemp "$TMPDIR/affected-go-head-state.XXXXXX")
 base_state=$(mktemp "$TMPDIR/affected-go-base-state.XXXXXX")
+# Read through descriptors opened now, before either run, so a child that
+# replaces a pathname changes nothing read here (#19090). The verdict FAILS
+# CLOSED: only an explicit clean (or not-run) verdict passes.
+exec 7<"$head_state" 8<"$base_state"
+. "$script_dir/testguard-state-verdict.sh"
 base_log=
 base_tree=
 cleanup_base_tree() {
@@ -431,16 +436,26 @@ run_logged_tests() {
     log=$2
     shift 2
     bash "$runner" "" "$@" 2>&1 | tee "$log"
-  ' affected-go-tests "$runner" "$log" "$@"
+  ' affected-go-tests "$runner" "$log" "$@" 7<&- 8<&-
 }
 # A production-state change is a FAIL whatever the package results: it is
-# never VOID and never waived by a base-red package (#19090 R4).
-fail_on_host_state() { # <state-file> <side> <rev>
-  if grep -qx 'state-changed' "$1" 2>/dev/null; then
+# never VOID and never waived by a base-red package (#19090 R4). So is a check
+# that did not complete: an interrupted run, or no verdict at all, says
+# nothing about the host, and a baseline comparison must not waive it either.
+fail_on_host_state() { # <state-fd-path> <side> <rev>
+  case $(testguard_state_verdict "$1") in
+  clean) ;;
+  state-changed)
     printf 'FAIL: host-state contamination: the %s %s run changed production state paths on the host (testguard-run diff above); a baseline comparison cannot waive it\n' \
       "$2" "$3" >&2
     exit 1
-  fi
+    ;;
+  *)
+    printf 'FAIL: host-state check incomplete: the %s %s run recorded no completed production-state verdict (interrupted, or none recorded); a baseline comparison cannot waive it\n' \
+      "$2" "$3" >&2
+    exit 1
+    ;;
+  esac
 }
 
 set -- $PKGS
@@ -451,7 +466,7 @@ if run_logged_tests "$test_runner" "$head_log" "$head_state" go -count=1 "$@"; t
 else
   head_rc=$?
 fi
-fail_on_host_state "$head_state" head "$HEAD"
+fail_on_host_state /proc/self/fd/7 head "$HEAD"
 if [ "$head_rc" -eq 0 ]; then
   exit 0
 fi
@@ -505,7 +520,7 @@ if (cd "$base_tree" && run_logged_tests "$test_runner" "$base_log" \
 else
   base_rc=$?
 fi
-fail_on_host_state "$base_state" base "$BASE"
+fail_on_host_state /proc/self/fd/8 base "$BASE"
 if [ "$base_rc" -eq 3 ]; then
   printf 'VOID: base Go package tests timed out at %s\n' "$BASE" >&2
   exit 3
