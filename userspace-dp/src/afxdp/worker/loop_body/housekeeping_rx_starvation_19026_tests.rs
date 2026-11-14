@@ -640,6 +640,12 @@ fn export_slice_leaves_a_blocked_head_to_housekeeping_19026() {
 /// later tick. Without the peek it consumed the latch, re-drained the blocked
 /// ring, failed, re-armed the latch and skipped the rest of the tick, on every
 /// tick of the block.
+///
+/// This pins the gate's CODE, not a loop property (#19063, R21 F1): the loop
+/// never runs delta recovery after a held tick, and a tick that polls RX
+/// clears the head bit, so in production the gate is defensive only. The
+/// production order is pinned by
+/// `blocked_drain_first_keeps_the_owed_resume_slot_19063` (loop_body/tests.rs).
 #[test]
 fn delta_recovery_leaves_a_blocked_head_to_housekeeping_19026() {
     let mut h = Harness19026::new();

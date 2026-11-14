@@ -279,11 +279,17 @@ pub(super) fn run_delta_recovery(
     // retry by `LOSS_RESYNC_RETRY_INTERVAL_NS` (`loss_resync_ready`), so a
     // stalled consumer is probed at a bounded rate rather than every loop
     // iteration; the latch stays armed meanwhile.
-    // #19026 (R13 F2): while the ring's head Close is blocked on its tuple
-    // permit the drain-first below cannot complete; leave the latch armed for
-    // the tick after housekeeping parks or retires it instead of failing here
-    // and skipping the rest of every tick. Both gates only DEFER: neither
-    // consumes the latch, and `take_delta_loss` (which does) stays last.
+    // #19026 (R13 F2): while the ring's head Close is marked blocked on its
+    // tuple permit the drain-first below cannot complete, so the latch is left
+    // armed instead of consumed. Both gates only DEFER: neither consumes the
+    // latch, and `take_delta_loss` (which does) stays last.
+    // #19063 (R21 F1 on 28b7bf2ebf): the blocked-head gate is DEFENSIVE ONLY.
+    // In the worker loop it never sees the bit set: every `false` return of
+    // `run_session_housekeeping` ends in `ClosePermitBarrier::clear`, which
+    // resets it, and a held tick `continue`s before this slice runs. So a
+    // Close that RX queued behind a held permit is met by the drain-first
+    // below, which fails and re-arms the resync, keeping its #18780 resume
+    // slot (`rearm_loss_resync_after_blocked_drain`).
     if worker_export_is_none
         && sessions.loss_resync_ready(loop_now_ns)
         && !super::close_barrier::front_close_still_blocked(sessions)
@@ -310,7 +316,10 @@ pub(super) fn run_delta_recovery(
             worker_lossless_wedged,
             flush_deltas,
         ) {
-            sessions.set_delta_loss();
+            // #19063 (R21 F1): a blocked drain loses no delta, so this is not
+            // a fresh loss episode; the owed retry keeps its resume slot and
+            // its zero-wait probe (see the gate comment above).
+            sessions.rearm_loss_resync_after_blocked_drain();
             return true;
         }
         // (#18780: `begin_loss_resync_export` inside starts the refusal flag

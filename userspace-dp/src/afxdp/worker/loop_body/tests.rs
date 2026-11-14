@@ -3392,6 +3392,19 @@ mod expiry_resync_lossless_wait_18780_tests {
         now_ns: u64,
         event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
     ) -> Resync {
+        let (skipped, resync) = run_resync_raw(sessions, bindings, now_ns, event_stream);
+        assert!(!skipped, "premise: no deferred cleanup");
+        resync
+    }
+
+    /// `run_resync` without its premise: also returns whether the slice asked
+    /// the loop to skip the rest of the tick (#19063).
+    fn run_resync_raw(
+        sessions: &mut SessionTable,
+        bindings: &mut [BindingWorker],
+        now_ns: u64,
+        event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
+    ) -> (bool, Resync) {
         let forwarding = ForwardingState::default();
         let shared = Arc::new(Mutex::new(FastMap::default()));
         let shared_nat = Arc::new(Mutex::new(FastMap::default()));
@@ -3456,12 +3469,92 @@ mod expiry_resync_lossless_wait_18780_tests {
             &mut worker_lossless_wedged,
             &mut flush_deltas,
         );
-        assert!(!skipped, "premise: no deferred cleanup");
         let after = crate::afxdp::session_delta::LOSSLESS_FAILURES_18780.with(|c| c.get());
-        Resync {
-            incremental_waits: after.0 - before.0,
-            bulk_waits: after.1 - before.1,
-        }
+        (
+            skipped,
+            Resync {
+                incremental_waits: after.0 - before.0,
+                bulk_waits: after.1 - before.1,
+            },
+        )
+    }
+
+    /// One iteration's `run_session_housekeeping` alone, flushing through
+    /// `flush_session_deltas_loop` as `run_iteration` does. Returns whether it
+    /// asked the loop to skip RX (#19063).
+    fn run_housekeeping_only(
+        sessions: &mut SessionTable,
+        now_ns: u64,
+        event_stream: &Option<crate::event_stream::EventStreamWorkerHandle>,
+    ) -> bool {
+        let forwarding = ForwardingState::default();
+        let shared = Arc::new(Mutex::new(FastMap::default()));
+        let shared_nat = Arc::new(Mutex::new(FastMap::default()));
+        let shared_wire = Arc::new(Mutex::new(FastMap::default()));
+        let indexes = SharedSessionOwnerRgIndexes::default();
+        let recent = Arc::new(Mutex::new(VecDeque::new()));
+        let channel = crate::afxdp::types::RuntimeViewChannel::default();
+        let reader = channel.reader();
+        let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
+        let lookup = WorkerBindingLookup::default();
+        let commands = crate::afxdp::empty_worker_commands_by_id();
+        let pptp_control = crate::session::pptp_control::PptpControlInbox::default();
+        let mut worker_lossless_wedged = false;
+        let mut worker_bulk_lossless_wedged = false;
+        let mut flush_deltas = |sessions: &mut SessionTable,
+                                bindings: &mut [BindingWorker],
+                                wedged: &mut bool,
+                                deltas: &[SessionDelta]| {
+            flush_session_deltas_loop(
+                sessions,
+                bindings,
+                SteeringMap::unshared_for_test(-1),
+                -1,
+                -1,
+                &shared,
+                &shared_nat,
+                &shared_wire,
+                &indexes,
+                &recent,
+                &[],
+                commands,
+                event_stream,
+                &forwarding,
+                &reader,
+                wedged,
+                &mut worker_bulk_lossless_wedged,
+                WORKER,
+                deltas,
+            );
+        };
+        run_session_housekeeping(
+            sessions,
+            &mut [],
+            &lookup,
+            &forwarding,
+            &BTreeMap::new(),
+            now_ns,
+            now_ns / SEC,
+            &rg_epochs,
+            SteeringMap::unshared_for_test(-1),
+            -1,
+            -1,
+            WORKER,
+            commands,
+            &pptp_control,
+            None,
+            &[],
+            &shared,
+            &shared_nat,
+            &shared_wire,
+            &indexes,
+            &reader,
+            &mut worker_lossless_wedged,
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut Default::default(),
+            &mut flush_deltas,
+        )
     }
 
     /// The EXACT session-open payload (wire bytes after the per-send header)
@@ -3798,6 +3891,109 @@ mod expiry_resync_lossless_wait_18780_tests {
             received_open_payloads(&again).contains_key(&first_row),
             "#18780: after a fresh loss the resync must restart at slot 0, not resume after the \
              previously delivered prefix"
+        );
+    }
+
+    /// #19063 (R21 F1 on 28b7bf2ebf): an owed resync whose drain-first meets
+    /// a Close blocked on its tuple permit keeps its #18780 resume slot.
+    ///
+    /// PRODUCTION loop order: housekeeping (it polls RX, so it leaves the
+    /// close-head bit clear), then RX (which queues a Close for a tuple whose
+    /// install permit another worker holds), then `run_delta_recovery`. The
+    /// recovery's blocked-head gate never sees the bit, so the owed retry
+    /// takes the latch and its drain-first fails on the Close. That failure
+    /// loses no delta. RED at 28b7bf2ebf: `set_delta_loss` treated it as a
+    /// fresh loss episode and dropped the resume slot (R21's probe cell read
+    /// `resume=None`), so the retry after the block re-exported from slot 0,
+    /// re-sending the prefix the consumer already had, without its zero-wait
+    /// probe. The #19026 cell `delta_recovery_leaves_a_blocked_head_to_
+    /// housekeeping_19026` reaches the gate only by running delta recovery
+    /// after a held tick, which the loop never does.
+    #[test]
+    fn blocked_drain_first_keeps_the_owed_resume_slot_19063() {
+        let t0 = 1_000 * SEC;
+        let owned = 300u32;
+        let mut sessions = SessionTable::new();
+        for i in 0..owned {
+            install_pair(&mut sessions, i, t0);
+        }
+        let _ = sessions.drain_deltas(usize::MAX);
+        let first_row = {
+            let owner_rgs = sessions.all_owner_rg_ids();
+            let (key, decision, metadata, origin) =
+                crate::afxdp::forward_export_candidates_for_owner_rgs(&sessions, &owner_rgs, u64::MAX)
+                    .into_iter()
+                    .next()
+                    .expect("an owned row");
+            sessions.emit_open_delta_with_origin(key, decision, metadata, origin, true);
+            open_payload(&sessions.drain_deltas(1)[0])
+        };
+        sessions.set_delta_loss();
+        let (handle, rx) = crate::event_stream::test_worker_handle_connected(
+            64,
+            crate::event_stream::DataplaneEventRateLimitConfig::default(),
+        );
+        let event_stream = Some(handle);
+        let mut bindings = vec![BindingWorker::new_for_mirror_test(0, WORKER, 24, 0)];
+        let mut now = t0 + 10 * SEC;
+        let first = run_resync(&mut sessions, &mut bindings, now, &event_stream);
+        assert_eq!(first.bulk_waits, 1, "premise: the first export stalls after a prefix");
+        let mut frames = Vec::new();
+        take_frames(&rx, &mut frames);
+        assert!(
+            received_open_payloads(&frames).contains_key(&first_row),
+            "premise: the first row was in the delivered prefix"
+        );
+        assert!(sessions.delta_loss_pending(), "premise: refused and owed");
+        let resume = sessions.loss_resync_resume_slot_for_test();
+        assert!(resume.is_some(), "premise: the refused export recorded where to resume");
+
+        // Past the retry deferral. Housekeeping runs first and polls RX.
+        now += 20 * 1_000_000;
+        assert!(
+            !run_housekeeping_only(&mut sessions, now, &event_stream),
+            "premise: housekeeping polls RX"
+        );
+        // During RX, a Close is queued for a tuple whose permit is held.
+        let stuck = key(owned + 19_063);
+        let held = crate::afxdp::bpf_map::global_tuple_gate()
+            .try_acquire_installs([stuck.clone()])
+            .expect("hold the stuck tuple");
+        sessions.emit_close_delta_with_origin(
+            stuck,
+            decision(),
+            metadata(false),
+            crate::session::SessionOrigin::ForwardFlow,
+            false,
+            0x1906_3001,
+        );
+        assert!(
+            !sessions.close_head_blocked(),
+            "premise: in production order nothing marked the head before delta recovery"
+        );
+        let (skipped, blocked) = run_resync_raw(&mut sessions, &mut bindings, now, &event_stream);
+        assert!(skipped, "premise: the drain-first met the blocked Close");
+        assert_eq!(blocked.bulk_waits, 0, "premise: no export ran");
+        assert!(sessions.delta_loss_pending(), "the resync stays owed");
+        assert_eq!(
+            sessions.loss_resync_resume_slot_for_test(),
+            resume,
+            "#19063 (R21 F1): a blocked drain-first dropped the #18780 resume slot, so the next \
+             owed retry restarts at slot 0 without its zero-wait probe"
+        );
+
+        // The permit frees and the consumer reads again.
+        drop(held);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = spawn_reader(rx, stop.clone());
+        run_until_delivered(&mut sessions, &mut bindings, now, &event_stream);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let again = received_open_payloads(&reader.join().expect("reader thread"));
+        assert!(!again.is_empty(), "premise: the owed suffix was delivered");
+        assert!(
+            !again.contains_key(&first_row),
+            "#19063 (R21 F1): after the block cleared, the owed retry re-sent the prefix the \
+             consumer already had (a full re-export from slot 0)"
         );
     }
 

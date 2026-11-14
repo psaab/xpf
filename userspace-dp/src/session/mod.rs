@@ -7802,6 +7802,23 @@ impl SessionTable {
         self.note_fresh_delta_loss();
     }
 
+    /// #19063 (R21 F1 on 28b7bf2ebf): re-arm an owed resync whose drain-first
+    /// could not complete because a Close in the ring is blocked on its tuple
+    /// permit (`drain_and_flush_all_impl` returned false). That attempt lost
+    /// nothing: the blocked deltas are back in the ring in order, and a delta
+    /// that WAS dropped meanwhile already recorded its own fresh loss
+    /// (`requeue_deltas_front` and a failed flush both go through
+    /// `note_fresh_delta_loss`, which clears the resume point). So only the
+    /// latch is re-armed. The #18780 resume slot, and with it the owed
+    /// retry's zero-wait probe (`probing = resume.is_some()`), survives.
+    /// Before, `set_delta_loss` treated the blocked drain as a fresh episode
+    /// and dropped the slot, so the next owed retry re-exported from slot 0
+    /// and waited a full budget against a consumer that was still stalled.
+    #[inline]
+    pub fn rearm_loss_resync_after_blocked_drain(&mut self) {
+        self.delta_loss_pending = true;
+    }
+
     /// #18780: a FRESH loss episode — a delta the peer never saw, from any
     /// source but this resync's own refusal. The peer's view may now be wrong
     /// anywhere, including rows an interrupted export already delivered, so
@@ -7910,6 +7927,13 @@ impl SessionTable {
     #[cfg(test)]
     pub fn delta_loss_pending(&self) -> bool {
         self.delta_loss_pending
+    }
+
+    /// #19063 (R21 F1): the #18780 resume slot an owed retry will start from
+    /// (tests).
+    #[cfg(test)]
+    pub fn loss_resync_resume_slot_for_test(&self) -> Option<usize> {
+        self.loss_resync_resume_slot
     }
 
     /// #2442: cumulative count of deltas dropped on ring overflow. Surfaced for
