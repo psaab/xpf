@@ -242,12 +242,17 @@ pub(super) fn run_session_housekeeping(
     // before polling another packet. Otherwise a lookup can miss the
     // removed local row, rematerialize the still-published shared copy,
     // and forward one more packet on an expired session.
-    // #10309: every row THIS call expired has its Close queued in THIS call,
-    // and retired in it unless the bounded barrier parks it behind a held
-    // tuple permit (#19026, below; that window is the stated #10419 residual
-    // for parked tuples, `close_barrier.rs`). A full ring may have accepted
-    // the first Close deltas and returned the suffix that did not fit on
-    // their `ExpiredSession` records. Drain the
+    // #10309: every row THIS call expired has its Close queued in THIS call.
+    // It is also retired in this call, with two #19026 exceptions (below;
+    // both are the stated #10419 residual, `close_barrier.rs` and
+    // `afxdp/worker/README.md`):
+    //   - the bounded barrier parks it behind a held tuple permit;
+    //   - the pass spends its parking budget (`CLOSE_PARK_PASS_BUDGET`)
+    //     first. That returns with deltas still in the ring, including
+    //     Closes whose permits are FREE, and defers the overflow suffix.
+    // Either way, those Closes wait across the RX poll.
+    // A full ring may have accepted the first Close deltas and returned the
+    // suffix that did not fit on their `ExpiredSession` records. Drain the
     // pre-existing ring first (preserving Open -> Close order), then
     // flush the returned suffix in fixed-size chunks before processing
     // another packet or control event. No shared entry can remain
@@ -259,9 +264,14 @@ pub(super) fn run_session_housekeeping(
     // (`SessionExpiryProbe::IdleCrossed`), exactly as between two 1 s GC
     // ticks; what must hold per call is the close of what it reaped. The
     // cut is pair-atomic (`cut_pair_companions`, R7 F1): a reverse half it
-    // reaped has its forward reaped and its Close queued in the same call, so
-    // the #10419 contract above (with its #19026 parking exception) holds for
-    // the reverse's shared copy too. (A pair
+    // reaped has its forward CLASSIFIED in the same call, by the same
+    // classification an uncut walk runs. Classification is the guarantee, not
+    // an unconditional reap. An owed `SharedPromote` forward can hit the
+    // restore fence and return `KeepAlive` or `Defer` (`session/expire.rs`,
+    // `promote_fence_step`), exactly as in wheel order, and is then neither
+    // reaped nor Closed. A forward the classification does reap has its Close
+    // queued in the same call, so the #10419 contract above (with its #19026
+    // exceptions) holds for the reverse's shared copy too. (A pair
     // whose halves are due in DIFFERENT ticks can still straddle two passes,
     // as before #18780: #19037.)
     // #19026 (cycle 2, Codex R15 P1#3 / R13 N2): an earlier tick's deferred

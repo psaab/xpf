@@ -829,10 +829,13 @@ The rest of the contract:
   rows with separate hints, in arbitrary order inside a bucket.
   - A reverse row owes no Close. Its shared copy and steering rows are
     retired by the FORWARD's Close (`afxdp/session_delta.rs`), which
-    housekeeping flushes before the worker polls another packet (#10419),
-    unless the bounded close-permit barrier parks that Close behind a held
-    tuple permit; the #10419 window for parked tuples is a stated residual
-    (#19026, `afxdp/worker/README.md`).
+    housekeeping flushes before the worker polls another packet (#10419).
+    There are two #19026 exceptions: the bounded close-permit barrier parks
+    that Close behind a held tuple permit, or the pass spends its parking
+    budget first. The second leaves the Close, permit free or not, in the
+    ring or in the deferred overflow suffix. Either way it waits across the
+    RX poll. That #10419 window is a stated residual
+    (`afxdp/worker/README.md`).
   - A cut between the two hints would leave the reverse reaped while the
     forward waits, crossed and un-Closed, for the next call. A reply would
     then miss the reverse as `Absent` (not `IdleCrossed`) and resolve
@@ -842,6 +845,10 @@ The rest of the contract:
     in this pass (`cut_pair_companions`, `WheelPopStats::pair_completions`;
     `budget_cut_never_splits_a_due_pair_18780`). The companion's hint stays
     queued and later drops as gone or stale.
+  - What the cut guarantees is CLASSIFICATION, not a reap. An owed
+    `SharedPromote` forward companion can reach the restore fence
+    (`promote_fence_step`) and come back `KeepAlive` or `Defer`, exactly as
+    in wheel order. It is then neither reaped nor Closed in this call.
   - A companion due in a LATER tick is not completed, because one unbudgeted
     pass would not have visited it either. A pair whose halves' deadlines
     fall in different ticks can therefore still be split for up to one GC
