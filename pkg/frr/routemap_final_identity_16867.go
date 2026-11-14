@@ -223,6 +223,13 @@ func beltRouteMapIdentities16867(fc *FullConfig) []beltRouteMapIdentity16867 {
 	}
 	if fc.ClusterMode {
 		add("generated cluster Null0 guard", clusterNull0DenyRouteMap15158)
+		// #19083: both static-NHT maps are emitted whenever ClusterMode is;
+		// an operator map that renders to either final name would merge
+		// into the NHT filter (the strict commit refuses the suffix; the
+		// tolerant / peer-sync path only warns, so this belt refuses the
+		// apply before any write).
+		add("generated cluster static NHT guard", clusterStaticNHTRouteMap19083)
+		add("generated cluster static NHT guard", clusterStaticNHTRouteMapAlt19083)
 	}
 	return out
 }

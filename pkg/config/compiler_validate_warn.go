@@ -1850,6 +1850,9 @@ func validateConfig(cfg *Config, includeJunosHostWarnings bool) []string {
 	warnings = append(warnings, validateUnhandledRibWarnings(cfg)...)
 	warnings = append(warnings, validateGenerateRoutePolicyWarnings(cfg)...)
 	warnings = append(warnings, validateGenerateRouteDiscardWarnings(cfg)...)
+	// #19083: a static anchored only on a configured blackhole stops being
+	// installed in a chassis cluster; name the pattern and its migration.
+	warnings = append(warnings, validateStaticDiscardAnchorWarnings19083(cfg)...)
 
 	// #1387: DHCP dynamic-DNS live-backend validation. Increment 2 wired the
 	// live RFC 2136 backend, so the increment-1 "no records are published"

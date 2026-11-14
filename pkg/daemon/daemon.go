@@ -1880,6 +1880,9 @@ type Daemon struct {
 	// VIP presence/removal idempotently every pass.
 	directVIPMu    sync.Mutex
 	directVIPOwned map[int]bool
+	// frrStaticNHTReevalFn is a #19083 test seam that replaces the launch of
+	// the static-NHT re-evaluation after a VIP removal.
+	frrStaticNHTReevalFn func(rgID int)
 	// garpClampWarned dedups the #5695 per-RG "gratuitous-arp-count clamped"
 	// warning so directSendGARPs (per-failover path) logs it at most once per
 	// RG, not per send. Guarded by garpClampWarnMu.

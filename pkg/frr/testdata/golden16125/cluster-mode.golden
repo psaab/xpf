@@ -5,6 +5,26 @@ ip route 0.0.0.0/0 192.0.2.254 5
 ip route 0.0.0.0/0 Null0 tag 2500 250
 ipv6 route ::/0 Null0 tag 2500 250
 !
+route-map xpf-static-nht-xpf-redist deny 10
+ match ip next-hop type blackhole
+exit
+route-map xpf-static-nht-xpf-redist deny 20
+ match ipv6 next-hop type blackhole
+exit
+route-map xpf-static-nht-xpf-redist permit 30
+exit
+route-map xpf-static-nht-b-xpf-redist deny 10
+ match ip next-hop type blackhole
+exit
+route-map xpf-static-nht-b-xpf-redist deny 20
+ match ipv6 next-hop type blackhole
+exit
+route-map xpf-static-nht-b-xpf-redist permit 30
+exit
+!
+ip nht static route-map xpf-static-nht-xpf-redist
+ipv6 nht static route-map xpf-static-nht-xpf-redist
+!
 route-map xpf-cluster-null0-xpf-redist deny 5
  match tag 2500
 exit
