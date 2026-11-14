@@ -320,7 +320,8 @@ fix, against 8.8–9.0 s on master. Master's daemon promoted at the same +34 s;
 its helper had gone active at +7 s on the dead process's pin, while its own
 daemon held the node not-owner. The 26 s difference is authority no layer had
 granted. The timeline and the worst case are in `pkg/daemon/README.md`, "A
-restart never inherits `rg_active`".
+restart never inherits `rg_active`". The per-run record behind these
+figures is in `docs/log/19093.md`, "Lone-owner lab record".
 
 Cells: the real-map cells in `pkg/dataplane/userspace/rg_active_inherited_pin_19093_test.go`
 (privileged, registered in `pkg/memlockcensus`; run by `make test-memlock-guards`)

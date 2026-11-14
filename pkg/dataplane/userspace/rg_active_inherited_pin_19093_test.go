@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -420,25 +419,30 @@ func TestRGActiveWriteBeforeFirstPublishIsKeptInheritedIsNot19093(t *testing.T) 
 		}()
 		<-parked
 
-		contended := make(chan struct{})
+		// contended reports whether the refresh's FIRST TryLock failed. The
+		// writer is parked inside its m.mu hold, so a TryLock that succeeds is
+		// the regression itself (Codex review): the refresh then runs with no
+		// contention at all, and nothing below could tell.
+		contended := make(chan bool, 1)
 		refreshDone := make(chan error, 1)
 		go func() {
-			signalled := false
-			for !m.mu.TryLock() {
-				if !signalled {
-					close(contended)
-					signalled = true
-				}
-				runtime.Gosched()
-			}
-			if !signalled {
-				close(contended)
+			if m.mu.TryLock() {
+				contended <- false
+			} else {
+				contended <- true
+				m.mu.Lock()
 			}
 			err := m.refreshHAStateFromMapsLocked()
 			m.mu.Unlock()
 			refreshDone <- err
 		}()
-		<-contended
+		if !<-contended {
+			close(release)
+			<-writerDone
+			<-refreshDone
+			t.Fatal("the refresh's first TryLock on m.mu SUCCEEDED while UpdateRGActive was parked " +
+				"inside its rg_active hold: the write is not serialized with the refresh by m.mu (#19093)")
+		}
 		select {
 		case err := <-refreshDone:
 			t.Fatalf("the refresh completed while UpdateRGActive was parked holding m.mu (err=%v): "+

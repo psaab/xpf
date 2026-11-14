@@ -1832,13 +1832,18 @@ boot:
 
 The new helper is seeded inactive, so forwarding resumes at that promotion.
 If readiness never proves, the degraded fallback
-(`DefaultDegradedPromoteTimeout`, 2 m, `pkg/cluster/manager.go`) promotes it,
-so the bound is about 150 s.
+(`DefaultDegradedPromoteTimeout`, 2 m, `pkg/cluster/manager.go`) promotes it.
+The resulting bound of about 150 s is DERIVED (30 s grace + 120 s fallback),
+not measured, and it bounds the promotion, not forwarding recovery.
 
 Measured on loss on 2026-11-13: mlx5 VFs, the peer's xpfd stopped, the owner
 SIGKILLed under iperf3 `-P16` and a 10 ms ping train. Runs where #19110
 struck (a failed arm, or VFs left in generic mode) are excluded on both
-builds.
+builds. Every figure below comes from the per-run record in
+`docs/log/19093.md` ("Lone-owner lab record"), which also names the debs,
+the excluded runs, and where the raw journals and captures are kept. Those
+raw outputs live outside the repository; the per-run table is the in-tree
+evidence.
 
 | From the kill | Fix (8e859ceb7b) | Master (fc315754be) |
 |---|---|---|
