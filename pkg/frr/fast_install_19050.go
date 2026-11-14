@@ -194,6 +194,13 @@ func (m *Manager) FastInstallStatics(want []string, precheck func() bool) (FastI
 	if elapsed > fastInstallSlowAlarm {
 		slog.Warn("frr: fast static install was slow (#19050)", "elapsed", elapsed, "lines", len(lines))
 	}
+	// #19083: zebra answers a NEWLY registered static without its NHT map, so
+	// a line that registered while its gateway already resolved only through
+	// a blackhole (its VIP left between the pre-check and the batch) would
+	// stay an active blackhole until the next NHT event. Force that event now,
+	// still under reloadMu, after an in-doubt batch too: a killed batch may
+	// have registered some of its lines.
+	defer m.reevaluateAfterFastInstall19083(fx)
 	if err != nil {
 		m.markFastInDoubtLocked(lines)
 		slog.Warn("frr: fast static install failed; lines are in doubt until a verified reload (#19050)",
@@ -202,6 +209,19 @@ func (m *Manager) FastInstallStatics(want []string, precheck func() bool) (FastI
 	}
 	slog.Info("frr: fast static install (#19050)", "elapsed", elapsed, "lines", lines)
 	return FastInstalled, lines
+}
+
+// reevaluateAfterFastInstall19083 runs the #19083 static-NHT re-evaluation
+// after a fast batch. Caller holds reloadMu. A stopping manager skips it (as
+// ReevaluateStaticNHT19083 does); a failure is logged, never returned: the
+// batch's outcome stands.
+func (m *Manager) reevaluateAfterFastInstall19083(ex vtyshConfigExecutor19083) {
+	if m.lifetimeCtx().Err() != nil {
+		return
+	}
+	if err := m.reevaluateStaticNHTLocked19083(ex); err != nil {
+		slog.Warn("frr: static NHT re-evaluation after the fast install failed (#19083)", "err", err)
+	}
 }
 
 // FastInDoubt reports whether fast-installed lines are still awaiting
@@ -320,6 +340,12 @@ func (m *Manager) resolveFastInDoubtLocked(ctx context.Context) (stop, notFound 
 			"lines", m.fastInDoubt.lines, "since", m.fastInDoubt.since)
 		m.fastInDoubt = nil
 		return !m.degraded.Load(), false
+	}
+	// #19083: this is a diff reload too, so a running alternate static NHT
+	// binding must become the primary first (restoreStaticNHTBindingLocked19083).
+	if err := m.restoreStaticNHTBindingLocked19083(); err != nil {
+		slog.Warn("frr: in-doubt authoritative reload not started; retrying (#19050)", "err", err)
+		return false, false
 	}
 	if err := m.executor().FrrReloadPy(rctx, m.frrConf); err != nil {
 		slog.Warn("frr: in-doubt authoritative reload failed; retrying (#19050)", "err", err)
