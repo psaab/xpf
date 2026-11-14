@@ -2194,8 +2194,9 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
 - **Not covered:** the graceful-stop VIP removal in `runShutdownSequence`
   runs after `frr.Stop()`, so it forces no re-evaluation. A static that
   registers in that window stays unfiltered until FRR's next NHT event, as on
-  master. #19050's fast install, which is not on master yet, is the case that
-  matters; #19050 carries it as an explicit exception.
+  master. #19050's fast install re-evaluates after every batch itself
+  (pkg/frr/README.md). Its remaining exception is a batch killed by
+  `frr.Stop()` whose line FRR still applies after the VIP left.
 - **A held FRR apply (operator view).** Before each diff reload the FRR
   manager restores zebra's static-NHT binding if a rebind was interrupted.
   While zebra does not answer or accept that restore, every FRR apply
@@ -2303,17 +2304,21 @@ never blocks the VIP path.
   - the hook;
   - link-cycle recovery's re-add of an OWNED RG, which writes neither
     `directVIPOwned` nor the epoch.
-- **Graceful shutdown: B widens #19083, so #19083 is a landing
-  dependency.** A graceful stop removes VIPs with the raw
-  `directRemoveVIPs` and leaves owned statics in FRR (#19083, confirmed in
-  the loss lab: a non-default static stays ACTIVE as a kernel blackhole).
-  The fast path refusing once the FRR manager is stopping does NOT keep B
-  out of that class. A node can promote, complete a fast install, and then
-  be stopped before the first coalesced promotion render: shutdown cancels
-  the pending apply, and `frr.Manager.Stop` joins the fast install but
-  removes nothing. FRR is then left holding a static that master's same
-  timeline never installed (review Codex P2-5). So #19050 does not land
-  before #19083's fix covers fast-installed lines too.
+- **Graceful shutdown (#19083 lands first).** A node can promote,
+  complete a fast install, and then be stopped before the first coalesced
+  promotion render: shutdown cancels the pending apply, and
+  `frr.Manager.Stop` joins the fast install but removes nothing, so FRR
+  keeps a static that master's same timeline never installed (review Codex
+  P2-5). #19083, which this branch is based on, keeps that line from being
+  an active, exportable blackhole: the VIP leaves, the gateway resolves
+  only through the cluster `Null0` default, and the static NHT map
+  withdraws it, as it does every owned static rendered as a plain gateway
+  (the interface-qualified class is #19122). The line stays in FRR's
+  running config, inactive, until the restart's first render. The planned
+  shutdown obligations for B (a latch, a join, a barrier, `ShutdownApply`)
+  are dropped. The fast install re-evaluates the map after every batch;
+  the remaining exception is a batch killed by `Stop` whose line FRR
+  still applies after the VIP left (the P2-6 lab cells).
 
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`
