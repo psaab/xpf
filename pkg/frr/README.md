@@ -811,6 +811,91 @@ step. Both are required — neither sees the other's case:
   consults the single `reservedGeneratedRouteMaps16871` table so a future
   generated name needs one new entry, not a new hand-written belt.
 
+## Cluster mode: a static may not resolve through a blackhole (#19083)
+
+`cluster_static_nht_19083.go`. In cluster mode the managed section binds
+staticd's next-hop tracking, for both address families, to a route-map that
+refuses resolution through a BLACKHOLE next hop:
+
+```
+route-map xpf-static-nht-xpf-redist deny 10
+ match ip next-hop type blackhole
+route-map xpf-static-nht-xpf-redist deny 20
+ match ipv6 next-hop type blackhole
+route-map xpf-static-nht-xpf-redist permit 30
+ip nht static route-map xpf-static-nht-xpf-redist
+ipv6 nht static route-map xpf-static-nht-xpf-redist
+```
+
+**Why.** After a graceful HA stop, or a planned move away, the node's VIPs are
+gone. An owned static's gateway, on the RETH subnet, then resolves
+recursively through the cluster `Null0` default (`renderClusterModeDefaults`).
+FRR kept it as an ACTIVE kernel blackhole that redistribution exported from a
+node that forwards nothing (#19083, measured on loss). With the map, the
+static goes inactive by itself when its gateway's connected route leaves.
+Nothing is written to FRR at shutdown: two earlier designs did that, and their
+review findings (budget, partial apply, overlay loss, lock order) are why this
+one does not.
+
+**Mechanism** (FRR 10.5.1 source, `zebra/zebra_rnh.c` and
+`zebra_routemap.c`):
+- zebra applies a client's NHT map to a COPY of the route that resolves the
+  next hop (`copy_state`).
+- The copy keeps the nexthop group but not the tag, so a `match tag 2500` map
+  never matches (measured, then explained from source).
+- `match ip|ipv6 next-hop type blackhole` reads the resolving nexthop's type.
+- A deny marks the client's resolution `(filtered)`, so staticd installs no
+  path.
+
+The udp premise cells are in `docs/log/19083.md`. Over existing statics, the
+blackhole-only ones were withdrawn within 3 s of binding the map. A static
+whose gateway route then LEFT was withdrawn within 3 s. A gateway through a
+real interface route stayed.
+
+**Scope:**
+- **Cluster mode only.** The cluster default and VIP ownership are cluster
+  constructs; standalone renders nothing.
+- **The default VRF only.** The top-level binding is per VRF, and the cluster
+  defaults exist only in the default VRF, so VRF statics are unchanged.
+- **staticd only.** BGP and every other NHT client are untouched.
+- **Recursion is otherwise unchanged.** Recursion through a real gateway route
+  (a real default included: #12613's contract) still works.
+
+**Changed behaviour, by design.** A static whose gateway resolves only
+through an operator discard/reject route or a generate-route aggregate also
+goes inactive. It is no longer installed or exported as an active blackhole.
+- This agrees with the userspace helper. Its recursion
+  (`recursive_static_target_v4/_v6`) already returns no target on a
+  discard/reject row, and generate routes reach it as `Discard` rows.
+- It also agrees with Junos, where the next hop is unreachable.
+- An operator who used the pattern to originate a blackhole for the prefix
+  should configure that prefix as a discard route. The compiler warns about
+  the pattern (`validateStaticDiscardAnchorWarnings19083`).
+
+**Names.** Both maps end in `config.ReservedRedistSuffix`.
+- A strict commit refuses an operator policy-statement with that suffix.
+- The tolerant load and peer-sync paths only warn, so both names are in the
+  final-name belt (`emittedRouteMapFinalCollision16867`) under ClusterMode.
+  An operator map that renders to either name refuses the apply before any
+  write.
+
+**Residual: a fresh registration bypasses the map.** zebra answers a NEWLY
+registering client without applying the map (`zebra_add_rnh_client`). A static
+that registers while its gateway already resolves only through a blackhole is
+therefore unfiltered until the next NHT event for that next hop (measured on
+udp).
+- `ReevaluateStaticNHT19083` forces such an event. It rebinds to the
+  identical, normally unbound `xpf-static-nht-b-xpf-redist` and back, because
+  `ip_nht_rm_add` re-evaluates only when the bound name changes, and
+  unbinding would briefly re-install the filtered statics. It runs under
+  `reloadMu` and writes no `frr.conf`.
+- The daemon calls it after a demotion's VIP removal.
+- **What stays residual:**
+  - FRR restarting without xpfd while the owner render is on disk;
+  - a registration that races the graceful-stop VIP removal, which runs
+    after `frr.Stop()`. This includes a #19050 fast-installed line, B's
+    explicit exception.
+
 ## Gotchas
 
 - Static routes have RETH names (`reth0`) but FRR wants the physical

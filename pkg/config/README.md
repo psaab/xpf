@@ -2074,6 +2074,20 @@ blackhole behavior in FRR and userspace. Strict commits and tolerant loads
 warn with the affected prefix; `ValidateConfig` repeats the warning for active
 configuration. Rendering and the userspace snapshot remain unchanged.
 
+**A static anchored only on a configured blackhole warns in a chassis cluster
+(#19083).** `validateStaticDiscardAnchorWarnings19083` covers a static whose
+next hop is on no configured connected subnet and whose longest CONFIGURED
+covering route is a blackhole: a discard/reject static, or a policy-less
+generate aggregate. That static is no longer installed or exported in cluster
+mode, because pkg/frr refuses static next-hop resolution through a blackhole.
+The userspace helper already treats it as unresolved.
+- **Migration:** configure the prefix as a discard route.
+- **Scope of the check:** cluster mode only, the default routing table only.
+  It warns and never refuses (#1960).
+- **What it cannot see:** learned routes. A learned more-specific route can
+  still resolve the next hop at runtime, which is why the warning says
+  "configured".
+
 The separate #2933 AST gate still rejects distinct bind-interface spellings
 such as `st0` and `st0.0` that derive the same if_id, since only one xfrmi
 device can carry that id. It runs over the group-expanded, inactive-pruned AST
