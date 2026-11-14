@@ -1047,7 +1047,7 @@ pub(crate) fn tcp_close_window_ns_with_app(
         }
     }
 }
-const MAX_SESSION_DELTAS: usize = 4096;
+pub(crate) const MAX_SESSION_DELTAS: usize = 4096;
 
 /// #18780: the most rows one `expire_stale_entries_ha` call may REAP before it
 /// cuts (plus the pair completions described below).
@@ -2578,6 +2578,15 @@ pub(crate) struct SessionTable {
     /// Tombstones refused by the bounded log. The active export transfers
     /// this count to its dedicated buffer's fail-closed drop metric.
     tombstone_drops: u64,
+    /// #19026 (F2/F3): the delta ring's head is a Close that could not take
+    /// its tuple install permits on the last attempt. While set, drains first
+    /// re-test the head's permits (one try, no 256-delta drain/requeue) and
+    /// the post-RX export/recovery slices leave the ring alone instead of
+    /// re-draining it and skipping the rest of the tick. Worker-local.
+    close_head_blocked: bool,
+    /// #19026: Close cancellations for the worker's parked slot (see
+    /// `cancel_pending_close`). Taken every housekeeping tick.
+    parked_close_cancellations: Vec<(SessionKey, u64)>,
 }
 
 /// #17083: the caller-specific half of an in-place refresh, handed to
@@ -2775,6 +2784,8 @@ impl SessionTable {
             session_id_worker_hi: 0,
             tombstone_log: Vec::new(),
             tombstone_drops: 0,
+            close_head_blocked: false,
+            parked_close_cancellations: Vec::new(),
         }
     }
 
@@ -4430,6 +4441,15 @@ impl SessionTable {
     #[inline]
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
+    }
+    /// #19026: the session id, origin and disposition of the row under
+    /// exactly `key` (the superseded-Close gate, `afxdp/session_delta.rs`).
+    pub(crate) fn exact_row_announcement(
+        &self,
+        key: &SessionKey,
+    ) -> Option<(u64, SessionOrigin, crate::afxdp::ForwardingDisposition)> {
+        self.entry_by_key(key)
+            .map(|e| (e.session_id, e.origin, e.decision.resolution.disposition))
     }
     /// Capture the identity used to fence a deferred ct-slice shared-evidence
     /// emission against a same-key replacement or NAT-decision rewrite.
@@ -7601,10 +7621,29 @@ impl SessionTable {
                 && delta.key == *key
                 && delta.session_id == session_id
         }) else {
+            // #19026: the Close may have left the ring for the worker's
+            // parked slot (`worker/loop_body/close_barrier.rs`), which this
+            // table cannot see. Record the cancellation; the parked retry
+            // applies it before retrying anything.
+            if session_id != 0 {
+                self.parked_close_cancellations.push((key.clone(), session_id));
+            }
             return false;
         };
         self.deltas.remove(pos);
         true
+    }
+
+    /// #19026: cancellations `cancel_pending_close` could not apply to the
+    /// ring (see there), taken by the worker's parked-Close retry.
+    pub(crate) fn take_parked_close_cancellations(&mut self) -> Vec<(SessionKey, u64)> {
+        std::mem::take(&mut self.parked_close_cancellations)
+    }
+
+    /// #19026: whether the delta ring can take one more delta (a flush that
+    /// loses its permit race requeues the Close it was handed).
+    pub(crate) fn delta_ring_has_room(&self) -> bool {
+        self.deltas.len() < MAX_SESSION_DELTAS
     }
 
     /// Requeue drained deltas at the front when a tuple gate could not be
@@ -7675,6 +7714,49 @@ impl SessionTable {
     }
     pub fn has_pending_deltas(&self) -> bool {
         !self.deltas.is_empty()
+    }
+
+    /// #19026: queued delta count. The worker's close-drain loop compares it
+    /// across one drain+flush pass: a pass that requeued everything it drained
+    /// made no progress, so the loop must yield instead of spinning on a tuple
+    /// permit it cannot take.
+    pub(crate) fn pending_delta_count(&self) -> usize {
+        self.deltas.len()
+    }
+
+    /// #19026: the oldest queued delta (the one a blocked close drain retries
+    /// first).
+    pub(crate) fn front_pending_delta(&self) -> Option<&SessionDelta> {
+        self.deltas.front()
+    }
+
+    /// #19026 (F1): take the ring's head out of FIFO order — the worker parks
+    /// a Close whose tuple permit stayed busy past the park bound so the
+    /// deltas behind it can flow.
+    pub(crate) fn pop_front_delta(&mut self) -> Option<SessionDelta> {
+        self.deltas.pop_front()
+    }
+
+    /// #19026 (R13 F3) cell seam: deltas ever drained from the ring.
+    #[cfg(test)]
+    pub(crate) fn delta_drained_for_test(&self) -> u64 {
+        self.delta_drained
+    }
+
+    /// #19026: deltas ever drained from the ring (the close barrier's
+    /// per-pass parking budget measures re-drains with it).
+    pub(crate) fn delta_drained_total(&self) -> u64 {
+        self.delta_drained
+    }
+
+    /// #19026 (F2/F3): see the `close_head_blocked` field.
+    pub(crate) fn close_head_blocked(&self) -> bool {
+        self.close_head_blocked
+    }
+
+    /// #19026 (F2/F3): see the `close_head_blocked` field.
+    pub(crate) fn set_close_head_blocked(&mut self, blocked: bool) {
+        self.close_head_blocked = blocked;
     }
 
     /// #2442: read-and-clear the loss-of-sync latch. Returns true iff

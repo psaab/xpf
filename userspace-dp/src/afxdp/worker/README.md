@@ -106,7 +106,8 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 | `loop_body/debug_report.rs` | #1776 cfg(debug-log)-only counters, per-second report, and stall dump; compiled out of release builds. |
 | `loop_body/export_slice.rs` | #13075 per-tick CommandExport slice and steady-state delta drain (`run_export_slice`, `#[inline(never)]`). |
 | `loop_body/gc_teardown.rs` | #13075 session-expiry/GC and control-plane delete teardown helpers, re-exported for worker call sites. #18780: the #16223 replica fence is evaluated once per reap call (`replica_fence_marks`, one `shared_sessions` pass, unchanged predicate) instead of one full-map scan per replica; the pass is still O(N shared rows) per call (residual measured in `session/README.md`). |
-| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`). #18780: each call's expiry is bounded (`EXPIRY_PASS_MAX_REAPS`/`EXPIRY_PASS_MAX_POPS`, pair-atomic cut); a cut walk resumes on the next loop iteration (`SessionTable::expiry_backlog`) and every row a call reaps is closed in that call (#10309). See `session/README.md` "Per-call budget (#18780)". |
+| `loop_body/housekeeping.rs` | #13075 per-tick session expiry/GC housekeeping and close-delta drain (`run_session_housekeeping`, `#[inline(never)]`). #18780: each call's expiry is bounded (`EXPIRY_PASS_MAX_REAPS`/`EXPIRY_PASS_MAX_POPS`, pair-atomic cut); a cut walk resumes on the next loop iteration (`SessionTable::expiry_backlog`) and every row a call reaps has its Close queued in that call (#10309), retired in it unless parked behind a held tuple permit (#19026). See `session/README.md` "Per-call budget (#18780)". #19026 parked-first retries, bounded ring drain, ring-before-overflow order. |
+| `loop_body/close_barrier.rs` | #19026 bounded close-permit barrier: one RX bound per run of held ticks, park at the bound into a side slot, head-blocked bit, rate-limited park log. |
 | `loop_body/idle_poll.rs` | #6431 `#[inline]` classification of Interrupt-mode idle `poll(2)` returns and one-shot fault summary. |
 | `loop_body/mod.rs` | `worker_loop` steady-state orchestrator; retains per-tick call ordering while selected control slices are `#[inline(never)]` calls into sibling modules. |
 | `loop_body/pptp_drain.rs` | #13075 per-tick PPTP control-inbox drain (`run_pptp_control_drain`, `#[inline(never)]`). |
@@ -134,6 +135,177 @@ pass. RX is unaffected either way — the rings are swept on every loop pass;
 
 ## Notable invariants
 
+- **Housekeeping never starves RX (#19026).** A Close delta that cannot
+  take its tuple install permits is a teardown barrier. `run_session_housekeeping`
+  retries it before command/control work and before `poll_binding`, which
+  keeps the #10419 teardown-before-poll order. `loop_body/close_barrier.rs`
+  bounds that barrier:
+  - **One RX bound per run.** A run is the consecutive ticks that skipped RX
+    for blocked Closes, whichever Closes they were. Inside
+    `CLOSE_PERMIT_BARRIER_NS` (1 ms, the idle path's
+    `INTERRUPT_POLL_TIMEOUT_MS`) of the run's start the tick skips RX; only a
+    tick that polls RX ends the run. A Close that blocks after an RX tick
+    gets its own window again.
+  - **At the bound the blocked Close is parked** out of the FIFO into a side
+    slot, and the drain continues in the same tick: the deltas behind it (the
+    other Closes, HA sync, RT_FLOW, the RPC mirror) retire before RX polls, up
+    to the pass's parking budget (below). The parked Close is retried on every
+    tick, before the drains and again after them, in one in-order walk of
+    the slot (oldest first; the Closes that cannot retire keep their order).
+    Once its permit frees it retires on the first tick whose ring has room
+    after the drain. Three rules
+    keep the parked slot as good as the ring it left (Codex review of
+    bbe57884f2):
+    - **Cancellation reaches it.** `SessionTable::cancel_pending_close` (the
+      pressure-shed retry's reply-evidence protection) searches the ring.
+      For a Close it cannot find there, it records a cancellation, which the
+      parked retry applies before retrying anything. Without that rule a
+      reply-protected flow was torn down by its parked Close.
+    - **A retry needs ring room.** A retry whose flush loses the permit race
+      is requeued by that flush, and `requeue_deltas_front` drops what does
+      not fit. So a parked Close is retried only while the ring has a free
+      slot. The retry also runs AFTER the drains, which made room. Without
+      that second retry, a ring that is full again at every housekeeping
+      entry postponed a free parked Close without bound (Codex review of
+      af0ea8415c).
+    - **The ring is drained once more after the overflow suffix.** An
+      overflow chunk's flush can lose its permit race and requeue the chunk
+      into the ring, so a successful purge does not mean the Close retired.
+      Master ran a final ring drain after the suffix; so does this, through
+      the same bounded barrier.
+  - **One parking pass is bounded in work, not only in ticks** (Codex review
+    of af0ea8415c). The 1 ms bound limits skipped ticks. Each park, however,
+    used to re-drain and requeue the next 256-delta batch, so 4,096 distinct
+    blocked Closes cost 1,015,680 delta drains (about 36 ms, optimized) in
+    the one pass that parked them. Master stopped at the first blocked head.
+    Now:
+    - a newly exposed head that is itself a blocked Close is marked at once,
+      so it costs one permit try instead of a re-drain;
+    - each pass charges its re-drain and overflow-suffix copying against
+      `CLOSE_PARK_PASS_BUDGET` (B, one ring, `MAX_SESSION_DELTAS`). Once
+      it is spent, the pass returns to RX and the run carries over
+      (`ClosePermitBarrier::clear`), so the next pass parks the remaining
+      blocked heads at once instead of holding RX for a fresh bound.
+    - **The bound is O(B + N + P) per pass, not "at most B"** (Codex
+      review of 661d9cb6ba). The budget is checked after work is done,
+      so one batch (256) and the second drain call overshoot it. A blocked
+      overflow attempt copies the remaining suffix, N, which can exceed the
+      ring, before it is charged. P is the parked slot: each of the pass's
+      two retries walks all of it (the residual below), and a pass that
+      applies pressure-shed cancellations scans it once more.
+    - **Progress.** With stable permits and m blocked Closes ahead of a
+      non-Close delta, each park charges at most 257, so a budget-exhausting
+      pass parks at least 16. The delta retires within `ceil(m/16) + 1`
+      passes after the initial hold (at most 257 for a full ring). That is
+      a PASS bound, not a millisecond bound.
+    - **A budget yield is not a drained ring.** The overflow suffix runs
+      only once the ring is empty. When an overflow chunk's flush loses its
+      permit race and requeues into the ring, the rest of the suffix waits
+      too. So at most one 256-delta chunk is ever requeued, always into an
+      empty ring: no drop, no overtaking. The pass's FIRST ring drain is
+      what empties the ring, so the suffix still runs in the same pass
+      while RX refills the ring between passes, PROVIDED that first drain
+      completes. Residual (Codex review of b62a36e29d, residual 3; #19064):
+      if every pass's first drain exhausts its parking budget (enough
+      interleaved blocked Closes and free deltas, with the retired room
+      refilled between passes), the suffix is deferred on every pass and
+      waits for as long as that contention lasts, even when its own
+      permits are free. That starvation class predates this branch: master
+      deferred the suffix and returned while ring cleanup stayed blocked.
+      The `ceil(m/16) + 1` bound above is for a fixed ring-resident delta,
+      not for a deferred suffix behind continually arriving work.
+
+    - **The order holds across a budget exit** (R13 N7 / R14 R1 on
+      661d9cb6ba). A pass that stops at its budget leaves deltas in the
+      ring, so the #10309 overflow suffix is deferred to a later pass
+      rather than run ahead of them. Otherwise a Close would overtake its
+      own session's older Open.
+    - Every parked Close is older than everything left in the ring (it was
+      the head when it parked), so the retry after the drains is safe even
+      with a non-empty ring.
+    - **Residual: the parked retry is O(parked) per call** (R13 N8 on
+      661d9cb6ba; split to #19064). Each pass walks the whole slot twice,
+      before and after the drains, so a large parked backlog costs time on
+      every tick. R13 measured, for 16,000 parked Closes, about 29 ms a
+      tick while their permits stayed held and about 36 ms in the one tick
+      in which they all freed and retired. The runner's load rose from 6 to
+      27 during that run, so both figures are order of magnitude only. The
+      trigger is many Closes whose permits stay held past the 1 ms bound at
+      once, so they park and stay parked: a long-held tuple gate across
+      thousands of tuples. Fold 3 bounded the
+      walk with a 256-try cursor and `swap_remove`. That broke two things
+      (Codex review of b62a36e29d): with stable permits, a key's newer Close
+      retired before its older one, and refilled newer arrivals could
+      starve an eligible old Close forever. It was REMOVED rather than
+      repaired a fourth time. The restored walk is fold 2's: in order, with
+      survivors kept in order. A bounded, per-key FIFO, fair retry is the
+      design item #19064. The walk preserves survivor order, but does not
+      enforce strict per-key retirement FIFO: an older Close can be skipped
+      while a later same-key Close becomes eligible, either because
+      availability changes or because their required permit sets differ
+      (the pre-existing residual). Same-key Closes need not share every
+      permit (`close_install_keys` in `afxdp/session_delta.rs`): an
+      ordinary Close also fences the reverse key derived from its own
+      captured NAT decision, so two incarnations with different translated
+      source ports fence different reverse keys, while a purge-retirement
+      Close fences only its forward key (Codex review of 05947834e1).
+
+    The cost: with more blocked work than one budget, the Closes left in
+    the ring, the deferred overflow suffix and the parked Closes all wait
+    a pass or more while RX polls.
+
+    A same-tuple reincarnation that overtakes it is safe:
+    the flush's stale-incarnation fence makes the old Close's local teardown
+    id-conditional, and when the EXACT key (scope included) now holds the
+    reincarnation the old Close's HA legs are skipped altogether. The binary
+    HA Close carries no id, so in routing domain 0 it would be a bare delete
+    of the reincarnation on the peer (Codex R16 F1; see `afxdp/README.md`
+    "A superseded stale Close sends no HA close"). That holds only for a
+    reincarnation the peer hears of. A same-id re-materialization (#19047) is
+    NOT a reincarnation: its newer promote Open can follow the parked
+    Close (Codex observed `ha=[2,1]`).
+  - **One order for the ring and the deferred overflow suffix (#10309).** An
+    overflow Close that could not retire is kept in
+    `deferred_expiry_overflow_deltas` and retried on later ticks AFTER the
+    ring drains, never before it: the ring can hold an older Open/Update of
+    the same session, and a Close must not overtake its own session's older
+    delta (cycle 1 retired the suffix first and emitted Close before Open:
+    Codex R15 P1#3). Deltas queued since the deferral also drain first. For
+    the same session those are newer deltas of a re-materialized same-id row
+    (a Close after them is the correct order) or a new incarnation (the
+    Close is id-fenced at flush); different sessions carry no order.
+  - `SessionTable::close_head_blocked` makes a blocked head cost one permit
+    try per tick instead of a 256-delta drain and requeue. The post-RX
+    export and loss-resync slices also leave a blocked head to housekeeping
+    rather than re-draining it and `continue`ing past the loop bottom. The
+    bit is set by whichever drain found the block (`drain_and_flush_all_impl`
+    or the export slice); `ClosePermitBarrier::on_blocked` only asserts it.
+  - Each park logs one rate-limited `xpf-dp: wN: #19026 session close
+    parked after N us` line, at most one per 10 s process-wide. The line
+    names the tuple and a `TupleGate::probe()` of the holder class.
+  - **Residual: every Close that waits across an RX poll** (R14 R2 on
+    661d9cb6ba). That is the parked Closes, the Closes a budget exit leaves
+    in the ring, and a deferred overflow suffix. While one of them waits, RX
+    polls, so a packet of its tuple can re-materialize a same-id row from the
+    still-published shared copy. That row outlives the Close and ages out on
+    its own idle timer: the #10419 hazard, for those tuples (#19047, including
+    its `ha=[2,1]` same-id promote order). Cycle 1 retired such a row with a bare
+    `DeleteSynced(key)`, which could delete a queued replacement incarnation
+    (Codex R15 P1#4), so that mechanism was removed.
+  - Before #19026 the skip was unbounded. Because the heartbeat is stored
+    before housekeeping, a worker whose Close never got its permit looked
+    healthy while it polled no RX at all; #19032 tracks the detector gap.
+  - `drain_and_flush_all_impl` also yields after a drain+flush pass that
+    leaves the queue no shorter, instead of re-draining in-call.
+  - Do not re-introduce an unbounded `return true` from housekeeping.
+  - Cells: `loop_body/housekeeping_rx_starvation_19026_tests.rs`; the
+    superseded-Close HA leg: `loop_body/superseded_close_ha_leg_19026_tests.rs`.
+  - Not in this change (#19063): restored `SharedPromote` copies on several
+    workers still each close at their own idle deadline, as on master. So a
+    restored session's RT_FLOW Close is emitted once per copy, not exactly
+    once, and nothing here claims otherwise. The restore close fence, the
+    one-owner close obligation and the restart/RG-departure lifecycle are
+    designed separately there.
 - CPU pinning honors the inherited systemd `CPUAffinity=` mask. Worker
   N pins to the N-th *allowed* CPU in that mask, so
   `CPUAffinity=2 3 4 5` puts workers 0..3 on CPUs 2..5. Don't revert

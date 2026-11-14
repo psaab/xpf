@@ -279,8 +279,14 @@ pub(super) fn run_delta_recovery(
     // retry by `LOSS_RESYNC_RETRY_INTERVAL_NS` (`loss_resync_ready`), so a
     // stalled consumer is probed at a bounded rate rather than every loop
     // iteration; the latch stays armed meanwhile.
+    // #19026 (R13 F2): while the ring's head Close is blocked on its tuple
+    // permit the drain-first below cannot complete; leave the latch armed for
+    // the tick after housekeeping parks or retires it instead of failing here
+    // and skipping the rest of every tick. Both gates only DEFER: neither
+    // consumes the latch, and `take_delta_loss` (which does) stays last.
     if worker_export_is_none
         && sessions.loss_resync_ready(loop_now_ns)
+        && !super::close_barrier::front_close_still_blocked(sessions)
         && sessions.take_delta_loss()
     {
         // #2442 loss-of-sync resync. If `push_delta` dropped any delta

@@ -2705,6 +2705,75 @@ Every other origin keeps the sessionless arm:
 A reply with no shared companion also keeps the sessionless arm. With no
 local row, a failed judgment drops only the packet.
 
+## A superseded stale Close sends no HA close (#19026)
+
+`session_delta.rs::flush_session_deltas` already treats a Close whose tuple
+now holds a different incarnation as STALE
+(`close_delta_is_stale_incarnation`): it still owes scoped, id-conditional
+teardown, but skips the bare-keyed BPF/conntrack deletes. #19026 adds one
+narrower case on top of it. A stale Close is SUPERSEDED when its EXACT key
+(routing domain and discriminator included) holds a different nonzero
+incarnation, in the flushing worker's table or in the shared primary map
+(`close_delta_is_superseded_on_exact_key`), and that incarnation reaches the
+peer's row for the key (`replacement_reaches_the_peer`). For a superseded
+Close the flush
+skips only the HA session-sync legs: the binary event-stream frame and the
+RPC fallback. The id-conditional local teardown and the RT_FLOW
+SESSION_CLOSE still run.
+
+- **Why.** The binary HA Close (type 2) carries no session id, and the
+  daemon's id-conditional peer delete exists only for a stated routing
+  domain (`pkg/daemon/daemon_ha_userspace_stream.go`,
+  `queueDeltaSink.deleteV4/V6`). In routing domain 0 it is a bare delete.
+  Arriving after the replacement's Open, it deleted the replacement on the
+  peer (Codex R16 F1). The close-permit barrier made that order reachable on
+  ONE worker: a Close parked at the RX bound (`worker/loop_body/close_barrier.rs`)
+  lets RX admit a replacement on the exact key, and the post-RX export
+  flushes Open(B) before the next tick retries Close(A).
+- **Why skipping is safe.** The replacement's own Open overwrites the peer's
+  row for that exact key, and the replacement's own Close later retracts it.
+- **Other-scope staleness** (the same bare tuple under another routing domain
+  or discriminator, #10512) is not superseded, so the old key keeps its HA
+  Close. It is the old key's own delete.
+  - **Residual, pre-existing (#10512 class; R14 review of bbe57884f2, B).**
+    A routing-domain-0 Close goes out as a BARE delete
+    (`queueDeltaSink.deleteV4/V6` needs a stated domain for the scoped
+    form). The peer resolves it through its bare-keyed mirror
+    (`pkg/dataplane/types.go` `SessionKey` has no domain;
+    `session_store.go` `DeleteWithCompanions*` -> `GetSession*` ->
+    `DeleteKnown*`).
+  - So if the peer's mirror row for the bare tuple is the OTHER scope's
+    session, the domain-0 Close can retract it. That session is an import
+    there, so the #9714 guard does not refuse it.
+  - Master has the same cross-worker. Parking adds the same-worker order.
+    Gating it is a #10512 design question.
+- **A replacement the peer never hears of does not supersede** (R13 review of
+  bbe57884f2, F1-gap). A `MissingNeighborSeed` is telemetry-only (#13974),
+  and the Go sender drops both it and a `LocalDelivery` session
+  (`daemon_ha_userspace_stream.go`). With such a replacement the peer still
+  holds A, so A keeps its HA Close.
+  - A `FabricPuntSeed` is also dropped by the Go sender, but it stands for a
+    flow the PEER adjudicated (#7770, #18620). The peer's own row is the
+    authority there, and a bare delete would remove it, so it still
+    supersedes.
+    - Residual (R14 review of bbe57884f2, C): if the peer's row for the key
+      is still A, nothing announces a replacement, and A ages out by the
+      peer's own idle or HOLD-ceiling expiry, `min(3 x timeout, ABS)`. That
+      is bounded and converging.
+- **Residual.** A different local or shared id is not proof that the peer
+  received Open(B). If Open(B) is lost (stream loss), the peer keeps A until
+  the loss latch's LossResync re-exports table truth, B's own Close retracts
+  the key, or the peer's own idle or HOLD expiry removes it.
+- **Not claimed: RT_FLOW exactly-once.** The gate removes only the HA legs of
+  a superseded Close. A restored `SharedPromote` session still has a copy on
+  every worker, and each copy closes at its own idle deadline, as on master.
+  Its RT_FLOW Close is therefore emitted once per copy (3 on the three-worker
+  restore fixture). One Close per restored session is #19063.
+- Cells: `worker/loop_body/superseded_close_ha_leg_19026_tests.rs` (the
+  same-worker schedule through the real flush and a connected event stream,
+  its non-superseded twin, the other-scope flush, the exact-key gate, and the
+  non-announcing replacement twins).
+
 ## Hot-path constants
 
 - `RX_BATCH_SIZE = 64`

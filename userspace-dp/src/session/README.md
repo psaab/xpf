@@ -829,7 +829,10 @@ The rest of the contract:
   rows with separate hints, in arbitrary order inside a bucket.
   - A reverse row owes no Close. Its shared copy and steering rows are
     retired by the FORWARD's Close (`afxdp/session_delta.rs`), which
-    housekeeping flushes before the worker polls another packet (#10419).
+    housekeeping flushes before the worker polls another packet (#10419),
+    unless the bounded close-permit barrier parks that Close behind a held
+    tuple permit; the #10419 window for parked tuples is a stated residual
+    (#19026, `afxdp/worker/README.md`).
   - A cut between the two hints would leave the reverse reaped while the
     forward waits, crossed and un-Closed, for the next call. A reply would
     then miss the reverse as `Absent` (not `IdleCrossed`) and resolve

@@ -3278,6 +3278,8 @@ mod expiry_resync_lossless_wait_18780_tests {
             &mut worker_lossless_wedged,
             &mut Vec::new(),
             &mut Vec::new(),
+            // #19026: the worker loop's close-permit barrier.
+            &mut Default::default(),
             &mut flush_deltas,
         );
         assert!(!skipped, "premise: no deferred cleanup (no bindings, no gate contention)");
