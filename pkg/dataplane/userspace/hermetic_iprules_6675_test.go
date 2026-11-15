@@ -8,6 +8,7 @@ import (
 
 	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/psaab/xpf/pkg/routing"
 	"github.com/vishvananda/netlink"
 )
@@ -42,6 +43,16 @@ import (
 // which now restores to this stub rather than to netlink.RuleList.
 func TestMain(m *testing.M) {
 	testguard.ExitIfUnsafe()
+	// #19110 (R23 P2-1): a test that reaches the shim's attach path must never
+	// reclaim, sweep or repair the PRODUCTION XDP link pins. No test in this
+	// package needs real pins, so the whole binary gets a private pin directory,
+	// and the guard stays as the backstop.
+	pinDir, err := os.MkdirTemp("", "userspace-xdp-links")
+	if err != nil {
+		panic(err)
+	}
+	restorePins := dataplane.SetLinkPinPathForTest(pinDir)
+	dataplane.GuardProductionPinDirForTest()
 	dir, err := os.MkdirTemp("", "userspace-nat-generation")
 	if err != nil {
 		panic(err)
@@ -53,6 +64,8 @@ func TestMain(m *testing.M) {
 	// package's network namespace (testguard.Run).
 	code := testguard.Run(m)
 	_ = os.RemoveAll(dir)
+	restorePins()
+	_ = os.RemoveAll(pinDir)
 	os.Exit(code)
 }
 

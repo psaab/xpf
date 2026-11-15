@@ -265,8 +265,13 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 // new ifindex, so it lands here; an unchanged link keeps its existing tracked
 // link. The forceGeneric classification
 // mirrors Compile's attachUserspaceShimXDP: a tunnel netdev (SecureTunnel
-// row) or a VLAN child (ParentIfindex > 0) goes generic, everything else
-// tries native first with a generic fallback. An attach failure is logged
+// row) or a VLAN child (ParentIfindex > 0) goes generic, and everything else
+// goes through the shim manager's AttachShimXDPInterface, which applies the
+// compile pass's #19110 rules. Those rules are: reclaim a stale pin first;
+// retry a refusal (EBUSY/EEXIST) and NEVER fall back to generic on one; fall
+// back to generic only on an unsupported native attach, and record that
+// fallback for the F4 takeover guard, which is recomputed after the loop. An
+// attach failure is logged
 // and left for the next refresh/full apply to retry — it must not fail
 // this publish, because the helper's snapshot update is still correct and
 // the unshimmed interface is fail-closed (no program, fence-dropped
@@ -311,29 +316,38 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 		if !m.refreshAttachAdmission(next, ifindex, row, owner) {
 			continue
 		}
-		var attach func(int, bool) error
-		if m.bpfShim != nil {
-			attach = m.bpfShim.AttachXDP
-		}
 		if m.attachInterfaceXDPHook != nil {
-			attach = m.attachInterfaceXDPHook
-		}
-		if attach == nil {
+			// Test hook: models a bare AttachXDP, so the native-then-generic
+			// sequence is spelled out here. Production goes through
+			// AttachShimXDPInterface below.
+			attach := m.attachInterfaceXDPHook
+			if err := attach(int(ifindex), forceGeneric); err != nil {
+				if attachErrIsAlreadyAttached(err) {
+					continue
+				}
+				if !forceGeneric {
+					if gerr := attach(int(ifindex), true); gerr == nil || attachErrIsAlreadyAttached(gerr) {
+						continue
+					} else {
+						err = gerr
+					}
+				}
+				slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; interface remains fail-closed until the next apply",
+					"ifindex", ifindex, "err", err, "issue", "#14133")
+			}
 			continue
 		}
-		if err := attach(int(ifindex), forceGeneric); err != nil {
-			if attachErrIsAlreadyAttached(err) {
-				continue
-			}
-			if !forceGeneric {
-				if gerr := attach(int(ifindex), true); gerr == nil || attachErrIsAlreadyAttached(gerr) {
-					continue
-				} else {
-					err = gerr
-				}
-			}
+		if err := m.bpfShim.AttachShimXDPInterface(int(ifindex), forceGeneric); err != nil && !attachErrIsAlreadyAttached(err) {
 			slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; interface remains fail-closed until the next apply",
 				"ifindex", ifindex, "err", err, "issue", "#14133")
+		}
+	}
+	// #19110 F4: a refresh attach can leave a RETH data member in unintended
+	// generic too (a re-probed VF whose driver refuses native), so the
+	// readiness reason is recomputed here as well, not only by Compile.
+	if m.bpfShim != nil && next.Config != nil {
+		if m.setGenericDataMembersLocked(m.computeGenericDataMemberReasons(next.Config)) {
+			logGenericDataMembers(m.genericDataMembers)
 		}
 	}
 }

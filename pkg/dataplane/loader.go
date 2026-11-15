@@ -415,14 +415,7 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 			return
 		}
 		reclaimed[ifidx] = true
-		if _, registered := m.xdpLinkFor(ifidx); registered {
-			return
-		}
-		r := reclaimStaleXDPLinkPin(filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifidx)))
-		r.log(ifidx)
-		if !r.clean() {
-			pass.reclaim[ifidx] = r.String()
-		}
+		m.reclaimBeforeAttach(pass, ifidx)
 	}
 
 	failedNativeXDP := make(map[int]error)
@@ -434,8 +427,7 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 		err := m.attachWithin(pass, ifidx, false)
 		switch {
 		case err == nil:
-			m.clearGenericFallback(ifidx)
-		case strings.Contains(err.Error(), "already attached"):
+		case isAlreadyAttached(err):
 		case errors.Is(err, ErrXDPOccupied):
 			slog.Error("XDP attach refused until the occupancy budget ran out; not falling back to generic",
 				"ifindex", ifidx, "err", err, "issue", "#19110")
@@ -635,6 +627,7 @@ func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 	}
 
 	// Pin the link for future restarts.
+	guardPinDir(pinFile)
 	if err := os.MkdirAll(linkPinPath, 0700); err != nil {
 		slog.Warn("failed to create link pin dir", "err", err)
 	} else if err := l.Pin(pinFile); err != nil {

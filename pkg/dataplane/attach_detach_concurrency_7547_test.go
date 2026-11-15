@@ -106,7 +106,11 @@ var serializingAuthority = map[string]string{
 	"pkg/dataplane/loader.go:attachUserspaceShimXDP": "dataplane XDP ownership lease plus daemon applySem",
 	// #19110: the refusal-retry loop. Its only caller is attachUserspaceShimXDP,
 	// so the same authority holds; each AttachXDP inside takes the lease itself.
-	"pkg/dataplane/xdp_attach_occupancy_19110.go:attachWithin":            "dataplane XDP ownership lease plus daemon applySem (called only from attachUserspaceShimXDP)",
+	"pkg/dataplane/xdp_attach_occupancy_19110.go:attachWithin": "dataplane XDP ownership lease plus daemon applySem (callers: attachUserspaceShimXDP and AttachShimXDPInterface)",
+	// #19110 (R23 P2-2): the #14133 interface-link refresh's single-interface
+	// attach. The userspace Manager calls it under m.mu from the refresh, which
+	// the daemon runs under applySem; AttachXDP/DetachXDP inside take the lease.
+	"pkg/dataplane/xdp_attach_occupancy_19110.go:AttachShimXDPInterface":  "userspace Manager m.mu plus daemon applySem (#14133 refresh) plus dataplane XDP ownership lease",
 	"pkg/dataplane/userspace/manager_compile.go:syncInterfaceAttachments": "userspace Manager m.mu plus dataplane XDP ownership lease",
 }
 

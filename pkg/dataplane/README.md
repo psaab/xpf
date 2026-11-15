@@ -2554,8 +2554,8 @@ The reclaim NEVER aborts the apply. Each failure falls back to the old unlink
 |---|---|---|
 | no pin (`ENOENT`) | `no-pin` | nothing |
 | detached and unpinned | `detached` | a free device |
-| not a link: a prog/map pin (cilium's errno-less "is not a Link"), or `EACCES` on a file not on bpffs | `not-a-link`, file removed | nothing to wait for |
-| load failed otherwise (`EPERM`, `EACCES` on bpffs, `ENOMEM`, …) | `deferred-release`, file unlinked | maybe a refusal until the kernel releases it |
+| not a link: a prog/map pin (exactly cilium's "<path> is not a Link"), or `EACCES` on a file not on bpffs | `not-a-link`, file removed | nothing to wait for |
+| load failed otherwise (`EPERM`, `EACCES` on bpffs, `ENOMEM`, any OTHER errno-less error, …) | `deferred-release`, file unlinked | maybe a refusal until the kernel releases it |
 | detach failed, unpin worked | `deferred-release` | the same |
 | detached, unpin failed | `detached-pin-stuck` | a free device, plus a dead pin the repair replaces |
 | detach and unpin both failed | `stuck` | a live link: a refusal, ending in `ErrXDPOccupied` naming this |
@@ -2567,8 +2567,23 @@ error there is only a kernel `WARN_ON`. The attach result is the arbiter.
 **`AttachXDP` is fresh-only.** It never loads a pin and `Update`s it; the old
 reuse block and `xdpAttachModeMatches` are gone. A pin still present at attach
 time is one the reclaim could not remove. Reusing it would bypass the fresh
-attach and the refusal wait. `TestAttachXDPIsFreshOnly19110` pins this
-structurally.
+attach and the refusal wait. `TestAttachXDPIsFreshOnly19110` pins this with a
+transitive walk: nothing reachable from `AttachXDP` may load a pin.
+
+**One classifier on every attach path.** The compile pass
+(`attachUserspaceShimXDP`) and the #14133 interface-link refresh both use the
+same rules. The refresh re-attaches a re-probed VF's new ifindex with no commit,
+through `AttachShimXDPInterface`. The rules are: reclaim first; a refusal is
+never a fallback; record an unintended generic. The userspace refresh
+recomputes the F4 reason after attaching.
+
+**Tests never touch the production pins.** Tests that reach the attach path
+must redirect `linkPinPath` (`SetLinkPinPathForTest`).
+`SetXDPTransitionSeamForTest` does that redirect itself while the seam is
+installed. As a backstop, every reclaim, sweep and pin repair panics in a test
+binary that targets `/sys/fs/bpf/xpf/links`. This package installs the guard
+from `pin_dir_guard_19110_test.go`. The userspace `TestMain` gives its whole
+test binary a private pin directory and calls `GuardProductionPinDirForTest`.
 
 **Pin presence is not proof.** `ensureXDPLinkPinned` keeps a pin only if it
 names the registered link (the same kernel link ID, `pinnedXDPLinkIsOursFn`).
@@ -2589,7 +2604,9 @@ The kernel makes those checks in generic mode too. So `attachWithin` retries
 the same mode with backoff (25 ms doubling to 200 ms) and reclassifies EVERY
 result: an EEXIST that becomes EINVAL is an unsupported device and falls back
 to generic as before. One deadline is shared by the whole pass
-(`xdpOccupancyBudget`, 5 s), not one per interface. A refusal that outlives it
+(`xdpOccupancyBudget`, 5 s), not one per interface. It is armed by the pass's
+FIRST refusal, so detaches and successful attaches never consume it. A refusal
+that outlives it
 fails the apply with `*XDPOccupiedError`. That error wraps both
 `ErrXDPOccupied` and the kernel's errno, and it carries a diagnostic:
 - the target's `IFLA_XDP`, and every upper device carrying XDP, read on a
@@ -2603,14 +2620,36 @@ and `BPF_LINK_DETACH` syscalls block on rtnl and are NOT bounded by this code.
 So "about 7.5 s worst case on loss" (the budget plus three mlx5 detach+attach
 pairs) is an estimate, not a bound.
 
+**The wait holds `applySem`.** The attach pass runs inside an apply, and a
+takeover's RG activation also needs `applySem`: `republishConnectedRGSync`
+runs before `SetRGActive`. So a node that is mid-apply with a PERSISTENT
+refusal, when its peer dies, delays that activation by up to about 6 s: the
+5 s budget, plus 1 s of diagnostic, plus the unbounded syscalls. The crash
+promotion itself is not delayed. Before #19110, a refused attach failed in
+milliseconds and arm-failed the node instead. This is a narrow double fault,
+because without a persistent refusal the wait is zero.
+
 **Unintended generic data members (F4).** `recordGenericFallback` remembers the
 native error that sent an interface to generic. `UnintendedGenericXDP` reports
 it unless the error was EOPNOTSUPP: `dev_xdp_attach` returns that exactly when
 the driver has no `ndo_bpf`, as on iavf, and that generic is the supported
-deployment. A later native attach, a detach, or `Teardown` clears the record.
+deployment. A `DetachXDP`, `Teardown`, or a fresh process clears the record. A
+RE-COMMIT DOES NOT: the registered generic link short-circuits `AttachXDP`
+("already attached"), so no native attempt is made. After fixing the native
+refusal (for mlx5, LRO and HW-GRO off), RESTART xpfd. The ERROR log says so.
+
 The userspace Manager turns a RETH data member in that state into a
 takeover-readiness reason; see `pkg/dataplane/userspace`,
-`generic_data_member_19110.go`.
+`generic_data_member_19110.go`. Two scope choices are deliberate:
+- **The reason is node-global.** One generic member makes the node not
+  takeover-ready for EVERY RG while the peer is alive, including an RG whose
+  members are native. Readiness has no per-RG input here, and a generic member
+  is a node fault.
+- **A symmetric fault costs up to 2 min on a cold boot.** If both nodes are
+  provisioned identically (both members generic), each sees the other alive and
+  neither is ready. On a cold boot no node owns the RGs until the degraded
+  fallback (`DefaultDegradedPromoteTimeout`, 2 min). A crash takeover is NOT
+  delayed: on a genuine peer loss the election bypasses readiness.
 
 Cells:
 - `xdp_attach_occupied_19110_test.go` and `xdp_stale_link_release_19110_test.go`

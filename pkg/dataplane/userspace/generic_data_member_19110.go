@@ -61,44 +61,65 @@ func (m *Manager) unintendedGenericXDP() map[int]string {
 	return m.bpfShim.UnintendedGenericXDP()
 }
 
-// refreshGenericDataMembers recomputes the set after an attach pass. Call it
-// WITHOUT m.mu held: it reads the shim manager and resolves interface names.
+// refreshGenericDataMembers recomputes the set after a compile attach pass.
+// Call it WITHOUT m.mu held. The #14133 refresh path, which holds m.mu, uses
+// computeGenericDataMemberReasons plus setGenericDataMembersLocked instead.
 func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
+	reasons := m.computeGenericDataMemberReasons(cfg)
+	m.mu.Lock()
+	changed := m.setGenericDataMembersLocked(reasons)
+	m.mu.Unlock()
+	if changed {
+		logGenericDataMembers(reasons)
+	}
+}
+
+// computeGenericDataMemberReasons reads the shim manager's record and resolves
+// the config's RETH data members. It takes no Manager lock.
+func (m *Manager) computeGenericDataMemberReasons(cfg *config.Config) []string {
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return nil
+	}
+	unintended := m.unintendedGenericXDP()
+	if len(unintended) == 0 {
+		return nil
+	}
+	members := cfg.RethToPhysical()
+	names := make([]string, 0, len(members))
+	for _, phys := range members {
+		names = append(names, config.LinuxIfName(phys))
+	}
+	sort.Strings(names)
 	var reasons []string
-	if cfg != nil && cfg.Chassis.Cluster != nil {
-		if unintended := m.unintendedGenericXDP(); len(unintended) > 0 {
-			members := cfg.RethToPhysical()
-			names := make([]string, 0, len(members))
-			for _, phys := range members {
-				names = append(names, config.LinuxIfName(phys))
-			}
-			sort.Strings(names)
-			for _, name := range slices.Compact(names) {
-				ifindex, err := ifindexByNameFn(name)
-				if err != nil {
-					continue
-				}
-				if why, ok := unintended[ifindex]; ok {
-					reasons = append(reasons, fmt.Sprintf(
-						"userspace data interface %s %s (native refused: %s)",
-						name, genericDataMemberReasonMarker, why))
-				}
-			}
+	for _, name := range slices.Compact(names) {
+		ifindex, err := ifindexByNameFn(name)
+		if err != nil {
+			continue
+		}
+		if why, ok := unintended[ifindex]; ok {
+			reasons = append(reasons, fmt.Sprintf(
+				"userspace data interface %s %s (native refused: %s)",
+				name, genericDataMemberReasonMarker, why))
 		}
 	}
-	m.mu.Lock()
+	return reasons
+}
+
+// setGenericDataMembersLocked stores the reasons and reports a change. Caller
+// holds m.mu.
+func (m *Manager) setGenericDataMembersLocked(reasons []string) bool {
 	changed := !slices.Equal(m.genericDataMembers, reasons)
 	m.genericDataMembers = reasons
-	m.mu.Unlock()
-	if !changed {
-		return
-	}
+	return changed
+}
+
+func logGenericDataMembers(reasons []string) {
 	if len(reasons) > 0 {
 		slog.Error("RETH data member in generic XDP mode: this node is not takeover-ready while a peer "+
 			"is alive, and a lone owner forwards it in skb mode with AF_XDP in copy mode",
 			"members", reasons, "issue", "#19110",
-			"remediation", "fix the native refusal (for mlx5: disable LRO and HW-GRO), then re-commit "+
-				"or restart xpfd")
+			"remediation", "fix the native refusal (for mlx5: disable LRO and HW-GRO), then RESTART xpfd; "+
+				"a re-commit keeps the existing generic link")
 		return
 	}
 	slog.Info("no RETH data member is in generic XDP mode any more", "issue", "#19110")

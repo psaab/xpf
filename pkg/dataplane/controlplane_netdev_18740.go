@@ -1,6 +1,9 @@
 package dataplane
 
-import "strings"
+import (
+	"os"
+	"strings"
+)
 
 // #18740: the management (fxp*) and cluster control-link (em*) netdevs are
 // zoned, so compileZones used to put them in the shim's attach set like any
@@ -89,8 +92,26 @@ var xdpTransitionSeam18740 func(op string, ifindex int, generic bool) (handled b
 // SetXDPTransitionSeamForTest installs fn as the #18740 transition seam and
 // returns a restore func. op is "attach" or "detach". Returning handled=false
 // lets the real method run, so a test can observe without emulating.
+//
+// #19110 (R23 P2-1): the attach pass reclaims a stale pin BEFORE the seam sees
+// the attach, and the reclaim detaches real links. So while the seam is
+// installed, the link pin directory is redirected to a fresh temp dir if it
+// still names the production one. A seamed attach can never reach the live
+// firewall's pins.
 func SetXDPTransitionSeamForTest(fn func(op string, ifindex int, generic bool) (handled bool, err error)) (restore func()) {
 	old := xdpTransitionSeam18740
 	xdpTransitionSeam18740 = fn
-	return func() { xdpTransitionSeam18740 = old }
+	oldPins, tmp := linkPinPath, ""
+	if linkPinPath == productionLinkPinPath {
+		if d, err := os.MkdirTemp("", "xpf-seam-links-"); err == nil {
+			tmp, linkPinPath = d, d
+		}
+	}
+	return func() {
+		xdpTransitionSeam18740 = old
+		if tmp != "" {
+			linkPinPath = oldPins
+			_ = os.RemoveAll(tmp)
+		}
+	}
 }

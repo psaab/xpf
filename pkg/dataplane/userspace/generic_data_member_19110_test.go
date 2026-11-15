@@ -7,9 +7,13 @@ import (
 	"go/token"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
+	"github.com/vishvananda/netlink"
 )
 
 // #19110 F4, the userspace half: a RETH data member left in unintended generic
@@ -169,5 +173,76 @@ func TestCompileRefreshesGenericDataMembersAfterTheAttach19110(t *testing.T) {
 	if refresh == token.NoPos || refresh < shim {
 		t.Error("Compile does not call refreshGenericDataMembers after CompileUserspaceShim: a RETH data " +
 			"member left in generic by the attach pass would not become a takeover-readiness reason (#19110)")
+	}
+}
+
+// R23 P2-2: the #14133 interface-link refresh (a re-probed VF gets a new
+// ifindex, no commit) attaches through the shim manager's classifier, not a
+// bare AttachXDP, and recomputes the F4 reason. These drive the real refresh
+// entry point with a real shim manager behind the #18740 transition seam.
+func refreshClassifierFixture19110(t *testing.T, native error) (*Manager, *[]string, func() (bool, error)) {
+	t.Helper()
+	prevLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = prevLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+	}
+	cfg := interfaceLinkRefreshConfig11530()
+	cfg.Chassis.Cluster = &config.ClusterConfig{NodeID: 0}
+	cfg.Interfaces.Interfaces["ge-0/0/0"] = &config.InterfaceConfig{Name: "ge-0/0/0", RedundantParent: "reth0"}
+	m, _, setLink := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-0", 17, 1500)
+	m.bpfShim = dataplane.New()
+	m.SetRGPrimaryProvider(func(int) (bool, bool) { return true, true }) // cluster config: #15919 publish gate
+	t.Cleanup(dataplane.SetXDPOccupancyBudgetForTest(300*time.Millisecond, 100*time.Millisecond))
+	old := ifindexByNameFn
+	ifindexByNameFn = func(name string) (int, error) {
+		if name == "ge-0-0-0" {
+			return 29, nil
+		}
+		return 0, fmt.Errorf("no %s", name)
+	}
+	t.Cleanup(func() { ifindexByNameFn = old })
+	ops := &[]string{}
+	t.Cleanup(dataplane.SetXDPTransitionSeamForTest(func(op string, ifindex int, generic bool) (bool, error) {
+		*ops = append(*ops, fmt.Sprintf("%s/%d/%v", op, ifindex, generic))
+		if op != "attach" || generic || ifindex != 29 {
+			return true, nil
+		}
+		return true, native
+	}))
+	setLink(29, 9000)
+	return m, ops, func() (bool, error) { return m.RefreshInterfaceRowsForLink(cfg, "ge-0-0-0") }
+}
+
+func TestRefreshAttachRecordsUnintendedGenericForF419110(t *testing.T) {
+	m, ops, refresh := refreshClassifierFixture19110(t,
+		fmt.Errorf("attach XDP to ifindex 29: %w", syscall.EINVAL))
+	if _, err := refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if !slices.Contains(*ops, "attach/29/false") || !slices.Contains(*ops, "attach/29/true") {
+		t.Fatalf("fixture: the refresh did not try native then generic on the re-probed ifindex 29 (ops %v)", *ops)
+	}
+	m.mu.Lock()
+	reasons := append([]string(nil), m.genericDataMembers...)
+	m.mu.Unlock()
+	if r, ok := hasGenericReason19110(reasons); !ok || !strings.Contains(r, "ge-0-0-0") {
+		t.Errorf("a refresh that left the RETH member ge-0-0-0 in generic after a native EINVAL raised no "+
+			"F4 reason (reasons %v): a re-probed VF could promote with a generic member", reasons)
+	}
+}
+
+func TestRefreshAttachNeverFallsBackOnARefusal19110(t *testing.T) {
+	_, ops, refresh := refreshClassifierFixture19110(t,
+		fmt.Errorf("attach XDP to ifindex 29: %w", syscall.EBUSY))
+	if _, err := refresh(); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if !slices.Contains(*ops, "attach/29/false") {
+		t.Fatalf("fixture: no native attempt on ifindex 29 (ops %v)", *ops)
+	}
+	if slices.Contains(*ops, "attach/29/true") {
+		t.Errorf("the refresh path fell back to generic after a REFUSAL (EBUSY) (ops %v); #19110 forbids "+
+			"that on every attach path", *ops)
 	}
 }
