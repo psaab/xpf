@@ -31,8 +31,11 @@ type zebraNHTFake19083 struct {
 	applyOnly     int // one-shot: apply only this many lines, report success
 	ignore        bool
 	unreadable    bool
-	unreadV4      int // the next N v4 binding reads are unreadable
-	unreadV6      int // the next N v6 binding reads are unreadable
+	unreadV4      int  // the next N v4 binding reads are a PARSE MISS
+	unreadV6      int  // the next N v6 binding reads are a PARSE MISS
+	execFail      bool // every binding read's exec fails (zebra does not answer)
+	execFailV4    int  // the next N v4 binding reads' exec fails
+	execFailV6    int  // the next N v6 binding reads' exec fails
 	batchGate     chan struct{}
 	onBatch       func() // one-shot, run under mu after a batch applies
 	reloadEntered chan struct{}
@@ -101,9 +104,15 @@ func (f *zebraNHTFake19083) Vtysh(ctx context.Context, cmd string) (string, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, "read")
-	unread := &f.unreadV4
+	unread, xfail := &f.unreadV4, &f.execFailV4
 	if strings.HasPrefix(cmd, "show ipv6") {
-		unread = &f.unreadV6
+		unread, xfail = &f.unreadV6, &f.execFailV6
+	}
+	if f.execFail || *xfail > 0 {
+		if *xfail > 0 {
+			*xfail--
+		}
+		return "", errors.New("vtysh: zebra did not answer (injected)")
 	}
 	if f.unreadable || *unread > 0 {
 		if *unread > 0 {
@@ -392,32 +401,39 @@ func containsInOrder19083(events []string, a, b string) bool {
 }
 
 // TestStaticNHTRestoreUnreadableFailsClosed19083 (Codex P1 / R24 P3-1 on
-// d8b6021582): while a restore is pending, the diff reload may start only after
-// zebra is POSITIVELY read with the primary (or nothing) in both families. An
-// unreadable family no longer lets the reload start: the primary is bound
-// (idempotent) and must then be read back; an unreadable verification keeps
-// the restore pending and the reload unstarted.
+// d8b6021582; R24 NEW-1 on 9d7abd581a): while a restore is pending, the diff
+// reload starts only after the primary is POSITIVELY read in both families,
+// or after a direct primary write that vtysh reported successful. An
+// unreadable family before the write never lets the reload start unwritten.
+// After a successful write:
+//   - a read-back zebra did not answer (exec failure) keeps the restore pending
+//     and the reload unstarted (fail closed);
+//   - a read-back zebra answered but that has no parseable static row (a parse
+//     miss, e.g. an FRR layout change) lets the reload start with an ERROR
+//     log, so a layout change cannot wedge every apply from startup.
 func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
-		v4, v6     string
 		setup      func(f *zebraNHTFake19083)
 		wantReload bool
 	}{
-		{"unreadable before, readable after the write", nhtMapB19083, nhtMapB19083,
-			func(f *zebraNHTFake19083) { f.unreadV4, f.unreadV6 = 1, 1 }, true},
-		{"partial read: v4 alternate, v6 unreadable", nhtMapB19083, nhtMapB19083,
-			func(f *zebraNHTFake19083) { f.unreadV6 = 1 }, true},
-		{"verification unreadable", nhtMapB19083, nhtMapB19083,
-			func(f *zebraNHTFake19083) {
-				// Readable B/B first; both verification reads fail.
-				f.onBatch = func() { f.unreadV4, f.unreadV6 = 1, 1 }
-			}, false},
-		{"unreadable throughout", nhtMapB19083, nhtMapB19083,
-			func(f *zebraNHTFake19083) { f.unreadable = true }, false},
+		{"parse miss before, readable after the write", func(f *zebraNHTFake19083) { f.unreadV4, f.unreadV6 = 1, 1 }, true},
+		{"partial read: v4 alternate, v6 parse miss", func(f *zebraNHTFake19083) { f.unreadV6 = 1 }, true},
+		{"exec failure before, readable after the write", func(f *zebraNHTFake19083) { f.execFailV4, f.execFailV6 = 1, 1 }, true},
+		{"read-back parse miss after a successful write", func(f *zebraNHTFake19083) {
+			f.onBatch = func() { f.unreadV4, f.unreadV6 = 1, 1 }
+		}, true},
+		{"parse miss throughout", func(f *zebraNHTFake19083) { f.unreadable = true }, true},
+		{"read-back exec failure after a successful write", func(f *zebraNHTFake19083) {
+			f.onBatch = func() { f.execFailV4, f.execFailV6 = 1, 1 }
+		}, false},
+		{"read-back exec failure in v6 only", func(f *zebraNHTFake19083) {
+			f.onBatch = func() { f.execFailV6 = 1 }
+		}, false},
+		{"exec failure throughout", func(f *zebraNHTFake19083) { f.execFail = true }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := newZebraNHTFake19083(tc.v4, tc.v6)
+			fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
 			tc.setup(fake)
 			ctx, cancel := context.WithCancel(context.Background())
 			m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
@@ -436,15 +452,52 @@ func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 			}
 			if tc.wantReload {
 				if err != nil || !reloaded || !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) || m.staticNHTRestorePending19083 {
-					t.Fatalf("err=%v pending=%v events %q: want the primary bound and verified, then the reload", err, m.staticNHTRestorePending19083, ev)
+					t.Fatalf("err=%v pending=%v events %q: want the primary written, then the reload", err, m.staticNHTRestorePending19083, ev)
 				}
 				return
 			}
 			if err == nil || reloaded || !m.staticNHTRestorePending19083 {
-				t.Fatalf("err=%v reloaded=%v pending=%v events %q: an unverifiable restore must not start the reload and must stay pending",
+				t.Fatalf("err=%v reloaded=%v pending=%v events %q: a read-back zebra did not answer must not start the reload and must stay pending",
 					err, reloaded, m.staticNHTRestorePending19083, ev)
 			}
 		})
+	}
+}
+
+// TestStaticNHTBindingParserRealFRR19083 (R24 NEW-1): the binding parser reads
+// REAL `show ip|ipv6 nht route-map` output, captured on FRR 10.5.1 (udp fw1,
+// 2026-11-13, with a map bound and with none) and FRR 10.6.0 (loss fw1,
+// 2026-11-15, both families). A file's version is in its name; the expected
+// binding is in the table.
+func TestStaticNHTBindingParserRealFRR19083(t *testing.T) {
+	for file, want := range map[string]string{
+		"show_ip_nht_routemap_bound-10.5.1_19083.txt":   "xpf-cluster-nht-19083",
+		"show_ip_nht_routemap_none-10.5.1_19083.txt":    "",
+		"show_ip_nht_routemap_bound-10.6.0_19083.txt":   clusterStaticNHTRouteMap19083,
+		"show_ipv6_nht_routemap_bound-10.6.0_19083.txt": clusterStaticNHTRouteMap19083,
+	} {
+		t.Run(file, func(t *testing.T) {
+			data, err := os.ReadFile(filepath.Join("testdata", file))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, ok := parseStaticNHTBinding19083(string(data))
+			if !ok || got != want {
+				t.Fatalf("parse(%s) = %q ok=%v, want %q", file, got, ok, want)
+			}
+		})
+	}
+	versions := map[string]bool{}
+	files, _ := filepath.Glob(filepath.Join("testdata", "show_*_nht_routemap_*_19083.txt"))
+	for _, f := range files {
+		for _, v := range []string{"-10.5.1_", "-10.6.0_"} {
+			if strings.Contains(f, v) {
+				versions[v] = true
+			}
+		}
+	}
+	if !versions["-10.5.1_"] || !versions["-10.6.0_"] {
+		t.Fatalf("fixtures %q: want real captures from both FRR 10.5.1 and 10.6.0", files)
 	}
 }
 
@@ -518,6 +571,40 @@ func TestStaticNHTRebindSerializesWithRetryReload19083(t *testing.T) {
 	}
 	if ev := fake.snapshot(); !containsInOrder19083(ev, "reload v4=", "batch ip nht static route-map "+nhtMapB19083) {
 		t.Fatalf("events %q: want the rebind after the retry's reload", ev)
+	}
+}
+
+// TestStaticNHTRequestedDrainSerializesWithRetryReload19083 (R24 P3-5 on
+// 9d7abd581a): the PRODUCTION rebind path, a requested drain, takes reloadMu:
+// it does not land while a degraded-retry reload holds the lock.
+func TestStaticNHTRequestedDrainSerializesWithRetryReload19083(t *testing.T) {
+	fake := newZebraNHTFake19083("", "")
+	m := newLiteralNHTManager19083(t, fake)
+	m.degraded.Store(true)
+	entered, release := make(chan struct{}), make(chan struct{})
+	fake.mu.Lock()
+	fake.reloadEntered, fake.reloadRelease = entered, release
+	fake.mu.Unlock()
+	fake.reset()
+	retried := make(chan struct{})
+	go func() { m.retryReloadOnce(context.Background()); close(retried) }()
+	<-entered
+	m.RequestStaticNHTReeval19083()
+	time.Sleep(4 * staticNHTRebindDebounce19083)
+	for _, e := range fake.snapshot() {
+		if strings.HasPrefix(e, "batch ") {
+			close(release)
+			t.Fatalf("a requested drain rebound while a degraded-retry reload held reloadMu: %q", fake.snapshot())
+		}
+	}
+	close(release)
+	<-retried
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !containsInOrder19083(fake.snapshot(), "reload v4=", "batch ip nht static route-map "+nhtMapB19083) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if ev := fake.snapshot(); !containsInOrder19083(ev, "reload v4=", "batch ip nht static route-map "+nhtMapB19083) {
+		t.Fatalf("events %q: want the requested rebind after the retry's reload", ev)
 	}
 }
 
