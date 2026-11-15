@@ -661,6 +661,7 @@ const (
 	HATakeoverBlockerEventStreamUnbound    HATakeoverBlocker = "event_stream_unbound"
 	HATakeoverBlockerFabricNotConverged    HATakeoverBlocker = "fabric_not_converged"
 	HATakeoverBlockerFabricPeerUnresolved  HATakeoverBlocker = "fabric_peer_unresolved"
+	HATakeoverBlockerXDPGenericDataMember  HATakeoverBlocker = "xdp_generic_data_member"
 	HATakeoverBlockerOther                 HATakeoverBlocker = "other"
 )
 
@@ -687,6 +688,7 @@ var HATakeoverBlockers = []HATakeoverBlocker{
 	HATakeoverBlockerEventStreamUnbound,
 	HATakeoverBlockerFabricNotConverged,
 	HATakeoverBlockerFabricPeerUnresolved,
+	HATakeoverBlockerXDPGenericDataMember,
 	HATakeoverBlockerOther,
 }
 
@@ -700,6 +702,10 @@ var HATakeoverBlockers = []HATakeoverBlocker{
 // subsystem name.
 func MapHATakeoverBlocker(reason string) HATakeoverBlocker {
 	switch {
+	// First: the reason embeds a kernel errno text ("native refused: ..."),
+	// which must not be matched by the generic substrings below.
+	case strings.Contains(reason, genericDataMemberReasonMarker):
+		return HATakeoverBlockerXDPGenericDataMember
 	case strings.Contains(reason, "helper not running"):
 		return HATakeoverBlockerHelperDown
 	case strings.Contains(reason, "not enabled"):
@@ -997,6 +1003,9 @@ func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
 	if m.pendingHAStateReplay {
 		reasons = append(reasons, "userspace HA state replay pending")
 	}
+	// #19110 F4: a RETH data member in unintended generic XDP mode. Only with
+	// a live peer; see generic_data_member_19110.go.
+	reasons = append(reasons, m.genericDataMemberReasonsLocked(peerAlive)...)
 	// #15918: a fabric the daemon marked populated is not takeover-ready
 	// unless the helper can actually install it. The predicate mirrors the
 	// Go-checkable half of Rust build_fabric_link_or_skip: parseable peer

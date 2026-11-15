@@ -190,9 +190,12 @@ var managerMethodClasses = map[string]string{
 	// registry users: detachDebt uses m.mu, while host divergence and arm
 	// coverage use their own cells' mutexes.
 	"ArmCoverageSnapshot": "catG",
-	"DetachDebt":          "catG",
-	"HostDivergence":      "catG",
-	"DetachTC":            "catG", // reads only the construction link map
+	// #19110 F4: a read of the m.mu-protected generic-fallback record; it
+	// touches no registry map and needs no armed state.
+	"UnintendedGenericXDP": "catG",
+	"DetachDebt":           "catG",
+	"HostDivergence":       "catG",
+	"DetachTC":             "catG", // reads only the construction link map
 	// DetachXDP's single label is category G (its direct access is the
 	// construction link map) with the class-3-LIKE delegation target
 	// setXDPAttachedFlag: scoped lookups, cleanup always runs, NO gate.
@@ -247,8 +250,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(inventory) != 141 {
-		t.Fatalf("exported *Manager method inventory = %d, want 141", len(inventory))
+	if len(inventory) != 142 {
+		t.Fatalf("exported *Manager method inventory = %d, want 142", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {

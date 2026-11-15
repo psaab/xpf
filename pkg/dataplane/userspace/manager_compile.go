@@ -392,6 +392,9 @@ func (m *Manager) Compile(cfg *config.Config) (*dataplane.CompileResult, error) 
 	if !snapshotPreflightDone {
 		return nil, fmt.Errorf("userspace: compiler did not run config snapshot preflight")
 	}
+	// #19110 F4: the attach pass just ran; recompute which RETH data members
+	// it left in unintended generic XDP mode (a takeover-readiness reason).
+	m.refreshGenericDataMembers(cfg)
 
 	// Capture the authority callback without invoking it under m.mu. The daemon
 	// owns the S4 snapshot and may need its own locks while producing wire epochs

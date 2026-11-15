@@ -80,6 +80,20 @@ func withTempPinDir9847(t *testing.T) string {
 	old := linkPinPath
 	linkPinPath = dir
 	t.Cleanup(func() { linkPinPath = old })
+	// #19110: ensureXDPLinkPinned no longer trusts a pin's mere presence; it
+	// keeps a pin only if it names the registered link. These fakes have no
+	// kernel identity, so a pin file holding "pin" (what seedPin9847 and the
+	// fake's Pin write) stands for "this process's link". The #19110 cells
+	// seed a different body to stand for a stale pin.
+	oldOurs := pinnedXDPLinkIsOursFn
+	pinnedXDPLinkIsOursFn = func(path string, _ link.Link) (bool, error) {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		return string(b) == "pin", nil
+	}
+	t.Cleanup(func() { pinnedXDPLinkIsOursFn = oldOurs })
 	return dir
 }
 
@@ -145,7 +159,7 @@ func TestRemoveUserspaceShimXDPLinkPins_KeepsRegisteredLinks_9847(t *testing.T) 
 	// still registered; xdp_9 is a stale pin from a previous process.
 	m := New()
 	m.SetLinkForTest(7, &pinTrackingLink9847{}, nil)
-	m.removeUserspaceShimXDPLinkPins()
+	m.removeUserspaceShimXDPLinkPins(nil)
 
 	if !pinExists9847(dir, "xdp_7") {
 		t.Error("xdp_7 removed for a registered link — the next Close detaches ifindex 7 (#9847)")

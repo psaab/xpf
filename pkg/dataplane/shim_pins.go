@@ -9,8 +9,10 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cilium/ebpf/link"
+	"golang.org/x/sys/unix"
 )
 
 // Per-compile bpffs pin finality for the userspace shim.
@@ -52,18 +54,31 @@ var linkPinPath = "/sys/fs/bpf/xpf/links"
 // Relocated here from userspace.Manager.Compile by #7079: it must precede
 // AttachXDP and must NOT precede CompileConfig. Best-effort — a pin already gone
 // is the desired end state, as at the original site.
-func (m *Manager) removeUserspaceShimXDPLinkPins() {
+//
+// #19110: "remove" now means RECLAIM. Unlinking a pin only schedules the link's
+// release in the kernel (bpffs inode destroy -> bpf_link_put -> schedule_work),
+// and the release takes rtnl, so an attach issued straight after the unlink can
+// overtake it. reclaimStaleXDPLinkPin detaches the link synchronously
+// (BPF_LINK_DETACH) before unpinning it. The sweep also KEEPS the pins of this
+// compile's pending interfaces: attachUserspaceShimXDP reclaims each of those
+// immediately before that interface's own attach, so no interface waits out
+// its neighbours' detaches.
+func (m *Manager) removeUserspaceShimXDPLinkPins(pending []int) {
 	keep := make(map[int]bool)
 	for ifindex := range m.XDPLinks() {
+		keep[ifindex] = true
+	}
+	for _, ifindex := range pending {
 		keep[ifindex] = true
 	}
 	removeUserspaceShimXDPLinkPinsExcept(linkPinPath, keep)
 }
 
-// removeUserspaceShimXDPLinkPinsExcept is the #9847 test seam: it deletes
-// every `xdp_*` pin in dir except those naming an ifindex in keep. A pin
-// whose suffix is not a decimal ifindex is removed — it cannot name a live
-// link. A missing dir is a no-op (best-effort, as at the original site).
+// removeUserspaceShimXDPLinkPinsExcept is the #9847 test seam: it reclaims
+// every `xdp_*` pin in dir except those naming an ifindex in keep. A pin whose
+// suffix is not a decimal ifindex is reclaimed too: it cannot name an interface
+// this process manages. A missing dir is a no-op (best-effort, as at the
+// original site).
 func removeUserspaceShimXDPLinkPinsExcept(dir string, keep map[int]bool) {
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
@@ -71,11 +86,195 @@ func removeUserspaceShimXDPLinkPinsExcept(dir string, keep map[int]bool) {
 		if !strings.HasPrefix(name, "xdp_") {
 			continue
 		}
-		if ifindex, err := strconv.Atoi(strings.TrimPrefix(name, "xdp_")); err == nil && keep[ifindex] {
+		ifindex, err := strconv.Atoi(strings.TrimPrefix(name, "xdp_"))
+		if err == nil && keep[ifindex] {
 			continue
 		}
-		_ = os.Remove(filepath.Join(dir, name))
+		reclaimStaleXDPLinkPin(filepath.Join(dir, name)).log(ifindex)
 	}
+}
+
+// reclaimableXDPLink is what reclaiming a stale pin needs from the link it
+// holds.
+type reclaimableXDPLink interface {
+	Detach() error
+	Unpin() error
+	Close() error
+}
+
+// loadPinnedXDPLinkFn opens a pinned link. It is a seam for the reclaim cells.
+var loadPinnedXDPLinkFn = func(path string) (reclaimableXDPLink, error) {
+	return link.LoadPinnedLink(path, nil)
+}
+
+// pinOnBPFFSFn reports whether path lives on a bpffs mount. Only a bpffs file
+// can be a pin; bpf_inode_type (kernel/bpf/inode.c) answers EACCES for any
+// other inode, which is how the #9847 fixtures' plain files load. It is a seam.
+var pinOnBPFFSFn = func(path string) (bool, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return false, err
+	}
+	return st.Type == unix.BPF_FS_MAGIC, nil
+}
+
+type xdpReclaimOutcome string
+
+const (
+	reclaimNoPin xdpReclaimOutcome = "no-pin"
+	// reclaimDetached: the link was detached synchronously and its pin removed.
+	reclaimDetached xdpReclaimOutcome = "detached"
+	// reclaimNotALink: the file was not a link pin (a prog/map pin, or not on
+	// bpffs), so it held no XDP link attachment. It was removed.
+	reclaimNotALink xdpReclaimOutcome = "not-a-link"
+	// reclaimDetachedPinStuck: detached, but the pin could not be removed. It now
+	// names a dead link, and ensureXDPLinkPinned's identity check replaces it
+	// once this process's link is attached.
+	reclaimDetachedPinStuck xdpReclaimOutcome = "detached-pin-stuck"
+	// reclaimDeferred: the link could not be detached (or could not be opened)
+	// but the pin is gone. The kernel releases it later, as master always did,
+	// and the attach's bounded wait absorbs that.
+	reclaimDeferred xdpReclaimOutcome = "deferred-release"
+	// reclaimStuck: neither detached nor unpinned, so a live pin may remain.
+	// AttachXDP never reuses a pin (fresh-only), so the attach meets it as a
+	// refusal and ends in ErrXDPOccupied naming this failure.
+	reclaimStuck xdpReclaimOutcome = "stuck"
+)
+
+type xdpReclaimResult struct {
+	path     string
+	outcome  xdpReclaimOutcome
+	detachMS int64
+	err      error
+}
+
+// clean reports a reclaim that left nothing for the attach to wait on.
+func (r xdpReclaimResult) clean() bool {
+	return r.outcome == reclaimNoPin || r.outcome == reclaimDetached || r.outcome == reclaimNotALink
+}
+
+func (r xdpReclaimResult) String() string {
+	if r.err == nil {
+		return string(r.outcome)
+	}
+	return fmt.Sprintf("%s: %v", r.outcome, r.err)
+}
+
+func (r xdpReclaimResult) log(ifindex int) {
+	switch {
+	case r.outcome == reclaimNoPin:
+	case r.err == nil:
+		slog.Info("reclaimed stale XDP link pin", "ifindex", ifindex, "pin", r.path,
+			"outcome", string(r.outcome), "detach_ms", r.detachMS, "issue", "#19110")
+	default:
+		slog.Warn("stale XDP link pin not fully reclaimed; the attach waits out the kernel's release",
+			"ifindex", ifindex, "pin", r.path, "outcome", string(r.outcome), "err", r.err, "issue", "#19110")
+	}
+}
+
+// reclaimStaleXDPLinkPin releases the link a previous process left pinned at
+// path. It NEVER aborts the apply: every failure falls back to master's unlink
+// (a deferred kernel release), and the attach that follows decides.
+//
+// The load failure is classified by its errno (cilium wraps BPF_OBJ_GET's errno
+// with %w; its type mismatch carries none):
+//   - ENOENT: nothing to do;
+//   - no errno: cilium's "is not a Link", a prog/map pin, which holds no XDP
+//     link attachment: remove it;
+//   - EACCES on a non-bpffs file: not a pin at all: remove it;
+//   - anything else (EPERM, EACCES on bpffs, ENOMEM, EMFILE, ...): UNKNOWN. It
+//     may be a live link this process cannot open: unlink it as master did and
+//     let the attach's wait absorb the deferred release.
+//
+// Once the link is open, Close runs on every path.
+func reclaimStaleXDPLinkPin(path string) xdpReclaimResult {
+	r := xdpReclaimResult{path: path}
+	l, err := loadPinnedXDPLinkFn(path)
+	if err != nil {
+		var errno unix.Errno
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			r.outcome = reclaimNoPin
+			return r
+		case !errors.As(err, &errno):
+			r.outcome = reclaimNotALink
+			r.err = removeStalePin(path)
+			return r
+		case errno == unix.EACCES:
+			if onBPF, serr := pinOnBPFFSFn(path); serr == nil && !onBPF {
+				r.outcome = reclaimNotALink
+				r.err = removeStalePin(path)
+				return r
+			}
+		}
+		if rmErr := removeStalePin(path); rmErr != nil {
+			r.outcome = reclaimStuck
+			r.err = errors.Join(fmt.Errorf("open pinned link: %w", err), rmErr)
+			return r
+		}
+		r.outcome = reclaimDeferred
+		r.err = fmt.Errorf("open pinned link: %w", err)
+		return r
+	}
+	defer func() {
+		if cerr := l.Close(); cerr != nil {
+			slog.Debug("close reclaimed XDP link handle", "pin", path, "err", cerr)
+		}
+	}()
+	start := time.Now()
+	detErr := l.Detach()
+	r.detachMS = time.Since(start).Milliseconds()
+	unpinErr := l.Unpin()
+	if unpinErr != nil {
+		// cilium's Unpin removes the file; try the plain unlink once more
+		// before calling the pin stuck.
+		if rmErr := removeStalePin(path); rmErr == nil {
+			unpinErr = nil
+		} else {
+			unpinErr = errors.Join(unpinErr, rmErr)
+		}
+	}
+	switch {
+	case detErr == nil && unpinErr == nil:
+		r.outcome = reclaimDetached
+	case detErr == nil:
+		r.outcome = reclaimDetachedPinStuck
+		r.err = fmt.Errorf("unpin: %w", unpinErr)
+	case unpinErr == nil:
+		r.outcome = reclaimDeferred
+		r.err = fmt.Errorf("detach: %w", detErr)
+	default:
+		r.outcome = reclaimStuck
+		r.err = errors.Join(fmt.Errorf("detach: %w", detErr), fmt.Errorf("unpin: %w", unpinErr))
+	}
+	return r
+}
+
+func removeStalePin(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// pinnedXDPLinkIsOursFn reports whether the pin at path names the very link
+// this process holds (the same kernel link ID). It is a seam for the #9847 and
+// #19110 cells, whose fakes carry no kernel identity.
+var pinnedXDPLinkIsOursFn = func(path string, ours link.Link) (bool, error) {
+	pinned, err := link.LoadPinnedLink(path, nil)
+	if err != nil {
+		return false, err
+	}
+	defer pinned.Close()
+	pi, err := pinned.Info()
+	if err != nil {
+		return false, fmt.Errorf("pinned link info: %w", err)
+	}
+	oi, err := ours.Info()
+	if err != nil {
+		return false, fmt.Errorf("registered link info: %w", err)
+	}
+	return pi.ID == oi.ID, nil
 }
 
 // ensureXDPLinkPinned re-pins a registered XDP link whose pin file is
@@ -103,7 +302,22 @@ func ensureXDPLinkPinned(ifindex int, l link.Link) error {
 	}
 	pinFile := filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifindex))
 	if _, err := os.Stat(pinFile); err == nil {
-		return nil
+		// #19110: presence is not proof. A reclaim that detached a dead
+		// process's link but could not unlink its pin leaves a pin naming a
+		// DEAD link at this path, and the sweep's keep set preserves it for a
+		// registered ifindex. Keep the pin only if it names this very link;
+		// otherwise replace it, or say the shutdown cannot be hitless.
+		ours, verr := pinnedXDPLinkIsOursFn(pinFile, l)
+		if verr == nil && ours {
+			return nil
+		}
+		slog.Warn("XDP link pin does not name this process's registered link; replacing it",
+			"ifindex", ifindex, "pin", pinFile, "verify_err", verr, "issue", "#19110")
+		if err := removeStalePin(pinFile); err != nil {
+			slog.Warn("could not remove a stale XDP link pin; hitless restart impossible for this interface",
+				"ifindex", ifindex, "pin", pinFile, "err", err)
+			return fmt.Errorf("replace stale XDP pin for ifindex %d: %w", ifindex, err)
+		}
 	}
 	if err := os.MkdirAll(linkPinPath, 0700); err != nil {
 		slog.Warn("failed to create link pin dir for XDP re-pin", "ifindex", ifindex, "err", err)

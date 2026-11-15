@@ -528,10 +528,10 @@ test-race-dp:
 		$(GO) test -list "^Test.*($$alt)" ./pkg/daemon/ | grep -q '^Test' || { echo "test-race-dp: pkg/daemon -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
 	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/daemon/ -run 'DataplaneCell|NATPoolAlarm|ForwardingStatus|BootstrapExit|RuntimeDataplaneNeverBareRootManager|EventStreamFallbackLoop|ConnectedDrain|RunUserspaceEventStream|LiveDataPlane_|GRPCShowBuffers_|SystemAction_|GRPCServer_|RESTServer_|ManagementProbe|ConsoleCLIProbeWiring|FullResync|ReconcilePassUsesOneDataplaneSnapshot|ReconcileBlackholeWrappersStillReloadPerCall|MTUWarningsCrossCommitRace' -count=2
-	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease RSSBootKeyFIFOAtThePathNeverBlocks; do \
+	@for alt in ArmedGate PreArm AllConcurrentSaveNoRace StatusPathReadRacesCompileWrite DetachXDPIsSerializedWithFenceLease RSSBootKeyFIFOAtThePathNeverBlocks HungProbeIsBoundedByTheDiagnosticBudget19110; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/dataplane/ | grep -q '^Test' || { echo "test-race-dp: pkg/dataplane -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
-	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease|RSSBootKeyFIFOAtThePathNeverBlocks' -count=2
+	bash ./scripts/go-test-watch.sh $(GO) test -race -timeout $(GOTEST_TIMEOUT) ./pkg/dataplane/ -run 'ArmedGate|PreArm|AllConcurrentSaveNoRace|StatusPathReadRacesCompileWrite|DetachXDPIsSerializedWithFenceLease|RSSBootKeyFIFOAtThePathNeverBlocks|HungProbeIsBoundedByTheDiagnosticBudget19110' -count=2
 	@for alt in DoesNotRaceUpdateGroups6550 DoesNotHoldMuAcrossManagerCallback6550 DoesNotRaceStopHeartbeat7257 StartHeartbeatSupersededByStopDoesNotPublish7257; do \
 		$(GO) test -list "^Test.*($$alt)" ./pkg/cluster/ | grep -q '^Test' || { echo "test-race-dp: pkg/cluster -run alternative $$alt matches no test" >&2; exit 1; }; \
 	done
