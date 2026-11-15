@@ -521,8 +521,20 @@ v2.1-v2.3 addenda):
   demotion reload, which would then skip itself and leak the line.
 - **Pre-check.** The caller's pre-check runs under `reloadMu`, right before
   the exec. It must not take `Manager` locks; atomic reads are fine.
-- **Fast set.** The wanted lines minus the managed section as last written
-  (read from `frr.conf` under `reloadMu`), v6 first, in ONE `vtysh` batch.
+- **Fast set.** The wanted lines are the WHOLE ownership-filtered render
+  (every RG owned at render time, every instance), not the triggering RG's
+  lines alone. The fast set is those minus the managed section as last
+  written (read from `frr.conf` under `reloadMu`), restricted to the lines
+  #19083 withdraws by itself once their VIP leaves
+  (`splitFastNHTCovered19050`, Codex P2 on d8b6021582):
+  - a default-VRF plain gateway (the static NHT map), `table N` included;
+  - a v6 global gateway with an interface, the inferred RETH shape (zebra's
+    connected-on-that-interface check; loss 10.6.0 lab).
+
+  Interface-qualified v4, interface-only, v6 link-local (#19122) and
+  `vrf NAME` statics are left to the coalesced render, as on master: a stop
+  before that render would otherwise leave a route master's same timeline
+  never installed. The fast set goes v6 first, in ONE `vtysh` batch.
 - **Bound.** The exec has the same `reloadTimeout` bound as the other
   writers, and `reloadMu` is held until vtysh exits. 500 ms is only a logged
   latency alarm.
@@ -586,14 +598,26 @@ v2.1-v2.3 addenda):
       forms (`203.0.113.0/24`, `2001:559:8585:50::1`). frr-reload
       normalizes the file side too, so the managed section's spelling can
       never be matched by string.
+- **#19083 re-evaluation after every batch.** Each batch that ran, an
+  in-doubt one included (a killed batch may have registered lines), REQUESTS
+  a static-NHT re-evaluation (`RequestStaticNHTReeval19083`). The request is
+  coalesced (R24 P2-1): a multi-RG promotion's batches share one rebind,
+  run after the last of them, and the daemon's demotion trigger shares the
+  same primitive. A stopping manager drains nothing.
 - **Shutdown.** `fastStopped` and `fastWG.Add` are both taken under
   `retryMu`, the `retryEnabled` pattern. `Stop` sets the flag, cancels the
   lifetime context (which kills an in-flight batch), and joins. It removes
-  NOTHING: a fast line FRR accepted before `Stop` stays installed after a
-  graceful stop. That is the #19083 class (owned statics survive a
-  graceful stop), and B can add a line to it that master never installed.
-  #19083's fix is therefore a landing dependency of #19050; see
-  pkg/daemon/README.md.
+  NOTHING: a fast line FRR accepted before `Stop` stays in the running
+  config after a graceful stop. #19083 (below) and the fast-set restriction
+  keep it from being an active route. Every fast line is one #19083 withdraws
+  when its VIP leaves (the loss 10.6.0 B arm: no kernel route, NHT
+  `(filtered)`), so B's planned shutdown obligations (latch, join, barrier,
+  `ShutdownApply`) are not needed.
+  - **The remaining exception:** a batch killed by `Stop` whose line FRR
+    still applies AFTER the shutdown VIP removal registers unfiltered (on
+    FRR versions that answer a fresh registration without the map). The
+    loss 10.6.0 P2-6 cells saw no late apply of a killed client's line. The
+    caveat: vtysh may stall before sending the line.
 
 ## Callers
 
