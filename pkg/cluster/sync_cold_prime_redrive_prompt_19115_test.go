@@ -742,3 +742,52 @@ func TestOutOfSweepBulkFailureWakesTheRetry19115(t *testing.T) {
 	}
 	t.Logf("debt retried %v after the out-of-sweep failure", took.Round(time.Millisecond))
 }
+
+// TestSweepWakesDoNotPostponeANewlyArmedDebt19115: the earlier-only wake rule
+// for a debt that is due NOW. A debt with a future deadline is re-armed to the
+// same absolute time by any wake, but a newly armed debt (no attempt in
+// flight: a peer reboot, a capable discovery) is due at once and gets the 1 s
+// floor, RELATIVE to the wake. A loop whose wakes reset the timer would push
+// that first re-drive back on every wake, forever.
+func TestSweepWakesDoNotPostponeANewlyArmedDebt19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ss := primarySync19115(t, ctx, sweepProfiles19115[1], (&flakySnapshot19115{}).read)
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	ss.handleNewConnection(ctx, 0, conn, true)
+	epoch, _, pending := ss.PendingBulkAck()
+	if !pending {
+		t.Fatal("FIXTURE: want the cold prime sent and pending")
+	}
+	ss.handleMessage(conn, syncMsgBulkAck, epochPayload9626(epoch))
+	if ss.needColdPrime.Load() {
+		t.Fatal("FIXTURE: the ack did not discharge the debt")
+	}
+
+	stop := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(100 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-tick.C:
+				ss.wakeSyncSweep()
+			}
+		}
+	}()
+	ss.mu.Lock()
+	ss.armColdPrimeLocked()
+	ss.mu.Unlock()
+	took, ok := waitForBulkSyncs19115(ss, 2, owedRedriveBound19115)
+	close(stop)
+	<-done
+	if !ok {
+		t.Fatalf("#19115: under a stream of sweep wakes, a newly armed debt was not re-driven within %v", owedRedriveBound19115)
+	}
+	t.Logf("newly armed debt re-driven %v after its arm, under wakes", took.Round(time.Millisecond))
+}
