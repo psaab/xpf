@@ -268,11 +268,17 @@ func fastNHTCovered19050(line string) bool {
 	if err != nil {
 		return false // an interface-only next hop, Null0, reject
 	}
+	if gw.Is6() && gw.IsLinkLocalUnicast() {
+		// A v6 link-local gateway, with or without an interface (#19122;
+		// Codex P3: a bare `fe80::1` renders when interface inference finds
+		// nothing).
+		return false
+	}
 	switch len(hop) {
 	case 1:
 		return true
 	case 2:
-		return gw.Is6() && !gw.Is4In6() && !gw.IsLinkLocalUnicast()
+		return gw.Is6() && !gw.Is4In6()
 	}
 	return false
 }

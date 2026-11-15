@@ -2453,9 +2453,15 @@ never blocks the VIP path.
 
   The planned shutdown obligations for B (a latch, a join, a barrier,
   `ShutdownApply`) are dropped. Each batch requests a coalesced map
-  re-evaluation. The remaining exception is a batch killed by `Stop` whose
-  line FRR still applies after the VIP left: the loss 10.6.0 P2-6 cells saw
-  no such late apply, with the vtysh-stall caveat.
+  re-evaluation. If the manager stops before that drain, `frr.Manager.Stop`
+  settles it after the fast-install join, covering a line that registered
+  after a concurrent demotion removed its VIP.
+  
+  The remaining exceptions (pkg/frr/README.md):
+  - Stop's settle failing, which is logged at ERROR;
+  - a batch killed by `Stop` whose line FRR still applies afterwards. The
+    loss 10.6.0 P2-6 cells saw no such late apply, with the vtysh-stall
+    caveat.
 
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`

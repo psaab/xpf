@@ -404,8 +404,9 @@ func (m *Manager) Stop() {
 	// bounded by process teardown, not by reloadTimeout.
 	m.fastWG.Wait()
 	// #19083: a requested static-NHT rebind no drain completed is settled
-	// here, after the workers above exited (the fast-install join included, so a
-	// line a just-finished batch registered is covered), with its own bounded context.
+	// here, after the workers above exited, with its own bounded context. It
+	// runs AFTER the fast-install join, so a line a just-finished batch
+	// registered is covered.
 	m.settleOwedStaticNHTRebind19083()
 }
 
