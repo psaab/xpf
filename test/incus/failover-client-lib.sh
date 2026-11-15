@@ -25,6 +25,24 @@ failover_start_main_iperf() {
 	' _ "$duration" "$target" "$port" "$streams" "$log" "$pidfile" "$wall" "$interval"
 }
 
+# failover_start_arrival_stamper <log> <pidfile>  (#19123, opt-in)
+#   Stamps every line the main client writes to <log> with the LAN host's
+#   CLOCK_REALTIME ($EPOCHREALTIME) as it arrives, into <log>.arrivals as
+#   "<epoch>\t<line>". iperf3 emits an interval line only after that
+#   interval's end, so stamp - end bounds the interval clock's zero from above
+#   (iperf3_sum_parse.py arrival_zero_bound). tail follows the file by inotify
+#   (-s 0.1 caps the poll fallback) and exits with the client supervisor in
+#   <pidfile>. Without bash 5's EPOCHREALTIME the stamps are empty and the
+#   parser takes no bounded window.
+failover_start_arrival_stamper() {
+	incus exec "$CLUSTER_LAN_HOST" -- bash -c '
+		pid=$(cat "$2" 2>/dev/null) || exit 0
+		case "$pid" in ""|*[!0-9]*) exit 0 ;; esac
+		stamp() { while IFS= read -r line; do printf "%s\t%s\n" "${EPOCHREALTIME:-}" "$line"; done; }
+		{ tail -s 0.1 --pid="$pid" -n +1 -F "$1" 2>/dev/null | stamp >"$1.arrivals"; } </dev/null >/dev/null 2>&1 &
+	' _ "$1" "$2" &>/dev/null
+}
+
 # failover_stop_main_iperf <pidfile> <target> <port> <streams>
 #   Stop only the client supervisor recorded by failover_start_main_iperf.
 failover_stop_main_iperf() {

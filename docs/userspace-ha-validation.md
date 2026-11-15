@@ -616,36 +616,78 @@ after the crash. Both directions are in the preserved loss runs:
    `timemillisecs`): the same stop, searched within ±1 s of the integer
    anchor. It is on iperf3's own clock and needs no clock reading. A stop
    before the clock window's start, when there is one, is not the crash.
-5. **A clock window but no stop: the bounded window (#19123).** A fast
-   takeover leaves no empty interval and too few streams stopped together,
-   so neither read above finds the crash, and the clock window (it runs to
-   the sysrq exec's return, 5–15 s) is no point anchor. Before #19123 such
-   runs took step 6, whose ±1 s VOIDed 8 of 10 of them. Two sound edges
-   still exist, and the cell judges the window between them at BOTH ends:
-   - **T_lo**: the window's lower edge, the stamp just before the sysrq
-     exec, less 0.05 s for the start stamp's phase. The sysrq cannot run
-     before its command was sent.
-   - **T_hi**: the first aggregate interval `k` ending after the command
-     whose rate is at most 50 % of the pre-crash floor (the lowest of the
-     five intervals before it). The streams carried their pre-crash bytes
-     in `k` at no less than 80 % of that floor, so the crash lies no later
-     than `start_k + len_k × min(1, f_k / 0.8) + 0.05`. Post-takeover bytes
-     in `k` only push that later.
+5. **A clock window but no stop: a window with MEASURED edges (#19123).**
+   A fast takeover leaves no empty interval and too few streams stopped
+   together, so neither read above finds the crash, and the clock window (it
+   runs to the sysrq exec's return, 5–15 s) is no point anchor. Before #19123
+   such runs took step 6, whose ±1 s VOIDed 8 of 10 of them. The cell now
+   judges a window `[T_lo, T_hi]` at BOTH ends, and both edges are measured;
+   no throughput model enters:
+   - **T_lo, the sysrq dispatch on iperf3's interval clock.** The stamp just
+     before the exec maps onto the LAN host's clock with the measured offset
+     (−rtt/2). That clock maps onto the interval clock through the interval
+     clock's zero, which is NOT `start.timestamp`: iperf3 3.20 takes that on
+     CLOCK_REALTIME at PARAM_EXCHANGE and starts the interval clock later, on
+     CLOCK_MONOTONIC, at TEST_START (after CREATE_STREAMS). test-failover runs
+     `failover_start_arrival_stamper`, which stamps every line the client
+     writes with the LAN host's CLOCK_REALTIME as it arrives. A line arrives
+     only after iperf3 emitted it at its interval's end, so
+     `zero ≤ stamp − end` for every interval line; the cell takes the minimum
+     over the at least three lines ending in `[N−10, N+1]` (N the integer
+     anchor). Those stamps must agree within 0.25 s and the zero must not
+     precede `start.timestamp`, or the clock was not continuous and there is
+     no window.
+   - **T_hi, the survivor's own record of the crash.** fw1 logs
+     `cluster: peer heartbeat timeout, marking peer lost` only after fw0 has
+     gone silent. test-failover reads fw1's clock offset just before the
+     sysrq (`_failover_clock_offset "$FW1"`) and that line's stamp from fw1's
+     journal after the run. Mapped onto the orchestrator's clock (+rtt/2), then
+     onto the interval clock through the zero's lower bound (`start.timestamp`,
+     which iperf3 takes before it starts the interval clock), it bounds the
+     crash from above. Its earliest reading must follow the dispatch, or it is
+     not this crash's peer loss and there is no window. With that, T_hi − T_lo
+     is at least the two readings' rtt, so the window always has width.
+
+   **A stop seen but rejected keeps the integer cell.** When the precise path
+   finds a stop near the crash but rejects it because it lies before the
+   mapped dispatch, the clock mapping reads late, and a window built on that
+   mapping cannot be trusted; step 6 judges the run (#19123 review).
 
    Resume evidence comes only from intervals starting at or after T_hi.
-   Latencies measured from T_lo are upper bounds on the true ones, and from
-   T_hi lower bounds. So PASS needs every stream within 3 s of T_lo, COST a
-   stream past 3 s from T_hi, and a disagreement between the two ends is
-   VOID. A true COST cannot read PASS. The windows run 0.2–0.4 s on the
-   captured runs. On all 11 captured H1 logs that do have a precise stop
-   (loss, tcp and udp), the stop lies inside `[T_lo, T_hi]`, the smallest
-   slack 0.07 s; without the 80 %/0.05 s margin one fell 17 ms outside.
+   Latencies from T_lo are upper bounds on the true ones, and from T_hi lower
+   bounds. So PASS needs every stream within 3 s of T_lo, COST a stream past
+   3 s from T_hi, and a disagreement between the ends is VOID. A PASS or COST
+   also needs every judged stream to carry data in every whole interval for
+   3 s after its read resume: a burst that then goes silent is not a resume,
+   and the cell is VOID.
+
+   **The premises.** "A true COST cannot read PASS" holds given (i) T_lo is at
+   or before the true crash: each min-RTT offset reading is right to ±rtt/2, a
+   line is stamped after iperf3 emitted it at its interval's end, and the LAN
+   host's clock is continuous across the stamps and the dispatch reading
+   (checked as above); (ii) the true crash is at or before T_hi: fw1 declares
+   its peer lost only after fw0's heartbeats stop, and `start.timestamp`
+   precedes the interval clock's zero; and (iii) the in-interval resume read
+   is late or exact. (iii) is shared with the precise path: after a late burst
+   followed by a smaller share, the read can be EARLY by up to an interval;
+   the stay-up requirement limits it. The window is
+   about the dispatch-to-detection time plus iperf3's startup gap and the
+   readings' rtt (about 1.5 s with a 0.3 s gap and a 0.8 s detection). With
+   those figures a stream resuming between about 2.8 s and 4.3 s after the
+   crash reads VOID, neither PASS nor COST: the honest answer when only those
+   edges are measured.
    `--print-crash-anchor` prints `<T_lo> <width> bounded`, so the
    zero-interval producer below starts its window at the earliest edge.
-   The five captured VOID runs (#19034 udp and tcp PR H1, #19026+#19063 udp
-   control ×2 and PR) judge PASS at both ends.
-6. **No stop at all, and no bounded window** (a reading missing, or no dip
-   to 50 %): the integer verdict under the same COST/FAIL policy,
+
+   **What the window cannot do.** Logs recorded before the stamper existed
+   have no arrival stamps, so they keep step 6's verdict. That includes the
+   five #19123 VOIDs (#19034 udp and tcp PR H1, #19026+#19063 udp control ×2
+   and PR). Legacy VRRP-backed mode logs no `marking peer lost` line, so it
+   takes step 6 too. The bound also inherits the precise path's resume read
+   (premise iii above).
+6. **No stop at all, and no measured window** (an arrival stamp, fw1's
+   peer-lost stamp or a clock reading missing, or a discontinuity): the
+   integer verdict under the same COST/FAIL policy,
    evaluated at the integer anchor and one second either side of it. No
    interval starting before anchor+1 counts as resume evidence for any of
    the three. With the old `[T+1, T+deadline]` window, the anchor-1
@@ -697,7 +739,11 @@ median of both latencies. The ledger row records `HARNESS_METRIC` lines for:
 - `crash_at_s`, `crash_anchor_uncertainty_s`, `crash_anchor_precise`,
   `crash_anchor_bounded` and `crash_stop_after_epoch_s`. For a bounded
   window (#19123) `crash_at_s` is its earliest edge, the uncertainty its
-  width, and the resume latencies are measured from that earliest edge;
+  width, and the resume latencies are measured from that earliest edge.
+  `crash_anchor_bounded` (0 or 1) is new in #19123, so `--emit-metrics`
+  output is not byte-identical to before even on the precise path: that
+  path's verdicts and anchors are unchanged, and it gains the
+  `_anchor_bounded=0` line;
 - the same `failback_*`.
 
 So arms are compared on the distribution (#18561).
@@ -754,31 +800,44 @@ no-op control through the same path. The mutants:
 - a fallback without the ±1 s stop search;
 - the aggregate stop only, with no stop of streams together.
 
-`iperf3_sum_parse_test.BoundedCrashWindowTests` (#19123) judges the five
-real fast-takeover logs that VOIDed under the integer anchor
-(`test/incus/failover-crash-bounded-{udp-a,tcp-a,udp-b,udp-c,udp-d}.jsonl`,
-each with its run's own epochs and clock reading) and two controls: an
-integer fallback whose three anchors agreed
-(`failover-crash-bounded-tcp-agreed.jsonl`) and the precise run whose stop
-sits closest to the bound (`failover-crash-precise-udp-edge.jsonl`, stop
-58.515 s). The rows:
+`iperf3_sum_parse_test.BoundedCrashWindowTests` (#19123) judges SYNTHETIC
+runs whose every truth is specified independently of the parser: the crash
+instant, each stream's resume, iperf3's startup gap, the arrival stamps'
+latency and any clock step, the dispatch and fw1's peer-lost stamp, and both
+clock offsets. Each interval's bytes are the exact overlap with each stream's
+on-time, so no rate model is assumed. The rows:
 
 | row | status |
 |---|---|
-| the five VOID logs, through the CLI | PASS at both ends (VOID at master) |
-| the agreed fallback | PASS, bounded |
-| the edge run | its precise PASS, the stop inside the bound |
-| udp-a, stream 15 held to 62 s (3.6 s after the latest edge) | COST at both ends |
-| udp-a, stream 15 resuming at 61.2 s (between the ends' 3 s lines) | VOID |
-| udp-a, stream 15 held forever | FAIL |
-| udp-a with its dip filled in | no bound: the integer cell |
-| the edge run, stream 15 resuming 3.08 s after its known stop | COST on the precise anchor, VOID bounded: never PASS |
+| all streams resume 1 s after the crash | PASS at both ends; the window holds the crash |
+| 0.30 s startup gap, a stream resuming 3.05 s after the crash (the review's counterexample; `start.timestamp` read 2.95/2.85 s) | VOID, never PASS |
+| a stream resuming 4.8 s after the crash | COST |
+| a stream that never resumes | FAIL |
+| an unrelated 40 % dip before or after the dispatch, the crash later, a dead stream with pre-crash bytes after the dip | FAIL |
+| traffic at half rate until the crash | the same window, PASS |
+| a 0.5 s clock step among the stamps; every stamp before `start.timestamp`; fw1's peer loss before the dispatch; fewer than three stamps near the crash; stamps only far from it; any reading missing | no window |
+| a stream back at 60.0 s that is silent again from 60.6 s | VOID: the resume is not sustained |
+| a whole-fleet stop at 58.4 s, the LAN offset misread 0.3 s late (the stop is rejected as before the dispatch), a stream truly resuming 3.05 s after the crash | the integer cell, never bounded, never PASS |
+| startup gaps 0–2 s × detection delays 0.001–2.5 s × rtts 0–0.15 s | the window holds the crash and has width |
+| the CLI and `--print-crash-anchor` on the same run | PASS, `crash_anchor_bounded=1`; `<T_lo> <width> bounded` |
+| a REAL fast-takeover log recorded before the stamper (`failover-crash-fast-takeover-udp.jsonl`, #19034 udp PR H1) | its integer VOID, unchanged |
 
-Four executable mutants each flip a named row: judging at the latest end
-only (the edge run's true COST reads PASS), resume evidence from the
-earliest edge (a dead stream stops reading FAIL), no rate margin (the edge
-run's stop falls outside the bound), and no 50 % dip test (the filled-in
-run takes a bound).
+A further row runs `failover_start_arrival_stamper` against an incus mock and
+checks one `<epoch>\t<line>` per line written, in order, inside the run's
+time span, with the stamper exiting with the client.
+
+Ten executable mutants each flip a named row:
+- mapping through `start.timestamp` (the review's 3.05 s true COST reads PASS);
+- judging at the latest end only (the same true COST reads PASS);
+- admitting a rejected stop (the misread-offset run's true COST reads PASS);
+- resume evidence from the earliest edge (a dead stream's pre-crash bytes
+  read as a resume);
+- no stay-up check (the burst-then-silent stream reads PASS);
+- no attribution guard (an early peer loss bounds a window);
+- no continuity check (a stepped clock bounds a window);
+- no `start.timestamp` check (a zero before it bounds a window);
+- fewer than three stamps accepted;
+- stamps far from the crash accepted.
 
 `make test-iperf-throughput-lib` adds the producer rows. A straggler that
 resumes at T+5 is excused to the 10 s line (0 outside, 2 excused). The same

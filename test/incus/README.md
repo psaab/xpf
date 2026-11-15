@@ -194,10 +194,9 @@ Configs/fixtures: `cos-iperf-config.set`, `cos-iperf-same-class.set`,
 `failover-crash-straggler-2s91.jsonl` and
 `failover-crash-straggler-4s05.jsonl` (real loss crash-run iperf3 logs,
 cut; #18692 rows in `iperf3_sum_parse_test.py`),
-`failover-crash-bounded-{udp-a,tcp-a,udp-b,udp-c,udp-d}.jsonl`,
-`failover-crash-bounded-tcp-agreed.jsonl` and
-`failover-crash-precise-udp-edge.jsonl` (real tcp/udp fast-takeover crash-run
-iperf3 logs, cut the same way; #19123 rows in `iperf3_sum_parse_test.py`),
+`failover-crash-fast-takeover-udp.jsonl` (a real udp fast-takeover crash-run
+iperf3 log recorded before the #19123 arrival stamper, cut the same way;
+#19123 rows in `iperf3_sum_parse_test.py`),
 `loss-userspace-shared-umem-phase0-node0.json`,
 `loss-userspace-shared-umem-phase0-node1.json`, `xpf-cluster-fw0.conf`,
 `xpf-cluster-fw1.conf`, `xpf-internet-test.conf`, `xpf-test.conf`,

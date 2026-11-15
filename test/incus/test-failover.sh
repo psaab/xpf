@@ -1870,6 +1870,8 @@ for attempt in 1 2 3; do
 	iperf_start_seconds=$SECONDS
 	failover_start_main_iperf "$IPERF_DURATION" "$IPERF_TARGET" "$IPERF_PORT" "$IPERF_STREAMS" \
 		/tmp/iperf3-failover.log /tmp/iperf3-failover.pid
+	# #19123: arrival stamps bound the interval clock's zero for the crash cell.
+	failover_start_arrival_stamper /tmp/iperf3-failover.log /tmp/iperf3-failover.pid
 
 	sleep 8  # all parallel streams must be fully established
 
@@ -2072,16 +2074,20 @@ info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover
 #     (`failover_epoch_after`). Only that pair bounds when the sysrq ran: an
 #     exec round trip measured beforehand is a minimum, not a limit.
 # iperf3_sum_parse.py looks for the aggregate's own stop inside that window
-# and anchors on it. With no stop there (a fast takeover), it bounds the crash
-# between this command and the first deep aggregate dip and judges the cell
-# at both ends (#19123); with no dip either, or any reading missing, the cell
-# falls back to the integer anchor (judged at it and +/-1 s).
+# and anchors on it. With no stop there (a fast takeover), it judges the cell
+# at both ends of a window with MEASURED edges (#19123): this command's
+# dispatch, mapped through the client's arrival stamps
+# (failover_start_arrival_stamper), and fw1's own "marking peer lost" stamp,
+# mapped through fw1's clock offset read here (`failover_peer_clock`). With any
+# of those missing, the cell falls back to the integer anchor (judged at it
+# and +/-1 s).
+failover_peer_clock=$(_failover_clock_offset "$FW1" 3) || failover_peer_clock=""
 failover_client_clock=$(_failover_clock_offset "$CLUSTER_LAN_HOST" 3) || failover_client_clock=""
 failover_epoch=$(date +%s.%N)
 failover_at_seconds=$((SECONDS - iperf_start_seconds))
 { timeout -k 5 10 incus exec "$FW0" -- bash -c 'echo b > /proc/sysrq-trigger' || true; } 2>/dev/null
 failover_epoch_after=$(date +%s.%N)
-info "#18692 crash anchor: integer ${failover_at_seconds}s after iperf start; epochs ${failover_epoch}..${failover_epoch_after}; LAN-host clock offset/rtt ${failover_client_clock:-unread}"
+info "#18692 crash anchor: integer ${failover_at_seconds}s after iperf start; epochs ${failover_epoch}..${failover_epoch_after}; LAN-host clock offset/rtt ${failover_client_clock:-unread}; fw1 clock offset/rtt ${failover_peer_clock:-unread}"
 
 # Wait for fw1 to detect failure and become primary
 sleep 3
@@ -2502,6 +2508,31 @@ ha_build_planned_move_args
 # Derive the throughput headline only from gate-validated JSON-stream metrics.
 # Missing, malformed, or incomplete metrics are VOID evidence, never a
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
+# ha_crash_peer_lost_epoch -- #19123: fw1's own "marking peer lost" stamp for
+# this crash, on fw1's clock (the first one from 5 s before the sysrq exec);
+# empty when absent (legacy VRRP mode logs no such line: no bounded window).
+ha_crash_peer_lost_epoch() {
+	[[ "${failover_epoch:-}" =~ ^[0-9]+ ]] || return 0
+	local base=${failover_epoch%%.*}
+	timeout 30 incus exec "$FW1" -- journalctl -u xpfd --no-pager -o short-unix \
+		--since "@$((base - 5))" --until "@$((base + 60))" 2>/dev/null |
+		awk '/cluster: peer heartbeat timeout, marking peer lost/ {print $1; exit}'
+}
+# ha_crash_bounded_args <arrivals> -- #19123's measured-window flags for
+# iperf3_sum_parse.py, one per line; none unless every reading is present.
+ha_crash_bounded_args() {
+	[[ -s "$1" && "${failover_peer_lost:-}" =~ ^[0-9]+([.][0-9]+)?$ &&
+		"${failover_peer_clock:-}" =~ ^-?[0-9.]+\ [0-9.]+$ ]] || return 0
+	printf '%s\n' --client-arrivals "$1" --peer-lost-epoch "$failover_peer_lost" \
+		--peer-clock-offset "${failover_peer_clock% *}" --peer-clock-rtt "${failover_peer_clock#* }"
+}
+# #19123: the measured window's two extra readings, read once for both cells
+# (outside the M1 fixture block, which the selftests execute with stubs).
+LOCAL_IPERF_ARRIVALS="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.json-stream.log.arrivals"
+incus exec "$CLUSTER_LAN_HOST" -- cat /tmp/iperf3-failover.log.arrivals \
+	>"$LOCAL_IPERF_ARRIVALS" 2>/dev/null || : >"$LOCAL_IPERF_ARRIVALS"
+failover_peer_lost=$(ha_crash_peer_lost_epoch)
+info "#19123 measured window: $(grep -c . "$LOCAL_IPERF_ARRIVALS" 2>/dev/null || true) arrival stamps; fw1 peer-lost stamp ${failover_peer_lost:-absent}"
 # M1 JSON capture/gate fixture begin
 # ha_crash_resume_at <log> -- #18692's crash anchor: seconds plus uncertainty
 # from the parser's aggregate-stop evidence, else the #19123 bounded window's
@@ -2511,11 +2542,13 @@ ha_build_planned_move_args
 # --resume-event-sec windows use raw anchor.seconds; near-boundary counter
 # classification can therefore differ from the cell's conservative cutoff.
 ha_crash_resume_at() {
-	local anchor_args=() line
+	local anchor_args=() bounded_args=() line
 	if [[ "${failover_client_clock:-}" =~ ^-?[0-9.]+\ [0-9.]+$ ]]; then
 		anchor_args=(--client-clock-offset "${failover_client_clock% *}"
 			--client-clock-rtt "${failover_client_clock#* }"
 			--crash-epoch "${failover_epoch:-}" --crash-epoch-after "${failover_epoch_after:-}")
+		mapfile -t bounded_args < <(ha_crash_bounded_args "${LOCAL_IPERF_ARRIVALS:-}")
+		anchor_args+=("${bounded_args[@]}")
 	fi
 	if line=$(python3 "${SCRIPT_DIR}/iperf3_sum_parse.py" --print-crash-anchor \
 		--crash-at "$failover_at_seconds" "${anchor_args[@]}" <"$1" 2>/dev/null) &&
@@ -2653,6 +2686,8 @@ if [[ "$iperf_gate_ok" == true ]]; then
 		oracle_anchor_args+=(--client-clock-offset "${failover_client_clock% *}"
 			--client-clock-rtt "${failover_client_clock#* }"
 			--crash-epoch "$failover_epoch" --crash-epoch-after "$failover_epoch_after")
+		mapfile -t oracle_bounded_args < <(ha_crash_bounded_args "${LOCAL_IPERF_ARRIVALS:-}")
+		oracle_anchor_args+=("${oracle_bounded_args[@]}")
 		if [[ -n "${failback_epoch:-}" ]]; then
 			oracle_anchor_args+=(--failback-epoch "$failback_epoch")
 		fi
