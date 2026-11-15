@@ -132,9 +132,11 @@ type frrExecutor interface {
 type realExecutor struct{}
 
 // Vtysh runs `vtysh -c <command>` under the CALLER's ctx, capped at
-// vtyshTimeout, and returns stdout. Output/error shape is identical to the
-// historical vtyshCmd free function (frr.go:1597-1605 pre-split); the timeout
-// bound was added in #1800 (U3) and the caller's context in #9143.
+// vtyshTimeout, and returns stdout. The output shape is the historical vtyshCmd
+// free function's (frr.go:1597-1605 pre-split); since #19083 (R24 NEW-A) the
+// error also carries up to 512 bytes of stdout, where vtysh prints its own
+// `% Unknown command` (exit 1). The timeout bound was added in #1800 (U3) and
+// the caller's context in #9143.
 //
 // WithTimeout(ctx, ...) composes: the effective deadline is the EARLIER of the
 // caller's and 15s, and cancelling ctx (an HTTP client disconnect, a cancelled
@@ -150,9 +152,23 @@ func (realExecutor) Vtysh(ctx context.Context, command string) (string, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("vtysh %q: %w: %s", command, err, stderr.String())
+		// vtysh prints its own parse errors (`% Unknown command: ...`) on
+		// STDOUT and exits 1, so the error carries a bounded copy of stdout
+		// too: callers such as the #19083 binding restore must tell a command
+		// vtysh does not know from a daemon that did not answer.
+		return "", fmt.Errorf("vtysh %q: %w: %s%s", command, err, stderr.String(), boundedVtyshOutput(stdout.String()))
 	}
 	return stdout.String(), nil
+}
+
+// boundedVtyshOutput returns at most vtyshErrOutputMax bytes of out, for error
+// text.
+func boundedVtyshOutput(out string) string {
+	const vtyshErrOutputMax = 512
+	if len(out) > vtyshErrOutputMax {
+		return out[:vtyshErrOutputMax] + "..."
+	}
+	return out
 }
 
 // VtyshStream runs `vtysh -c <command>` under ctx and streams stdout
