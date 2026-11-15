@@ -149,6 +149,11 @@ type vtyshConfigExecutor19083 interface {
 // staticd re-sends its statics and bgpd re-runs bestpath for the paths on
 // those next hops. A rebind is two such evaluations per family, so production
 // callers go through RequestStaticNHTReeval19083, which coalesces them.
+//
+// It has no production caller: production goes through
+// RequestStaticNHTReeval19083 and its drain, which takes reloadMu itself
+// (pinned by TestStaticNHTRequestedDrainSerializesWithRetryReload19083). This
+// synchronous form serves cells and diagnostics.
 func (m *Manager) ReevaluateStaticNHT19083() error {
 	ex, ok := m.executor().(vtyshConfigExecutor19083)
 	if !ok {
@@ -256,19 +261,32 @@ func (m *Manager) writtenSectionBindsStaticNHT19083() (bool, error) {
 //     adds the binding): settled, no write;
 //   - anything else, including an unreadable family: bind the primary by
 //     direct replacement (one name change, no unbound moment; idempotent when
-//     already bound, R24 P3-1), then read both families back. Only a readable
-//     primary/primary verification lets the reload start.
+//     already bound, R24 P3-1), then read both families back.
 //
-// Every other outcome keeps the restore pending and returns an error, so the
-// caller does not start the reload (Codex P1 on d8b6021582: an unreadable
-// state used to let the reload delete the alternate's binding before adding
-// the primary's). The degraded retry repeats it. Liveness (R24 P3-2): each read
-// has its own staticNHTReadTimeout19083 and the write its own
+// What lets the reload start after that write (R24 NEW-1 on 9d7abd581a):
+//   - a read-back of the primary in both families: verified;
+//   - a read-back zebra ANSWERED but whose output has no parseable static row
+//     (a parse miss): the reload starts with an ERROR log. The write was a
+//     direct replacement of both families and vtysh reported success, which
+//     is the evidence. Failing closed here would wedge every FRR apply on
+//     every cluster node from startup (New sets the restore pending) the
+//     moment an FRR update changes the output's layout, and a restart would
+//     not clear it.
+//
+// Fails closed (pending kept, error returned, the caller does not start the
+// reload; the degraded retry repeats it):
+//   - the write failed;
+//   - a read-back exec failed (zebra did not answer in time);
+//   - a family was positively read back as anything but the primary.
+//
+// (Codex P1 on d8b6021582: an unreadable state used to let the reload delete
+// the alternate's binding before adding the primary's.) Liveness (R24 P3-2):
+// each read has its own staticNHTReadTimeout19083 and the write its own
 // staticNHTReevalTimeout19083, so the restore holds reloadMu for at most
-// 4 reads + 1 write (+ the exec WaitDelay). It stalls FRR applies only while
-// zebra cannot answer a vtysh read in time, a condition under which
+// 4 reads + 1 write (+ the exec WaitDelay). It holds FRR applies only while a
+// vtysh exec to zebra fails or times out, a condition under which
 // frr-reload.py, which reads the running config through vtysh too, fails
-// anyway.
+// anyway. It never holds them on output it merely cannot parse.
 func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	if !m.staticNHTRestorePending19083 {
 		return nil
@@ -293,51 +311,80 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	}
 	want := frrName(clusterStaticNHTRouteMap19083)
 	primaryOrNone := func(v string) bool { return v == "" || v == want }
-	v4, ok4 := m.readStaticNHTBinding19083("show ip nht route-map")
-	v6, ok6 := m.readStaticNHTBinding19083("show ipv6 nht route-map")
-	if ok4 && ok6 && primaryOrNone(v4) && primaryOrNone(v6) {
+	v4, r4 := m.readStaticNHTBinding19083("show ip nht route-map")
+	v6, r6 := m.readStaticNHTBinding19083("show ipv6 nht route-map")
+	if r4 == nhtReadOK19083 && r6 == nhtReadOK19083 && primaryOrNone(v4) && primaryOrNone(v6) {
 		m.staticNHTRestorePending19083 = false
 		return nil
-	}
-	seen := func(v string, ok bool) string {
-		if !ok {
-			return "<unreadable>"
-		}
-		return v
 	}
 	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReevalTimeout19083)
 	out, werr := ex.VtyshConfigLines(ctx, staticNHTBindLines19083(clusterStaticNHTRouteMap19083))
 	cancel()
 	if werr != nil {
 		return fmt.Errorf("restore static NHT binding (#19083): zebra had %s/%s: %w: %s",
-			seen(v4, ok4), seen(v6, ok6), werr, strings.TrimSpace(string(out)))
+			r4.show(v4), r6.show(v6), werr, strings.TrimSpace(string(out)))
 	}
-	a4, okA4 := m.readStaticNHTBinding19083("show ip nht route-map")
-	a6, okA6 := m.readStaticNHTBinding19083("show ipv6 nht route-map")
-	if !okA4 || !okA6 || a4 != want || a6 != want {
+	a4, q4 := m.readStaticNHTBinding19083("show ip nht route-map")
+	a6, q6 := m.readStaticNHTBinding19083("show ipv6 nht route-map")
+	if q4 == nhtReadExecFailed19083 || q6 == nhtReadExecFailed19083 ||
+		(q4 == nhtReadOK19083 && a4 != want) || (q6 == nhtReadOK19083 && a6 != want) {
 		return fmt.Errorf("restore static NHT binding (#19083): not verified after binding %q: zebra reports %s/%s",
-			want, seen(a4, okA4), seen(a6, okA6))
+			want, q4.show(a4), q6.show(a6))
+	}
+	if q4 == nhtReadParseMiss19083 || q6 == nhtReadParseMiss19083 {
+		slog.Error("frr: cannot parse zebra's `show ip|ipv6 nht route-map` after binding the static NHT primary; trusting vtysh's success and starting the reload (#19083)",
+			"was_v4", r4.show(v4), "was_v6", r6.show(v6), "read_back_v4", q4.show(a4), "read_back_v6", q6.show(a6), "now", want)
+		m.staticNHTRestorePending19083 = false
+		return nil
 	}
 	slog.Info("frr: restored the static NHT binding before the reload (#19083)",
-		"was_v4", seen(v4, ok4), "was_v6", seen(v6, ok6), "now", want)
+		"was_v4", r4.show(v4), "was_v6", r6.show(v6), "now", want)
 	m.staticNHTRestorePending19083 = false
 	return nil
 }
 
+// nhtRead19083 is the outcome of one binding read: the exec failing (zebra did
+// not answer in time) is told apart from output with no parseable static row
+// (R24 NEW-1).
+type nhtRead19083 int
+
+const (
+	nhtReadOK19083 nhtRead19083 = iota
+	nhtReadExecFailed19083
+	nhtReadParseMiss19083
+)
+
+func (r nhtRead19083) show(v string) string {
+	switch r {
+	case nhtReadExecFailed19083:
+		return "<no answer>"
+	case nhtReadParseMiss19083:
+		return "<unparseable>"
+	}
+	if v == "" {
+		return "none"
+	}
+	return v
+}
+
 // readStaticNHTBinding19083 reads the map bound to staticd's next-hop tracking
 // for one family from zebra (`show ip|ipv6 nht route-map`: a "%-24s  : %-10s"
-// row per protocol, "none" when unset; FRR 10.6.0 zebra_routemap.c
-// show_vrf_nht_rm, and the format lab-confirmed on loss 10.6.0). "" means none.
-// ok is false when the read fails, times out, or has no static row. Each read
-// has its own staticNHTReadTimeout19083.
-func (m *Manager) readStaticNHTBinding19083(cmd string) (string, bool) {
+// row per protocol, "none" when unset; FRR zebra_routemap.c show_vrf_nht_rm.
+// The real 10.5.1 and 10.6.0 outputs are the testdata fixtures
+// show_*_nht_routemap_*_19083.txt). "" means none. Each read has its own
+// staticNHTReadTimeout19083.
+func (m *Manager) readStaticNHTBinding19083(cmd string) (string, nhtRead19083) {
 	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReadTimeout19083)
 	defer cancel()
 	out, err := m.executor().Vtysh(ctx, cmd)
 	if err != nil {
-		return "", false
+		return "", nhtReadExecFailed19083
 	}
-	return parseStaticNHTBinding19083(out)
+	v, ok := parseStaticNHTBinding19083(out)
+	if !ok {
+		return "", nhtReadParseMiss19083
+	}
+	return v, nhtReadOK19083
 }
 
 // parseStaticNHTBinding19083 returns the default VRF's static row of a

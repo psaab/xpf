@@ -974,22 +974,30 @@ R22 #5).
   - anything else, an unreadable family included: the primary is bound
     DIRECTLY (one name change, no unbound moment; idempotent when already
     bound) and then read back;
-  - only a readable primary/primary read-back lets the reload start. A failed
-    write, an unreadable read-back, or a mismatch in either family keeps the
-    restore pending and returns an error: the reload does not start, and the
-    degraded retry repeats it (Codex P1 on d8b6021582: an unreadable state
-    used to let the reload run).
+  - after that write, the reload starts on a primary/primary read-back, or
+    on a read-back zebra answered but that has no parseable static row (a
+    parse miss: an ERROR is logged and vtysh's success is trusted, since the
+    write replaced both families). That keeps an FRR output-layout change from
+    wedging every apply on every cluster node from startup (R24 NEW-1).
+  - It fails closed (pending kept, error returned, the reload not started, the
+    degraded retry repeats it) on a failed write, a read-back exec that failed
+    or timed out, or a family positively read back as anything but the
+    primary (Codex P1 on d8b6021582: an unreadable state used to let the
+    reload run).
+  - The parser is pinned by real `show ip|ipv6 nht route-map` captures from
+    FRR 10.5.1 and 10.6.0 (`testdata/show_*_nht_routemap_*_19083.txt`).
   - A standalone section reads nothing and does not settle the flag, since
     its reload may fail and leave the alternate bound for a later cluster
     apply (R24 P3-3).
 - **Liveness, chosen deliberately** (R24 P3-2). Each read has its own 3 s
   budget (`staticNHTReadTimeout19083`) and the write its own 5 s, so a
   restore holds `reloadMu` for at most four reads and one write (plus the
-  exec WaitDelay). While zebra cannot answer a read in time, every FRR apply
-  is held, on purpose. That is the same condition under which frr-reload.py,
-  which reads the running config through vtysh too, would fail anyway, and
-  the degraded retry keeps trying. There is no automatic give-up that would
-  reopen the window.
+  exec WaitDelay). While a vtysh exec to zebra fails or times out, every FRR
+  apply is held, on purpose. That is the same condition under which
+  frr-reload.py, which reads the running config through vtysh too, would fail
+  anyway, and the degraded retry keeps trying. Output that zebra returns but
+  the parser cannot read never holds applies (see above). There is no other
+  automatic give-up that would reopen the window.
 
 ## Gotchas
 
