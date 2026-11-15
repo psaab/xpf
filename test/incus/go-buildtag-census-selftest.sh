@@ -81,9 +81,13 @@ EMPTY_REVIEWED="$WORK/empty-reviewed"
 # of the way, at a present-but-untagged file when the cell wants it to trip.
 # REVIEWED is the GO_BUILDTAG_REVIEWED override: cells that exercise complex
 # declarations pass a per-fixture file, the rest default to the empty one.
+# KNOWN_PROD (#19115, optional 5th argument) is the same control for the
+# non-test xpf_* discovery; it defaults to an absent path, so the cells that
+# predate it are unaffected.
 run_census() {
 	GO_BUILDTAG_ROOT="$1" GO_BUILDTAG_DIRS="pkg" GO_BUILDTAG_KNOWN="$2" \
 	GO_BUILDTAG_REVIEWED="${4:-$EMPTY_REVIEWED}" \
+	GO_BUILDTAG_KNOWN_PROD="${5:-pkg/__absent__/none.go}" \
 	GO="$STUB_GO" STUB_GO_LOG="$3" "$SH_BIN" "$CENSUS" 2>&1
 }
 
@@ -346,6 +350,101 @@ EMPTYBIN="$WORK/emptybin"; mkdir -p "$EMPTYBIN"
 out=$(PATH="$EMPTYBIN" "$SH_BIN" "$CENSUS" 2>&1); rc=$?
 [ "$rc" = "77" ] && ok "no-go exits 77 (SKIP)" || bad "no-go exited $rc, want 77: $out"
 echo "$out" | grep -q "SKIP" && ok "no-go SKIP says so" || bad "no-go has no SKIP text: $out"
+
+# ── 8. #19115: NON-test files behind a positive xpf_* tag ──
+# A production file behind a project-private tag (the xpf_faultinject seam)
+# is as invisible to the default build as a tagged test. It must get the
+# same compile leg; its `!xpf_*` release twin and platform constraints must
+# NOT be discovered (the default build compiles them); a complex constraint
+# naming an xpf_* tag goes through the reviewed-declaration gate.
+FX8=$(new_fixture prodtag)
+mkdir -p "$FX8/pkg/eta"
+cat >"$FX8/pkg/eta/eta.go" <<'GO'
+package eta
+func Eta() int { return 8; }
+GO
+cat >"$FX8/pkg/eta/eta_fault.go" <<'GO'
+//go:build xpf_fixfault
+
+package eta
+func fault() error { return nil }
+GO
+cat >"$FX8/pkg/eta/eta_release.go" <<'GO'
+//go:build !xpf_fixfault
+
+package eta
+func fault() error { return nil }
+GO
+cat >"$FX8/pkg/eta/eta_linux.go" <<'GO'
+//go:build linux
+
+package eta
+GO
+LOG8="$WORK/log8"; : >"$LOG8"
+out=$(run_census "$FX8" "pkg/__absent__/none_test.go" "$LOG8" "" "pkg/eta/eta_fault.go"); rc=$?
+[ "$rc" = "0" ] && ok "8a: a compiling xpf_*-tagged non-test file passes" || bad "8a: clean xpf_* tree failed (rc=$rc): $out"
+echo "$out" | grep -q "pkg/eta/eta_fault.go: //go:build xpf_fixfault" \
+	&& ok "8a: the census row names the non-test file AND its constraint" \
+	|| bad "8a: no census row for the xpf_*-tagged non-test file: $out"
+grep -q -- "-tags xpf_fixfault" "$LOG8" \
+	&& ok "8a: the compile leg ran with -tags xpf_fixfault" \
+	|| bad "8a: no vet leg for the xpf_*-tagged non-test file: $(cat "$LOG8")"
+if echo "$out" | grep -qE "eta_release.go|eta_linux.go"; then
+	bad "8a: the !xpf_* release twin or a platform-constrained file was discovered: $out"
+else
+	ok "8a: neither the !xpf_* release twin nor a platform-constrained file is discovered"
+fi
+echo "$out" | grep -q "fail-closed control: pkg/eta/eta_fault.go" \
+	&& ok "8a: the non-test fail-closed control sees the known file" \
+	|| bad "8a: no non-test fail-closed PASS line: $out"
+
+# 8b. POSITIVE CONTROL: the xpf_*-tagged non-test file does not compile.
+FX8b=$(new_fixture prodtag-broken)
+mkdir -p "$FX8b/pkg/theta"
+cat >"$FX8b/pkg/theta/theta.go" <<'GO'
+package theta
+GO
+cat >"$FX8b/pkg/theta/theta_fault.go" <<'GO'
+//go:build xpf_fixfault
+
+package theta
+
+// STUB_VET_FAIL: emulates a fault seam that no longer compiles under its tag.
+var _ = undefinedSymbolBuildtag
+GO
+LOG8b="$WORK/log8b"; : >"$LOG8b"
+out=$(run_census "$FX8b" "pkg/__absent__/none_test.go" "$LOG8b"); rc=$?
+[ "$rc" != "0" ] \
+	&& ok "8b: an uncompilable xpf_*-tagged non-test file fails the census" \
+	|| bad "8b: an uncompilable xpf_*-tagged non-test file did NOT fail the census"
+echo "$out" | grep -q "pkg/theta/theta_fault.go" \
+	&& ok "8b: the failure names the file" \
+	|| bad "8b: failure does not name the file: $out"
+
+# 8c. FAIL-CLOSED: the known non-test file is on disk but not discovered
+# (here it is untagged: the discovery is blind to exactly what it must see).
+LOG8c="$WORK/log8c"; : >"$LOG8c"
+out=$(run_census "$FX8" "pkg/__absent__/none_test.go" "$LOG8c" "" "pkg/eta/eta.go"); rc=$?
+[ "$rc" != "0" ] && echo "$out" | grep -q "fail-closed: known xpf_" \
+	&& ok "8c: a known non-test file present but undiscovered fails closed" \
+	|| bad "8c: the non-test fail-closed control did not trip (rc=$rc): $out"
+
+# 8d. A complex constraint naming an xpf_* tag needs a reviewed declaration.
+FX8d=$(new_fixture prodtag-complex)
+mkdir -p "$FX8d/pkg/iota"
+cat >"$FX8d/pkg/iota/iota.go" <<'GO'
+package iota
+GO
+cat >"$FX8d/pkg/iota/iota_fault.go" <<'GO'
+//go:build xpf_fixfault && linux
+
+package iota
+GO
+LOG8d="$WORK/log8d"; : >"$LOG8d"
+out=$(run_census "$FX8d" "pkg/__absent__/none_test.go" "$LOG8d"); rc=$?
+[ "$rc" != "0" ] && echo "$out" | grep -q "complex constraint in pkg/iota/iota_fault.go" \
+	&& ok "8d: an undeclared complex xpf_* constraint on a non-test file fails" \
+	|| bad "8d: an undeclared complex xpf_* constraint passed (rc=$rc): $out"
 
 # ── 7. real-toolchain cells (gated on go) ──
 if command -v go >/dev/null 2>&1; then

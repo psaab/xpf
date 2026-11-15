@@ -98,8 +98,25 @@ generate-userspace-xdp:
 build-userspace-xdp: generate-userspace-xdp
 
 # Build the daemon binary
+# #19115: the lab fault seam (pkg/daemon/faultinject_bulk_export_19115.go,
+# build tag xpf_faultinject) is compiled ONLY with XPF_FAULTINJECT=1, and
+# `make deb` then refuses a DEB_VERSION that does not say "faultinject", so a
+# fault build can never pass as a release package. A tag smuggled in through
+# GOFLAGS is refused: it would build the seam into an unmarked binary.
+# TestReleaseBuildExcludesTheBulkExportFault19115 pins all three.
+XPF_FAULTINJECT ?=
+export XPF_FAULTINJECT
+XPF_GO_BUILD_TAGS := $(if $(filter 1,$(XPF_FAULTINJECT)),-tags xpf_faultinject,)
+
 build:
-	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/xpfd
+	@case "$$GOFLAGS" in *xpf_faultinject*) echo "make build: REFUSED: GOFLAGS carries the xpf_faultinject tag; a fault build goes through XPF_FAULTINJECT=1 so its package is marked (#19115)" >&2; exit 2;; esac
+	CGO_ENABLED=0 $(GO) build $(XPF_GO_BUILD_TAGS) -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/xpfd
+
+# #19115: the lab fault's own cells, compiled only under its tag (the
+# go-buildtag census compiles them on every test-go; this target RUNS them).
+.PHONY: test-faultinject
+test-faultinject:
+	bash ./scripts/go-test-json.sh "$(GOTESTJSON)" "$(GO)" -tags xpf_faultinject -count=1 -run '19115' ./pkg/daemon/
 
 # Build the remote CLI client. Pin empty linker flags so GOFLAGS cannot inject
 # linker options into the cli binary.
@@ -2371,6 +2388,7 @@ deb-cell-guard:
 	    exit 1; \
 	  fi
 deb: deb-cell-guard deb-changelog-check
+	@if [ "$(XPF_FAULTINJECT)" = 1 ]; then case "$(DEB_VERSION)" in *faultinject*) echo "==> FAULT-INJECTION build (#19115): $(DEB_VERSION) is a lab package, never a release";; *) echo "make deb: REFUSED: XPF_FAULTINJECT=1 needs a DEB_VERSION containing 'faultinject' (got $(DEB_VERSION)) so the lab package cannot pass as a release (#19115)" >&2; exit 2;; esac; fi
 	@source_dirty=$$(python3 "$(CURDIR)/scripts/image/build_provenance.py" \
 	  --dirty-suffix --root "$(CURDIR)") || { \
 	    echo "FATAL: provenance probe refused the build" >&2; exit 1; }; \
