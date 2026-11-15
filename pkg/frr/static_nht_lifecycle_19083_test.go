@@ -28,14 +28,19 @@ type zebraNHTFake19083 struct {
 	events        []string
 	failAfter     int
 	blockAfter    int
+	applyOnly     int // one-shot: apply only this many lines, report success
 	ignore        bool
 	unreadable    bool
+	unreadV4      int // the next N v4 binding reads are unreadable
+	unreadV6      int // the next N v6 binding reads are unreadable
+	batchGate     chan struct{}
+	onBatch       func() // one-shot, run under mu after a batch applies
 	reloadEntered chan struct{}
 	reloadRelease chan struct{}
 }
 
 func newZebraNHTFake19083(v4, v6 string) *zebraNHTFake19083 {
-	return &zebraNHTFake19083{fakeExecutor: &fakeExecutor{}, v4: v4, v6: v6, failAfter: -1, blockAfter: -1}
+	return &zebraNHTFake19083{fakeExecutor: &fakeExecutor{}, v4: v4, v6: v6, failAfter: -1, blockAfter: -1, applyOnly: -1}
 }
 
 func (f *zebraNHTFake19083) applyLocked(line string) {
@@ -50,8 +55,8 @@ func (f *zebraNHTFake19083) applyLocked(line string) {
 func (f *zebraNHTFake19083) VtyshConfigLines(ctx context.Context, lines []string) ([]byte, error) {
 	f.mu.Lock()
 	f.events = append(f.events, "batch "+strings.Join(lines, "|"))
-	fa, ba := f.failAfter, f.blockAfter
-	f.failAfter, f.blockAfter = -1, -1
+	fa, ba, ao, gate := f.failAfter, f.blockAfter, f.applyOnly, f.batchGate
+	f.failAfter, f.blockAfter, f.applyOnly = -1, -1, -1
 	n := len(lines)
 	if fa >= 0 && fa < n {
 		n = fa
@@ -59,15 +64,29 @@ func (f *zebraNHTFake19083) VtyshConfigLines(ctx context.Context, lines []string
 	if ba >= 0 && ba < n {
 		n = ba
 	}
+	if ao >= 0 && ao < n {
+		n = ao
+	}
 	if !f.ignore {
 		for _, l := range lines[:n] {
 			f.applyLocked(l)
 		}
 	}
+	if fn := f.onBatch; fn != nil {
+		f.onBatch = nil
+		fn()
+	}
 	f.mu.Unlock()
 	if ba >= 0 {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if gate != nil {
+		select {
+		case <-gate:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	if fa >= 0 {
 		return []byte("% injected rejection"), errors.New("injected vtysh failure")
@@ -82,7 +101,14 @@ func (f *zebraNHTFake19083) Vtysh(ctx context.Context, cmd string) (string, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, "read")
-	if f.unreadable {
+	unread := &f.unreadV4
+	if strings.HasPrefix(cmd, "show ipv6") {
+		unread = &f.unreadV6
+	}
+	if f.unreadable || *unread > 0 {
+		if *unread > 0 {
+			*unread--
+		}
 		return "% Unknown command: " + cmd + "\n", nil
 	}
 	v := f.v4
@@ -230,25 +256,26 @@ func TestStaticNHTInterruptedRebindRestoresPrimaryBeforeReload19083(t *testing.T
 
 // TestStaticNHTRestoreWritesOnlyWhenAlternateBound19083: the restore reads
 // zebra first. The primary or no binding at all (a fresh FRR: the reload adds
-// it) writes nothing and settles; an unreadable binding writes nothing and
-// stays pending (not evidence of the alternate).
+// it), positively read in both families, writes nothing and settles. A
+// standalone section reads nothing and does NOT settle (R24 P3-3: the reload
+// it precedes may fail and leave the alternate bound for a later cluster
+// apply).
 func TestStaticNHTRestoreWritesOnlyWhenAlternateBound19083(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		v4, v6      string
-		unreadable  bool
+		cluster     bool
 		wantPending bool
 	}{
-		{"primary bound", nhtMapA19083, nhtMapA19083, false, false},
-		{"nothing bound", "", "", false, false},
-		{"unreadable", nhtMapA19083, nhtMapA19083, true, true},
+		{"primary bound", nhtMapA19083, nhtMapA19083, true, false},
+		{"nothing bound", "", "", true, false},
+		{"standalone keeps pending", nhtMapB19083, nhtMapB19083, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newZebraNHTFake19083(tc.v4, tc.v6)
-			fake.unreadable = tc.unreadable
 			m := NewForTest(filepath.Join(t.TempDir(), "frr.conf"), fake)
 			t.Cleanup(m.Stop)
-			if err := m.ApplyFull(clusterFC19083(true)); err != nil {
+			if err := m.ApplyFull(clusterFC19083(tc.cluster)); err != nil {
 				t.Fatalf("apply: %v", err)
 			}
 			for _, e := range fake.snapshot() {
@@ -279,6 +306,9 @@ func TestStaticNHTRestoreFailureDoesNotStartReload19083(t *testing.T) {
 			f.ignore = false
 			f.mu.Unlock()
 		}},
+		// Codex: a verification that checks only one family. The write lands
+		// for v4 only; v6 stays on the alternate.
+		{"restore lands for v4 only", func(f *zebraNHTFake19083) { f.applyOnly = 1 }, func(*zebraNHTFake19083) {}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
@@ -359,4 +389,197 @@ func containsInOrder19083(events []string, a, b string) bool {
 		}
 	}
 	return false
+}
+
+// TestStaticNHTRestoreUnreadableFailsClosed19083 (Codex P1 / R24 P3-1 on
+// d8b6021582): while a restore is pending, the diff reload may start only after
+// zebra is POSITIVELY read with the primary (or nothing) in both families. An
+// unreadable family no longer lets the reload start: the primary is bound
+// (idempotent) and must then be read back; an unreadable verification keeps
+// the restore pending and the reload unstarted.
+func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		v4, v6     string
+		setup      func(f *zebraNHTFake19083)
+		wantReload bool
+	}{
+		{"unreadable before, readable after the write", nhtMapB19083, nhtMapB19083,
+			func(f *zebraNHTFake19083) { f.unreadV4, f.unreadV6 = 1, 1 }, true},
+		{"partial read: v4 alternate, v6 unreadable", nhtMapB19083, nhtMapB19083,
+			func(f *zebraNHTFake19083) { f.unreadV6 = 1 }, true},
+		{"verification unreadable", nhtMapB19083, nhtMapB19083,
+			func(f *zebraNHTFake19083) {
+				// Readable B/B first; both verification reads fail.
+				f.onBatch = func() { f.unreadV4, f.unreadV6 = 1, 1 }
+			}, false},
+		{"unreadable throughout", nhtMapB19083, nhtMapB19083,
+			func(f *zebraNHTFake19083) { f.unreadable = true }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newZebraNHTFake19083(tc.v4, tc.v6)
+			tc.setup(fake)
+			ctx, cancel := context.WithCancel(context.Background())
+			m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
+				staticNHTRestorePending19083: true}
+			t.Cleanup(m.Stop)
+			err := m.ApplyFull(clusterFC19083(true))
+			ev := fake.snapshot()
+			reloaded := false
+			for _, e := range ev {
+				if strings.HasPrefix(e, "reload ") {
+					reloaded = true
+				}
+			}
+			if bad := reloadEventsSawAlternate19083(ev); len(bad) != 0 {
+				t.Fatalf("a diff reload started with the alternate bound: %q (events %q)", bad, ev)
+			}
+			if tc.wantReload {
+				if err != nil || !reloaded || !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) || m.staticNHTRestorePending19083 {
+					t.Fatalf("err=%v pending=%v events %q: want the primary bound and verified, then the reload", err, m.staticNHTRestorePending19083, ev)
+				}
+				return
+			}
+			if err == nil || reloaded || !m.staticNHTRestorePending19083 {
+				t.Fatalf("err=%v reloaded=%v pending=%v events %q: an unverifiable restore must not start the reload and must stay pending",
+					err, reloaded, m.staticNHTRestorePending19083, ev)
+			}
+		})
+	}
+}
+
+// TestStaticNHTStopCancelsExecutingRebind19083 (Codex P2): Stop cancels a
+// rebind that is executing (its context derives from the manager lifetime, not
+// only from its own timeout), and the interrupted rebind leaves the restore
+// pending.
+func TestStaticNHTStopCancelsExecutingRebind19083(t *testing.T) {
+	orig := staticNHTReevalTimeout19083
+	staticNHTReevalTimeout19083 = 30 * time.Second
+	t.Cleanup(func() { staticNHTReevalTimeout19083 = orig })
+	fake := newZebraNHTFake19083("", "")
+	m := newLiteralNHTManager19083(t, fake)
+	fake.mu.Lock()
+	fake.blockAfter = 2
+	fake.mu.Unlock()
+	done := make(chan error, 1)
+	go func() { done <- m.ReevaluateStaticNHT19083() }()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if v4, _ := fake.bindings(); v4 == nhtMapB19083 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	m.Stop()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a rebind cancelled by Stop reported success")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Stop did not cancel the executing rebind (it would run to its own 30 s timeout)")
+	}
+	m.reloadMu.Lock()
+	pending := m.staticNHTRestorePending19083
+	m.reloadMu.Unlock()
+	if !pending {
+		t.Fatal("an interrupted rebind did not leave the restore pending")
+	}
+}
+
+// TestStaticNHTRebindSerializesWithRetryReload19083 (R24 P3-5): the rebind
+// takes reloadMu itself, not buildMu: it cannot land while a degraded-retry
+// reload (which holds reloadMu only) is running.
+func TestStaticNHTRebindSerializesWithRetryReload19083(t *testing.T) {
+	fake := newZebraNHTFake19083("", "")
+	m := newLiteralNHTManager19083(t, fake)
+	m.degraded.Store(true)
+	entered, release := make(chan struct{}), make(chan struct{})
+	fake.mu.Lock()
+	fake.reloadEntered, fake.reloadRelease = entered, release
+	fake.mu.Unlock()
+	fake.reset()
+	retried := make(chan struct{})
+	go func() { m.retryReloadOnce(context.Background()); close(retried) }()
+	<-entered
+	rebound := make(chan error, 1)
+	go func() { rebound <- m.ReevaluateStaticNHT19083() }()
+	time.Sleep(200 * time.Millisecond)
+	for _, e := range fake.snapshot() {
+		if strings.HasPrefix(e, "batch ") {
+			close(release)
+			t.Fatalf("the rebind ran while a degraded-retry reload held reloadMu: %q", fake.snapshot())
+		}
+	}
+	close(release)
+	<-retried
+	if err := <-rebound; err != nil {
+		t.Fatalf("rebind: %v", err)
+	}
+	if ev := fake.snapshot(); !containsInOrder19083(ev, "reload v4=", "batch ip nht static route-map "+nhtMapB19083) {
+		t.Fatalf("events %q: want the rebind after the retry's reload", ev)
+	}
+}
+
+// TestStaticNHTRebindRequestsCoalesce19083 (R22 #2, R24 P2-1/P3-4):
+// RequestStaticNHTReeval19083 coalesces a burst into ONE rebind; a request
+// made while that rebind is in flight yields exactly one more after it; a
+// stopped manager drains nothing.
+func TestStaticNHTRebindRequestsCoalesce19083(t *testing.T) {
+	rebinds := func(f *zebraNHTFake19083) int {
+		n := 0
+		for _, e := range f.snapshot() {
+			if strings.HasPrefix(e, "batch ip nht static route-map "+nhtMapB19083) {
+				n++
+			}
+		}
+		return n
+	}
+	waitRebinds := func(f *zebraNHTFake19083, n int) int {
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && rebinds(f) < n {
+			time.Sleep(10 * time.Millisecond)
+		}
+		return rebinds(f)
+	}
+	t.Run("burst and one pending", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		gate := make(chan struct{})
+		fake.mu.Lock()
+		fake.batchGate = gate
+		fake.mu.Unlock()
+		for i := 0; i < 3; i++ {
+			m.RequestStaticNHTReeval19083()
+		}
+		if got := waitRebinds(fake, 1); got != 1 {
+			close(gate)
+			t.Fatalf("a burst of 3 requests ran %d rebinds, want 1", got)
+		}
+		m.RequestStaticNHTReeval19083() // while the first is held in flight
+		m.RequestStaticNHTReeval19083()
+		time.Sleep(300 * time.Millisecond)
+		if got := rebinds(fake); got != 1 {
+			close(gate)
+			t.Fatalf("%d rebinds while the first was in flight, want 1", got)
+		}
+		close(gate)
+		if got := waitRebinds(fake, 2); got != 2 {
+			t.Fatalf("requests made during an in-flight rebind ran %d rebinds in total, want 2", got)
+		}
+		time.Sleep(4 * staticNHTRebindDebounce19083)
+		if got := rebinds(fake); got != 2 {
+			t.Fatalf("%d rebinds, want 2 (one running plus one pending)", got)
+		}
+	})
+	t.Run("stopped", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		m.Stop()
+		m.RequestStaticNHTReeval19083()
+		time.Sleep(4 * staticNHTRebindDebounce19083)
+		if got := rebinds(fake); got != 0 {
+			t.Fatalf("a stopped manager ran %d rebinds", got)
+		}
+	})
 }

@@ -913,12 +913,20 @@ next NHT event for that next hop (measured on udp).
   `ip_nht_rm_add` re-evaluates only when the bound name changes, and
   unbinding would briefly re-install the filtered statics. It runs under
   `reloadMu` and writes no `frr.conf`.
-- The daemon calls it after a demotion's VIP removal, coalesced to one rebind
-  per demotion burst (`triggerStaticNHTReeval19083`, 100 ms).
+- Production callers REQUEST it (`RequestStaticNHTReeval19083`, non-blocking,
+  safe under `reloadMu`). Requests coalesce: one drain runs 100 ms
+  (`staticNHTRebindDebounce19083`) after the first request of a burst, under
+  `reloadMu`; every request until that drain takes `reloadMu` rides on it; a
+  request made while the drain is rebinding schedules exactly one more (one
+  running plus one pending, nothing dropped). A failed rebind is logged, not
+  retried: the restore below keeps filtering safe. A stopped manager drains
+  nothing.
+- The daemon requests it after a demotion's VIP removal
+  (`triggerStaticNHTReeval19083`).
   - On master nothing registers a static inside that window. The demotion
     render only prunes, so the trigger closes little there.
-  - Its real target is #19050's fast install, which also rebinds after each
-    batch.
+  - Its real target is #19050's fast install, which requests a rebind after
+    each batch through the same coalescing primitive.
 - **What stays residual:**
   - **(i)** FRR restarting without xpfd while the owner render is on disk.
   - **(ii)** A commit, or an FRR or xpfd start, that registers a static whose
@@ -939,9 +947,11 @@ evaluation of EVERY tracked next hop of that family, for EVERY client:
 - staticd re-sends its statics;
 - bgpd re-runs bestpath for the paths on those next hops.
 
-A rebind is two such evaluations per family. That is why the daemon coalesces
-its triggers, and why the loss lab measures zebra, staticd and bgpd across
-one RG move.
+A rebind is two such evaluations per family. That is why every production
+caller goes through the coalescing request, and why the loss lab measured the
+staticd churn across one RG move (loss 10.6.0: an upper bound of v4 +6/+14 and
+v6 +10/+6 added-or-updated/deleted, the demotion reload included; bgpd was not
+running there).
 
 **An interrupted rebind is restored before the next diff reload** (Codex P1 /
 R22 #5).
@@ -953,16 +963,33 @@ R22 #5).
 - **The flag.** `staticNHTRestorePending19083` (under `reloadMu`) is set:
   - from before every rebind batch, until the batch fully applies;
   - by `New`, because a previous xpfd may have been killed mid-rebind.
-- **The restore.** `reloadLocked` and `retryReloadOnce` first run
-  `restoreStaticNHTBindingLocked19083`. It reads zebra's bindings
-  (`show ip|ipv6 nht route-map`):
-  - the primary, or nothing (a fresh FRR, which the reload binds), settles
-    with no write;
-  - anything else is replaced by the primary DIRECTLY (one name change, no
-    unbound moment) and verified;
-  - a failed or unverified restore does not start the reload. It returns an
-    error, and the degraded retry repeats it;
-  - unreadable bindings are logged, not written blind.
+- **The restore.** `restoreStaticNHTBindingLocked19083` runs first in every
+  diff-reload path (`reloadLocked`, `retryReloadOnce`, and #19050's in-doubt
+  authoritative reload). While a restore is pending and the section binds the
+  primary, the reload starts only after zebra is POSITIVELY read
+  (`show ip|ipv6 nht route-map`) with the primary, or nothing, in BOTH
+  families:
+  - the primary or nothing (a fresh FRR, which the reload binds), read in
+    both families: settled, no write;
+  - anything else, an unreadable family included: the primary is bound
+    DIRECTLY (one name change, no unbound moment; idempotent when already
+    bound) and then read back;
+  - only a readable primary/primary read-back lets the reload start. A failed
+    write, an unreadable read-back, or a mismatch in either family keeps the
+    restore pending and returns an error: the reload does not start, and the
+    degraded retry repeats it (Codex P1 on d8b6021582: an unreadable state
+    used to let the reload run).
+  - A standalone section reads nothing and does not settle the flag, since
+    its reload may fail and leave the alternate bound for a later cluster
+    apply (R24 P3-3).
+- **Liveness, chosen deliberately** (R24 P3-2). Each read has its own 3 s
+  budget (`staticNHTReadTimeout19083`) and the write its own 5 s, so a
+  restore holds `reloadMu` for at most four reads and one write (plus the
+  exec WaitDelay). While zebra cannot answer a read in time, every FRR apply
+  is held, on purpose. That is the same condition under which frr-reload.py,
+  which reads the running config through vtysh too, would fail anyway, and
+  the degraded retry keeps trying. There is no automatic give-up that would
+  reopen the window.
 
 ## Gotchas
 

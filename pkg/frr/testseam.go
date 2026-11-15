@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"sync"
 )
@@ -41,6 +42,22 @@ type RecordingExecutor struct {
 	ConfigBatches   [][]string
 	ConfigBatchErr  error
 	ConfigBatchGate chan struct{}
+	// nhtV4/nhtV6 model zebra's static NHT binding per family (guarded by
+	// mu; "" = none): binding lines in a batch set them, a successful reload
+	// converges them to frr.conf, and `show ip|ipv6 nht route-map` reports
+	// them, so the #19083 binding restore sees a readable zebra.
+	nhtV4, nhtV6 string
+}
+
+// applyNHTBindingLocked models one `ip|ipv6 nht static route-map NAME` line.
+// Caller holds r.mu.
+func (r *RecordingExecutor) applyNHTBindingLocked(line string) {
+	switch {
+	case strings.HasPrefix(line, "ip nht static route-map "):
+		r.nhtV4 = strings.TrimPrefix(line, "ip nht static route-map ")
+	case strings.HasPrefix(line, "ipv6 nht static route-map "):
+		r.nhtV6 = strings.TrimPrefix(line, "ipv6 nht static route-map ")
+	}
 }
 
 // VtyshConfigLines records a configuration batch.
@@ -51,6 +68,11 @@ func (r *RecordingExecutor) VtyshConfigLines(_ context.Context, lines []string) 
 	r.mu.Lock()
 	r.ConfigBatches = append(r.ConfigBatches, append([]string(nil), lines...))
 	err, gate := r.ConfigBatchErr, r.ConfigBatchGate
+	if err == nil {
+		for _, l := range lines {
+			r.applyNHTBindingLocked(l)
+		}
+	}
 	r.mu.Unlock()
 	if gate != nil {
 		<-gate
@@ -65,11 +87,39 @@ func (r *RecordingExecutor) ConfigBatchesSnapshot() [][]string {
 	return append([][]string(nil), r.ConfigBatches...)
 }
 
-func (r *RecordingExecutor) Vtysh(context.Context, string) (string, error) { return "", nil }
+// Vtysh answers `show ip|ipv6 nht route-map` from the modelled binding (the
+// FRR 10.6.0 row layout) and every other command with "".
+func (r *RecordingExecutor) Vtysh(_ context.Context, cmd string) (string, error) {
+	if cmd != "show ip nht route-map" && cmd != "show ipv6 nht route-map" {
+		return "", nil
+	}
+	r.mu.Lock()
+	v := r.nhtV4
+	if strings.HasPrefix(cmd, "show ipv6") {
+		v = r.nhtV6
+	}
+	r.mu.Unlock()
+	if v == "" {
+		v = "none"
+	}
+	return "VRF: default\nProtocol                  : route-map\n-------------------------------------\n" +
+		"static                    : " + v + "\n", nil
+}
 
 func (r *RecordingExecutor) FrrReloadPy(_ context.Context, conf string) error {
 	r.ReloadCalls++
 	r.LastConf = conf
+	if r.ReloadErr == nil {
+		// A converged reload leaves zebra's static NHT binding as frr.conf
+		// renders it.
+		data, _ := os.ReadFile(conf)
+		r.mu.Lock()
+		r.nhtV4, r.nhtV6 = "", ""
+		for _, l := range strings.Split(string(data), "\n") {
+			r.applyNHTBindingLocked(strings.TrimSpace(l))
+		}
+		r.mu.Unlock()
+	}
 	return r.ReloadErr
 }
 
