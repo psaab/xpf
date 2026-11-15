@@ -551,14 +551,14 @@ func (s *SessionSync) syncSweep() int {
 	// arm exactly once (CAS true->false); re-arm on failure so a later sweep or
 	// reconnect retries. flushDeleteJournal already ran this tick, so any tail
 	// still queued replays before this snapshot's window closes.
-	// #19115 (design v4): every RETRY of an authoritative bulk honours the
-	// shared backoff (bulkRetryNotBefore), whichever branch carries it, so a
-	// sweep that ticks every second (negotiated liveness) cannot turn a
-	// persistent export failure into a retry per tick. New forced work is not
-	// dropped: an armed forceResync waits for the deadline, then runs.
-	backoffOpen := s.bulkRetryBackoffOpen()
+	// #19115: at most one bulk per tick, in this priority. Only the owed
+	// cold-prime re-drive is held to the retry backoff (bulkRetryNotBefore,
+	// sync_cold_prime_retry_19115.go). A forced resync re-armed after a failure
+	// and the aged-ack re-drive keep their pre-#19115 cadence, a retry on the
+	// next sweep tick (scoped out by the user's decision of 2026-11-15; the
+	// missing backoff there is #19135).
 	switch {
-	case backoffOpen && s.forceResync.CompareAndSwap(true, false):
+	case s.forceResync.CompareAndSwap(true, false):
 		slog.Warn("cluster sync: forcing full bulk resync after delete-journal overflow (standby may retain stale sessions)")
 		if err := s.doBulkSync(); err != nil {
 			s.forceResync.Store(true)
@@ -608,15 +608,17 @@ func (s *SessionSync) syncSweep() int {
 		// simply skips this tick when that re-drive owns the flag, and the arm
 		// it is still holding brings us back on the next one.
 		//
-		// #19115: while a debt is owed it governs every sweep retry. The
+		// #19115: while a debt is owed, this branch is the sweep's retry. The
 		// re-drive waits for its own eligibility (the backoff deadline, no
 		// young ack for the debt, no capability fence), rechecked under
 		// bulkSendMu, and an ineligible debt never falls through to the
-		// aged-ack branch below (Codex finding 1 on design v3).
+		// aged-ack branch below (Codex finding 1 on design v3). Its due time
+		// is scheduled by nextSweepDelay, so being held back never costs a
+		// profile interval (Codex finding 18 on design v4).
 		if s.owedColdPrimeRetryEligible() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
 			s.redriveOwedColdPrime()
 		}
-	case backoffOpen && (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) &&
+	case (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) &&
 		s.bulkRedriveInFlight.CompareAndSwap(false, true):
 		// A forced resync or another authoritative bulk may be withheld at
 		// BulkEnd without discharging cold-prime debt. Re-send an aged,
