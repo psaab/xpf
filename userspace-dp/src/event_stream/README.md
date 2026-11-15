@@ -571,9 +571,10 @@ cluster-scoped.
         no delta does not: an RG demote or re-activate during the owed window
         can make a row below the resume slot a candidate that waits for the
         next full export (#19048). Neither does an owed retry whose
-        drain-first stops at a Close blocked on its tuple permit: that drain
-        loses no delta, so the retry re-arms with its resume slot, and its
-        probe, intact (`rearm_loss_resync_after_blocked_drain`; #19063, R21 F1;
+        drain-first stops at a Close blocked on its tuple permit: blocking
+        itself loses no delta, so the retry re-arms with its resume slot, and
+        its probe, intact. A separate loss in the same drain (a failed prefix
+        enqueue, a requeue overflow) clears the slot on its own path (`rearm_loss_resync_after_blocked_drain`; #19063, R21 F1;
         `blocked_drain_first_keeps_the_owed_resume_slot_19063`). Before, it
         was treated as a fresh episode, so the next retry re-exported from
         slot 0 at a full budget.

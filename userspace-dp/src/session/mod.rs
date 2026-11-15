@@ -7804,12 +7804,14 @@ impl SessionTable {
 
     /// #19063 (R21 F1 on 28b7bf2ebf): re-arm an owed resync whose drain-first
     /// could not complete because a Close in the ring is blocked on its tuple
-    /// permit (`drain_and_flush_all_impl` returned false). That attempt lost
-    /// nothing: the blocked deltas are back in the ring in order, and a delta
-    /// that WAS dropped meanwhile already recorded its own fresh loss
-    /// (`requeue_deltas_front` and a failed flush both go through
-    /// `note_fresh_delta_loss`, which clears the resume point). So only the
-    /// latch is re-armed. The #18780 resume slot, and with it the owed
+    /// permit (`drain_and_flush_all_impl` returned false; the caller starts its
+    /// sticky cleanup flag false). BLOCKING itself loses no delta: the
+    /// blocked Close and the suffix behind it are back in the ring in order.
+    /// A SEPARATE loss in the same drain clears the resume point on its own
+    /// path: a handled-prefix Open that fails its stream enqueue goes through
+    /// `flush_session_deltas_loop` -> `set_delta_loss`, and a requeue overflow
+    /// through `note_fresh_delta_loss`. This method never restores a cleared
+    /// slot, so only the latch is re-armed. The #18780 resume slot, and with it the owed
     /// retry's zero-wait probe (`probing = resume.is_some()`), survives.
     /// Before, `set_delta_loss` treated the blocked drain as a fresh episode
     /// and dropped the slot, so the next owed retry re-exported from slot 0
