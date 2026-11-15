@@ -696,12 +696,32 @@ func wantStaticNHTRebind19083() []string {
 		staticNHTBindLines19083(clusterStaticNHTRouteMap19083)...)
 }
 
+// sessions19083 returns the fake's vtysh sessions, one string per batch.
+func sessions19083(f *fastFake19050) []string {
+	installs, _, _ := f.snapshot()
+	var got []string
+	for _, b := range installs {
+		got = append(got, strings.Join(b, "|"))
+	}
+	return got
+}
+
+// waitSessions19083 waits until the fake has n sessions (or 3 s), then lets a
+// few debounce periods pass so a surplus session would show.
+func waitSessions19083(f *fastFake19050, n int) []string {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(sessions19083(f)) < n {
+		time.Sleep(10 * time.Millisecond)
+	}
+	time.Sleep(4 * staticNHTRebindDebounce19083)
+	return sessions19083(f)
+}
+
 // TestFastInstallReevaluatesStaticNHTAfterBatch19083: zebra answers a newly
-// registered static without the #19083 NHT map, so every fast batch is
-// followed (never preceded) by the rebind that forces zebra to re-evaluate,
-// in that order and in a separate vtysh session. That holds after an
-// in-doubt batch too, because a killed batch may have registered lines. With
-// the map not bound (standalone), nothing is ever run after the batch.
+// registered static without the #19083 NHT map, so every fast batch REQUESTS a
+// re-evaluation, which runs after the batch (never before), in its own vtysh
+// session, an in-doubt batch included (a killed batch may have registered
+// lines). With the map not bound (standalone) no rebind ever runs.
 func TestFastInstallReevaluatesStaticNHTAfterBatch19083(t *testing.T) {
 	rebind := strings.Join(wantStaticNHTRebind19083(), "|")
 	for _, tc := range []struct {
@@ -718,6 +738,7 @@ func TestFastInstallReevaluatesStaticNHTAfterBatch19083(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fastFake19050{fakeExecutor: &fakeExecutor{}, installErr: tc.installErr}
 			m := newFastTestManager19050(t, fake)
+			m.retryEnabled = false
 			section := []string{other19050}
 			if tc.bound {
 				section = append(section, staticNHTBound19083)
@@ -727,15 +748,26 @@ func TestFastInstallReevaluatesStaticNHTAfterBatch19083(t *testing.T) {
 			if outcome != tc.outcome {
 				t.Fatalf("outcome = %v, want %v", outcome, tc.outcome)
 			}
-			installs, _, _ := fake.snapshot()
-			var got []string
-			for _, b := range installs {
-				got = append(got, strings.Join(b, "|"))
-			}
-			if strings.Join(got, " ;; ") != strings.Join(tc.want, " ;; ") {
+			if got := waitSessions19083(fake, len(tc.want)); strings.Join(got, " ;; ") != strings.Join(tc.want, " ;; ") {
 				t.Fatalf("vtysh sessions = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestFastInstallRebindsOncePerBurst19083 (R24 P2-1): the batches of one
+// multi-RG promotion (one goroutine per RG, each fast set non-empty until the
+// coalesced render writes frr.conf) share ONE rebind, run after the last batch.
+func TestFastInstallRebindsOncePerBurst19083(t *testing.T) {
+	fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
+	m := newFastTestManager19050(t, fake)
+	writeManagedStatics19050(t, m, other19050, staticNHTBound19083)
+	m.FastInstallStatics([]string{other19050, v4Default19050}, func() bool { return true })
+	m.FastInstallStatics([]string{other19050, v4Default19050, v6Default19050}, func() bool { return true })
+	rebind := strings.Join(wantStaticNHTRebind19083(), "|")
+	want := []string{v4Default19050, v6Default19050 + "|" + v4Default19050, rebind}
+	if got := waitSessions19083(fake, len(want)); strings.Join(got, " ;; ") != strings.Join(want, " ;; ") {
+		t.Fatalf("vtysh sessions = %q, want both batches and then ONE rebind %q", got, want)
 	}
 }
 
@@ -761,16 +793,16 @@ func TestFastInstallNoReevaluationWithoutBatch19083(t *testing.T) {
 				m.Stop()
 			}
 			m.FastInstallStatics(tc.want, func() bool { return tc.precheck })
-			if installs, _, _ := fake.snapshot(); len(installs) != 0 {
-				t.Fatalf("vtysh sessions = %q, want none", installs)
+			if got := waitSessions19083(fake, 1); len(got) != 0 {
+				t.Fatalf("vtysh sessions = %q, want none", got)
 			}
 		})
 	}
 }
 
 // TestFastInstallSkipsReevaluationWhenStoppedMidBatch19083: Stop cancels the
-// lifetime while a batch runs. The batch's outcome stands, and no rebind
-// session is started on a stopping manager.
+// lifetime while a batch runs. The batch's outcome stands, and the requested
+// rebind is not run on a stopping manager.
 func TestFastInstallSkipsReevaluationWhenStoppedMidBatch19083(t *testing.T) {
 	fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
 	m := newFastTestManager19050(t, fake)
@@ -779,9 +811,35 @@ func TestFastInstallSkipsReevaluationWhenStoppedMidBatch19083(t *testing.T) {
 	if outcome, _ := m.FastInstallStatics([]string{other19050, v4Default19050}, func() bool { return true }); outcome != FastInstalled {
 		t.Fatalf("outcome = %v, want installed (the fake batch succeeded)", outcome)
 	}
+	if got := waitSessions19083(fake, 2); len(got) != 1 || got[0] != v4Default19050 {
+		t.Fatalf("vtysh sessions = %q, want only the batch", got)
+	}
+}
+
+// TestFastSetOnlyNHTCoveredLines19050 (Codex P2 on d8b6021582): the fast path
+// installs only lines #19083 withdraws by itself once their VIP leaves. A line
+// a graceful stop would leave ACTIVE (#19122: interface-qualified v4,
+// interface-only, v6 link-local; and a VRF static, where the map does not
+// bind) is left to the coalesced render, as on master, so B adds no route
+// master's same timeline never installed.
+func TestFastSetOnlyNHTCoveredLines19050(t *testing.T) {
+	const (
+		plainV4    = "ip route 198.51.100.0/24 172.16.50.1 5"
+		tableV4    = "ip route 198.51.100.0/25 172.16.50.1 5 table 100"
+		globalV6   = "ipv6 route ::/0 2001:559:8585:50::1 ge-0-0-2.50 5"
+		qualV4     = "ip route 198.51.100.64/26 172.16.50.1 ge-0-0-2.50 5"
+		ifOnlyV4   = "ip route 198.51.100.128/26 ge-0-0-2.50 5"
+		linkLocal6 = "ipv6 route 2001:db8:1905:71::/64 fe80::1 ge-0-0-2.50 5"
+		vrfV4      = "ip route 0.0.0.0/0 10.255.192.41 5 vrf sfmix"
+	)
+	fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
+	m := newFastTestManager19050(t, fake)
+	writeManagedStatics19050(t, m, other19050)
+	m.FastInstallStatics([]string{plainV4, tableV4, globalV6, qualV4, ifOnlyV4, linkLocal6, vrfV4}, func() bool { return true })
 	installs, _, _ := fake.snapshot()
-	if len(installs) != 1 || strings.Join(installs[0], "|") != v4Default19050 {
-		t.Fatalf("vtysh sessions = %q, want only the batch", installs)
+	want := strings.Join([]string{globalV6, plainV4, tableV4}, "|")
+	if len(installs) != 1 || strings.Join(installs[0], "|") != want {
+		t.Fatalf("installs = %q, want ONE batch of only the NHT-covered lines %q", installs, want)
 	}
 }
 
