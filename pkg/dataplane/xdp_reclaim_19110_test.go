@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -617,13 +618,13 @@ func TestShimInterfaceAttachIsClassified19110(t *testing.T) {
 	t.Cleanup(restore)
 	m := New()
 
-	if err := m.AttachShimXDPInterface(29, false); err != nil {
+	if err := m.AttachShimXDPInterfaces([]ShimXDPAttachRequest{{Ifindex: 29}})[29]; err != nil {
 		t.Fatalf("EINVAL interface: %v", err)
 	}
 	if m.UnintendedGenericXDP()[29] != "invalid argument" {
 		t.Errorf("the refresh attach's EINVAL->generic fallback was not recorded for F4: %v", m.UnintendedGenericXDP())
 	}
-	err := m.AttachShimXDPInterface(30, false)
+	err := m.AttachShimXDPInterfaces([]ShimXDPAttachRequest{{Ifindex: 30}})[30]
 	if !errors.Is(err, ErrXDPOccupied) || !errors.Is(err, unix.EBUSY) {
 		t.Errorf("a persistent refusal on the refresh path = %v, want ErrXDPOccupied wrapping EBUSY", err)
 	}
@@ -677,6 +678,11 @@ func TestReclaimNeverDetachesALinkRegisteredMeanwhile19110(t *testing.T) {
 	racerGo, racerDone := raceRegistration19110(t, m, pin, 29)
 	old := reclaimAfterCheckHook
 	reclaimAfterCheckHook = func(int) {
+		// Deterministic half: the ownership lease is HELD here.
+		if m.xdpOwnershipMu.TryLock() {
+			m.xdpOwnershipMu.Unlock()
+			t.Error("the XDP ownership lease is not held between the registration check and the reclaim")
+		}
 		close(racerGo)
 		select {
 		case <-racerDone:
@@ -710,6 +716,10 @@ func TestSweepNeverDetachesALinkRegisteredMeanwhile19110(t *testing.T) {
 	racerGo, racerDone := raceRegistration19110(t, m, pin, 29)
 	old := sweepAfterKeepHook
 	sweepAfterKeepHook = func() {
+		if m.xdpOwnershipMu.TryLock() {
+			m.xdpOwnershipMu.Unlock()
+			t.Error("the XDP ownership lease is not held between the sweep's registry read and its reclaims")
+		}
 		close(racerGo)
 		select {
 		case <-racerDone:
@@ -745,10 +755,242 @@ func TestAtMostOneOccupantProbeInFlight19110(t *testing.T) {
 	p2.refusalDeadline()
 	got := p2.diagnose(5)
 	close(block)
+	for deadline := time.Now().Add(2 * time.Second); xdpProbeInFlight.Load(); {
+		if time.Now().After(deadline) {
+			t.Fatal("the released probe never cleared the in-flight flag")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	if !strings.Contains(got, "previous occupant probe is still running") {
 		t.Errorf("second pass while the first probe still runs: %q, want it refused", got)
 	}
 	if n := started.Load(); n != 1 {
 		t.Errorf("%d probes started, want 1", n)
+	}
+}
+
+// Codex delta P2-1: the refresh batch is ONE pass. The production refresh
+// budget is zero (TestRefreshPassNeverWaitsOrProbes19110), so this cell gives the
+// pass a non-zero TEST budget to pin the batch contract itself: three interfaces
+// refuse for good, the first waits out the budget, and the later ones give up on
+// their FIRST attempt instead of each starting a fresh budget.
+func TestRefreshBatchSharesOneRefusalBudget19110(t *testing.T) {
+	withTempPinDir9847(t)
+	newReclaimHarness19110(t)
+	const budget = 600 * time.Millisecond
+	t.Cleanup(SetXDPOccupancyBudgetForTest(budget, 50*time.Millisecond))
+	stubOccupantProbe19110(t, "", nil)
+	var mu sync.Mutex
+	var first time.Time
+	var late []string
+	restore := SetXDPTransitionSeamForTest(func(op string, ifindex int, generic bool) (bool, error) {
+		if op != "attach" {
+			return true, nil
+		}
+		mu.Lock()
+		now := time.Now()
+		if first.IsZero() {
+			first = now
+		}
+		// ONE shared deadline: every attempt of every interface falls inside the
+		// first refusal plus one budget. A fresh budget per interface puts the
+		// later interfaces' attempts past it.
+		if now.Sub(first) > budget+300*time.Millisecond {
+			late = append(late, fmt.Sprintf("ifindex %d at +%s", ifindex, now.Sub(first).Round(time.Millisecond)))
+		}
+		mu.Unlock()
+		return true, occupiedErr19110(ifindex, unix.EBUSY)
+	})
+	t.Cleanup(restore)
+
+	res := New().AttachShimXDPInterfaces([]ShimXDPAttachRequest{{Ifindex: 40}, {Ifindex: 41}, {Ifindex: 42}})
+	for _, i := range []int{40, 41, 42} {
+		if !errors.Is(res[i], ErrXDPOccupied) {
+			t.Errorf("ifindex %d: %v, want ErrXDPOccupied", i, res[i])
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(late) > 0 {
+		t.Errorf("attempts after the shared refusal budget (%s from the first refusal): %v. Each interface "+
+			"got its own budget, so the caller's Manager mutex is held N budgets, not one", budget, late)
+	}
+}
+
+// Codex delta P2-1 / R23 NEW-1 at the PRODUCTION refresh budgets. The caller
+// holds the userspace Manager's mutex, so the refresh pass must not wait and
+// must not start an occupant probe: one native attempt per interface, no
+// generic attempt, ErrXDPOccupied for each, and no probe goroutine.
+func TestRefreshPassNeverWaitsOrProbes19110(t *testing.T) {
+	withTempPinDir9847(t)
+	newReclaimHarness19110(t)
+	var probes atomic.Int32
+	old := xdpOccupantProbeFn
+	xdpOccupantProbeFn = func(int) (string, error) { probes.Add(1); return "", nil }
+	t.Cleanup(func() { xdpOccupantProbeFn = old })
+	var mu sync.Mutex
+	native, generic := map[int]int{}, map[int]int{}
+	t.Cleanup(SetXDPTransitionSeamForTest(func(op string, ifindex int, gen bool) (bool, error) {
+		if op != "attach" {
+			return true, nil
+		}
+		mu.Lock()
+		if gen {
+			generic[ifindex]++
+		} else {
+			native[ifindex]++
+		}
+		mu.Unlock()
+		return true, occupiedErr19110(ifindex, unix.EBUSY)
+	}))
+
+	start := time.Now()
+	res := New().AttachShimXDPInterfaces([]ShimXDPAttachRequest{{Ifindex: 40}, {Ifindex: 41}, {Ifindex: 42}})
+	el := time.Since(start)
+	mu.Lock()
+	defer mu.Unlock()
+	for _, i := range []int{40, 41, 42} {
+		if !errors.Is(res[i], ErrXDPOccupied) {
+			t.Errorf("ifindex %d: %v, want ErrXDPOccupied", i, res[i])
+		}
+		if native[i] != 1 || generic[i] != 0 {
+			t.Errorf("ifindex %d: %d native and %d generic attempts, want 1 and 0", i, native[i], generic[i])
+		}
+	}
+	if n := probes.Load(); n != 0 {
+		t.Errorf("%d occupant probes started on the refresh path, want 0: it holds the userspace Manager "+
+			"mutex, and a probe would wait under it", n)
+	}
+	if el > 200*time.Millisecond {
+		t.Errorf("the refresh pass took %s against three refusals; it must not wait", el.Round(time.Millisecond))
+	}
+}
+
+// fallbackPaths19110 runs one attach of ifindex on each of the two attach paths
+// that can fall back to generic: the compile pass and the refresh batch.
+var fallbackPaths19110 = map[string]func(m *Manager, ifindex int) error{
+	"compile": func(m *Manager, ifindex int) error {
+		return m.attachUserspaceShimXDP(&CompileResult{pendingXDP: []int{ifindex}})
+	},
+	"refresh": func(m *Manager, ifindex int) error {
+		return m.AttachShimXDPInterfaces([]ShimXDPAttachRequest{{Ifindex: ifindex}})[ifindex]
+	},
+}
+
+// R23 NEW-2: between a failed native attach and the generic fallback, the
+// OTHER attacher (the compile vs the status-loop refresh) registers the
+// interface. The fallback must leave that link alone: no DetachXDP of it, no
+// generic attempt and no fallback record. Before the fix both paths called
+// DetachXDP there, which could only ever find somebody else's link.
+func TestFallbackLeavesALinkRegisteredMeanwhile19110(t *testing.T) {
+	for name, run := range fallbackPaths19110 {
+		t.Run(name, func(t *testing.T) {
+			withTempPinDir9847(t)
+			m := New()
+			theirs := &pinTrackingLink9847{}
+			var mu sync.Mutex
+			var ops []string
+			t.Cleanup(SetXDPTransitionSeamForTest(func(op string, ifindex int, gen bool) (bool, error) {
+				mu.Lock()
+				ops = append(ops, fmt.Sprintf("%s/%d/%v", op, ifindex, gen))
+				mu.Unlock()
+				if op == "attach" && !gen {
+					// The other attacher wins the race: AttachXDP's registration
+					// step, under the lease.
+					m.xdpOwnershipMu.Lock()
+					m.setXDPLink(7, theirs)
+					m.xdpOwnershipMu.Unlock()
+					return true, occupiedErr19110(ifindex, unix.EINVAL)
+				}
+				return true, nil
+			}))
+			if err := run(m, 7); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if !slices.Equal(ops, []string{"attach/7/false"}) {
+				t.Errorf("ops %v, want only the native attempt: the fallback detached or re-attached a link "+
+					"another attacher had registered", ops)
+			}
+			if l, ok := m.xdpLinkFor(7); !ok || l != theirs {
+				t.Errorf("the other attacher's registered link was replaced or removed (registered=%v)", ok)
+			}
+			if _, rec := m.UnintendedGenericXDP()[7]; rec {
+				t.Error("a fallback was recorded for a link this call never attached (an F4 false positive)")
+			}
+		})
+	}
+}
+
+// R23 NEW-2, second half: the generic attempt answers "already attached" (the
+// other attacher registered between the settle and the generic attach). That
+// link is not this call's generic link, so nothing may be recorded for F4.
+func TestFallbackRecordsOnlyItsOwnGenericLink19110(t *testing.T) {
+	for name, run := range fallbackPaths19110 {
+		t.Run(name, func(t *testing.T) {
+			withTempPinDir9847(t)
+			m := New()
+			t.Cleanup(SetXDPTransitionSeamForTest(func(op string, ifindex int, gen bool) (bool, error) {
+				switch {
+				case op != "attach":
+					return true, nil
+				case !gen:
+					return true, occupiedErr19110(ifindex, unix.EINVAL)
+				default:
+					return true, fmt.Errorf("XDP already attached to ifindex %d", ifindex)
+				}
+			}))
+			if err := run(m, 7); err != nil {
+				t.Fatalf("attach: %v", err)
+			}
+			if r, rec := m.UnintendedGenericXDP()[7]; rec {
+				t.Errorf("recorded an unintended generic fallback (%q) when this call's generic attach "+
+					"returned \"already attached\": the registered link may be another attacher's NATIVE link", r)
+			}
+		})
+	}
+}
+
+// R23 NEW-3: AttachXDP's test backstop runs BEFORE the kernel attach, so a test
+// that reaches it against the production pin directory panics before it holds a
+// real link.
+func TestPinDirGuardPrecedesTheKernelAttach19110(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "loader.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var guard, attach token.Pos
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "AttachXDP" || fd.Recv == nil || fd.Body == nil {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			ce, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fn := ce.Fun.(type) {
+			case *ast.Ident:
+				if fn.Name == "guardPinDir" && guard == token.NoPos {
+					guard = ce.Pos()
+				}
+			case *ast.SelectorExpr:
+				if id, ok := fn.X.(*ast.Ident); ok && id.Name == "link" && fn.Sel.Name == "AttachXDP" {
+					attach = ce.Pos()
+				}
+			}
+			return true
+		})
+	}
+	if guard == token.NoPos || attach == token.NoPos {
+		t.Fatalf("fixture: (*Manager).AttachXDP has guardPinDir at %v and link.AttachXDP at %v; one is missing",
+			fset.Position(guard), fset.Position(attach))
+	}
+	if guard > attach {
+		t.Errorf("guardPinDir (%s) runs after link.AttachXDP (%s): a test reaching the production pin "+
+			"directory panics while holding a real kernel link", fset.Position(guard), fset.Position(attach))
 	}
 }

@@ -44,10 +44,16 @@ var xdpOccupancyBudget = 5 * time.Second
 
 // SetXDPOccupancyBudgetForTest shortens the refusal and diagnostic budgets and
 // returns a restore func. It is for tests only.
+// It sets the compile pass's budgets and the refresh reconciliation's alike.
 func SetXDPOccupancyBudgetForTest(budget, diag time.Duration) (restore func()) {
 	ob, od := xdpOccupancyBudget, xdpOccupancyDiagBudget
+	rb, rd := xdpRefreshOccupancyBudget, xdpRefreshDiagBudget
 	xdpOccupancyBudget, xdpOccupancyDiagBudget = budget, diag
-	return func() { xdpOccupancyBudget, xdpOccupancyDiagBudget = ob, od }
+	xdpRefreshOccupancyBudget, xdpRefreshDiagBudget = budget, diag
+	return func() {
+		xdpOccupancyBudget, xdpOccupancyDiagBudget = ob, od
+		xdpRefreshOccupancyBudget, xdpRefreshDiagBudget = rb, rd
+	}
 }
 
 // xdpOccupancyDiagBudget bounds the WHOLE diagnostic probing of one pass. The
@@ -120,27 +126,52 @@ func xdpNativeUnsupportedByDriver(err error) bool {
 	return errors.Is(err, unix.EOPNOTSUPP)
 }
 
-// xdpAttachPass carries one attach pass's shared deadlines. They are armed by
-// the pass's first refusal.
+// xdpRefreshOccupancyBudget and xdpRefreshDiagBudget are the budgets of a
+// #14133 refresh reconciliation (AttachShimXDPInterfaces). Both are ZERO: the
+// refresh path never waits (Codex delta P2-1, R23 NEW-1).
+//   - A refresh runs under the userspace Manager's mutex, which RG activation
+//     (UpdateRGActive), takeover readiness, session installs and the 1 Hz status
+//     poll also need. A refusal wait there would stall an HA cutover on a
+//     healthy node.
+//   - A refresh never has a dead process's stale link to wait out (the boot
+//     race the compile budget exists for). A refusal there is the persistent
+//     kind: an upper device, tcp-data-split, a memory provider. Waiting would
+//     not clear it.
+//
+// So each interface gets ONE attempt per mode. A refusal returns ErrXDPOccupied
+// with no generic attempt and no occupant probe. The interface stays
+// fail-closed until the next apply or the next refresh that re-resolves it.
+// They are vars so the batch cells can give the pass a non-zero budget.
+var (
+	xdpRefreshOccupancyBudget time.Duration
+	xdpRefreshDiagBudget      time.Duration
+)
+
+// xdpAttachPass carries one attach pass's shared deadlines: the refusal
+// deadline, armed at the pass's FIRST refusal, and the aggregate diagnostic
+// deadline, armed at its FIRST give-up.
 type xdpAttachPass struct {
-	deadline     time.Time
-	diagDeadline time.Time
+	budget, diagBudget     time.Duration
+	deadline, diagDeadline time.Time
 	// reclaim records what the per-interface reclaim did, for the give-up
 	// message.
 	reclaim map[int]string
 }
 
 func newXDPAttachPass() *xdpAttachPass {
-	return &xdpAttachPass{reclaim: map[int]string{}}
+	return newXDPAttachPassWithBudget(xdpOccupancyBudget, xdpOccupancyDiagBudget)
 }
 
-// refusalDeadline arms the pass's shared deadlines at its first refusal and
-// returns the occupancy deadline.
+func newXDPAttachPassWithBudget(budget, diag time.Duration) *xdpAttachPass {
+	return &xdpAttachPass{budget: budget, diagBudget: diag, reclaim: map[int]string{}}
+}
+
+// refusalDeadline arms the pass's refusal deadline at its first refusal and
+// returns it. It is wall-clock from then on: work done AFTER the first refusal
+// counts against it, but work done before it does not.
 func (p *xdpAttachPass) refusalDeadline() time.Time {
 	if p.deadline.IsZero() {
-		now := time.Now()
-		p.deadline = now.Add(xdpOccupancyBudget)
-		p.diagDeadline = p.deadline.Add(xdpOccupancyDiagBudget)
+		p.deadline = time.Now().Add(p.budget)
 	}
 	return p.deadline
 }
@@ -219,35 +250,93 @@ func isAlreadyAttached(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "already attached")
 }
 
-// AttachShimXDPInterface attaches the shim to ONE interface outside a compile
-// pass: the #14133 interface-link refresh (a recreated or re-probed netdev). It
-// applies the compile pass's #19110 rules, so neither path is a bypass (R23
-// P2-2):
+// ShimXDPAttachRequest is one interface for AttachShimXDPInterfaces.
+type ShimXDPAttachRequest struct {
+	Ifindex      int
+	ForceGeneric bool
+}
+
+// AttachShimXDPInterfaces attaches the shim to interfaces outside a compile
+// pass: the #14133 interface-link refresh and the status loop's revalidation
+// (a recreated or re-probed netdev). It applies the compile pass's #19110
+// rules, so neither path is a bypass (R23 P2-2, Codex P1-2):
 //   - the stale pin is reclaimed first;
-//   - a refusal (EBUSY/EEXIST) is retried within its own budget and never
-//     falls back to generic;
+//   - a refusal (EBUSY/EEXIST) is retried and never falls back to generic;
 //   - an unsupported native attach falls back to generic, and a fallback for
 //     any reason other than EOPNOTSUPP is recorded for the F4 guard.
-func (m *Manager) AttachShimXDPInterface(ifindex int, forceGeneric bool) error {
-	pass := newXDPAttachPass()
+//
+// The caller holds the userspace Manager's mutex across this call, so the
+// refresh budgets are ZERO (Codex delta P2-1, R23 NEW-1): every interface gets
+// one attempt per mode, and a refusal gives up at once with no occupant probe.
+// The whole batch is still ONE pass, so if those budgets were ever non-zero, N
+// refusing interfaces would share one budget instead of waiting N.
+// Results are per ifindex; a nil entry means attached or already attached.
+func (m *Manager) AttachShimXDPInterfaces(reqs []ShimXDPAttachRequest) map[int]error {
+	pass := newXDPAttachPassWithBudget(xdpRefreshOccupancyBudget, xdpRefreshDiagBudget)
+	out := make(map[int]error, len(reqs))
+	for _, r := range reqs {
+		out[r.Ifindex] = m.attachShimOne(pass, r.Ifindex, r.ForceGeneric)
+	}
+	return out
+}
+
+// attachShimOne is one interface's whole sequence within a pass.
+func (m *Manager) attachShimOne(pass *xdpAttachPass, ifindex int, forceGeneric bool) error {
 	m.reclaimBeforeAttach(pass, ifindex)
 	if forceGeneric {
-		return m.attachWithin(pass, ifindex, true)
+		err := m.attachWithin(pass, ifindex, true)
+		if isAlreadyAttached(err) {
+			return nil
+		}
+		return err
 	}
 	nerr := m.attachWithin(pass, ifindex, false)
-	if nerr == nil || isAlreadyAttached(nerr) || errors.Is(nerr, ErrXDPOccupied) {
+	if nerr == nil || isAlreadyAttached(nerr) {
+		return nil
+	}
+	if errors.Is(nerr, ErrXDPOccupied) {
 		return nerr
+	}
+	if m.settleFailedNativeAttach(ifindex) {
+		return nil // another attacher registered it meanwhile; leave its link alone
 	}
 	slog.Warn("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
 		"ifindex", ifindex, "err", nerr, "path", "interface-link refresh",
 		"impact", "higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP")
-	m.DetachXDP(ifindex)
-	m.clearNativeXDPFlagsForIfindexes([]int{ifindex})
 	if err := m.attachWithin(pass, ifindex, true); err != nil {
+		if isAlreadyAttached(err) {
+			return nil // not THIS call's generic link: nothing to record
+		}
 		return err
 	}
 	m.recordGenericFallback(ifindex, nerr)
 	return nil
+}
+
+// settleFailedNativeAttach runs between a failed native attach and the generic
+// fallback, on both attach paths (R23 NEW-2). It replaces a DetachXDP call.
+//
+// A failed fresh native attach registered nothing. So the only link DetachXDP
+// could find here was one ANOTHER attacher registered in between: the compile
+// pass and the userspace status loop's revalidation reconcile both attach, and
+// only the compile holds applySem. Detaching that link, and then failing the
+// generic attach, would leave the interface with no XDP after the compile had
+// already published its arm proof.
+//
+// It reports whether a link is registered now. If one is, it changes nothing,
+// and the caller neither falls back nor records a fallback. Otherwise it does
+// what DetachXDP did for an absent link (discard the unobservable detach debt)
+// and clears the native-XDP flags, both under the ownership lease, so no
+// attacher can register between the check and the clear.
+func (m *Manager) settleFailedNativeAttach(ifindex int) (registered bool) {
+	m.xdpOwnershipMu.Lock()
+	defer m.xdpOwnershipMu.Unlock()
+	if _, ok := m.xdpLinkFor(ifindex); ok {
+		return true
+	}
+	m.ReconcileDetachDebt([]int{ifindex})
+	m.clearNativeXDPFlagsForIfindexes([]int{ifindex})
+	return false
 }
 
 // diagnose runs the occupant probe within what is left of the pass's aggregate
@@ -255,6 +344,13 @@ func (m *Manager) AttachShimXDPInterface(ifindex int, forceGeneric bool) error {
 // the budget: a netlink dump cannot be cancelled, but this pass no longer waits
 // for it.
 func (p *xdpAttachPass) diagnose(ifindex int) string {
+	if p.diagBudget <= 0 {
+		// The refresh path: no probe, and no goroutine left behind.
+		return "unknown (not probed: this attach path holds the userspace Manager mutex and never waits)"
+	}
+	if p.diagDeadline.IsZero() {
+		p.diagDeadline = time.Now().Add(p.diagBudget)
+	}
 	remaining := time.Until(p.diagDeadline)
 	if remaining <= 0 {
 		return "unknown (diagnostic budget spent)"

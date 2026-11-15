@@ -74,6 +74,11 @@ func (m *Manager) unintendedGenericXDP() map[int]string {
 func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
 	members := m.resolveGenericDataMembers(cfg)
 	m.mu.Lock()
+	// This compile's config becomes the membership AUTHORITY. A later
+	// refresh or revalidation re-resolves THIS config's members, never its
+	// own snapshot's, so a stale retained publication cannot replace them
+	// (Codex delta P2-2).
+	m.genericDataMemberCfg = cfg
 	reasons, changed := m.setGenericDataMembersLocked(members)
 	m.mu.Unlock()
 	if changed {

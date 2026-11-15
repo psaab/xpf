@@ -194,10 +194,14 @@ func refreshClassifierFixture19110(t *testing.T, native error) (*Manager, *[]str
 	m.bpfShim = dataplane.New()
 	m.SetRGPrimaryProvider(func(int) (bool, bool) { return true, true }) // cluster config: #15919 publish gate
 	t.Cleanup(dataplane.SetXDPOccupancyBudgetForTest(300*time.Millisecond, 100*time.Millisecond))
+	// The member resolves to the link's CURRENT ifindex: 17 at compile time,
+	// 29 after the VF is re-probed. Only the refresh's re-resolution can point
+	// F4 at the new ifindex.
+	current := 17
 	old := ifindexByNameFn
 	ifindexByNameFn = func(name string) (int, error) {
 		if name == "ge-0-0-0" {
-			return 29, nil
+			return current, nil
 		}
 		return 0, fmt.Errorf("no %s", name)
 	}
@@ -210,7 +214,11 @@ func refreshClassifierFixture19110(t *testing.T, native error) (*Manager, *[]str
 		}
 		return true, native
 	}))
+	// Production order: a compile of cfg always precedes a refresh, and it makes
+	// cfg the F4 membership authority that the refresh re-resolves.
+	m.refreshGenericDataMembers(cfg)
 	setLink(29, 9000)
+	current = 29
 	return m, ops, func() (bool, error) { return m.RefreshInterfaceRowsForLink(cfg, "ge-0-0-0") }
 }
 
@@ -260,5 +268,119 @@ func TestGenericDataMemberReasonFollowsTheLiveRecord19110(t *testing.T) {
 	if r, ok := hasGenericReason19110(reasons19110(m, true)); ok {
 		t.Errorf("readiness still blocks on %q after the shim's record dropped the member: a cached "+
 			"reason outlives the detach until the next compile", r)
+	}
+}
+
+// Codex delta P2-1 / R23 NEW-1, through the real refresh, at the PRODUCTION
+// budgets: three untracked ingress interfaces refuse permanently. The
+// reconciliation holds m.mu, which UpdateRGActive (the HA cutover) also needs,
+// so it must not wait at all. Each interface gets exactly ONE native attempt,
+// no generic attempt (a refusal never falls back), and the whole refresh
+// returns in far less than any refusal budget.
+func TestRefreshNeverWaitsUnderTheManagerMutex19110(t *testing.T) {
+	prevLookup := linkByNameFn
+	t.Cleanup(func() { linkByNameFn = prevLookup })
+	linkByNameFn = func(name string) (netlink.Link, error) {
+		return &netlink.Device{LinkAttrs: netlink.LinkAttrs{Name: name, EncapType: "ether"}}, nil
+	}
+	cfg := &config.Config{
+		Interfaces: config.InterfacesConfig{Interfaces: map[string]*config.InterfaceConfig{
+			"ge-0/0/0": {}, "ge-0/0/1": {}, "ge-0/0/2": {},
+		}},
+		Security: config.SecurityConfig{Zones: map[string]*config.ZoneConfig{
+			"trust": {Name: "trust", Interfaces: []string{"ge-0/0/0", "ge-0/0/1", "ge-0/0/2"}},
+		}},
+	}
+	idx := map[string]int{"ge-0-0-0": 17, "ge-0-0-1": 41, "ge-0-0-2": 42}
+	m, _, _ := interfaceLinkRefreshManager11530(t, cfg, "ge-0-0-0", 17, 1500)
+	oldBuild := buildLinkSnapshot
+	t.Cleanup(func() { buildLinkSnapshot = oldBuild })
+	buildLinkSnapshot = func(name string) (int, int, string, []InterfaceAddressSnapshot) {
+		if i, ok := idx[name]; ok {
+			return i, 1500, "02:00:00:00:19:10", nil
+		}
+		return 0, 0, "", nil
+	}
+	m.bpfShim = dataplane.New()
+	native, generic := map[int]int{}, map[int]int{}
+	t.Cleanup(dataplane.SetXDPTransitionSeamForTest(func(op string, ifindex int, gen bool) (bool, error) {
+		if op != "attach" {
+			return true, nil
+		}
+		if gen {
+			generic[ifindex]++
+		} else {
+			native[ifindex]++
+		}
+		return true, fmt.Errorf("attach XDP to ifindex %d: %w", ifindex, syscall.EBUSY)
+	}))
+	idx["ge-0-0-0"] = 40 // the recreated link: the refresh publishes and reconciles
+
+	start := time.Now()
+	if _, err := m.RefreshInterfaceRowsForLink(cfg, "ge-0-0-0"); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	el := time.Since(start)
+	for _, i := range []int{40, 41, 42} {
+		if native[i] == 0 {
+			t.Fatalf("fixture: the refresh never attempted ifindex %d (native %v)", i, native)
+		}
+		if native[i] != 1 {
+			t.Errorf("ifindex %d: %d native attempts under m.mu, want exactly 1: the refresh path retried "+
+				"a refusal while holding the mutex the HA cutover needs", i, native[i])
+		}
+		if generic[i] != 0 {
+			t.Errorf("ifindex %d: %d generic attempts after a refusal, want 0", i, generic[i])
+		}
+	}
+	if el > 250*time.Millisecond {
+		t.Errorf("the refresh held m.mu for %s against three refusing interfaces; it must not wait at all "+
+			"(R23 NEW-1)", el.Round(time.Millisecond))
+	}
+}
+
+// Codex delta P2-2: the F4 member map follows the CONFIG AUTHORITY, the most
+// recent compile, not whichever snapshot a refresh happens to republish. B adds
+// RETH member ge-0-0-1, which is generic. A stale status-loop reconciliation of
+// the retained config A, which lacks that member, must not drop it from F4.
+func TestStaleRefreshCannotReplaceTheCompiledMembership19110(t *testing.T) {
+	old := ifindexByNameFn
+	ifindexByNameFn = func(name string) (int, error) {
+		switch name {
+		case "ge-0-0-0":
+			return 4, nil
+		case "ge-0-0-1":
+			return 5, nil
+		}
+		return 0, fmt.Errorf("no %s", name)
+	}
+	t.Cleanup(func() { ifindexByNameFn = old })
+	cfgA := &config.Config{}
+	cfgA.Chassis.Cluster = &config.ClusterConfig{NodeID: 0}
+	cfgA.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0"},
+	}
+	cfgB := &config.Config{}
+	cfgB.Chassis.Cluster = &config.ClusterConfig{NodeID: 0}
+	cfgB.Interfaces.Interfaces = map[string]*config.InterfaceConfig{
+		"ge-0/0/0": {Name: "ge-0/0/0", RedundantParent: "reth0"},
+		"ge-0/0/1": {Name: "ge-0/0/1", RedundantParent: "reth1"},
+	}
+	m := New()
+	m.clusterHA = true
+	t.Cleanup(dataplane.SetLinkPinPathForTest(t.TempDir()))
+	m.bpfShim = dataplane.New()
+	m.unintendedGenericXDPHook = func() map[int]string { return map[int]string{5: "invalid argument"} }
+
+	m.refreshGenericDataMembers(cfgB) // compile B: its member ge-0-0-1 is generic
+	if _, ok := hasGenericReason19110(reasons19110(m, true)); !ok {
+		t.Fatal("fixture: compile B did not raise the reason for its generic member")
+	}
+	m.mu.Lock()
+	m.reconcileInterfaceAttachmentsForRefreshLocked(&ConfigSnapshot{Config: cfgA}) // stale A republication
+	m.mu.Unlock()
+	if r, ok := hasGenericReason19110(reasons19110(m, true)); !ok || !strings.Contains(r, "ge-0-0-1") {
+		t.Errorf("a stale reconciliation of the retained config A replaced compile B's membership: "+
+			"B's generic member ge-0-0-1 no longer blocks takeover (reasons %v)", reasons19110(m, true))
 	}
 }
