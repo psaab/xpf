@@ -2196,6 +2196,19 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
   registers in that window stays unfiltered until FRR's next NHT event, as on
   master. #19050's fast install, which is not on master yet, is the case that
   matters; #19050 carries it as an explicit exception.
+- **A held FRR apply (operator view).** Before each diff reload the FRR
+  manager restores zebra's static-NHT binding if a rebind was interrupted.
+  While zebra does not answer or accept that restore, every FRR apply
+  (commit, HA reconcile) is HELD, and the journal shows on each attempt:
+  `frr: FRR applies HELD: zebra did not answer or accept the static NHT
+  binding restore. Recover zebra (...)`.
+  - **Recovery:** restore zebra's ability to answer vtysh. Find the fault;
+    if zebra is wedged, `systemctl restart frr`, never `reload` (#1880).
+  - The held apply already armed the FRR degraded retry (15 s, 30 s, 60 s,
+    then every 5 min). Its next tick restores the binding and reloads, with
+    no xpfd restart.
+  - There is no override file (removed; pkg/frr/README.md "Liveness, chosen
+    deliberately").
 
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`

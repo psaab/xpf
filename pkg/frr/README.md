@@ -1020,36 +1020,46 @@ R22 #5).
   read has its own 3 s budget (`staticNHTReadTimeout19083`) and the write its
   own 5 s, so one restore holds `reloadMu` for at most four reads and one
   write (plus the exec WaitDelay).
-  - **When applies are held:** every FRR apply stays held for as long as the
-    write fails, or a `show ip|ipv6 nht route-map` read-back exec persistently
-    fails or exceeds its 3 s. This is NOT the same condition as frr-reload.py
-    failing (a different command, a longer budget). Nothing recovers it
-    automatically, by design: an automatic give-up would reopen the window.
-  - **When they are not held:** output that zebra returns but the parser
-    cannot read never holds applies once the write succeeded (see above).
-  - **Operator recovery:**
-    1. Restore timely NHT reads (zebra, vtysh health). The degraded retry
-       then converges, and a successful rebind also clears the pending state.
-    2. Or, having checked `show ip|ipv6 nht route-map` by hand, create
-       `/run/xpf/frr-static-nht-restore-override`
-       (`staticNHTRestoreOverridePath19083`). It releases ONE reload of the
-       current recovery episode (R24 NEW-B; Codex P2 on 18eb95d167):
-       - the restore is skipped with a WARN, the file is removed, and the
-         reload proceeds;
-       - the restore stays PENDING: only a reload that converges
-         (frr-reload.py succeeded, or its `--test` re-check shows no diff)
-         settles it. A failed or degraded released reload leaves it pending,
-         so the next attempt restores the primary (or holds) again;
-       - only a regular file created during the current pending episode
-         counts (`os.Lstat`, modified at or after the episode began). An
-         older one is stale: it is removed with a WARN and ignored. A
-         directory or symlink is ignored with a WARN;
-       - a file left from before xpfd started is stale by that rule, and `New`
-         WARNs about it. `New` does not remove it, because `xpfd cleanup`
-         also calls `New`, in another process.
+  - **When applies are held:** zebra is not answering, or not accepting,
+    the binding restore. Each FRR apply stays held while:
+    - the direct write fails;
+    - a `show ip|ipv6 nht route-map` read-back exec fails or exceeds its
+      3 s;
+    - zebra positively reports a non-primary binding after the write.
 
-       Create the file again for each release. It is on tmpfs, so a reboot
-       clears it.
+    This is NOT the same condition as frr-reload.py failing (a different
+    command, a longer budget). Nothing gives up automatically, by design: a
+    give-up would reopen the unbound window.
+  - **When they are not held:** once the write succeeded, two cases never
+    hold applies (see above):
+    - output zebra returns that the parser cannot read;
+    - a read command vtysh itself does not know (`% Unknown command`, exit 1).
+  - **What the operator sees:** an ERROR on each held attempt (the apply,
+    then each degraded-retry tick: 15 s, 30 s, 60 s, then every 5 min):
+
+    `frr: FRR applies HELD: zebra did not answer or accept the static NHT
+    binding restore. Recover zebra (find the fault; if zebra is wedged,
+    systemctl restart frr, which withdraws FRR's routes until it is back).
+    The degraded retry then restores the binding and reloads, with no xpfd
+    restart (#19083)`
+
+    It is followed by `FRR reload failed` / `FRR degraded-retry reload not
+    started`, carrying the restore error.
+  - **Operator recovery:** restore zebra's ability to answer vtysh:
+    1. find the zebra fault;
+    2. if zebra is wedged, `systemctl restart frr` (never `systemctl reload
+       frr`, #1880).
+
+    The held apply already armed the degraded retry. Its next tick reads
+    zebra, binds the primary directly, verifies it and runs the reload. No
+    xpfd restart is needed (`TestStaticNHTRestoreRecoversWhenZebraAnswers19083`).
+  - **There is no operator override.** Folds 4-5 had one, a marker file
+    under `/run/xpf` that released a held reload. Two consecutive review
+    rounds found defects in that mechanism itself (Codex P2s on 18eb95d167
+    and afd8ae325c: it erased the restore debt, a failed removal re-granted
+    it, and its wall-clock episode scoping broke on a clock step). It was
+    removed, not patched again. A marker left on a node has no effect
+    (`TestStaticNHTRestoreOverrideRemoved19083`).
 
 ## Gotchas
 

@@ -96,14 +96,11 @@ const (
 // of its burst (RequestStaticNHTReeval19083). Vars so cells can shorten them.
 // staticNHTStopBudget19083 bounds Stop's settle of an owed rebind: the wait for
 // reloadMu, and the rebind exec, each get this long.
-// staticNHTRestoreOverridePath19083 is the operator's escape hatch for a
-// restore that cannot verify (see takeStaticNHTRestoreOverrideLocked19083).
 var (
-	staticNHTReevalTimeout19083       = 5 * time.Second
-	staticNHTReadTimeout19083         = 3 * time.Second
-	staticNHTRebindDebounce19083      = 100 * time.Millisecond
-	staticNHTStopBudget19083          = 2 * time.Second
-	staticNHTRestoreOverridePath19083 = "/run/xpf/frr-static-nht-restore-override"
+	staticNHTReevalTimeout19083  = 5 * time.Second
+	staticNHTReadTimeout19083    = 3 * time.Second
+	staticNHTRebindDebounce19083 = 100 * time.Millisecond
+	staticNHTStopBudget19083     = 2 * time.Second
 )
 
 func clusterStaticNHTMapBody19083(name string) string {
@@ -318,7 +315,7 @@ func (m *Manager) rebindStaticNHTLocked19083(ctx context.Context, ex vtyshConfig
 	}
 	lines := append(staticNHTBindLines19083(clusterStaticNHTRouteMapAlt19083),
 		staticNHTBindLines19083(clusterStaticNHTRouteMap19083)...)
-	m.markStaticNHTRestorePendingLocked19083()
+	m.staticNHTRestorePending19083 = true
 	if out, err := ex.VtyshConfigLines(ctx, lines); err != nil {
 		return fmt.Errorf("re-evaluate static NHT (#19083): %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -372,20 +369,20 @@ func (m *Manager) writtenSectionBindsStaticNHT19083() (bool, error) {
 // Codex P3 on 137fea64f9): each read has its own staticNHTReadTimeout19083
 // and the write its own staticNHTReevalTimeout19083, so one restore holds
 // reloadMu for at most 4 reads + 1 write (+ the exec WaitDelay). Every FRR
-// apply stays held for as long as the write fails, or a `show ip|ipv6 nht
-// route-map` read-back exec persistently fails or exceeds its budget. That is
-// NOT the same condition as frr-reload.py failing (a different command, a
-// longer budget), and nothing recovers it automatically. Recovery: restore
-// timely NHT reads (zebra/vtysh health), after which the degraded retry
-// converges; or, having checked the binding by hand, create
-// staticNHTRestoreOverridePath19083, which releases ONE reload with a WARN
-// and leaves the restore pending until a reload converges
-// (takeStaticNHTRestoreOverrideLocked19083). A successful rebind also clears
-// the pending state. Output zebra returns but the parser cannot read, or a read
-// command vtysh does not know, never holds applies once the write succeeded.
+// apply stays held while the direct write fails, a `show ip|ipv6 nht
+// route-map` read-back exec fails or exceeds its budget, or zebra positively
+// reports a non-primary binding after the write: zebra not answering, or not
+// accepting the binding. That is NOT the same condition as frr-reload.py
+// failing (a different command, a longer budget). There is NO operator
+// override: an override file was tried and removed after two review rounds
+// found defects in the mechanism itself (Codex P2s on 18eb95d167 and
+// afd8ae325c). Recovery is restoring zebra's ability to answer. The held
+// apply has armed the degraded retry, which then restores the binding and
+// reloads, with no xpfd restart; heldStaticNHTRestore19083 says so at ERROR.
+// A successful rebind also clears the pending state. Output zebra returns but
+// the parser cannot read, or a read command vtysh does not know, never holds
+// applies once the write succeeded.
 func (m *Manager) restoreStaticNHTBindingLocked19083() error {
-	// The override releases exactly the reload this call precedes.
-	m.staticNHTOverrideReload19083 = false
 	if !m.staticNHTRestorePending19083 {
 		return nil
 	}
@@ -404,15 +401,6 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	if !ok {
 		return nil
 	}
-	if m.takeStaticNHTRestoreOverrideLocked19083() {
-		// Released WITHOUT settling (Codex P2 on 18eb95d167): the binding is
-		// unverified, so the restore stays pending until this reload
-		// CONVERGES (staticNHTReloadConvergedLocked19083). A failed or
-		// degraded reload leaves it pending, and the next attempt restores
-		// (or holds) again.
-		m.staticNHTOverrideReload19083 = true
-		return nil
-	}
 	if m.lifetimeCtx().Err() != nil {
 		return fmt.Errorf("restore static NHT binding (#19083): manager stopping")
 	}
@@ -428,15 +416,15 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	out, werr := ex.VtyshConfigLines(ctx, staticNHTBindLines19083(clusterStaticNHTRouteMap19083))
 	cancel()
 	if werr != nil {
-		return fmt.Errorf("restore static NHT binding (#19083): zebra had %s/%s: %w: %s",
-			r4.show(v4), r6.show(v6), werr, strings.TrimSpace(string(out)))
+		return heldStaticNHTRestore19083(fmt.Errorf("restore static NHT binding (#19083): zebra had %s/%s: %w: %s",
+			r4.show(v4), r6.show(v6), werr, strings.TrimSpace(string(out))))
 	}
 	a4, q4 := m.readStaticNHTBinding19083("show ip nht route-map")
 	a6, q6 := m.readStaticNHTBinding19083("show ipv6 nht route-map")
 	if q4 == nhtReadExecFailed19083 || q6 == nhtReadExecFailed19083 ||
 		(q4 == nhtReadOK19083 && a4 != want) || (q6 == nhtReadOK19083 && a6 != want) {
-		return fmt.Errorf("restore static NHT binding (#19083): not verified after binding %q: zebra reports %s/%s",
-			want, q4.show(a4), q6.show(a6))
+		return heldStaticNHTRestore19083(fmt.Errorf("restore static NHT binding (#19083): not verified after binding %q: zebra reports %s/%s",
+			want, q4.show(a4), q6.show(a6)))
 	}
 	if q4 == nhtReadParseMiss19083 || q6 == nhtReadParseMiss19083 {
 		slog.Error("frr: cannot parse zebra's `show ip|ipv6 nht route-map` after binding the static NHT primary; trusting vtysh's success and starting the reload (#19083)",
@@ -448,6 +436,17 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 		"was_v4", r4.show(v4), "was_v6", r6.show(v6), "now", want)
 	m.staticNHTRestorePending19083 = false
 	return nil
+}
+
+// heldStaticNHTRestore19083 logs a restore that holds FRR applies, with the
+// operator's recovery action, and returns err. It fires once per held attempt:
+// the apply, then each degraded-retry tick (15 s, 30 s, 60 s, then every
+// 5 min).
+func heldStaticNHTRestore19083(err error) error {
+	slog.Error("frr: FRR applies HELD: zebra did not answer or accept the static NHT binding restore. "+
+		"Recover zebra (find the fault; if zebra is wedged, `systemctl restart frr`, which withdraws FRR's routes until it is back). "+
+		"The degraded retry then restores the binding and reloads, with no xpfd restart (#19083)", "err", err)
+	return err
 }
 
 // nhtRead19083 is the outcome of one binding read: the exec failing (zebra did
@@ -551,77 +550,4 @@ func (realExecutor) VtyshConfigLines(ctx context.Context, lines []string) ([]byt
 		return out, fmt.Errorf("vtysh configure (%d lines): FRR reported an error", len(lines))
 	}
 	return out, nil
-}
-
-// takeStaticNHTRestoreOverrideLocked19083 consumes the operator's restore
-// override (`/run/xpf/frr-static-nht-restore-override`), the explicit recovery
-// entry point when zebra's binding reads persistently fail (Codex P3 on
-// 137fea64f9). Caller holds reloadMu, with a restore pending. The override is
-// scoped to ONE acknowledged recovery episode (R24 NEW-B; Codex P2 on
-// 18eb95d167):
-//   - only a regular file counts (Lstat: no directory, no followed symlink);
-//   - only one created during THIS pending episode counts (modified at or
-//     after staticNHTPendingSince19083); an older one is stale, so it is
-//     removed with a WARN and ignored;
-//   - honouring it removes it: it releases one reload, never a later restore.
-func (m *Manager) takeStaticNHTRestoreOverrideLocked19083() bool {
-	path := staticNHTRestoreOverridePath19083
-	fi, err := os.Lstat(path)
-	if err != nil {
-		return false
-	}
-	if !fi.Mode().IsRegular() {
-		slog.Warn("frr: the static NHT restore override is not a regular file; ignored (#19083)",
-			"override", path, "mode", fi.Mode().String())
-		return false
-	}
-	rmErr := os.Remove(path)
-	if fi.ModTime().Before(m.staticNHTPendingSince19083) {
-		slog.Warn("frr: a STALE static NHT restore override (older than the pending restore) was removed and ignored; create it again to release this restore (#19083)",
-			"override", path, "override_mtime", fi.ModTime(), "pending_since", m.staticNHTPendingSince19083,
-			"removed", rmErr == nil, "remove_err", rmErr)
-		return false
-	}
-	slog.Warn("frr: static NHT binding restore SKIPPED once by operator override; the restore stays pending until a reload converges (#19083)",
-		"override", path, "removed", rmErr == nil, "remove_err", rmErr)
-	return true
-}
-
-// staticNHTReloadConvergedLocked19083 is called after a diff reload that
-// CONVERGED (frr-reload.py succeeded, or its --test re-check shows no diff).
-// Caller holds reloadMu. When that reload was released by the operator
-// override, the running config now matches frr.conf, so the binding is what
-// the section renders and the restore is settled. A failed or degraded reload
-// never calls it, so the restore stays pending (Codex P2 on 18eb95d167).
-func (m *Manager) staticNHTReloadConvergedLocked19083() {
-	if !m.staticNHTOverrideReload19083 {
-		return
-	}
-	m.staticNHTOverrideReload19083 = false
-	m.staticNHTRestorePending19083 = false
-	slog.Info("frr: the reload released by the static NHT restore override converged; the restore is settled (#19083)")
-}
-
-// markStaticNHTRestorePendingLocked19083 sets the restore pending and, on the
-// edge into pending, starts a new episode for the override's staleness check.
-// Caller holds reloadMu (or owns m exclusively, as in New).
-func (m *Manager) markStaticNHTRestorePendingLocked19083() {
-	if !m.staticNHTRestorePending19083 {
-		m.staticNHTPendingSince19083 = time.Now()
-	}
-	m.staticNHTRestorePending19083 = true
-}
-
-// warnStaleStaticNHTRestoreOverride19083 WARNs, from New, about an override
-// left from before this manager started (R24 NEW-B). It belongs to an earlier
-// episode: New starts the pending episode now, so the first restore removes it
-// as stale and does not honour it. New only warns, because `xpfd cleanup` also
-// calls New, in another process, and must not consume a running daemon's
-// override.
-func warnStaleStaticNHTRestoreOverride19083() {
-	if _, err := os.Lstat(staticNHTRestoreOverridePath19083); err != nil {
-		return
-	}
-	slog.Warn("frr: a static NHT restore override exists from before this start; it is stale and will be removed, not honoured, by the first restore (#19083)",
-		"override", staticNHTRestoreOverridePath19083)
 }
