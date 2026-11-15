@@ -906,7 +906,7 @@ func (s *SessionSync) ColdPrimeDebtDetail() string {
 	if f := s.lastBulkFailure.Load(); f != nil {
 		last = fmt.Sprintf("%s (%s ago)", f.err, time.Since(f.at).Round(time.Second))
 	}
-	return fmt.Sprintf("owed for %s; it clears when a bulk re-drive (1 s after a failure, then 2 s, then every 4 s) is acked by the peer; last bulk error: %s",
+	return fmt.Sprintf("owed for %s; it clears when a bulk re-drive (1 s after a failure, then 2 s, then 4 s after each later failure) is acked by the peer; last bulk error: %s",
 		owed, last)
 }
 

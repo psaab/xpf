@@ -6129,17 +6129,23 @@ it.
   first-bulk failure, or a debt armed with no attempt at all (the peer-reboot
   edge, a capable discovery), therefore outlived the 5 s manual-failover
   admission window, and ISSU drains were refused. Now
-  (`sync_cold_prime_retry_19115.go`, design v4 on #19115):
-  - **One backoff for every retry.** `bulkRetryNotBefore` gates every retry
-    of an authoritative bulk: the forced resync re-armed after a failure, the
-    owed re-drive and the aged-ack re-drive.
+  (`sync_cold_prime_retry_19115.go`, design v4 on #19115, narrowed on
+  2026-11-15):
+  - **The backoff holds back only the owed re-drive.** `bulkRetryNotBefore`
+    gates the owed cold-prime re-drive this issue adds, and nothing else.
     - It advances when ANY authoritative bulk ends in a non-fence error, to
-      1 s, then 2 s, then 4 s after that failure (`noteBulkResult`).
+      1 s, then 2 s, then 4 s after that failure COMPLETED
+      (`noteBulkResult`). A failed attempt's own duration therefore adds to
+      the gap between two attempts' starts.
     - It resets on a successful send (BulkEnd written), a discharge, the
       runtime being wired, and a new debt generation.
     - It never touches the #18752 owed age or last failure.
-    - New forced work is never dropped: an armed `forceResync` waits for the
-      deadline, then runs.
+    - The other retries keep their earlier cadence, by the user's decision
+      of 2026-11-15: a forced resync re-armed after a failure and the
+      aged-ack re-drive retry on the next sweep tick, the barrier-fence
+      re-prime on the next refused barrier, and the daemon prime on its own
+      schedule. They have no backoff; that predates #19115 and is #19135
+      (Codex findings 1 and 17 on design v4).
   - **The owed debt governs.** While a debt is owed, the sweep's retry is the
     owed re-drive or nothing. It may start only when no young ack covers the
     debt, the bulk is not fenced (`bulkFenceNow`: exactly the window's
@@ -6169,20 +6175,31 @@ it.
       - the connect-time cold prime: that its debt is not already covered by
         a young pending bulk (a consumed forced resync always goes);
       - the aged-ack re-drive: that the aged bulk is still owed and no debt
-        has been armed;
+        has been armed (an owed debt is the owed re-drive's to send);
       - the daemon prime (`DoPrimeBulkSync`): that no young bulk is pending;
       - the barrier-fence re-prime: that the fence still needs it.
-    - A peer's bulk request and a forced resync are new work and always go.
+    - A peer's bulk request and a forced resync always go.
       The survivor re-drive keeps its own `bulkSendHeld` scope (#10387).
     - `bulkRedriveInFlight` is released by `defer` on every path.
   - **The fence precheck.** A fenced snapshot bulk is refused before its
     table-truth read. The window's revalidate-on-consume stays the authority.
-  - **What it guarantees.** Inside the 5 s admission window, the debt reaches
-    a qualifying pending bulk, provided an attempt starts (they are at most
-    4 s apart), succeeds, and exports up to its pending publish inside the
-    window. It does NOT guarantee admission: after an ordered-stream move the
-    barrier fence stays armed until that bulk's ack, and the barrier is
-    refused at once. That is the intended safe refusal.
+  - **What it guarantees, and on what condition.** Measured from an observed
+    COMPLETED failure, the next attempt reaches a qualifying pending bulk
+    inside a 5 s admission window when three things add up to less than
+    5 s:
+    - the remaining backoff, at most 4 s;
+    - the scheduling and lock delay before the attempt starts (the timer is
+      armed exactly at the deadline, but the attempt waits for `bulkSendMu`
+      if another bulk holds it);
+    - that attempt's own successful time-to-pending: its export, up to the
+      pending publish before BulkEnd.
+
+    A window that opens while an attempt is failing also waits for that
+    attempt to end, and an attempt that fails restarts the clock. Nothing
+    here bounds an export's duration. It does NOT guarantee admission: after
+    an ordered-stream move the barrier fence stays armed until that bulk's
+    ack, and the barrier is refused at once. That is the intended safe
+    refusal.
 
   Cells: `sync_cold_prime_redrive_prompt_19115_test.go` and
   `pkg/daemon/daemon_ha_userspace_admission_coldprime_19115_test.go`.
