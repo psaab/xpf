@@ -1,0 +1,37 @@
+VRF: default
+Protocol                  : route-map
+-------------------------------------
+system                    : none
+kernel                    : none
+connected                 : none
+local                     : none
+static                    : xpf-static-nht-xpf-redist
+rip                       : none
+ripng                     : none
+ospf                      : none
+ospf6                     : none
+isis                      : none
+bgp                       : none
+pim                       : none
+eigrp                     : none
+nhrp                      : none
+hsls                      : none
+olsr                      : none
+table                     : none
+ldp                       : none
+vnc                       : none
+vnc-direct                : none
+vnc-rn                    : none
+bgp-direct                : none
+bgp-direct-to-nve-groups  : none
+babel                     : none
+sharp                     : none
+pbr                       : none
+bfd                       : none
+openfabric                : none
+vrrp                      : none
+zebra                     : none
+srte                      : none
+table-direct              : none
+any                       : none
+any                       : none
