@@ -607,8 +607,10 @@ v2.1-v2.3 addenda):
 - **Shutdown.** `fastStopped` and `fastWG.Add` are both taken under
   `retryMu`, the `retryEnabled` pattern. `Stop` sets the flag, cancels the
   lifetime context (which kills an in-flight batch), and joins. It removes
-  NOTHING: a fast line FRR accepted before `Stop` stays in the running
-  config after a graceful stop. #19083 (below) and the fast-set restriction
+  no fast line: a line FRR accepted before `Stop` stays in the running
+  config after a graceful stop. `Stop`'s only FRR write is #19083's bounded
+  settle of an owed or running re-evaluation (R24 NEW-C; about 9 s worst
+  case, see "Stop settles what is owed"). #19083 (below) and the fast-set restriction
   keep it from being an active route. Every fast line is one #19083 withdraws
   when its VIP leaves (the loss 10.6.0 B arm: no kernel route, NHT
   `(filtered)`).
@@ -621,7 +623,13 @@ v2.1-v2.3 addenda):
     `ShutdownApply`) are not needed.
   - **The remaining exceptions:**
     - Stop's settle failing: the writer lock is still busy after 2 s, or the
-      rebind fails. This is logged at ERROR.
+      rebind fails (a 2 s context plus the exec's 5 s WaitDelay). This is
+      logged at ERROR.
+  - The in-doubt authoritative reload (`resolveFastInDoubtLocked`) runs the
+    #19083 restore first but does not settle a restore the operator override
+    released: the restore stays pending and the next reload re-verifies it
+    (fail-closed; only `reloadLocked` and the degraded retry settle on
+    convergence).
     - A batch killed by `Stop` whose line FRR still applies after the settle
       (on FRR versions that answer a fresh registration without the map).
       The loss 10.6.0 P2-6 cells saw no late apply of a killed client's

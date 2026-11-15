@@ -29,7 +29,13 @@ type fastFake19050 struct {
 	afterInstall func()
 }
 
-func (f *fastFake19050) VtyshConfigLines(_ context.Context, lines []string) ([]byte, error) {
+func (f *fastFake19050) VtyshConfigLines(ctx context.Context, lines []string) ([]byte, error) {
+	// Like exec.CommandContext, a context already done refuses to start
+	// (Codex survivor on 18eb95d167: a settle on the cancelled lifetime must
+	// not look like a successful rebind).
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	f.mu.Lock()
 	if len(lines) == 0 {
 		f.barriers++
@@ -902,7 +908,7 @@ func TestFastInstallStopSettlesRebindOwedByBatch19083(t *testing.T) {
 		t.Helper()
 		got := sessions19083(fake)
 		if len(got) != 2 || got[0] != v4Default19050 || got[1] != rebind {
-			t.Fatalf("vtysh sessions = %q, want the batch, then the rebind Stop settled (the line filtered)", got)
+			t.Fatalf("vtysh sessions = %q, want the batch, then the rebind Stop settled (in this ordering model, the line would then be filtered)", got)
 		}
 	}
 	t.Run("Stop before the drain", func(t *testing.T) {
