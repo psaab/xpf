@@ -85,12 +85,43 @@ func TestForceSecondaryAdmittedWhileOwedColdPrimeIsRedriven19115(t *testing.T) {
 				}
 				return err
 			})
+			// The oracle (Codex finding 7 on design v3): the debt reaching a
+			// QUALIFYING pending bulk for its current generation (or its
+			// matching ack), observed directly, not inferred from the
+			// pre-hook's error text.
+			var qualifiedAt atomic.Int64
+			pollDone := make(chan struct{})
+			stopPoll := make(chan struct{})
+			go func() {
+				defer close(pollDone)
+				for {
+					if !ss.ColdPrimeOwedWithoutPendingBulk() {
+						qualifiedAt.Store(time.Now().UnixNano())
+						return
+					}
+					select {
+					case <-stopPoll:
+						return
+					case <-time.After(5 * time.Millisecond):
+					}
+				}
+			}()
 			drainErr := cm.ForceSecondary()
+			close(stopPoll)
+			<-pollDone
 
 			mu.Lock()
 			defer mu.Unlock()
 			if coldPrimeRefusals == 0 {
 				t.Fatal("FIXTURE: the drain was never refused for the cold-prime debt, so this run says nothing about the re-drive")
+			}
+			if qualifiedAt.Load() == 0 {
+				t.Fatalf("#19115: the owed debt never reached a qualifying pending bulk during the drain (%d attempts, sweep profile %v/%v): %v",
+					attempts, p.active, p.idle, drainErr)
+			}
+			if sinceFirst := time.Unix(0, qualifiedAt.Load()).Sub(firstAttempt); sinceFirst >= cluster.DefaultPreManualFailoverRetryTimeout {
+				t.Fatalf("#19115: the owed debt reached a qualifying pending bulk %v after the first refused attempt, outside the %v window",
+					sinceFirst.Round(time.Millisecond), cluster.DefaultPreManualFailoverRetryTimeout)
 			}
 			if firstPass.IsZero() {
 				t.Fatalf("#19115: the pre-hook refused the drain for the cold-prime debt for the whole %v admission window (%d attempts, sweep profile %v/%v): %v",
@@ -102,8 +133,9 @@ func TestForceSecondaryAdmittedWhileOwedColdPrimeIsRedriven19115(t *testing.T) {
 				t.Fatalf("#19115: the first attempt past the cold-prime refusal started %v after the first attempt, outside the %v window",
 					sinceFirst.Round(time.Millisecond), cluster.DefaultPreManualFailoverRetryTimeout)
 			}
-			t.Logf("cold-prime refusals: %d; past them %v after the first attempt (that attempt took %v including the barrier); ForceSecondary returned %v",
-				coldPrimeRefusals, passStarted.Sub(firstAttempt).Round(time.Millisecond),
+			t.Logf("cold-prime refusals: %d; qualifying pending %v after the first attempt; past the refusal %v after it (that attempt took %v including the barrier); ForceSecondary returned %v",
+				coldPrimeRefusals, time.Unix(0, qualifiedAt.Load()).Sub(firstAttempt).Round(time.Millisecond),
+				passStarted.Sub(firstAttempt).Round(time.Millisecond),
 				firstPass.Sub(passStarted).Round(time.Millisecond), drainErr)
 		})
 	}

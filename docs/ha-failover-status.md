@@ -1243,15 +1243,21 @@ pay it is in flight:
 
 **How it clears.** Only on its own. The sync sweep re-drives the bulk on a
 schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
-- at once when a new debt is armed;
+- 100 ms after a new debt is armed;
 - 1 s after a failed attempt, then 2 s, then every 4 s, so every 5 s
-  admission window holds at least one retry;
+  admission window holds the start of at least one retry. The same backoff
+  holds back every other retry of a failing bulk (a forced resync, an aged
+  unacknowledged bulk);
 - while an ack for it is younger than 35 s, not at all (#9626);
 - while the bulk is fenced for a peer that has not proved a capability
   (install-table identity, IPsec discriminator), not at all, until the peer's
   capability frame lifts the fence.
 
-The debt is paid when the peer acks a bulk, and the line disappears.
+The debt is paid when the peer acks a bulk, and the line disappears. A bulk
+that is merely pending ends this refusal, but not every refusal. After the
+ordered stream moved to another fabric connection, the barrier stays fenced
+until that bulk's ack arrives, and a drain in that interval is refused with
+"session sync barrier fenced" (#9508). That refusal is intended.
 There is no CLI force-override, by design: admitting a demotion to an unprimed
 peer makes it delete every session missing from its table (#10387).
 

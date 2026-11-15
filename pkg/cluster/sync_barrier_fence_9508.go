@@ -125,7 +125,12 @@ func (s *SessionSync) scheduleBarrierFenceReprime(reason string) {
 		}
 		slog.Info("cluster sync: re-priming the peer to discharge the barrier fence",
 			"reason", reason, "fence_epoch", s.fence.epoch.Load())
-		if err := s.doBulkSync(); err != nil {
+		// #19115: recheck this re-prime's own obligation under bulkSendMu: a
+		// bulk sent meanwhile may already be awaiting the ack that discharges
+		// the fence.
+		if _, err := s.doBulkSyncAdmitted(func() bool {
+			return s.barrierFenced() && s.stats.Connected.Load() && !s.fenceDischargeAwaited()
+		}); err != nil {
 			slog.Warn("cluster sync: barrier-fence re-prime failed; the next refused barrier retries it", "err", err)
 		}
 	}()
