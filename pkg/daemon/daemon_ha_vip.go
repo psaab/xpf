@@ -211,20 +211,13 @@ func (d *Daemon) applyDirectVIPOwnershipWith(rgID int, wantFn func(int) bool, re
 	}
 }
 
-// staticNHTReevalDebounce19083 is how long a #19083 re-evaluation waits for
-// the rest of its demotion burst (a var so cells can shorten it).
-var staticNHTReevalDebounce19083 = 100 * time.Millisecond
-
 // triggerStaticNHTReeval19083 forces zebra to re-evaluate static next hops
-// against the #19083 map (frr.Manager.ReevaluateStaticNHT19083) after a VIP
-// removal. frrStaticNHTReevalFn is a test seam that replaces the launch.
-//
-// It is asynchronous (never on the VIP path) and COALESCED (R22 #2): every
-// rebind makes zebra re-evaluate every tracked next hop for every client
-// (staticd re-sends its statics, bgpd re-runs bestpath), so the triggers of
-// one demotion burst (a resign demotes every RG in one pass) share ONE rebind,
-// run staticNHTReevalDebounce19083 after the first. A trigger that arrives
-// after that run has started schedules the next one.
+// against the #19083 map after a VIP removal. It never blocks the VIP path: it
+// only REQUESTS the re-evaluation (frr.Manager.RequestStaticNHTReeval19083),
+// which coalesces every request of a burst, from this trigger and from #19050's
+// fast install alike, into one rebind (every rebind makes zebra re-evaluate
+// every tracked next hop for every client, R22 #2). frrStaticNHTReevalFn is a
+// test seam that replaces the request.
 func (d *Daemon) triggerStaticNHTReeval19083(rgID int) {
 	if fn := d.frrStaticNHTReevalFn; fn != nil {
 		fn(rgID)
@@ -233,26 +226,7 @@ func (d *Daemon) triggerStaticNHTReeval19083(rgID int) {
 	if d.frr == nil {
 		return
 	}
-	d.staticNHTReevalMu.Lock()
-	if d.staticNHTReevalScheduled {
-		d.staticNHTReevalMu.Unlock()
-		return
-	}
-	d.staticNHTReevalScheduled = true
-	d.staticNHTReevalMu.Unlock()
-	time.AfterFunc(staticNHTReevalDebounce19083, func() {
-		d.staticNHTReevalMu.Lock()
-		d.staticNHTReevalScheduled = false
-		d.staticNHTReevalMu.Unlock()
-		f := d.frr
-		if f == nil {
-			return
-		}
-		if err := f.ReevaluateStaticNHT19083(); err != nil {
-			slog.Warn("static NHT re-evaluation after VIP removal failed; a static registered since the last NHT event may stay an active blackhole until the next one (#19083)",
-				"first_rg", rgID, "err", err)
-		}
-	})
+	d.frr.RequestStaticNHTReeval19083()
 }
 
 // directAddVIPs converges rgID's RETH VIPs for the RG OWNER: adds every

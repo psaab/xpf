@@ -47,16 +47,13 @@ func TestVIPRemovalForcesStaticNHTReeval19083(t *testing.T) {
 
 // TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083 drives the
 // PRODUCTION launch (no seam) against a real frr.Manager whose section binds
-// the #19083 map (Codex P2 lifecycle, R22 #2/#4):
+// the #19083 map (Codex P2 lifecycle, R22 #2/#4, R24 P3-4):
 //   - the VIP path never waits for the rebind (it is held in flight here);
 //   - one demotion burst (two RGs) produces ONE rebind;
-//   - a later demotion schedules the next one;
+//   - a demotion WHILE that rebind is in flight produces exactly one more
+//     after it (one running plus one pending, nothing dropped);
 //   - with no FRR manager the trigger is a no-op.
 func TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083(t *testing.T) {
-	old := staticNHTReevalDebounce19083
-	staticNHTReevalDebounce19083 = 50 * time.Millisecond
-	t.Cleanup(func() { staticNHTReevalDebounce19083 = old })
-
 	d, _ := newDemotion18701(t, false, 0)
 	d.directSendGARPsFn = func(int) {}
 	rec := &frr.RecordingExecutor{}
@@ -67,6 +64,14 @@ func TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083(t *testing.T) {
 	}
 	gate := make(chan struct{})
 	rec.ConfigBatchGate = gate
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(gate)
+		}
+	}
+	t.Cleanup(release)
 	own := func(rgs ...int) {
 		d.directVIPMu.Lock()
 		for _, rg := range rgs {
@@ -74,7 +79,6 @@ func TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083(t *testing.T) {
 		}
 		d.directVIPMu.Unlock()
 	}
-	own(1, 2)
 	waitBatches := func(n int) [][]string {
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
@@ -85,7 +89,10 @@ func TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083(t *testing.T) {
 		}
 		return rec.ConfigBatchesSnapshot()
 	}
+	want := "ip nht static route-map xpf-static-nht-b-xpf-redist|ipv6 nht static route-map xpf-static-nht-b-xpf-redist|" +
+		"ip nht static route-map xpf-static-nht-xpf-redist|ipv6 nht static route-map xpf-static-nht-xpf-redist"
 
+	own(1, 2)
 	returned := make(chan struct{})
 	go func() {
 		d.applyDirectVIPOwnership(1, false, "demote")
@@ -95,26 +102,25 @@ func TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083(t *testing.T) {
 	select {
 	case <-returned:
 	case <-time.After(2 * time.Second):
-		close(gate)
 		t.Fatal("the VIP path waited for the static NHT re-evaluation; it must be asynchronous")
 	}
-	b := waitBatches(1)
-	want := "ip nht static route-map xpf-static-nht-b-xpf-redist|ipv6 nht static route-map xpf-static-nht-b-xpf-redist|" +
-		"ip nht static route-map xpf-static-nht-xpf-redist|ipv6 nht static route-map xpf-static-nht-xpf-redist"
-	if len(b) != 1 || strings.Join(b[0], "|") != want {
-		close(gate)
+	if b := waitBatches(1); len(b) != 1 || strings.Join(b[0], "|") != want {
 		t.Fatalf("after one demotion burst of two RGs: batches %q, want exactly one rebind %q", b, want)
 	}
-	close(gate)
-	time.Sleep(4 * staticNHTReevalDebounce19083)
-	if b := rec.ConfigBatchesSnapshot(); len(b) != 1 {
-		t.Fatalf("one demotion burst ran %d rebinds, want ONE (coalesced): %q", len(b), b)
-	}
-
+	// The first rebind is now held in flight at the gate: demote again.
 	own(1)
 	d.applyDirectVIPOwnership(1, false, "demote")
+	time.Sleep(300 * time.Millisecond)
+	if b := rec.ConfigBatchesSnapshot(); len(b) != 1 {
+		t.Fatalf("a second rebind ran while the first was still in flight: %q", b)
+	}
+	release()
 	if b := waitBatches(2); len(b) != 2 {
-		t.Fatalf("a later demotion ran %d rebinds in total, want 2: %q", len(b), b)
+		t.Fatalf("a demotion during an in-flight rebind ran %d rebinds in total, want 2 (one pending must follow): %q", len(b), b)
+	}
+	time.Sleep(400 * time.Millisecond)
+	if b := rec.ConfigBatchesSnapshot(); len(b) != 2 {
+		t.Fatalf("more rebinds than requests' bursts: %q", b)
 	}
 
 	d.frr = nil

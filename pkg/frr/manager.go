@@ -129,6 +129,13 @@ type Manager struct {
 	// until it fully applies, and by New (a previous xpfd may have been killed
 	// mid-rebind).
 	staticNHTRestorePending19083 bool
+	// nhtRebindMu (a leaf, after reloadMu) guards the coalesced #19083
+	// re-evaluation: nhtRebindOwed = a request is outstanding;
+	// nhtRebindScheduled = a drain is scheduled and has not taken reloadMu yet
+	// (RequestStaticNHTReeval19083).
+	nhtRebindMu        sync.Mutex
+	nhtRebindOwed      bool
+	nhtRebindScheduled bool
 	// writeGen mirrors confGen for lock-free readers (#18561): a caller
 	// rendering under its own lock captures it and passes a predicate to
 	// ApplyFullIfCurrent, so only a write that actually happened (not a
