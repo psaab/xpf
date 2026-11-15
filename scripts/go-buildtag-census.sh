@@ -8,6 +8,15 @@
 #   `go vet -tags <ident> <pkgdir>` must pass. `go vet` never executes the
 #   package, so the leg is safe against TestMain side effects.
 #
+#   #19115: so does every NON-test `.go` file whose constraint names a
+#   project-private `xpf_*` tag POSITIVELY (the `xpf_faultinject` fault
+#   seam). Such a file is as invisible to the default build as a tagged
+#   test, and nothing else compiles it. Its `!xpf_*` release twin is what
+#   the default build compiles, so it is not discovered; neither are
+#   platform constraints (`linux`, `amd64`, ...), which the default build on
+#   that platform compiles. A complex constraint naming an `xpf_*` tag goes
+#   through the same reviewed-declaration gate as a complex test file.
+#
 # WHY IT EXISTS
 #
 #   A build-tagged test file is INVISIBLE to the default gate: `go test ./...`
@@ -93,6 +102,8 @@ DEFAULT_ROOT=$(CDPATH= cd -- "$HERE/.." && pwd)
 ROOT=${GO_BUILDTAG_ROOT:-$DEFAULT_ROOT}
 SCAN_DIRS=${GO_BUILDTAG_DIRS:-"pkg cmd test"}
 KNOWN=${GO_BUILDTAG_KNOWN:-"pkg/daemon/login_password_functional_test.go"}
+# #19115: the fail-closed control for production discovery, the same shape.
+KNOWN_PROD=${GO_BUILDTAG_KNOWN_PROD:-"pkg/daemon/faultinject_bulk_export_19115.go"}
 
 cd "$ROOT" || { echo "FATAL: cannot cd to $ROOT" >&2; exit 2; }
 
@@ -130,12 +141,33 @@ if [ -n "$existing_dirs" ]; then
 	' {} + 2>/dev/null | sed 's|^\./||')
 fi
 
+# #19115: non-test files behind a positive project-private (xpf_*) tag.
+discovered_prod=""
+if [ -n "$existing_dirs" ]; then
+	discovered_prod=$(find $existing_dirs -name '*.go' ! -name '*_test.go' -exec awk '
+		FNR == 1 { in_head = 1 }
+		in_head && /^package / { in_head = 0 }
+		in_head && /^\/\/go:build / {
+			expr = $0
+			sub(/^\/\/go:build[ \t]+/, "", expr)
+			if (expr ~ /(^|[^!A-Za-z0-9_])xpf_[A-Za-z0-9_]+/)
+				print FILENAME "\t" expr
+		}
+	' {} + 2>/dev/null | sed 's|^\./||')
+fi
+n_prod=0
+if [ -n "$discovered_prod" ]; then
+	n_prod=$(printf '%s\n' "$discovered_prod" | grep -c . || true)
+	discovered="${discovered:+$discovered
+}$discovered_prod"
+fi
+
 n_tagged=0
 if [ -n "$discovered" ]; then
 	n_tagged=$(printf '%s\n' "$discovered" | grep -c . || true)
 fi
 
-echo "go-buildtag census: $n_tagged tagged test file(s)"
+echo "go-buildtag census: $n_tagged tagged file(s), $n_prod of them non-test behind an xpf_* tag"
 if [ -n "$discovered" ]; then
 	printf '%s\n' "$discovered" | while IFS='	' read -r file expr; do
 		echo "  $file: //go:build $expr"
@@ -215,6 +247,20 @@ fi
 # parens) must be DECLARED reviewed in $REVIEWED (§2): undeclared, drifted,
 # or reason-less fails the census, while a declared file keeps its
 # NEEDS-REVIEW line as the audit trail of that human acceptance.
+if [ -f "$KNOWN_PROD" ]; then
+	case "
+$discovered_prod
+" in
+	*"
+$KNOWN_PROD	"*)
+			note_pass "fail-closed control: $KNOWN_PROD (a non-test xpf_* tagged file) is discovered"
+			;;
+		*)
+			note_fail "fail-closed: known xpf_*-tagged file $KNOWN_PROD exists but was NOT discovered (the parse is broken, not clean)"
+			;;
+	esac
+fi
+
 n_vet=0
 n_review=0
 vetted=""

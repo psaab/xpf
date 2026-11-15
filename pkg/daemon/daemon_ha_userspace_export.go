@@ -152,7 +152,18 @@ func (d *Daemon) userspaceBulkSnapshotWithConfig(
 	}
 	sink := newSnapshotDeltaSink()
 	zoneIDs := buildZoneIDs(cfg)
+	// #19115: the lab fault (faultinject_bulk_export_19115.go, only in a
+	// -tags xpf_faultinject build; the release hook returns nil) fails the
+	// first page from the sink, so it returns through the pager's normal
+	// error path and its #18752 abandon of an open window.
+	firstPage := true
 	status, _, err := exporter.ExportOwnerRGSessionsPagedStream(rgIDs, dpuserspace.OwnerRGExportPageFunc(func(deltas []dpuserspace.SessionDeltaInfo) error {
+		if firstPage {
+			firstPage = false
+			if err := faultinjectBulkExport19115(); err != nil {
+				return err
+			}
+		}
 		d.walkUserspaceSessionDeltas(ss, zoneIDs, deltas, sink)
 		return nil
 	}))
