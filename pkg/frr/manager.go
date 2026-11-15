@@ -129,6 +129,11 @@ type Manager struct {
 	// until it fully applies, and by New (a previous xpfd may have been killed
 	// mid-rebind).
 	staticNHTRestorePending19083 bool
+	// staticNHTHeldAttempts19083 / staticNHTHeldLastLog19083 (under reloadMu)
+	// rate-limit the held-apply log of one episode
+	// (heldStaticNHTRestoreLocked19083).
+	staticNHTHeldAttempts19083 int
+	staticNHTHeldLastLog19083  time.Time
 	// nhtRebindMu (a leaf, after reloadMu) guards the coalesced #19083
 	// re-evaluation: nhtRebindOwed = a request is outstanding;
 	// nhtRebindScheduled = a drain is scheduled and has not taken reloadMu yet
