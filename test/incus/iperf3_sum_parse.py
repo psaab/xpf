@@ -298,6 +298,9 @@ def failover_stream_verdict(
 #      about a quarter of crash runs, master's included, by which side of a
 #      retransmission a stream landed on.
 #
+# With a clock window but no stop in it (a fast takeover), the crash cell is
+# judged over a window bounded by the sysrq command and the first deep
+# aggregate dip, at both of its ends (#19123, dip_bounded_anchor below).
 # Without a clock window that holds the crash, the cell first looks for the
 # aggregate's stop within ±1 s of the integer anchor (iperf3's own clock, no
 # clock reading needed). Without one it falls back to the integer verdict
@@ -352,6 +355,9 @@ class EventAnchor:
         # Seconds from the mapped event-command epoch to this anchor, when
         # the anchor is a data stop inside a clock window (a live residual).
         self.after_epoch: Optional[float] = None
+        # #19123: a window [seconds, latest] that holds the event, judged at
+        # both of its ends (bounded_stream_cell), not a point to judge at.
+        self.bounded = False
 
     @property
     def latest(self) -> float:
@@ -945,6 +951,123 @@ def resolve_anchor(
     return stop
 
 
+# ── #19123: a crash window bounded by the command and the first deep dip ──
+#
+# A fast takeover leaves no empty aggregate interval and too few streams
+# stopped together, so the stop reads above find nothing, the clock window
+# (seconds wide: it runs to the sysrq exec's return) is no point anchor, and
+# the integer anchor's ±1 s VOIDed 8 of 10 such runs (#19123). Two sound
+# edges still exist:
+#
+#   - T_lo: the clock window's lower edge, the orchestrator's stamp just
+#     before the sysrq exec mapped onto iperf3's clock, less a budget for the
+#     start stamp's few-ms phase. The sysrq cannot run before its command.
+#   - T_hi: the first aggregate interval k ending after the command that
+#     falls to at most _DIP_FRACTION of the pre-crash FLOOR (the lowest of
+#     the five intervals before it). The streams carried their pre-crash
+#     bytes in k at no less than _DIP_RATE_FLOOR of that floor, so the crash
+#     lies no later than start_k + len_k * f_k / _DIP_RATE_FLOOR (plus the
+#     stop budget); post-takeover bytes in k only push that later.
+#
+# bounded_stream_cell judges the window at BOTH ends with resume evidence
+# from T_hi on: PASS needs every stream within 3 s of T_lo (an upper bound on
+# its true latency), COST a stream past 3 s from T_hi (a lower bound), and
+# any disagreement is VOID. A true COST cannot read PASS.
+#
+# Checked on every captured H1 log that has a precise stop (11 runs, loss,
+# tcp and udp, 2026-11-14/15): the stop lies inside [T_lo, T_hi] in all 11,
+# the smallest slack 0.07 s. Without the rate margin one run fell 17 ms
+# outside; the margin is what keeps it in.
+_DIP_FRACTION = 0.5
+_DIP_RATE_FLOOR = 0.8
+
+
+def dip_bounded_anchor(
+    text: str,
+    before: Optional[float],
+    after: Optional[float],
+    offset: Optional[float],
+    rtt: Optional[float],
+) -> Optional[EventAnchor]:
+    """``[T_lo, T_hi]`` that holds the crash, as ``EventAnchor(T_lo, T_hi - T_lo)``
+    with ``bounded`` set, or None when a reading is missing, no aggregate
+    interval after the command dips to ``_DIP_FRACTION`` of its pre-crash
+    floor, or the two edges disagree (T_hi before T_lo)."""
+    window = clock_window(text, before, after, offset, rtt)
+    if window is None:
+        return None
+    lo, hi = window
+    try:
+        rows, json_rows = _oracle_interval_rows(text, True)
+    except ValueError:
+        return None
+    if not json_rows:
+        return None
+    sums = sorted(
+        (start, end, bps) for stream, start, end, bps in rows
+        if stream is None and 0.5 <= end - start <= 1.5
+    )
+    t_lo = lo - _STOP_UNCERTAINTY
+    for start, end, bps in sums:
+        if end <= lo or start > hi:
+            continue
+        pre = [b for s, _, b in sums if start - 5 <= s < start]
+        if len(pre) < 3:
+            continue
+        floor = min(pre)
+        if floor <= 0 or bps > _DIP_FRACTION * floor:
+            continue
+        t_hi = (
+            start + (end - start) * min(1.0, bps / floor / _DIP_RATE_FLOOR)
+            + _STOP_UNCERTAINTY
+        )
+        if t_hi < t_lo:
+            return None
+        anchor = EventAnchor(
+            t_lo,
+            t_hi - t_lo,
+            f"crash bounded by the sysrq command's mapped dispatch ({lo:.3f}s) and the "
+            f"first aggregate dip after it ([{start:.3f}, {end:.3f})s at "
+            f"{bps / floor:.0%} of its pre-crash floor) on iperf3's own interval clock "
+            f"(offset {offset:+.3f}s, rtt {rtt:.3f}s)",
+        )
+        anchor.bounded = True
+        return anchor
+    return None
+
+
+def bounded_stream_cell(
+    text: str,
+    anchor: EventAnchor,
+    expected_streams: int,
+    *,
+    event_label: str = "failover",
+) -> Tuple[str, str]:
+    """The crash cell over a bounded window: ``precise_stream_cell`` at its
+    earliest end (latencies from ``anchor.seconds``) and at its latest end
+    (from ``anchor.latest``), both with resume evidence only from intervals
+    starting at or after ``anchor.latest``. The same verdict at both ends is
+    the verdict; any disagreement is VOID."""
+    earliest = EventAnchor(anchor.seconds, anchor.uncertainty, anchor.source)
+    latest = EventAnchor(anchor.latest, 0.0, anchor.source)
+    status_lo, message_lo = precise_stream_cell(
+        text, earliest, expected_streams, json_stream=True, event_label=event_label
+    )
+    status_hi, message_hi = precise_stream_cell(
+        text, latest, expected_streams, json_stream=True, event_label=event_label
+    )
+    note = (
+        f" [{event_label} bounded to [{anchor.seconds:.3f}, {anchor.latest:.3f}]s, judged at "
+        f"both ends: {status_lo} at the earliest, {status_hi} at the latest]"
+    )
+    if status_lo == status_hi:
+        return status_lo, message_lo + note
+    return "VOID", (
+        f"the bounded {event_label} window cannot place the streams: the verdict changes "
+        f"between its ends" + note + f"; at the earliest end: {message_lo}"
+    )
+
+
 def integer_stream_cell(
     text: str,
     event_seconds: float,
@@ -974,7 +1097,9 @@ def integer_stream_cell(
 def print_crash_anchor(argv) -> int:
     """``--print-crash-anchor``: the crash instant the stream cell will use.
 
-    Prints ``<seconds> <uncertainty> precise`` or ``<integer-at> 1 integer``,
+    Prints ``<seconds> <uncertainty> precise``, ``<T_lo> <width> bounded``
+    (#19123: the window's earliest edge, which the cell's latencies are
+    measured from at their most conservative) or ``<integer-at> 1 integer``,
     so test-failover can hand the zero-interval producer the same anchor
     before the cells run.
     """
@@ -995,6 +1120,13 @@ def print_crash_anchor(argv) -> int:
     except ValueError:
         anchor = None
     if anchor is None:
+        bounded = dip_bounded_anchor(
+            text, args.crash_epoch, args.crash_epoch_after,
+            args.client_clock_offset, args.client_clock_rtt,
+        )
+        if bounded is not None:
+            print(f"{bounded.seconds:.3f} {bounded.uncertainty:.3f} bounded")
+            return 0
         print(f"{args.crash_at:g} 1 integer")
     else:
         print(f"{anchor.seconds:.3f} {anchor.uncertainty:.3f} precise")
@@ -1094,7 +1226,17 @@ def main() -> int:
                 text, at, before=before, after=after, offset=args.client_clock_offset,
                 rtt=args.client_clock_rtt, crash=crash,
             )
-        if anchor is not None:
+        if anchor is None and args.json_stream and crash:
+            # #19123: no stop to anchor on (a fast takeover); a window bounded
+            # by the command and the first deep dip, judged at both ends.
+            anchor = dip_bounded_anchor(
+                text, before, after, args.client_clock_offset, args.client_clock_rtt
+            )
+        if anchor is not None and anchor.bounded:
+            status, message = bounded_stream_cell(
+                text, anchor, args.streams, event_label=label
+            )
+        elif anchor is not None:
             status, message = precise_stream_cell(
                 text, anchor, args.streams, json_stream=True, event_label=label
             )
@@ -1143,9 +1285,14 @@ def main() -> int:
             # Numeric values only: harness-result.sh records `key=<number>`.
             if anchor is None:
                 print(f"METRIC {name}_anchor_precise=0")
+                print(f"METRIC {name}_anchor_bounded=0")
                 print(f"METRIC {name}_at_s={at:g}")
                 continue
-            print(f"METRIC {name}_anchor_precise=1")
+            # #19123: a bounded window is not a precise point. Its at_s is the
+            # earliest edge and its uncertainty the window's width, so the
+            # resume latencies below are the conservative (latest) reading.
+            print(f"METRIC {name}_anchor_precise={0 if anchor.bounded else 1}")
+            print(f"METRIC {name}_anchor_bounded={1 if anchor.bounded else 0}")
             print(f"METRIC {name}_at_s={anchor.seconds:.3f}")
             print(f"METRIC {name}_anchor_uncertainty_s={anchor.uncertainty:.3f}")
             if anchor.after_epoch is not None:

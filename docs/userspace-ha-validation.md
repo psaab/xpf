@@ -616,7 +616,36 @@ after the crash. Both directions are in the preserved loss runs:
    `timemillisecs`): the same stop, searched within ±1 s of the integer
    anchor. It is on iperf3's own clock and needs no clock reading. A stop
    before the clock window's start, when there is one, is not the crash.
-5. **No stop at all**: the integer verdict under the same COST/FAIL policy,
+5. **A clock window but no stop: the bounded window (#19123).** A fast
+   takeover leaves no empty interval and too few streams stopped together,
+   so neither read above finds the crash, and the clock window (it runs to
+   the sysrq exec's return, 5–15 s) is no point anchor. Before #19123 such
+   runs took step 6, whose ±1 s VOIDed 8 of 10 of them. Two sound edges
+   still exist, and the cell judges the window between them at BOTH ends:
+   - **T_lo**: the window's lower edge, the stamp just before the sysrq
+     exec, less 0.05 s for the start stamp's phase. The sysrq cannot run
+     before its command was sent.
+   - **T_hi**: the first aggregate interval `k` ending after the command
+     whose rate is at most 50 % of the pre-crash floor (the lowest of the
+     five intervals before it). The streams carried their pre-crash bytes
+     in `k` at no less than 80 % of that floor, so the crash lies no later
+     than `start_k + len_k × min(1, f_k / 0.8) + 0.05`. Post-takeover bytes
+     in `k` only push that later.
+
+   Resume evidence comes only from intervals starting at or after T_hi.
+   Latencies measured from T_lo are upper bounds on the true ones, and from
+   T_hi lower bounds. So PASS needs every stream within 3 s of T_lo, COST a
+   stream past 3 s from T_hi, and a disagreement between the two ends is
+   VOID. A true COST cannot read PASS. The windows run 0.2–0.4 s on the
+   captured runs. On all 11 captured H1 logs that do have a precise stop
+   (loss, tcp and udp), the stop lies inside `[T_lo, T_hi]`, the smallest
+   slack 0.07 s; without the 80 %/0.05 s margin one fell 17 ms outside.
+   `--print-crash-anchor` prints `<T_lo> <width> bounded`, so the
+   zero-interval producer below starts its window at the earliest edge.
+   The five captured VOID runs (#19034 udp and tcp PR H1, #19026+#19063 udp
+   control ×2 and PR) judge PASS at both ends.
+6. **No stop at all, and no bounded window** (a reading missing, or no dip
+   to 50 %): the integer verdict under the same COST/FAIL policy,
    evaluated at the integer anchor and one second either side of it. No
    interval starting before anchor+1 counts as resume evidence for any of
    the three. With the old `[T+1, T+deadline]` window, the anchor-1
@@ -665,8 +694,10 @@ median of both latencies. The ledger row records `HARNESS_METRIC` lines for:
 - `crash_resume_data_max_s`, `_median_s` and `_never`, and their `rate`
   twins;
 - `crash_resume_straggler_streams`;
-- `crash_at_s`, `crash_anchor_uncertainty_s`, `crash_anchor_precise` and
-  `crash_stop_after_epoch_s`;
+- `crash_at_s`, `crash_anchor_uncertainty_s`, `crash_anchor_precise`,
+  `crash_anchor_bounded` and `crash_stop_after_epoch_s`. For a bounded
+  window (#19123) `crash_at_s` is its earliest edge, the uncertainty its
+  width, and the resume latencies are measured from that earliest edge;
 - the same `failback_*`.
 
 So arms are compared on the distribution (#18561).
@@ -722,6 +753,32 @@ no-op control through the same path. The mutants:
   review's "52s PASS");
 - a fallback without the ±1 s stop search;
 - the aggregate stop only, with no stop of streams together.
+
+`iperf3_sum_parse_test.BoundedCrashWindowTests` (#19123) judges the five
+real fast-takeover logs that VOIDed under the integer anchor
+(`test/incus/failover-crash-bounded-{udp-a,tcp-a,udp-b,udp-c,udp-d}.jsonl`,
+each with its run's own epochs and clock reading) and two controls: an
+integer fallback whose three anchors agreed
+(`failover-crash-bounded-tcp-agreed.jsonl`) and the precise run whose stop
+sits closest to the bound (`failover-crash-precise-udp-edge.jsonl`, stop
+58.515 s). The rows:
+
+| row | status |
+|---|---|
+| the five VOID logs, through the CLI | PASS at both ends (VOID at master) |
+| the agreed fallback | PASS, bounded |
+| the edge run | its precise PASS, the stop inside the bound |
+| udp-a, stream 15 held to 62 s (3.6 s after the latest edge) | COST at both ends |
+| udp-a, stream 15 resuming at 61.2 s (between the ends' 3 s lines) | VOID |
+| udp-a, stream 15 held forever | FAIL |
+| udp-a with its dip filled in | no bound: the integer cell |
+| the edge run, stream 15 resuming 3.08 s after its known stop | COST on the precise anchor, VOID bounded: never PASS |
+
+Four executable mutants each flip a named row: judging at the latest end
+only (the edge run's true COST reads PASS), resume evidence from the
+earliest edge (a dead stream stops reading FAIL), no rate margin (the edge
+run's stop falls outside the bound), and no 50 % dip test (the filled-in
+run takes a bound).
 
 `make test-iperf-throughput-lib` adds the producer rows. A straggler that
 resumes at T+5 is excused to the 10 s line (0 outside, 2 excused). The same

@@ -1265,5 +1265,320 @@ class PreciseCrashAnchorTests(unittest.TestCase):
         )
 
 
+# #19123: five REAL fast-takeover crash logs on which the stop reads found
+# nothing and the integer anchor's ±1 s VOIDed the crash cell, cut like the
+# fixtures above (the start event plus the intervals from 10 s before the
+# integer anchor to 20 s after it, lines verbatim). Each carries its run's own
+# integer anchor and (before, after, offset, rtt): the sysrq exec's epochs and
+# the LAN-host clock reading test-failover took.
+_BOUNDED_RUNS = {
+    # #19034 udp PR H1 (g5-19034-logs/pr-udp-h1-1794699622)
+    "udp-a": ("failover-crash-bounded-udp-a.jsonl", 58,
+              (1794699715.273589580, 1794699720.459956343, -0.051, 0.155)),
+    # #19034 tcp PR H1 (g5-19034-logs/pr-tcp-h1-1794705735)
+    "tcp-a": ("failover-crash-bounded-tcp-a.jsonl", 55,
+              (1794705825.332534888, 1794705840.338322529, -0.157, 0.165)),
+    # #19026+#19063 udp master control H1 (g5-19063-logs/ctl-udp-h1-1794648015)
+    "udp-b": ("failover-crash-bounded-udp-b.jsonl", 57,
+              (1794648106.661414949, 1794648121.667787508, 0.046, 0.156)),
+    # the same control's H1 repeat (g5-19063-logs/ctl-udp-h1b-1794648800)
+    "udp-c": ("failover-crash-bounded-udp-c.jsonl", 56,
+              (1794648890.661486636, 1794648905.667667938, -0.023, 0.157)),
+    # #19026+#19063 udp PR H1 repeat (g5-19063-logs/pr-udp-h1b-1794634096)
+    "udp-d": ("failover-crash-bounded-udp-d.jsonl", 59,
+              (1794634189.989307242, 1794634195.189892536, 0.025, 0.165)),
+}
+# Controls. An integer fallback whose three anchors agreed (PASS) on the
+# #19034 tcp master control (g5-19034-logs/ctl-tcp-h1-1794703255); and the
+# #19034 udp master control (g5-19034-logs/ctl-udp-h1-1794695626), whose
+# aggregate stop is precise at 58.515 s and sits 17 ms past the dip bound
+# WITHOUT its rate margin: the tightest of the 11 precise runs checked.
+_AGREED_RUN = ("failover-crash-bounded-tcp-agreed.jsonl", 55,
+               (1794703344.000900818, 1794703359.006422001, -0.018, 0.151))
+_EDGE_RUN = ("failover-crash-precise-udp-edge.jsonl", 58,
+             (1794695718.837531692, 1794695733.842937875, -0.309, 0.143))
+
+
+def _with_stream_rate(text, stream, start_from, until, rate):
+    """``text`` with one stream's rate set to ``rate(row)`` for intervals
+    starting in ``[start_from, until)``, the sum adjusted to match."""
+    out = []
+    for line in text.splitlines():
+        event = json.loads(line)
+        if event.get("event") == "interval":
+            data = event["data"]
+            for row in data["streams"]:
+                if row["socket"] == stream and start_from <= row["start"] < until:
+                    bps = rate(row)
+                    data["sum"]["bits_per_second"] += bps - row["bits_per_second"]
+                    row["bits_per_second"] = bps
+            line = json.dumps(event, separators=(",", ":"))
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _stream_rate_at(text, stream, start):
+    for line in text.splitlines():
+        event = json.loads(line)
+        if event.get("event") == "interval":
+            for row in event["data"]["streams"]:
+                if row["socket"] == stream and abs(row["start"] - start) < 0.05:
+                    return row["bits_per_second"]
+    raise AssertionError(f"no interval at {start} for stream {stream}")
+
+
+def _with_intervals_like(text, source_start, targets):
+    """``text`` with every stream's rate in the intervals starting near each
+    of ``targets`` replaced by its own rate in the one near ``source_start``:
+    the run with its crash dip filled in."""
+    rates = {}
+    for line in text.splitlines():
+        event = json.loads(line)
+        if event.get("event") == "interval" and abs(event["data"]["sum"]["start"] - source_start) < 0.05:
+            rates = {row["socket"]: row["bits_per_second"] for row in event["data"]["streams"]}
+    out = []
+    for line in text.splitlines():
+        event = json.loads(line)
+        if event.get("event") == "interval":
+            data = event["data"]
+            if any(abs(data["sum"]["start"] - target) < 0.05 for target in targets):
+                for row in data["streams"]:
+                    row["bits_per_second"] = rates[row["socket"]]
+                data["sum"]["bits_per_second"] = sum(rates.values())
+            line = json.dumps(event, separators=(",", ":"))
+        out.append(line)
+    return "\n".join(out) + "\n"
+
+
+def _assert_flips(test, anchor, replacement, judge, expected):
+    """``assert_flips`` above, for a class that is not PreciseCrashAnchorTests."""
+    import iperf3_sum_parse as module
+
+    test.assertEqual(judge(module)[0], expected)
+    control = types.SimpleNamespace(**_mutant(anchor, anchor))
+    test.assertEqual(judge(control)[0], expected, "no-op control moved the row")
+    mutant = types.SimpleNamespace(**_mutant(anchor, replacement))
+    status, reason = judge(mutant)
+    test.assertNotEqual(status, expected, f"mutant did not flip the row: {reason}")
+
+
+class BoundedCrashWindowTests(unittest.TestCase):
+    """#19123: a fast takeover leaves no stop; the crash cell is judged over a
+    window bounded by the sysrq command and the first deep aggregate dip, at
+    both of its ends."""
+
+    def setUp(self):
+        import iperf3_sum_parse as module
+
+        self.module = module
+        self.runs = {
+            name: (_read(os.path.join(_HERE, path)), at, epochs)
+            for name, (path, at, epochs) in _BOUNDED_RUNS.items()
+        }
+        self.agreed = (_read(os.path.join(_HERE, _AGREED_RUN[0])),) + _AGREED_RUN[1:]
+        self.edge = (_read(os.path.join(_HERE, _EDGE_RUN[0])),) + _EDGE_RUN[1:]
+
+    @staticmethod
+    def bound(module, run):
+        text, _, (before, after, offset, rtt) = run
+        return module.dip_bounded_anchor(text, before, after, offset, rtt)
+
+    @staticmethod
+    def cli(run):
+        """The crash cell line and METRIC lines, through the CLI test-failover
+        runs: at master these logs VOID, here they are judged."""
+        text, at, (before, after, offset, rtt) = run
+        result = subprocess.run(
+            [sys.executable, _PARSER_PATH, "--failover-check", "--json-stream",
+             "--streams", "8", "--min-throughput-gbps", "1", "--crash-at", str(at),
+             "--straggler-cost", "--emit-metrics",
+             "--crash-epoch", repr(before), "--crash-epoch-after", repr(after),
+             "--client-clock-offset", repr(offset), "--client-clock-rtt", repr(rtt)],
+            input=text, capture_output=True, text=True,
+        )
+        lines = result.stdout.splitlines()
+        return lines[1], [line for line in lines if line.startswith("METRIC ")]
+
+    def test_the_five_void_logs_are_judged_pass(self):
+        for name, run in self.runs.items():
+            with self.subTest(run=name):
+                text, at, _ = run
+                # What master did with this log: no stop, integer anchor, VOID.
+                self.assertIsNone(self.module.resolve_anchor(
+                    text, at, before=run[2][0], after=run[2][1], offset=run[2][2],
+                    rtt=run[2][3], crash=True,
+                ))
+                status, _ = self.module.integer_three_anchor_cell(text, at, 8, json_stream=True)
+                self.assertEqual(status, "VOID")
+                # Here: a window under 0.45 s that both ends judge PASS.
+                anchor = self.bound(self.module, run)
+                self.assertIsNotNone(anchor)
+                self.assertTrue(anchor.bounded)
+                self.assertLess(anchor.uncertainty, 0.45)
+                line, metrics = self.cli(run)
+                self.assertTrue(line.startswith("PASS "), line)
+                self.assertIn("judged at both ends: PASS at the earliest, PASS at the latest", line)
+                self.assertIn("METRIC crash_anchor_precise=0", metrics)
+                self.assertIn("METRIC crash_anchor_bounded=1", metrics)
+
+    def test_print_crash_anchor_hands_the_producer_the_earliest_edge(self):
+        text, at, (before, after, offset, rtt) = self.runs["udp-a"]
+        result = subprocess.run(
+            [sys.executable, _PARSER_PATH, "--print-crash-anchor", "--crash-at", str(at),
+             "--crash-epoch", repr(before), "--crash-epoch-after", repr(after),
+             "--client-clock-offset", repr(offset), "--client-clock-rtt", repr(rtt)],
+            input=text, capture_output=True, text=True, check=True,
+        )
+        anchor = self.bound(self.module, self.runs["udp-a"])
+        self.assertEqual(
+            result.stdout.strip(), f"{anchor.seconds:.3f} {anchor.uncertainty:.3f} bounded"
+        )
+
+    def test_an_agreed_integer_fallback_stays_pass(self):
+        line, metrics = self.cli(self.agreed)
+        self.assertTrue(line.startswith("PASS "), line)
+        self.assertIn("METRIC crash_anchor_bounded=1", metrics)
+
+    def test_a_precise_stop_keeps_the_precise_path_and_lies_inside_the_bound(self):
+        text, at, (before, after, offset, rtt) = self.edge
+        precise = self.module.resolve_anchor(
+            text, at, before=before, after=after, offset=offset, rtt=rtt, crash=True
+        )
+        self.assertAlmostEqual(precise.seconds, 58.515, delta=0.002)
+        bound = self.bound(self.module, self.edge)
+        self.assertLessEqual(bound.seconds, precise.seconds)
+        self.assertGreaterEqual(bound.latest, precise.seconds)
+        line, metrics = self.cli(self.edge)
+        self.assertTrue(line.startswith("PASS "), line)
+        self.assertIn("aggregate stop", line)
+        self.assertIn("METRIC crash_anchor_precise=1", metrics)
+        self.assertIn("METRIC crash_anchor_bounded=0", metrics)
+
+    # Rows derived from udp-a by changing ONE stream (15) after the crash;
+    # every other byte is the run's own. Window: about [58.03, 58.38] s.
+    def judge(self, module, text, run=None):
+        run = run or self.runs["udp-a"]
+        anchor = self.bound(module, (text,) + run[1:])
+        return module.bounded_stream_cell(text, anchor, 8)
+
+    def straggler(self):
+        # Down through the intervals starting at 59-61; resumes at 62.0 s,
+        # 3.6 s after the latest edge: a COST at both ends.
+        return _with_stream_rate(self.runs["udp-a"][0], 15, 59.0, 62.0, lambda row: 0)
+
+    def ambiguous(self):
+        # Down through 59-60; in the interval starting 61.0 it carries 0.8 of
+        # its next interval's rate, so the in-interval read puts its resume at
+        # 61.2 s: past 3 s from the earliest edge, inside 3 s of the latest.
+        text = _with_stream_rate(self.runs["udp-a"][0], 15, 59.0, 61.0, lambda row: 0)
+        following = _stream_rate_at(text, 15, 62.0)
+        return _with_stream_rate(text, 15, 61.0, 62.0, lambda row: 0.8 * following)
+
+    def dead(self):
+        return _with_stream_rate(self.runs["udp-a"][0], 15, 59.0, 1e9, lambda row: 0)
+
+    def no_dip(self):
+        # The crash dip filled in with the intervals before it.
+        return _with_intervals_like(self.runs["udp-a"][0], 57.0, (58.0, 59.0))
+
+    def test_a_straggler_past_the_latest_edge_is_cost(self):
+        status, reason = self.judge(self.module, self.straggler())
+        self.assertEqual(status, "COST", reason)
+        self.assertIn("COST at the earliest, COST at the latest", reason)
+
+    def test_a_resume_between_the_ends_is_void(self):
+        status, reason = self.judge(self.module, self.ambiguous())
+        self.assertEqual(status, "VOID", reason)
+        self.assertIn("COST at the earliest, PASS at the latest", reason)
+
+    def test_a_dead_stream_is_fail(self):
+        status, reason = self.judge(self.module, self.dead())
+        self.assertEqual(status, "FAIL", reason)
+
+    def test_no_dip_takes_no_bound(self):
+        text = self.no_dip()
+        run = (text,) + self.runs["udp-a"][1:]
+        self.assertIsNone(self.bound(self.module, run))
+        line, metrics = self.cli(run)
+        self.assertNotIn("bounded to [", line)
+        self.assertIn("METRIC crash_anchor_bounded=0", metrics)
+
+    def edge_true_cost(self):
+        # On the edge log the crash instant is KNOWN (the precise stop). Stream
+        # 15 down through 60, then at 0.4 of its next rate in 61: resumes at
+        # 61.6 s, 3.08 s after the stop: a true COST, inside 3 s of the dip
+        # bound's latest edge.
+        text = _with_stream_rate(self.edge[0], 15, 60.0, 61.0, lambda row: 0)
+        following = _stream_rate_at(text, 15, 62.0)
+        return _with_stream_rate(text, 15, 61.0, 62.0, lambda row: 0.4 * following)
+
+    def test_a_true_cost_is_never_pass(self):
+        text = self.edge_true_cost()
+        _, at, (before, after, offset, rtt) = self.edge
+        precise = self.module.resolve_anchor(
+            text, at, before=before, after=after, offset=offset, rtt=rtt, crash=True
+        )
+        status, reason = self.module.precise_stream_cell(text, precise, 8, json_stream=True)
+        self.assertEqual(status, "COST", reason)
+        status, reason = self.judge(self.module, text, self.edge)
+        self.assertEqual(status, "VOID", reason)
+
+    # Executable mutants: each removes one piece and must flip its row.
+    def test_mutant_judging_at_the_latest_end_turns_a_true_cost_into_pass(self):
+        text = self.edge_true_cost()
+        _assert_flips(
+            self,
+            "    if status_lo == status_hi:\n        return status_lo, message_lo + note\n",
+            "    if True:\n        return status_hi, message_hi + note\n",
+            lambda module: self.judge(module, text, self.edge),
+            "VOID",
+        )
+        mutant = types.SimpleNamespace(**_mutant(
+            "    if status_lo == status_hi:\n        return status_lo, message_lo + note\n",
+            "    if True:\n        return status_hi, message_hi + note\n",
+        ))
+        self.assertEqual(self.judge(mutant, text, self.edge)[0], "PASS")
+
+    def test_mutant_resume_evidence_from_the_earliest_edge_flips_a_dead_row(self):
+        # tcp-a's window holds the interval starting 55.0 s; stream 7 carries
+        # pre-crash bytes there and is then held down for good.
+        text = _with_stream_rate(self.runs["tcp-a"][0], 7, 56.0, 1e9, lambda row: 0)
+        _assert_flips(
+            self,
+            "    earliest = EventAnchor(anchor.seconds, anchor.uncertainty, anchor.source)\n",
+            "    earliest = EventAnchor(anchor.seconds, 0.0, anchor.source)\n",
+            lambda module: self.judge(module, text, self.runs["tcp-a"]),
+            "FAIL",
+        )
+
+    def test_mutant_without_the_rate_margin_loses_the_edge_stop(self):
+        text, at, (before, after, offset, rtt) = self.edge
+        precise = self.module.resolve_anchor(
+            text, at, before=before, after=after, offset=offset, rtt=rtt, crash=True
+        ).seconds
+
+        def inside(module):
+            bound = self.bound(module, self.edge)
+            return ("IN" if bound.seconds <= precise <= bound.latest else "OUT", "")
+
+        _assert_flips(
+            self,
+            "start + (end - start) * min(1.0, bps / floor / _DIP_RATE_FLOOR)\n"
+            "            + _STOP_UNCERTAINTY\n",
+            "start + (end - start) * min(1.0, bps / floor)\n",
+            inside, "IN",
+        )
+
+    def test_mutant_without_the_dip_test_bounds_the_no_dip_row(self):
+        run = (self.no_dip(),) + self.runs["udp-a"][1:]
+        _assert_flips(
+            self,
+            "        if floor <= 0 or bps > _DIP_FRACTION * floor:\n",
+            "        if floor <= 0:\n",
+            lambda module: ("none" if self.bound(module, run) is None else "bounded", ""),
+            "none",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

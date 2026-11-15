@@ -2072,7 +2072,9 @@ info "Crashing fw0 (sysrq reboot — unclean shutdown, tests worst-case failover
 #     (`failover_epoch_after`). Only that pair bounds when the sysrq ran: an
 #     exec round trip measured beforehand is a minimum, not a limit.
 # iperf3_sum_parse.py looks for the aggregate's own stop inside that window
-# and anchors on it; with no stop there, or any reading missing, the cell
+# and anchors on it. With no stop there (a fast takeover), it bounds the crash
+# between this command and the first deep aggregate dip and judges the cell
+# at both ends (#19123); with no dip either, or any reading missing, the cell
 # falls back to the integer anchor (judged at it and +/-1 s).
 failover_client_clock=$(_failover_clock_offset "$CLUSTER_LAN_HOST" 3) || failover_client_clock=""
 failover_epoch=$(date +%s.%N)
@@ -2502,7 +2504,8 @@ ha_build_planned_move_args
 # zero-valued throughput FAIL; valid averages go through the anchored cell.
 # M1 JSON capture/gate fixture begin
 # ha_crash_resume_at <log> -- #18692's crash anchor: seconds plus uncertainty
-# from the parser's aggregate-stop evidence, else the integer anchor. The
+# from the parser's aggregate-stop evidence, else the #19123 bounded window's
+# earliest edge, else the integer anchor. The
 # stream-resume cell rejects evidence before anchor.latest (seconds plus
 # uncertainty). This shell handoff keeps only seconds, so the producer's
 # --resume-event-sec windows use raw anchor.seconds; near-boundary counter
