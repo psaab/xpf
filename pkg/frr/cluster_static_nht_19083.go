@@ -101,6 +101,8 @@ var (
 	staticNHTReadTimeout19083    = 3 * time.Second
 	staticNHTRebindDebounce19083 = 100 * time.Millisecond
 	staticNHTStopBudget19083     = 2 * time.Second
+	// staticNHTHeldLogEvery19083 spaces the WARNs of one held episode.
+	staticNHTHeldLogEvery19083 = time.Minute
 )
 
 func clusterStaticNHTMapBody19083(name string) string {
@@ -378,11 +380,24 @@ func (m *Manager) writtenSectionBindsStaticNHT19083() (bool, error) {
 // found defects in the mechanism itself (Codex P2s on 18eb95d167 and
 // afd8ae325c). Recovery is restoring zebra's ability to answer. The held
 // apply has armed the degraded retry, which then restores the binding and
-// reloads, with no xpfd restart; heldStaticNHTRestore19083 says so at ERROR.
+// reloads, with no xpfd restart; heldStaticNHTRestoreLocked19083 says so at
+// ERROR, rate-limited per held episode.
 // A successful rebind also clears the pending state. Output zebra returns but
 // the parser cannot read, or a read command vtysh does not know, never holds
 // applies once the write succeeded.
 func (m *Manager) restoreStaticNHTBindingLocked19083() error {
+	err := m.restoreStaticNHTBindingOnceLocked19083()
+	if err == nil && m.staticNHTHeldAttempts19083 > 0 {
+		slog.Info("frr: the static NHT binding restore succeeded; FRR applies resume (#19083)",
+			"held_attempts", m.staticNHTHeldAttempts19083)
+		m.staticNHTHeldAttempts19083 = 0
+	}
+	return err
+}
+
+// restoreStaticNHTBindingOnceLocked19083 is one restore attempt (see
+// restoreStaticNHTBindingLocked19083). Caller holds reloadMu.
+func (m *Manager) restoreStaticNHTBindingOnceLocked19083() error {
 	if !m.staticNHTRestorePending19083 {
 		return nil
 	}
@@ -416,14 +431,14 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	out, werr := ex.VtyshConfigLines(ctx, staticNHTBindLines19083(clusterStaticNHTRouteMap19083))
 	cancel()
 	if werr != nil {
-		return heldStaticNHTRestore19083(fmt.Errorf("restore static NHT binding (#19083): zebra had %s/%s: %w: %s",
+		return m.heldStaticNHTRestoreLocked19083(fmt.Errorf("restore static NHT binding (#19083): zebra had %s/%s: %w: %s",
 			r4.show(v4), r6.show(v6), werr, strings.TrimSpace(string(out))))
 	}
 	a4, q4 := m.readStaticNHTBinding19083("show ip nht route-map")
 	a6, q6 := m.readStaticNHTBinding19083("show ipv6 nht route-map")
 	if q4 == nhtReadExecFailed19083 || q6 == nhtReadExecFailed19083 ||
 		(q4 == nhtReadOK19083 && a4 != want) || (q6 == nhtReadOK19083 && a6 != want) {
-		return heldStaticNHTRestore19083(fmt.Errorf("restore static NHT binding (#19083): not verified after binding %q: zebra reports %s/%s",
+		return m.heldStaticNHTRestoreLocked19083(fmt.Errorf("restore static NHT binding (#19083): not verified after binding %q: zebra reports %s/%s",
 			want, q4.show(a4), q6.show(a6)))
 	}
 	if q4 == nhtReadParseMiss19083 || q6 == nhtReadParseMiss19083 {
@@ -438,14 +453,36 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	return nil
 }
 
-// heldStaticNHTRestore19083 logs a restore that holds FRR applies, with the
-// operator's recovery action, and returns err. It fires once per held attempt:
-// the apply, then each degraded-retry tick (15 s, 30 s, 60 s, then every
-// 5 min).
-func heldStaticNHTRestore19083(err error) error {
-	slog.Error("frr: FRR applies HELD: zebra did not answer or accept the static NHT binding restore. "+
-		"Recover zebra (find the fault; if zebra is wedged, `systemctl restart frr`, which withdraws FRR's routes until it is back). "+
-		"The degraded retry then restores the binding and reloads, with no xpfd restart (#19083)", "err", err)
+// heldStaticNHTRestoreLocked19083 logs a restore that holds FRR applies, with
+// the operator's recovery action, and returns err. Caller holds reloadMu.
+//
+// Rate-limited per held episode (coordinator, CLAUDE.md logging rule). A held
+// apply is retried by the degraded retry (15 s, 30 s, 60 s, then every 5 min),
+// but ALSO by the ip-monitoring actuator every DefaultThrottle (3 s) while its
+// state is dirty, and once per commit or HA reconcile. A zebra that fails
+// fast (vtysh cannot connect) would otherwise log an ERROR every 3 s. So:
+//   - the first held attempt of an episode logs the ERROR;
+//   - later ones log a WARN at most once per staticNHTHeldLogEvery19083, with
+//     the count, and are Debug otherwise;
+//   - the restore succeeding ends the episode with one INFO
+//     (restoreStaticNHTBindingLocked19083).
+func (m *Manager) heldStaticNHTRestoreLocked19083(err error) error {
+	m.staticNHTHeldAttempts19083++
+	now := time.Now()
+	switch {
+	case m.staticNHTHeldAttempts19083 == 1:
+		slog.Error("frr: FRR applies HELD: zebra did not answer or accept the static NHT binding restore. "+
+			"Recover zebra (find the fault; if zebra is wedged, `systemctl restart frr`, which withdraws FRR's routes until it is back). "+
+			"The degraded retry then restores the binding and reloads, with no xpfd restart (#19083)", "err", err)
+		m.staticNHTHeldLastLog19083 = now
+	case now.Sub(m.staticNHTHeldLastLog19083) >= staticNHTHeldLogEvery19083:
+		slog.Warn("frr: FRR applies still HELD: zebra does not answer or accept the static NHT binding restore; recover zebra (see the first ERROR) (#19083)",
+			"held_attempts", m.staticNHTHeldAttempts19083, "err", err)
+		m.staticNHTHeldLastLog19083 = now
+	default:
+		slog.Debug("frr: FRR applies still held by the static NHT binding restore (#19083)",
+			"held_attempts", m.staticNHTHeldAttempts19083, "err", err)
+	}
 	return err
 }
 

@@ -959,11 +959,18 @@ func TestRealExecutorVtyshErrorCarriesBoundedStdout19083(t *testing.T) {
 // degraded retry. Once zebra answers again, the SAME manager (no xpfd
 // restart) restores the primary on its next retry and reloads. Nothing
 // releases the hold except zebra answering, and the ERROR names the recovery.
+// The log is rate-limited per held episode (CLAUDE.md logging rule; the
+// ip-monitoring actuator retries a held apply every 3 s): one ERROR, then a
+// WARN at most once per staticNHTHeldLogEvery19083, one INFO on recovery, and
+// a NEW episode logs its ERROR again.
 func TestStaticNHTRestoreRecoversWhenZebraAnswers19083(t *testing.T) {
 	var logs strings.Builder
 	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelError})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	t.Cleanup(func() { slog.SetDefault(prev) })
+	origEvery := staticNHTHeldLogEvery19083
+	t.Cleanup(func() { staticNHTHeldLogEvery19083 = origEvery })
+	count := func(sub string) int { return strings.Count(logs.String(), sub) }
 	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083) // a rebind interrupted on the alternate
 	fake.execFail, fake.writeFail = true, true               // zebra wedged: reads and writes fail
 	ctx, cancel := context.WithCancel(context.Background())
@@ -989,11 +996,22 @@ func TestStaticNHTRestoreRecoversWhenZebraAnswers19083(t *testing.T) {
 	if !strings.Contains(logs.String(), "FRR applies HELD") || !strings.Contains(logs.String(), "systemctl restart frr") {
 		t.Fatalf("the held apply's ERROR does not name the recovery: %q", logs.String())
 	}
-	// Persistent: every retry while zebra stays wedged is held too.
+	// Persistent: every retry while zebra stays wedged is held too, and
+	// logs no second ERROR and, inside the interval, no WARN.
 	for i := 0; i < 3; i++ {
 		if done, _ := m.retryReloadOnce(context.Background()); done || reloads() != 0 {
 			t.Fatalf("retry %d with zebra wedged: done=%v events %q, want it held and retrying", i, done, fake.snapshot())
 		}
+	}
+	if e, w := count("FRR applies HELD"), count("FRR applies still HELD"); e != 1 || w != 0 {
+		t.Fatalf("4 held attempts in one episode logged %d ERRORs and %d WARNs inside the interval, want 1 and 0: %q", e, w, logs.String())
+	}
+	staticNHTHeldLogEvery19083 = 0 // the interval has passed
+	if done, _ := m.retryReloadOnce(context.Background()); done {
+		t.Fatal("held retry reported done")
+	}
+	if e, w := count("FRR applies HELD"), count("FRR applies still HELD"); e != 1 || w != 1 || !strings.Contains(logs.String(), "held_attempts=5") {
+		t.Fatalf("after the interval: %d ERRORs, %d WARNs, want 1 and 1 with held_attempts=5: %q", e, w, logs.String())
 	}
 	// Zebra answers again; the next retry restores, then reloads.
 	fake.mu.Lock()
@@ -1010,6 +1028,23 @@ func TestStaticNHTRestoreRecoversWhenZebraAnswers19083(t *testing.T) {
 	if !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) || m.staticNHTRestorePending19083 || m.degraded.Load() {
 		t.Fatalf("events %q pending=%v degraded=%v: want the primary restored, then the reload, then settled",
 			ev, m.staticNHTRestorePending19083, m.degraded.Load())
+	}
+	if count("FRR applies resume") != 1 {
+		t.Fatalf("recovery did not log its one INFO: %q", logs.String())
+	}
+	// A NEW episode: a rebind interrupted with zebra wedged again leaves the
+	// restore owed, and the next held apply logs its ERROR again.
+	fake.mu.Lock()
+	fake.execFail, fake.writeFail = true, true
+	fake.mu.Unlock()
+	if err := m.ReevaluateStaticNHT19083(); err == nil || !m.staticNHTRestorePending19083 {
+		t.Fatalf("rebind with zebra wedged: err=%v pending=%v, want it failed and owed", err, m.staticNHTRestorePending19083)
+	}
+	if err := m.ApplyFull(fc2For19083()); err == nil {
+		t.Fatal("second episode: the apply was not held")
+	}
+	if e := count("FRR applies HELD"); e != 2 {
+		t.Fatalf("a new held episode logged %d ERRORs in total, want 2: %q", e, logs.String())
 	}
 }
 
