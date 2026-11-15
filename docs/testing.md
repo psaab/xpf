@@ -697,6 +697,32 @@ Because those cells now run, `pkg/daemon` under testguard takes longer: about
 The make legs pass `GOTEST_TIMEOUT` (60m, #18778). A hand-run
 `testguard-run.sh go test ./pkg/daemon/` needs an explicit `-timeout` too.
 
+### Build-tagged lab faults (#19115)
+
+A lab fault is production code that exists only in a build made for the lab.
+The first is `pkg/daemon/faultinject_bulk_export_19115.go` (build tag
+`xpf_faultinject`). Once armed, it fails the authoritative bulk's owner-RG
+snapshot export from its first page, which exercises the #18752 abandon of an
+open export window, the owed cold-prime re-drive, and the manual-failover
+admission that waits on it.
+
+- **Building it.** Only `XPF_FAULTINJECT=1 make build` (or `make deb`)
+  compiles it. `make deb` then refuses a DEB_VERSION that does not contain
+  `faultinject`, so a lab package cannot pass as a release. `make build`
+  refuses a `GOFLAGS` that carries the tag, since that would build the seam
+  into an unmarked binary. A release build compiles the twin,
+  `faultinject_bulk_export_19115_release.go`, whose hook returns nil.
+  `TestReleaseBuildExcludesTheBulkExportFault19115` (untagged) pins all of
+  this.
+- **Arming it,** on a node running a lab build, at run time: write `once` or
+  `persistent` to `/run/xpf/faultinject/bulk-export-19115`. A `once` fault
+  removes the file before it fails the export. Every firing logs a Warn and
+  appends a line to `/run/xpf/faultinject/bulk-export-19115.fired`.
+- **Its cells** carry the tag, so `go test ./...` never sees them.
+  `make test-faultinject` runs them. `scripts/go-buildtag-census.sh`
+  compiles them on every `make test-go`, and the census now also discovers
+  and compiles every non-test file behind a positive `xpf_*` tag.
+
 ### The go-skip census, and the thing it found
 
 `make go-skip-census` counts skip call sites into four **named** buckets and
