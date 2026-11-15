@@ -3155,7 +3155,15 @@ never lock an operator out of a remote box it manages.
     failure** — `rt.Start` has exactly two call sites (boot and bootstrap
     exit), and the boot one runs once — so that node stays transit-closed until
     xpfd restarts. Fixing the config and re-committing is not enough;
-    `systemctl restart xpfd` is.
+    `systemctl restart xpfd` is. The same latch holds for an APPLY-stage
+    disarm (the #7191 arm-coverage gate is one-way): even after the #9811
+    retry re-attaches every interface, the node stays transit-closed with
+    arm debt. #19118 tracks a bounded re-arm path. With a live peer, that
+    retry can also wedge on the empty-diff policy authority fence (#19111).
+    The most common trigger measured on loss, the restart's XDP attach
+    racing the dead process's link release after a SIGKILL, is removed by
+    #19110 (see `pkg/dataplane/README.md`, "Stale XDP links and refused
+    attaches").
   - **How to tell.** The failure logs at **Error**: `dataplane arm FAILED;
     kernel transit forwarding DISABLED (fail-closed, degraded)` with a
     `remediation` attribute. Confirm with `sysctl net.ipv4.ip_forward` (0) and

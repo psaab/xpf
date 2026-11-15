@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -62,6 +63,10 @@ type Manager struct {
 	// xdpLinks and must be omitted from every armed-fence census. Guarded by
 	// m.mu, like xdpLinks; see detach_debt_10519.go.
 	detachDebt map[int]struct{}
+	// genericFallback records, per ifindex, the native error that sent an
+	// interface to generic XDP in this process (#19110 F4). A native attach
+	// or a detach clears it. Guarded by mu.
+	genericFallback map[int]error
 	// attachedLinksObserver is a wake-only callback. It never carries a count:
 	// callers must re-read kernel link truth through AttachedXDPLinkCount.
 	// Access is serialized by m.mu and callbacks run after m.mu is released.
@@ -358,7 +363,7 @@ func (m *Manager) CompileUserspaceShim(cfg *config.Config, beforeMutation ...fun
 	if err := cleanupUserspaceShimLegacyOnlyMapPins(); err != nil {
 		return nil, m.abortAfterHostMutation(result, err)
 	}
-	m.removeUserspaceShimXDPLinkPins()
+	m.removeUserspaceShimXDPLinkPins(result.pendingXDP)
 
 	if err := runPostMutationSteps(result,
 		func(r *CompileResult) error {
@@ -396,20 +401,51 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 		return nil
 	}
 
-	failedNativeXDP := make(map[int]bool)
+	// #19110: one pass, one occupancy deadline shared by every interface.
+	// Each interface's stale pin (a previous process's link) is reclaimed
+	// immediately before that interface's own first attach, so no interface's
+	// gap includes its neighbours' detaches. A kernel REFUSAL (EBUSY/EEXIST) is
+	// retried within the deadline and never becomes a generic fallback: the
+	// kernel refuses generic for the same reasons, and an occupant that leaves
+	// mid-fallback would land a native-capable interface in skb mode.
+	pass := newXDPAttachPass()
+	reclaimed := make(map[int]bool)
+	reclaimFor := func(ifidx int) {
+		if reclaimed[ifidx] {
+			return
+		}
+		reclaimed[ifidx] = true
+		if _, registered := m.xdpLinkFor(ifidx); registered {
+			return
+		}
+		r := reclaimStaleXDPLinkPin(filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifidx)))
+		r.log(ifidx)
+		if !r.clean() {
+			pass.reclaim[ifidx] = r.String()
+		}
+	}
+
+	failedNativeXDP := make(map[int]error)
 	for _, ifidx := range result.pendingXDP {
 		if result.tunnelIfindexes[ifidx] || result.genericXDPIfindexes[ifidx] {
 			continue
 		}
-		if err := m.AttachXDP(ifidx, false); err != nil {
-			if strings.Contains(err.Error(), "already attached") {
-				continue
-			}
+		reclaimFor(ifidx)
+		err := m.attachWithin(pass, ifidx, false)
+		switch {
+		case err == nil:
+			m.clearGenericFallback(ifidx)
+		case strings.Contains(err.Error(), "already attached"):
+		case errors.Is(err, ErrXDPOccupied):
+			slog.Error("XDP attach refused until the occupancy budget ran out; not falling back to generic",
+				"ifindex", ifidx, "err", err, "issue", "#19110")
+			return err
+		default:
 			slog.Warn("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
 				"ifindex", ifidx, "err", err,
 				"impact", "higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP")
 			m.DetachXDP(ifidx)
-			failedNativeXDP[ifidx] = true
+			failedNativeXDP[ifidx] = err
 		}
 	}
 	if len(failedNativeXDP) > 0 {
@@ -420,17 +456,28 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 		m.clearNativeXDPFlagsForIfindexes(failed)
 	}
 	for _, ifidx := range result.pendingXDP {
-		forceGeneric := failedNativeXDP[ifidx] || result.tunnelIfindexes[ifidx] || result.genericXDPIfindexes[ifidx]
+		_, nativeFailed := failedNativeXDP[ifidx]
+		forceGeneric := nativeFailed || result.tunnelIfindexes[ifidx] || result.genericXDPIfindexes[ifidx]
 		if !forceGeneric {
 			continue
 		}
 		if result.genericXDPIfindexes[ifidx] && !result.tunnelIfindexes[ifidx] {
 			continue
 		}
-		if err := m.AttachXDP(ifidx, true); err != nil {
-			if !strings.Contains(err.Error(), "already attached") {
-				return fmt.Errorf("attach userspace XDP shim generic to ifindex %d: %w", ifidx, err)
+		reclaimFor(ifidx)
+		if err := m.attachWithin(pass, ifidx, true); err != nil {
+			if strings.Contains(err.Error(), "already attached") {
+				continue
 			}
+			if errors.Is(err, ErrXDPOccupied) {
+				slog.Error("generic XDP attach refused until the occupancy budget ran out",
+					"ifindex", ifidx, "err", err, "issue", "#19110")
+				return err
+			}
+			return fmt.Errorf("attach userspace XDP shim generic to ifindex %d: %w", ifidx, err)
+		}
+		if nativeFailed {
+			m.recordGenericFallback(ifidx, failedNativeXDP[ifidx])
 		}
 	}
 	return nil
@@ -507,34 +554,11 @@ func (m *Manager) IsLoaded() bool {
 	return m.loaded.Load()
 }
 
-// xdpAttachModeMatches reports whether the kernel's current XDP attach mode
-// on ifindex matches what AttachXDP is about to request.  Returns true on
-// "probe failed" so we fall through to the existing Update() path rather
-// than punishing transient netlink hiccups.
-//
-// Kernel XDP attach modes (nl/link_linux.go):
-//
-//	XDP_ATTACHED_NONE = 0 — no prog attached
-//	XDP_ATTACHED_DRV  = 1 — driver (native) mode
-//	XDP_ATTACHED_SKB  = 2 — generic (skb) mode
-//	XDP_ATTACHED_HW   = 3 — hw offload
-func xdpAttachModeMatches(ifindex int, wantGeneric bool) bool {
-	l, err := netlink.LinkByIndex(ifindex)
-	if err != nil || l == nil {
-		return true
-	}
-	xdp := l.Attrs().Xdp
-	if xdp == nil || !xdp.Attached {
-		return true
-	}
-	isGeneric := xdp.AttachMode == xdpAttachedSKB
-	return isGeneric == wantGeneric
-}
-
 // AttachXDP attaches the XDP main program to the given interface.
 // If forceGeneric is true, uses generic (SKB) mode instead of native driver mode.
 // When forceGeneric is false, tries native driver mode only (no automatic fallback).
-// On restart, reuses a previously pinned link and atomically replaces the program.
+// It always makes a FRESH link (#19110): a pin this process did not create is
+// never reused.
 func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 	if seam := xdpTransitionSeam18740; seam != nil {
 		if handled, err := seam("attach", ifindex, forceGeneric); handled {
@@ -583,35 +607,16 @@ func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 		}
 	}()
 
-	// Try to load a previously pinned link and update it atomically.
-	//
-	// #864: before reusing, verify the pinned link's attach mode matches
-	// what the caller requested.  If a previous boot fell back to generic
-	// (skb-mode) and pinned a generic-mode link, we would otherwise keep
-	// running in generic forever — losing native-XDP performance even
-	// after the driver/firmware issue that forced the fallback is resolved,
-	// and leaving IFACE_FLAG_NATIVE_XDP stale in the BPF maps.
+	// #19110: FRESH ONLY. An unregistered ifindex's pin is never loaded and
+	// Update()d. The per-interface reclaim and the sweep have already detached
+	// or removed every pin they could, so a pin still here is one they could
+	// not (a live link whose Detach and Unpin both failed, or a dead one whose
+	// unlink failed). Reusing it would bypass the fresh attach #9847 requires
+	// (Update does not reinitialize the mlx5 XSK RQs) and the refusal wait
+	// #19110 adds. A live one makes the fresh attach below fail EBUSY, which
+	// attachWithin retries within its budget. A dead one is replaced by the
+	// identity-checked repair after the attach.
 	pinFile := filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifindex))
-	if existing, err := link.LoadPinnedLink(pinFile, nil); err == nil {
-		if xdpAttachModeMatches(ifindex, forceGeneric) {
-			if err := existing.Update(prog); err == nil {
-				m.setXDPLink(ifindex, existing)
-				slog.Info("updated pinned XDP link", "ifindex", ifindex)
-				return nil
-			}
-			// Update failed (e.g. program type mismatch) — detach + re-attach.
-			existing.Close()
-			os.Remove(pinFile)
-		} else {
-			// Attach mode mismatch — existing pin is generic but we want
-			// driver (or vice versa).  Drop the pin and attach fresh so the
-			// mode picks up correctly and IFACE_FLAG_NATIVE_XDP stays true.
-			slog.Warn("pinned XDP link has wrong attach mode; re-attaching",
-				"ifindex", ifindex, "forceGeneric", forceGeneric)
-			existing.Close()
-			os.Remove(pinFile)
-		}
-	}
 
 	// Fresh attachment (first boot or pin was removed/incompatible).
 	opts := link.XDPOptions{
@@ -633,7 +638,11 @@ func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 	if err := os.MkdirAll(linkPinPath, 0700); err != nil {
 		slog.Warn("failed to create link pin dir", "err", err)
 	} else if err := l.Pin(pinFile); err != nil {
-		slog.Warn("failed to pin XDP link", "ifindex", ifindex, "err", err)
+		// #19110: EEXIST here is a dead pin a reclaim could not unlink. The
+		// identity-checked repair replaces it; any other failure warns there.
+		if rerr := ensureXDPLinkPinned(ifindex, l); rerr != nil {
+			slog.Warn("failed to pin XDP link", "ifindex", ifindex, "err", err, "repair_err", rerr)
+		}
 	}
 
 	m.setXDPLink(ifindex, l)
@@ -772,6 +781,7 @@ func (m *Manager) DetachXDP(ifindex int) error {
 	// or not Close errored. Remove from m.xdpLinks so a retry doesn't
 	// infinite-loop on a stuck-close link, but surface the close error.
 	m.deleteXDPLink(ifindex)
+	m.clearGenericFallback(ifindex)
 	m.ReconcileDetachDebt([]int{ifindex})
 	if closeErr != nil {
 		return fmt.Errorf("detach XDP from ifindex %d: %w", ifindex,
@@ -1369,8 +1379,11 @@ func (m *Manager) Close() error {
 	// BEFORE releasing the handles — after the last handle closes there is
 	// nothing left to pin. Each repair is best-effort (warns inside, same
 	// snapshot idiom: the Pin syscalls run with the lock released).
+	var repairFailed []int
 	for ifindex, l := range m.XDPLinks() {
-		_ = ensureXDPLinkPinned(ifindex, l)
+		if err := ensureXDPLinkPinned(ifindex, l); err != nil {
+			repairFailed = append(repairFailed, ifindex)
+		}
 	}
 	for ifindex, l := range m.XDPLinks() {
 		if err := l.Close(); err != nil {
@@ -1387,7 +1400,17 @@ func (m *Manager) Close() error {
 	// instead of claiming preserved BPF state. The handles still close above
 	// either way; no abort here could keep an unpinned link attached past
 	// process exit.
-	if missing := unpinnedXDPLinks(linkPinPath, m.XDPLinks()); len(missing) > 0 {
+	// #19110: a pin can be PRESENT and still not name the registered link (a
+	// dead link a reclaim could not unlink). Presence alone is therefore not
+	// enough: a failed identity-checked repair counts as missing too.
+	missing := unpinnedXDPLinks(linkPinPath, m.XDPLinks())
+	for _, ifindex := range repairFailed {
+		if !slices.Contains(missing, ifindex) {
+			missing = append(missing, ifindex)
+		}
+	}
+	slices.Sort(missing)
+	if len(missing) > 0 {
 		return fmt.Errorf("XDP links without pins detached on close (ifindexes %v): shutdown was not hitless", missing)
 	}
 	return nil
@@ -1447,6 +1470,7 @@ func (m *Manager) Teardown() error {
 	clear(m.xdpLinks)
 	clear(m.tcLinks)
 	clear(m.detachDebt)
+	clear(m.genericFallback)
 	clear(m.vlanSubInterfaces)
 	m.mu.Unlock()
 	return err

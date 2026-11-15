@@ -102,8 +102,11 @@ func TestDetachXDPIsSerializedWithFenceLease7547(t *testing.T) {
 var serializingAuthority = map[string]string{
 	// Measured, not assumed — the census below rejected an earlier hand-written
 	// version of this map, which is the point of having it.
-	"pkg/dataplane/compiler.go:Compile":                                   "dataplane XDP ownership lease plus daemon applySem",
-	"pkg/dataplane/loader.go:attachUserspaceShimXDP":                      "dataplane XDP ownership lease plus daemon applySem",
+	"pkg/dataplane/compiler.go:Compile":              "dataplane XDP ownership lease plus daemon applySem",
+	"pkg/dataplane/loader.go:attachUserspaceShimXDP": "dataplane XDP ownership lease plus daemon applySem",
+	// #19110: the refusal-retry loop. Its only caller is attachUserspaceShimXDP,
+	// so the same authority holds; each AttachXDP inside takes the lease itself.
+	"pkg/dataplane/xdp_attach_occupancy_19110.go:attachWithin":            "dataplane XDP ownership lease plus daemon applySem (called only from attachUserspaceShimXDP)",
 	"pkg/dataplane/userspace/manager_compile.go:syncInterfaceAttachments": "userspace Manager m.mu plus dataplane XDP ownership lease",
 }
 

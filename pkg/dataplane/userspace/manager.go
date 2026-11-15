@@ -95,6 +95,13 @@ type Manager struct {
 	// the privileged XDP compile/attach leg while exercising pre-mutation
 	// snapshot validation and apply_snapshot publication.
 	compileUserspaceShimHook func(*config.Config, func(*dataplane.CompileResult) error) (*dataplane.CompileResult, error)
+	// unintendedGenericXDPHook is nil in production; the #19110 F4 cells use
+	// it in place of the shim manager's generic-fallback record.
+	unintendedGenericXDPHook func() map[int]string
+	// genericDataMembers holds the #19110 F4 readiness reasons: RETH data
+	// members attached generic after a native refusal that was not
+	// "driver has no native XDP". Guarded by mu.
+	genericDataMembers []string
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.

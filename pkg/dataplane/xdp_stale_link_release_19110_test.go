@@ -248,7 +248,7 @@ func TestUpperDeviceRefusalIsNotAGenericFallback19110(t *testing.T) {
 	t.Cleanup(func() { _ = ul.Close() })
 
 	var trace []string
-	restore := SetXDPTransitionSeamForTest(func(op string, ifindex int, generic bool) (bool, error) {
+	seam := func(op string, ifindex int, generic bool) (bool, error) {
 		mode := "native"
 		if generic {
 			mode = "generic"
@@ -267,18 +267,8 @@ func TestUpperDeviceRefusalIsNotAGenericFallback19110(t *testing.T) {
 		}
 		_ = l.Close()
 		return true, nil
-	})
-	t.Cleanup(restore)
-
-	m := New()
-	done := make(chan error, 1)
-	go func() { done <- m.attachUserspaceShimXDP(&CompileResult{pendingXDP: []int{f.ifindex}}) }()
-	var aerr error
-	select {
-	case aerr = <-done:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the attach pass did not return within 20 s")
 	}
+	aerr := runAttachWithSeam19110(t, seam, f.ifindex)
 	if aerr == nil {
 		t.Fatalf("the attach succeeded although the upper device carries XDP (trace %v)", trace)
 	}

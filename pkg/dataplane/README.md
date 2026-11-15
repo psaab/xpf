@@ -2515,6 +2515,112 @@ Use `binary.NativeEndian.Uint32(ip4)` for `__be32` BPF fields, **not**
 `BigEndian`. cilium/ebpf serializes map values in native endian; the IP
 bytes are already in network order on the wire.
 
+## Stale XDP links and refused attaches (#19110)
+
+After an unclean exit (SIGKILL, OOM, panic, a stop-timeout SIGKILL), the dead
+process's XDP bpf_links stay attached, held by their pins in
+`/sys/fs/bpf/xpf/links/xdp_<ifindex>`. Only the fail-closed `Teardown` unpins
+them. A hitless `Close` keeps them on purpose. The next process must replace
+them with a FRESH attach (#9847: `Update` does not reinitialize the mlx5 XSK
+RQs).
+
+**Why "remove the pin" was not enough.** Unlinking a bpffs pin only schedules
+the link's release: `bpf_destroy_inode` → `bpf_link_put` → `schedule_work`. The
+release takes rtnl to detach. An attach issued about 1 ms later could overtake it:
+- mlx5 refused native with EBUSY ("Can't replace active BPF XDP link"), and the
+  loader read that as "native unavailable";
+- generic then failed with EEXIST (an arm failure), or succeeded once the
+  release landed (a native-capable VF in skb mode with AF_XDP in copy mode,
+  which forwarded nothing).
+
+On loss, 9 of 30 SIGKILL restarts hit one shape or the other. A real-kernel cell
+on a veth saw the stale link still attached after the old sweep in 37–50 of 50
+iterations.
+
+**Reclaim, per interface, synchronously** (`shim_pins.go`).
+- `reclaimStaleXDPLinkPin` opens the pinned link, calls `Detach()`
+  (`BPF_LINK_DETACH`, which runs the XDP release in the syscall under rtnl),
+  then `Unpin`, then `Close`.
+- The sweep (`removeUserspaceShimXDPLinkPins(pending)`) reclaims only pins that
+  are neither registered in this process nor pending in this compile.
+- `attachUserspaceShimXDP` reclaims each pending interface immediately before
+  that interface's own first attach. No interface's gap includes its
+  neighbours' detaches. A registered link is never reclaimed.
+
+The reclaim NEVER aborts the apply. Each failure falls back to the old unlink
+(a deferred release), and the attach decides:
+
+| What happened | Outcome | What the attach sees |
+|---|---|---|
+| no pin (`ENOENT`) | `no-pin` | nothing |
+| detached and unpinned | `detached` | a free device |
+| not a link: a prog/map pin (cilium's errno-less "is not a Link"), or `EACCES` on a file not on bpffs | `not-a-link`, file removed | nothing to wait for |
+| load failed otherwise (`EPERM`, `EACCES` on bpffs, `ENOMEM`, …) | `deferred-release`, file unlinked | maybe a refusal until the kernel releases it |
+| detach failed, unpin worked | `deferred-release` | the same |
+| detached, unpin failed | `detached-pin-stuck` | a free device, plus a dead pin the repair replaces |
+| detach and unpin both failed | `stuck` | a live link: a refusal, ending in `ErrXDPOccupied` naming this |
+
+Once the link is open, `Close` runs on every path. A nil `Detach` proves the
+kernel ran the release. It does not prove the hardware recovered: a driver
+error there is only a kernel `WARN_ON`. The attach result is the arbiter.
+
+**`AttachXDP` is fresh-only.** It never loads a pin and `Update`s it; the old
+reuse block and `xdpAttachModeMatches` are gone. A pin still present at attach
+time is one the reclaim could not remove. Reusing it would bypass the fresh
+attach and the refusal wait. `TestAttachXDPIsFreshOnly19110` pins this
+structurally.
+
+**Pin presence is not proof.** `ensureXDPLinkPinned` keeps a pin only if it
+names the registered link (the same kernel link ID, `pinnedXDPLinkIsOursFn`).
+Otherwise it removes the pin and re-pins this link.
+- **Why:** a reclaim that detached a link but could not unlink its pin leaves a
+  dead pin. The sweep's keep set preserves it for a registered ifindex, so
+  without this check `Close` would hand a hitless restart a dead link.
+- **Where:** `AttachXDP` runs the repair when its fresh `Pin` fails.
+- **Close:** `Close` counts a failed repair as missing, and reports the
+  shutdown as not hitless.
+
+**A refusal is retried, never a fallback** (`xdp_attach_occupancy_19110.go`).
+EBUSY and EEXIST are kernel refusals. They are not proof of an occupant:
+- `dev_xdp_install` returns EBUSY for tcp-data-split and memory providers;
+- `dev_xdp_attach` returns EEXIST for an XDP program on an upper device.
+
+The kernel makes those checks in generic mode too. So `attachWithin` retries
+the same mode with backoff (25 ms doubling to 200 ms) and reclassifies EVERY
+result: an EEXIST that becomes EINVAL is an unsupported device and falls back
+to generic as before. One deadline is shared by the whole pass
+(`xdpOccupancyBudget`, 5 s), not one per interface. A refusal that outlives it
+fails the apply with `*XDPOccupiedError`. That error wraps both
+`ErrXDPOccupied` and the kernel's errno, and it carries a diagnostic:
+- the target's `IFLA_XDP`, and every upper device carrying XDP, read on a
+  dedicated netlink handle with a 250 ms socket timeout;
+- the whole probe bounded by an AGGREGATE `xdpOccupancyDiagBudget` (1 s);
+- when the probe finds nothing, fails, or runs out of budget: "occupant
+  unknown".
+
+The diagnostic never changes the classification. Timing: the `BPF_LINK_CREATE`
+and `BPF_LINK_DETACH` syscalls block on rtnl and are NOT bounded by this code.
+So "about 7.5 s worst case on loss" (the budget plus three mlx5 detach+attach
+pairs) is an estimate, not a bound.
+
+**Unintended generic data members (F4).** `recordGenericFallback` remembers the
+native error that sent an interface to generic. `UnintendedGenericXDP` reports
+it unless the error was EOPNOTSUPP: `dev_xdp_attach` returns that exactly when
+the driver has no `ndo_bpf`, as on iavf, and that generic is the supported
+deployment. A later native attach, a detach, or `Teardown` clears the record.
+The userspace Manager turns a RETH data member in that state into a
+takeover-readiness reason; see `pkg/dataplane/userspace`,
+`generic_data_member_19110.go`.
+
+Cells:
+- `xdp_attach_occupied_19110_test.go` and `xdp_stale_link_release_19110_test.go`
+  compile at master, which shows them RED;
+- `xdp_reclaim_19110_test.go` and the userspace
+  `generic_data_member_19110_test.go` use the new seams.
+
+The real-kernel cells are registered in `pkg/memlockcensus`. Record:
+`docs/log/19110.md`.
+
 ## Arm-coverage proof (#5275, observe-only)
 
 `armproof.go` computes whether the dataplane is genuinely armed for the
@@ -2527,7 +2633,9 @@ route/VIP advertisement until the proof passes.
 Why a measurement phase: "armed" today is weaker than the proof.
 `attachUserspaceShimXDP` treats a **native** XDP attach failure as a warning —
 it detaches and re-attaches in generic (skb) mode, and only a *generic* failure
-returns an error. A box therefore reports itself armed while running the whole
+returns an error. The exception, since #19110, is a kernel *refusal*
+(EBUSY/EEXIST): that is retried within the pass budget and never becomes a
+generic fallback (see "Stale XDP links and refused attaches" below). A box therefore reports itself armed while running the whole
 shim on the fallback path.
 
 **Which stage this measures.** The plan's §5 takes the *final* proof after the

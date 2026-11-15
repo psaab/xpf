@@ -3,6 +3,7 @@ package dataplane
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,7 +94,15 @@ func (s *xdpAttachScript19110) trace() []string {
 
 func runAttach19110(t *testing.T, s *xdpAttachScript19110, pending ...int) error {
 	t.Helper()
-	restore := SetXDPTransitionSeamForTest(s.seam)
+	return runAttachWithSeam19110(t, s.seam, pending...)
+}
+
+// runAttachWithSeam19110 runs one attach pass against a fresh Manager behind the
+// given #18740 seam, and fails the cell instead of hanging if the pass never
+// returns (an unbounded refusal wait).
+func runAttachWithSeam19110(t *testing.T, seam func(string, int, bool) (bool, error), pending ...int) error {
+	t.Helper()
+	restore := SetXDPTransitionSeamForTest(seam)
 	t.Cleanup(restore)
 	m := New()
 	done := make(chan error, 1)
@@ -101,9 +110,8 @@ func runAttach19110(t *testing.T, s *xdpAttachScript19110, pending ...int) error
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(20 * time.Second):
-		t.Fatalf("attachUserspaceShimXDP did not return within 20 s; the occupied wait is unbounded "+
-			"(trace so far: %v)", s.trace())
+	case <-time.After(30 * time.Second):
+		t.Fatal("attachUserspaceShimXDP did not return within 30 s: the refusal wait is unbounded")
 		return nil
 	}
 }
@@ -260,17 +268,17 @@ func TestRefusalThatChangesErrnoIsStillRetried19110(t *testing.T) {
 }
 
 // C3b: the occupancy budget is ONE deadline for the whole attach pass, not one
-// per interface. Ifindex 5 is refused for its first 3 s and then attaches.
-// Ifindex 6 is refused for good. With one 5 s budget per pass, 6 gets what 5
-// left (about 2 s), so the pass ends near 5 s. A per-interface budget would give
-// 6 a fresh 5 s and end near 8 s. Neither interface may try generic.
+// per interface. Three interfaces are each refused for the first 2 s after
+// their own first attempt, and then attach. With one 5 s budget per pass,
+// ifindexes 5 and 6 use about 4.4 s, so ifindex 7 runs out before its 2 s are
+// up and the pass fails. A per-interface budget would give 7 a fresh 5 s, and
+// the pass would SUCCEED. The cell judges that OUTCOME, not a timing.
 //
-// RED at master through the no-generic assertion. Master never waits, so it
-// meets the time bound trivially; the bound is what kills the per-interface
-// budget mutant.
+// RED at master through the no-generic assertion. Master sends the first
+// refused interface to generic, which the seam refuses with EEXIST.
 func TestOccupancyBudgetIsSharedAcrossThePass19110(t *testing.T) {
 	var mu sync.Mutex
-	var first time.Time
+	firstTry := map[int]time.Time{}
 	var ops []string
 	seam := func(op string, ifindex int, generic bool) (bool, error) {
 		mu.Lock()
@@ -282,41 +290,29 @@ func TestOccupancyBudgetIsSharedAcrossThePass19110(t *testing.T) {
 		if generic {
 			return true, occupiedErr19110(ifindex, unix.EEXIST)
 		}
-		if first.IsZero() {
-			first = time.Now()
+		if _, ok := firstTry[ifindex]; !ok {
+			firstTry[ifindex] = time.Now()
 		}
-		if ifindex == 5 && time.Since(first) >= 3*time.Second {
+		if time.Since(firstTry[ifindex]) >= 2*time.Second {
 			return true, nil
 		}
 		return true, occupiedErr19110(ifindex, unix.EBUSY)
 	}
-	restore := SetXDPTransitionSeamForTest(seam)
-	t.Cleanup(restore)
-	m := New()
 	start := time.Now()
-	done := make(chan error, 1)
-	go func() { done <- m.attachUserspaceShimXDP(&CompileResult{pendingXDP: []int{5, 6}}) }()
-	var err error
-	select {
-	case err = <-done:
-	case <-time.After(20 * time.Second):
-		t.Fatal("the pass did not return within 20 s: the occupancy wait is unbounded")
-	}
-	el := time.Since(start)
+	err := runAttachWithSeam19110(t, seam, 5, 6, 7)
 	mu.Lock()
 	trace := append([]string(nil), ops...)
 	mu.Unlock()
-	if err == nil {
-		t.Errorf("ifindex 6 is refused for good, yet the pass reported success (trace %v)", trace)
-	}
 	for _, o := range trace {
-		if o == "attach/5/true" || o == "attach/6/true" {
+		if strings.HasSuffix(o, "/true") {
 			t.Errorf("a generic attempt on a refused interface: %s", o)
 		}
 	}
-	if el > 7*time.Second {
-		t.Errorf("the pass took %s: ifindex 6 got its own budget instead of what ifindex 5 left "+
-			"(one 5 s budget per pass)", el.Round(time.Millisecond))
+	if err == nil {
+		t.Errorf("all three interfaces attached after %s: each one got a fresh budget, so the budget is "+
+			"per interface, not one per pass (trace %v)", time.Since(start).Round(time.Millisecond), trace)
+	} else if !errors.Is(err, unix.EBUSY) {
+		t.Errorf("the pass failed, but not on the refusal: %v", err)
 	}
-	t.Logf("pass ended after %s", el.Round(time.Millisecond))
+	t.Logf("pass ended after %s: %v", time.Since(start).Round(time.Millisecond), err)
 }
