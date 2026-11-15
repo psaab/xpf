@@ -1,9 +1,11 @@
 package frr
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -31,6 +33,8 @@ type zebraNHTFake19083 struct {
 	applyOnly     int // one-shot: apply only this many lines, report success
 	ignore        bool
 	unreadable    bool
+	cmdDrift      bool          // every binding read fails as vtysh does on a command it does not know
+	reloadFail    bool          // every frr-reload.py fails without converging the binding
 	unreadV4      int           // the next N v4 binding reads are a PARSE MISS
 	unreadV6      int           // the next N v6 binding reads are a PARSE MISS
 	execFail      bool          // every binding read's exec fails (zebra does not answer)
@@ -57,6 +61,17 @@ func (f *zebraNHTFake19083) applyLocked(line string) {
 }
 
 func (f *zebraNHTFake19083) VtyshConfigLines(ctx context.Context, lines []string) ([]byte, error) {
+	// Like exec.CommandContext, a context already done refuses to start: FRR
+	// never sees the batch (Codex survivor on 18eb95d167: a settle on the
+	// cancelled lifetime must not look like a successful rebind).
+	// The attempt is still recorded, as "refused ...", so a cell can tell a
+	// caller that did not try from one whose exec was refused.
+	if err := ctx.Err(); err != nil {
+		f.mu.Lock()
+		f.events = append(f.events, "refused batch "+strings.Join(lines, "|"))
+		f.mu.Unlock()
+		return nil, err
+	}
 	f.mu.Lock()
 	f.events = append(f.events, "batch "+strings.Join(lines, "|"))
 	fa, ba, ao, gate := f.failAfter, f.blockAfter, f.applyOnly, f.batchGate
@@ -119,6 +134,11 @@ func (f *zebraNHTFake19083) Vtysh(ctx context.Context, cmd string) (string, erro
 	if strings.HasPrefix(cmd, "show ipv6") {
 		unread, xfail = &f.unreadV6, &f.execFailV6
 	}
+	if f.cmdDrift {
+		// realExecutor's error for vtysh's own parse error: exit 1, the
+		// message on stdout (FRR 10.5.1, udp fw1, R24 NEW-A probe).
+		return "", fmt.Errorf("vtysh %q: exit status 1: %% Unknown command: %s\n", cmd, cmd)
+	}
 	if f.execFail || *xfail > 0 {
 		if *xfail > 0 {
 			*xfail--
@@ -129,7 +149,8 @@ func (f *zebraNHTFake19083) Vtysh(ctx context.Context, cmd string) (string, erro
 		if *unread > 0 {
 			*unread--
 		}
-		return "% Unknown command: " + cmd + "\n", nil
+		// A layout change: zebra answers, but with no "static : <map>" row.
+		return "VRF default:\n  static -> route-map (layout changed, injected)\n", nil
 	}
 	v := f.v4
 	if strings.HasPrefix(cmd, "show ipv6") {
@@ -154,6 +175,12 @@ func (f *zebraNHTFake19083) FrrReloadPy(ctx context.Context, conf string) error 
 	}
 	if release != nil {
 		<-release
+	}
+	f.mu.Lock()
+	fail := f.reloadFail
+	f.mu.Unlock()
+	if fail {
+		return errors.New("frr-reload.py failed (injected); the binding is unchanged")
 	}
 	if data, err := os.ReadFile(conf); err == nil && strings.Contains(string(data), "ip nht static route-map "+nhtMapA19083+"\n") {
 		f.mu.Lock()
@@ -421,7 +448,10 @@ func containsInOrder19083(events []string, a, b string) bool {
 //     and the reload unstarted (fail closed);
 //   - a read-back zebra answered but that has no parseable static row (a parse
 //     miss, e.g. an FRR layout change) lets the reload start with an ERROR
-//     log, so a layout change cannot wedge every apply from startup.
+//     log, so a layout change cannot wedge every apply from startup;
+//   - a read command vtysh itself does not know (`% Unknown command`, exit 1;
+//     R24 NEW-A) is the same command drift: it never succeeds, so it is a
+//     parse miss, not an exec failure.
 func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -435,6 +465,7 @@ func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 			f.onBatch = func() { f.unreadV4, f.unreadV6 = 1, 1 }
 		}, true},
 		{"parse miss throughout", func(f *zebraNHTFake19083) { f.unreadable = true }, true},
+		{"command drift throughout (vtysh: % Unknown command, exit 1)", func(f *zebraNHTFake19083) { f.cmdDrift = true }, true},
 		{"read-back exec failure after a successful write", func(f *zebraNHTFake19083) {
 			f.onBatch = func() { f.execFailV4, f.execFailV6 = 1, 1 }
 		}, false},
@@ -442,6 +473,17 @@ func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 			f.onBatch = func() { f.execFailV6 = 1 }
 		}, false},
 		{"exec failure throughout", func(f *zebraNHTFake19083) { f.execFail = true }, false},
+		// Codex survivors on 18eb95d167: a parse miss releases the reload only
+		// after a SUCCESSFUL write, and never ahead of the other family's
+		// failure.
+		{"rejected write, then parse misses", func(f *zebraNHTFake19083) { f.unreadable = true; f.failAfter = 0 }, false},
+		{"read-back: v4 parse miss, v6 exec failure", func(f *zebraNHTFake19083) {
+			f.onBatch = func() { f.unreadV4, f.execFailV6 = 1, 1 }
+		}, false},
+		{"read-back: v4 parse miss, v6 still the alternate", func(f *zebraNHTFake19083) {
+			f.applyOnly = 1
+			f.onBatch = func() { f.unreadV4 = 1 }
+		}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
@@ -476,17 +518,21 @@ func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 }
 
 // TestStaticNHTBindingParserRealFRR19083 (R24 NEW-1): the binding parser reads
-// REAL `show ip|ipv6 nht route-map` output, captured on FRR 10.5.1 (udp fw1,
-// 2026-11-13, with a map bound and with none) and FRR 10.6.0 (loss fw1,
-// 2026-11-15, both families). A file's version is in its name; the expected
-// binding is in the table.
+// REAL `show ip|ipv6 nht route-map` output, captured on FRR 10.5.1 (udp fw1:
+// v4 bound and none 2026-11-13, v6 none 2026-11-15) and FRR 10.6.0 (loss fw1,
+// 2026-11-15, both families bound). A file's version is in its name; the
+// expected binding is in the table. Five of the eight version x family x state
+// cells are captured; both families print through the same zebra function
+// (show_vrf_nht_rm, parameterized by AFI), so the layout is family-agnostic.
 func TestStaticNHTBindingParserRealFRR19083(t *testing.T) {
-	for file, want := range map[string]string{
+	table := map[string]string{
 		"show_ip_nht_routemap_bound-10.5.1_19083.txt":   "xpf-cluster-nht-19083",
 		"show_ip_nht_routemap_none-10.5.1_19083.txt":    "",
+		"show_ipv6_nht_routemap_none-10.5.1_19083.txt":  "",
 		"show_ip_nht_routemap_bound-10.6.0_19083.txt":   clusterStaticNHTRouteMap19083,
 		"show_ipv6_nht_routemap_bound-10.6.0_19083.txt": clusterStaticNHTRouteMap19083,
-	} {
+	}
+	for file, want := range table {
 		t.Run(file, func(t *testing.T) {
 			data, err := os.ReadFile(filepath.Join("testdata", file))
 			if err != nil {
@@ -498,17 +544,35 @@ func TestStaticNHTBindingParserRealFRR19083(t *testing.T) {
 			}
 		})
 	}
-	versions := map[string]bool{}
-	files, _ := filepath.Glob(filepath.Join("testdata", "show_*_nht_routemap_*_19083.txt"))
-	for _, f := range files {
-		for _, v := range []string{"-10.5.1_", "-10.6.0_"} {
-			if strings.Contains(f, v) {
-				versions[v] = true
+	// The coverage matrix (Codex on 18eb95d167): every FRR version x family
+	// x binding state must be a real capture, or be named here with the
+	// reason it is not one yet. Nothing else may be missing.
+	uncaptured := map[string]string{
+		"show_ipv6_nht_routemap_bound-10.5.1_19083.txt": "needs a vtysh WRITE on a 10.5.1 node (no tcp/udp node binds a map); not read-only",
+		"show_ip_nht_routemap_none-10.6.0_19083.txt":    "loss is the only 10.6.0 cluster; captured read-only by lane H2 lab 2's restore phase",
+		"show_ipv6_nht_routemap_none-10.6.0_19083.txt":  "loss is the only 10.6.0 cluster; captured read-only by lane H2 lab 2's restore phase",
+	}
+	for _, v := range []string{"10.5.1", "10.6.0"} {
+		for _, af := range []string{"ip", "ipv6"} {
+			for _, st := range []string{"bound", "none"} {
+				f := fmt.Sprintf("show_%s_nht_routemap_%s-%s_19083.txt", af, st, v)
+				_, err := os.Stat(filepath.Join("testdata", f))
+				why, excused := uncaptured[f]
+				switch {
+				case err != nil && !excused:
+					t.Errorf("missing real capture %s (not named as uncaptured)", f)
+				case err == nil && excused:
+					t.Errorf("%s is now captured: drop it from uncaptured (%s) and add it to the parse table", f, why)
+				}
 			}
 		}
 	}
-	if !versions["-10.5.1_"] || !versions["-10.6.0_"] {
-		t.Fatalf("fixtures %q: want real captures from both FRR 10.5.1 and 10.6.0", files)
+	// Every capture on disk is in the parse table above.
+	files, _ := filepath.Glob(filepath.Join("testdata", "show_*_nht_routemap_*_19083.txt"))
+	for _, f := range files {
+		if _, ok := table[filepath.Base(f)]; !ok {
+			t.Errorf("capture %s is not in the parse table", f)
+		}
 	}
 }
 
@@ -679,6 +743,11 @@ func TestStaticNHTRebindRequestsCoalesce19083(t *testing.T) {
 		if got := rebinds(fake); got != 0 {
 			t.Fatalf("a stopped manager ran %d rebinds", got)
 		}
+		for _, e := range fake.snapshot() {
+			if strings.HasPrefix(e, "refused ") {
+				t.Fatalf("a stopped manager's drain attempted a rebind (refused only by the exec's done context): %q", e)
+			}
+		}
 	})
 }
 
@@ -760,6 +829,28 @@ func TestStaticNHTStopSettlesOwedRebind19083(t *testing.T) {
 			t.Fatalf("Stop with nothing owed ran %q", ev)
 		}
 	})
+	t.Run("settle exec stalls past its budget", func(t *testing.T) {
+		// Codex survivor on 18eb95d167: the settle's own exec deadline.
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		fake.reset()
+		m.nhtRebindMu.Lock()
+		m.nhtRebindOwed = true
+		m.nhtRebindMu.Unlock()
+		fake.mu.Lock()
+		fake.blockAfter = 0 // the settle's batch hangs until its context ends
+		fake.mu.Unlock()
+		stopped := make(chan struct{})
+		go func() { m.Stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(3 * time.Second):
+			t.Fatal("Stop hung on a stalled settle exec; the settle must bound its own exec")
+		}
+		if ev := fake.snapshot(); rebindBatches19083(ev) != 1 {
+			t.Fatalf("events %q: want the settle's one (stalled) batch", ev)
+		}
+	})
 	t.Run("writer lock busy past the budget", func(t *testing.T) {
 		fake := newZebraNHTFake19083("", "")
 		m := newLiteralNHTManager19083(t, fake)
@@ -788,9 +879,13 @@ func TestStaticNHTStopSettlesOwedRebind19083(t *testing.T) {
 // 3 on 137fea64f9): every binding read has its own budget. Four reads that each
 // fit the budget succeed, although together they exceed it.
 func TestStaticNHTRestoreReadBudgetsAreIndependent19083(t *testing.T) {
-	orig := staticNHTReadTimeout19083
+	orig, origW := staticNHTReadTimeout19083, staticNHTReevalTimeout19083
 	staticNHTReadTimeout19083 = 300 * time.Millisecond
-	t.Cleanup(func() { staticNHTReadTimeout19083 = orig })
+	// The write budget is shortened too, below the four reads' sum, so a
+	// return to ONE shared budget (read or write) fails this cell (Codex
+	// survivor on 18eb95d167).
+	staticNHTReevalTimeout19083 = 500 * time.Millisecond
+	t.Cleanup(func() { staticNHTReadTimeout19083, staticNHTReevalTimeout19083 = orig, origW })
 	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
 	fake.readDelay = 200 * time.Millisecond
 	ctx, cancel := context.WithCancel(context.Background())
@@ -808,7 +903,9 @@ func TestStaticNHTRestoreReadBudgetsAreIndependent19083(t *testing.T) {
 // TestStaticNHTRestoreOperatorOverride19083 (Codex P3 on 137fea64f9): with
 // zebra's binding reads persistently failing, the restore holds every FRR
 // apply. The operator's explicit entry point, the override file, releases it
-// with a WARN; without the file, it stays held.
+// with a WARN; without the file, it stays held. It is ONE-SHOT (R24 NEW-B):
+// honouring it removes the file, so the next pending restore is held again
+// instead of being skipped silently.
 func TestStaticNHTRestoreOperatorOverride19083(t *testing.T) {
 	for _, override := range []bool{false, true} {
 		t.Run(fmt.Sprintf("override=%v", override), func(t *testing.T) {
@@ -837,9 +934,251 @@ func TestStaticNHTRestoreOperatorOverride19083(t *testing.T) {
 			if override && (err != nil || !reloaded || m.staticNHTRestorePending19083) {
 				t.Fatalf("override present: err=%v reloaded=%v pending=%v, want the reload released", err, reloaded, m.staticNHTRestorePending19083)
 			}
+			if override {
+				if _, serr := os.Stat(staticNHTRestoreOverridePath19083); !os.IsNotExist(serr) {
+					t.Fatalf("override honoured but the file is still there (stat err %v): it would skip every later restore", serr)
+				}
+				// A later rebind leaves the restore pending again: it must be
+				// held, not skipped by the spent override.
+				fake.reset()
+				fake.execFail = true
+				fake.failAfter = 0
+				m.reloadMu.Lock()
+				m.staticNHTRestorePending19083 = true
+				m.reloadMu.Unlock()
+				err2 := m.ApplyFull(fc2For19083())
+				for _, e := range fake.snapshot() {
+					if strings.HasPrefix(e, "reload ") {
+						t.Fatalf("second restore after the one-shot override: err=%v events %q, want the reload held", err2, fake.snapshot())
+					}
+				}
+				if err2 == nil {
+					t.Fatal("second restore after the one-shot override returned nil, want the hold")
+				}
+			}
 			if !override && (err == nil || reloaded) {
 				t.Fatalf("no override: err=%v reloaded=%v, want the reload held", err, reloaded)
 			}
 		})
+	}
+}
+
+// TestStaticNHTRestoreOverrideWarnsAtStartup19083 (R24 NEW-B): a leftover
+// override file is announced when the manager starts, as stale. New only
+// warns: `xpfd cleanup` calls New in another process and must not consume a
+// running daemon's override.
+func TestStaticNHTRestoreOverrideWarnsAtStartup19083(t *testing.T) {
+	for _, present := range []bool{false, true} {
+		t.Run(fmt.Sprintf("present=%v", present), func(t *testing.T) {
+			orig := staticNHTRestoreOverridePath19083
+			staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
+			t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
+			if present {
+				if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			m := New()
+			t.Cleanup(m.Stop)
+			warned := strings.Contains(buf.String(), "override exists from before this start")
+			if warned != present {
+				t.Fatalf("override present=%v, startup WARN=%v; log %q", present, warned, buf.String())
+			}
+			if _, err := os.Stat(staticNHTRestoreOverridePath19083); present && err != nil {
+				t.Fatalf("New() must only warn, not consume the override: %v", err)
+			}
+		})
+	}
+}
+
+// TestStaticNHTReadClassifiesRealVtyshErrors19083 (R24 NEW-A): the binding read
+// through the REAL executor, against a stand-in vtysh binary. vtysh reports a
+// command it does not know on STDOUT with exit 1 (FRR 10.5.1, udp fw1:
+// `% Unknown command: show ip nht route-mapx`, rc=1); before this fold
+// realExecutor dropped stdout from the error, so command drift was
+// indistinguishable from zebra not answering and failed closed forever.
+func TestStaticNHTReadClassifiesRealVtyshErrors19083(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		script string
+		want   nhtRead19083
+	}{
+		{"unknown command on stdout, exit 1", "#!/bin/sh\necho \"% Unknown command: $2\"\nexit 1\n", nhtReadParseMiss19083},
+		{"daemon not answering, exit 1", "#!/bin/sh\necho 'Exiting: failed to connect to any daemons.' >&2\nexit 1\n", nhtReadExecFailed19083},
+		{"a layout without the static row", "#!/bin/sh\necho 'VRF default:'\nexit 0\n", nhtReadParseMiss19083},
+		{"the real 10.6.0 layout", "#!/bin/sh\nprintf 'VRF: default\\nProtocol                  : route-map\\nstatic                    : xpf-static-nht-xpf-redist\\n'\n", nhtReadOK19083},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "vtysh")
+			if err := os.WriteFile(path, []byte(tc.script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			orig := vtyshBinary
+			vtyshBinary = path
+			t.Cleanup(func() { vtyshBinary = orig })
+			ctx, cancel := context.WithCancel(context.Background())
+			m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), mgrCtx: ctx, mgrCancel: cancel}
+			t.Cleanup(m.Stop)
+			if _, got := m.readStaticNHTBinding19083("show ip nht route-map"); got != tc.want {
+				t.Fatalf("read classified as %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRealExecutorVtyshErrorCarriesBoundedStdout19083 (R24 NEW-A): the error
+// carries vtysh's stdout, bounded.
+func TestRealExecutorVtyshErrorCarriesBoundedStdout19083(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "vtysh")
+	script := "#!/bin/sh\necho '% Unknown command: show x'\nhead -c 4096 /dev/zero | tr '\\0' x\nexit 1\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := vtyshBinary
+	vtyshBinary = path
+	t.Cleanup(func() { vtyshBinary = orig })
+	_, err := realExecutor{}.Vtysh(context.Background(), "show x")
+	if err == nil || !strings.Contains(err.Error(), "% Unknown command: show x") {
+		t.Fatalf("err = %v, want it to carry vtysh's stdout", err)
+	}
+	if len(err.Error()) > 1024 {
+		t.Fatalf("error is %d bytes: stdout is not bounded", len(err.Error()))
+	}
+}
+
+// TestStaticNHTOverrideKeepsDebtUntilReloadConverges19083 (Codex P2 on
+// 18eb95d167): the override releases one reload WITHOUT settling the restore.
+// Sequence: reads failing, alternate bound, override honoured, the released
+// reload FAILS; the operator's marker is gone; reads recover. The next reload
+// must restore the primary first, not run the diff with the alternate bound.
+func TestStaticNHTOverrideKeepsDebtUntilReloadConverges19083(t *testing.T) {
+	orig := staticNHTRestoreOverridePath19083
+	staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
+	t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
+	if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
+	fake.execFail = true
+	fake.reloadFail = true
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
+		staticNHTRestorePending19083: true}
+	t.Cleanup(m.Stop)
+	_ = m.ApplyFull(clusterFC19083(true)) // released by the override; the reload fails
+	if ev := fake.snapshot(); len(reloadEventsSawAlternate19083(ev)) == 0 {
+		t.Fatalf("events %q: the override should have released one reload", ev)
+	}
+	if !m.staticNHTRestorePending19083 {
+		t.Fatal("the released reload failed, but the restore was settled: the binding was never verified")
+	}
+	if _, err := os.Stat(staticNHTRestoreOverridePath19083); !os.IsNotExist(err) {
+		t.Fatalf("override not consumed (stat err %v)", err)
+	}
+	// A standalone apply that CONVERGES after the failed release must not
+	// settle either: the override released only the earlier reload.
+	fake.mu.Lock()
+	fake.reloadFail = false
+	fake.mu.Unlock()
+	_ = m.ApplyFull(clusterFC19083(false))
+	if !m.staticNHTRestorePending19083 {
+		t.Fatal("a later converged standalone reload settled the restore the override released earlier")
+	}
+	fake.mu.Lock()
+	fake.execFail = false
+	fake.events = nil
+	fake.mu.Unlock()
+	if err := m.ApplyFull(fc2For19083()); err != nil {
+		t.Fatalf("apply after recovery: %v (events %q)", err, fake.snapshot())
+	}
+	ev := fake.snapshot()
+	if bad := reloadEventsSawAlternate19083(ev); len(bad) != 0 {
+		t.Fatalf("after recovery a diff reload started with the alternate bound: %q (events %q)", bad, ev)
+	}
+	if !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) || m.staticNHTRestorePending19083 {
+		t.Fatalf("events %q pending=%v: want the primary restored, then the reload, then settled", ev, m.staticNHTRestorePending19083)
+	}
+}
+
+// TestStaticNHTOverrideScopedToEpisode19083 (R24 NEW-B; Codex P2 on
+// 18eb95d167): only a regular file created during the CURRENT pending episode
+// releases a restore. A marker from before the episode (an old recovery) is
+// removed and ignored; a directory is ignored. Each arm interrupts a rebind
+// (the alternate stays bound), then reads fail.
+func TestStaticNHTOverrideScopedToEpisode19083(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		make        func(path string) error
+		mtime       time.Duration // relative to the interrupted rebind
+		wantRelease bool
+	}{
+		{"fresh marker", func(p string) error { return os.WriteFile(p, nil, 0o644) }, time.Hour, true},
+		{"stale marker", func(p string) error { return os.WriteFile(p, nil, 0o644) }, -time.Hour, false},
+		{"a directory", func(p string) error { return os.Mkdir(p, 0o755) }, time.Hour, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := staticNHTRestoreOverridePath19083
+			staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
+			t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
+			fake := newZebraNHTFake19083("", "")
+			m := newLiteralNHTManager19083(t, fake)
+			fake.mu.Lock()
+			fake.failAfter = 2 // the rebind binds the alternate, then is rejected
+			fake.mu.Unlock()
+			if err := m.ReevaluateStaticNHT19083(); err == nil {
+				t.Fatal("the interrupted rebind reported success")
+			}
+			if err := tc.make(staticNHTRestoreOverridePath19083); err != nil {
+				t.Fatal(err)
+			}
+			at := time.Now().Add(tc.mtime)
+			if err := os.Chtimes(staticNHTRestoreOverridePath19083, at, at); err != nil {
+				t.Fatal(err)
+			}
+			fake.mu.Lock()
+			fake.execFail = true
+			fake.events = nil
+			fake.mu.Unlock()
+			err := m.ApplyFull(fc2For19083())
+			released := len(reloadEventsSawAlternate19083(fake.snapshot())) != 0
+			if released != tc.wantRelease {
+				t.Fatalf("released=%v err=%v events %q, want released=%v", released, err, fake.snapshot(), tc.wantRelease)
+			}
+			if !tc.wantRelease && err == nil {
+				t.Fatal("held restore returned nil")
+			}
+		})
+	}
+}
+
+// TestStaticNHTPreStartOverrideIsStale19083 (R24 NEW-B; Codex P2 on
+// 18eb95d167): an override left from before the manager started belongs to an
+// earlier episode. New starts the pending episode, so the first restore
+// removes that override and holds; it does not release the reload.
+func TestStaticNHTPreStartOverrideIsStale19083(t *testing.T) {
+	orig := staticNHTRestoreOverridePath19083
+	staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
+	t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
+	if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(staticNHTRestoreOverridePath19083, at, at); err != nil {
+		t.Fatal(err)
+	}
+	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
+	fake.execFail = true
+	m := NewForTest(filepath.Join(t.TempDir(), "frr.conf"), fake)
+	t.Cleanup(m.Stop)
+	err := m.ApplyFull(clusterFC19083(true))
+	if bad := reloadEventsSawAlternate19083(fake.snapshot()); len(bad) != 0 || err == nil {
+		t.Fatalf("err=%v events %q: a pre-start override released the first restore", err, fake.snapshot())
+	}
+	if _, serr := os.Stat(staticNHTRestoreOverridePath19083); !os.IsNotExist(serr) {
+		t.Fatalf("the stale override was not removed (stat err %v)", serr)
 	}
 }

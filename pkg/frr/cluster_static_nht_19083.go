@@ -21,11 +21,12 @@ import (
 // gone, and an owned static's gateway (on the RETH subnet) then resolves
 // recursively through the cluster Null0 default (renderClusterModeDefaults):
 // FRR installed it as an ACTIVE kernel blackhole that redistribution exported
-// from a node that forwards nothing (#19083, measured on loss). Nothing is
-// written at shutdown; instead the render binds staticd's next-hop tracking
-// to a route-map that denies resolution through any blackhole next hop, so a
-// static rendered as a PLAIN gateway goes inactive by itself the moment its
-// gateway's connected route leaves.
+// from a node that forwards nothing (#19083, measured on loss). The fix does
+// not depend on a shutdown write (Stop writes only to settle an owed
+// re-evaluation, settleOwedStaticNHTRebind19083); instead the render binds
+// staticd's next-hop tracking to a route-map that denies resolution through any
+// blackhole next hop, so a static rendered as a PLAIN gateway goes inactive by
+// itself the moment its gateway's connected route leaves.
 //
 // Coverage boundary (R22 #1, TestStaticNHTMapCoverageBoundary19083): staticd
 // consults next-hop tracking only for a plain gateway; a gateway WITH an
@@ -96,7 +97,7 @@ const (
 // staticNHTStopBudget19083 bounds Stop's settle of an owed rebind: the wait for
 // reloadMu, and the rebind exec, each get this long.
 // staticNHTRestoreOverridePath19083 is the operator's escape hatch for a
-// restore that cannot verify (see restoreStaticNHTBindingLocked19083).
+// restore that cannot verify (see takeStaticNHTRestoreOverrideLocked19083).
 var (
 	staticNHTReevalTimeout19083       = 5 * time.Second
 	staticNHTReadTimeout19083         = 3 * time.Second
@@ -247,6 +248,13 @@ func (m *Manager) drainStaticNHTRebind19083() {
 // lifetime is already cancelled). Bounded: reloadMu is polled for at most
 // staticNHTStopBudget19083 and the rebind exec gets the same; on either
 // failing, the residue is logged at ERROR and Stop returns.
+//
+// This is the one FRR write Stop can make (R24 NEW-C), and only when a rebind
+// is owed or running: the rebind's binding lines (alternate, then primary).
+// Its worst-case addition to Stop is staticNHTStopBudget19083 for the lock,
+// the same again for the exec, plus the exec's WaitDelay (5 s): about 9 s,
+// inside the unit's TimeoutStopSec=20. With nothing owed or running, Stop
+// writes nothing to FRR.
 func (m *Manager) settleOwedStaticNHTRebind19083() {
 	m.nhtRebindMu.Lock()
 	busy := m.nhtRebindOwed || m.nhtRebindRunning
@@ -310,7 +318,7 @@ func (m *Manager) rebindStaticNHTLocked19083(ctx context.Context, ex vtyshConfig
 	}
 	lines := append(staticNHTBindLines19083(clusterStaticNHTRouteMapAlt19083),
 		staticNHTBindLines19083(clusterStaticNHTRouteMap19083)...)
-	m.staticNHTRestorePending19083 = true
+	m.markStaticNHTRestorePendingLocked19083()
 	if out, err := ex.VtyshConfigLines(ctx, lines); err != nil {
 		return fmt.Errorf("re-evaluate static NHT (#19083): %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -370,10 +378,14 @@ func (m *Manager) writtenSectionBindsStaticNHT19083() (bool, error) {
 // longer budget), and nothing recovers it automatically. Recovery: restore
 // timely NHT reads (zebra/vtysh health), after which the degraded retry
 // converges; or, having checked the binding by hand, create
-// staticNHTRestoreOverridePath19083, which releases the restore with a WARN. A
-// successful rebind also clears the pending state. Output zebra returns but
-// the parser cannot read never holds applies once the write succeeded.
+// staticNHTRestoreOverridePath19083, which releases ONE reload with a WARN
+// and leaves the restore pending until a reload converges
+// (takeStaticNHTRestoreOverrideLocked19083). A successful rebind also clears
+// the pending state. Output zebra returns but the parser cannot read, or a read
+// command vtysh does not know, never holds applies once the write succeeded.
 func (m *Manager) restoreStaticNHTBindingLocked19083() error {
+	// The override releases exactly the reload this call precedes.
+	m.staticNHTOverrideReload19083 = false
 	if !m.staticNHTRestorePending19083 {
 		return nil
 	}
@@ -392,14 +404,13 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	if !ok {
 		return nil
 	}
-	if _, err := os.Stat(staticNHTRestoreOverridePath19083); err == nil {
-		// The operator's explicit recovery entry point (Codex P3 on
-		// 137fea64f9): with zebra's binding reads persistently failing, the
-		// restore would hold every FRR apply. The operator, having checked the
-		// binding by hand, creates this file to release it.
-		slog.Warn("frr: static NHT binding restore SKIPPED by operator override; remove the file once FRR reads work (#19083)",
-			"override", staticNHTRestoreOverridePath19083)
-		m.staticNHTRestorePending19083 = false
+	if m.takeStaticNHTRestoreOverrideLocked19083() {
+		// Released WITHOUT settling (Codex P2 on 18eb95d167): the binding is
+		// unverified, so the restore stays pending until this reload
+		// CONVERGES (staticNHTReloadConvergedLocked19083). A failed or
+		// degraded reload leaves it pending, and the next attempt restores
+		// (or holds) again.
+		m.staticNHTOverrideReload19083 = true
 		return nil
 	}
 	if m.lifetimeCtx().Err() != nil {
@@ -469,11 +480,25 @@ func (r nhtRead19083) show(v string) string {
 // The real 10.5.1 and 10.6.0 outputs are the testdata fixtures
 // show_*_nht_routemap_*_19083.txt). "" means none. Each read has its own
 // staticNHTReadTimeout19083.
+//
+// It calls the executor directly, deliberately BYPASSING the vtysh funnel
+// (m.vtysh and its diagcmd.VtyshLimiter; R24 NEW-D): the restore runs under
+// reloadMu ahead of every FRR apply, so an ErrVtyshBusy from diagnostic
+// commands saturating the limiter must never be able to hold applies. The
+// read is two bounded commands per restore, not a diagnostic stream.
+//
+// A command vtysh itself does not know (`% Unknown command`, exit 1, FRR 10.5.1
+// probe on udp fw1) is COMMAND DRIFT, not a daemon that did not answer: it is a
+// parse miss (R24 NEW-A). It will never succeed, so failing closed on it would
+// wedge every apply from startup.
 func (m *Manager) readStaticNHTBinding19083(cmd string) (string, nhtRead19083) {
 	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReadTimeout19083)
 	defer cancel()
 	out, err := m.executor().Vtysh(ctx, cmd)
 	if err != nil {
+		if ctx.Err() == nil && strings.Contains(err.Error(), "% Unknown command") {
+			return "", nhtReadParseMiss19083
+		}
 		return "", nhtReadExecFailed19083
 	}
 	v, ok := parseStaticNHTBinding19083(out)
@@ -526,4 +551,77 @@ func (realExecutor) VtyshConfigLines(ctx context.Context, lines []string) ([]byt
 		return out, fmt.Errorf("vtysh configure (%d lines): FRR reported an error", len(lines))
 	}
 	return out, nil
+}
+
+// takeStaticNHTRestoreOverrideLocked19083 consumes the operator's restore
+// override (`/run/xpf/frr-static-nht-restore-override`), the explicit recovery
+// entry point when zebra's binding reads persistently fail (Codex P3 on
+// 137fea64f9). Caller holds reloadMu, with a restore pending. The override is
+// scoped to ONE acknowledged recovery episode (R24 NEW-B; Codex P2 on
+// 18eb95d167):
+//   - only a regular file counts (Lstat: no directory, no followed symlink);
+//   - only one created during THIS pending episode counts (modified at or
+//     after staticNHTPendingSince19083); an older one is stale, so it is
+//     removed with a WARN and ignored;
+//   - honouring it removes it: it releases one reload, never a later restore.
+func (m *Manager) takeStaticNHTRestoreOverrideLocked19083() bool {
+	path := staticNHTRestoreOverridePath19083
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	if !fi.Mode().IsRegular() {
+		slog.Warn("frr: the static NHT restore override is not a regular file; ignored (#19083)",
+			"override", path, "mode", fi.Mode().String())
+		return false
+	}
+	rmErr := os.Remove(path)
+	if fi.ModTime().Before(m.staticNHTPendingSince19083) {
+		slog.Warn("frr: a STALE static NHT restore override (older than the pending restore) was removed and ignored; create it again to release this restore (#19083)",
+			"override", path, "override_mtime", fi.ModTime(), "pending_since", m.staticNHTPendingSince19083,
+			"removed", rmErr == nil, "remove_err", rmErr)
+		return false
+	}
+	slog.Warn("frr: static NHT binding restore SKIPPED once by operator override; the restore stays pending until a reload converges (#19083)",
+		"override", path, "removed", rmErr == nil, "remove_err", rmErr)
+	return true
+}
+
+// staticNHTReloadConvergedLocked19083 is called after a diff reload that
+// CONVERGED (frr-reload.py succeeded, or its --test re-check shows no diff).
+// Caller holds reloadMu. When that reload was released by the operator
+// override, the running config now matches frr.conf, so the binding is what
+// the section renders and the restore is settled. A failed or degraded reload
+// never calls it, so the restore stays pending (Codex P2 on 18eb95d167).
+func (m *Manager) staticNHTReloadConvergedLocked19083() {
+	if !m.staticNHTOverrideReload19083 {
+		return
+	}
+	m.staticNHTOverrideReload19083 = false
+	m.staticNHTRestorePending19083 = false
+	slog.Info("frr: the reload released by the static NHT restore override converged; the restore is settled (#19083)")
+}
+
+// markStaticNHTRestorePendingLocked19083 sets the restore pending and, on the
+// edge into pending, starts a new episode for the override's staleness check.
+// Caller holds reloadMu (or owns m exclusively, as in New).
+func (m *Manager) markStaticNHTRestorePendingLocked19083() {
+	if !m.staticNHTRestorePending19083 {
+		m.staticNHTPendingSince19083 = time.Now()
+	}
+	m.staticNHTRestorePending19083 = true
+}
+
+// warnStaleStaticNHTRestoreOverride19083 WARNs, from New, about an override
+// left from before this manager started (R24 NEW-B). It belongs to an earlier
+// episode: New starts the pending episode now, so the first restore removes it
+// as stale and does not honour it. New only warns, because `xpfd cleanup` also
+// calls New, in another process, and must not consume a running daemon's
+// override.
+func warnStaleStaticNHTRestoreOverride19083() {
+	if _, err := os.Lstat(staticNHTRestoreOverridePath19083); err != nil {
+		return
+	}
+	slog.Warn("frr: a static NHT restore override exists from before this start; it is stale and will be removed, not honoured, by the first restore (#19083)",
+		"override", staticNHTRestoreOverridePath19083)
 }
