@@ -919,8 +919,17 @@ next NHT event for that next hop (measured on udp).
   `reloadMu`; every request until that drain takes `reloadMu` rides on it; a
   request made while the drain is rebinding schedules exactly one more (one
   running plus one pending, nothing dropped). A failed rebind is logged, not
-  retried: the restore below keeps filtering safe. A stopped manager drains
-  nothing.
+  retried: the restore below keeps filtering safe.
+- **Stop settles what is owed** (Codex P2 on 137fea64f9). A requested rebind
+  that no drain completed may cover a static that registered unfiltered (FRR
+  10.5.1) after the event that requested it. An example: a fast-install line
+  that registered after a concurrent demotion removed its VIP. So a drain
+  that finds the manager stopping leaves the request owed, a drain cancelled
+  mid-rebind owes it again, and `Stop`, after its workers exit, runs it with
+  its own context (`settleOwedStaticNHTRebind19083`). It is bounded: the
+  writer lock is polled, and the rebind runs, for at most 2 s each
+  (`staticNHTStopBudget19083`). If either fails, the residue is logged at
+  ERROR and `Stop` returns.
 - The daemon requests it after a demotion's VIP removal
   (`triggerStaticNHTReeval19083`).
   - On master nothing registers a static inside that window. The demotion
@@ -989,15 +998,25 @@ R22 #5).
   - A standalone section reads nothing and does not settle the flag, since
     its reload may fail and leave the alternate bound for a later cluster
     apply (R24 P3-3).
-- **Liveness, chosen deliberately** (R24 P3-2). Each read has its own 3 s
-  budget (`staticNHTReadTimeout19083`) and the write its own 5 s, so a
-  restore holds `reloadMu` for at most four reads and one write (plus the
-  exec WaitDelay). While a vtysh exec to zebra fails or times out, every FRR
-  apply is held, on purpose. That is the same condition under which
-  frr-reload.py, which reads the running config through vtysh too, would fail
-  anyway, and the degraded retry keeps trying. Output that zebra returns but
-  the parser cannot read never holds applies (see above). There is no other
-  automatic give-up that would reopen the window.
+- **Liveness, chosen deliberately** (R24 P3-2, Codex P3 on 137fea64f9). Each
+  read has its own 3 s budget (`staticNHTReadTimeout19083`) and the write its
+  own 5 s, so one restore holds `reloadMu` for at most four reads and one
+  write (plus the exec WaitDelay).
+  - **When applies are held:** every FRR apply stays held for as long as the
+    write fails, or a `show ip|ipv6 nht route-map` read-back exec persistently
+    fails or exceeds its 3 s. This is NOT the same condition as frr-reload.py
+    failing (a different command, a longer budget). Nothing recovers it
+    automatically, by design: an automatic give-up would reopen the window.
+  - **When they are not held:** output that zebra returns but the parser
+    cannot read never holds applies once the write succeeded (see above).
+  - **Operator recovery:**
+    1. Restore timely NHT reads (zebra, vtysh health). The degraded retry
+       then converges, and a successful rebind also clears the pending state.
+    2. Or, having checked `show ip|ipv6 nht route-map` by hand, create
+       `/run/xpf/frr-static-nht-restore-override`
+       (`staticNHTRestoreOverridePath19083`). The next restore is skipped
+       with a WARN and the apply proceeds. Remove the file once reads work;
+       it is on tmpfs, so a reboot clears it.
 
 ## Gotchas
 

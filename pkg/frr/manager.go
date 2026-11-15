@@ -136,6 +136,7 @@ type Manager struct {
 	nhtRebindMu        sync.Mutex
 	nhtRebindOwed      bool
 	nhtRebindScheduled bool
+	nhtRebindRunning   bool // a drain is rebinding (Stop's settle then waits for reloadMu)
 	// writeGen mirrors confGen for lock-free readers (#18561): a caller
 	// rendering under its own lock captures it and passes a predicate to
 	// ApplyFullIfCurrent, so only a write that actually happened (not a
@@ -380,6 +381,9 @@ func (m *Manager) Stop() {
 		m.mgrCancel()
 	}
 	m.retryWG.Wait()
+	// #19083: a requested static-NHT rebind no drain completed is settled
+	// here, after the workers above exited, with its own bounded context.
+	m.settleOwedStaticNHTRebind19083()
 }
 
 // lifetimeCtx returns the manager lifetime context, tolerating

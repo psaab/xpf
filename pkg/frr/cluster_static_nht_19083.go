@@ -93,10 +93,16 @@ const (
 // READ has its own staticNHTReadTimeout19083 (R24 P3-2: no shared budget).
 // staticNHTRebindDebounce19083 is how long a requested rebind waits for the rest
 // of its burst (RequestStaticNHTReeval19083). Vars so cells can shorten them.
+// staticNHTStopBudget19083 bounds Stop's settle of an owed rebind: the wait for
+// reloadMu, and the rebind exec, each get this long.
+// staticNHTRestoreOverridePath19083 is the operator's escape hatch for a
+// restore that cannot verify (see restoreStaticNHTBindingLocked19083).
 var (
-	staticNHTReevalTimeout19083  = 5 * time.Second
-	staticNHTReadTimeout19083    = 3 * time.Second
-	staticNHTRebindDebounce19083 = 100 * time.Millisecond
+	staticNHTReevalTimeout19083       = 5 * time.Second
+	staticNHTReadTimeout19083         = 3 * time.Second
+	staticNHTRebindDebounce19083      = 100 * time.Millisecond
+	staticNHTStopBudget19083          = 2 * time.Second
+	staticNHTRestoreOverridePath19083 = "/run/xpf/frr-static-nht-restore-override"
 )
 
 func clusterStaticNHTMapBody19083(name string) string {
@@ -193,20 +199,88 @@ func (m *Manager) RequestStaticNHTReeval19083() {
 func (m *Manager) drainStaticNHTRebind19083() {
 	m.reloadMu.Lock()
 	defer m.reloadMu.Unlock()
+	if m.lifetimeCtx().Err() != nil {
+		// Stopping: leave what is owed for Stop to settle
+		// (settleOwedStaticNHTRebind19083), never drop it (Codex P2 on
+		// 137fea64f9).
+		return
+	}
 	m.nhtRebindMu.Lock()
 	owed := m.nhtRebindOwed
 	m.nhtRebindOwed, m.nhtRebindScheduled = false, false
+	// running is set in the SAME critical section that clears owed, so Stop's
+	// settle always sees one or the other (it then waits for reloadMu).
+	m.nhtRebindRunning = owed
 	m.nhtRebindMu.Unlock()
-	if !owed || m.lifetimeCtx().Err() != nil {
+	if !owed {
+		return
+	}
+	defer func() {
+		m.nhtRebindMu.Lock()
+		m.nhtRebindRunning = false
+		m.nhtRebindMu.Unlock()
+	}()
+	ex, ok := m.executor().(vtyshConfigExecutor19083)
+	if !ok {
+		return
+	}
+	if err := m.reevaluateStaticNHTLocked19083(ex); err != nil {
+		if m.lifetimeCtx().Err() != nil {
+			// Stop cancelled this rebind mid-flight: owe it again, so Stop
+			// settles it with its own context.
+			m.nhtRebindMu.Lock()
+			m.nhtRebindOwed = true
+			m.nhtRebindMu.Unlock()
+			return
+		}
+		slog.Warn("frr: static NHT re-evaluation failed; a static registered since the last NHT event may stay unfiltered until the next one (#19083)", "err", err)
+	}
+}
+
+// settleOwedStaticNHTRebind19083 runs at the END of Stop, after every worker
+// that could register a static has exited. A requested rebind no drain has
+// completed is OWED: a static may have registered (unfiltered, on FRR 10.5.1)
+// after the event that asked for it, for example a fast-install line that
+// registered after a concurrent demotion removed its VIP. Abandoning it would
+// leave that static active and exportable on a stopping node (Codex P2 on
+// 137fea64f9). So Stop runs it here, under reloadMu, with its own context (the
+// lifetime is already cancelled). Bounded: reloadMu is polled for at most
+// staticNHTStopBudget19083 and the rebind exec gets the same; on either
+// failing, the residue is logged at ERROR and Stop returns.
+func (m *Manager) settleOwedStaticNHTRebind19083() {
+	m.nhtRebindMu.Lock()
+	busy := m.nhtRebindOwed || m.nhtRebindRunning
+	m.nhtRebindMu.Unlock()
+	if !busy {
 		return
 	}
 	ex, ok := m.executor().(vtyshConfigExecutor19083)
 	if !ok {
 		return
 	}
-	if err := m.reevaluateStaticNHTLocked19083(ex); err != nil {
-		slog.Warn("frr: static NHT re-evaluation failed; a static registered since the last NHT event may stay unfiltered until the next one (#19083)", "err", err)
+	deadline := time.Now().Add(staticNHTStopBudget19083)
+	for !m.reloadMu.TryLock() {
+		if time.Now().After(deadline) {
+			slog.Error("frr: stopping with a static NHT re-evaluation owed while the FRR writer lock is busy; a static registered since the last NHT event may stay an active, exportable route (#19083)")
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
+	defer m.reloadMu.Unlock()
+	m.nhtRebindMu.Lock()
+	owed := m.nhtRebindOwed
+	m.nhtRebindOwed = false
+	m.nhtRebindMu.Unlock()
+	if !owed {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), staticNHTStopBudget19083)
+	defer cancel()
+	if err := m.rebindStaticNHTLocked19083(ctx, ex); err != nil {
+		slog.Error("frr: the static NHT re-evaluation owed at stop failed; a static registered since the last NHT event may stay an active, exportable route (#19083)", "err", err)
+		return
+	}
+	slog.Info("frr: settled the static NHT re-evaluation owed at stop (#19083)")
 }
 
 // reevaluateStaticNHTLocked19083 is the rebind itself. Caller holds reloadMu
@@ -222,14 +296,20 @@ func (m *Manager) drainStaticNHTRebind19083() {
 // the whole batch is known applied; restoreStaticNHTBindingLocked19083 settles
 // it before any diff reload.
 func (m *Manager) reevaluateStaticNHTLocked19083(ex vtyshConfigExecutor19083) error {
+	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReevalTimeout19083)
+	defer cancel()
+	return m.rebindStaticNHTLocked19083(ctx, ex)
+}
+
+// rebindStaticNHTLocked19083 runs the rebind batch under ctx. Caller holds
+// reloadMu.
+func (m *Manager) rebindStaticNHTLocked19083(ctx context.Context, ex vtyshConfigExecutor19083) error {
 	bound, err := m.writtenSectionBindsStaticNHT19083()
 	if err != nil || !bound {
 		return err
 	}
 	lines := append(staticNHTBindLines19083(clusterStaticNHTRouteMapAlt19083),
 		staticNHTBindLines19083(clusterStaticNHTRouteMap19083)...)
-	ctx, cancel := context.WithTimeout(m.lifetimeCtx(), staticNHTReevalTimeout19083)
-	defer cancel()
 	m.staticNHTRestorePending19083 = true
 	if out, err := ex.VtyshConfigLines(ctx, lines); err != nil {
 		return fmt.Errorf("re-evaluate static NHT (#19083): %w: %s", err, strings.TrimSpace(string(out)))
@@ -280,13 +360,19 @@ func (m *Manager) writtenSectionBindsStaticNHT19083() (bool, error) {
 //   - a family was positively read back as anything but the primary.
 //
 // (Codex P1 on d8b6021582: an unreadable state used to let the reload delete
-// the alternate's binding before adding the primary's.) Liveness (R24 P3-2):
-// each read has its own staticNHTReadTimeout19083 and the write its own
-// staticNHTReevalTimeout19083, so the restore holds reloadMu for at most
-// 4 reads + 1 write (+ the exec WaitDelay). It holds FRR applies only while a
-// vtysh exec to zebra fails or times out, a condition under which
-// frr-reload.py, which reads the running config through vtysh too, fails
-// anyway. It never holds them on output it merely cannot parse.
+// the alternate's binding before adding the primary's.) Liveness (R24 P3-2,
+// Codex P3 on 137fea64f9): each read has its own staticNHTReadTimeout19083
+// and the write its own staticNHTReevalTimeout19083, so one restore holds
+// reloadMu for at most 4 reads + 1 write (+ the exec WaitDelay). Every FRR
+// apply stays held for as long as the write fails, or a `show ip|ipv6 nht
+// route-map` read-back exec persistently fails or exceeds its budget. That is
+// NOT the same condition as frr-reload.py failing (a different command, a
+// longer budget), and nothing recovers it automatically. Recovery: restore
+// timely NHT reads (zebra/vtysh health), after which the degraded retry
+// converges; or, having checked the binding by hand, create
+// staticNHTRestoreOverridePath19083, which releases the restore with a WARN. A
+// successful rebind also clears the pending state. Output zebra returns but
+// the parser cannot read never holds applies once the write succeeded.
 func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	if !m.staticNHTRestorePending19083 {
 		return nil
@@ -304,6 +390,16 @@ func (m *Manager) restoreStaticNHTBindingLocked19083() error {
 	}
 	ex, ok := m.executor().(vtyshConfigExecutor19083)
 	if !ok {
+		return nil
+	}
+	if _, err := os.Stat(staticNHTRestoreOverridePath19083); err == nil {
+		// The operator's explicit recovery entry point (Codex P3 on
+		// 137fea64f9): with zebra's binding reads persistently failing, the
+		// restore would hold every FRR apply. The operator, having checked the
+		// binding by hand, creates this file to release it.
+		slog.Warn("frr: static NHT binding restore SKIPPED by operator override; remove the file once FRR reads work (#19083)",
+			"override", staticNHTRestoreOverridePath19083)
+		m.staticNHTRestorePending19083 = false
 		return nil
 	}
 	if m.lifetimeCtx().Err() != nil {
