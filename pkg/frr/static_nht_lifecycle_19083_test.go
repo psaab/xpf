@@ -1,7 +1,6 @@
 package frr
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -34,7 +33,7 @@ type zebraNHTFake19083 struct {
 	ignore        bool
 	unreadable    bool
 	cmdDrift      bool          // every binding read fails as vtysh does on a command it does not know
-	reloadFail    bool          // every frr-reload.py fails without converging the binding
+	writeFail     bool          // every batch fails without applying (zebra not answering)
 	unreadV4      int           // the next N v4 binding reads are a PARSE MISS
 	unreadV6      int           // the next N v6 binding reads are a PARSE MISS
 	execFail      bool          // every binding read's exec fails (zebra does not answer)
@@ -73,6 +72,11 @@ func (f *zebraNHTFake19083) VtyshConfigLines(ctx context.Context, lines []string
 		return nil, err
 	}
 	f.mu.Lock()
+	if f.writeFail {
+		f.events = append(f.events, "failed batch "+strings.Join(lines, "|"))
+		f.mu.Unlock()
+		return []byte("% zebra did not answer (injected)"), errors.New("injected vtysh write failure")
+	}
 	f.events = append(f.events, "batch "+strings.Join(lines, "|"))
 	fa, ba, ao, gate := f.failAfter, f.blockAfter, f.applyOnly, f.batchGate
 	f.failAfter, f.blockAfter, f.applyOnly = -1, -1, -1
@@ -175,12 +179,6 @@ func (f *zebraNHTFake19083) FrrReloadPy(ctx context.Context, conf string) error 
 	}
 	if release != nil {
 		<-release
-	}
-	f.mu.Lock()
-	fail := f.reloadFail
-	f.mu.Unlock()
-	if fail {
-		return errors.New("frr-reload.py failed (injected); the binding is unchanged")
 	}
 	if data, err := os.ReadFile(conf); err == nil && strings.Contains(string(data), "ip nht static route-map "+nhtMapA19083+"\n") {
 		f.mu.Lock()
@@ -900,101 +898,6 @@ func TestStaticNHTRestoreReadBudgetsAreIndependent19083(t *testing.T) {
 	}
 }
 
-// TestStaticNHTRestoreOperatorOverride19083 (Codex P3 on 137fea64f9): with
-// zebra's binding reads persistently failing, the restore holds every FRR
-// apply. The operator's explicit entry point, the override file, releases it
-// with a WARN; without the file, it stays held. It is ONE-SHOT (R24 NEW-B):
-// honouring it removes the file, so the next pending restore is held again
-// instead of being skipped silently.
-func TestStaticNHTRestoreOperatorOverride19083(t *testing.T) {
-	for _, override := range []bool{false, true} {
-		t.Run(fmt.Sprintf("override=%v", override), func(t *testing.T) {
-			orig := staticNHTRestoreOverridePath19083
-			staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
-			t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
-			if override {
-				if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
-			fake.execFail = true
-			fake.failAfter = 0
-			ctx, cancel := context.WithCancel(context.Background())
-			m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
-				staticNHTRestorePending19083: true}
-			t.Cleanup(m.Stop)
-			err := m.ApplyFull(clusterFC19083(true))
-			reloaded := false
-			for _, e := range fake.snapshot() {
-				if strings.HasPrefix(e, "reload ") {
-					reloaded = true
-				}
-			}
-			if override && (err != nil || !reloaded || m.staticNHTRestorePending19083) {
-				t.Fatalf("override present: err=%v reloaded=%v pending=%v, want the reload released", err, reloaded, m.staticNHTRestorePending19083)
-			}
-			if override {
-				if _, serr := os.Stat(staticNHTRestoreOverridePath19083); !os.IsNotExist(serr) {
-					t.Fatalf("override honoured but the file is still there (stat err %v): it would skip every later restore", serr)
-				}
-				// A later rebind leaves the restore pending again: it must be
-				// held, not skipped by the spent override.
-				fake.reset()
-				fake.execFail = true
-				fake.failAfter = 0
-				m.reloadMu.Lock()
-				m.staticNHTRestorePending19083 = true
-				m.reloadMu.Unlock()
-				err2 := m.ApplyFull(fc2For19083())
-				for _, e := range fake.snapshot() {
-					if strings.HasPrefix(e, "reload ") {
-						t.Fatalf("second restore after the one-shot override: err=%v events %q, want the reload held", err2, fake.snapshot())
-					}
-				}
-				if err2 == nil {
-					t.Fatal("second restore after the one-shot override returned nil, want the hold")
-				}
-			}
-			if !override && (err == nil || reloaded) {
-				t.Fatalf("no override: err=%v reloaded=%v, want the reload held", err, reloaded)
-			}
-		})
-	}
-}
-
-// TestStaticNHTRestoreOverrideWarnsAtStartup19083 (R24 NEW-B): a leftover
-// override file is announced when the manager starts, as stale. New only
-// warns: `xpfd cleanup` calls New in another process and must not consume a
-// running daemon's override.
-func TestStaticNHTRestoreOverrideWarnsAtStartup19083(t *testing.T) {
-	for _, present := range []bool{false, true} {
-		t.Run(fmt.Sprintf("present=%v", present), func(t *testing.T) {
-			orig := staticNHTRestoreOverridePath19083
-			staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
-			t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
-			if present {
-				if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			var buf bytes.Buffer
-			prev := slog.Default()
-			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
-			t.Cleanup(func() { slog.SetDefault(prev) })
-			m := New()
-			t.Cleanup(m.Stop)
-			warned := strings.Contains(buf.String(), "override exists from before this start")
-			if warned != present {
-				t.Fatalf("override present=%v, startup WARN=%v; log %q", present, warned, buf.String())
-			}
-			if _, err := os.Stat(staticNHTRestoreOverridePath19083); present && err != nil {
-				t.Fatalf("New() must only warn, not consume the override: %v", err)
-			}
-		})
-	}
-}
-
 // TestStaticNHTReadClassifiesRealVtyshErrors19083 (R24 NEW-A): the binding read
 // through the REAL executor, against a stand-in vtysh binary. vtysh reports a
 // command it does not know on STDOUT with exit 1 (FRR 10.5.1, udp fw1:
@@ -1050,135 +953,107 @@ func TestRealExecutorVtyshErrorCarriesBoundedStdout19083(t *testing.T) {
 	}
 }
 
-// TestStaticNHTOverrideKeepsDebtUntilReloadConverges19083 (Codex P2 on
-// 18eb95d167): the override releases one reload WITHOUT settling the restore.
-// Sequence: reads failing, alternate bound, override honoured, the released
-// reload FAILS; the operator's marker is gone; reads recover. The next reload
-// must restore the primary first, not run the diff with the alternate bound.
-func TestStaticNHTOverrideKeepsDebtUntilReloadConverges19083(t *testing.T) {
-	orig := staticNHTRestoreOverridePath19083
-	staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
-	t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
-	if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
-	fake.execFail = true
-	fake.reloadFail = true
+// TestStaticNHTRestoreRecoversWhenZebraAnswers19083 (Codex P2s on 18eb95d167
+// and afd8ae325c; the operator override was REMOVED): with zebra not
+// answering, the restore holds every reload, and the held apply arms the
+// degraded retry. Once zebra answers again, the SAME manager (no xpfd
+// restart) restores the primary on its next retry and reloads. Nothing
+// releases the hold except zebra answering, and the ERROR names the recovery.
+func TestStaticNHTRestoreRecoversWhenZebraAnswers19083(t *testing.T) {
+	var logs strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelError})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083) // a rebind interrupted on the alternate
+	fake.execFail, fake.writeFail = true, true               // zebra wedged: reads and writes fail
 	ctx, cancel := context.WithCancel(context.Background())
 	m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
 		staticNHTRestorePending19083: true}
 	t.Cleanup(m.Stop)
-	_ = m.ApplyFull(clusterFC19083(true)) // released by the override; the reload fails
-	if ev := fake.snapshot(); len(reloadEventsSawAlternate19083(ev)) == 0 {
-		t.Fatalf("events %q: the override should have released one reload", ev)
+	reloads := func() int {
+		n := 0
+		for _, e := range fake.snapshot() {
+			if strings.HasPrefix(e, "reload ") {
+				n++
+			}
+		}
+		return n
 	}
-	if !m.staticNHTRestorePending19083 {
-		t.Fatal("the released reload failed, but the restore was settled: the binding was never verified")
+	if err := m.ApplyFull(clusterFC19083(true)); err == nil || reloads() != 0 {
+		t.Fatalf("zebra wedged: err=%v events %q, want the apply held", err, fake.snapshot())
 	}
-	if _, err := os.Stat(staticNHTRestoreOverridePath19083); !os.IsNotExist(err) {
-		t.Fatalf("override not consumed (stat err %v)", err)
+	if !m.degraded.Load() || !m.staticNHTRestorePending19083 {
+		t.Fatalf("held apply: degraded=%v pending=%v, want the retry armed and the restore still owed",
+			m.degraded.Load(), m.staticNHTRestorePending19083)
 	}
-	// A standalone apply that CONVERGES after the failed release must not
-	// settle either: the override released only the earlier reload.
+	if !strings.Contains(logs.String(), "FRR applies HELD") || !strings.Contains(logs.String(), "systemctl restart frr") {
+		t.Fatalf("the held apply's ERROR does not name the recovery: %q", logs.String())
+	}
+	// Persistent: every retry while zebra stays wedged is held too.
+	for i := 0; i < 3; i++ {
+		if done, _ := m.retryReloadOnce(context.Background()); done || reloads() != 0 {
+			t.Fatalf("retry %d with zebra wedged: done=%v events %q, want it held and retrying", i, done, fake.snapshot())
+		}
+	}
+	// Zebra answers again; the next retry restores, then reloads.
 	fake.mu.Lock()
-	fake.reloadFail = false
-	fake.mu.Unlock()
-	_ = m.ApplyFull(clusterFC19083(false))
-	if !m.staticNHTRestorePending19083 {
-		t.Fatal("a later converged standalone reload settled the restore the override released earlier")
-	}
-	fake.mu.Lock()
-	fake.execFail = false
+	fake.execFail, fake.writeFail = false, false
 	fake.events = nil
 	fake.mu.Unlock()
-	if err := m.ApplyFull(fc2For19083()); err != nil {
-		t.Fatalf("apply after recovery: %v (events %q)", err, fake.snapshot())
+	if done, _ := m.retryReloadOnce(context.Background()); !done {
+		t.Fatalf("retry after zebra recovered: not converged (events %q)", fake.snapshot())
 	}
 	ev := fake.snapshot()
 	if bad := reloadEventsSawAlternate19083(ev); len(bad) != 0 {
 		t.Fatalf("after recovery a diff reload started with the alternate bound: %q (events %q)", bad, ev)
 	}
-	if !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) || m.staticNHTRestorePending19083 {
-		t.Fatalf("events %q pending=%v: want the primary restored, then the reload, then settled", ev, m.staticNHTRestorePending19083)
+	if !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) || m.staticNHTRestorePending19083 || m.degraded.Load() {
+		t.Fatalf("events %q pending=%v degraded=%v: want the primary restored, then the reload, then settled",
+			ev, m.staticNHTRestorePending19083, m.degraded.Load())
 	}
 }
 
-// TestStaticNHTOverrideScopedToEpisode19083 (R24 NEW-B; Codex P2 on
-// 18eb95d167): only a regular file created during the CURRENT pending episode
-// releases a restore. A marker from before the episode (an old recovery) is
-// removed and ignored; a directory is ignored. Each arm interrupts a rebind
-// (the alternate stays bound), then reads fail.
-func TestStaticNHTOverrideScopedToEpisode19083(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		make        func(path string) error
-		mtime       time.Duration // relative to the interrupted rebind
-		wantRelease bool
-	}{
-		{"fresh marker", func(p string) error { return os.WriteFile(p, nil, 0o644) }, time.Hour, true},
-		{"stale marker", func(p string) error { return os.WriteFile(p, nil, 0o644) }, -time.Hour, false},
-		{"a directory", func(p string) error { return os.Mkdir(p, 0o755) }, time.Hour, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			orig := staticNHTRestoreOverridePath19083
-			staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
-			t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
-			fake := newZebraNHTFake19083("", "")
-			m := newLiteralNHTManager19083(t, fake)
-			fake.mu.Lock()
-			fake.failAfter = 2 // the rebind binds the alternate, then is rejected
-			fake.mu.Unlock()
-			if err := m.ReevaluateStaticNHT19083(); err == nil {
-				t.Fatal("the interrupted rebind reported success")
+// TestStaticNHTRestoreOverrideRemoved19083: the operator override file
+// (`/run/xpf/frr-static-nht-restore-override`, folds 4-5) was REMOVED after two
+// review rounds found defects in the mechanism itself. No production source
+// may read it again, so a stale marker left on a node has no effect. The
+// cell scans every non-test Go file in the repository for the path and for
+// the mechanism's identifiers. (A behavioural arm would need to write under
+// /run/xpf, which a test must not do on a real node.)
+func TestStaticNHTRestoreOverrideRemoved19083(t *testing.T) {
+	root := filepath.Join("..", "..")
+	needles := []string{"frr-static-nht-restore-override", "RestoreOverride", "staticNHTOverrideReload", "staticNHTPendingSince"}
+	scanned := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case ".git", "node_modules", "target", "vendor", "testdata":
+				return filepath.SkipDir
 			}
-			if err := tc.make(staticNHTRestoreOverridePath19083); err != nil {
-				t.Fatal(err)
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		scanned++
+		for _, n := range needles {
+			if strings.Contains(string(data), n) {
+				t.Errorf("%s still mentions %q: the restore override must stay removed", path, n)
 			}
-			at := time.Now().Add(tc.mtime)
-			if err := os.Chtimes(staticNHTRestoreOverridePath19083, at, at); err != nil {
-				t.Fatal(err)
-			}
-			fake.mu.Lock()
-			fake.execFail = true
-			fake.events = nil
-			fake.mu.Unlock()
-			err := m.ApplyFull(fc2For19083())
-			released := len(reloadEventsSawAlternate19083(fake.snapshot())) != 0
-			if released != tc.wantRelease {
-				t.Fatalf("released=%v err=%v events %q, want released=%v", released, err, fake.snapshot(), tc.wantRelease)
-			}
-			if !tc.wantRelease && err == nil {
-				t.Fatal("held restore returned nil")
-			}
-		})
-	}
-}
-
-// TestStaticNHTPreStartOverrideIsStale19083 (R24 NEW-B; Codex P2 on
-// 18eb95d167): an override left from before the manager started belongs to an
-// earlier episode. New starts the pending episode, so the first restore
-// removes that override and holds; it does not release the reload.
-func TestStaticNHTPreStartOverrideIsStale19083(t *testing.T) {
-	orig := staticNHTRestoreOverridePath19083
-	staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
-	t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
-	if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	at := time.Now().Add(-time.Hour)
-	if err := os.Chtimes(staticNHTRestoreOverridePath19083, at, at); err != nil {
-		t.Fatal(err)
-	}
-	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
-	fake.execFail = true
-	m := NewForTest(filepath.Join(t.TempDir(), "frr.conf"), fake)
-	t.Cleanup(m.Stop)
-	err := m.ApplyFull(clusterFC19083(true))
-	if bad := reloadEventsSawAlternate19083(fake.snapshot()); len(bad) != 0 || err == nil {
-		t.Fatalf("err=%v events %q: a pre-start override released the first restore", err, fake.snapshot())
-	}
-	if _, serr := os.Stat(staticNHTRestoreOverridePath19083); !os.IsNotExist(serr) {
-		t.Fatalf("the stale override was not removed (stat err %v)", serr)
+	if scanned < 100 {
+		t.Fatalf("scanned only %d Go files from %s; the walk is not seeing the repository", scanned, root)
 	}
 }

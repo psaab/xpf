@@ -129,13 +129,6 @@ type Manager struct {
 	// until it fully applies, and by New (a previous xpfd may have been killed
 	// mid-rebind).
 	staticNHTRestorePending19083 bool
-	// staticNHTPendingSince19083 (under reloadMu) is when the current pending
-	// episode began; an operator override older than it is stale.
-	// staticNHTOverrideReload19083 (under reloadMu) marks the reload the
-	// override released, which settles the restore only if it converges
-	// (staticNHTReloadConvergedLocked19083).
-	staticNHTPendingSince19083   time.Time
-	staticNHTOverrideReload19083 bool
 	// nhtRebindMu (a leaf, after reloadMu) guards the coalesced #19083
 	// re-evaluation: nhtRebindOwed = a request is outstanding;
 	// nhtRebindScheduled = a drain is scheduled and has not taken reloadMu yet
@@ -229,7 +222,6 @@ type Manager struct {
 // call DisableDegradedRetry; everyone constructing via New should
 // arrange for Stop() at teardown.
 func New() *Manager {
-	warnStaleStaticNHTRestoreOverride19083()
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Manager{
 		frrConf:                      DefaultFRRConf,
@@ -238,7 +230,6 @@ func New() *Manager {
 		mgrCtx:                       ctx,
 		mgrCancel:                    cancel,
 		staticNHTRestorePending19083: true,
-		staticNHTPendingSince19083:   time.Now(),
 	}
 }
 
@@ -1884,7 +1875,6 @@ func (m *Manager) reloadLocked() error {
 	perr := m.executor().FrrReloadPy(pctx, m.frrConf)
 	pcancel()
 	if perr == nil {
-		m.staticNHTReloadConvergedLocked19083()
 		slog.Info("FRR reloaded via frr-reload.py (full diff)")
 		if err := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); err != nil {
 			return fmt.Errorf("reconcile QNH metric overlays after full FRR reload: %w", err)
@@ -1905,7 +1895,6 @@ func (m *Manager) reloadLocked() error {
 	if isFrrReloadPyMissing(perr) {
 		m.warnPytoolsOnce(perr)
 	} else if m.reloadTestConverged15203() {
-		m.staticNHTReloadConvergedLocked19083()
 		slog.Info("FRR reload converged on re-check: primary frr-reload.py failed but frr-reload.py --test shows no diff (#15203)", "primary_err", perr)
 		if err := m.reconcileQNHMetricOverlaysLocked(m.lifetimeCtx()); err != nil {
 			return fmt.Errorf("reconcile QNH metric overlays after benign FRR reload: %w (primary frr-reload.py failed: %w)", err, perr)
@@ -2166,7 +2155,6 @@ func (m *Manager) retryReloadOnce(ctx context.Context) (stop, notFound bool) {
 		}
 		return false, nf
 	}
-	m.staticNHTReloadConvergedLocked19083()
 	if err := m.reconcileQNHMetricOverlaysLocked(ctx); err != nil {
 		slog.Warn("FRR degraded-retry could not reconcile QNH metric overlays", "err", err)
 		return false, false
