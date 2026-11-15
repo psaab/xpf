@@ -551,7 +551,14 @@ func (s *SessionSync) syncSweep() int {
 	// arm exactly once (CAS true->false); re-arm on failure so a later sweep or
 	// reconnect retries. flushDeleteJournal already ran this tick, so any tail
 	// still queued replays before this snapshot's window closes.
-	if s.forceResync.CompareAndSwap(true, false) {
+	// #19115 (design v4): every RETRY of an authoritative bulk honours the
+	// shared backoff (bulkRetryNotBefore), whichever branch carries it, so a
+	// sweep that ticks every second (negotiated liveness) cannot turn a
+	// persistent export failure into a retry per tick. New forced work is not
+	// dropped: an armed forceResync waits for the deadline, then runs.
+	backoffOpen := s.bulkRetryBackoffOpen()
+	switch {
+	case backoffOpen && s.forceResync.CompareAndSwap(true, false):
 		slog.Warn("cluster sync: forcing full bulk resync after delete-journal overflow (standby may retain stale sessions)")
 		if err := s.doBulkSync(); err != nil {
 			s.forceResync.Store(true)
@@ -564,7 +571,7 @@ func (s *SessionSync) syncSweep() int {
 				slog.Warn("cluster sync: forced resync bulk failed, will retry", "err", err)
 			}
 		}
-	} else if s.needColdPrime.Load() && s.owedColdPrimeRetryEligible() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
+	case s.needColdPrime.Load():
 		// #82: an OWED cold prime had exactly two consumers — installConn (a
 		// reconnect) and handleDisconnect's survivor re-drive. Both are
 		// disconnect-edge triggered, so a first bulk that failed WITHOUT
@@ -601,35 +608,24 @@ func (s *SessionSync) syncSweep() int {
 		// simply skips this tick when that re-drive owns the flag, and the arm
 		// it is still holding brings us back on the next one.
 		//
-		// #19115: the re-drive now waits for its own retry deadline (the
-		// branch condition above), so a faster sweep cannot bypass the
-		// backoff, and it rechecks that eligibility under bulkSendMu before
-		// exporting (redriveOwedColdPrime).
-		s.redriveOwedColdPrime()
-		s.bulkRedriveInFlight.Store(false)
-	} else if (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) &&
-		s.bulkRedriveInFlight.CompareAndSwap(false, true) {
+		// #19115: while a debt is owed it governs every sweep retry. The
+		// re-drive waits for its own eligibility (the backoff deadline, no
+		// young ack for the debt, no capability fence), rechecked under
+		// bulkSendMu, and an ineligible debt never falls through to the
+		// aged-ack branch below (Codex finding 1 on design v3).
+		if s.owedColdPrimeRetryEligible() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
+			s.redriveOwedColdPrime()
+		}
+	case backoffOpen && (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) &&
+		s.bulkRedriveInFlight.CompareAndSwap(false, true):
 		// A forced resync or another authoritative bulk may be withheld at
 		// BulkEnd without discharging cold-prime debt. Re-send an aged,
 		// unacknowledged snapshot so that a recovered receiver can complete
 		// reconciliation. The sender-side timeout is bounded by the same retry
 		// interval as cold-prime, and the shared in-flight guard prevents
-		// overlapping survivor/cold-prime retries.
-		slog.Warn("cluster sync: re-driving aged unacknowledged bulk on the live connection")
-		s.bulkAckRetryOwed.Store(true)
-		s.bulkSendMu.Lock()
-		s.clearPendingBulkAck()
-		err := s.doBulkSyncWithBulkSend(true)
-		s.bulkSendMu.Unlock()
-		s.bulkRedriveInFlight.Store(false)
-		if err != nil {
-			s.bulkAckRetryOwed.Store(true)
-			if errors.Is(err, errBulkFencedForPeer) || errors.Is(err, errBulkFencedForIpsecPeer) {
-				slog.Debug("cluster sync: unacknowledged bulk retry fenced for peer; waiting for disconnect or capable discovery")
-			} else {
-				slog.Warn("cluster sync: unacknowledged bulk retry failed, will retry", "err", err)
-			}
-		}
+		// overlapping survivor/cold-prime retries. redriveAgedBulk rechecks
+		// this obligation under bulkSendMu.
+		s.redriveAgedBulk()
 	}
 	now := s.sweepNow()
 

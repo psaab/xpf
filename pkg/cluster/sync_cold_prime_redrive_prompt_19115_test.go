@@ -743,16 +743,30 @@ func TestOutOfSweepBulkFailureWakesTheRetry19115(t *testing.T) {
 	t.Logf("debt retried %v after the out-of-sweep failure", took.Round(time.Millisecond))
 }
 
-// TestSweepWakesDoNotPostponeANewlyArmedDebt19115: the earlier-only wake rule
-// for a debt that is due NOW. A debt with a future deadline is re-armed to the
-// same absolute time by any wake, but a newly armed debt (no attempt in
-// flight: a peer reboot, a capable discovery) is due at once and gets the 1 s
-// floor, RELATIVE to the wake. A loop whose wakes reset the timer would push
-// that first re-drive back on every wake, forever.
-func TestSweepWakesDoNotPostponeANewlyArmedDebt19115(t *testing.T) {
+// ── design v4 cells (#19115, Codex review of design v3) ──────────────────
+
+// bareSync19115 is a connected-ready primary with NO sweep loop, for cells
+// that drive syncSweep or a re-drive directly.
+func bareSync19115(src func() (BulkSnapshot, error)) *SessionSync {
+	dp := &mockSweepDP{
+		v4sessions:     map[dataplane.SessionKey]dataplane.SessionValue{},
+		sessionCounter: 1,
+	}
+	ss := NewSessionSync(":0", "10.0.0.2:4785", dp)
+	ss.IsPrimaryFn = func() bool { return true }
+	ss.BulkSnapshotSource = src
+	return ss
+}
+
+// TestSweepWakesDoNotPostponeTheSweep19115: a wake only moves the loop's
+// deadline EARLIER. With a 1 s profile and a wake every 100 ms, the sweep
+// still runs about once a second; a loop whose wakes reset the timer would
+// never run it.
+func TestSweepWakesDoNotPostponeTheSweep19115(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	ss := primarySync19115(t, ctx, sweepProfiles19115[1], (&flakySnapshot19115{}).read)
+	p := sweepProfile19115{name: "one-second", active: time.Second, idle: time.Second}
+	ss := primarySync19115(t, ctx, p, (&flakySnapshot19115{}).read)
 	conn := newBulkCaptureConn()
 	t.Cleanup(func() { conn.Close() })
 	ss.handleNewConnection(ctx, 0, conn, true)
@@ -761,10 +775,7 @@ func TestSweepWakesDoNotPostponeANewlyArmedDebt19115(t *testing.T) {
 		t.Fatal("FIXTURE: want the cold prime sent and pending")
 	}
 	ss.handleMessage(conn, syncMsgBulkAck, epochPayload9626(epoch))
-	if ss.needColdPrime.Load() {
-		t.Fatal("FIXTURE: the ack did not discharge the debt")
-	}
-
+	fx := fx19115(ss)
 	stop := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
@@ -780,14 +791,369 @@ func TestSweepWakesDoNotPostponeANewlyArmedDebt19115(t *testing.T) {
 			}
 		}
 	}()
-	ss.mu.Lock()
-	ss.armColdPrimeLocked()
-	ss.mu.Unlock()
-	took, ok := waitForBulkSyncs19115(ss, 2, owedRedriveBound19115)
+	before := fx.sweeps.Load()
+	time.Sleep(3500 * time.Millisecond)
 	close(stop)
 	<-done
-	if !ok {
-		t.Fatalf("#19115: under a stream of sweep wakes, a newly armed debt was not re-driven within %v", owedRedriveBound19115)
+	if n := fx.sweeps.Load() - before; n < 2 {
+		t.Fatalf("#19115: under a wake every 100 ms a 1 s sweep ran %d time(s) in 3.5 s; the wakes postponed it", n)
 	}
-	t.Logf("newly armed debt re-driven %v after its arm, under wakes", took.Round(time.Millisecond))
+}
+
+// TestForcedResyncHonoursTheBackoff19115 (Codex finding 1 on design v3): a
+// forced resync re-armed after a failure is a RETRY and honours the shared
+// backoff. Under a 50 ms sweep, a persistently failing forced export is
+// attempted about 1 s, then 2 s apart, not on every tick.
+func TestForcedResyncHonoursTheBackoff19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	ss := primarySync19115(t, ctx, sweepProfiles19115[0], snap.read)
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	ss.handleNewConnection(ctx, 0, conn, true)
+	epoch, _, pending := ss.PendingBulkAck()
+	if !pending {
+		t.Fatal("FIXTURE: want the cold prime sent and pending")
+	}
+	ss.handleMessage(conn, syncMsgBulkAck, epochPayload9626(epoch))
+	if ss.needColdPrime.Load() {
+		t.Fatal("FIXTURE: the ack did not discharge the debt")
+	}
+	snap.failures.Store(1 << 20)
+	before := len(snap.times())
+	ss.forceResync.Store(true) // a delete-journal overflow
+	time.Sleep(5 * time.Second)
+	at := snap.times()[before:]
+	if len(at) < 3 {
+		t.Fatalf("#19115: want the forced resync and two retries within 5 s, got %d attempts", len(at))
+	}
+	for i, want := range []time.Duration{time.Second, 2 * time.Second} {
+		if gap := at[i+1].Sub(at[i]); gap < want-150*time.Millisecond {
+			t.Errorf("#19115 (Codex finding 1): forced-resync retry %d came %v after the previous attempt, want at least %v; the backoff does not gate the forced branch",
+				i+1, gap.Round(time.Millisecond), want)
+		}
+	}
+	if len(at) > 4 {
+		t.Errorf("#19115 (Codex finding 1): %d forced-resync attempts in 5 s under a 50 ms sweep, want at most 4", len(at))
+	}
+}
+
+// TestIneligibleOwedRetryDoesNotFallThroughToAgedRetry19115 (Codex finding
+// 1): while a debt is owed it governs every sweep retry. An owed debt inside
+// its backoff must not be re-sent by the aged-ack branch on its behalf.
+func TestIneligibleOwedRetryDoesNotFallThroughToAgedRetry19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	snap.failures.Store(1 << 20)
+	ss := bareSync19115(snap.read)
+	connectWithFailedColdPrime19115(t, ctx, ss, snap) // owed, backoff 1 s
+	ss.bulkAckRetryOwed.Store(true)                   // left by an earlier aged retry
+	reads := snap.calls.Load()
+	for range 5 {
+		ss.syncSweep()
+	}
+	if got := snap.calls.Load(); got != reads {
+		t.Fatalf("#19115 (Codex finding 1): inside the owed debt's backoff a sweep re-sent the bulk through another branch (%d snapshot reads, want %d)", got, reads)
+	}
+}
+
+// TestIpsecFenceNeedsLearnedCapabilities19115 (Codex finding 3): the IPsec
+// fence is lifted only when the peer's capabilities are LEARNED and it is
+// discriminator capable, the bulk window's exact conjunction. The capability
+// bit alone does not make a fenced debt eligible, and a bulk is refused before
+// its table-truth read.
+func TestIpsecFenceNeedsLearnedCapabilities19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	snap.failures.Store(1)
+	ss := bareSync19115(snap.read)
+	connectWithFailedColdPrime19115(t, ctx, ss, snap)
+	ss.peerIncarnationState().bulkFencedForIpsecPeer.Store(true)
+	ss.peerIncarnationState().peerCapabilityFlags.Store(uint32(capFlagIpsecTunnelDiscriminator))
+	if ss.peerCapabilitiesLearned() || !ss.IpsecTunnelDiscriminatorCapable() {
+		t.Fatal("FIXTURE: want the discriminator bit set with the capabilities NOT learned")
+	}
+	ss.bulkRetryReset() // the backoff is not what keeps it ineligible
+	if err := ss.bulkFenceNow(); !errors.Is(err, errBulkFencedForIpsecPeer) {
+		t.Fatalf("#19115 (Codex finding 3): the IPsec fence reads %v with unlearned capabilities, want errBulkFencedForIpsecPeer", err)
+	}
+	if ss.owedColdPrimeRetryEligible() {
+		t.Error("#19115 (Codex finding 3): a debt fenced for IPsec is eligible on the capability bit alone")
+	}
+	reads := snap.calls.Load()
+	if err := ss.DoBulkSync(); !errors.Is(err, errBulkFencedForIpsecPeer) || snap.calls.Load() != reads {
+		t.Errorf("#19115: a bulk fenced for IPsec returned %v after %d table-truth read(s), want the fence before any read",
+			err, snap.calls.Load()-reads)
+	}
+}
+
+// TestConnectTimeBulkSkipsWhenTheSweepAlreadyPrimed19115 (Codex finding 4 on
+// design v3, the reverse ordering): installConn decides the connect-time cold
+// prime, then the connection setup writes run. If they are slow, the sweep's
+// owed re-drive sends the qualifying bulk first. The connect path must then
+// recheck its own obligation under bulkSendMu and NOT send a second snapshot.
+// The connect path is held just before its admission
+// (testBeforeConnectColdPrime) while the sweep's re-drive runs to completion.
+func TestConnectTimeBulkSkipsWhenTheSweepAlreadyPrimed19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	ss := bareSync19115(snap.read)
+	held := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	ss.testBeforeConnectColdPrime = func() {
+		once.Do(func() {
+			close(held)
+			<-release
+		})
+	}
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	connected := make(chan struct{})
+	go func() {
+		defer close(connected)
+		ss.handleNewConnection(ctx, 0, conn, true)
+	}()
+	select {
+	case <-held:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("FIXTURE: the connect path never reached its cold prime")
+	}
+	if !ss.owedColdPrimeRetryEligible() {
+		close(release)
+		t.Fatal("FIXTURE: the connect-armed debt is not eligible for the sweep's re-drive")
+	}
+	if ss.bulkRedriveInFlight.CompareAndSwap(false, true) {
+		ss.redriveOwedColdPrime()
+	}
+	if got := snap.calls.Load(); got != 1 {
+		close(release)
+		t.Fatalf("FIXTURE: the sweep's re-drive did not send the cold prime (%d reads)", got)
+	}
+	close(release)
+	<-connected
+	if got := snap.calls.Load(); got != 1 {
+		t.Fatalf("#19115 (Codex finding 4): the connect-time cold prime sent a second snapshot after the sweep had primed the same debt (%d reads, want 1)", got)
+	}
+	if got := ss.stats.BulkSyncs.Load(); got != 1 {
+		t.Errorf("#19115: want exactly one completed bulk, got %d", got)
+	}
+}
+
+// TestRetryWaitingBehindAFailedBulkSeesItsOutcome19115 (Codex finding 12 on
+// design v3): a retry that waits for bulkSendMu behind a FAILED bulk must see
+// that failure's advanced deadline when it is admitted. The outcome is held
+// at the start of noteBulkResult; the bulk's admission lock must still be held
+// there, so the waiting retry cannot read the old deadline and export again.
+func TestRetryWaitingBehindAFailedBulkSeesItsOutcome19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	snap.failures.Store(1)
+	ss := bareSync19115(snap.read)
+	atResult := make(chan struct{})
+	releaseResult := make(chan struct{})
+	var once sync.Once
+	ss.testBeforeBulkResult = func(err error) {
+		if err != nil {
+			once.Do(func() {
+				close(atResult)
+				<-releaseResult
+			})
+		}
+	}
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	connected := make(chan struct{})
+	go func() {
+		defer close(connected)
+		ss.handleNewConnection(ctx, 0, conn, true)
+	}()
+	select {
+	case <-atResult:
+	case <-time.After(5 * time.Second):
+		close(releaseResult)
+		t.Fatal("FIXTURE: the connect-time cold prime never reached its result")
+	}
+	retried := make(chan struct{})
+	go func() {
+		defer close(retried)
+		if ss.bulkRedriveInFlight.CompareAndSwap(false, true) {
+			ss.redriveOwedColdPrime()
+		}
+	}()
+	time.Sleep(200 * time.Millisecond)
+	whileHeld := snap.calls.Load()
+	close(releaseResult)
+	<-retried
+	<-connected
+	if whileHeld != 1 || snap.calls.Load() != 1 {
+		t.Fatalf("#19115 (Codex finding 12): a retry admitted behind a failed bulk exported again before the failure's backoff was published (%d reads while the outcome was held, %d after; want 1 and 1)",
+			whileHeld, snap.calls.Load())
+	}
+}
+
+// TestSkippedRetriesReleaseTheRedriveGuard19115 (Codex finding 4): a re-drive
+// that its own recheck skips releases bulkRedriveInFlight, or every later
+// re-drive, survivor and aged-ack included, is locked out.
+func TestSkippedRetriesReleaseTheRedriveGuard19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	snap.failures.Store(1 << 20)
+	ss := bareSync19115(snap.read)
+	connectWithFailedColdPrime19115(t, ctx, ss, snap) // owed, inside its backoff
+	ss.bulkRedriveInFlight.Store(true)
+	ss.redriveOwedColdPrime()
+	if ss.bulkRedriveInFlight.Load() {
+		t.Error("#19115: an owed re-drive skipped by its recheck kept bulkRedriveInFlight")
+	}
+	ss.bulkRedriveInFlight.Store(true)
+	ss.redriveAgedBulk() // a debt is owed: not this branch's obligation
+	if ss.bulkRedriveInFlight.Load() {
+		t.Error("#19115: an aged-ack re-drive skipped by its recheck kept bulkRedriveInFlight")
+	}
+	if got := snap.calls.Load(); got != 1 {
+		t.Errorf("#19115: a skipped re-drive read the snapshot (%d reads, want 1)", got)
+	}
+}
+
+// TestArmDuringTheSnapshotReadIsPaidByThatBulk19115 (Codex finding 15): an
+// arm that lands while the table-truth snapshot is being read, BEFORE the
+// window captures its generation, is paid by that same bulk: it carries the
+// new generation, and no second bulk is sent for it.
+func TestArmDuringTheSnapshotReadIsPaidByThatBulk19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var calls atomic.Int32
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	ss := primarySync19115(t, ctx, sweepProfiles19115[1], func() (BulkSnapshot, error) {
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+		}
+		return BulkSnapshot{}, nil
+	})
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	connected := make(chan struct{})
+	go func() {
+		defer close(connected)
+		ss.handleNewConnection(ctx, 0, conn, true)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("FIXTURE: the connect-time cold prime never reached its snapshot read")
+	}
+	ss.mu.Lock()
+	ss.armColdPrimeLocked()
+	gen := ss.coldPrimeGen.Load()
+	ss.mu.Unlock()
+	close(release)
+	<-connected
+	if got := ss.pendingBulkOwed.Load(); got != gen {
+		t.Fatalf("#9626: a bulk whose generation capture followed the arm carries %d, want the new generation %d", got, gen)
+	}
+	time.Sleep(1500 * time.Millisecond)
+	if got := ss.stats.BulkSyncs.Load(); got != 1 {
+		t.Errorf("#19115: the arm already paid by the in-flight bulk was sent again (%d bulks, want 1)", got)
+	}
+}
+
+// TestFencedStreamRefusesAPendingBulkPromptly19115 (Codex finding 16): a
+// qualifying pending bulk ends the cold-prime refusal, but it does not by
+// itself admit the drain. After an ordered-stream move the barrier fence stays
+// armed until that bulk's ack discharges it, and the barrier is refused at once
+// (no 60 s wait). That is the intended safe refusal; #19115 promises the
+// first, not the second.
+func TestFencedStreamRefusesAPendingBulkPromptly19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ss := bareSync19115((&flakySnapshot19115{}).read)
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	ss.handleNewConnection(ctx, 0, conn, true)
+	if ss.ColdPrimeOwedWithoutPendingBulk() {
+		t.Fatal("FIXTURE: want the debt covered by a qualifying pending bulk")
+	}
+	ss.fence.epoch.Store(ss.fence.cleared.Load() + 1)
+	ss.fence.pendingBulk.Store(ss.fence.epoch.Load() + 1) // that bulk will discharge it
+	if !ss.barrierFenced() || !ss.fenceDischargeAwaited() {
+		t.Fatal("FIXTURE: want the barrier fenced, awaiting the pending bulk's ack")
+	}
+	start := time.Now()
+	err := ss.WaitForPeerBarrierAfterColdPrimeGate(60 * time.Second)
+	if err == nil || !strings.Contains(err.Error(), "barrier fenced") {
+		t.Fatalf("#19115 (Codex finding 16): a fenced stream with a pending bulk returned %v, want the barrier-fence refusal", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Errorf("#19115 (Codex finding 16): the fence refusal took %v, want it at once", took)
+	}
+}
+
+// TestDaemonPrimeSkipsWhileABulkIsPending19115 (Codex finding 4): the
+// daemon's bulk-prime retry rechecks its own obligation under bulkSendMu: a
+// bulk sent since it decided to retry, still young, makes it a no-op.
+func TestDaemonPrimeSkipsWhileABulkIsPending19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	ss := bareSync19115((&flakySnapshot19115{}).read)
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	ss.handleNewConnection(ctx, 0, conn, true)
+	if sent, err := ss.DoPrimeBulkSync(); sent || err != nil {
+		t.Fatalf("#19115: the daemon prime sent=%v err=%v with a young bulk pending, want a skip", sent, err)
+	}
+	if got := ss.stats.BulkSyncs.Load(); got != 1 {
+		t.Fatalf("#19115: want one bulk, got %d", got)
+	}
+	ss.pendingBulkAckSince.Store(ss.nowMono() - int64(BulkAckPendingRetryAfter) - int64(time.Second))
+	if sent, err := ss.DoPrimeBulkSync(); !sent || err != nil {
+		t.Fatalf("#19115: the daemon prime sent=%v err=%v once the pending bulk aged out, want a send", sent, err)
+	}
+}
+
+// TestBarrierReprimeRechecksItsObligation19115 (Codex finding 4): the barrier
+// fence re-prime rechecks its own obligation under bulkSendMu. If a bulk
+// admitted ahead of it captured the fence epoch and is now awaiting the ack
+// that discharges the fence, the re-prime sends nothing.
+func TestBarrierReprimeRechecksItsObligation19115(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	snap := &flakySnapshot19115{}
+	ss := bareSync19115(snap.read)
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	ss.handleNewConnection(ctx, 0, conn, true)
+	ss.fence.epoch.Store(ss.fence.cleared.Load() + 1)
+	ss.fence.pendingBulk.Store(0)
+	if !ss.barrierFenced() || ss.fenceDischargeAwaited() {
+		t.Fatal("FIXTURE: want the barrier fenced with no discharge-capable bulk pending")
+	}
+	reads := snap.calls.Load()
+	ss.bulkSendMu.Lock() // another bulk holds admission
+	ss.scheduleBarrierFenceReprime("19115-cell")
+	time.Sleep(100 * time.Millisecond)
+	ss.fence.pendingBulk.Store(ss.fence.epoch.Load() + 1)
+	ss.pendingBulkAckSince.Store(ss.nowMono())
+	ss.bulkSendMu.Unlock()
+	deadline := time.Now().Add(3 * time.Second)
+	for ss.fence.reprimeInFlight.Load() {
+		if time.Now().After(deadline) {
+			t.Fatal("FIXTURE: the re-prime never finished")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := snap.calls.Load(); got != reads {
+		t.Fatalf("#19115 (Codex finding 4): the barrier re-prime exported (%d reads, want %d) although the bulk admitted ahead of it already awaits the fence-discharging ack",
+			got, reads)
+	}
 }
