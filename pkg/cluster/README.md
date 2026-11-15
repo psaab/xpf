@@ -6144,8 +6144,11 @@ it.
     debt generation, a discharge, a successful send, or the runtime being
     wired. It never touches the #18752 owed age or last failure.
   - **Scheduling.** The sweep timer is lowered to the debt's due time: the
-    later of the deadline and a young ack's 35 s expiry, never below 1 s.
-    The loop keeps an explicit deadline, and a wake only moves it EARLIER.
+    later of the deadline and a young ack's 35 s expiry. A due time already
+    passed gets 1 s instead, so a just-armed debt is re-driven about 1 s
+    later and a debt whose re-drive cannot run yet (nil store, not
+    connected) does not spin. The loop keeps an explicit deadline, and a
+    wake only moves it EARLIER.
   - **Wakes.** The loop is woken by:
     - every arm;
     - every bulk completion, success or failure, since an older generation's

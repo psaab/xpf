@@ -126,12 +126,21 @@ func (s *SessionSync) owedColdPrimeRetryEligible() bool {
 }
 
 // nextSweepDelay is the sweep timer for the current interval, lowered to an
-// owed debt's due time (never below coldPrimeRetryBase, so a debt whose
-// re-drive cannot run yet, a nil store say, does not spin the loop).
+// owed debt's due time.
+//
+// A due time in the FUTURE (a backoff deadline, a young ack's expiry) is the
+// timer itself, so the retry lands on it. A due time already PASSED gets
+// coldPrimeRetryBase instead of zero. That covers a debt just armed (the
+// first re-drive of a debt armed with no attempt in flight comes about 1 s
+// after its arm), and a debt whose re-drive could not run on this tick (a nil
+// store, not connected), which would otherwise spin the loop.
 func (s *SessionSync) nextSweepDelay(interval time.Duration) time.Duration {
 	d := s.capSweepIntervalForLiveness(interval)
 	if due, ok := s.owedColdPrimeRetryDue(); ok {
-		wait := max(time.Duration(due-s.nowMono()), coldPrimeRetryBase)
+		wait := time.Duration(due - s.nowMono())
+		if wait <= 0 {
+			wait = coldPrimeRetryBase
+		}
 		d = min(d, wait)
 	}
 	return d
