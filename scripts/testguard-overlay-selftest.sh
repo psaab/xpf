@@ -28,7 +28,11 @@
 #   [dev-nodev]    a block node created INSIDE the view's /dev cannot be
 #                  opened;
 #   [nodev-overlay] a block node on host storage outside /dev, backed by a
-#                  disposable loop device, cannot be opened in the view;
+#                  disposable loop device, cannot be opened in the view (the
+#                  host opens it: the positive control);
+#   [pass-through-nodev] neither can one that already sits in a writable
+#                  pass-through (TMPDIR), on both paths (Codex P1 on
+#                  26517e7917);
 #   [dev-chardev]  the allowlisted character devices work, and the host
 #                  inode of one cannot be changed (utimes) from the view;
 #   [dev-pts]      /dev/pts is a fresh devpts instance, not the host's;
@@ -36,10 +40,17 @@
 #   [procfs-alias] a procfs mounted anywhere but /proc refuses the run;
 #   [procfs-pass-through] so does one selected as a pass-through
 #                  (GOCACHE=/srv/hostproc), checked before the skip;
+#   [devtmpfs-alias] a bind of the host's /dev outside /dev (a devtmpfs
+#                  alias) refuses the run, also when selected as GOCACHE
+#                  (Codex P1 on 26517e7917);
 #   [pass-through-refused] a pass-through below a system tree (/etc/x)
 #                  refuses the run before it is created;
 #   [tmpdir-refused] so does a TMPDIR below /etc, which is created first of
 #                  all the pass-through, so it is checked first too;
+#   [tmpdir-dotdot] a TMPDIR or GOCACHE spelled through /etc/<x>/../.. that
+#                  normalizes to an allowed path runs, and /etc/<x> is never
+#                  created: the validated canonical path is what gets made
+#                  (Codex P2 on 26517e7917);
 #   [F3-id]        an `id` that fails refuses the run (exit 2, no command);
 #   [F4-vm]        on a non-VM this selftest refuses before seeding anything;
 #   [proof-untouched] the runner's shared VM proof is never touched;
@@ -90,7 +101,8 @@ proof=/run/xpf-testguard-vm-boot-id
 W=$(mktemp -d "$TMPDIR/tg-overlay.XXXXXX")
 seeds="/etc/$tag.seed /var/lib/$tag /var/log/$tag.log /run/$tag /srv/$tag /opt/$tag /root/$tag /tmp/$tag
 /etc/$tag.new /var/log/$tag-f1 /srv/$tag-f1 /etc/$tag-cwd /srv/$tag-fd /srv/$tag-unsup /srv/$tag-vfat /srv/$tag-hostproc /etc/$tag-cache
-/etc/$tag-tmp /srv/$tag-blk /dev/$tag-late /dev/$tag-inside /dev/shm/$tag.shm"
+/etc/$tag-tmp /srv/$tag-blk /dev/$tag-late /dev/$tag-inside /dev/shm/$tag.shm
+/etc/$tag-dd /etc/$tag-gd /var/tmp/$tag-gd"
 # [proof-untouched]: the runner's VM proof, as other lanes see it, is recorded
 # here and must be byte-, mode- and mtime-identical at the end (R19 F3).
 proof_state() { stat -c '%F %a %U %s %Y' "$proof" 2>&1; cat "$proof" 2>&1; }
@@ -99,6 +111,8 @@ loopdev=
 cleanup() {
 	for p in $seeds; do rm -rf "$p"; done
 	[ -z "$loopdev" ] || losetup -d "$loopdev" 2>/dev/null
+	# Never rm -rf a mountpoint that held a bind of /dev: rmdir only.
+	rmdir "/srv/$tag-devalias" 2>/dev/null
 	rm -rf "$W"
 }
 trap cleanup EXIT
@@ -248,6 +262,12 @@ mknod /dev/$tag-inside b $blk_maj $blk_min 2>/dev/null || exit 5 # no CAP_MKNOD 
 if ( exec 3<>/dev/$tag-inside ) 2>/dev/null; then fail 'a block node created in the view /dev can be opened'; fi
 rm -f /dev/$tag-inside"
 
+# [pass-through-nodev]: a block node already in the writable TMPDIR pass-through.
+mkfake ptnodev "
+[ -b $W/$tag-ptblk ] || fail 'FIXTURE: the pass-through block node is not visible'
+if ( exec 3<>$W/$tag-ptblk ) 2>/dev/null; then fail 'a block node in a writable pass-through opens read-write in the view'; fi
+if ( exec 3<$W/$tag-ptblk ) 2>/dev/null; then fail 'a block node in a writable pass-through opens read-only in the view'; fi"
+
 # [nodev-overlay]: a block node the host keeps on its root filesystem.
 mkfake nodevov "
 [ -b /srv/$tag-blk ] || fail 'FIXTURE: the host block node /srv/$tag-blk is not visible'
@@ -387,18 +407,41 @@ branch_cases() { # $1 label
 		run_tg / "$W/devnodev"
 		case $rc in
 		0) ok "[dev-nodev] $b: a block node created inside the view's /dev cannot be opened" ;;
-		5) echo "  skip [dev-nodev] $b: this path cannot create a device node (no CAP_MKNOD in its user namespace), so there is nothing to open" ;;
+		5)
+			# Only the user-namespace path lacks CAP_MKNOD; on the VM-proof
+			# path a failed mknod is a broken fixture, not a skip (Codex).
+			if [[ $b == *"VM-proof"* ]]; then
+				bad "[dev-nodev] $b: FIXTURE: mknod failed on the VM-proof path, which has CAP_MKNOD"
+			else
+				echo "  skip [dev-nodev] $b: this path cannot create a device node (no CAP_MKNOD in its user namespace), so there is nothing to open"
+			fi
+			;;
 		*) bad "[dev-nodev] $b: testguard-run exited $rc: $out" ;;
 		esac
 
 		trace "seed host block node $b"
 		mknod "/srv/$tag-blk" b "$blk_maj" "$blk_min"
-		run_tg / "$W/nodevov"
-		[ "$rc" = 0 ] && ok "[nodev-overlay] $b: a block node on host storage outside /dev cannot be opened" ||
-			bad "[nodev-overlay] $b: testguard-run exited $rc: $out"
+		if ! (exec 3<>"/srv/$tag-blk") 2>/dev/null; then
+			bad "[nodev-overlay] $b: FIXTURE: the host itself cannot open /srv/$tag-blk, so a refusal in the view would prove nothing"
+		else
+			run_tg / "$W/nodevov"
+			[ "$rc" = 0 ] && ok "[nodev-overlay] $b: a block node on host storage outside /dev cannot be opened (the host can)" ||
+				bad "[nodev-overlay] $b: testguard-run exited $rc: $out"
+		fi
 		rm -f "/srv/$tag-blk"
+
+		trace "seed pass-through block node $b"
+		mknod "$W/$tag-ptblk" b "$blk_maj" "$blk_min"
+		if ! (exec 3<>"$W/$tag-ptblk") 2>/dev/null; then
+			bad "[pass-through-nodev] $b: FIXTURE: the host itself cannot open $W/$tag-ptblk"
+		else
+			run_tg / "$W/ptnodev"
+			[ "$rc" = 0 ] && ok "[pass-through-nodev] $b: a block node in the writable TMPDIR pass-through cannot be opened (the host can)" ||
+				bad "[pass-through-nodev] $b: testguard-run exited $rc: $out"
+		fi
+		rm -f "$W/$tag-ptblk"
 	else
-		echo "  skip [dev-late-block] [dev-nodev] [nodev-overlay] $b: coverage unavailable (no loop device for a disposable block node)"
+		echo "  skip [dev-late-block] [dev-nodev] [nodev-overlay] [pass-through-nodev] $b: coverage unavailable (no loop device for a disposable block node)"
 	fi
 
 	before=$(stat -c '%a %X %Y %Z' /dev/full)
@@ -503,6 +546,30 @@ else
 fi
 rm -rf "/srv/$tag-hostproc"
 
+# ── [devtmpfs-alias]: a bind of the host's /dev outside /dev refuses ──────
+# Codex P1 on 26517e7917: a devtmpfs alias (a chroot's /dev, say) was bound
+# in unchanged, the host device tree with it. The bind exists only in this
+# cell's private mount namespace; the directory is removed with rmdir.
+trace "seed devtmpfs-alias"
+mkdir -p "/srv/$tag-devalias"
+for how in mount GOCACHE; do
+	rm -f "$W/f3.marker"
+	if [ "$how" = mount ]; then
+		out=$(unshare -m --propagation private bash -c 'mount --bind /dev "$1" || exit 99; exec bash "$2" "$3"' _ \
+			"/srv/$tag-devalias" "$here/testguard-run.sh" "$W/marker" 2>&1)
+	else
+		out=$(unshare -m --propagation private bash -c 'mount --bind /dev "$1" || exit 99; GOCACHE=$1 exec bash "$2" "$3"' _ \
+			"/srv/$tag-devalias" "$here/testguard-run.sh" "$W/marker" 2>&1)
+	fi
+	rc=$?
+	if [ "$rc" = 2 ] && [ ! -e "$W/f3.marker" ] && [[ $out == *"/srv/$tag-devalias is a devtmpfs other than /dev"* ]]; then
+		ok "[devtmpfs-alias] $how: a bind of the host's /dev at /srv refuses the run (exit 2), naming it"
+	else
+		bad "[devtmpfs-alias] $how: exit $rc (want 2; 99 = fixture mount failed), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no): $out"
+	fi
+done
+rmdir "/srv/$tag-devalias"
+
 # ── [tmpdir-refused]: a TMPDIR below /etc refuses before it is created ───
 # Codex P2 on 468f7d2371: the scratch was created before any check.
 rm -f "$W/f3.marker"
@@ -514,6 +581,32 @@ else
 	bad "[tmpdir-refused] exit $rc (want 2), command ran: $([ -e "$W/f3.marker" ] && echo yes || echo no), /etc/$tag-tmp created: $([ -e "/etc/$tag-tmp" ] && echo yes || echo no): $out"
 fi
 rm -rf "/etc/$tag-tmp"
+
+# ── [tmpdir-dotdot]: the canonical path is created, not the spelling ─────
+# Codex P2 on 26517e7917: `mkdir -p /etc/x/../../var/tmp` creates /etc/x
+# while it walks, although the path normalizes to an allowed /var/tmp.
+for var in TMPDIR GOCACHE; do
+	rm -f "$W/f3.marker"
+	if [ "$var" = TMPDIR ]; then
+		spelled="/etc/$tag-dd/../../var/tmp"
+		stray="/etc/$tag-dd"
+		out=$(TMPDIR="$spelled" bash "$here/testguard-run.sh" "$W/marker" 2>&1)
+	else
+		spelled="/etc/$tag-gd/../../var/tmp/$tag-gd"
+		stray="/etc/$tag-gd"
+		out=$(GOCACHE="$spelled" bash "$here/testguard-run.sh" "$W/marker" 2>&1)
+	fi
+	rc=$?
+	# rc 0 is the command's own success (the marker it touches lands in the
+	# view's overlay when TMPDIR moves the pass-through to /var/tmp).
+	if [ "$rc" = 0 ] && [ ! -e "$stray" ]; then
+		ok "[tmpdir-dotdot] $var=$spelled runs and never creates $stray"
+	else
+		bad "[tmpdir-dotdot] $var=$spelled: exit $rc (want 0), $stray created: $([ -e "$stray" ] && echo yes || echo no): $out"
+	fi
+	rm -rf "$stray"
+done
+rm -rf "/var/tmp/$tag-gd"
 
 # ── [F4-vm]: on a non-VM this selftest touches nothing ───────────────────
 if [ -z "${TG_SELFTEST_NESTED:-}" ]; then

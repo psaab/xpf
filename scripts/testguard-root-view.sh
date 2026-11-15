@@ -7,6 +7,25 @@
 #
 #   testguard-root-view.sh SCRATCH CWD [PASS-THROUGH ...] -- COMMAND [ARG ...]
 #
+# THE CONTRACT (#19084, decided 2026-11-15): the view stops a WELL-BEHAVED
+# test's ACCIDENTAL writes to production state on a disposable, VM-marked
+# runner: a write, unlink, rename, chmod or device open made through an
+# ordinary path, a symlink, a relative path from the caller's cwd, or an
+# inherited descriptor above 2. It is NOT a containment boundary against a
+# test that sets out to escape. Out of contract, and not defended here:
+#   - deliberate device access: creating device nodes, mounting, loop or
+#     device-mapper setup, or driving an allowlisted device's I/O at the host;
+#   - metadata changes made through an INHERITED stdio descriptor (fd 0-2)
+#     that the caller pointed at a host device or file, e.g. fchmod(1) when
+#     the caller redirected stdout to the host's /dev/null (#19124);
+#   - device-filesystem aliases the host already had: a devtmpfs or procfs
+#     mounted outside /dev or /proc is REFUSED (the run does not start), not
+#     isolated;
+#   - concurrent replacement of a validated path (a symlink swapped between
+#     validation and use);
+#   - everything listed under "Its limits" in docs/testing.md (sysfs,
+#     sysctls, host IPC, the VM-proof path's real root).
+#
 # What it builds, in that mount namespace only:
 #
 #  - "/" itself becomes an overlay. The lower layer is the host's root
@@ -51,7 +70,7 @@
 #    later, by anyone, unopenable.
 #  - The PASS-THROUGH directories (the checkout, the TMPDIR scratch, GOCACHE,
 #    GOMODCACHE, GOTMPDIR; chosen by testguard-run.sh) are bound in from the
-#    host, writable. They are the only writable host storage in the view, so
+#    host, writable and nodev. They are the only writable host storage in the view, so
 #    build output and t.TempDir() land on disk, not in the tmpfs upper.
 #  - pivot_root into the view and detach the old root, so the host's root
 #    filesystem is not attached anywhere in this mount namespace; then cd to
@@ -145,6 +164,13 @@ while read -r _ mp fstype; do
 	# (GOCACHE=/srv/hostproc) was skipped as "the host's, by intent" and then
 	# bound in writable with the pass-through (Codex P1 on 468f7d2371).
 	[[ $fstype == proc && $mp != /proc ]] && refuse "$mp is a procfs other than /proc, a host-process alias"
+	# A devtmpfs other than /dev itself (a bind of the host's /dev at
+	# /srv/chroot/dev, say) is the HOST's device tree, later-created nodes
+	# included: an ordinary open of a disk node there reaches the disk, and a
+	# chmod of its null reaches the host inode. The private /dev cannot cover
+	# it, so the run is refused, before the skips below, like a procfs alias
+	# (Codex P1 on 26517e7917).
+	[[ $fstype == devtmpfs && $mp != /dev ]] && refuse "$mp is a devtmpfs other than /dev, a host device-tree alias"
 	# The host's /dev and its submounts (/dev/pts, /dev/shm, /dev/mqueue,
 	# /dev/hugepages, ...) are replaced by the private /dev built below.
 	under "$mp" /dev && continue
@@ -215,7 +241,11 @@ ln -s /proc/self/fd "$d/fd" && ln -s /proc/self/fd/0 "$d/stdin" &&
 # The writable pass-through, parents before children.
 while read -r p; do
 	[[ -n $p ]] || continue
-	mount --bind "$p" "$m$p" || refuse "cannot bind the pass-through $p into the view"
+	# nodev: permission to write build files is not permission to open a
+	# device node that happens to sit in the checkout, TMPDIR or a Go cache
+	# (Codex P1 on 26517e7917). A bind copies its source mount's flags.
+	mount --bind "$p" "$m$p" && mount -o remount,bind,nodev "$m$p" ||
+		refuse "cannot bind the pass-through $p into the view (nodev)"
 done < <(for p in "${pass[@]}"; do printf '%s %s\n' "$(tr -cd / <<<"$p" | wc -c)" "$p"; done | sort -n -s -k1,1 | cut -d' ' -f2-)
 
 # Enter the view. pivot_root, not chroot: after the old root is detached the

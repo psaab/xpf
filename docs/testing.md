@@ -325,12 +325,32 @@ R2 on 11eaccc637). So on a root run `testguard-run.sh` builds the view in
 `scripts/testguard-root-view.sh`, as real root and before any user namespace
 exists, and runs the test namespaces inside it.
 
-What it protects against is an ACCIDENTAL host write by a root test: a test
-writing, unlinking or chmodding a production path, through a symlink, a
-relative path or an inherited descriptor, or opening a disk by mistake. It
-is NOT a containment boundary against a test that deliberately sets out to
-escape: on the VM-proof path the command keeps real root (the limits below
-say what that still allows). A runner is a disposable VM for that reason.
+**The contract** (decided by the user on 2026-11-15, after the #19084
+review rounds). The root view stops a WELL-BEHAVED test's ACCIDENTAL writes
+to production state, on a disposable, VM-marked runner. Accidental writes
+are a write, unlink, rename or chmod of a production path, or a device open,
+made through:
+- an ordinary path;
+- a symlink;
+- a relative path from the caller's cwd;
+- an inherited descriptor above 2.
+
+It is NOT a containment boundary against a test that sets out to escape. On
+the VM-proof path the command keeps real root; the limits below say what
+that still allows. A runner is a disposable VM for that reason. Explicitly
+OUT of contract:
+- **Deliberate device access:** creating device nodes, mounting, loop or
+  device-mapper setup, or driving an allowlisted device's I/O at the host.
+- **Metadata changes through an inherited stdio descriptor (fd 0-2)** that
+  the caller pointed at a host device or file. For example, `fchmod(1)` when
+  stdout was redirected to the host's `/dev/null` changes the host inode,
+  because the descriptor keeps its original mount. Recorded as a residual:
+  #19124.
+- **Device-filesystem aliases the host already had:** a devtmpfs or procfs
+  mounted outside `/dev` or `/proc` is REFUSED (the run does not start), not
+  isolated.
+- **Concurrent replacement of a validated path,** such as a symlink swapped
+  between validation and use.
 
 What the wrapper enforces on a root run:
 
@@ -349,6 +369,11 @@ What the wrapper enforces on a root run:
     skips: a procfs chosen as a pass-through (`GOCACHE=/srv/hostproc`) used
     to be skipped as "the host's, by intent" and bound in writable (Codex P1
     on 468f7d2371).
+  - So does a devtmpfs anywhere but `/dev`: a bind of the host's `/dev` at
+    a chroot's `/srv/chroot/dev`, say. That is the host's device tree,
+    later-created nodes included, so an ordinary open of a disk node there
+    reaches the disk. The private `/dev` cannot cover it. It is checked
+    before the same skips (Codex P1 on 26517e7917).
   - `/proc` and `/sys` are bound in recursively (pseudo filesystems).
     Storage mounted below them has its imported host copy DETACHED and is
     then overlaid, so no writable host mount sits beneath the view (Codex P1
@@ -390,12 +415,18 @@ What the wrapper enforces on a root run:
   O_RDWR there). The allowlist is what a full root `pkg/daemon` run needs
   (`docs/log/19084.md`).
 - The only writable host storage is a pass-through allowlist, bound in from
-  the host: the checkout, the `TMPDIR` scratch, and Go's `GOCACHE`,
-  `GOMODCACHE` and `GOTMPDIR` (from the environment or `go env`). Build
+  the host and mounted `nodev`: the checkout, the `TMPDIR` scratch, and Go's
+  `GOCACHE`, `GOMODCACHE` and `GOTMPDIR` (from the environment or `go env`).
+  Permission to write build files is not permission to open a device node
+  that sits among them (Codex P1 on 26517e7917). Build
   output and `t.TempDir()` therefore land on disk, not in the tmpfs upper. A
   pass-through that would expose a system tree refuses the run, before
   anything is created (the `TMPDIR` scratch, which is created first of all,
-  is checked before that creation too, Codex P2 on 468f7d2371):
+  is checked before that creation too, Codex P2 on 468f7d2371). What gets
+  created is the VALIDATED canonical path, not the caller's spelling:
+  `mkdir -p /etc/x/../../var/tmp` would create `/etc/x` while it walks,
+  although the path normalizes to an allowed `/var/tmp` (Codex P2 on
+  26517e7917). The checks are:
   - a top-level root itself (`/`, `/home`, `/root`, `/srv`, `/opt`, `/var`,
     `/mnt`, `/media`);
   - anything at or below `/etc`, `/usr`, `/boot`, `/bin`, `/sbin`, `/lib*`,
@@ -475,10 +506,13 @@ writable first, is read-only; `/dev` is the private nodev tmpfs with only
 the allowlisted devices, and every overlay is nodev; a block node the host
 creates AFTER the view is built is not visible in it; a block node created
 inside the view's `/dev`, or kept on host storage outside `/dev`, cannot be
-opened; the allowlisted devices work while the host inode cannot be changed;
-`/dev/pts` and `/dev/shm` are fresh instances; a failing `id`, an
-unplaceable mount, a procfs alias (also as a pass-through) and a `TMPDIR`
-below `/etc` each refuse the run, the last without creating it; a detach of the view fails a
+opened, and neither can one already in a writable pass-through (each with
+a host-side open as the positive control); the allowlisted devices work while
+the host inode cannot be changed; `/dev/pts` and `/dev/shm` are fresh
+instances; a failing `id`, an unplaceable mount, a procfs or devtmpfs alias
+(also as a pass-through) and a `TMPDIR` below `/etc` each refuse the run, the
+last without creating it; a `TMPDIR` or `GOCACHE` spelled through
+`/etc/<x>/../..` runs without creating `/etc/<x>`; a detach of the view fails a
 VM-proof run; and on a non-VM the selftest refuses before touching anything.
 
 Because those cells now run, `pkg/daemon` under testguard takes longer: about

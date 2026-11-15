@@ -75,12 +75,17 @@ scratch=${TMPDIR:-/var/worktrees/.cache/tmpdir}
 # it, so a root run checks it first: TMPDIR=/etc/new-cache was refused, but
 # only after this mkdir had left /etc/new-cache on the host (Codex P2 on
 # 468f7d2371).
+# The VALIDATED canonical path is what gets created, not the caller's
+# spelling: `mkdir -p /etc/new-cache/../../var/tmp` creates /etc/new-cache
+# while it walks the components, although the path normalizes to an allowed
+# /var/tmp (Codex P2 on 26517e7917).
 if [[ $euid == 0 ]]; then
 	lexical=$(realpath -m "$scratch" 2>/dev/null) || lexical=
 	if [[ -z $lexical ]] || system_tree "$lexical"; then
 		echo "testguard-run: REFUSED: pass-through directory '$scratch' (TMPDIR) would expose a host system tree; point TMPDIR elsewhere (#19084)" >&2
 		exit 2
 	fi
+	scratch=$lexical
 fi
 mkdir -p "$scratch"
 work=$(mktemp -d "$scratch/testguard-run.XXXXXX")
@@ -175,7 +180,7 @@ if [[ $euid == 0 ]]; then
 			echo "testguard-run: REFUSED: pass-through directory '$p' would expose a host system tree; point TMPDIR/GOCACHE/GOMODCACHE/GOTMPDIR elsewhere (#19084)" >&2
 			exit 2
 		fi
-		mkdir -p "$p" 2>/dev/null && p=$(realpath -e "$p" 2>/dev/null) || {
+		mkdir -p "$lexical" 2>/dev/null && p=$(realpath -e "$lexical" 2>/dev/null) || {
 			echo "testguard-run: REFUSED: cannot resolve the pass-through directory '$p' (#19084)" >&2
 			exit 2
 		}
