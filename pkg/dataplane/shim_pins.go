@@ -102,6 +102,11 @@ func SetLinkPinPathForTest(dir string) (restore func()) {
 // immediately before that interface's own attach, so no interface waits out
 // its neighbours' detaches.
 func (m *Manager) removeUserspaceShimXDPLinkPins(pending []int) {
+	// The keep set and the reclaims run under the XDP ownership write lease, as
+	// reclaimBeforeAttach's do (Codex P1-1): a concurrent AttachXDP cannot
+	// register a link between our read of the registry and our reclaim.
+	m.xdpOwnershipMu.Lock()
+	defer m.xdpOwnershipMu.Unlock()
 	keep := make(map[int]bool)
 	for ifindex := range m.XDPLinks() {
 		keep[ifindex] = true
@@ -109,8 +114,15 @@ func (m *Manager) removeUserspaceShimXDPLinkPins(pending []int) {
 	for _, ifindex := range pending {
 		keep[ifindex] = true
 	}
+	if h := sweepAfterKeepHook; h != nil {
+		h()
+	}
 	removeUserspaceShimXDPLinkPinsExcept(linkPinPath, keep)
 }
+
+// sweepAfterKeepHook is a test seam: it runs between the sweep's read of the
+// registry and its reclaims, inside the ownership lease.
+var sweepAfterKeepHook func()
 
 // removeUserspaceShimXDPLinkPinsExcept is the #9847 test seam: it reclaims
 // every `xdp_*` pin in dir except those naming an ifindex in keep. A pin whose
@@ -187,9 +199,11 @@ type xdpReclaimResult struct {
 	err      error
 }
 
-// clean reports a reclaim that left nothing for the attach to wait on.
+// clean reports a reclaim that left nothing for the attach to wait on and hit no
+// error. A not-a-link file that could not be removed is NOT clean (Codex P3-5),
+// so the failure is carried into the pass's give-up message.
 func (r xdpReclaimResult) clean() bool {
-	return r.outcome == reclaimNoPin || r.outcome == reclaimDetached || r.outcome == reclaimNotALink
+	return r.err == nil && (r.outcome == reclaimNoPin || r.outcome == reclaimDetached || r.outcome == reclaimNotALink)
 }
 
 func (r xdpReclaimResult) String() string {

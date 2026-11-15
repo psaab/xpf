@@ -98,10 +98,13 @@ type Manager struct {
 	// unintendedGenericXDPHook is nil in production; the #19110 F4 cells use
 	// it in place of the shim manager's generic-fallback record.
 	unintendedGenericXDPHook func() map[int]string
-	// genericDataMembers holds the #19110 F4 readiness reasons: RETH data
-	// members attached generic after a native refusal that was not
-	// "driver has no native XDP". Guarded by mu.
-	genericDataMembers []string
+	// genericDataMemberNames maps this node's RETH data members (ifindex ->
+	// Linux name), resolved at compile/refresh for the #19110 F4 guard; the
+	// reason itself is computed live from the shim's record.
+	// genericDataMembersLogged is the last reason set logged (log-on-change).
+	// Both guarded by mu.
+	genericDataMemberNames   map[int]string
+	genericDataMembersLogged []string
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.

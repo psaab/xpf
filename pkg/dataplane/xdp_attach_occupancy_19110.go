@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/vishvananda/netlink"
@@ -58,6 +59,9 @@ var xdpOccupancyDiagBudget = time.Second
 // diagnostic handle. The library default is 60 s.
 const xdpOccupancyProbeTimeout = 250 * time.Millisecond
 
+// xdpProbeInFlight bounds outstanding occupant probes to one (see diagnose).
+var xdpProbeInFlight atomic.Bool
+
 // xdpOccupantProbeFn describes what holds ifindex (its own XDP program, or an
 // upper device's) for the give-up diagnostic only. It never changes the
 // classification. It is a seam for the probe-error and upper-device cells.
@@ -106,6 +110,12 @@ func isXDPRefusal(err error) bool {
 // device has no ndo_bpf ("Underlying driver does not support XDP in native
 // mode"). A generic fallback after it is the supported deployment (iavf). Any
 // other native error that ends in generic is an UNINTENDED generic (#19110 F4).
+//
+// FAIL-OPEN, deliberately: EOPNOTSUPP does not PROVE "no ndo_bpf". A driver
+// with ndo_bpf can return it for a configuration refusal; virtio-net does,
+// while the host implements GRO_HW/CSUM. Such a generic member is exempt from
+// the F4 guard, as every generic member was before #19110. Telling the two
+// apart would need the extack string, which this path does not see.
 func xdpNativeUnsupportedByDriver(err error) bool {
 	return errors.Is(err, unix.EOPNOTSUPP)
 }
@@ -172,12 +182,31 @@ func (m *Manager) attachWithin(pass *xdpAttachPass, ifindex int, generic bool) e
 	}
 }
 
+// reclaimAfterCheckHook is a test seam: it runs between the registration check
+// and the reclaim, inside the ownership lease.
+var reclaimAfterCheckHook func(ifindex int)
+
 // reclaimBeforeAttach reclaims ifindex's stale pin (a previous process's link)
 // immediately before this process's first attach of it. A link this process
 // already registered is never reclaimed.
+//
+// The registration check and the reclaim run under the XDP ownership WRITE
+// lease (Codex P1-1). AttachXDP holds the same lease across its attach, pin
+// and registration, and this process has a second attacher outside the
+// daemon's applySem: the userspace status loop's revalidation
+// (statusLoop -> syncSnapshotLocked -> consumeRevalidateAttachLocked -> the
+// #14133 reconcile). Without the lease, that attacher could attach, pin and
+// register the interface between our check and our reclaim. We would then
+// load THIS process's fresh pin and detach it, and the registry would still
+// say "attached".
 func (m *Manager) reclaimBeforeAttach(pass *xdpAttachPass, ifindex int) {
+	m.xdpOwnershipMu.Lock()
+	defer m.xdpOwnershipMu.Unlock()
 	if _, registered := m.xdpLinkFor(ifindex); registered {
 		return
+	}
+	if h := reclaimAfterCheckHook; h != nil {
+		h(ifindex)
 	}
 	r := reclaimStaleXDPLinkPin(filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifindex)))
 	r.log(ifindex)
@@ -234,11 +263,18 @@ func (p *xdpAttachPass) diagnose(ifindex int) string {
 		s   string
 		err error
 	}
+	// At most ONE probe in flight, process-wide (Codex note). A probe abandoned
+	// at its budget keeps running until its netlink operations time out; it is
+	// not cancelled. A later pass must not stack another behind it.
+	if !xdpProbeInFlight.CompareAndSwap(false, true) {
+		return "unknown (a previous occupant probe is still running)"
+	}
 	ch := make(chan res, 1)
 	// Read the probe here, not in the goroutine: an abandoned probe goroutine
 	// can outlive this pass, and must not race a later reassignment of the seam.
 	probe := xdpOccupantProbeFn
 	go func() {
+		defer xdpProbeInFlight.Store(false)
 		s, err := probe(ifindex)
 		ch <- res{s, err}
 	}()

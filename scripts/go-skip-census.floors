@@ -215,21 +215,21 @@
 # #19104's priv-absent site and by one "other" site added since bd1a23d3fe;
 # neither is banked here, so this tree reds by exactly those two, as master
 # does.
-# #19110 adds six sites in pkg/dataplane/xdp_stale_link_release_19110_test.go,
-# the real-kernel stale-link and upper-device cells. Five are priv-absent: the
-# four memlock guards and the euid check. One is other: no writable bpffs.
+# #19110 adds seven sites in pkg/dataplane/xdp_stale_link_release_19110_test.go,
+# the real-kernel stale-link and upper-device cells. Six are priv-absent: the
+# five memlock guards and the euid check. One is other: no writable bpffs.
 # They skip only in an unprivileged run. The privileged leg (make
 # test-memlock-guards, where XPF_REQUIRE_MEMLOCK_GUARDS=1) runs them, checks
 # that each registered name ran, and turns the euid and bpffs skips into
-# failures. Only these 6 are banked here, on top of #19093's 8.
+# failures. Only these 7 are banked here, on top of #19093's 8.
 # The #19104 drift (pkg/daemon/proxyarp_stop_wakeup_17231_test.go:74) is still
 # not banked.
-total        = 660
+total        = 661
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 145
+priv-absent  = 146
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.

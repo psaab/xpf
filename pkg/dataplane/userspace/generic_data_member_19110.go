@@ -61,27 +61,30 @@ func (m *Manager) unintendedGenericXDP() map[int]string {
 	return m.bpfShim.UnintendedGenericXDP()
 }
 
-// refreshGenericDataMembers recomputes the set after a compile attach pass.
-// Call it WITHOUT m.mu held. The #14133 refresh path, which holds m.mu, uses
-// computeGenericDataMemberReasons plus setGenericDataMembersLocked instead.
+// refreshGenericDataMembers re-resolves the RETH data members after a compile
+// attach pass. Call it WITHOUT m.mu held. The #14133 refresh path, which holds
+// m.mu, uses resolveGenericDataMembers plus setGenericDataMembersLocked.
+//
+// The readiness reason itself is NOT cached here (Codex note: cached
+// readiness). genericDataMemberReasonsLocked checks the resolved members
+// against the shim's LIVE generic-fallback record each time, so a post-
+// acceptance DetachXDP clears the blocker at once. This keeps only the member
+// map, which needs syscalls, and the last-logged reasons for the
+// log-on-change.
 func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
-	reasons := m.computeGenericDataMemberReasons(cfg)
+	members := m.resolveGenericDataMembers(cfg)
 	m.mu.Lock()
-	changed := m.setGenericDataMembersLocked(reasons)
+	reasons, changed := m.setGenericDataMembersLocked(members)
 	m.mu.Unlock()
 	if changed {
 		logGenericDataMembers(reasons)
 	}
 }
 
-// computeGenericDataMemberReasons reads the shim manager's record and resolves
-// the config's RETH data members. It takes no Manager lock.
-func (m *Manager) computeGenericDataMemberReasons(cfg *config.Config) []string {
+// resolveGenericDataMembers maps the config's local RETH data members to their
+// ifindexes. It takes no Manager lock.
+func (m *Manager) resolveGenericDataMembers(cfg *config.Config) map[int]string {
 	if cfg == nil || cfg.Chassis.Cluster == nil {
-		return nil
-	}
-	unintended := m.unintendedGenericXDP()
-	if len(unintended) == 0 {
 		return nil
 	}
 	members := cfg.RethToPhysical()
@@ -90,27 +93,38 @@ func (m *Manager) computeGenericDataMemberReasons(cfg *config.Config) []string {
 		names = append(names, config.LinuxIfName(phys))
 	}
 	sort.Strings(names)
-	var reasons []string
+	out := map[int]string{}
 	for _, name := range slices.Compact(names) {
-		ifindex, err := ifindexByNameFn(name)
-		if err != nil {
-			continue
+		if ifindex, err := ifindexByNameFn(name); err == nil {
+			out[ifindex] = name
 		}
-		if why, ok := unintended[ifindex]; ok {
+	}
+	return out
+}
+
+// genericDataMemberReasonsFor is the live readiness computation: the members
+// the shim currently records as unintended generic.
+func genericDataMemberReasonsFor(members map[int]string, unintended map[int]string) []string {
+	var reasons []string
+	for ifindex, why := range unintended {
+		if name, ok := members[ifindex]; ok {
 			reasons = append(reasons, fmt.Sprintf(
 				"userspace data interface %s %s (native refused: %s)",
 				name, genericDataMemberReasonMarker, why))
 		}
 	}
+	sort.Strings(reasons)
 	return reasons
 }
 
-// setGenericDataMembersLocked stores the reasons and reports a change. Caller
-// holds m.mu.
-func (m *Manager) setGenericDataMembersLocked(reasons []string) bool {
-	changed := !slices.Equal(m.genericDataMembers, reasons)
-	m.genericDataMembers = reasons
-	return changed
+// setGenericDataMembersLocked stores the member map and reports whether the
+// live reasons changed since the last log. Caller holds m.mu.
+func (m *Manager) setGenericDataMembersLocked(members map[int]string) ([]string, bool) {
+	m.genericDataMemberNames = members
+	reasons := genericDataMemberReasonsFor(members, m.unintendedGenericXDP())
+	changed := !slices.Equal(m.genericDataMembersLogged, reasons)
+	m.genericDataMembersLogged = reasons
+	return reasons, changed
 }
 
 func logGenericDataMembers(reasons []string) {
@@ -125,11 +139,12 @@ func logGenericDataMembers(reasons []string) {
 	slog.Info("no RETH data member is in generic XDP mode any more", "issue", "#19110")
 }
 
-// genericDataMemberReasonsLocked returns the readiness reasons. Caller holds
-// m.mu.
+// genericDataMemberReasonsLocked returns the readiness reasons, computed from
+// the shim's LIVE record. Caller holds m.mu (lock order: userspace m.mu, then
+// the shim manager's own mutex, as for XDPLinks in the refresh reconcile).
 func (m *Manager) genericDataMemberReasonsLocked(peerAlive bool) []string {
-	if !peerAlive || len(m.genericDataMembers) == 0 {
+	if !peerAlive || len(m.genericDataMemberNames) == 0 {
 		return nil
 	}
-	return append([]string(nil), m.genericDataMembers...)
+	return genericDataMemberReasonsFor(m.genericDataMemberNames, m.unintendedGenericXDP())
 }

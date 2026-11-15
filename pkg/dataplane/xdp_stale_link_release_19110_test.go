@@ -332,3 +332,77 @@ func TestReclaimBeforeAttachLeavesTheKernelFree19110(t *testing.T) {
 		f.settle()
 	}
 }
+
+// P5 (Codex): the identity repair against REAL kernel link IDs. The #9847
+// fixture replaces the verifier, so no other cell sees a real link ID: a "fix"
+// comparing link TYPES instead of IDs passes every faked cell. Here the
+// registered link A is real. A pin at A's path is first A's own, which must be
+// kept, and then another real XDP link B's, which has the same type but a
+// different ID and must be replaced by A's pin.
+func TestRepairUsesRealLinkIdentity19110(t *testing.T) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Skipf("needs the memlock privilege (CAP_BPF/CAP_NET_ADMIN): %v", err)
+	}
+	f := newStaleLinkFixture19110(t)
+	t.Cleanup(SetLinkPinPathForTest(f.dir))
+	peer, err := netlink.LinkByName(strings.Replace(mustLinkName19110(t, f.ifindex), "t19110a", "t19110b", 1))
+	if err != nil {
+		t.Fatalf("fixture: peer veth: %v", err)
+	}
+	a, err := link.AttachXDP(link.XDPOptions{Program: f.prog, Interface: f.ifindex, Flags: link.XDPDriverMode})
+	if err != nil {
+		t.Fatalf("fixture: link A: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	b, err := link.AttachXDP(link.XDPOptions{Program: f.prog, Interface: peer.Attrs().Index, Flags: link.XDPGenericMode})
+	if err != nil {
+		t.Fatalf("fixture: link B: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	pin := filepath.Join(f.dir, fmt.Sprintf("xdp_%d", f.ifindex))
+	id := func(l link.Link) link.ID {
+		i, err := l.Info()
+		if err != nil {
+			t.Fatalf("link info: %v", err)
+		}
+		return i.ID
+	}
+	pinnedID := func() link.ID {
+		l, err := link.LoadPinnedLink(pin, nil)
+		if err != nil {
+			t.Fatalf("load the pin: %v", err)
+		}
+		defer l.Close()
+		return id(l)
+	}
+
+	if err := a.Pin(pin); err != nil {
+		t.Fatalf("fixture: pin A: %v", err)
+	}
+	if err := ensureXDPLinkPinned(f.ifindex, a); err != nil || pinnedID() != id(a) {
+		t.Fatalf("A's own pin: ensure=%v pinned=%d, want A's pin kept (id %d)", err, pinnedID(), id(a))
+	}
+
+	if err := os.Remove(pin); err != nil {
+		t.Fatalf("fixture: unlink A's pin: %v", err)
+	}
+	if err := b.Pin(pin); err != nil {
+		t.Fatalf("fixture: pin B at A's path: %v", err)
+	}
+	if err := ensureXDPLinkPinned(f.ifindex, a); err != nil {
+		t.Fatalf("ensure over B's pin: %v", err)
+	}
+	if got := pinnedID(); got != id(a) {
+		t.Errorf("after the repair the pin names link %d, want A (%d): a pin naming another XDP link "+
+			"(B, %d, same type) was trusted as this link's", got, id(a), id(b))
+	}
+}
+
+func mustLinkName19110(t *testing.T, ifindex int) string {
+	t.Helper()
+	l, err := netlink.LinkByIndex(ifindex)
+	if err != nil {
+		t.Fatalf("link %d: %v", ifindex, err)
+	}
+	return l.Attrs().Name
+}

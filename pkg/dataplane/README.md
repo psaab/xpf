@@ -2546,6 +2546,18 @@ iterations.
 - `attachUserspaceShimXDP` reclaims each pending interface immediately before
   that interface's own first attach. No interface's gap includes its
   neighbours' detaches. A registered link is never reclaimed.
+- The registration check and the reclaim are one step under the XDP ownership
+  WRITE lease, as are the sweep's registry read and its reclaims. `AttachXDP`
+  holds that lease across its attach, pin and registration. There is a second
+  attacher outside the daemon's `applySem`: the userspace status loop's
+  revalidation reconcile. Without the lease it could register the interface
+  between our check and our reclaim, and we would detach THIS process's fresh
+  link. Deterministic interleaving cells pin both.
+- Each interface finishes its whole sequence before the next starts: reclaim,
+  native, then on an unsupported native the generic fallback, at once. A
+  neighbour's refusal wait or budget exhaustion can therefore neither stretch
+  nor strand it. VLAN children are delegated to their parent and are never
+  attached here, so no stacked pair needs a second loop.
 
 The reclaim NEVER aborts the apply. Each failure falls back to the old unlink
 (a deferred release), and the attach decides:
@@ -2593,7 +2605,8 @@ Otherwise it removes the pin and re-pins this link.
   without this check `Close` would hand a hitless restart a dead link.
 - **Where:** `AttachXDP` runs the repair when its fresh `Pin` fails.
 - **Close:** `Close` counts a failed repair as missing, and reports the
-  shutdown as not hitless.
+  shutdown as not hitless. It says those links "may have detached with their
+  handles", because an inconclusive identity check does not prove they did.
 
 **A refusal is retried, never a fallback** (`xdp_attach_occupancy_19110.go`).
 EBUSY and EEXIST are kernel refusals. They are not proof of an occupant:
@@ -2613,7 +2626,10 @@ fails the apply with `*XDPOccupiedError`. That error wraps both
   dedicated netlink handle with a 250 ms socket timeout;
 - the whole probe bounded by an AGGREGATE `xdpOccupancyDiagBudget` (1 s);
 - when the probe finds nothing, fails, or runs out of budget: "occupant
-  unknown".
+  unknown";
+- at most ONE probe in flight, process-wide. A probe abandoned at its budget is
+  not cancelled; it runs until its own netlink timeouts end it. A later pass
+  reports "unknown" rather than stacking another.
 
 The diagnostic never changes the classification. Timing: the `BPF_LINK_CREATE`
 and `BPF_LINK_DETACH` syscalls block on rtnl and are NOT bounded by this code.
@@ -2633,14 +2649,21 @@ because without a persistent refusal the wait is zero.
 native error that sent an interface to generic. `UnintendedGenericXDP` reports
 it unless the error was EOPNOTSUPP: `dev_xdp_attach` returns that exactly when
 the driver has no `ndo_bpf`, as on iavf, and that generic is the supported
-deployment. A `DetachXDP`, `Teardown`, or a fresh process clears the record. A
+deployment. This is deliberately FAIL-OPEN. EOPNOTSUPP does not prove "no
+`ndo_bpf`": virtio-net returns it for a configuration refusal while the host
+implements GRO_HW/CSUM, and such a generic member stays exempt, as every generic
+member was before #19110. A `DetachXDP`, `Teardown`, or a fresh process clears
+the record. A
 RE-COMMIT DOES NOT: the registered generic link short-circuits `AttachXDP`
 ("already attached"), so no native attempt is made. After fixing the native
 refusal (for mlx5, LRO and HW-GRO off), RESTART xpfd. The ERROR log says so.
 
 The userspace Manager turns a RETH data member in that state into a
 takeover-readiness reason; see `pkg/dataplane/userspace`,
-`generic_data_member_19110.go`. Two scope choices are deliberate:
+`generic_data_member_19110.go`. The reason is computed LIVE from this record
+each time readiness is asked; only the member map is cached. So a post-
+acceptance `DetachXDP` lifts the blocker at once. Two scope choices are
+deliberate:
 - **The reason is node-global.** One generic member makes the node not
   takeover-ready for EVERY RG while the peer is alive, including an RG whose
   members are native. Readiness has no per-RG input here, and a generic member

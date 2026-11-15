@@ -223,9 +223,7 @@ func TestRefreshAttachRecordsUnintendedGenericForF419110(t *testing.T) {
 	if !slices.Contains(*ops, "attach/29/false") || !slices.Contains(*ops, "attach/29/true") {
 		t.Fatalf("fixture: the refresh did not try native then generic on the re-probed ifindex 29 (ops %v)", *ops)
 	}
-	m.mu.Lock()
-	reasons := append([]string(nil), m.genericDataMembers...)
-	m.mu.Unlock()
+	reasons := reasons19110(m, true)
 	if r, ok := hasGenericReason19110(reasons); !ok || !strings.Contains(r, "ge-0-0-0") {
 		t.Errorf("a refresh that left the RETH member ge-0-0-0 in generic after a native EINVAL raised no "+
 			"F4 reason (reasons %v): a re-probed VF could promote with a generic member", reasons)
@@ -244,5 +242,23 @@ func TestRefreshAttachNeverFallsBackOnARefusal19110(t *testing.T) {
 	if slices.Contains(*ops, "attach/29/true") {
 		t.Errorf("the refresh path fell back to generic after a REFUSAL (EBUSY) (ops %v); #19110 forbids "+
 			"that on every attach path", *ops)
+	}
+}
+
+// Codex note (cached readiness): the reason is live. When the shim's record
+// drops the member (a post-acceptance DetachXDP), readiness stops blocking at
+// once, with no compile or refresh in between.
+func TestGenericDataMemberReasonFollowsTheLiveRecord19110(t *testing.T) {
+	unintended := map[int]string{5: "invalid argument"}
+	m := f4Manager19110(t, nil)
+	m.unintendedGenericXDPHook = func() map[int]string { return unintended }
+	m.refreshGenericDataMembers(f4Config19110(true))
+	if _, ok := hasGenericReason19110(reasons19110(m, true)); !ok {
+		t.Fatal("fixture: the reason was not raised")
+	}
+	unintended = map[int]string{} // DetachXDP cleared the record; NO refresh
+	if r, ok := hasGenericReason19110(reasons19110(m, true)); ok {
+		t.Errorf("readiness still blocks on %q after the shim's record dropped the member: a cached "+
+			"reason outlives the detach until the next compile", r)
 	}
 }
