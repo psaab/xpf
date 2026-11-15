@@ -2439,16 +2439,23 @@ never blocks the VIP path.
   promotion render: shutdown cancels the pending apply, and
   `frr.Manager.Stop` joins the fast install but removes nothing, so FRR
   keeps a static that master's same timeline never installed (review Codex
-  P2-5). #19083, which this branch is based on, keeps that line from being
-  an active, exportable blackhole: the VIP leaves, the gateway resolves
-  only through the cluster `Null0` default, and the static NHT map
-  withdraws it, as it does every owned static rendered as a plain gateway
-  (the interface-qualified class is #19122). The line stays in FRR's
-  running config, inactive, until the restart's first render. The planned
-  shutdown obligations for B (a latch, a join, a barrier, `ShutdownApply`)
-  are dropped. The fast install re-evaluates the map after every batch;
-  the remaining exception is a batch killed by `Stop` whose line FRR
-  still applies after the VIP left (the P2-6 lab cells).
+  P2-5). Two things keep that line from being an active, exportable route:
+  - **#19083 below it.** The VIP leaves, the gateway resolves only through
+    the cluster `Null0` default, and the static NHT map withdraws it
+    (measured on loss 10.6.0: no kernel route, NHT `(filtered)`). The line
+    stays in FRR's running config, inactive, until the restart's first
+    render.
+  - **The fast set holds only lines #19083 withdraws by itself**
+    (pkg/frr/README.md, "Fast set"). Interface-qualified v4, interface-only,
+    v6 link-local (#19122) and VRF statics wait for the coalesced render,
+    as on master, so B adds no route a stop would leave active (Codex P2 on
+    d8b6021582).
+
+  The planned shutdown obligations for B (a latch, a join, a barrier,
+  `ShutdownApply`) are dropped. Each batch requests a coalesced map
+  re-evaluation. The remaining exception is a batch killed by `Stop` whose
+  line FRR still applies after the VIP left: the loss 10.6.0 P2-6 cells saw
+  no such late apply, with the vtysh-stall caveat.
 
 **VIP ownership is stamped in the kernel (#18573).** `directAddVIPs` /
 `directRemoveVIPs` both run `reconcileDirectVIPAddrs`

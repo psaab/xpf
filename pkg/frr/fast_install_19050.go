@@ -45,9 +45,11 @@ import (
 //     P1-3).
 //   - Shutdown: fastStopped and fastWG.Add are both under retryMu, the same
 //     pattern Stop uses for retryEnabled, so no install starts behind Stop's
-//     Wait (review R4 N3, R14). Stop removes nothing: a fast line FRR
-//     accepted stays after a graceful stop, which is #19083's class, and B
-//     can add to it (Codex P2-5); #19083 is a landing dependency.
+//     Wait (review R4 N3, R14). Stop removes nothing. A fast line FRR
+//     accepted stays in the running config after a graceful stop, and #19083
+//     withdraws it when its VIP leaves, because the fast set holds only lines
+//     #19083 can withdraw (splitFastNHTCovered19050). That closes Codex P2-5
+//     without shutdown writes.
 
 // FastInstallOutcome reports what FastInstallStatics did.
 type FastInstallOutcome int
@@ -182,7 +184,10 @@ func (m *Manager) FastInstallStatics(want []string, precheck func() bool) (FastI
 		slog.Debug("frr: fast install skipped: managed section unreadable", "err", err)
 		return FastSkipped, nil
 	}
-	lines := fastSet19050(want, written)
+	lines, held := splitFastNHTCovered19050(fastSet19050(want, written))
+	if len(held) > 0 {
+		slog.Debug("frr: fast install leaves lines #19083 cannot withdraw to the coalesced render (#19050)", "lines", held)
+	}
 	if len(lines) == 0 {
 		return FastNothingToDo, nil
 	}
@@ -194,13 +199,14 @@ func (m *Manager) FastInstallStatics(want []string, precheck func() bool) (FastI
 	if elapsed > fastInstallSlowAlarm {
 		slog.Warn("frr: fast static install was slow (#19050)", "elapsed", elapsed, "lines", len(lines))
 	}
-	// #19083: zebra answers a NEWLY registered static without its NHT map, so
-	// a line that registered while its gateway already resolved only through
-	// a blackhole (its VIP left between the pre-check and the batch) would
-	// stay an active blackhole until the next NHT event. Force that event now,
-	// still under reloadMu, after an in-doubt batch too: a killed batch may
-	// have registered some of its lines.
-	defer m.reevaluateAfterFastInstall19083(fx)
+	// #19083: zebra answers a NEWLY registered static without its NHT map (FRR
+	// 10.5.1; 10.6.0 did not show it in the loss lab), so a line that
+	// registered while its gateway already resolved only through a blackhole
+	// would stay unfiltered until the next NHT event. REQUEST that event after
+	// every batch that ran, an in-doubt one too (a killed batch may have
+	// registered lines). The request is coalesced (R24 P2-1): a multi-RG
+	// promotion's batches share one rebind, run after the last of them.
+	defer m.RequestStaticNHTReeval19083()
 	if err != nil {
 		m.markFastInDoubtLocked(lines)
 		slog.Warn("frr: fast static install failed; lines are in doubt until a verified reload (#19050)",
@@ -211,17 +217,76 @@ func (m *Manager) FastInstallStatics(want []string, precheck func() bool) (FastI
 	return FastInstalled, lines
 }
 
-// reevaluateAfterFastInstall19083 runs the #19083 static-NHT re-evaluation
-// after a fast batch. Caller holds reloadMu. A stopping manager skips it (as
-// ReevaluateStaticNHT19083 does); a failure is logged, never returned: the
-// batch's outcome stands.
-func (m *Manager) reevaluateAfterFastInstall19083(ex vtyshConfigExecutor19083) {
-	if m.lifetimeCtx().Err() != nil {
-		return
+// splitFastNHTCovered19050 splits the fast set into the lines #19083 withdraws
+// by itself once their VIP leaves, and the rest (Codex P2 on d8b6021582).
+// Only the former may be installed ahead of the coalesced render. A line the
+// stop leaves ACTIVE would otherwise be a route master's same timeline (stop
+// before the render) never installed. Covered (fastNHTCovered19050):
+//   - a default-VRF plain gateway, `ip|ipv6 route P GW [dist] [table N]`:
+//     the static NHT map filters it;
+//   - a v6 GLOBAL gateway with an interface (the inferred RETH shape): zebra's
+//     connected-on-that-interface check makes it inactive (loss 10.6.0 lab).
+//
+// Held for the render, as on master: an interface-qualified v4 gateway, an
+// interface-only next hop, a v6 link-local gateway (all #19122), and any
+// `vrf NAME` static (the map binds the default VRF only).
+func splitFastNHTCovered19050(lines []string) (covered, held []string) {
+	for _, l := range lines {
+		if fastNHTCovered19050(l) {
+			covered = append(covered, l)
+		} else {
+			held = append(held, l)
+		}
 	}
-	if err := m.reevaluateStaticNHTLocked19083(ex); err != nil {
-		slog.Warn("frr: static NHT re-evaluation after the fast install failed (#19083)", "err", err)
+	return covered, held
+}
+
+func fastNHTCovered19050(line string) bool {
+	f := strings.Fields(line)
+	if len(f) < 4 || (f[0] != "ip" && f[0] != "ipv6") || f[1] != "route" {
+		return false
 	}
+	hop := f[3:]
+	for {
+		n := len(hop)
+		switch {
+		case n >= 2 && hop[n-2] == "vrf":
+			return false
+		case n >= 2 && hop[n-2] == "table":
+			hop = hop[:n-2]
+			continue
+		case n >= 1 && allDigits19050(hop[n-1]):
+			hop = hop[:n-1]
+			continue
+		}
+		break
+	}
+	if len(hop) == 0 {
+		return false
+	}
+	gw, err := netip.ParseAddr(hop[0])
+	if err != nil {
+		return false // an interface-only next hop, Null0, reject
+	}
+	switch len(hop) {
+	case 1:
+		return true
+	case 2:
+		return gw.Is6() && !gw.Is4In6() && !gw.IsLinkLocalUnicast()
+	}
+	return false
+}
+
+func allDigits19050(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // FastInDoubt reports whether fast-installed lines are still awaiting
