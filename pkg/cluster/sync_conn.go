@@ -1004,11 +1004,23 @@ func (s *SessionSync) handleNewConnection(ctx context.Context, fabricIdx int, co
 		default:
 			slog.Info("cluster sync: re-priming bulk sync on reconnect (peer may have rebooted and lost its session table, #5480)", "fabric", fabricIdx, "remote", connRemoteAddrString(conn))
 		}
-		if err := s.doBulkSync(); err != nil {
+		// #19115 (Codex finding 4 on design v3): admission by THIS caller's
+		// own obligation, rechecked under bulkSendMu. Between installConn's
+		// decision and here the connection setup writes can be slow; the
+		// sweep's owed re-drive may have sent the qualifying bulk meanwhile,
+		// and a second full snapshot for the same debt is redundant. A
+		// consumed forced resync is new work and always goes.
+		if hook := s.testBeforeConnectColdPrime; hook != nil {
+			hook()
+		}
+		sent, err := s.doBulkSyncAdmitted(func() bool { return forcedConsumed || !s.coldPrimeCovered() })
+		if err != nil {
 			slog.Warn("cluster sync: bulk sync failed", "err", err, "fabric", fabricIdx)
 			if forcedConsumed {
 				s.forceResync.Store(true)
 			}
+		} else if !sent {
+			slog.Info("cluster sync: connect-time cold prime already covered by a pending bulk for this debt; not sending another", "fabric", fabricIdx)
 		}
 		// #9626: no discharge here. A nil doBulkSync means the frames through
 		// BulkEnd were WRITTEN, not that the peer holds them. The matching BulkAck

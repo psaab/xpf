@@ -6122,48 +6122,67 @@ it.
   bulk-prime retry bound (35 s), exported so there is one number. Cells:
   `sync_cold_prime_ack_9626_test.go`.
 
-  **An owed debt is re-driven on its own schedule (#19115).** The owed re-drive
-  used to run only on the sweep timer (15 s active / 60 s idle under the
-  userspace profile, backing off after a failed re-drive), and a sweep wake
-  RESET that timer. A transient first-bulk failure, or a debt armed with no
-  attempt at all (the peer-reboot edge, a capable discovery), therefore
-  outlived the 5 s manual-failover admission window, and ISSU drains were
-  refused. Now (`sync_cold_prime_retry_19115.go`, design v3 on #19115):
-  - **Eligibility.** The re-drive may START only when:
-    - debt is owed;
-    - no ack for it is young;
-    - the bulk is not fenced for an incapable peer (`bulkFenceNow`, the
-      window's own predicates);
-    - its retry deadline has passed.
-
-    The branch itself checks this, so a faster sweep (negotiated liveness)
-    cannot bypass the backoff.
-  - **The deadline.** It advances only when an authoritative bulk ENDS in a
-    non-fence error while debt is owed, to 1 s, then 2 s, then 4 s
-    (`noteBulkResult`, the hook every bulk converges on). It resets on a new
-    debt generation, a discharge, a successful send, or the runtime being
-    wired. It never touches the #18752 owed age or last failure.
-  - **Scheduling.** The sweep timer is lowered to the debt's due time: the
-    later of the deadline and a young ack's 35 s expiry. A due time already
-    passed gets 1 s instead, so a just-armed debt is re-driven about 1 s
-    later and a debt whose re-drive cannot run yet (nil store, not
-    connected) does not spin. The loop keeps an explicit deadline, and a
-    wake only moves it EARLIER.
+  **An owed debt is re-driven on its own schedule, and every bulk is admitted
+  by its own obligation (#19115).** The owed re-drive used to run only on the
+  sweep timer (15 s active / 60 s idle under the userspace profile, backing
+  off after a failed re-drive), and a sweep wake RESET that timer. A transient
+  first-bulk failure, or a debt armed with no attempt at all (the peer-reboot
+  edge, a capable discovery), therefore outlived the 5 s manual-failover
+  admission window, and ISSU drains were refused. Now
+  (`sync_cold_prime_retry_19115.go`, design v4 on #19115):
+  - **One backoff for every retry.** `bulkRetryNotBefore` gates every retry
+    of an authoritative bulk: the forced resync re-armed after a failure, the
+    owed re-drive and the aged-ack re-drive.
+    - It advances when ANY authoritative bulk ends in a non-fence error, to
+      1 s, then 2 s, then 4 s after that failure (`noteBulkResult`).
+    - It resets on a successful send (BulkEnd written), a discharge, the
+      runtime being wired, and a new debt generation.
+    - It never touches the #18752 owed age or last failure.
+    - New forced work is never dropped: an armed `forceResync` waits for the
+      deadline, then runs.
+  - **The owed debt governs.** While a debt is owed, the sweep's retry is the
+    owed re-drive or nothing. It may start only when no young ack covers the
+    debt, the bulk is not fenced (`bulkFenceNow`: exactly the window's
+    predicates, including `peerCapabilitiesLearned()` for the IPsec fence),
+    and the backoff has elapsed. It never falls through to the aged-ack
+    branch.
+  - **Scheduling.** The sweep timer is armed EXACTLY at the debt's future due
+    time: the backoff deadline, or a young ack's 35 s expiry. A new debt is
+    eligible at once, and its first re-drive is scheduled 100 ms after the
+    arm (`coldPrimeFirstRetryDelay`). A due debt whose re-drive could not run
+    (nil store, not connected) is re-checked every second; the loop never
+    spins. The loop keeps an explicit deadline, and a wake only moves it
+    EARLIER.
   - **Wakes.** The loop is woken by:
     - every arm;
     - every bulk completion, success or failure, since an older generation's
       success leaves a newer one owed;
     - the capability fence lift, which arms no new generation;
     - the runtime being wired.
-  - **Admission.** The re-drive takes `bulkSendMu` and RECHECKS eligibility
-    under it before exporting. A re-drive that waited behind any other bulk
-    sees its outcome, so it never stacks a second snapshot. There is no
-    in-flight flag besides the existing `bulkRedriveInFlight` CAS.
-
-    While waiting there, the sweep goroutine blocks for the length of the
-    in-flight bulk, as the aged-ack branch already did.
+  - **Admission.**
+    - Every authoritative bulk holds `bulkSendMu` across the whole bulk AND
+      its result hook (`doBulkSyncAdmitted`). A caller waiting on the lock
+      therefore always sees its predecessor's outcome: a published pending
+      ack, or an advanced deadline.
+    - Each caller rechecks its OWN obligation under the lock:
+      - the owed re-drive: its eligibility;
+      - the connect-time cold prime: that its debt is not already covered by
+        a young pending bulk (a consumed forced resync always goes);
+      - the aged-ack re-drive: that the aged bulk is still owed and no debt
+        has been armed;
+      - the daemon prime (`DoPrimeBulkSync`): that no young bulk is pending;
+      - the barrier-fence re-prime: that the fence still needs it.
+    - A peer's bulk request and a forced resync are new work and always go.
+      The survivor re-drive keeps its own `bulkSendHeld` scope (#10387).
+    - `bulkRedriveInFlight` is released by `defer` on every path.
   - **The fence precheck.** A fenced snapshot bulk is refused before its
     table-truth read. The window's revalidate-on-consume stays the authority.
+  - **What it guarantees.** Inside the 5 s admission window, the debt reaches
+    a qualifying pending bulk, provided an attempt starts (they are at most
+    4 s apart), succeeds, and exports up to its pending publish inside the
+    window. It does NOT guarantee admission: after an ordered-stream move the
+    barrier fence stays armed until that bulk's ack, and the barrier is
+    refused at once. That is the intended safe refusal.
 
   Cells: `sync_cold_prime_redrive_prompt_19115_test.go` and
   `pkg/daemon/daemon_ha_userspace_admission_coldprime_19115_test.go`.

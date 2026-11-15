@@ -69,7 +69,13 @@ var errBulkFencedForIpsecPeer = errors.New("bulk sync refused: peer lacks S9.4 I
 // authoritative window is destructive, whereas skipping this bulk only defers
 // the reconcile and every caller re-arms its cold-prime / resync obligation.
 func (s *SessionSync) doBulkSync() error {
-	return s.doBulkSyncWithBulkSend(false)
+	// #19115 (Codex finding 12 on design v3): hold bulkSendMu across the
+	// whole bulk AND its result hook, so a caller waiting on the lock sees
+	// this bulk's outcome. Before, the window released the lock in its own
+	// defer and noteBulkResult ran after it, so a waiting retry could take
+	// the lock, read the old deadline and export again at once.
+	_, err := s.doBulkSyncAdmitted(nil)
+	return err
 }
 
 // DoBulkSync runs the authoritative cold-prime / re-drive bulk window for
@@ -739,10 +745,10 @@ func (s *SessionSync) armColdPrimeLocked() {
 	}
 	s.needColdPrime.Store(true)
 	s.coldPrimeGen.Add(1)
-	// #19115: a new debt generation is due at once, whatever an earlier one's
-	// failures backed off to; wake the sweep so its timer is lowered to it.
-	// Both are leaf operations, safe under s.mu.
-	s.coldPrimeRetryReset()
+	// #19115: a new debt generation is due coldPrimeFirstRetryDelay from now,
+	// whatever an earlier one's failures backed off to; wake the sweep so its
+	// timer is lowered to it. Both are leaf operations, safe under s.mu.
+	s.bulkRetryArmNewDebt()
 	s.wakeSyncSweep()
 }
 
@@ -759,15 +765,20 @@ type bulkFailure struct {
 // A success leaves the last failure in place while debt is owed: only the
 // peer's ack discharges the debt and clears its failure.
 func (s *SessionSync) noteBulkResult(err error) {
+	if hook := s.testBeforeBulkResult; hook != nil {
+		hook(err)
+	}
 	if err != nil {
 		s.lastBulkFailure.Store(&bulkFailure{err: err.Error(), at: time.Now()})
 	}
-	// #19115: every authoritative bulk ends here. Apply it to the owed retry
-	// schedule, then wake the sweep for EVERY outcome: a failure makes the
-	// debt due at its backed-off deadline, and a success of an OLDER debt
-	// generation leaves a newer one owed without pending (#9626 interleaving),
-	// which no arm will announce again.
-	s.noteColdPrimeRetryResult(err)
+	// #19115: every authoritative bulk ends here, under bulkSendMu
+	// (doBulkSyncAdmitted). Apply it to the retry backoff, then wake the
+	// sweep for EVERY outcome: a failure makes the debt due at its
+	// backed-off deadline, and a success of an OLDER debt generation leaves a
+	// newer one owed without pending (#9626 interleaving), which no arm will
+	// announce again. err == nil means the window wrote BulkEnd: a send that
+	// succeeded, not merely a published pending ack.
+	s.noteBulkRetryResult(err)
 	s.wakeSyncSweep()
 }
 
@@ -807,7 +818,7 @@ func (s *SessionSync) dischargeColdPrime(stamp uint64) {
 		s.needColdPrime.Store(false)
 		s.coldPrimeOwedSince.Store(0)
 		s.lastBulkFailure.Store(nil)
-		s.coldPrimeRetryReset() // #19115
+		s.bulkRetryReset() // #19115
 	}
 }
 

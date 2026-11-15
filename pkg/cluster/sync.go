@@ -1713,16 +1713,25 @@ type SessionSync struct {
 	needColdPrime  atomic.Bool
 	bulkMu         sync.Mutex
 	bulkInProgress bool
-	// #19115 (design v3): the owed cold-prime retry schedule
-	// (sync_cold_prime_retry_19115.go). coldPrimeRetryNotBefore is in nowMono()
-	// nanoseconds, 0 = eligible now; coldPrimeRetryFailures counts consecutive
-	// non-fence bulk failures while debt is owed. coldPrimeRetryMu is a LEAF
-	// lock: nothing else is taken while it is held.
-	coldPrimeRetryMu        sync.Mutex
-	coldPrimeRetryNotBefore int64
-	coldPrimeRetryFailures  uint32
+	// #19115 (design v4): the backoff every authoritative bulk RETRY honours
+	// (sync_cold_prime_retry_19115.go). bulkRetryNotBefore is in nowMono()
+	// nanoseconds, 0 = eligible now; bulkRetryFailures counts consecutive
+	// non-fence bulk failures. bulkRetryMu is a LEAF lock: nothing else is
+	// taken while it is held.
+	bulkRetryMu        sync.Mutex
+	bulkRetryNotBefore int64
+	bulkRetryFailures  uint32
+	// coldPrimeFreshUntil schedules a NEW debt's first sweep re-drive:
+	// coldPrimeFirstRetryDelay after its arm (nowMono() ns; under bulkRetryMu).
+	coldPrimeFreshUntil int64
 	// testSweepTimerArmed, when set, observes every sweep timer (re)arm.
 	testSweepTimerArmed func(time.Duration)
+	// testBeforeBulkResult, when set, runs at the start of noteBulkResult:
+	// the point between a bulk's end and the publication of its outcome.
+	testBeforeBulkResult func(error)
+	// testBeforeConnectColdPrime, when set, runs in handleNewConnection just
+	// before the connect-time cold-prime bulk is admitted.
+	testBeforeConnectColdPrime func()
 	// The next accepted bulk window captures the pending helper generation and
 	// local request token. The active pair follows it through reconciliation so
 	// completion and abort callbacks identify the replay they describe.
@@ -2652,7 +2661,7 @@ func (s *SessionSync) SetRuntimeDomains(sessions dataplane.SessionStore, telemet
 	// so the backoff that failure earned is cleared, and the sweep re-arms its
 	// timer from the debt's due time.
 	if sessions != nil {
-		s.coldPrimeRetryReset()
+		s.bulkRetryReset()
 	}
 	s.wakeSyncSweep()
 }

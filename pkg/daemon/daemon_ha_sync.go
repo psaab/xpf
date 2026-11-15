@@ -326,7 +326,14 @@ func (d *Daemon) bulkSyncViaEventStreamOrFallback(ss *cluster.SessionSync) error
 	if ss == nil {
 		return fmt.Errorf("session sync not initialized")
 	}
-	return ss.DoBulkSync()
+	// #19115: admitted under the session sync's bulk lock, and skipped when a
+	// bulk sent since this retry was decided (the sweep's owed re-drive, a
+	// connect-time cold prime) is still young and awaiting its ack.
+	sent, err := ss.DoPrimeBulkSync()
+	if err == nil && !sent {
+		slog.Info("cluster: session sync bulk prime retry skipped: a bulk sent meanwhile is still awaiting its ack")
+	}
+	return err
 }
 
 // rg0ConfigSyncAuthority is the SINGLE, transport-independent rule for whether
