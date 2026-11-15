@@ -1034,8 +1034,16 @@ R22 #5).
     hold applies (see above):
     - output zebra returns that the parser cannot read;
     - a read command vtysh itself does not know (`% Unknown command`, exit 1).
-  - **What the operator sees:** an ERROR on each held attempt (the apply,
-    then each degraded-retry tick: 15 s, 30 s, 60 s, then every 5 min):
+  - **What the operator sees** (`heldStaticNHTRestoreLocked19083`). A held
+    apply is retried by several callers:
+    - the degraded retry: 15 s, 30 s, 60 s, then every 5 min;
+    - the ip-monitoring actuator: every 3 s while its state is dirty
+      (`ipmon.DefaultThrottle`);
+    - each commit or HA reconcile.
+
+    A zebra that fails fast would therefore log every 3 s, so the log is
+    rate-limited per held episode:
+    - the FIRST held attempt logs this ERROR:
 
     `frr: FRR applies HELD: zebra did not answer or accept the static NHT
     binding restore. Recover zebra (find the fault; if zebra is wedged,
@@ -1043,8 +1051,15 @@ R22 #5).
     The degraded retry then restores the binding and reloads, with no xpfd
     restart (#19083)`
 
-    It is followed by `FRR reload failed` / `FRR degraded-retry reload not
-    started`, carrying the restore error.
+    - later held attempts log `frr: FRR applies still HELD ...` at WARN at
+      most once a minute (`staticNHTHeldLogEvery19083`), with
+      `held_attempts`, and are Debug otherwise;
+    - the restore succeeding logs one INFO (`FRR applies resume`) and ends
+      the episode. A later episode logs its ERROR again.
+
+    The callers' own lines (`FRR reload failed`, `FRR degraded-retry reload
+    not started`, the ip-monitoring "staying dirty" WARN) carry the restore
+    error too.
   - **Operator recovery:** restore zebra's ability to answer vtysh:
     1. find the zebra fault;
     2. if zebra is wedged, `systemctl restart frr` (never `systemctl reload

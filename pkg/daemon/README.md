@@ -2199,7 +2199,9 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
 - **A held FRR apply (operator view).** Before each diff reload the FRR
   manager restores zebra's static-NHT binding if a rebind was interrupted.
   While zebra does not answer or accept that restore, every FRR apply
-  (commit, HA reconcile) is HELD, and the journal shows on each attempt:
+  (commit, HA reconcile, ip-monitoring actuation) is HELD. The journal shows
+  this ERROR once per held episode, then a `still HELD` WARN at most once a
+  minute, and an INFO `FRR applies resume` on recovery:
   `frr: FRR applies HELD: zebra did not answer or accept the static NHT
   binding restore. Recover zebra (...)`.
   - **Recovery:** restore zebra's ability to answer vtysh. Find the fault;
