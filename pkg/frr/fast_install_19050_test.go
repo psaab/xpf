@@ -827,6 +827,8 @@ func TestFastSetOnlyNHTCoveredLines19050(t *testing.T) {
 		plainV4    = "ip route 198.51.100.0/24 172.16.50.1 5"
 		tableV4    = "ip route 198.51.100.0/25 172.16.50.1 5 table 100"
 		globalV6   = "ipv6 route ::/0 2001:559:8585:50::1 ge-0-0-2.50 5"
+		plainV6    = "ipv6 route 2001:db8:3::/64 2001:db8:50::1 5"
+		bareLL6    = "ipv6 route 2001:db8:4::/64 fe80::1 5"
 		qualV4     = "ip route 198.51.100.64/26 172.16.50.1 ge-0-0-2.50 5"
 		ifOnlyV4   = "ip route 198.51.100.128/26 ge-0-0-2.50 5"
 		linkLocal6 = "ipv6 route 2001:db8:1905:71::/64 fe80::1 ge-0-0-2.50 5"
@@ -835,9 +837,9 @@ func TestFastSetOnlyNHTCoveredLines19050(t *testing.T) {
 	fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
 	m := newFastTestManager19050(t, fake)
 	writeManagedStatics19050(t, m, other19050)
-	m.FastInstallStatics([]string{plainV4, tableV4, globalV6, qualV4, ifOnlyV4, linkLocal6, vrfV4}, func() bool { return true })
+	m.FastInstallStatics([]string{plainV4, tableV4, globalV6, plainV6, qualV4, ifOnlyV4, linkLocal6, bareLL6, vrfV4}, func() bool { return true })
 	installs, _, _ := fake.snapshot()
-	want := strings.Join([]string{globalV6, plainV4, tableV4}, "|")
+	want := strings.Join([]string{globalV6, plainV6, plainV4, tableV4}, "|")
 	if len(installs) != 1 || strings.Join(installs[0], "|") != want {
 		t.Fatalf("installs = %q, want ONE batch of only the NHT-covered lines %q", installs, want)
 	}
@@ -885,4 +887,62 @@ func TestFastInDoubtAuthoritativeReloadRestoresNHTBindingFirst19083(t *testing.T
 		t.Fatalf("installs %q (restore seen with %d reloads before it), reloads %d: want the primary restore %q, then ONE authoritative reload",
 			installs, reloadsAtRestore, reloads, want)
 	}
+}
+
+// TestFastInstallStopSettlesRebindOwedByBatch19083 (Codex P2 on 137fea64f9):
+// a fast batch that registered a line (unfiltered on FRR 10.5.1, if its VIP
+// had already left) REQUESTS a rebind. If the manager stops before the
+// coalesced drain runs, Stop settles that rebind after the fast-install join,
+// so the line is filtered. In the model, a line registered after the last
+// rebind is unfiltered, so the last session must be a rebind that comes after
+// the batch. This covers a Stop before the drain and a Stop during the batch.
+func TestFastInstallStopSettlesRebindOwedByBatch19083(t *testing.T) {
+	rebind := strings.Join(wantStaticNHTRebind19083(), "|")
+	check := func(t *testing.T, fake *fastFake19050) {
+		t.Helper()
+		got := sessions19083(fake)
+		if len(got) != 2 || got[0] != v4Default19050 || got[1] != rebind {
+			t.Fatalf("vtysh sessions = %q, want the batch, then the rebind Stop settled (the line filtered)", got)
+		}
+	}
+	t.Run("Stop before the drain", func(t *testing.T) {
+		fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
+		m := newFastTestManager19050(t, fake)
+		writeManagedStatics19050(t, m, other19050, staticNHTBound19083)
+		// The concurrent demotion's own request lands during the batch.
+		fake.afterInstall = func() { m.RequestStaticNHTReeval19083() }
+		if outcome, _ := m.FastInstallStatics([]string{other19050, v4Default19050}, func() bool { return true }); outcome != FastInstalled {
+			t.Fatalf("outcome = %v, want installed", outcome)
+		}
+		m.Stop() // before the 100 ms drain
+		check(t, fake)
+	})
+	t.Run("Stop during the batch", func(t *testing.T) {
+		fake := &fastFake19050{fakeExecutor: &fakeExecutor{}}
+		m := newFastTestManager19050(t, fake)
+		writeManagedStatics19050(t, m, other19050, staticNHTBound19083)
+		release := make(chan struct{})
+		var once sync.Once
+		fake.afterInstall = func() { once.Do(func() { <-release }) }
+		done := make(chan struct{})
+		go func() {
+			m.FastInstallStatics([]string{other19050, v4Default19050}, func() bool { return true })
+			close(done)
+		}()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && len(sessions19083(fake)) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		stopped := make(chan struct{})
+		go func() { m.Stop(); close(stopped) }()
+		time.Sleep(100 * time.Millisecond) // Stop is now waiting on the fast-install join
+		close(release)
+		<-done
+		select {
+		case <-stopped:
+		case <-time.After(5 * time.Second):
+			t.Fatal("Stop did not return")
+		}
+		check(t, fake)
+	})
 }

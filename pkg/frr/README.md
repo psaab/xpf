@@ -611,13 +611,21 @@ v2.1-v2.3 addenda):
   config after a graceful stop. #19083 (below) and the fast-set restriction
   keep it from being an active route. Every fast line is one #19083 withdraws
   when its VIP leaves (the loss 10.6.0 B arm: no kernel route, NHT
-  `(filtered)`), so B's planned shutdown obligations (latch, join, barrier,
-  `ShutdownApply`) are not needed.
-  - **The remaining exception:** a batch killed by `Stop` whose line FRR
-    still applies AFTER the shutdown VIP removal registers unfiltered (on
-    FRR versions that answer a fresh registration without the map). The
-    loss 10.6.0 P2-6 cells saw no late apply of a killed client's line. The
-    caveat: vtysh may stall before sending the line.
+  `(filtered)`).
+  - **A line that registers AFTER its VIP already left** (a concurrent
+    demotion) is unfiltered on FRR 10.5.1 until a re-evaluation. The batch
+    requests one. If the manager stops before the drain, `Stop` settles it
+    AFTER the fast-install join (Codex P2 on 137fea64f9;
+    `TestFastInstallStopSettlesRebindOwedByBatch19083`).
+  - So B's planned shutdown obligations (latch, join, barrier,
+    `ShutdownApply`) are not needed.
+  - **The remaining exceptions:**
+    - Stop's settle failing: the writer lock is still busy after 2 s, or the
+      rebind fails. This is logged at ERROR.
+    - A batch killed by `Stop` whose line FRR still applies after the settle
+      (on FRR versions that answer a fresh registration without the map).
+      The loss 10.6.0 P2-6 cells saw no late apply of a killed client's
+      line. The caveat: vtysh may stall before sending the line.
 
 ## Callers
 
