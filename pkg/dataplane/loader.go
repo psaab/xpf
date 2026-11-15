@@ -446,12 +446,18 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 				"ifindex", ifidx, "err", nerr, "issue", "#19110")
 			return nerr
 		}
+		// R23 NEW-2: never DetachXDP here. A link registered now is another
+		// attacher's; leave it, and record nothing.
+		if m.settleFailedNativeAttach(ifidx) {
+			continue
+		}
 		slog.Warn("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
 			"ifindex", ifidx, "err", nerr,
 			"impact", "higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP")
-		m.DetachXDP(ifidx)
-		m.clearNativeXDPFlagsForIfindexes([]int{ifidx})
-		if err := m.attachWithin(pass, ifidx, true); err != nil && !isAlreadyAttached(err) {
+		if err := m.attachWithin(pass, ifidx, true); err != nil {
+			if isAlreadyAttached(err) {
+				continue // not THIS pass's generic link: nothing to record
+			}
 			if errors.Is(err, ErrXDPOccupied) {
 				slog.Error("generic XDP attach refused until the occupancy budget ran out",
 					"ifindex", ifidx, "err", err, "issue", "#19110")
@@ -610,13 +616,16 @@ func (m *Manager) AttachXDP(ifindex int, forceGeneric bool) error {
 		opts.Flags = link.XDPDriverMode
 	}
 
+	// Test backstop BEFORE the kernel attach (R23 NEW-3): a test that reaches
+	// this path against the production pin directory must panic before it
+	// holds a real link, not after.
+	guardPinDir(pinFile)
 	l, err := link.AttachXDP(opts)
 	if err != nil {
 		return fmt.Errorf("attach XDP to ifindex %d: %w", ifindex, err)
 	}
 
 	// Pin the link for future restarts.
-	guardPinDir(pinFile)
 	if err := os.MkdirAll(linkPinPath, 0700); err != nil {
 		slog.Warn("failed to create link pin dir", "err", err)
 	} else if err := l.Pin(pinFile); err != nil {

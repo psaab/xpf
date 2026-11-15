@@ -2583,11 +2583,42 @@ attach and the refusal wait. `TestAttachXDPIsFreshOnly19110` pins this with a
 transitive walk: nothing reachable from `AttachXDP` may load a pin.
 
 **One classifier on every attach path.** The compile pass
-(`attachUserspaceShimXDP`) and the #14133 interface-link refresh both use the
-same rules. The refresh re-attaches a re-probed VF's new ifindex with no commit,
-through `AttachShimXDPInterface`. The rules are: reclaim first; a refusal is
-never a fallback; record an unintended generic. The userspace refresh
-recomputes the F4 reason after attaching.
+(`attachUserspaceShimXDP`) and the #14133 interface-link refresh (with the status
+loop's revalidation, which uses the same reconcile) both use the same rules. The
+refresh re-attaches a re-probed VF's new ifindex with no commit, through
+`AttachShimXDPInterfaces`. The rules are: reclaim first; a refusal is never a
+fallback; record an unintended generic.
+
+**The refresh never waits.** The refresh runs under the userspace Manager's
+mutex, which RG activation (`UpdateRGActive`), takeover readiness, session
+installs and the 1 Hz status poll also need. So its budgets,
+`xdpRefreshOccupancyBudget` and `xdpRefreshDiagBudget`, are ZERO (Codex delta
+P2-1, R23 NEW-1):
+- each interface gets ONE attempt per mode;
+- a refusal returns `ErrXDPOccupied` at once, with no generic attempt and no
+  occupant probe ("not probed");
+- the interface stays fail-closed until the next apply, or the next refresh
+  that re-resolves it. The reconcile clears its revalidation flag either way,
+  as it did before #19110.
+
+Waiting would buy nothing: a refresh never has a dead process's stale link to
+wait out, so a refusal there is the persistent kind (an upper device,
+tcp-data-split, a memory provider). The mutex hold is the reclaim's synchronous
+detach plus one attach syscall per interface, and neither syscall is bounded by
+this code. The mutex is not released mid-reconcile, because that would let
+another publication interleave with a half-attached snapshot. The reconcile is
+still ONE `AttachShimXDPInterfaces` pass, so a non-zero budget could never
+multiply by the interface count.
+
+**A failed native attach detaches nothing** (R23 NEW-2). The compile and the
+status-loop refresh can attach the same ifindex concurrently, because only the
+compile holds `applySem`. A failed fresh attach registered nothing, so the old
+post-failure `DetachXDP` could only find the OTHER attacher's link. Both paths
+now call `settleFailedNativeAttach` instead. Under the ownership lease, it
+leaves a registered link alone (no generic attempt, no record). Otherwise it
+discards the unobservable detach debt and clears the native flags, which is
+what `DetachXDP` did for an absent link. A fallback is recorded only when THIS
+call's generic attach succeeded, never on "already attached".
 
 **Tests never touch the production pins.** Tests that reach the attach path
 must redirect `linkPinPath` (`SetLinkPinPathForTest`).
@@ -2618,13 +2649,14 @@ the same mode with backoff (25 ms doubling to 200 ms) and reclassifies EVERY
 result: an EEXIST that becomes EINVAL is an unsupported device and falls back
 to generic as before. One deadline is shared by the whole pass
 (`xdpOccupancyBudget`, 5 s), not one per interface. It is armed by the pass's
-FIRST refusal, so detaches and successful attaches never consume it. A refusal
-that outlives it
+FIRST refusal, so detaches and successful attaches BEFORE that never consume it.
+From then on it is wall-clock. A refusal that outlives it
 fails the apply with `*XDPOccupiedError`. That error wraps both
 `ErrXDPOccupied` and the kernel's errno, and it carries a diagnostic:
 - the target's `IFLA_XDP`, and every upper device carrying XDP, read on a
   dedicated netlink handle with a 250 ms socket timeout;
-- the whole probe bounded by an AGGREGATE `xdpOccupancyDiagBudget` (1 s);
+- the whole probe bounded by an AGGREGATE `xdpOccupancyDiagBudget` (1 s),
+  armed at the pass's first give-up;
 - when the probe finds nothing, fails, or runs out of budget: "occupant
   unknown";
 - at most ONE probe in flight, process-wide. A probe abandoned at its budget is
@@ -2636,14 +2668,19 @@ and `BPF_LINK_DETACH` syscalls block on rtnl and are NOT bounded by this code.
 So "about 7.5 s worst case on loss" (the budget plus three mlx5 detach+attach
 pairs) is an estimate, not a bound.
 
-**The wait holds `applySem`.** The attach pass runs inside an apply, and a
-takeover's RG activation also needs `applySem`: `republishConnectedRGSync`
-runs before `SetRGActive`. So a node that is mid-apply with a PERSISTENT
-refusal, when its peer dies, delays that activation by up to about 6 s: the
-5 s budget, plus 1 s of diagnostic, plus the unbounded syscalls. The crash
-promotion itself is not delayed. Before #19110, a refused attach failed in
-milliseconds and arm-failed the node instead. This is a narrow double fault,
-because without a persistent refusal the wait is zero.
+**Which locks the waits hold.**
+- **The compile pass holds `applySem`.** It runs inside an apply, and a
+  takeover's RG activation also needs `applySem`: `republishConnectedRGSync`
+  runs before `SetRGActive`. So a node that is mid-apply with a PERSISTENT
+  refusal, when its peer dies, delays that activation by up to about 6 s: the
+  5 s budget, plus 1 s of diagnostic, plus the unbounded syscalls. The crash
+  promotion itself is not delayed. Before #19110, a refused attach failed in
+  milliseconds and arm-failed the node instead. This is a narrow double fault,
+  because without a persistent refusal the wait is zero.
+- **The refresh path holds the userspace Manager's mutex and does not wait**
+  (see "The refresh never waits" above). Its hold is the same syscalls it made
+  before #19110 plus the reclaim's synchronous detach, with no sleep and no
+  probe.
 
 **Unintended generic data members (F4).** `recordGenericFallback` remembers the
 native error that sent an interface to generic. `UnintendedGenericXDP` reports
@@ -2661,7 +2698,10 @@ refusal (for mlx5, LRO and HW-GRO off), RESTART xpfd. The ERROR log says so.
 The userspace Manager turns a RETH data member in that state into a
 takeover-readiness reason; see `pkg/dataplane/userspace`,
 `generic_data_member_19110.go`. The reason is computed LIVE from this record
-each time readiness is asked; only the member map is cached. So a post-
+each time readiness is asked; only the member map is cached. That map follows
+the config AUTHORITY, the most recent compile. A refresh or revalidation only
+re-resolves that config's members to their (possibly new) ifindexes. A stale
+retained publication can never install its own, older membership. So a post-
 acceptance `DetachXDP` lifts the blocker at once. Two scope choices are
 deliberate:
 - **The reason is node-global.** One generic member makes the node not
@@ -2884,10 +2924,13 @@ a test in `armproof_5275_test.go`.
     surface. `missingInterfaceRecord` therefore takes the VLAN id and names
     `<parent>.<vid>`, keeping the parent in the reason.
 - **`XDP_ATTACHED_MULTI` counts as generic.** It means programs are attached in
-  more than one mode, and it is reachable — `attachUserspaceShimXDP` discards
-  `DetachXDP`'s error on the native-fallback path. Reading it as native would
-  undercount the slow-path population, the same direction as the defect that
-  moved the flag to the kernel.
+  more than one mode. The kernel refuses native and generic together
+  (`dev_xdp_attach`: "Native and generic XDP can't be active at the same
+  time", EEXIST), so MULTI needs an offloaded program beside one of them. The
+  native-fallback path no longer calls `DetachXDP` at all (#19110, R23 NEW-2).
+  Counting MULTI as generic is the conservative reading: reading it as native
+  would undercount the slow-path population, the same direction as the defect
+  that moved the flag to the kernel.
 - **Residual: the program instance is reported, not verified.**
   `xdpLinkProgramID` accepts **any** readable program id. It does not compare
   it against `m.programs[m.XDPEntryProgram()]` — the program `AttachXDP`

@@ -47,8 +47,8 @@ var managerMethodClasses = map[string]string{
 	"AddTxPort": "class1", "AttachTC": "class1-carveout", "AttachXDP": "class1-carveout",
 	// #19110 (R23 P2-2): only delegates to AttachXDP/DetachXDP, so it takes
 	// AttachXDP's class.
-	"AttachShimXDPInterface": "class1-carveout",
-	"SetZone":                "class1", "SetVlanIfaceInfo": "class1",
+	"AttachShimXDPInterfaces": "class1-carveout",
+	"SetZone":                 "class1", "SetVlanIfaceInfo": "class1",
 	"ClearIfaceZoneMap": "class1", "ClearVlanIfaceMap": "class1",
 	"SwapToUserspaceXDPShimEntryProgram": "class1",
 	"ReadGlobalCounter":                  "class1", "ReadInterfaceCounters": "class1", "ClearInterfaceCounters": "class1",
@@ -345,7 +345,7 @@ var armedGateInvokeExemptions = map[string]string{
 	// assert. Its classification (refusal vs fallback) is driven by the #19110
 	// cells (TestShimInterfaceAttachIsClassified19110 and the userspace refresh
 	// cells).
-	"AttachShimXDPInterface": "carve-out by delegation to AttachXDP: unarmed outcome asserted by AttachXDP's legs; classification by the #19110 cells",
+	"AttachShimXDPInterfaces": "carve-out by delegation to AttachXDP: unarmed outcome asserted by AttachXDP's legs; classification by the #19110 cells",
 	// Compile's only direct registry access (redirect_capable) runs past
 	// CompileConfig's loaded check, so it never blocks pre-arm and cannot
 	// join the blocked legs; its fresh/retained outcomes are asserted

@@ -105,6 +105,10 @@ type Manager struct {
 	// Both guarded by mu.
 	genericDataMemberNames   map[int]string
 	genericDataMembersLogged []string
+	// genericDataMemberCfg is the membership authority: the most recent
+	// compile's config. Refresh and revalidation re-resolve ITS members
+	// (Codex delta P2-2). Guarded by mu.
+	genericDataMemberCfg *config.Config
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.
