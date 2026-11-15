@@ -349,6 +349,16 @@ OUT of contract:
 - **Device-filesystem aliases the host already had:** a devtmpfs or procfs
   mounted outside `/dev` or `/proc` is REFUSED (the run does not start), not
   isolated.
+- **Production state reachable inside a pass-through is refused, not
+  allowed.** The writable pass-through must be disjoint from the production
+  state the overlay protects. Before a root run, `testguard-run.sh` scans
+  the overlay-covered production trees (`/etc`, `/var/lib`, `/var/log`,
+  `/run`; one filesystem each, depth 8) for a symlink whose resolved target
+  lies inside a pass-through. An example is `/var/log/xpf ->
+  /var/tmp/xpf-log` with `TMPDIR=/var/tmp`. Such a layout refuses the run
+  (exit 2), naming the link. An accidental write through the link would
+  otherwise reach the host file through the writable bind (Codex P1 on
+  70ba89c39f).
 - **Concurrent replacement of a validated path,** such as a symlink swapped
   between validation and use.
 
@@ -472,13 +482,15 @@ Its limits:
   - write `/sys` and global sysctls (as on either path);
   - talk to host daemons (as on either path).
 
-  None of that happens by accident, and nothing here can stop it. The host's
-  root filesystem is not attached in the view, so a detach alone exposes
-  nothing. After the command, `testguard-run.sh` checks that the run's
-  namespace still has the testguard overlay at `/`, and fails the run
-  otherwise (R18 R1). That is detection of the simplest case only. On the
-  user-namespace path the inherited mounts are locked, and creating a device
-  node needs a capability that path does not have.
+  These are EXCLUDED from the contract, not claimed to be impossible by
+  accident: ordinary code can invoke a host daemon or write a global setting
+  without meaning to, and nothing here stops it. The host's root filesystem
+  is not attached in the view, so a detach alone exposes nothing. After the
+  command, `testguard-run.sh` checks that the run's namespace still has the
+  testguard overlay at `/`, and fails the run otherwise (R18 R1). That is
+  detection of the simplest case only. On the user-namespace path the
+  inherited mounts are locked, and creating a device node needs a capability
+  that path does not have.
 - **Copy-up changes some filesystem semantics** relative to the host (rename
   across separate overlays, inotify and open readers across copy-up, lock
   identity against a host holder). Not measured; tracked in #19102.

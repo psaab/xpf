@@ -47,6 +47,10 @@
 #                  refuses the run before it is created;
 #   [tmpdir-refused] so does a TMPDIR below /etc, which is created first of
 #                  all the pass-through, so it is checked first too;
+#   [pass-through-symlink] a production symlink (/var/log/<tag>-pt) that
+#                  resolves INTO the TMPDIR pass-through refuses the run, on
+#                  both paths, and the write through it never reaches the
+#                  host (Codex P1 on 70ba89c39f);
 #   [tmpdir-dotdot] a TMPDIR or GOCACHE spelled through /etc/<x>/../.. that
 #                  normalizes to an allowed path runs, and /etc/<x> is never
 #                  created: the validated canonical path is what gets made
@@ -102,7 +106,7 @@ W=$(mktemp -d "$TMPDIR/tg-overlay.XXXXXX")
 seeds="/etc/$tag.seed /var/lib/$tag /var/log/$tag.log /run/$tag /srv/$tag /opt/$tag /root/$tag /tmp/$tag
 /etc/$tag.new /var/log/$tag-f1 /srv/$tag-f1 /etc/$tag-cwd /srv/$tag-fd /srv/$tag-unsup /srv/$tag-vfat /srv/$tag-hostproc /etc/$tag-cache
 /etc/$tag-tmp /srv/$tag-blk /dev/$tag-late /dev/$tag-inside /dev/shm/$tag.shm
-/etc/$tag-dd /etc/$tag-gd /var/tmp/$tag-gd"
+/etc/$tag-dd /etc/$tag-gd /var/tmp/$tag-gd /var/log/$tag-pt"
 # [proof-untouched]: the runner's VM proof, as other lanes see it, is recorded
 # here and must be byte-, mode- and mtime-identical at the end (R19 F3).
 proof_state() { stat -c '%F %a %U %s %Y' "$proof" 2>&1; cat "$proof" 2>&1; }
@@ -267,6 +271,10 @@ mkfake ptnodev "
 [ -b $W/$tag-ptblk ] || fail 'FIXTURE: the pass-through block node is not visible'
 if ( exec 3<>$W/$tag-ptblk ) 2>/dev/null; then fail 'a block node in a writable pass-through opens read-write in the view'; fi
 if ( exec 3<$W/$tag-ptblk ) 2>/dev/null; then fail 'a block node in a writable pass-through opens read-only in the view'; fi"
+
+# [pass-through-symlink]: the command appends through a production symlink
+# that resolves into the TMPDIR pass-through.
+mkfake ptlink "printf 'x\\n' >> /var/log/$tag-pt/events.log"
 
 # [nodev-overlay]: a block node the host keeps on its root filesystem.
 mkfake nodevov "
@@ -443,6 +451,18 @@ branch_cases() { # $1 label
 	else
 		echo "  skip [dev-late-block] [dev-nodev] [nodev-overlay] [pass-through-nodev] $b: coverage unavailable (no loop device for a disposable block node)"
 	fi
+
+	trace "seed pass-through symlink $b"
+	mkdir -p "$W/$tag-ptlog"
+	ln -sfn "$W/$tag-ptlog" "/var/log/$tag-pt"
+	run_tg / "$W/ptlink"
+	if [ "$rc" = 2 ] && [ ! -e "$W/$tag-ptlog/events.log" ] && [[ $out == *"production symlink /var/log/$tag-pt resolves to"* ]]; then
+		ok "[pass-through-symlink] $b: a production symlink into the TMPDIR pass-through refuses the run, and nothing reached the host"
+	else
+		bad "[pass-through-symlink] $b: exit $rc (want 2), host file written: $([ -e "$W/$tag-ptlog/events.log" ] && echo yes || echo no): $out"
+	fi
+	rm -f "/var/log/$tag-pt"
+	rm -rf "$W/$tag-ptlog"
 
 	before=$(stat -c '%a %X %Y %Z' /dev/full)
 	run_tg / "$W/devchar"

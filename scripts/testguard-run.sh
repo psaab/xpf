@@ -190,6 +190,30 @@ if [[ $euid == 0 ]]; then
 		fi
 		pass+=("$p")
 	done
+	# #19084 (Codex P1 on 70ba89c39f): the pass-through must be DISJOINT from
+	# the production state the overlay protects. A production symlink that
+	# resolves INTO a writable pass-through (/var/log/xpf -> /var/tmp/xpf-log
+	# with TMPDIR=/var/tmp) turns an accidental append to /var/log/xpf/... into
+	# a write to the host file through the pass-through bind; nodev does not
+	# stop ordinary writes. Refuse such a layout before anything runs. The scan
+	# covers the overlay-protected production trees, one filesystem each,
+	# depth-bounded, and resolves every symlink in one realpath pass.
+	mapfile -d '' -t prod_links < <(find /etc /var/lib /var/log /run -xdev -maxdepth 8 -type l -print0 2>/dev/null)
+	if ((${#prod_links[@]})); then
+		mapfile -d '' -t prod_targets < <(printf '%s\0' "${prod_links[@]}" | xargs -0 realpath -m -z -- 2>/dev/null)
+		# realpath -m resolves a missing target or a symlink loop without
+		# failing (coreutils 9.12 on the runner), so the arrays stay aligned;
+		# every target is compared either way.
+		for i in "${!prod_links[@]}"; do
+			for p in "${pass[@]}"; do
+				t=${prod_targets[i]:-}
+				if [[ -n $t && ($t == "$p" || $t == "$p"/*) ]]; then
+					echo "testguard-run: REFUSED: production symlink ${prod_links[i]} resolves to $t, inside the writable pass-through $p; an accidental write there would reach the host. Move the pass-through (TMPDIR/GOCACHE/GOMODCACHE/GOTMPDIR, the checkout) or the symlink (#19084)" >&2
+					exit 2
+				fi
+			done
+		done
+	fi
 	mkdir -p "$work/overlay"
 	cover=(unshare -m --propagation private bash "$root/scripts/testguard-root-view.sh" "$work/overlay" "$cwd" "${pass[@]}" --)
 	# R18 R1: in the VM-proof branch the command keeps real root, so it can

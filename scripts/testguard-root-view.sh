@@ -20,7 +20,9 @@
 #     the caller redirected stdout to the host's /dev/null (#19124);
 #   - device-filesystem aliases the host already had: a devtmpfs or procfs
 #     mounted outside /dev or /proc is REFUSED (the run does not start), not
-#     isolated;
+#     isolated. So is a production symlink (under /etc, /var/lib, /var/log or
+#     /run) that resolves into a writable pass-through: testguard-run.sh
+#     refuses that layout before the view is built;
 #   - concurrent replacement of a validated path (a symlink swapped between
 #     validation and use);
 #   - everything listed under "Its limits" in docs/testing.md (sysfs,
