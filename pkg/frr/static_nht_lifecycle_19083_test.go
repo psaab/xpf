@@ -31,11 +31,12 @@ type zebraNHTFake19083 struct {
 	applyOnly     int // one-shot: apply only this many lines, report success
 	ignore        bool
 	unreadable    bool
-	unreadV4      int  // the next N v4 binding reads are a PARSE MISS
-	unreadV6      int  // the next N v6 binding reads are a PARSE MISS
-	execFail      bool // every binding read's exec fails (zebra does not answer)
-	execFailV4    int  // the next N v4 binding reads' exec fails
-	execFailV6    int  // the next N v6 binding reads' exec fails
+	unreadV4      int           // the next N v4 binding reads are a PARSE MISS
+	unreadV6      int           // the next N v6 binding reads are a PARSE MISS
+	execFail      bool          // every binding read's exec fails (zebra does not answer)
+	execFailV4    int           // the next N v4 binding reads' exec fails
+	execFailV6    int           // the next N v6 binding reads' exec fails
+	readDelay     time.Duration // each binding read takes this long (honouring its context)
 	batchGate     chan struct{}
 	onBatch       func() // one-shot, run under mu after a batch applies
 	reloadEntered chan struct{}
@@ -100,6 +101,16 @@ func (f *zebraNHTFake19083) VtyshConfigLines(ctx context.Context, lines []string
 func (f *zebraNHTFake19083) Vtysh(ctx context.Context, cmd string) (string, error) {
 	if cmd != "show ip nht route-map" && cmd != "show ipv6 nht route-map" {
 		return f.fakeExecutor.Vtysh(ctx, cmd)
+	}
+	f.mu.Lock()
+	delay := f.readDelay
+	f.mu.Unlock()
+	if delay > 0 {
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -669,4 +680,166 @@ func TestStaticNHTRebindRequestsCoalesce19083(t *testing.T) {
 			t.Fatalf("a stopped manager ran %d rebinds", got)
 		}
 	})
+}
+
+// rebindBatches19083 counts the rebind batches (alternate first) in events.
+func rebindBatches19083(events []string) int {
+	n := 0
+	for _, e := range events {
+		if strings.HasPrefix(e, "batch ip nht static route-map "+nhtMapB19083) {
+			n++
+		}
+	}
+	return n
+}
+
+// TestStaticNHTStopSettlesOwedRebind19083 (Codex P2 on 137fea64f9): a
+// requested rebind no drain has completed is OWED, since a static may have
+// registered unfiltered (FRR 10.5.1) after the event that requested it. Stop
+// settles it, after its workers exit, with its own bounded context. It never
+// drops it and never hangs.
+func TestStaticNHTStopSettlesOwedRebind19083(t *testing.T) {
+	orig := staticNHTStopBudget19083
+	staticNHTStopBudget19083 = 300 * time.Millisecond
+	t.Cleanup(func() { staticNHTStopBudget19083 = orig })
+	t.Run("requested, Stop before the drain", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		fake.reset()
+		m.RequestStaticNHTReeval19083()
+		m.Stop()
+		if ev := fake.snapshot(); rebindBatches19083(ev) != 1 {
+			t.Fatalf("events %q: want the owed rebind settled by Stop", ev)
+		}
+		if v4, v6 := fake.bindings(); v4 != nhtMapA19083 || v6 != nhtMapA19083 {
+			t.Fatalf("bindings %q/%q after the settle, want the primary", v4, v6)
+		}
+	})
+	t.Run("drain in flight, cancelled by Stop", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		fake.reset()
+		fake.mu.Lock()
+		fake.blockAfter = 4 // the drain's batch applies, then hangs until its context ends
+		fake.mu.Unlock()
+		m.RequestStaticNHTReeval19083()
+		deadline := time.Now().Add(3 * time.Second)
+		for time.Now().Before(deadline) && rebindBatches19083(fake.snapshot()) == 0 {
+			time.Sleep(5 * time.Millisecond)
+		}
+		start := time.Now()
+		m.Stop()
+		if took := time.Since(start); took > 3*time.Second {
+			t.Fatalf("Stop took %s", took)
+		}
+		if ev := fake.snapshot(); rebindBatches19083(ev) != 2 {
+			t.Fatalf("events %q: want the interrupted drain's rebind owed again and settled by Stop (2 batches)", ev)
+		}
+	})
+	t.Run("drain woken after the cancel leaves it owed", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		fake.reset()
+		m.reloadMu.Lock() // the drain will block here
+		m.RequestStaticNHTReeval19083()
+		time.Sleep(4 * staticNHTRebindDebounce19083)
+		m.mgrCancel()
+		m.reloadMu.Unlock() // the drain now runs on a cancelled lifetime
+		time.Sleep(100 * time.Millisecond)
+		m.Stop()
+		if ev := fake.snapshot(); rebindBatches19083(ev) != 1 {
+			t.Fatalf("events %q: a drain woken on a stopping manager must leave the rebind owed for Stop", ev)
+		}
+	})
+	t.Run("nothing owed", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		fake.reset()
+		m.Stop()
+		if ev := fake.snapshot(); len(ev) != 0 {
+			t.Fatalf("Stop with nothing owed ran %q", ev)
+		}
+	})
+	t.Run("writer lock busy past the budget", func(t *testing.T) {
+		fake := newZebraNHTFake19083("", "")
+		m := newLiteralNHTManager19083(t, fake)
+		fake.reset()
+		m.nhtRebindMu.Lock()
+		m.nhtRebindOwed = true
+		m.nhtRebindMu.Unlock()
+		m.reloadMu.Lock()
+		stopped := make(chan struct{})
+		go func() { m.Stop(); close(stopped) }()
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			m.reloadMu.Unlock()
+			<-stopped
+			t.Fatal("Stop waited on a busy writer lock past its budget; it must give up and return")
+		}
+		m.reloadMu.Unlock()
+		if ev := fake.snapshot(); len(ev) != 0 {
+			t.Fatalf("events %q: nothing can run without the writer lock", ev)
+		}
+	})
+}
+
+// TestStaticNHTRestoreReadBudgetsAreIndependent19083 (R24 P3-2; Codex survivor
+// 3 on 137fea64f9): every binding read has its own budget. Four reads that each
+// fit the budget succeed, although together they exceed it.
+func TestStaticNHTRestoreReadBudgetsAreIndependent19083(t *testing.T) {
+	orig := staticNHTReadTimeout19083
+	staticNHTReadTimeout19083 = 300 * time.Millisecond
+	t.Cleanup(func() { staticNHTReadTimeout19083 = orig })
+	fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
+	fake.readDelay = 200 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
+		staticNHTRestorePending19083: true}
+	t.Cleanup(m.Stop)
+	if err := m.ApplyFull(clusterFC19083(true)); err != nil {
+		t.Fatalf("four 200 ms reads under a 300 ms per-read budget failed: %v (events %q)", err, fake.snapshot())
+	}
+	if ev := fake.snapshot(); !containsInOrder19083(ev, restoreBatch19083, "reload v4="+nhtMapA19083) {
+		t.Fatalf("events %q: want the restore, then the reload", ev)
+	}
+}
+
+// TestStaticNHTRestoreOperatorOverride19083 (Codex P3 on 137fea64f9): with
+// zebra's binding reads persistently failing, the restore holds every FRR
+// apply. The operator's explicit entry point, the override file, releases it
+// with a WARN; without the file, it stays held.
+func TestStaticNHTRestoreOperatorOverride19083(t *testing.T) {
+	for _, override := range []bool{false, true} {
+		t.Run(fmt.Sprintf("override=%v", override), func(t *testing.T) {
+			orig := staticNHTRestoreOverridePath19083
+			staticNHTRestoreOverridePath19083 = filepath.Join(t.TempDir(), "override")
+			t.Cleanup(func() { staticNHTRestoreOverridePath19083 = orig })
+			if override {
+				if err := os.WriteFile(staticNHTRestoreOverridePath19083, nil, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fake := newZebraNHTFake19083(nhtMapB19083, nhtMapB19083)
+			fake.execFail = true
+			fake.failAfter = 0
+			ctx, cancel := context.WithCancel(context.Background())
+			m := &Manager{frrConf: filepath.Join(t.TempDir(), "frr.conf"), exec: fake, mgrCtx: ctx, mgrCancel: cancel,
+				staticNHTRestorePending19083: true}
+			t.Cleanup(m.Stop)
+			err := m.ApplyFull(clusterFC19083(true))
+			reloaded := false
+			for _, e := range fake.snapshot() {
+				if strings.HasPrefix(e, "reload ") {
+					reloaded = true
+				}
+			}
+			if override && (err != nil || !reloaded || m.staticNHTRestorePending19083) {
+				t.Fatalf("override present: err=%v reloaded=%v pending=%v, want the reload released", err, reloaded, m.staticNHTRestorePending19083)
+			}
+			if !override && (err == nil || reloaded) {
+				t.Fatalf("no override: err=%v reloaded=%v, want the reload held", err, reloaded)
+			}
+		})
+	}
 }
