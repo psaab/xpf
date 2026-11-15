@@ -286,7 +286,11 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 	// aborted during the discovery race must not stay latched once the
 	// peer proves capable — the next redrive completes it.
 	if s.InstallTableIdentityCapable() {
-		s.peerIncarnationState().bulkFencedForPeer.Store(false)
+		// #19115: an owed debt that was fenced is eligible again; wake the
+		// sweep without arming a new generation.
+		if s.peerIncarnationState().bulkFencedForPeer.Swap(false) && s.needColdPrime.Load() {
+			s.wakeSyncSweep()
+		}
 		// #9752 round 5 item 5: suppressed installs are never retried
 		// by the sweep (its Created>=threshold window advances past
 		// them), so transfer the suppress debt into a cold-prime
@@ -309,7 +313,10 @@ func (s *SessionSync) handlePeerCapabilities(conn net.Conn, payload []byte) bool
 		}
 	}
 	if s.IpsecTunnelDiscriminatorCapable() {
-		s.peerIncarnationState().bulkFencedForIpsecPeer.Store(false)
+		// #19115: as above, for the IPsec fence.
+		if s.peerIncarnationState().bulkFencedForIpsecPeer.Swap(false) && s.needColdPrime.Load() {
+			s.wakeSyncSweep()
+		}
 	}
 	if s.IpsecTunnelDiscriminatorCapable() && s.peerIncarnationState().ipsecDiscriminatorSuppressDebt.Load() {
 		s.mu.Lock()

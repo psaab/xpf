@@ -2479,8 +2479,9 @@ so an operator can see why every failback fails:
   disconnected) skip it too, so a disconnect does not raise it.
 
 The other re-drive failures (`tombstone dropped` under churn, a generation
-change) still cost one sweep re-drive (~7 s) each. They no longer hold a window
-open.
+change) no longer hold a window open. Each one costs a re-drive on the owed-debt
+schedule: 1 s after the failure, then 2 s, then every 4 s, independent of the
+sweep profile (#19115, `pkg/cluster/README.md`).
 
 ## Incremental Sweep and Delete Journal
 

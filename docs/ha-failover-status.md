@@ -1232,8 +1232,8 @@ pay it is in flight:
 
 - `show chassis cluster information`, Cold synchronization block:
   `Cold prime owed to peer (no bulk pending): owed for <age>; it clears when a
-  bulk re-drive (every sweep tick) is acked by the peer; last bulk error:
-  <error> (<age> ago)`, followed by `Blocks: demotion of this node's primary
+  bulk re-drive (1 s after a failure, then 2 s, then every 4 s) is acked by the
+  peer; last bulk error: <error> (<age> ago)`, followed by `Blocks: demotion of this node's primary
   RGs (manual failover/failback and ISSU drain)`. The error reads `none recorded`
   before the first failed re-drive in this cold-prime episode.
 - The refused failover's error ends with the same detail.
@@ -1241,8 +1241,17 @@ pay it is in flight:
   `cluster sync: cold prime owed to peer past the long-owed threshold with no
   bulk pending; ...`.
 
-**How it clears.** Only on its own. The sync sweep re-drives the bulk about
-every 7 s. The debt is paid when the peer acks one, and the line disappears.
+**How it clears.** Only on its own. The sync sweep re-drives the bulk on a
+schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
+- at once when a new debt is armed;
+- 1 s after a failed attempt, then 2 s, then every 4 s, so every 5 s
+  admission window holds at least one retry;
+- while an ack for it is younger than 35 s, not at all (#9626);
+- while the bulk is fenced for a peer that has not proved a capability
+  (install-table identity, IPsec discriminator), not at all, until the peer's
+  capability frame lifts the fence.
+
+The debt is paid when the peer acks a bulk, and the line disappears.
 There is no CLI force-override, by design: admitting a demotion to an unprimed
 peer makes it delete every session missing from its table (#10387).
 

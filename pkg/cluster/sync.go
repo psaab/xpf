@@ -1713,6 +1713,16 @@ type SessionSync struct {
 	needColdPrime  atomic.Bool
 	bulkMu         sync.Mutex
 	bulkInProgress bool
+	// #19115 (design v3): the owed cold-prime retry schedule
+	// (sync_cold_prime_retry_19115.go). coldPrimeRetryNotBefore is in nowMono()
+	// nanoseconds, 0 = eligible now; coldPrimeRetryFailures counts consecutive
+	// non-fence bulk failures while debt is owed. coldPrimeRetryMu is a LEAF
+	// lock: nothing else is taken while it is held.
+	coldPrimeRetryMu        sync.Mutex
+	coldPrimeRetryNotBefore int64
+	coldPrimeRetryFailures  uint32
+	// testSweepTimerArmed, when set, observes every sweep timer (re)arm.
+	testSweepTimerArmed func(time.Duration)
 	// The next accepted bulk window captures the pending helper generation and
 	// local request token. The active pair follows it through reconciliation so
 	// completion and abort callbacks identify the replay they describe.
@@ -2637,6 +2647,14 @@ func (s *SessionSync) SetDataPlane(dp dataplane.DataPlane) {
 func (s *SessionSync) SetRuntimeDomains(sessions dataplane.SessionStore, telemetry dataplane.Telemetry) {
 	s.sessions = sessions
 	s.telemetry = telemetry
+	// #19115: a debt owed before the store was wired (#82) can be re-driven
+	// now. Wiring removes the cause of its "session store not ready" failure,
+	// so the backoff that failure earned is cleared, and the sweep re-arms its
+	// timer from the debt's due time.
+	if sessions != nil {
+		s.coldPrimeRetryReset()
+	}
+	s.wakeSyncSweep()
 }
 
 // Stats returns a point-in-time snapshot of sync statistics.
