@@ -20,9 +20,30 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 	go func() {
 		defer s.wg.Done()
 		activeInterval, idleInterval := s.sweepIntervals()
-		interval := s.capSweepIntervalForLiveness(activeInterval)
-		timer := time.NewTimer(interval)
+		interval := activeInterval
+		// #19115: the loop keeps an explicit deadline. A timer (re)arm comes
+		// from nextSweepDelay, which lowers the profile interval to an owed
+		// cold-prime debt's due time, and a WAKE only ever moves the deadline
+		// EARLIER. Before, a wake reset the timer to the full interval, so a
+		// stream of wakes (capability exchange, liveness requests) postponed
+		// the sweep, and with it the owed re-drive, without bound.
+		timer := time.NewTimer(time.Hour)
 		defer timer.Stop()
+		var deadline time.Time
+		arm := func(d time.Duration) {
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(d)
+			deadline = time.Now().Add(d)
+			if hook := s.testSweepTimerArmed; hook != nil {
+				hook(d)
+			}
+		}
+		arm(s.nextSweepDelay(interval))
 		for {
 			select {
 			case <-ctx.Done():
@@ -34,13 +55,9 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 				if requestedScanSeconds > 0 {
 					interval = min(interval, time.Duration(requestedScanSeconds)*time.Second)
 				}
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
+				if d := s.nextSweepDelay(interval); time.Now().Add(d).Before(deadline) {
+					arm(d)
 				}
-				timer.Reset(s.capSweepIntervalForLiveness(interval))
 			case <-timer.C:
 				activeInterval, idleInterval = s.sweepIntervals()
 				synced := s.syncSweep()
@@ -49,7 +66,7 @@ func (s *SessionSync) StartSyncSweep(ctx context.Context) {
 				} else {
 					interval = min(interval*2, idleInterval)
 				}
-				timer.Reset(s.capSweepIntervalForLiveness(interval))
+				arm(s.nextSweepDelay(interval))
 			}
 		}
 	}()
@@ -547,7 +564,7 @@ func (s *SessionSync) syncSweep() int {
 				slog.Warn("cluster sync: forced resync bulk failed, will retry", "err", err)
 			}
 		}
-	} else if s.needColdPrime.Load() && !s.coldPrimeAckAwaited() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
+	} else if s.needColdPrime.Load() && s.owedColdPrimeRetryEligible() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
 		// #82: an OWED cold prime had exactly two consumers — installConn (a
 		// reconnect) and handleDisconnect's survivor re-drive. Both are
 		// disconnect-edge triggered, so a first bulk that failed WITHOUT
@@ -583,17 +600,13 @@ func (s *SessionSync) syncSweep() int {
 		// two cannot stack a second bulk on top of an in-flight one; the CAS
 		// simply skips this tick when that re-drive owns the flag, and the arm
 		// it is still holding brings us back on the next one.
-		slog.Warn("cluster sync: re-driving owed cold-prime bulk on the live connection (first attempt did not complete)")
-		err := s.doBulkSync()
+		//
+		// #19115: the re-drive now waits for its own retry deadline (the
+		// branch condition above), so a faster sweep cannot bypass the
+		// backoff, and it rechecks that eligibility under bulkSendMu before
+		// exporting (redriveOwedColdPrime).
+		s.redriveOwedColdPrime()
 		s.bulkRedriveInFlight.Store(false)
-		if err != nil {
-			// #9752 round 4 / #17113: quiet when fenced (see the forced-resync twin).
-			if errors.Is(err, errBulkFencedForPeer) || errors.Is(err, errBulkFencedForIpsecPeer) {
-				slog.Debug("cluster sync: owed cold-prime re-drive fenced for peer; waiting for disconnect or capable discovery")
-			} else {
-				slog.Warn("cluster sync: owed cold-prime re-drive failed, will retry", "err", err)
-			}
-		}
 	} else if (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) &&
 		s.bulkRedriveInFlight.CompareAndSwap(false, true) {
 		// A forced resync or another authoritative bulk may be withheld at
