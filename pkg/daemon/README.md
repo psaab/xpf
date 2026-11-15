@@ -2310,10 +2310,12 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
   actually removed VIPs) calls `triggerStaticNHTReeval19083`.
   - **Asynchronous:** it never blocks the VIP path.
   - **Coalesced:** every rebind makes zebra re-evaluate every tracked next
-    hop for every client, so one demotion burst (a resign demotes every RG
-    in one pass) shares ONE `frr.Manager.ReevaluateStaticNHT19083`, run
-    `staticNHTReevalDebounce19083` (100 ms) after the first trigger. A trigger
-    that arrives once that run has started schedules the next one.
+    hop for every client, so the trigger only REQUESTS a re-evaluation
+    (`frr.Manager.RequestStaticNHTReeval19083`). One demotion burst (a resign
+    demotes every RG in one pass) shares ONE rebind, 100 ms after the first
+    request; a demotion during that rebind yields exactly one more. #19050's
+    fast install requests through the same primitive, so both share one
+    budget (pkg/frr/README.md).
   - **Seam:** `frrStaticNHTReevalFn` replaces the launch.
     `TestStaticNHTReevalProductionLaunchIsAsyncAndCoalesced19083` drives the
     production launch instead.
