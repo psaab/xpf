@@ -49,7 +49,9 @@ import (
 //     accepted stays in the running config after a graceful stop, and #19083
 //     withdraws it when its VIP leaves, because the fast set holds only lines
 //     #19083 can withdraw (splitFastNHTCovered19050). That closes Codex P2-5
-//     without shutdown writes.
+//     without removing any fast line at shutdown. Stop's only FRR write is
+//     #19083's bounded settle of an owed or running re-evaluation (R24
+//     NEW-C; settleOwedStaticNHTRebind19083).
 
 // FastInstallOutcome reports what FastInstallStatics did.
 type FastInstallOutcome int
