@@ -626,10 +626,9 @@ v2.1-v2.3 addenda):
       rebind fails (a 2 s context plus the exec's 5 s WaitDelay). This is
       logged at ERROR.
   - The in-doubt authoritative reload (`resolveFastInDoubtLocked`) runs the
-    #19083 restore first but does not settle a restore the operator override
-    released: the restore stays pending and the next reload re-verifies it
-    (fail-closed; only `reloadLocked` and the degraded retry settle on
-    convergence).
+    #19083 restore first, like every diff reload. While zebra does not
+    answer, it is held and retried like the others (#19083 has no override;
+    see "Liveness, chosen deliberately").
     - A batch killed by `Stop` whose line FRR still applies after the settle
       (on FRR versions that answer a fresh registration without the map).
       The loss 10.6.0 P2-6 cells saw no late apply of a killed client's
