@@ -2298,8 +2298,10 @@ both through the shared `vrrp.GatewayProbeTarget` helper.
   blackhole (pkg/frr/README.md, "Cluster mode: a static may not resolve
   through a blackhole"). An owned static rendered as a PLAIN gateway (the
   default v4 shape) therefore goes inactive when its VIP leaves, on a
-  demotion and on a graceful stop alike, and nothing is written to FRR at
-  shutdown.
+  demotion and on a graceful stop alike, without depending on a shutdown
+  write. `frr.Stop` writes to FRR only to settle a re-evaluation that was
+  owed or running, bounded at about 9 s (pkg/frr/README.md, "Stop settles
+  what is owed").
   - A default v6 static on a RETH subnet is interface-qualified, and goes
     inactive through zebra's interface check instead.
   - Operator-qualified v4 next hops, interface-only next hops and v6

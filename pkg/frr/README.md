@@ -833,9 +833,11 @@ recursively through the cluster `Null0` default (`renderClusterModeDefaults`).
 FRR kept it as an ACTIVE kernel blackhole that redistribution exported from a
 node that forwards nothing (#19083, measured on loss). With the map, a static
 rendered as a PLAIN gateway goes inactive by itself when its gateway's
-connected route leaves (the coverage boundary is below). Nothing is written to FRR at shutdown: two earlier designs did that, and their
-review findings (budget, partial apply, overlay loss, lock order) are why this
-one does not.
+connected route leaves (the coverage boundary is below). The fix does not
+depend on a shutdown write: two earlier designs did, and their review findings
+(budget, partial apply, overlay loss, lock order) are why this one does not.
+`Stop` writes to FRR only to settle a re-evaluation that was owed or running
+(below).
 
 **Mechanism** (FRR 10.5.1 source, `zebra/zebra_rnh.c` and
 `zebra_routemap.c`):
@@ -927,9 +929,14 @@ next NHT event for that next hop (measured on udp).
   that finds the manager stopping leaves the request owed, a drain cancelled
   mid-rebind owes it again, and `Stop`, after its workers exit, runs it with
   its own context (`settleOwedStaticNHTRebind19083`). It is bounded: the
-  writer lock is polled, and the rebind runs, for at most 2 s each
-  (`staticNHTStopBudget19083`). If either fails, the residue is logged at
-  ERROR and `Stop` returns.
+  writer lock is polled for at most 2 s, and the rebind exec gets a 2 s
+  context plus that exec's 5 s WaitDelay (`staticNHTStopBudget19083`). If
+  either fails, the residue is logged at ERROR and `Stop` returns.
+  - This is the only FRR write `Stop` makes, and only when a rebind is owed
+    or running: the rebind's binding lines (R24 NEW-C). Its worst-case
+    addition to `Stop` is about 9 s: 2 s for the lock, 2 s for the exec, and
+    the exec's 5 s WaitDelay. That is inside the unit's `TimeoutStopSec=20`.
+    With nothing owed or running, `Stop` writes nothing to FRR.
 - The daemon requests it after a demotion's VIP removal
   (`triggerStaticNHTReeval19083`).
   - On master nothing registers a static inside that window. The demotion
@@ -988,6 +995,17 @@ R22 #5).
     parse miss: an ERROR is logged and vtysh's success is trusted, since the
     write replaced both families). That keeps an FRR output-layout change from
     wedging every apply on every cluster node from startup (R24 NEW-1).
+  - A read command that vtysh itself does not know is the same command drift
+    (R24 NEW-A). vtysh prints `% Unknown command: ...` on stdout and exits 1
+    (probed on FRR 10.5.1, udp fw1). `realExecutor.Vtysh` now carries up to
+    512 bytes of stdout in its error, and the read classifies that error as
+    a parse miss, not an exec failure: it can never succeed, so failing
+    closed on it would hold applies forever.
+  - The reads call the executor directly, deliberately BYPASSING `m.vtysh()`
+    and its `diagcmd.VtyshLimiter` funnel (R24 NEW-D). The restore runs under
+    `reloadMu` ahead of every FRR apply, so an `ErrVtyshBusy` from diagnostic
+    commands saturating the limiter must never hold applies. It is at most
+    four bounded reads per restore, not a diagnostic stream.
   - It fails closed (pending kept, error returned, the reload not started, the
     degraded retry repeats it) on a failed write, a read-back exec that failed
     or timed out, or a family positively read back as anything but the
@@ -1014,9 +1032,24 @@ R22 #5).
        then converges, and a successful rebind also clears the pending state.
     2. Or, having checked `show ip|ipv6 nht route-map` by hand, create
        `/run/xpf/frr-static-nht-restore-override`
-       (`staticNHTRestoreOverridePath19083`). The next restore is skipped
-       with a WARN and the apply proceeds. Remove the file once reads work;
-       it is on tmpfs, so a reboot clears it.
+       (`staticNHTRestoreOverridePath19083`). It releases ONE reload of the
+       current recovery episode (R24 NEW-B; Codex P2 on 18eb95d167):
+       - the restore is skipped with a WARN, the file is removed, and the
+         reload proceeds;
+       - the restore stays PENDING: only a reload that converges
+         (frr-reload.py succeeded, or its `--test` re-check shows no diff)
+         settles it. A failed or degraded released reload leaves it pending,
+         so the next attempt restores the primary (or holds) again;
+       - only a regular file created during the current pending episode
+         counts (`os.Lstat`, modified at or after the episode began). An
+         older one is stale: it is removed with a WARN and ignored. A
+         directory or symlink is ignored with a WARN;
+       - a file left from before xpfd started is stale by that rule, and `New`
+         WARNs about it. `New` does not remove it, because `xpfd cleanup`
+         also calls `New`, in another process.
+
+       Create the file again for each release. It is on tmpfs, so a reboot
+       clears it.
 
 ## Gotchas
 
