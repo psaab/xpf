@@ -6122,6 +6122,49 @@ it.
   bulk-prime retry bound (35 s), exported so there is one number. Cells:
   `sync_cold_prime_ack_9626_test.go`.
 
+  **An owed debt is re-driven on its own schedule (#19115).** The owed re-drive
+  used to run only on the sweep timer (15 s active / 60 s idle under the
+  userspace profile, backing off after a failed re-drive), and a sweep wake
+  RESET that timer. A transient first-bulk failure, or a debt armed with no
+  attempt at all (the peer-reboot edge, a capable discovery), therefore
+  outlived the 5 s manual-failover admission window, and ISSU drains were
+  refused. Now (`sync_cold_prime_retry_19115.go`, design v3 on #19115):
+  - **Eligibility.** The re-drive may START only when:
+    - debt is owed;
+    - no ack for it is young;
+    - the bulk is not fenced for an incapable peer (`bulkFenceNow`, the
+      window's own predicates);
+    - its retry deadline has passed.
+
+    The branch itself checks this, so a faster sweep (negotiated liveness)
+    cannot bypass the backoff.
+  - **The deadline.** It advances only when an authoritative bulk ENDS in a
+    non-fence error while debt is owed, to 1 s, then 2 s, then 4 s
+    (`noteBulkResult`, the hook every bulk converges on). It resets on a new
+    debt generation, a discharge, a successful send, or the runtime being
+    wired. It never touches the #18752 owed age or last failure.
+  - **Scheduling.** The sweep timer is lowered to the debt's due time: the
+    later of the deadline and a young ack's 35 s expiry, never below 1 s.
+    The loop keeps an explicit deadline, and a wake only moves it EARLIER.
+  - **Wakes.** The loop is woken by:
+    - every arm;
+    - every bulk completion, success or failure, since an older generation's
+      success leaves a newer one owed;
+    - the capability fence lift, which arms no new generation;
+    - the runtime being wired.
+  - **Admission.** The re-drive takes `bulkSendMu` and RECHECKS eligibility
+    under it before exporting. A re-drive that waited behind any other bulk
+    sees its outcome, so it never stacks a second snapshot. There is no
+    in-flight flag besides the existing `bulkRedriveInFlight` CAS.
+
+    While waiting there, the sweep goroutine blocks for the length of the
+    in-flight bulk, as the aged-ack branch already did.
+  - **The fence precheck.** A fenced snapshot bulk is refused before its
+    table-truth read. The window's revalidate-on-consume stays the authority.
+
+  Cells: `sync_cold_prime_redrive_prompt_19115_test.go` and
+  `pkg/daemon/daemon_ha_userspace_admission_coldprime_19115_test.go`.
+
   **The stale-session reconcile judges ownership by the bulk-start snapshot
   (#9655, #11012).** At BulkEnd, `reconcileStaleSessions` deletes a session
   absent from the peer's authoritative bulk only when the bulk-start snapshot

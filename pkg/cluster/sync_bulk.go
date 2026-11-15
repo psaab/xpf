@@ -98,6 +98,14 @@ func (s *SessionSync) doBulkSyncWithBulkSend(bulkSendHeld bool) (retErr error) {
 		}
 	}
 	if src := s.BulkSnapshotSource; src != nil {
+		// #19115 (design v3 C): a bulk the window would refuse for a capability
+		// fence is refused here, BEFORE the table-truth snapshot is read; that
+		// read is the expensive part of the attempt. Same predicates as
+		// bulkSyncWindow, and no latch is cleared here: the window's
+		// revalidate-on-consume stays the authority.
+		if err := s.bulkFenceNow(); err != nil {
+			return err
+		}
 		// #10283: the table-truth snapshot is read before bulkSyncWindow can
 		// write BulkStart. Hold queued incremental writes across BOTH operations
 		// so a gap-opened session cannot land before the receive window and then
@@ -731,6 +739,11 @@ func (s *SessionSync) armColdPrimeLocked() {
 	}
 	s.needColdPrime.Store(true)
 	s.coldPrimeGen.Add(1)
+	// #19115: a new debt generation is due at once, whatever an earlier one's
+	// failures backed off to; wake the sweep so its timer is lowered to it.
+	// Both are leaf operations, safe under s.mu.
+	s.coldPrimeRetryReset()
+	s.wakeSyncSweep()
 }
 
 // bulkFailure is the most recent doBulkSync failure (#18752), for display.
@@ -749,6 +762,13 @@ func (s *SessionSync) noteBulkResult(err error) {
 	if err != nil {
 		s.lastBulkFailure.Store(&bulkFailure{err: err.Error(), at: time.Now()})
 	}
+	// #19115: every authoritative bulk ends here. Apply it to the owed retry
+	// schedule, then wake the sweep for EVERY outcome: a failure makes the
+	// debt due at its backed-off deadline, and a success of an OLDER debt
+	// generation leaves a newer one owed without pending (#9626 interleaving),
+	// which no arm will announce again.
+	s.noteColdPrimeRetryResult(err)
+	s.wakeSyncSweep()
 }
 
 // coldPrimeOwedGen is the generation of the outstanding cold-prime debt, or 0
@@ -787,6 +807,7 @@ func (s *SessionSync) dischargeColdPrime(stamp uint64) {
 		s.needColdPrime.Store(false)
 		s.coldPrimeOwedSince.Store(0)
 		s.lastBulkFailure.Store(nil)
+		s.coldPrimeRetryReset() // #19115
 	}
 }
 
@@ -874,7 +895,7 @@ func (s *SessionSync) ColdPrimeDebtDetail() string {
 	if f := s.lastBulkFailure.Load(); f != nil {
 		last = fmt.Sprintf("%s (%s ago)", f.err, time.Since(f.at).Round(time.Second))
 	}
-	return fmt.Sprintf("owed for %s; it clears when a bulk re-drive (every sweep tick) is acked by the peer; last bulk error: %s",
+	return fmt.Sprintf("owed for %s; it clears when a bulk re-drive (1 s after a failure, then 2 s, then every 4 s) is acked by the peer; last bulk error: %s",
 		owed, last)
 }
 
