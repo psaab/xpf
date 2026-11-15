@@ -6,10 +6,10 @@ import (
 	"time"
 )
 
-// #19115 (design v4, issue #19115): an owed cold-prime debt with no bulk in
-// flight is re-driven inside the manual-failover admission window, at a
-// backed-off cadence that no retry branch and no sweep frequency can bypass,
-// and no authoritative bulk is sent twice for one obligation.
+// #19115 (design v4, narrowed 2026-11-15): an owed cold-prime debt with no
+// bulk in flight is re-driven inside the manual-failover admission window, at
+// a backed-off cadence that no sweep frequency can bypass, and no
+// authoritative bulk is sent twice for one obligation.
 //
 // Before this, the sweep's owed re-drive was the only consumer of a debt left
 // on a live connection, and it ran only on the sweep timer: 15 s active / 60 s
@@ -21,21 +21,25 @@ import (
 //
 // The model:
 //
-//   - ONE BACKOFF for every RETRY of an authoritative bulk (the forced resync
-//     re-armed after a failure, the owed cold-prime re-drive, the aged-ack
-//     re-drive): bulkRetryNotBefore. It is advanced by ANY authoritative bulk
-//     that ends in a non-fence error (1 s, 2 s, then 4 s after that failure),
-//     reset by a SUCCESSFUL send (the window wrote BulkEnd; publishing pending
-//     state alone is not success), by a discharge, by the runtime being wired
-//     and by a new debt generation, which is eligible at once (the next sweep
-//     tick sends it, as the #9626/#10387/#9618 contracts require) and whose
-//     first re-drive is SCHEDULED coldPrimeFirstRetryDelay after its arm. It
-//     never touches the #18752 owed age or last failure. New forced work is
-//     never dropped: an armed forceResync waits for the deadline, then runs.
-//   - OWED ELIGIBILITY: while a cold-prime debt is owed it governs every sweep
-//     retry. The owed re-drive may start only when no young ack covers the
-//     debt, the bulk is not fenced, and the backoff deadline has passed; the
-//     aged-ack branch never runs on its behalf.
+//   - THE BACKOFF, bulkRetryNotBefore, holds back ONLY the owed cold-prime
+//     re-drive. It is advanced by ANY authoritative bulk that ends in a
+//     non-fence error, to 1 s, 2 s, then 4 s after that failure COMPLETED (a
+//     failed attempt's own duration adds to the start-to-start gap). It is
+//     reset by a SUCCESSFUL send (the window wrote BulkEnd; publishing
+//     pending state alone is not success), by a discharge, by the runtime
+//     being wired and by a new debt generation, which is eligible at once
+//     (the next sweep tick sends it, as the #9626/#10387/#9618 contracts
+//     require) and whose first re-drive is SCHEDULED coldPrimeFirstRetryDelay
+//     after its arm. It never touches the #18752 owed age or last failure.
+//     The other retries keep their pre-#19115 cadence, by the user's decision
+//     of 2026-11-15 (Codex findings 1 and 17 on design v4; #19135): a forced
+//     resync re-armed after a failure and the aged-ack re-drive retry on the
+//     next sweep tick, the barrier-fence re-prime on the next refused
+//     barrier, the daemon prime on its own schedule.
+//   - OWED ELIGIBILITY: while a cold-prime debt is owed, the sweep's retry is
+//     the owed re-drive or nothing. It may start only when no young ack covers
+//     the debt, the bulk is not fenced, and the backoff deadline has passed;
+//     the aged-ack branch never runs on its behalf.
 //   - SCHEDULING: the sweep timer is lowered to the debt's due time, the later
 //     of the deadline and a young ack's 35 s expiry, armed EXACTLY at it. A due
 //     time already passed is scheduled at the end of a new debt's first delay,
@@ -50,17 +54,22 @@ import (
 //     advanced deadline. Each caller rechecks ITS OWN obligation under the
 //     lock before exporting: the owed re-drive its eligibility, the
 //     connect-time cold prime that its debt is not already covered by a
-//     pending bulk, the aged-ack re-drive that the aged bulk is still owed,
-//     the daemon prime that no young bulk is pending, the barrier-fence
-//     re-prime that the fence still needs it. A peer's bulk request and a
-//     forced resync are new work and always export.
+//     pending bulk, the aged-ack re-drive that the aged bulk is still owed
+//     and no debt is, the daemon prime that no young bulk is pending, the
+//     barrier-fence re-prime that the fence still needs it. A peer's bulk
+//     request and a forced resync always export.
 
 const (
-	// coldPrimeRetryBase is the first backoff after a failed authoritative
-	// bulk; it doubles to coldPrimeRetryBase << coldPrimeRetryMaxShift.
+	// coldPrimeRetryBase is the owed re-drive's first backoff after a failed
+	// authoritative bulk; it doubles to coldPrimeRetryBase <<
+	// coldPrimeRetryMaxShift.
 	coldPrimeRetryBase = time.Second
-	// coldPrimeRetryMaxShift caps the backoff at 4 s, so every 5 s admission
-	// window holds the START of at least one attempt.
+	// coldPrimeRetryMaxShift caps the backoff at 4 s. Measured from an
+	// observed completed failure, the next attempt reaches a qualifying
+	// pending bulk inside a 5 s admission window when the remaining backoff
+	// (at most 4 s), the scheduling and lock delay and that attempt's own
+	// successful time-to-pending add up to less than 5 s. A window that opens
+	// during a failing attempt also waits for that attempt to end.
 	coldPrimeRetryMaxShift = 2
 	// coldPrimeFirstRetryDelay schedules a NEW debt generation's first sweep
 	// re-drive (the debt itself is eligible at once): a debt armed with no
@@ -100,14 +109,15 @@ func (s *SessionSync) coldPrimeFreshUntilNs() int64 {
 	return s.coldPrimeFreshUntil
 }
 
-// bulkRetryNotBeforeNs is the earliest nowMono() a retry may start, or 0.
+// bulkRetryNotBeforeNs is the earliest nowMono() the owed re-drive may start,
+// or 0.
 func (s *SessionSync) bulkRetryNotBeforeNs() int64 {
 	s.bulkRetryMu.Lock()
 	defer s.bulkRetryMu.Unlock()
 	return s.bulkRetryNotBefore
 }
 
-// bulkRetryBackoffOpen reports whether the retry backoff has elapsed.
+// bulkRetryBackoffOpen reports whether the owed re-drive's backoff has elapsed.
 func (s *SessionSync) bulkRetryBackoffOpen() bool {
 	return s.nowMono() >= s.bulkRetryNotBeforeNs()
 }
@@ -236,13 +246,14 @@ func (s *SessionSync) redriveOwedColdPrime() {
 // redriveAgedBulk re-sends an aged, unacknowledged authoritative bulk that
 // carries no cold-prime debt (a forced resync withheld at BulkEnd). The caller
 // has taken bulkRedriveInFlight; it is released here on EVERY path. Under
-// bulkSendMu it rechecks its own obligation (the aged bulk is still owed, no
-// debt has been armed meanwhile, the backoff has elapsed) before clearing the
-// pending ack and exporting.
+// bulkSendMu it rechecks its own obligation (the aged bulk is still owed, and
+// no debt has been armed meanwhile: an owed debt is the owed re-drive's to
+// send) before clearing the pending ack and exporting. It keeps its
+// pre-#19115 cadence: the retry backoff does not hold it back.
 func (s *SessionSync) redriveAgedBulk() {
 	defer s.bulkRedriveInFlight.Store(false)
 	s.bulkSendMu.Lock()
-	if s.needColdPrime.Load() || !s.bulkRetryBackoffOpen() || !(s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) {
+	if s.needColdPrime.Load() || !(s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) {
 		s.bulkSendMu.Unlock()
 		return
 	}

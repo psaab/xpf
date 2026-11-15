@@ -1232,8 +1232,8 @@ pay it is in flight:
 
 - `show chassis cluster information`, Cold synchronization block:
   `Cold prime owed to peer (no bulk pending): owed for <age>; it clears when a
-  bulk re-drive (1 s after a failure, then 2 s, then every 4 s) is acked by the
-  peer; last bulk error: <error> (<age> ago)`, followed by `Blocks: demotion of this node's primary
+  bulk re-drive (1 s after a failure, then 2 s, then 4 s after each later
+  failure) is acked by the peer; last bulk error: <error> (<age> ago)`, followed by `Blocks: demotion of this node's primary
   RGs (manual failover/failback and ISSU drain)`. The error reads `none recorded`
   before the first failed re-drive in this cold-prime episode.
 - The refused failover's error ends with the same detail.
@@ -1244,10 +1244,16 @@ pay it is in flight:
 **How it clears.** Only on its own. The sync sweep re-drives the bulk on a
 schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
 - 100 ms after a new debt is armed;
-- 1 s after a failed attempt, then 2 s, then every 4 s, so every 5 s
-  admission window holds the start of at least one retry. The same backoff
-  holds back every other retry of a failing bulk (a forced resync, an aged
-  unacknowledged bulk);
+- 1 s after a failed attempt ENDS, then 2 s, then 4 s after each later
+  failure. The wait runs from the end of the failed attempt, so a slow
+  failing export adds its own duration to the gap. A drain admitted within
+  5 s therefore needs the remaining wait (at most 4 s), any wait for another
+  bulk in progress, and the next attempt's own export up to its pending
+  publish to add up to less than 5 s. A drain that starts during a failing
+  attempt also waits for that attempt to end. This backoff applies only to
+  the cold-prime re-drive; other retries of a failing bulk (a forced resync,
+  an aged unacknowledged bulk, the barrier re-prime) keep their own earlier
+  cadence (#19135);
 - while an ack for it is younger than 35 s, not at all (#9626);
 - while the bulk is fenced for a peer that has not proved a capability
   (install-table identity, IPsec discriminator), not at all, until the peer's

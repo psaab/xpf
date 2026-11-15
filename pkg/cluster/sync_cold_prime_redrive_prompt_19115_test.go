@@ -466,8 +466,10 @@ func TestRedriveDoesNotStackOnAnInFlightColdPrime19115(t *testing.T) {
 // deadline the re-drive checks, not a timer cap. Under a sweep that ticks
 // every 50-100 ms (the fast profile; negotiated liveness or session work
 // speed the production sweep up the same way), a persistently failing export
-// must still be attempted about 1 s, then 2 s, then 4 s apart, not on every
-// tick. (A first revision negotiated primary liveness for the fast sweep; its
+// must still be attempted about 1 s, then 2 s, then 4 s after each failure
+// (these failures are instantaneous, so that is also the start-to-start gap;
+// TestOwedRetryBackoffRunsFromTheFailedAttemptsEnd19115 separates the two),
+// not on every tick. (A first revision negotiated primary liveness for the fast sweep; its
 // scan interval adapts upward with no rows, so the sweep was not actually fast
 // and the cell did not see a missing deadline check.)
 func TestOwedRetryBacksOffUnderAFastSweep19115(t *testing.T) {
@@ -491,6 +493,65 @@ func TestOwedRetryBacksOffUnderAFastSweep19115(t *testing.T) {
 		if gap > want+1500*time.Millisecond {
 			t.Errorf("#19115: retry %d came %v after the previous attempt, want about %v", i+1, gap.Round(time.Millisecond), want)
 		}
+	}
+}
+
+// TestOwedRetryBackoffRunsFromTheFailedAttemptsEnd19115 (Codex findings 7
+// and 20 on design v4): the backoff runs from the END of a failed attempt, so
+// the failed attempt's own duration adds to the start-to-start gap, and under
+// the production 15 s / 60 s profile the sweep timer is armed exactly at each
+// deadline, the 4 s cap included. Every failed export takes 400 ms. A backoff
+// measured from the attempt's START comes 400 ms early; a timer that rounds a
+// deadline up (or waits for the profile) comes late.
+func TestOwedRetryBackoffRunsFromTheFailedAttemptsEnd19115(t *testing.T) {
+	const exportTakes = 400 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	var mu sync.Mutex
+	var starts, ends []time.Time
+	var failuresLeft atomic.Int32
+	failuresLeft.Store(3) // the connect attempt and two re-drives fail
+	src := func() (BulkSnapshot, error) {
+		mu.Lock()
+		starts = append(starts, time.Now())
+		mu.Unlock()
+		if failuresLeft.Add(-1) < 0 {
+			return BulkSnapshot{}, nil
+		}
+		time.Sleep(exportTakes)
+		mu.Lock()
+		ends = append(ends, time.Now())
+		mu.Unlock()
+		return BulkSnapshot{}, errExportGenChanged19115
+	}
+	ss := primarySync19115(t, ctx, sweepProfiles19115[1], src)
+	conn := newBulkCaptureConn()
+	t.Cleanup(func() { conn.Close() })
+	ss.handleNewConnection(ctx, 0, conn, true)
+	if _, ok := waitForBulkSyncs19115(ss, 1, 11*time.Second); !ok {
+		t.Fatalf("#19115: the owed debt was not delivered within 11 s (want failures ending at about 0.4 s, 1.8 s and 4.2 s, then a success at about 8.2 s)")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(starts) != 4 || len(ends) != 3 {
+		t.Fatalf("FIXTURE: want 4 attempts and 3 failures, got %d and %d", len(starts), len(ends))
+	}
+	for i, backoff := range []time.Duration{time.Second, 2 * time.Second, 4 * time.Second} {
+		fromEnd := starts[i+1].Sub(ends[i])
+		if fromEnd < backoff-30*time.Millisecond {
+			t.Errorf("#19115 (Codex finding 20): retry %d started %v after the failed attempt ENDED, want at least %v; "+
+				"the backoff ran from the attempt's start", i+1, fromEnd.Round(time.Millisecond), backoff)
+		}
+		if fromEnd > backoff+400*time.Millisecond {
+			t.Errorf("#19115 (Codex findings 7, 13): retry %d started %v after the failed attempt ended, want about %v; "+
+				"the sweep timer was not armed at the deadline", i+1, fromEnd.Round(time.Millisecond), backoff)
+		}
+		t.Logf("retry %d: %v after the failure ended, %v after the failed attempt started",
+			i+1, fromEnd.Round(time.Millisecond), starts[i+1].Sub(starts[i]).Round(time.Millisecond))
+	}
+	if gap := starts[3].Sub(starts[2]); gap < 4*time.Second+exportTakes-30*time.Millisecond {
+		t.Errorf("#19115 (Codex finding 7): at the 4 s cap the start-to-start gap is %v, want at least 4 s plus the failed export's %v",
+			gap.Round(time.Millisecond), exportTakes)
 	}
 }
 
@@ -581,58 +642,92 @@ func TestFencedDebtWaitsForCapableDiscovery19115(t *testing.T) {
 	t.Logf("fenced debt re-driven %v after capable discovery", took.Round(time.Millisecond))
 }
 
-// TestDebtArmedDuringABulkIsSentAfterIt19115 (Codex P1-2): a new debt
-// generation armed while an older one's bulk is on the wire is not paid by
-// that bulk (#9626: the bulk carries the generation it captured when its
-// window opened, before BulkStart). Once it ends, the new generation is sent
-// promptly, and that bulk carries the new generation. The arm lands when the
-// first bulk writes its BulkStart, the same point the #9626 cell uses.
+// TestDebtArmedDuringABulkIsSentAfterIt19115 (Codex P1-2 on design v3,
+// finding 15 on v4): a debt generation armed AFTER a bulk captured its
+// generation is a newer debt, which that bulk does not pay (#9626). The
+// sender is HELD at its BulkStart write: after the window captured the
+// generation it pays, before it publishes its pending ack. The newer
+// generation is armed there, and only then is the sender released. The held
+// bulk must publish the OLDER generation (so its ack cannot discharge the
+// newer debt), and the newer debt must then be sent promptly by a second bulk
+// that carries it.
 func TestDebtArmedDuringABulkIsSentAfterIt19115(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	ss := primarySync19115(t, ctx, sweepProfiles19115[1], (&flakySnapshot19115{}).read)
-	armed := make(chan uint64, 1)
-	conn := &armOnBulkStartConn19115{bulkCaptureConn: newBulkCaptureConn(), onBulkStart: func() {
-		ss.mu.Lock()
-		ss.armColdPrimeLocked()
-		gen := ss.coldPrimeGen.Load()
-		ss.mu.Unlock()
-		armed <- gen
-	}}
-	t.Cleanup(func() { conn.Close() })
-	older := ss.coldPrimeGen.Load()
-	ss.handleNewConnection(ctx, 0, conn, true)
-	var newer uint64
+	conn := &holdAtBulkStartConn19115{
+		bulkCaptureConn: newBulkCaptureConn(),
+		ss:              ss,
+		held:            make(chan struct{}),
+		release:         make(chan struct{}),
+	}
+	t.Cleanup(func() {
+		conn.releaseOnce.Do(func() { close(conn.release) })
+		conn.Close()
+	})
+	connected := make(chan struct{})
+	go func() {
+		defer close(connected)
+		ss.handleNewConnection(ctx, 0, conn, true)
+	}()
 	select {
-	case newer = <-armed:
+	case <-conn.held:
 	case <-time.After(5 * time.Second):
-		t.Fatal("FIXTURE: the first bulk never wrote its BulkStart")
+		t.Fatal("FIXTURE: the connect-time bulk never wrote its BulkStart")
+	}
+	// The sender is between its generation capture and its pending
+	// publication. The generation it captured is the current one: nothing has
+	// armed since.
+	ss.mu.Lock()
+	captured := ss.coldPrimeGen.Load()
+	ss.armColdPrimeLocked()
+	newer := ss.coldPrimeGen.Load()
+	ss.mu.Unlock()
+	if newer == captured {
+		t.Fatal("FIXTURE: the arm did not make a newer generation")
+	}
+	conn.releaseOnce.Do(func() { close(conn.release) })
+	<-connected
+	if got := conn.firstPublished.Load(); got != captured {
+		t.Fatalf("#9626 (Codex finding 15): the held bulk published generation %d, want the %d it captured before the arm "+
+			"(the newer %d is not this bulk's to pay)", got, captured, newer)
 	}
 	took, ok := waitForBulkSyncs19115(ss, 2, owedRedriveBound19115)
 	if !ok {
 		t.Fatalf("#19115 (Codex P1-2): the debt armed during a bulk was not sent within %v of that bulk (%d bulks)",
 			owedRedriveBound19115, ss.stats.BulkSyncs.Load())
 	}
-	if got := ss.pendingBulkOwed.Load(); got != newer || newer == older {
-		t.Errorf("#19115: the bulk sent after the in-flight one carries generation %d, want the newer %d (the connect arm made %d)", got, newer, older)
+	if got := ss.pendingBulkOwed.Load(); got != newer {
+		t.Errorf("#19115: the bulk sent after the held one carries generation %d, want the newer %d", got, newer)
 	}
-	t.Logf("newer debt sent %v after the older bulk ended", took.Round(time.Millisecond))
+	t.Logf("newer debt sent %v after the held bulk ended", took.Round(time.Millisecond))
 }
 
-// armOnBulkStartConn19115 runs onBulkStart, once and asynchronously, when a
-// BulkStart frame is written through it.
-type armOnBulkStartConn19115 struct {
+// holdAtBulkStartConn19115 holds the FIRST BulkStart write until release is
+// closed (held is closed when it is reached), and records the pending
+// generation the first bulk published when that bulk writes its BulkEnd: the
+// window publishes the pending stamp before it writes BulkEnd.
+type holdAtBulkStartConn19115 struct {
 	*bulkCaptureConn
-	once        sync.Once
-	onBulkStart func()
+	ss             *SessionSync
+	held, release  chan struct{}
+	startOnce      sync.Once
+	endOnce        sync.Once
+	releaseOnce    sync.Once
+	firstPublished atomic.Uint64
 }
 
-func (c *armOnBulkStartConn19115) Write(b []byte) (int, error) {
-	n, err := c.bulkCaptureConn.Write(b)
+func (c *holdAtBulkStartConn19115) Write(b []byte) (int, error) {
 	if len(b) > 4 && b[4] == syncMsgBulkStart {
-		c.once.Do(func() { go c.onBulkStart() })
+		c.startOnce.Do(func() {
+			close(c.held)
+			<-c.release
+		})
 	}
-	return n, err
+	if len(b) > 4 && b[4] == syncMsgBulkEnd {
+		c.endOnce.Do(func() { c.firstPublished.Store(c.ss.pendingBulkOwed.Load()) })
+	}
+	return c.bulkCaptureConn.Write(b)
 }
 
 // TestAgedAckIsRetriedAtItsExpiry19115 (Codex P1-2): a young ack suppresses
@@ -800,11 +895,14 @@ func TestSweepWakesDoNotPostponeTheSweep19115(t *testing.T) {
 	}
 }
 
-// TestForcedResyncHonoursTheBackoff19115 (Codex finding 1 on design v3): a
-// forced resync re-armed after a failure is a RETRY and honours the shared
-// backoff. Under a 50 ms sweep, a persistently failing forced export is
-// attempted about 1 s, then 2 s apart, not on every tick.
-func TestForcedResyncHonoursTheBackoff19115(t *testing.T) {
+// TestForcedResyncKeepsItsCadence19115 pins the narrowed scope (the user's
+// decision of 2026-11-15 on Codex findings 1 and 17 on design v4): the retry
+// backoff holds back ONLY the owed cold-prime re-drive. A forced resync armed
+// while the backoff is closed (a bulk failed just now) goes on the next sweep
+// tick, as before #19115. Holding it to the deadline is the v4 gate that was
+// removed, and it also cost a slow profile interval when no debt was owed to
+// schedule the deadline (Codex finding 18).
+func TestForcedResyncKeepsItsCadence19115(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	snap := &flakySnapshot19115{}
@@ -820,23 +918,22 @@ func TestForcedResyncHonoursTheBackoff19115(t *testing.T) {
 	if ss.needColdPrime.Load() {
 		t.Fatal("FIXTURE: the ack did not discharge the debt")
 	}
-	snap.failures.Store(1 << 20)
-	before := len(snap.times())
+	snap.failures.Store(1)
+	if err := ss.doBulkSync(); err == nil {
+		t.Fatal("FIXTURE: want the injected bulk failure")
+	}
+	if ss.bulkRetryBackoffOpen() {
+		t.Fatal("FIXTURE: the failure must close the backoff for 1 s")
+	}
+	bulks := ss.stats.BulkSyncs.Load()
 	ss.forceResync.Store(true) // a delete-journal overflow
-	time.Sleep(5 * time.Second)
-	at := snap.times()[before:]
-	if len(at) < 3 {
-		t.Fatalf("#19115: want the forced resync and two retries within 5 s, got %d attempts", len(at))
+	const bound = 600 * time.Millisecond
+	took, ok := waitForBulkSyncs19115(ss, bulks+1, bound)
+	if !ok {
+		t.Fatalf("#19115 (narrowed scope): a forced resync armed inside the owed re-drive's 1 s backoff was not sent within %v "+
+			"under a 50 ms sweep; the backoff holds back only the owed cold-prime re-drive", bound)
 	}
-	for i, want := range []time.Duration{time.Second, 2 * time.Second} {
-		if gap := at[i+1].Sub(at[i]); gap < want-150*time.Millisecond {
-			t.Errorf("#19115 (Codex finding 1): forced-resync retry %d came %v after the previous attempt, want at least %v; the backoff does not gate the forced branch",
-				i+1, gap.Round(time.Millisecond), want)
-		}
-	}
-	if len(at) > 4 {
-		t.Errorf("#19115 (Codex finding 1): %d forced-resync attempts in 5 s under a 50 ms sweep, want at most 4", len(at))
-	}
+	t.Logf("forced resync sent %v after it was armed, inside the backoff", took.Round(time.Millisecond))
 }
 
 // TestIneligibleOwedRetryDoesNotFallThroughToAgedRetry19115 (Codex finding

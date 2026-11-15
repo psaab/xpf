@@ -1713,8 +1713,9 @@ type SessionSync struct {
 	needColdPrime  atomic.Bool
 	bulkMu         sync.Mutex
 	bulkInProgress bool
-	// #19115 (design v4): the backoff every authoritative bulk RETRY honours
-	// (sync_cold_prime_retry_19115.go). bulkRetryNotBefore is in nowMono()
+	// #19115: the owed cold-prime re-drive's backoff, advanced by every failed
+	// authoritative bulk (sync_cold_prime_retry_19115.go). It holds back only
+	// the owed re-drive. bulkRetryNotBefore is in nowMono()
 	// nanoseconds, 0 = eligible now; bulkRetryFailures counts consecutive
 	// non-fence bulk failures. bulkRetryMu is a LEAF lock: nothing else is
 	// taken while it is held.
