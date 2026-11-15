@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -634,3 +635,120 @@ func TestShimInterfaceAttachIsClassified19110(t *testing.T) {
 }
 
 var _ link.Link = (*pinTrackingLink9847)(nil)
+
+// Codex P1-1: the registration check and the reclaim are ONE step under the XDP
+// ownership write lease. A second attacher runs outside the daemon's applySem
+// (the userspace status loop's revalidation reconcile). It must not be able to
+// attach, pin and register the interface between our check and our reclaim;
+// otherwise we would load THIS process's fresh pin and detach it.
+//
+// Deterministic interleaving: the hook fires between the check and the reclaim
+// and releases a racer that performs AttachXDP's registration step under the
+// lease. With the lease held, the racer blocks and the reclaim sees only the
+// stale pin. Without it, the racer registers at once, and the reclaim loads a
+// pin while its ifindex is REGISTERED.
+func raceRegistration19110(t *testing.T, m *Manager, pin string, ifindex int) (racerGo, racerDone chan struct{}) {
+	t.Helper()
+	racerGo, racerDone = make(chan struct{}), make(chan struct{})
+	go func() {
+		<-racerGo
+		m.xdpOwnershipMu.Lock()
+		m.setXDPLink(ifindex, &pinTrackingLink9847{})
+		_ = os.WriteFile(pin, []byte("pin"), 0600)
+		m.xdpOwnershipMu.Unlock()
+		close(racerDone)
+	}()
+	return racerGo, racerDone
+}
+
+func TestReclaimNeverDetachesALinkRegisteredMeanwhile19110(t *testing.T) {
+	dir := withTempPinDir9847(t)
+	h := newReclaimHarness19110(t)
+	pin := filepath.Join(dir, "xdp_29")
+	seedPinBody19110(t, pin, "stale")
+	m := New()
+	var loadedWhileRegistered atomic.Bool
+	h.load = func(path string) (reclaimableXDPLink, error) {
+		if _, ok := m.xdpLinkFor(29); ok {
+			loadedWhileRegistered.Store(true)
+		}
+		return h.fake(path, nil, nil), nil
+	}
+	racerGo, racerDone := raceRegistration19110(t, m, pin, 29)
+	old := reclaimAfterCheckHook
+	reclaimAfterCheckHook = func(int) {
+		close(racerGo)
+		select {
+		case <-racerDone:
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { reclaimAfterCheckHook = old })
+
+	m.reclaimBeforeAttach(newXDPAttachPass(), 29)
+	<-racerDone
+	if loadedWhileRegistered.Load() {
+		t.Error("the reclaim loaded (and would detach) a pin whose ifindex a concurrent attacher had " +
+			"REGISTERED after our registration check: the check and the reclaim are not one step " +
+			"under the XDP ownership lease (Codex P1-1)")
+	}
+}
+
+func TestSweepNeverDetachesALinkRegisteredMeanwhile19110(t *testing.T) {
+	dir := withTempPinDir9847(t)
+	h := newReclaimHarness19110(t)
+	pin := filepath.Join(dir, "xdp_29")
+	seedPinBody19110(t, pin, "stale")
+	m := New()
+	var loadedWhileRegistered atomic.Bool
+	h.load = func(path string) (reclaimableXDPLink, error) {
+		if _, ok := m.xdpLinkFor(29); ok {
+			loadedWhileRegistered.Store(true)
+		}
+		return h.fake(path, nil, nil), nil
+	}
+	racerGo, racerDone := raceRegistration19110(t, m, pin, 29)
+	old := sweepAfterKeepHook
+	sweepAfterKeepHook = func() {
+		close(racerGo)
+		select {
+		case <-racerDone:
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	t.Cleanup(func() { sweepAfterKeepHook = old })
+
+	m.removeUserspaceShimXDPLinkPins(nil) // 29 is not pending: the sweep owns it
+	<-racerDone
+	if loadedWhileRegistered.Load() {
+		t.Error("the sweep loaded a pin whose ifindex a concurrent attacher registered after the sweep " +
+			"read the registry (Codex P1-1)")
+	}
+}
+
+// Codex note: at most one occupant probe in flight. A probe abandoned at its
+// budget keeps running; the next pass must not stack another behind it.
+func TestAtMostOneOccupantProbeInFlight19110(t *testing.T) {
+	block := make(chan struct{})
+	var started atomic.Int32
+	old := xdpOccupantProbeFn
+	xdpOccupantProbeFn = func(int) (string, error) { started.Add(1); <-block; return "", nil }
+	t.Cleanup(func() { xdpOccupantProbeFn = old })
+	t.Cleanup(SetXDPOccupancyBudgetForTest(50*time.Millisecond, 50*time.Millisecond))
+
+	p1 := newXDPAttachPass()
+	p1.refusalDeadline()
+	if got := p1.diagnose(5); !strings.Contains(got, "diagnostic budget spent") {
+		t.Fatalf("first probe: %q, want the budget-spent result", got)
+	}
+	p2 := newXDPAttachPass()
+	p2.refusalDeadline()
+	got := p2.diagnose(5)
+	close(block)
+	if !strings.Contains(got, "previous occupant probe is still running") {
+		t.Errorf("second pass while the first probe still runs: %q, want it refused", got)
+	}
+	if n := started.Load(); n != 1 {
+		t.Errorf("%d probes started, want 1", n)
+	}
+}

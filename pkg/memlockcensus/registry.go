@@ -90,6 +90,7 @@ var Registry = []Site{
 	{File: "pkg/dataplane/verify_userspace_shim_test.go", Test: "TestVerifyUserspaceShimShrinkEquivalence"},
 	{File: "pkg/dataplane/xdp_stale_link_release_19110_test.go", Test: "TestNativeAttachAfterSweepNeverSeesTheStaleLink19110"},
 	{File: "pkg/dataplane/xdp_stale_link_release_19110_test.go", Test: "TestReclaimBeforeAttachLeavesTheKernelFree19110"},
+	{File: "pkg/dataplane/xdp_stale_link_release_19110_test.go", Test: "TestRepairUsesRealLinkIdentity19110"},
 	{File: "pkg/dataplane/xdp_stale_link_release_19110_test.go", Test: "TestStaleXDPLinkIsDetachedWhenTheSweepReturns19110"},
 	{File: "pkg/dataplane/xdp_stale_link_release_19110_test.go", Test: "TestUpperDeviceRefusalIsNotAGenericFallback19110"},
 	{File: "pkg/dataplane/userspace/wg_zone_admission_11574_test.go", Test: "TestSyncUserspaceWGZoneMapsMarshalsRustWidths17996"},

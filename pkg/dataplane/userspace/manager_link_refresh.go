@@ -346,8 +346,8 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 	// generic too (a re-probed VF whose driver refuses native), so the
 	// readiness reason is recomputed here as well, not only by Compile.
 	if m.bpfShim != nil && next.Config != nil {
-		if m.setGenericDataMembersLocked(m.computeGenericDataMemberReasons(next.Config)) {
-			logGenericDataMembers(m.genericDataMembers)
+		if reasons, changed := m.setGenericDataMembersLocked(m.resolveGenericDataMembers(next.Config)); changed {
+			logGenericDataMembers(reasons)
 		}
 	}
 }

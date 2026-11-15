@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -409,58 +408,50 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 	// kernel refuses generic for the same reasons, and an occupant that leaves
 	// mid-fallback would land a native-capable interface in skb mode.
 	pass := newXDPAttachPass()
-	reclaimed := make(map[int]bool)
-	reclaimFor := func(ifidx int) {
-		if reclaimed[ifidx] {
-			return
+	// ONE loop, in pendingXDP order (Codex P2-4). Each interface finishes its
+	// whole sequence before the next starts:
+	//   - reclaim its stale pin;
+	//   - try native;
+	//   - on an unsupported native attach, fall back to generic NOW.
+	// That keeps a falling-back interface's gap free of its neighbours'
+	// detaches and refusal waits. A neighbour's budget exhaustion can no
+	// longer strand it without any XDP. Stacking order needs no second loop:
+	// VLAN children are delegated to their parent and never attached here
+	// (the genericXDPIfindexes skip), and nothing else attached here is an
+	// upper device of another.
+	for _, ifidx := range result.pendingXDP {
+		tunnel := result.tunnelIfindexes[ifidx]
+		genericOnly := result.genericXDPIfindexes[ifidx]
+		if genericOnly && !tunnel {
+			continue // a VLAN child: its parent's program covers it
 		}
-		reclaimed[ifidx] = true
 		m.reclaimBeforeAttach(pass, ifidx)
-	}
-
-	failedNativeXDP := make(map[int]error)
-	for _, ifidx := range result.pendingXDP {
-		if result.tunnelIfindexes[ifidx] || result.genericXDPIfindexes[ifidx] {
-			continue
-		}
-		reclaimFor(ifidx)
-		err := m.attachWithin(pass, ifidx, false)
-		switch {
-		case err == nil:
-		case isAlreadyAttached(err):
-		case errors.Is(err, ErrXDPOccupied):
-			slog.Error("XDP attach refused until the occupancy budget ran out; not falling back to generic",
-				"ifindex", ifidx, "err", err, "issue", "#19110")
-			return err
-		default:
-			slog.Warn("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
-				"ifindex", ifidx, "err", err,
-				"impact", "higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP")
-			m.DetachXDP(ifidx)
-			failedNativeXDP[ifidx] = err
-		}
-	}
-	if len(failedNativeXDP) > 0 {
-		failed := make([]int, 0, len(failedNativeXDP))
-		for ifidx := range failedNativeXDP {
-			failed = append(failed, ifidx)
-		}
-		m.clearNativeXDPFlagsForIfindexes(failed)
-	}
-	for _, ifidx := range result.pendingXDP {
-		_, nativeFailed := failedNativeXDP[ifidx]
-		forceGeneric := nativeFailed || result.tunnelIfindexes[ifidx] || result.genericXDPIfindexes[ifidx]
-		if !forceGeneric {
-			continue
-		}
-		if result.genericXDPIfindexes[ifidx] && !result.tunnelIfindexes[ifidx] {
-			continue
-		}
-		reclaimFor(ifidx)
-		if err := m.attachWithin(pass, ifidx, true); err != nil {
-			if strings.Contains(err.Error(), "already attached") {
-				continue
+		if tunnel || genericOnly {
+			if err := m.attachWithin(pass, ifidx, true); err != nil && !isAlreadyAttached(err) {
+				if errors.Is(err, ErrXDPOccupied) {
+					slog.Error("generic XDP attach refused until the occupancy budget ran out",
+						"ifindex", ifidx, "err", err, "issue", "#19110")
+					return err
+				}
+				return fmt.Errorf("attach userspace XDP shim generic to ifindex %d: %w", ifidx, err)
 			}
+			continue
+		}
+		nerr := m.attachWithin(pass, ifidx, false)
+		switch {
+		case nerr == nil, isAlreadyAttached(nerr):
+			continue
+		case errors.Is(nerr, ErrXDPOccupied):
+			slog.Error("XDP attach refused until the occupancy budget ran out; not falling back to generic",
+				"ifindex", ifidx, "err", nerr, "issue", "#19110")
+			return nerr
+		}
+		slog.Warn("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
+			"ifindex", ifidx, "err", nerr,
+			"impact", "higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP")
+		m.DetachXDP(ifidx)
+		m.clearNativeXDPFlagsForIfindexes([]int{ifidx})
+		if err := m.attachWithin(pass, ifidx, true); err != nil && !isAlreadyAttached(err) {
 			if errors.Is(err, ErrXDPOccupied) {
 				slog.Error("generic XDP attach refused until the occupancy budget ran out",
 					"ifindex", ifidx, "err", err, "issue", "#19110")
@@ -468,9 +459,7 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 			}
 			return fmt.Errorf("attach userspace XDP shim generic to ifindex %d: %w", ifidx, err)
 		}
-		if nativeFailed {
-			m.recordGenericFallback(ifidx, failedNativeXDP[ifidx])
-		}
+		m.recordGenericFallback(ifidx, nerr)
 	}
 	return nil
 }
@@ -1404,7 +1393,8 @@ func (m *Manager) Close() error {
 	}
 	slices.Sort(missing)
 	if len(missing) > 0 {
-		return fmt.Errorf("XDP links without pins detached on close (ifindexes %v): shutdown was not hitless", missing)
+		return fmt.Errorf("XDP links without a pin proven to be theirs on close (ifindexes %v): "+
+			"they may have detached with their handles; shutdown was not hitless", missing)
 	}
 	return nil
 }

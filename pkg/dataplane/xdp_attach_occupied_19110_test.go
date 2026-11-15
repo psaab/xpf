@@ -364,3 +364,40 @@ func TestSlowSuccessesDoNotSpendTheRefusalBudget19110(t *testing.T) {
 		}
 	}
 }
+
+// C6 (Codex P2-4): an interface that falls back to generic finishes its fallback
+// BEFORE the next interface starts. Ifindex 4 is refused native for real
+// (EINVAL) and goes generic. Ifindex 5 is then refused for good (EBUSY), which
+// ends the pass. Ifindex 4 must already be attached generic before ifindex 5's
+// first attempt: its gap must not include 5's refusal wait, and 5's give-up
+// must not strand it.
+//
+// RED at master: the generic attach of ifindex 4 comes in a second loop, after
+// ifindex 5's native attempt.
+func TestFallbackCompletesBeforeTheNextInterface19110(t *testing.T) {
+	s := &xdpAttachScript19110{
+		native: map[int][]error{
+			4: {occupiedErr19110(4, unix.EINVAL)},
+			5: {occupiedErr19110(5, unix.EBUSY)},
+		},
+		generic: map[int][]error{5: {occupiedErr19110(5, unix.EEXIST)}},
+	}
+	_ = runAttach19110(t, s, 4, 5)
+	tr := s.trace()
+	g4, n5 := -1, -1
+	for i, o := range tr {
+		if o == "attach/4/generic" && g4 < 0 {
+			g4 = i
+		}
+		if o == "attach/5/native" && n5 < 0 {
+			n5 = i
+		}
+	}
+	if g4 < 0 {
+		t.Fatalf("ifindex 4 never got its generic attach (trace %v): a neighbour's refusal stranded it", tr)
+	}
+	if n5 >= 0 && g4 > n5 {
+		t.Errorf("ifindex 4's generic attach came after ifindex 5's native attempt (trace %v): its gap "+
+			"includes the neighbour's refusal wait", tr)
+	}
+}
