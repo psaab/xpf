@@ -286,3 +286,49 @@ func TestUpperDeviceRefusalIsNotAGenericFallback19110(t *testing.T) {
 		t.Errorf("the give-up diagnostic does not name the upper device %s that carries XDP: %v", upperName, aerr)
 	}
 }
+
+// P4 (R23 P3-6): P1 and P2 drive the SWEEP, but production never sweeps a
+// configured interface's pin; its path is the attach pass's per-interface
+// reclaim. Here a stale native link is left pinned at <linkPinPath>/xdp_<veth>,
+// the SIGKILL shape, and attachUserspaceShimXDP runs on that interface. The
+// #18740 seam hands each attach to the REAL kernel. Every iteration must
+// succeed on its FIRST native attempt: no EBUSY, no EEXIST, no retry.
+func TestReclaimBeforeAttachLeavesTheKernelFree19110(t *testing.T) {
+	if err := rlimit.RemoveMemlock(); err != nil {
+		t.Skipf("needs the memlock privilege (CAP_BPF/CAP_NET_ADMIN): %v", err)
+	}
+	f := newStaleLinkFixture19110(t)
+	t.Cleanup(SetLinkPinPathForTest(f.dir))
+	var natives, refusals int
+	t.Cleanup(SetXDPTransitionSeamForTest(func(op string, ifindex int, generic bool) (bool, error) {
+		if op != "attach" {
+			return true, nil
+		}
+		if !generic {
+			natives++
+		}
+		flags := link.XDPDriverMode
+		if generic {
+			flags = link.XDPGenericMode
+		}
+		l, err := link.AttachXDP(link.XDPOptions{Program: f.prog, Interface: ifindex, Flags: flags})
+		if err != nil {
+			if errors.Is(err, unix.EBUSY) || errors.Is(err, unix.EEXIST) {
+				refusals++
+			}
+			return true, fmt.Errorf("attach XDP to ifindex %d: %w", ifindex, err)
+		}
+		_ = l.Close()
+		return true, nil
+	}))
+	for i := 0; i < staleLinkIterations19110; i++ {
+		f.leaveStaleLink()
+		natives, refusals = 0, 0
+		err := New().attachUserspaceShimXDP(&CompileResult{pendingXDP: []int{f.ifindex}})
+		if err != nil || natives != 1 || refusals != 0 {
+			t.Fatalf("iteration %d: err=%v native attempts=%d refusals=%d; the per-interface reclaim must "+
+				"leave the kernel free for ONE native attach (#19110)", i, err, natives, refusals)
+		}
+		f.settle()
+	}
+}

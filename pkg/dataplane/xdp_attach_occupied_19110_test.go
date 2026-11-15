@@ -102,6 +102,9 @@ func runAttach19110(t *testing.T, s *xdpAttachScript19110, pending ...int) error
 // returns (an unbounded refusal wait).
 func runAttachWithSeam19110(t *testing.T, seam func(string, int, bool) (bool, error), pending ...int) error {
 	t.Helper()
+	// Never the production pin directory: the attach pass reclaims stale pins
+	// (#19110 review, R23 P2-1).
+	t.Cleanup(SetLinkPinPathForTest(t.TempDir()))
 	restore := SetXDPTransitionSeamForTest(seam)
 	t.Cleanup(restore)
 	m := New()
@@ -315,4 +318,49 @@ func TestOccupancyBudgetIsSharedAcrossThePass19110(t *testing.T) {
 		t.Errorf("the pass failed, but not on the refusal: %v", err)
 	}
 	t.Logf("pass ended after %s: %v", time.Since(start).Round(time.Millisecond), err)
+}
+
+// C3f: productive work does not consume the refusal budget (R23 P3-2). Two
+// interfaces attach successfully but SLOWLY (3 s each, longer in total than the
+// 5 s budget). A third is refused once, then attaches. A budget that started at
+// the pass start would already be spent at the third interface's first refusal
+// and fail the apply. One armed at the FIRST refusal lets it through.
+//
+// RED at master through the generic attempt on the refused interface.
+func TestSlowSuccessesDoNotSpendTheRefusalBudget19110(t *testing.T) {
+	var mu sync.Mutex
+	refusedOnce := false
+	var ops []string
+	seam := func(op string, ifindex int, generic bool) (bool, error) {
+		mu.Lock()
+		ops = append(ops, fmt.Sprintf("%s/%d/%v", op, ifindex, generic))
+		mu.Unlock()
+		if op != "attach" {
+			return true, nil
+		}
+		switch ifindex {
+		case 4, 5:
+			time.Sleep(3 * time.Second)
+			return true, nil
+		case 6:
+			mu.Lock()
+			defer mu.Unlock()
+			if !refusedOnce {
+				refusedOnce = true
+				return true, occupiedErr19110(6, unix.EBUSY)
+			}
+		}
+		return true, nil
+	}
+	if err := runAttachWithSeam19110(t, seam, 4, 5, 6); err != nil {
+		t.Errorf("attach failed after 6 s of SUCCESSFUL work and one refusal: %v (the refusal budget "+
+			"must start at the first refusal, not at the pass start)", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, o := range ops {
+		if o == "attach/6/true" {
+			t.Errorf("a generic attempt on the refused interface (ops %v)", ops)
+		}
+	}
 }

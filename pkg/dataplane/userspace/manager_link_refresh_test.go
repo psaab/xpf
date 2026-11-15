@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/psaab/xpf/pkg/config"
+	"github.com/psaab/xpf/pkg/dataplane"
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/internal/testguard"
@@ -41,6 +42,9 @@ func interfaceLinkRefreshManager11530(t *testing.T, cfg *config.Config, linuxNam
 	t.Cleanup(func() { buildLinkSnapshot = oldBuild })
 
 	m := New()
+	// #19110: the refresh attach reclaims stale XDP link pins through the real
+	// shim manager; never against the production pin directory.
+	t.Cleanup(dataplane.SetLinkPinPathForTest(t.TempDir()))
 	m.rxVlanPreconditionCheck = safeRxVlanPreconditionsForTest
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.generation = 7

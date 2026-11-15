@@ -34,7 +34,45 @@ import (
 // var rather than a const so #9847 tests can redirect the pin-finality paths
 // (scoped removal, re-pin, Close degraded-report) at a temp dir; production
 // never reassigns it.
-var linkPinPath = "/sys/fs/bpf/xpf/links"
+var linkPinPath = productionLinkPinPath
+
+// productionLinkPinPath is linkPinPath's production value.
+const productionLinkPinPath = "/sys/fs/bpf/xpf/links"
+
+// productionPinDirGuard is nil in production. Test binaries install a guard
+// that panics when a pin is about to be reclaimed, removed or written in the
+// PRODUCTION pin directory (#19110 review, R23 P2-1). The reclaim detaches
+// real links, so a cell that forgot to redirect linkPinPath and ran as root on
+// a host running xpfd would silently tear down the live firewall's XDP. This
+// package's tests install it from pin_dir_guard_19110_test.go. Other packages'
+// tests call GuardProductionPinDirForTest from their TestMain.
+var productionPinDirGuard func(path string)
+
+func guardPinDir(path string) {
+	if g := productionPinDirGuard; g != nil {
+		g(path)
+	}
+}
+
+// GuardProductionPinDirForTest makes every reclaim, sweep and pin repair panic
+// if it targets the production pin directory. It is for test binaries only,
+// which call it once, from TestMain.
+func GuardProductionPinDirForTest() {
+	productionPinDirGuard = func(path string) {
+		if path == productionLinkPinPath || strings.HasPrefix(path, productionLinkPinPath+"/") {
+			panic("test reached the PRODUCTION XDP link pin directory " + path +
+				": redirect it first with dataplane.SetLinkPinPathForTest (#19110)")
+		}
+	}
+}
+
+// SetLinkPinPathForTest redirects the link pin directory and returns a restore
+// func. It is for tests only.
+func SetLinkPinPathForTest(dir string) (restore func()) {
+	old := linkPinPath
+	linkPinPath = dir
+	return func() { linkPinPath = old }
+}
 
 // removeUserspaceShimXDPLinkPins deletes every `xdp_*` link pin for an
 // interface with NO live link in this process, so the attach is a FRESH
@@ -80,6 +118,7 @@ func (m *Manager) removeUserspaceShimXDPLinkPins(pending []int) {
 // this process manages. A missing dir is a no-op (best-effort, as at the
 // original site).
 func removeUserspaceShimXDPLinkPinsExcept(dir string, keep map[int]bool) {
+	guardPinDir(dir)
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
 		name := e.Name()
@@ -179,15 +218,17 @@ func (r xdpReclaimResult) log(ifindex int) {
 // The load failure is classified by its errno (cilium wraps BPF_OBJ_GET's errno
 // with %w; its type mismatch carries none):
 //   - ENOENT: nothing to do;
-//   - no errno: cilium's "is not a Link", a prog/map pin, which holds no XDP
-//     link attachment: remove it;
+//   - exactly cilium's "<path> is not a Link" (no errno): a prog/map pin,
+//     which holds no XDP link attachment: remove it;
 //   - EACCES on a non-bpffs file: not a pin at all: remove it;
-//   - anything else (EPERM, EACCES on bpffs, ENOMEM, EMFILE, ...): UNKNOWN. It
+//   - anything else (EPERM, EACCES on bpffs, ENOMEM, EMFILE, an errno-less
+//     info failure, ...): UNKNOWN. It
 //     may be a live link this process cannot open: unlink it as master did and
 //     let the attach's wait absorb the deferred release.
 //
 // Once the link is open, Close runs on every path.
 func reclaimStaleXDPLinkPin(path string) xdpReclaimResult {
+	guardPinDir(path)
 	r := xdpReclaimResult{path: path}
 	l, err := loadPinnedXDPLinkFn(path)
 	if err != nil {
@@ -196,7 +237,12 @@ func reclaimStaleXDPLinkPin(path string) xdpReclaimResult {
 		case errors.Is(err, os.ErrNotExist):
 			r.outcome = reclaimNoPin
 			return r
-		case !errors.As(err, &errno):
+		case !errors.As(err, &errno) && strings.HasSuffix(err.Error(), " is not a Link"):
+			// Exactly cilium's type mismatch (loadPinnedRawLink). Any OTHER
+			// errno-less error is not proof of "no link": cilium's
+			// RawLink.Info wraps an OBJ_GET_INFO_BY_FD failure with %s, so a
+			// live link whose info read failed arrives errno-less too (R23
+			// P3-1). That falls through to the unknown branch.
 			r.outcome = reclaimNotALink
 			r.err = removeStalePin(path)
 			return r
@@ -301,6 +347,7 @@ func ensureXDPLinkPinned(ifindex int, l link.Link) error {
 		return nil
 	}
 	pinFile := filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifindex))
+	guardPinDir(pinFile)
 	if _, err := os.Stat(pinFile); err == nil {
 		// #19110: presence is not proof. A reclaim that detached a dead
 		// process's link but could not unlink its pin leaves a pin naming a

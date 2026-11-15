@@ -142,6 +142,13 @@ func TestReclaimFailureContract19110(t *testing.T) {
 			load: func(_ *reclaimHarness19110, path string) (reclaimableXDPLink, error) {
 				return nil, fmt.Errorf("%s is not a Link", path)
 			}},
+		{name: "C1b2_errnoless_info_failure_is_unknown", wantOutcome: reclaimDeferred, wantGone: true,
+			// cilium's RawLink.Info wraps OBJ_GET_INFO_BY_FD with %s: a LIVE
+			// link whose info read failed arrives errno-less. It must not
+			// pass as "not a link" (R23 P3-1).
+			load: func(_ *reclaimHarness19110, _ string) (reclaimableXDPLink, error) {
+				return nil, errors.New("link info: bad file descriptor")
+			}},
 		{name: "C1c_eacces_off_bpffs", onBPFFS: false, wantOutcome: reclaimNotALink, wantGone: true,
 			load: func(_ *reclaimHarness19110, _ string) (reclaimableXDPLink, error) {
 				return nil, fmt.Errorf("load pinned link: %w", unix.EACCES)
@@ -313,38 +320,77 @@ func TestDeferredReclaimDoesNotAbortTheAttach19110(t *testing.T) {
 	}
 }
 
-// The fresh-only half, structurally: AttachXDP must never load a pin and Update
-// it. That path bypasses the fresh attach #9847 requires and the refusal wait
-// #19110 adds.
+// The fresh-only half, structurally and TRANSITIVELY (R23 P3-6): nothing
+// reachable from AttachXDP may load a pin. That covers AttachXDP itself, its
+// receiver's methods, and the package functions it calls. A reuse (load a pin,
+// Update it) needs a load, so the walk flags link.LoadPinnedLink and the reclaim
+// seam loadPinnedXDPLinkFn. The repair's identity check, pinnedXDPLinkIsOursFn,
+// is a function VARIABLE that only reads the link ID; the walk does not follow
+// variables.
 func TestAttachXDPIsFreshOnly19110(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "loader.go", nil, 0)
-	if err != nil {
-		t.Fatalf("parse loader.go: %v", err)
-	}
-	var fn *ast.FuncDecl
-	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "AttachXDP" && fd.Recv != nil {
-			fn = fd
+	decls := map[string][]*ast.FuncDecl{}
+	files, _ := filepath.Glob("*.go")
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
 		}
-	}
-	if fn == nil {
-		t.Fatal("(*Manager).AttachXDP not found in loader.go")
-	}
-	ast.Inspect(fn, func(n ast.Node) bool {
-		call, ok := n.(*ast.CallExpr)
-		if !ok {
-			return true
+		pf, err := parser.ParseFile(fset, f, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", f, err)
 		}
-		if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-			switch sel.Sel.Name {
-			case "LoadPinnedLink", "Update":
-				t.Errorf("AttachXDP calls %s at %s: a pin this process did not create must never be "+
-					"reused (#19110 fresh-only)", sel.Sel.Name, fset.Position(call.Pos()))
+		for _, d := range pf.Decls {
+			if fd, ok := d.(*ast.FuncDecl); ok && fd.Body != nil {
+				decls[fd.Name.Name] = append(decls[fd.Name.Name], fd)
 			}
 		}
-		return true
-	})
+	}
+	start := decls["AttachXDP"]
+	if len(start) == 0 {
+		t.Fatal("(*Manager).AttachXDP not found")
+	}
+	seen := map[*ast.FuncDecl]bool{}
+	queue := append([]*ast.FuncDecl(nil), start...)
+	for len(queue) > 0 {
+		fd := queue[0]
+		queue = queue[1:]
+		if seen[fd] {
+			continue
+		}
+		seen[fd] = true
+		recv := ""
+		if fd.Recv != nil && len(fd.Recv.List) == 1 && len(fd.Recv.List[0].Names) == 1 {
+			recv = fd.Recv.List[0].Names[0].Name
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			var name string
+			follow := false
+			switch fn := call.Fun.(type) {
+			case *ast.Ident:
+				name, follow = fn.Name, true
+			case *ast.SelectorExpr:
+				name = fn.Sel.Name
+				if id, ok := fn.X.(*ast.Ident); ok && recv != "" && id.Name == recv {
+					follow = true
+				}
+			}
+			if name == "LoadPinnedLink" || name == "loadPinnedXDPLinkFn" {
+				t.Errorf("%s (reachable from AttachXDP) calls %s at %s: a pin this process did not "+
+					"create must never be reused (#19110 fresh-only)", fd.Name.Name, name, fset.Position(call.Pos()))
+			}
+			if follow {
+				queue = append(queue, decls[name]...)
+			}
+			return true
+		})
+	}
+	if len(seen) < 3 {
+		t.Fatalf("the walk visited only %d function(s) from AttachXDP; the census is not following calls", len(seen))
+	}
 }
 
 func shortenOccupancyBudget19110(t *testing.T, budget, diag time.Duration) {
@@ -488,20 +534,30 @@ func TestCloseReportsAnUnreplaceableStalePinAsDegraded19110(t *testing.T) {
 
 // F4, dataplane half: the generic-fallback record. EOPNOTSUPP (the driver has
 // no native XDP at all) is the supported generic and is not reported. Any other
-// native refusal that ended in generic is. A later native attach clears it.
+// native refusal that ended in generic is.
+//
+// What clears it (R23 P2-3): a RE-COMMIT does NOT. The registered generic link
+// short-circuits AttachXDP ("already attached"), so no native attempt is made.
+// A detach, or a fresh process (an xpfd restart), does. The fixture models
+// production: after the first pass the generic link is REGISTERED, and the
+// second pass sees the short-circuit, as AttachXDP returns it.
 func TestUnintendedGenericRecord19110(t *testing.T) {
 	newReclaimHarness19110(t)
 	withTempPinDir9847(t)
+	m := New()
 	native := map[int]error{}
 	restore := SetXDPTransitionSeamForTest(func(op string, ifindex int, generic bool) (bool, error) {
-		if op != "attach" || generic {
+		if op != "attach" {
+			return true, nil
+		}
+		if _, ok := m.xdpLinkFor(ifindex); ok {
+			return true, fmt.Errorf("XDP already attached to ifindex %d", ifindex)
+		}
+		if generic {
 			return true, nil
 		}
 		return true, native[ifindex]
 	})
-	t.Cleanup(restore)
-
-	m := New()
 	native[5] = occupiedErr19110(5, unix.EINVAL)     // mlx5 with LRO on
 	native[6] = occupiedErr19110(6, unix.EOPNOTSUPP) // no ndo_bpf (iavf)
 	if err := m.attachUserspaceShimXDP(&CompileResult{pendingXDP: []int{5, 6}}); err != nil {
@@ -516,12 +572,64 @@ func TestUnintendedGenericRecord19110(t *testing.T) {
 			"supported deployment: %v", got)
 	}
 
-	native[5] = nil
+	// Production: the generic attach registered a link.
+	m.SetLinkForTest(5, &pinTrackingLink9847{}, nil)
+	native[5] = nil // the operator fixed LRO
 	if err := m.attachUserspaceShimXDP(&CompileResult{pendingXDP: []int{5}}); err != nil {
-		t.Fatalf("second attach: %v", err)
+		t.Fatalf("re-commit pass: %v", err)
+	}
+	if _, ok := m.UnintendedGenericXDP()[5]; !ok {
+		t.Error("a re-commit cleared the record, but in production the registered generic link " +
+			"short-circuits AttachXDP and no native attach happens: the record (and the F4 reason) " +
+			"must stay, and the remediation must say restart")
+	}
+
+	restore()
+	if err := m.DetachXDP(5); err != nil {
+		t.Fatalf("detach: %v", err)
 	}
 	if _, ok := m.UnintendedGenericXDP()[5]; ok {
-		t.Error("ifindex 5 attached native on the next pass but is still reported generic")
+		t.Error("DetachXDP removed the generic link but left its generic-fallback record")
+	}
+	if got := New().UnintendedGenericXDP(); len(got) != 0 {
+		t.Errorf("a fresh Manager (an xpfd restart) carries a record: %v", got)
+	}
+}
+
+// P2-2, the dataplane half: the single-interface attach the #14133 refresh
+// uses applies the compile pass's rules. An unsupported native attach falls
+// back and is recorded; a refusal never becomes a generic attempt.
+func TestShimInterfaceAttachIsClassified19110(t *testing.T) {
+	withTempPinDir9847(t)
+	newReclaimHarness19110(t)
+	t.Cleanup(SetXDPOccupancyBudgetForTest(300*time.Millisecond, 100*time.Millisecond))
+	stubOccupantProbe19110(t, "", nil)
+	var ops []string
+	native := map[int]error{29: occupiedErr19110(29, unix.EINVAL), 30: occupiedErr19110(30, unix.EBUSY)}
+	restore := SetXDPTransitionSeamForTest(func(op string, ifindex int, generic bool) (bool, error) {
+		ops = append(ops, fmt.Sprintf("%s/%d/%v", op, ifindex, generic))
+		if op != "attach" || generic {
+			return true, nil
+		}
+		return true, native[ifindex]
+	})
+	t.Cleanup(restore)
+	m := New()
+
+	if err := m.AttachShimXDPInterface(29, false); err != nil {
+		t.Fatalf("EINVAL interface: %v", err)
+	}
+	if m.UnintendedGenericXDP()[29] != "invalid argument" {
+		t.Errorf("the refresh attach's EINVAL->generic fallback was not recorded for F4: %v", m.UnintendedGenericXDP())
+	}
+	err := m.AttachShimXDPInterface(30, false)
+	if !errors.Is(err, ErrXDPOccupied) || !errors.Is(err, unix.EBUSY) {
+		t.Errorf("a persistent refusal on the refresh path = %v, want ErrXDPOccupied wrapping EBUSY", err)
+	}
+	for _, o := range ops {
+		if o == "attach/30/true" {
+			t.Errorf("the refresh path attempted generic after a refusal (ops %v)", ops)
+		}
 	}
 }
 

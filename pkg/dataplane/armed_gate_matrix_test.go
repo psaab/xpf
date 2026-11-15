@@ -45,7 +45,10 @@ var managerMethodClasses = map[string]string{
 	// --- class 1: fallible map-required (fresh -> ErrDataplaneNotArmed at
 	// each REQUIRED access; armed/retained absent -> master's text) ---
 	"AddTxPort": "class1", "AttachTC": "class1-carveout", "AttachXDP": "class1-carveout",
-	"SetZone": "class1", "SetVlanIfaceInfo": "class1",
+	// #19110 (R23 P2-2): only delegates to AttachXDP/DetachXDP, so it takes
+	// AttachXDP's class.
+	"AttachShimXDPInterface": "class1-carveout",
+	"SetZone":                "class1", "SetVlanIfaceInfo": "class1",
 	"ClearIfaceZoneMap": "class1", "ClearVlanIfaceMap": "class1",
 	"SwapToUserspaceXDPShimEntryProgram": "class1",
 	"ReadGlobalCounter":                  "class1", "ReadInterfaceCounters": "class1", "ClearInterfaceCounters": "class1",
@@ -250,8 +253,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(inventory) != 142 {
-		t.Fatalf("exported *Manager method inventory = %d, want 142", len(inventory))
+	if len(inventory) != 143 {
+		t.Fatalf("exported *Manager method inventory = %d, want 143", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {
@@ -337,6 +340,12 @@ var armedGateInvokeExemptions = map[string]string{
 	// asserted directly in the fresh/retained/pass-then-block legs.
 	"AttachXDP": "carve-out: asserted directly (fresh+retained+pass-then-block legs)",
 	"AttachTC":  "carve-out: asserted directly (pass-then-block leg)",
+	// #19110: only delegates to AttachXDP/DetachXDP, so its unarmed outcome is
+	// AttachXDP's own pre-registry loaded rejection, which AttachXDP's legs
+	// assert. Its classification (refusal vs fallback) is driven by the #19110
+	// cells (TestShimInterfaceAttachIsClassified19110 and the userspace refresh
+	// cells).
+	"AttachShimXDPInterface": "carve-out by delegation to AttachXDP: unarmed outcome asserted by AttachXDP's legs; classification by the #19110 cells",
 	// Compile's only direct registry access (redirect_capable) runs past
 	// CompileConfig's loaded check, so it never blocks pre-arm and cannot
 	// join the blocked legs; its fresh/retained outcomes are asserted
