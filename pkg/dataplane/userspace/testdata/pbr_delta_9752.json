@@ -11,6 +11,7 @@
   "event": "open",
   "fabric_ingress": false,
   "fabric_redirect": false,
+  "forward_wire_alias_origin": false,
   "fwd_packets": 0,
   "ifindex": 12,
   "ingress_ifindex": 0,
