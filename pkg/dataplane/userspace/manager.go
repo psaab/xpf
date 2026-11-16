@@ -423,6 +423,11 @@ type Manager struct {
 	// helper-facing view only: haGroups and the rg_active BPF map keep the
 	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
 	transferPreActive map[int]transferPreActivation
+	// helperEpoch (#19167 fold 1) advances on every helper reset and every
+	// spawn. A pre-activation's routes-ready is bound to the epoch its Begin
+	// saw: a helper replaced between the route republish and the publish
+	// never sees the RG active. Guarded by m.mu.
+	helperEpoch uint64
 	// rgActiveWritten (#19093) records, per rg_active slot, whether THIS
 	// process has landed a write to that slot through UpdateRGActive. The
 	// rg_active map is pinned under /sys/fs/bpf/xpf and outlives an unclean

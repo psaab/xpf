@@ -1,6 +1,7 @@
 package userspace
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -55,7 +56,7 @@ func TestPollCannotPublishPreActiveRGBeforeRoutes19167(t *testing.T) {
 		t.Fatal("the poll publish dropped the unrelated active RG2")
 	}
 
-	if err := m.PublishTransferPreActivation([]int{1}); err != nil && err.Error() != "userspace_ctrl map not loaded" {
+	if err := m.PublishTransferPreActivation([]int{1}, preActivateEpoch19167(m)); err != nil && err.Error() != "userspace_ctrl map not loaded" {
 		t.Fatalf("PublishTransferPreActivation: %v", err)
 	}
 	if got := rec.last(t); !got[1] {
@@ -92,7 +93,7 @@ func TestPublishMarksOnlyItsOwnRGs19167(t *testing.T) {
 	m.mu.Unlock()
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
 	m.BeginTransferPreActivation([]int{3}, time.Now().Add(time.Minute))
-	_ = m.PublishTransferPreActivation([]int{1})
+	_ = m.PublishTransferPreActivation([]int{1}, preActivateEpoch19167(m))
 	got := rec.last(t)
 	if !got[1] {
 		t.Fatalf("helper inventory %v: RG1 was published and must be active", got)
@@ -108,7 +109,7 @@ func TestPublishMarksOnlyItsOwnRGs19167(t *testing.T) {
 func TestReBeginKeepsAReadyPreActivationOpen19167(t *testing.T) {
 	m, rec := newPreActivateManager18559(t)
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
-	_ = m.PublishTransferPreActivation([]int{1})
+	_ = m.PublishTransferPreActivation([]int{1}, preActivateEpoch19167(m))
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(2*time.Minute))
 	pollPublish19167(t, m)
 	if got := rec.last(t); !got[1] {
@@ -128,5 +129,63 @@ func TestPendingPreActivationNotOpenedBySecondaryWrite19167(t *testing.T) {
 	}
 	if got := rec.last(t); got[1] {
 		t.Fatalf("helper inventory %v: an rg_active=false write published a routes-pending RG active", got)
+	}
+}
+
+// preActivateEpoch19167 is the helper epoch, for cells that call Publish
+// without a helper reset after their Begin (#19167 fold 1).
+func preActivateEpoch19167(m *Manager) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.helperEpoch
+}
+
+// Fold 1 (codex-d P2-1): routes-ready is bound to the helper that received the
+// routes. The helper is replaced between the route republish and the Publish:
+// the Publish is refused, and every HA publication afterwards keeps the RG
+// inactive (the snapshot replay to the new helper has not happened).
+func TestPreActivationRefusedAfterHelperReplaced19167(t *testing.T) {
+	m, rec := newPreActivateManager18559(t)
+	epoch := m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
+	// The helper exits and a replacement spawns before the daemon's Publish.
+	m.mu.Lock()
+	m.resetAfterHelperGoneLocked()
+	m.helperEpoch++ // what startHelperSupervisorLocked does at the spawn
+	m.mu.Unlock()
+	if err := m.PublishTransferPreActivation([]int{1}, epoch); !errors.Is(err, errPreActivationHelperChanged) {
+		t.Fatalf("Publish across a helper replacement = %v, want errPreActivationHelperChanged", err)
+	}
+	pollPublish19167(t, m)
+	if rec.count() == 0 {
+		t.Fatal("setup: no HA publication after the replacement, so this cell would observe nothing")
+	}
+	if got := rec.last(t); got[1] {
+		t.Fatalf("helper inventory %v: the replacement helper was told the pre-active RG1 is active", got)
+	}
+	m.mu.Lock()
+	ready := m.transferPreActive[1].routesReady
+	m.mu.Unlock()
+	if ready {
+		t.Fatal("the refused Publish still marked RG1 routes-ready")
+	}
+}
+
+// Fold 1: a helper reset drops the readiness of an ALREADY-OPEN pre-activation:
+// its routes went to the helper that is gone.
+func TestHelperResetDropsPreActivationReadiness19167(t *testing.T) {
+	m, rec := newPreActivateManager18559(t)
+	epoch := m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
+	if err := m.PublishTransferPreActivation([]int{1}, epoch); err != nil && err.Error() != "userspace_ctrl map not loaded" {
+		t.Fatalf("Publish: %v", err)
+	}
+	if got := rec.last(t); !got[1] {
+		t.Fatalf("setup: helper inventory %v, want RG1 open", got)
+	}
+	m.mu.Lock()
+	m.resetAfterHelperGoneLocked()
+	m.mu.Unlock()
+	pollPublish19167(t, m)
+	if got := rec.last(t); got[1] {
+		t.Fatalf("helper inventory %v after a helper reset: the pre-active RG1 stayed open on routes the new helper never got", got)
 	}
 }

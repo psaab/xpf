@@ -651,7 +651,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
 		opened := pub.published(t, "PublishTransferPreActivation", func() {
-			if err := m.PublishTransferPreActivation([]int{1}); err != nil {
+			if err := m.PublishTransferPreActivation([]int{1}, preActivateEpoch19167(m)); err != nil {
 				t.Logf("pre-activation publish tail: %v", err)
 			}
 		})

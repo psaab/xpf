@@ -39,6 +39,7 @@ package userspace
 //     status poll's signature comparison republishes the effective view.
 
 import (
+	"errors"
 	"sort"
 	"time"
 )
@@ -60,9 +61,14 @@ type transferPreActivation struct {
 // Re-beginning an RG that is still live and routes-ready only extends its
 // deadline: its routes are already in the helper FIB, and dropping it back to
 // pending would make the next helper publish close its forwarding mid-window.
-func (m *Manager) BeginTransferPreActivation(rgIDs []int, until time.Time) {
+//
+// It returns the helper epoch (#19167 fold 1). The caller hands it back to
+// PublishTransferPreActivation, which refuses if a helper reset or spawn
+// happened in between: the routes it republished may have gone to a helper
+// that no longer exists.
+func (m *Manager) BeginTransferPreActivation(rgIDs []int, until time.Time) uint64 {
 	if m == nil {
-		return
+		return 0
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -77,6 +83,26 @@ func (m *Manager) BeginTransferPreActivation(rgIDs []int, until time.Time) {
 		ready := m.transferPreActiveLocked(rgID, now) && m.transferPreActive[rgID].routesReady
 		m.transferPreActive[rgID] = transferPreActivation{until: until, routesReady: ready}
 	}
+	return m.helperEpoch
+}
+
+// errPreActivationHelperChanged refuses a pre-activation publish whose helper
+// was reset or replaced after the Begin (#19167 fold 1).
+var errPreActivationHelperChanged = errors.New(
+	"the userspace helper was reset or replaced after the pre-activation began; " +
+		"its route republish may have reached a helper that no longer exists, so the transfer runs break-before-make")
+
+// dropTransferPreActivationRoutesLocked is the helper-reset half of #19167
+// fold 1: every pre-active entry goes back to routes-pending (the routes went
+// to the helper that is gone) and the epoch moves, so a Publish still in flight
+// for the old helper is refused. The deadline is kept; the caller's release or
+// the deadline ends the entry. Caller holds m.mu.
+func (m *Manager) dropTransferPreActivationRoutesLocked() {
+	m.helperEpoch++
+	for rgID, entry := range m.transferPreActive {
+		entry.routesReady = false
+		m.transferPreActive[rgID] = entry
+	}
 }
 
 // PublishTransferPreActivation marks rgIDs ROUTES-READY and sends the effective
@@ -86,12 +112,20 @@ func (m *Manager) BeginTransferPreActivation(rgIDs []int, until time.Time) {
 // whose routes are not published yet, and that one must stay pending. IDs with
 // no pre-activation are ignored. A no-op publish without a running helper or
 // an HA inventory.
-func (m *Manager) PublishTransferPreActivation(rgIDs []int) error {
+//
+// epoch is what BeginTransferPreActivation returned. If the helper was reset or
+// replaced since (#19167 fold 1), nothing is marked ready and the publish is
+// refused: the caller's release then runs, and the transfer falls back to
+// #18559's break-before-make.
+func (m *Manager) PublishTransferPreActivation(rgIDs []int, epoch uint64) error {
 	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if epoch != m.helperEpoch {
+		return errPreActivationHelperChanged
+	}
 	for _, rgID := range rgIDs {
 		if entry, ok := m.transferPreActive[rgID]; ok {
 			entry.routesReady = true

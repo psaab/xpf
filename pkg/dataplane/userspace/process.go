@@ -1179,6 +1179,10 @@ func (m *Manager) helperExitedChanLocked() chan struct{} {
 // stop would leave exactly the stale readiness the issue is about; before this
 // existed the crash path cleared nothing at all.
 func (m *Manager) resetAfterHelperGoneLocked() {
+	// #19167 fold 1: the routes a pre-activation published went to the helper
+	// that is gone. Drop their readiness and move the epoch, so a publish
+	// still in flight for the old helper cannot open the RG on the next one.
+	m.dropTransferPreActivationRoutesLocked()
 	m.stopEventStreamLocked()
 	if m.syncCancel != nil {
 		m.syncCancel()

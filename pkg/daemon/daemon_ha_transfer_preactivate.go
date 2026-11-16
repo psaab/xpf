@@ -22,8 +22,8 @@ const transferPreActivateTTL = 5 * time.Second
 
 // transferPreActivator is the userspace dataplane surface the hook drives.
 type transferPreActivator interface {
-	BeginTransferPreActivation(rgIDs []int, until time.Time)
-	PublishTransferPreActivation(rgIDs []int) error
+	BeginTransferPreActivation(rgIDs []int, until time.Time) uint64
+	PublishTransferPreActivation(rgIDs []int, epoch uint64) error
 	EndTransferPreActivation(rgIDs []int) (bool, error)
 }
 
@@ -79,10 +79,11 @@ func (d *Daemon) beginTransferPreActivation(rgIDs []int) error {
 	// failover request behind a stuck apply, and a wait longer than the TTL
 	// published an overlay that had already expired (make-before-break lost
 	// with no log line).
+	var epoch uint64
 	if err := func() error {
 		if d.applySem == nil {
-			pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
-			return nil
+			epoch = pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
+			return d.preActivationRoutesPublished()
 		}
 		ctx, cancel := context.WithTimeout(d.applyCancelCtx(), transferPreActivateLockWait)
 		err := d.applySem.Acquire(ctx, 1)
@@ -93,21 +94,21 @@ func (d *Daemon) beginTransferPreActivation(rgIDs []int) error {
 			return errTransferPreActivationLockBusy
 		}
 		defer d.applySem.Release(1)
-		pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
+		epoch = pre.BeginTransferPreActivation(ids, time.Now().Add(transferPreActivateTTL))
 		// Routes first: the connected prefixes of the RG must be in the
 		// helper FIB before its forwarding opens, or the first redirected
 		// packet resolves to the cluster terminal (#16270).
 		// republishConnectedRG reads the overlay just marked.
-		if !d.republishConnectedRG("transfer-preactivate") {
-			return errors.New("connected-route republish failed; transfer pre-activation aborted")
-		}
-		return nil
+		return d.preActivationRoutesPublished()
 	}(); err != nil {
 		return err
 	}
 	// #19167: this call is what lets the helper see the RGs active, so it
-	// must stay after the successful republish above.
-	if err := pre.PublishTransferPreActivation(ids); err != nil {
+	// must stay after the successful republish above. It is refused if the
+	// helper was reset or replaced since the Begin (fold 1): the routes may
+	// have gone to a helper that no longer exists. The cluster's release then
+	// runs and the transfer falls back to break-before-make.
+	if err := pre.PublishTransferPreActivation(ids, epoch); err != nil {
 		return err
 	}
 	slog.Info("cluster: transfer pre-activation opened local forwarding", "rgs", ids)
@@ -131,5 +132,21 @@ func (d *Daemon) endTransferPreActivation(rgIDs []int) {
 	if reverted {
 		slog.Info("cluster: transfer pre-activation released without promotion", "rgs", rgIDs)
 		d.scheduleConnectedRGRepublish("transfer-preactivate-release")
+	}
+}
+
+// preActivationRoutesPublished runs the connected-RG republish for a transfer
+// pre-activation and reports whether the helper now holds the routes (#19167
+// review): published, or unchanged against the current helper's last
+// publication. A SKIPPED republish (resetting, no config, no overlay
+// publisher) published nothing, so it must not open forwarding either.
+func (d *Daemon) preActivationRoutesPublished() error {
+	switch outcome := d.republishConnectedRGOutcome("transfer-preactivate"); outcome {
+	case connectedRGRepublished, connectedRGRepublishUnchanged:
+		return nil
+	case connectedRGRepublishSkipped:
+		return errors.New("connected-route republish published nothing (daemon resetting, no active config, or no route publisher); transfer pre-activation aborted")
+	default:
+		return errors.New("connected-route republish failed; transfer pre-activation aborted")
 	}
 }

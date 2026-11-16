@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,23 +19,27 @@ import (
 
 type fakePreActivateDP struct {
 	*fakeOverlayDP
-	publishErr error
-	reverted   bool
-	marked     []int
-	published  []int // the RGs the publish marked routes-ready (#19167)
-	until      time.Time
+	publishErr     error
+	reverted       bool
+	marked         []int
+	published      []int  // the RGs the publish marked routes-ready (#19167)
+	epoch          uint64 // what Begin returns (#19167 fold 1)
+	publishedEpoch uint64 // what Publish was handed
+	until          time.Time
 }
 
-func (f *fakePreActivateDP) BeginTransferPreActivation(rgIDs []int, until time.Time) {
+func (f *fakePreActivateDP) BeginTransferPreActivation(rgIDs []int, until time.Time) uint64 {
 	f.marked = append([]int(nil), rgIDs...)
 	f.until = until
 	f.recordCall("mark")
 	if time.Until(until) <= 0 || time.Until(until) > transferPreActivateTTL {
 		f.recordCall("bad-deadline")
 	}
+	return f.epoch
 }
 
-func (f *fakePreActivateDP) PublishTransferPreActivation(rgIDs []int) error {
+func (f *fakePreActivateDP) PublishTransferPreActivation(rgIDs []int, epoch uint64) error {
+	f.publishedEpoch = epoch
 	f.published = append([]int(nil), rgIDs...)
 	f.recordCall("ha-publish")
 	return f.publishErr
@@ -208,5 +213,62 @@ func TestTransferPreActivationTTLStartsAfterLock18569(t *testing.T) {
 	if dp.until.Before(start.Add(hold).Add(transferPreActivateTTL)) {
 		t.Fatalf("overlay deadline %v is less than the TTL after the lock was taken (start %v + wait %v + TTL %v)",
 			dp.until, start, hold, transferPreActivateTTL)
+	}
+}
+
+// #19167 review (r23 P3-3): a FAILED route republish never opens forwarding.
+// The pre-activation errors out with no helper publish, and the cluster's
+// release (preActivateTransfer calls it on any activation error) reverts the
+// entry and schedules the withdrawal of what the pre-activation published.
+func TestFailedRepublishNeverOpensForwarding19167(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	// The ROUTE republish fails: the embedded overlay fake's error. The
+	// outer dp.publishErr is the helper HA publish, a different call.
+	dp.fakeOverlayDP.publishErr = errors.New("injected route publish failure")
+	dp.reverted = true
+	if err := d.beginTransferPreActivation([]int{1}); err == nil {
+		t.Fatal("a failed route republish still reported the pre-activation opened")
+	}
+	if got := dp.callsSnapshot(); !slices.Contains(got, "publish") || slices.Contains(got, "ha-publish") {
+		t.Fatalf("calls %v: want the failed route republish and no helper publish after it", got)
+	}
+	dp.fakeOverlayDP.publishErr = nil
+	d.endTransferPreActivation([]int{1}) // what the cluster's release does
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := dp.callsSnapshot()
+		end := slices.Index(got, "end")
+		if end >= 0 && slices.Contains(got[end:], "publish") {
+			return // released, then the withdrawal republish ran
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("calls %v: want the release and then a scheduled withdrawal republish", got)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// #19167 review (r23 P3-2): a SKIPPED republish (here: the daemon is
+// resetting) published nothing, so it must not open forwarding either.
+func TestSkippedRepublishNeverOpensForwarding19167(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	d.resetting.Store(true)
+	if err := d.beginTransferPreActivation([]int{1}); err == nil {
+		t.Fatal("a republish that published nothing still reported the pre-activation opened")
+	}
+	if got := dp.callsSnapshot(); slices.Contains(got, "ha-publish") {
+		t.Fatalf("calls %v: the helper was told to open forwarding with no route republish", got)
+	}
+}
+
+// #19167 fold 1: the epoch Begin returned is the one handed to Publish.
+func TestPreActivationPublishCarriesTheBeginEpoch19167(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	dp.epoch = 42
+	if err := d.beginTransferPreActivation([]int{1}); err != nil {
+		t.Fatalf("beginTransferPreActivation: %v", err)
+	}
+	if dp.publishedEpoch != 42 {
+		t.Fatalf("Publish got epoch %d, want the Begin epoch 42", dp.publishedEpoch)
 	}
 }

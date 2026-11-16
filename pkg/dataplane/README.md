@@ -347,6 +347,24 @@ An entry has two stages (#19167):
   exactly the named RGs: a concurrent transfer's routes-pending entry stays
   pending. From here on the RG is active in the helper-facing view.
   Re-beginning a live, routes-ready RG only extends its deadline.
+- **Routes-ready is bound to the helper that received the routes** (#19167
+  fold 1).
+  - `BeginTransferPreActivation` returns the manager's helper epoch, which
+    advances on every helper reset (`resetAfterHelperGoneLocked`) and every
+    spawn (`startHelperSupervisorLocked`).
+  - `PublishTransferPreActivation(rgIDs, epoch)` is refused when the epoch
+    moved: the republished routes may have gone to a helper that no longer
+    exists.
+  - A helper reset also returns every pre-active entry to routes-pending. A
+    replacement helper therefore never sees a pre-activation as active before
+    its snapshot replay, and the transfer falls back to #18559's
+    break-before-make.
+- **The daemon opens forwarding only on a republish that reached the helper.**
+  It does so on a published or unchanged outcome
+  (`republishConnectedRGOutcome`), never on a skipped one (resetting, no
+  config, no route publisher) or a failed one.
+- **Not covered here:** the pre-activation deadline's expiry holes, tracked by
+  #19103.
 
 Before #19167, Begin made the RG helper-facing active at once. The periodic
 status poll runs outside the daemon's `applySem` and publishes the effective
