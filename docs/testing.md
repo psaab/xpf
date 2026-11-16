@@ -62,7 +62,8 @@ The script also prepares the runner environment:
   keeps the two apart for a caller that parses stdout alone; their relative
   order is then not preserved. `make test-vm-test-run-lib` pins this with a
   mock incus whose transport holds stdout until the command exits.
-- A lane never re-tests a previous cargo binary (#19134). cargo calls a crate
+- A reused lane does not re-test a previous cargo binary under the conditions
+  below (#19134). cargo calls a crate
   fresh when no source is newer than its artefacts, and the lane's target dir
   outlives every sync, so a tree carrying OLDER mtimes than the lane's last
   build (another worktree, an older commit) once re-ran the old binary in
@@ -71,7 +72,7 @@ The script also prepares the runner environment:
   path to its content hash and the exact mtime (ns) the sync applied:
   - an unchanged file gets that mtime back, so the incremental build
     survives;
-  - a new or changed file gets the sync time;
+  - a new or changed file gets a fresh stamp;
   - so does every file the previous run TOUCHED on the runner: its content or
     its mtime no longer matches what the sync applied, or it was deleted.
     Content alone cannot see a run that edits, builds, and writes the
@@ -79,6 +80,26 @@ The script also prepares the runner environment:
     way): the bytes match the ledger, but the binary is the edit's;
   - a lane with no ledger, or a ledger in the earlier format, restamps every
     file once.
+
+  A fresh stamp is the sync clock or, if later, the newest artefact in the
+  lane's `target/*/deps` and `target/*/*/deps` plus one second. So a clock
+  behind the build (a step backward between the build and this sync) or a
+  filesystem too coarse to separate the two still yields a source newer than
+  every compiled artefact. The ledger also keeps the clock of the previous
+  sync. If the clock is now behind it, the sync says so, deletes the lane's
+  target dir, and restamps everything: a fail-closed backstop for artefacts
+  the `deps` scan does not see.
+
+  What this does NOT cover:
+  - a runner-side change that restores both a file's original bytes and its
+    exact previous mtime, which is indistinguishable from no change;
+  - an artefact newer than the stamp that lives outside `*/deps` and
+    `*/*/deps`, while the clock still runs forward (for example, one written
+    with an explicit future mtime);
+  - a lane whose target dir another process writes during the sync.
+
+  After a stamp is placed ahead of the clock, the crates built from those
+  files rebuild on every run until the clock passes it (the safe direction).
   The tree is extracted to `src.new` and swapped in after the restamp.
   Hashing costs about 2 s per sync of a full worktree.
   `make test-vm-test-run-sync-lib` drives this with real cargo under a mock
