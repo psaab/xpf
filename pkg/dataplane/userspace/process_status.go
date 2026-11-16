@@ -851,10 +851,10 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 				ticker.Reset(interval)
 			}
 			m.mu.Unlock()
-			// #19110: after the tick releases m.mu. The per-member retry runs
-			// its netlink, ethtool and attach work off the lock, single-flight,
-			// so it never holds m.mu and never delays a tick.
-			m.startMissingDataMemberRetry(ctx, time.Now())
+			// #19110: after the tick releases m.mu. The live RETH data member
+			// observation does its netlink lookups and program-ID query off
+			// the lock; takeover readiness serves the verdict it publishes.
+			m.observeDataMembers()
 		}
 	}
 }

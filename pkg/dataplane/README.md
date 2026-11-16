@@ -2597,55 +2597,46 @@ P2-1, R23 NEW-1):
 - each interface gets ONE attempt per mode;
 - a refusal returns `ErrXDPOccupied` at once, with no generic attempt and no
   occupant probe ("not probed");
-- the interface stays fail-closed (no XDP, fence-dropped transit). The
-  reconcile keeps NO record of the failure. A configured RETH data member is
-  covered from LIVE kernel state instead
+- the interface stays fail-closed (no XDP, fence-dropped transit), and
+  NOTHING retries the attach automatically: recovery is the next compile (an
+  operator commit) or a later link-refresh event for the interface. The
+  operator-facing WARN/ERROR lines say so. Two earlier designs retried (a
+  record of failed attaches, then a background per-name attach worker); review
+  found the record erasable by a partial pass and the worker able to attach a
+  reused index, escape config/program/Close fencing and bypass structural
+  admission (codex-e, codex-f), so the user removed both;
+- a configured RETH data member in that state is a takeover-readiness reason
+  from LIVE kernel state, fail-closed
   (`pkg/dataplane/userspace/missing_data_member_19110.go`):
-  - **the live verdict, on the status tick:** once per tick (1 s), OFF the
-    mutex, each configured local RETH data member is looked up by NAME
-    (netlink, 250 ms socket timeout). The positive evidence is XDP attached to
-    its CURRENT ifindex with the shim's own entry program ID. The tick stores
-    the verdict with its timestamp, built from scratch: a failed lookup is
-    "unverified", never the previous answer carried forward;
-  - **readiness serves that verdict** and does no lookup (the shim program's
-    ID is read once per loaded program): it is called under
-    the mutex that `UpdateRGActive` (the HA cutover) also needs, by the
-    daemon's RG reconcile loop (every 2 s and on each triggered pass, once per
-    RG; its result reaches the election through `SetRGReady`) and by the
-    metrics scrape. A verdict older than 3 s, or one that does not cover a
-    configured member yet, is "unverified". In steady state the served
-    verdict is at most one tick old. A member without positive evidence is
-    the reason "... has no XDP shim attached (kind)", blocker
-    `xdp_missing_data_member`. The scope is F4's: peer alive blocks; a lone
-    owner gets an ERROR log and the peer-alive-form metric instead;
-  - **retry:** keyed by member NAME, OFF the mutex. After each status tick
-    releases it, a single-flight goroutine attempts each member that is still
-    missing when due (1 s, doubling to 30 s). It resolves the name to an
-    ifindex immediately before the attach, attaches only that freshly
-    resolved index, then reads the kernel again as the evidence. An absent
-    netdev or an admission refusal (by name, against the config authority)
-    keeps the obligation and advances the backoff. The state clears only on
-    positive evidence or when the name leaves the configured members;
-  - logs are on change, keyed on a stable failure kind (errno, refusal,
-    admission reason, absent, foreign program), never on `Error()`, which
-    embeds elapsed time. The retry's attach is `Quiet`, so the shim's own
-    reclaim and fallback lines are DEBUG;
-  - cost: every tick, one netlink lookup per configured member (the
-    verdict). One attempt adds a second lookup, the admission's `ethtool`
-    subprocess(es) (each bounded by the wrapper's 15 s timeout plus 5 s
-    WaitDelay), one pin reclaim and one `BPF_LINK_CREATE` (rtnl), all off the
-    mutex. The pass stores the verdict BEFORE its attempts, and it is
-    single-flight, so a slow attempt delays only the next pass; if one ever
-    holds the verdict past 3 s, readiness reads "unverified", not a stale
-    "attached".
-
-  Two earlier designs kept a record of failed attaches instead. Review showed
-  a pass that merely SKIPPED the member (admission refusal, a stale snapshot,
-  the netdev briefly absent) could erase it, and its retry could chase a dead
-  or REUSED ifindex after a second recreate (codex-e). Before #19110 nothing
-  retried the attach at all, F4 saw only generic fallbacks, and the box-wide
-  XSK liveness proof stayed latched, so a standby with a member that had NO
-  XDP could still report takeover-ready.
+  - **the observation, on the status tick, OFF the mutex:** once per tick
+    (1 s), the shim's entry program ID is identified (one info query per
+    loaded program, retried next tick on failure, never made by readiness)
+    and each configured local RETH data member is looked up by NAME (netlink,
+    250 ms socket timeout). Every observation carries its OWN timestamp,
+    taken before its lookup. The pass publishes one verdict, recording the
+    config authority and the program it was made against, aged from its
+    EARLIEST observation; old evidence is never re-stamped;
+  - **readiness serves that verdict** with no lookup and no info query. It is
+    called under the mutex that `UpdateRGActive` (the HA cutover) also needs,
+    by the daemon's RG reconcile loop (every 2 s and on each triggered pass,
+    once per RG; its result reaches the election through `SetRGReady`) and by
+    the metrics scrape. A member is "unverified" (NOT ready) when the verdict
+    was made against another config or program, when the loaded program could
+    not be identified, when its earliest observation is older than 3 s, or
+    when it lacks the member. Positive evidence is XDP attached to the
+    member's CURRENT ifindex with the shim's own program ID; absent, not
+    attached, a foreign program or a failed lookup is the reason "... has no
+    XDP shim attached (kind)", blocker `xdp_missing_data_member`. The scope is
+    F4's: peer alive blocks; a lone owner gets an ERROR log and the
+    peer-alive-form metric instead;
+  - **not required, never a blocker:** a member whose config disables it, and
+    a member with known non-Ethernet framing (`ShimAttachRefused`), the
+    refresh path's structural attach exclusions. NO shim program loaded is a
+    distinct state (the check is skipped; other reasons block); a loaded
+    program that cannot be identified is not that state;
+  - cost: per tick, one netlink lookup per configured member plus one info
+    query when the loaded program changed, all off the mutex. Logs are on
+    change, keyed on a stable kind.
 
 Waiting would buy nothing: a refresh never has a dead process's stale link to
 wait out, so a refusal there is the persistent kind (an upper device,
@@ -2761,8 +2752,10 @@ deliberate:
   delayed: on a genuine peer loss the election bypasses readiness.
 
 A member with NO XDP at all (a failed refresh attach) is the companion
-`xdp_missing_data_member` reason, with the same two scope choices; see "The
-refresh never waits" above.
+`xdp_missing_data_member` reason, with the same two scope choices and no
+automatic retry; see "The refresh never waits" above. A PRIMARY in that state
+keeps its RGs (readiness gates taking an RG, not keeping one); that policy is
+#19140.
 
 Cells:
 - `xdp_attach_occupied_19110_test.go` and `xdp_stale_link_release_19110_test.go`
