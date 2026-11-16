@@ -1,6 +1,7 @@
 package vrrp
 
 import (
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -199,8 +200,24 @@ func (vi *vrrpInstance) rearmForRetry(masterDownTimer *time.Timer) {
 
 // becomeBackup transitions to Backup state after removing the VIPs. Holding
 // vipMu across removal and publication prevents ReconcileVIP from re-adding a
-// VIP in the gap between those operations.
+// VIP in the gap between those operations. It settles every armed resign
+// barrier with the removal outcome.
 func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) error {
+	removeErr := vi.becomeBackupNoResignAck(masterDownTimer, advertTimer)
+	// #6177 item 1: a waiter observes the completed VIP removal, not merely
+	// "resignation signalled + priority 0".
+	vi.notifyResigned(removeErr)
+	return removeErr
+}
+
+// becomeBackupNoResignAck is becomeBackup without settling the armed resign
+// barriers. The forced-resign arm uses it so it can settle them only after its
+// priority-0 burst is on the wire (#18716): a barrier waiter (the daemon) may
+// then remove the stable router link-local, which is this node's IPv6 advert
+// source and the master source the peer learned. Removing it before the burst
+// would send the burst from a deleted address, or from a source the peer's
+// #16018 gate drops as unknown.
+func (vi *vrrpInstance) becomeBackupNoResignAck(masterDownTimer, advertTimer *time.Timer) error {
 	slog.Info("vrrp: transitioning to BACKUP",
 		"key", vi.key())
 	vi.vipMu.Lock()
@@ -228,8 +245,35 @@ func (vi *vrrpInstance) becomeBackup(masterDownTimer, advertTimer *time.Timer) e
 	// against the very master that demoted us).
 	vi.discardPendingPreemptNow()
 	vi.emitEvent()
-	// #6177 item 1: a waiter observes the completed VIP removal, not merely
-	// "resignation signalled + priority 0".
-	vi.notifyResigned(removeErr)
 	return removeErr
+}
+
+// errForcedResignIncomplete is the resign verdict when a forced resignation
+// exits before becomeBackupNoResignAck returned (a panic): nothing proves the
+// VIPs are off.
+var errForcedResignIncomplete = errors.New("vrrp: forced resignation did not complete")
+
+// resignWithBurst is the forced-resign arm: remove the VIPs and publish BACKUP,
+// then send the three priority-0 adverts the peer takes over on, then settle
+// the armed resign barriers (#18716). Settling after the burst means a barrier
+// waiter (the daemon) may remove the stable router link-local, the burst's IPv6
+// source, without stripping it from the burst.
+//
+// The settle is deferred, so it runs on EVERY exit: a failed VIP removal (no
+// burst, the removal error), a send failure (sendAdvert only logs it; the VIPs
+// are off, so nil), or a panic while sending (nil, the VIPs are off) or while
+// removing (errForcedResignIncomplete). A waiter can never be left hanging on
+// a resign that ended.
+func (vi *vrrpInstance) resignWithBurst(masterDownTimer, advertTimer *time.Timer) {
+	err := errForcedResignIncomplete
+	defer func() { vi.notifyResigned(err) }()
+	err = vi.becomeBackupNoResignAck(masterDownTimer, advertTimer)
+	if err != nil {
+		// A failed removal is surfaced by becomeBackupNoResignAck and
+		// deliberately sends no priority zero.
+		return
+	}
+	for range 3 {
+		vi.sendAdvert(0)
+	}
 }

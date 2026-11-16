@@ -372,12 +372,26 @@ func TestLegacyReconcileHelperDownBoundsTheWrite18716(t *testing.T) {
 	}
 }
 
+// waitFor18716d polls the order log until name appears.
+func waitFor18716d(t *testing.T, log *order18701, name string, within time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(within)
+	for time.Now().Before(deadline) {
+		if slices.Contains(log.snapshot(), name) {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("events %v: %q did not happen within %s", log.snapshot(), name, within)
+}
+
 // TestLegacyTargetShapeHelperDown18716 (review P2-1, P2-2): the event RG is
-// still VRRP MASTER at the edge. The cluster handler takes the stable router
-// link-local off BEFORE the resign and writes nothing (desired stays true until
-// VRRP goes BACKUP). The VRRP BACKUP arm then releases the link-local and the
-// RA/DHCP services first, skips the prep against a silent control socket, and
-// bounds the write. On both demotion edges.
+// still VRRP MASTER at the edge. The cluster handler resigns and writes nothing
+// (desired stays true until VRRP goes BACKUP); the stable router link-local
+// leaves once the VRRP barrier settles, after the priority-0 burst (fold 2).
+// The VRRP BACKUP arm then clears the RA/DHCP services first, skips the prep
+// against a silent control socket, and bounds the write. On both demotion
+// edges.
 func TestLegacyTargetShapeHelperDown18716(t *testing.T) {
 	for _, edge := range demotionEdges18716 {
 		t.Run(edge, func(t *testing.T) {
@@ -387,9 +401,10 @@ func TestLegacyTargetShapeHelperDown18716(t *testing.T) {
 			start := time.Now()
 			demoteRG1Edge18716(t, d, edge)
 			took := time.Since(start)
+			waitFor18716d(t, log, "ll-removed:1", time.Second)
 			ev := log.snapshot()
-			if index18716(t, ev, "ll-removed:1") > index18716(t, ev, "resign:1") {
-				t.Fatalf("events %v: the stable router link-local must leave before the resign", ev)
+			if index18716(t, ev, "resign:1") > index18716(t, ev, "ll-removed:1") {
+				t.Fatalf("events %v: the stable router link-local must leave after the resign, never before", ev)
 			}
 			if slices.Contains(ev, "rg_active=false sent") || slices.Contains(ev, "prep") || took > time.Second {
 				t.Fatalf("events %v after %s: with RG1 still VRRP MASTER the cluster handler must not reach the prep or the write", ev, took)
@@ -399,6 +414,12 @@ func TestLegacyTargetShapeHelperDown18716(t *testing.T) {
 			if index18716(t, ev, "services-cleared:1") > write {
 				t.Fatalf("events %v: the VRRP BACKUP arm must clear the services before the helper write", ev)
 			}
+			// Fold 2: this BACKUP event precedes the resign's priority-0
+			// burst, whose IPv6 source is the stable link-local, so the arm
+			// must not remove it up front.
+			if index18716(t, ev, "ll-removed:1") < write {
+				t.Fatalf("events %v: the VRRP BACKUP arm removed the stable link-local before its write", ev)
+			}
 			if slices.Contains(ev, "prep") {
 				t.Fatalf("events %v: the VRRP BACKUP arm ran the prep against a silent control socket", ev)
 			}
@@ -407,6 +428,28 @@ func TestLegacyTargetShapeHelperDown18716(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLegacyLinkLocalLeavesOnlyAfterTheVRRPBarrier18716 (fold 2, Codex P2): the
+// stable router link-local is the VRRP IPv6 advert source and the master
+// source the peer learned, so it must stay until the VRRP barrier settles
+// (VIPs off and the priority-0 burst on the wire), and leave right after.
+func TestLegacyLinkLocalLeavesOnlyAfterTheVRRPBarrier18716(t *testing.T) {
+	d, log := legacyDemotion18716(t, true, 5*time.Second)
+	d.rethVIPReleaseTimeout = 5 * time.Second
+	barrier := newFakeVIPRelease()
+	d.resignRethRGFn = func(rg int) vipReleaseBarrier {
+		log.add(fmt.Sprintf("resign:%d", rg))
+		return barrier
+	}
+	primeRG1PrimaryVRRPMaster18716(t, d)
+	demoteRG1(t, d)
+	time.Sleep(150 * time.Millisecond)
+	if ev := log.snapshot(); slices.Contains(ev, "ll-removed:1") {
+		t.Fatalf("events %v: the link-local left before the VRRP barrier settled; the priority-0 burst would lose its source", ev)
+	}
+	barrier.release(nil)
+	waitFor18716d(t, log, "ll-removed:1", 500*time.Millisecond)
 }
 
 // TestLegacyTargetShapeControlAnswers18716: a frozen worker whose control

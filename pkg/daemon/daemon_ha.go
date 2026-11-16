@@ -914,14 +914,16 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			// shared IPv6 default-router identity, and VRRP does not manage
 			// it. It used to leave this node only in the VRRP BACKUP arm,
 			// after the prep and the write, while the new primary adds it
-			// (NODAD) on its MASTER event. Remove it BEFORE the resign, so
-			// it is off this node before the priority-0 advert the peer
-			// takes over on: break-before-make by construction, like the
-			// VIPs. The RA/DHCP services are cleared in the VRRP BACKUP arm
+			// (NODAD) on its MASTER event. It is also this node's VRRP IPv6
+			// advert source (it sorts lowest) and the master source the
+			// peer learned, so it must still be here for the priority-0
+			// burst (fold 2): stableLLReleaseBarrier removes it as soon as
+			// the VRRP barrier settles, which is after the last priority-0
+			// advert, and before any helper round trip finishes. The
+			// RA/DHCP services are cleared in the VRRP BACKUP arm
 			// (handleVRRPEvent), the first point where this RG's state reads
 			// inactive; clearRethServicesForRG snapshots that state.
-			d.removeStableRethLinkLocal(ev.GroupID)
-			rethResign = d.stableLLCheckedBarrier(ev.GroupID, d.resignRethRG(ev.GroupID))
+			rethResign = d.stableLLReleaseBarrier(ev.GroupID, d.resignRethRG(ev.GroupID))
 			rethResignDone = true
 		}
 		if clusterDemotionEdge && d.dataplane() != nil && !controlSilentAtEntry {
@@ -1442,13 +1444,19 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			// is skipped when the control socket is silent (one sample
 			// decides the prep and the bound), and the write is bounded. A
 			// healthy helper keeps prep, write, then link-local and services.
+			//
+			// Fold 2: only the services move to the front. The stable
+			// link-local stays at the end of this arm: this BACKUP event is
+			// emitted before the forced resign's priority-0 burst, and the
+			// link-local is that burst's IPv6 source. On the resign path the
+			// cluster handler's stableLLReleaseBarrier removes it right after
+			// the burst instead.
 			desiredActive, _ := s.CurrentDesired()
 			helperDown := !desiredActive && d.dataplane() != nil && d.helperDownForDemotion()
 			controlSilent := helperDown && d.helperControlSilentForPrep()
 			if helperDown {
-				slog.Warn("vrrp: demoting with an unresponsive helper; releasing the router link-local and services before helper-side demotion (#18716)",
+				slog.Warn("vrrp: demoting with an unresponsive helper; clearing RETH services before helper-side demotion (#18716)",
 					"rg", rgID, "helper", d.helperElectionReason(), "control_silent", controlSilent)
-				d.removeStableRethLinkLocal(rgID)
 				d.clearRethServicesForRG(rgID)
 			}
 			if rt := d.dataplane(); rt != nil {
@@ -1489,8 +1497,8 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 				}
 				d.RefreshFabricFwd()
 			}
+			d.removeStableRethLinkLocal(rgID)
 			if !helperDown {
-				d.removeStableRethLinkLocal(rgID)
 				d.clearRethServicesForRG(rgID)
 			}
 			// #16690: re-gate probes + close publish gate on standby.

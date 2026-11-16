@@ -5642,12 +5642,20 @@ disabled or lost edge still resigns nothing. Two code paths are involved,
 because in legacy mode the rg_active write is not where it seems:
 
 1. **The cluster handler** (`handleClusterEventMerged`):
-   1. removes the stable router link-local (the shared IPv6 default-router
-      identity, which VRRP does not manage) from this node;
-   2. resigns the event RG's RETH VRRP. Both happen BEFORE any helper round
-      trip, and the link-local leaves before the priority-0 advert the peer
-      takes over on, so it is break-before-make by construction, like the
-      VIPs;
+   1. resigns the event RG's RETH VRRP BEFORE any helper round trip;
+   2. removes the stable router link-local (the shared IPv6 default-router
+      identity, which VRRP does not manage) as soon as the VRRP resign
+      barrier settles (`stableLLReleaseBarrier`). The barrier settles after
+      the VIPs are off AND after the last priority-0 advert of the burst
+      (pkg/vrrp settles a forced resign's barrier after its burst, fold 2).
+      This step must not come earlier, because the stable link-local sorts
+      below the per-node link-locals. It is therefore the VRRP IPv6 advert
+      source and the master source the peer learned. Removed before the
+      burst, the burst goes out from a deleted address, or (once the
+      address watcher re-resolves) from a per-node source the peer's
+      #16018 gate drops as an unknown master. An IPv6-only RETH then falls
+      back to master-down expiry. (Fold 1 removed it before the resign;
+      review fold 2 reverted that.);
    3. skips the prep when the control socket is silent.
 
    With the RG's VRRP still MASTER at the edge, legacy desired
@@ -5658,13 +5666,16 @@ because in legacy mode the rg_active write is not where it seems:
    lost, or a partially MASTER RG. That write is bounded as in direct mode.
 2. **The VRRP BACKUP arm** (`handleVRRPEvent`), which runs when the resign
    lands, is where the target shape's write happens. With the helper down it:
-   1. releases the stable link-local (idempotent here) and clears the RA/DHCP
-      services FIRST. This is the first point where the RG's state reads
-      inactive, and `clearRethServicesForRG` snapshots that state, so it
-      cannot move into the cluster handler;
+   1. clears the RA/DHCP services FIRST. This is the first point where the
+      RG's state reads inactive, and `clearRethServicesForRG` snapshots that
+      state, so it cannot move into the cluster handler;
    2. skips the prep when the control socket is silent (one sample decides
       both the prep and the bound);
-   3. bounds the write.
+   3. bounds the write;
+   4. removes the stable link-local LAST, as before. The BACKUP event is
+      emitted before the resign's priority-0 burst, so this arm cannot
+      remove the burst's source up front. On the resign path the cluster
+      handler's barrier has already removed it, and here it is idempotent.
 
    Before, this arm always ran the 5 s prep and then an unbounded write, and
    released the link-local and services only after both, all on the single
@@ -5698,8 +5709,12 @@ promotions on the peer have to be kept apart:
 With the helper down, the ack resolves from the actual release
 (`awaitRethVIPRelease`), and the release now includes the stable link-local:
 the VRRP VIPs leaving is not enough while the IPv6 default-router address is
-still here (a fresh kernel read, `stableLinkLocalConfirmedAbsent`). In the
-target shape no handler write happens, so the release alone decides the ack.
+still here. `stableLLReleaseBarrier` settles only after it has removed the
+address and re-read the kernel (`stableLinkLocalConfirmedAbsent`). If the
+VRRP barrier does not settle within the 500 ms release bound (a wedged run
+loop, so no burst is coming), the address is removed anyway and the ack fails.
+In the target shape no handler write happens, so the release alone decides the
+ack.
 
 Where the handler does write and the bounded write fails:
 - **Control socket silent at entry and still silent (fresh sample):** the ack
@@ -5719,6 +5734,12 @@ the peer-loss transient.
 - On the election path both nodes act on their own events, so in shapes 1
   and 3 an equal-priority overlap runs from the peer's force to this node's
   resign. It is no longer stretched by helper timeouts, but it is not zero.
+- **The stable link-local is not break-before-make by construction.** The
+  peer adds it (NODAD) on its MASTER event. That comes at least its 1 ms
+  takeover timer plus `becomeMaster` after the first priority-0 advert. This
+  node's netlink delete runs microseconds after the last advert: an ordering
+  of microseconds against milliseconds, not a guarantee. It cannot move
+  earlier without losing the burst's source (above).
 - The services clear and the write in the BACKUP arm still run on the one
   VRRP event goroutine, now bounded per RG.
 
@@ -5728,7 +5749,7 @@ the peer-loss transient.
 
 In the VRRP BACKUP arm:
 
-    vrrp: demoting with an unresponsive helper; releasing the router link-local and services before helper-side demotion (#18716)
+    vrrp: demoting with an unresponsive helper; clearing RETH services before helper-side demotion (#18716)
 
 Both carry `rg`, the verdict reason and `control_silent`. When the handler's
 bounded write fails silently:
@@ -5739,10 +5760,11 @@ bounded write fails silently:
 both edges: the manual secondary-hold one and the election primary to
 secondary one.
 - **Target shape (RG still VRRP MASTER at the edge):**
-  - the link-local leaves before the resign;
+  - the link-local leaves after the resign, and only once the VRRP barrier
+    has settled;
   - the handler reaches neither the prep nor the write;
-  - the BACKUP arm clears the services before a bounded write and skips the
-    silent prep;
+  - the BACKUP arm clears the services before a bounded write, skips the
+    silent prep, and removes the link-local only after the write;
   - with control answering, services, then prep, then a write that waits;
   - a healthy BACKUP arm keeps prep, write, services;
   - the fence waits for the link-local as well as the VRRP release.

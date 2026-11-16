@@ -1298,11 +1298,7 @@ func (vi *vrrpInstance) stepMaster(masterDownTimer, advertTimer *time.Timer) (st
 		// the peer to take over. A failed removal is surfaced by
 		// becomeBackup and deliberately does not send priority zero.
 		slog.Info("vrrp: forced resignation", "key", vi.key())
-		if err := vi.becomeBackup(masterDownTimer, advertTimer); err == nil {
-			for range 3 {
-				vi.sendAdvert(0)
-			}
-		}
+		vi.resignWithBurst(masterDownTimer, advertTimer)
 		// #16766: invalidate any one-shot preempt kick/force at the
 		// resign edge so the first BACKUP iteration cannot consume it
 		// as a fresh preempt and re-promote at the stashed priority 0.
