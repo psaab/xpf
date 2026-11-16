@@ -138,7 +138,6 @@ pkg/fsatomic.SetAfterRenameSyncDirForTesting	cross-package seam: called by tests
 pkg/fsatomic.SetRenameFileForTesting	cross-package seam: called by tests in pkg/cluster, pkg/configstore, pkg/upgrade
 pkg/ipsec.(Manager).SetSwanctlForTesting	cross-package seam: called by tests in pkg/daemon
 pkg/linuxsock.(PpollRecv).AttachPollFnForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
-pkg/linuxsock.(PpollRecv).AttachRecvFnForTest	no caller today; kept: it is the only setter of the recvFn field that PpollRecv.Recv branches on (#17231), so deleting it orphans a product-code branch and belongs with a pkg/linuxsock change, not a seam cleanup
 pkg/linuxsock.NewPpollRecvForTest	cross-package seam: called by tests in pkg/daemon, pkg/lldp
 pkg/lldp.FailIfSessionForTesting	cross-package seam: called by tests in pkg/daemon
 pkg/lldp.SetInterfaceByNameForTesting	cross-package seam: called by tests in pkg/daemon

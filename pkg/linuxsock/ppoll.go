@@ -29,13 +29,9 @@ var ErrWakeStopped = errors.New("linuxsock: recv stopped by wake eventfd")
 // (signal → join → close), so no recv is ever in flight on a closed
 // or reused fd. fd stays blocking: ppoll guarantees readability
 // before Recvfrom, so the read itself does not park.
-//
-// The recvFn seam replaces the real ppoll/Recvfrom for deterministic
-// tests of owners' loop handling without a real socket.
 type PpollRecv struct {
 	fd     int
 	wakeFD int
-	recvFn func(buf []byte) (int, unix.Sockaddr, error)
 	pollFn func(fds []unix.PollFd, timeout *unix.Timespec, sigmask *unix.Sigset_t) (int, error)
 
 	wakeOnce  sync.Once
@@ -66,12 +62,6 @@ func NewPpollRecvForTest(fd, wakeFD int) *PpollRecv {
 	return &PpollRecv{fd: fd, wakeFD: wakeFD}
 }
 
-// AttachRecvFnForTest replaces the real ppoll/Recvfrom path. For
-// tests only; production leaves it unset.
-func (p *PpollRecv) AttachRecvFnForTest(fn func(buf []byte) (int, unix.Sockaddr, error)) {
-	p.recvFn = fn
-}
-
 // FD returns the wrapped socket fd, for Sendto by the owner. It is
 // valid until Close; owners must not use it after joining + Close.
 func (p *PpollRecv) FD() int { return p.fd }
@@ -86,9 +76,6 @@ func (p *PpollRecv) WakeFD() int { return p.wakeFD }
 // context/stopped state after every successful Recv before acting on
 // the frame. Returns ErrWakeStopped when the wake fires first.
 func (p *PpollRecv) Recv(buf []byte) (int, unix.Sockaddr, error) {
-	if p.recvFn != nil {
-		return p.recvFn(buf)
-	}
 	for {
 		fds := []unix.PollFd{
 			{Fd: int32(p.fd), Events: unix.POLLIN},
@@ -123,8 +110,8 @@ func (p *PpollRecv) Recv(buf []byte) (int, unix.Sockaddr, error) {
 }
 
 // SignalStop wakes a Recv parked in ppoll. It is idempotent and
-// non-blocking. Receivers built without a wake fd (wakeFD <= 0, e.g.
-// recvFn stubs) skip the write.
+// non-blocking. A receiver built without a wake fd (wakeFD <= 0)
+// skips the write.
 func (p *PpollRecv) SignalStop() {
 	if p.wakeFD <= 0 {
 		return
