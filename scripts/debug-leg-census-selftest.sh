@@ -218,6 +218,21 @@ expect_fail "unexpected family path" "nat::unexpected" unexpected_family
 expect_fail "ignored-to-runnable transition" "ignored family equation" ignored_transition
 expect_fail "ignored family placed in A" "missing/ignored" ignored_in_allowlist
 expect_fail_both "same-cardinality missing plus substitution" "frame::keep" "frame::substitute" substitution_same_cardinality
+# #19163: two equations fail at once; the report must name BOTH (it used to
+# stop at the first, the ignored equation, and hide the partition).
+two_equations() {
+	python3 - "$1/census.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["targets"][0]["listed"].append("nat::new_ignored")
+data["targets"][0]["ignored"].append("nat::new_ignored")
+data["targets"][1]["listed"].append("frame::new_runnable")
+json.dump(data, open(path, "w", encoding="utf-8"), separators=(",", ":"))
+PY
+}
+expect_fail_both "two failing equations are both reported (#19163)" "ignored family equation" "family partition A union E" two_equations
 expect_fail "duplicate registry entry" "duplicate target/path" duplicate_registry
 expect_fail "unsorted registry" "registry is unsorted" unsorted_registry
 expect_fail "duplicate target path" "target collision" duplicate_target_path
