@@ -60,13 +60,15 @@
 # status survives. Mutations: the refusal dropped (the command runs), the
 # after-run report dropped, and the before/after comparison inverted (names
 # the old entry, not the new one).
-# Fold (Codex on b7e): a FAILED probe is not a clean directory (a --root run
-# is refused, --allow-xpf-state discloses it, and a failed after-probe is
-# disclosed with the status kept); two overlapping --root lanes are
-# serialized by the per-runner lock (B waits, then is refused over A's
-# write, and A's report names only A's entry); a TERM after a write exits 143
-# and still names it. Mutations: the lock dropped (A's report also claims
-# B's write), the interrupt report dropped.
+# Folds (Codex on b7e and b7f): a FAILED probe is not a clean directory (a
+# --root run is refused, --allow-xpf-state discloses it, a failed after-probe
+# is disclosed with the status kept, a runner-user leg warns); two
+# overlapping --root lanes are serialized by the runner-side lock their lane
+# scripts run under (B waits and names the holder, then is refused over A's
+# write, and A's report names only A's entry); a TERM during the command
+# exits 143 and still names the write; a TERM during the handback is ignored
+# until it ends; a nested --root run is refused. Mutations: a per-run lock,
+# the interrupt report dropped, an interruptible handback, no nested check.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -95,13 +97,17 @@ exec) shift 2; [[ "${1:-}" == -- ]] && shift ;;
 *) exit 90 ;;
 esac
 case "${1:-}" in
-test | find) exit 0 ;;
-flock)
-	# #19162: the per-runner root lock holder, with /run/ in the sandbox.
-	[[ "${3:-}" == sh && "${4:-}" == -c ]] || exit 94
-	mkdir -p "$MOCK_ROOT/run"
-	exec flock "${2//\/run\//$MOCK_ROOT/run/}" sh -c "${5//\/run\//$MOCK_ROOT/run/}" ;;
-cat) exec cat "${2//\/run\//$MOCK_ROOT/run/}" ;;
+test) exit 0 ;;
+find)
+	# The root handback. #19162: MOCK_FIND_DELAY_S stretches it, with
+	# markers, so a cell can signal the script in the middle of it.
+	touch "$MOCK_ROOT/handback-start"
+	[[ -n "${MOCK_FIND_DELAY_S:-}" ]] && sleep "$MOCK_FIND_DELAY_S"
+	touch "$MOCK_ROOT/handback-done"
+	exit 0 ;;
+cat)
+	c=${2//\/work\//$MOCK_ROOT/work/}
+	exec cat "${c//\/run\//$MOCK_ROOT/run/}" ;;
 systemd-detect-virt) echo kvm; exit 0 ;;
 su) [[ "${2:-}" == - && "${3:-}" == runner && "${4:-}" == -c ]] || exit 91; body=$5 ;;
 bash)
@@ -122,9 +128,18 @@ bash)
 			echo "${MOCK_VM_PROOF:-present}"
 			exit 0
 		fi
-		# #19162: the runner's /var/lib/xpf lives in the sandbox too.
+		# #19162: the runner's /var/lib/xpf and root-lane lock live in the
+		# sandbox too, including inside the uploaded root-lane script (it
+		# carries the command).
 		one=${3//\/work\//$MOCK_ROOT/work/}
-		exec bash -c "${one//\/var\/lib\/xpf/$MOCK_ROOT/varlibxpf}"
+		one=${one//\/var\/lib\/xpf/$MOCK_ROOT/varlibxpf}
+		one=${one//\/run\/xpf-root-lane/$MOCK_ROOT/run/xpf-root-lane}
+		if [[ "$one" == *".vmtr-root-lane."* ]]; then
+			sed -e "s#/work/#$MOCK_ROOT/work/#g" -e "s#/var/lib/xpf#$MOCK_ROOT/varlibxpf#g" \
+				-e "s#/run/xpf-root-lane#$MOCK_ROOT/run/xpf-root-lane#g" | bash -c "$one"
+			exit $?
+		fi
+		exec bash -c "$one"
 	fi
 	[[ "${2:-}" == -lc ]] || exit 92
 	body=$3 ;;
@@ -132,6 +147,8 @@ bash)
 esac
 body=${body//\/work\//$MOCK_ROOT/work/}
 body=${body//\/var\/lib\/xpf/$MOCK_ROOT/varlibxpf}
+body=${body//\/run\/xpf-root-lane/$MOCK_ROOT/run/xpf-root-lane}
+mkdir -p "$MOCK_ROOT/run"
 rc=0
 held="$MOCK_ROOT/held.$$"
 # #19142: MOCK_PRE_DELAY_S delays the start, time a frozen guest clock never
@@ -149,11 +166,12 @@ if [[ -n "${MOCK_STALL_S:-}" ]]; then
 	kill -CONT -- "-$pid" 2>/dev/null || true
 	wait "$pid" || rc=$?
 else
-	# A TERM to this client ends the command at once, as closing a real
-	# `incus exec` client ends the remote process (#19162).
-	bash -c "$body" >"$held" &
+	# A TERM to this client ends the remote command at once, the whole
+	# process group with SIGKILL, as a dropped `incus exec` connection does
+	# (#19162): the remote side gets no chance to clean up or report.
+	setsid bash -c "$body" >"$held" &
 	child=$!
-	trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; cat "$held"; rm -f "$held"; exit 143' TERM
+	trap 'kill -KILL -- "-$child" 2>/dev/null; wait "$child" 2>/dev/null; cat "$held"; rm -f "$held"; exit 143' TERM
 	wait "$child" || rc=$?
 	trap - TERM
 fi
@@ -374,8 +392,12 @@ else
 fi
 
 # #19162: the runner's /var/lib/xpf, mapped by the mock to $tmp/varlibxpf.
+# Root-lane lines name the mapped path; the regexes accept either spelling.
+# Those lines travel in the command's own merged stream, the workstation's on
+# stderr, so the cells read both.
 state="$tmp/varlibxpf"
 reset_state() { rm -rf "$state" && mkdir -p "$state"; }
+wrote_re() { echo "^vm-test-run: this --root command wrote production state to mock:runner:[^ ]*: $1 \(#19162"; }
 # state_refuses <script> <tag>: with an entry present, --root is refused
 # before the command runs, and the entry is named.
 state_refuses() {
@@ -383,7 +405,7 @@ state_refuses() {
 	rm -f "$marker"
 	rc=$(pause_run "$1" "$2" 'touch /work/lane/tmp/ran-19142' --root)
 	[[ "$rc" == 2 && ! -e "$marker" ]] &&
-		grep -q '^vm-test-run: refusing a --root run: .*/var/lib/xpf holds state .*ha-peer-epoch.lock' "$tmp/$2.err"
+		grep -q '^vm-test-run: refusing a --root run: .*holds state .*ha-peer-epoch.lock' <(cat "$tmp/$2.out" "$tmp/$2.err")
 }
 # writer_named <script> <tag>: a --root command that adds an entry (and exits
 # 3) has exactly that entry named, and its status survives.
@@ -391,8 +413,7 @@ writer_named() {
 	local rc
 	reset_state
 	rc=$(pause_run "$1" "$2" 'touch /var/lib/xpf/transit-gate-owned; exit 3' --root)
-	[[ "$rc" == 3 ]] &&
-		grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: transit-gate-owned (#19162)' "$tmp/$2.err"
+	[[ "$rc" == 3 ]] && grep -qE "$(wrote_re transit-gate-owned)\)$" <(cat "$tmp/$2.out" "$tmp/$2.err")
 }
 # only_new_named <script> <tag>: with a pre-existing entry (allowed), only the
 # entry the command added is named.
@@ -401,13 +422,12 @@ only_new_named() {
 	reset_state
 	touch "$state/fabric-auth-grace"
 	rc=$(pause_run "$1" "$2" 'touch /var/lib/xpf/unkeyed-authority-grace' --root --allow-xpf-state)
-	[[ "$rc" == 0 ]] &&
-		grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: unkeyed-authority-grace (#19162)' "$tmp/$2.err"
+	[[ "$rc" == 0 ]] && grep -qE "$(wrote_re unkeyed-authority-grace)\)$" <(cat "$tmp/$2.out" "$tmp/$2.err")
 }
 reset_state
 rm -f "$marker"
 clean_rc=$(pause_run "$script" st-clean 'touch /work/lane/tmp/ran-19142' --root)
-if [[ "$clean_rc" == 0 && -e "$marker" ]] && ! grep -q '(#19162)' "$tmp/st-clean.err"; then
+if [[ "$clean_rc" == 0 && -e "$marker" ]] && ! grep -q '(#19162)' <(cat "$tmp/st-clean.out" "$tmp/st-clean.err"); then
 	ok "xpf-state empty: a --root run proceeds, with no #19162 line"
 else
 	bad "xpf-state empty: rc=$clean_rc $(tr '\n' '|' <"$tmp/st-clean.err")"
@@ -421,14 +441,14 @@ else
 fi
 rm -f "$marker"
 st_allow_rc=$(pause_run "$script" st-allow 'touch /work/lane/tmp/ran-19142' --root --allow-xpf-state)
-if [[ "$st_allow_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*ha-peer-epoch.lock' "$tmp/st-allow.err"; then
+if [[ "$st_allow_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*ha-peer-epoch.lock' <(cat "$tmp/st-allow.out" "$tmp/st-allow.err"); then
 	ok "--allow-xpf-state: the --root command runs, with the entry listed"
 else
 	bad "--allow-xpf-state: rc=$st_allow_rc $(tr '\n' '|' <"$tmp/st-allow.err")"
 fi
 rm -f "$marker"
 st_user_rc=$(pause_run "$script" st-user 'touch /work/lane/tmp/ran-19142')
-if [[ "$st_user_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*ha-peer-epoch.lock' "$tmp/st-user.err"; then
+if [[ "$st_user_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*ha-peer-epoch.lock' <(cat "$tmp/st-user.out" "$tmp/st-user.err"); then
 	ok "xpf-state present, runner-user leg: it runs, with a warning naming the entry"
 else
 	bad "xpf-state present, runner-user leg: rc=$st_user_rc $(tr '\n' '|' <"$tmp/st-user.err")"
@@ -443,36 +463,45 @@ if only_new_named "$script" st-new; then
 else
 	bad "xpf-state only-new: rc=$(cat "$tmp/st-new.rc") $(tr '\n' '|' <"$tmp/st-new.err")"
 fi
-reset_state
 
-# Fold (7): a failed probe is not a clean directory.
-rm -f "$marker" "$tmp/probe-count"
-pe_rc=$(pause_run "$script" st-perr 'touch /work/lane/tmp/ran-19142' --root -- MOCK_XPF_PROBE_FAIL=1)
-if [[ "$pe_rc" == 2 && ! -e "$marker" ]] && grep -q '^vm-test-run: refusing a --root run: .*could not be inspected' "$tmp/st-perr.err"; then
+# A failed probe is not a clean directory. On the runner side the failure is
+# a /var/lib/xpf that is not a directory; on the workstation side (the
+# runner-user leg) an exec failure.
+rm -rf "$state" && touch "$state"
+rm -f "$marker"
+pe_rc=$(pause_run "$script" st-perr 'touch /work/lane/tmp/ran-19142' --root)
+if [[ "$pe_rc" == 2 && ! -e "$marker" ]] && grep -q '^vm-test-run: refusing a --root run: .*could not be inspected' <(cat "$tmp/st-perr.out" "$tmp/st-perr.err"); then
 	ok "xpf-state probe failed: the --root run is refused (status 2), not read as clean, and the command never runs"
 else
 	bad "xpf-state probe failed: rc=$pe_rc $(tr '\n' '|' <"$tmp/st-perr.err")"
 fi
-rm -f "$marker" "$tmp/probe-count"
-pa_rc=$(pause_run "$script" st-pallow 'touch /work/lane/tmp/ran-19142' --root --allow-xpf-state -- MOCK_XPF_PROBE_FAIL=1)
-if [[ "$pa_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*could not be inspected' "$tmp/st-pallow.err"; then
+rm -f "$marker"
+pa_rc=$(pause_run "$script" st-pallow 'touch /work/lane/tmp/ran-19142' --root --allow-xpf-state)
+if [[ "$pa_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*could not be inspected' <(cat "$tmp/st-pallow.out" "$tmp/st-pallow.err"); then
 	ok "xpf-state probe failed + --allow-xpf-state: the command runs, the unknown state disclosed"
 else
 	bad "xpf-state probe failed + allow: rc=$pa_rc $(tr '\n' '|' <"$tmp/st-pallow.err")"
 fi
 reset_state
-rm -f "$tmp/probe-count"
-pf_rc=$(pause_run "$script" st-pafter 'touch /var/lib/xpf/after-wrote; exit 3' --root -- MOCK_XPF_PROBE_FAIL=2)
-if [[ "$pf_rc" == 3 ]] && grep -q '^vm-test-run: could not inspect .*/var/lib/xpf after the --root command' "$tmp/st-pafter.err" &&
-	! grep -q '^vm-test-run: this --root command wrote production state' "$tmp/st-pafter.err"; then
+pf_rc=$(pause_run "$script" st-pafter 'touch /var/lib/xpf/after-wrote; rm -rf /var/lib/xpf; echo x >/var/lib/xpf; exit 3' --root)
+if [[ "$pf_rc" == 3 ]] && grep -q '^vm-test-run: could not inspect .* after the --root command' <(cat "$tmp/st-pafter.out" "$tmp/st-pafter.err") &&
+	! grep -q '^vm-test-run: this --root command wrote production state' <(cat "$tmp/st-pafter.out" "$tmp/st-pafter.err"); then
 	ok "xpf-state after-probe failed: disclosed, and the command's status (3) survives"
 else
 	bad "xpf-state after-probe failed: rc=$pf_rc $(tr '\n' '|' <"$tmp/st-pafter.err")"
 fi
+reset_state
+rm -f "$tmp/probe-count" "$marker"
+pu_rc=$(pause_run "$script" st-puser 'touch /work/lane/tmp/ran-19142' -- MOCK_XPF_PROBE_FAIL=1)
+if [[ "$pu_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*could not be inspected' <(cat "$tmp/st-puser.out" "$tmp/st-puser.err"); then
+	ok "xpf-state probe failed, runner-user leg: it runs, with the unknown state disclosed"
+else
+	bad "xpf-state probe failed, runner-user leg: rc=$pu_rc $(tr '\n' '|' <"$tmp/st-puser.err")"
+fi
 rm -f "$tmp/probe-count"
 
-# Fold (8): two overlapping --root lanes. A sleeps, then writes; B starts
-# while A holds the lock, writes too, and marks that it ran.
+# Two overlapping --root lanes. A sleeps, then writes; B starts while A holds
+# the runner's lock, writes too, and marks that it ran.
 # two_lanes <script> <tag>: true when B waited, was refused over A's entry
 # without running, and A's report names exactly A's entry.
 two_lanes() {
@@ -486,9 +515,28 @@ two_lanes() {
 	wait "$a_pid" || true
 	a_rc=$(cat "$tmp/$2-a.rc")
 	[[ "$a_rc" == 0 && "$b_rc" == 2 && ! -e "$tmp/work/lane/tmp/b-ran" ]] &&
-		grep -q '^vm-test-run: waiting for another --root run on mock:runner' "$tmp/$2-b.err" &&
-		grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: a-wrote (#19162)' "$tmp/$2-a.err"
+		grep -q '^vm-test-run: waiting for another --root run on mock:runner' <(cat "$tmp/$2-b.out" "$tmp/$2-b.err") &&
+		grep -qE "$(wrote_re a-wrote)\)$" <(cat "$tmp/$2-a.out" "$tmp/$2-a.err")
 }
+# lock_wait_not_a_pause <script> <tag>: B waits for A's lock, then runs; its
+# wait is disclosed and NOT counted as a pause (it reports paused-for=0s).
+lock_wait_not_a_pause() {
+	reset_state
+	(pause_run "$1" "$2-a" 'sleep 4' --root >/dev/null) &
+	local a_pid=$!
+	sleep 1
+	local b_rc
+	b_rc=$(pause_run "$1" "$2-b" 'true' --root)
+	wait "$a_pid" || true
+	[[ "$b_rc" == 0 ]] &&
+		grep -q "^vm-test-run: waited [0-9.]*s for mock:runner's root-lane lock; not counted as a pause" "$tmp/$2-b.err" &&
+		grep -q '^vm-test-run: paused-for=0s ' "$tmp/$2-b.err"
+}
+if lock_wait_not_a_pause "$script" st-wait; then
+	ok "a --root lane that waited for the lock: the wait is disclosed, and paused-for=0s"
+else
+	bad "lock wait: B=[$(tr '\n' '|' <"$tmp/st-wait-b.err")]"
+fi
 if two_lanes "$script" st-two; then
 	ok "two overlapping --root lanes: B waits for A's lock, is refused over A's write without running, and A's report names only a-wrote"
 else
@@ -496,7 +544,9 @@ else
 fi
 reset_state
 
-# Fold (9): a TERM after the command wrote state still reports it, with 143.
+# A TERM during the command: the mock's client kills the remote lane with
+# SIGKILL (as a dropped connection would), so only the workstation's best
+# effort can name the write; it must, with 143.
 # term_reports <script> <tag>
 term_reports() {
 	local pid rc=0
@@ -511,14 +561,49 @@ term_reports() {
 	kill -TERM "$pid"
 	wait "$pid" || rc=$?
 	echo "$rc" >"$tmp/$2.rc"
-	[[ "$rc" == 143 ]] && grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: sig-wrote (#19162)' "$tmp/$2.err"
+	[[ "$rc" == 143 ]] && grep -qE "$(wrote_re sig-wrote)" <(cat "$tmp/$2.out" "$tmp/$2.err")
 }
 if term_reports "$script" st-term; then
-	ok "TERM after a write: exit 143, and the write is still named"
+	ok "TERM during the command: exit 143, and the write is still named"
 else
-	bad "TERM after a write: rc=$(cat "$tmp/st-term.rc") $(tr '\n' '|' <"$tmp/st-term.err")"
+	bad "TERM during the command: rc=$(cat "$tmp/st-term.rc") $(tr '\n' '|' <"$tmp/st-term.err")"
 fi
 reset_state
+
+# A TERM during the finalization (the handback, which the mock delays): it is
+# ignored until the handback ends; the command's status survives and the
+# handback completes.
+# term_in_finalize <script> <tag>
+term_in_finalize() {
+	local pid rc=0
+	reset_state
+	rm -f "$tmp/handback-start" "$tmp/handback-done"
+	(cd "$tmp/repo" && exec env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" MOCK_FIND_DELAY_S=3 \
+		bash "$1" --runner mock:runner --name lane --no-sync --root -- 'touch /var/lib/xpf/fin-wrote') \
+		>"$tmp/$2.out" 2>"$tmp/$2.err" &
+	pid=$!
+	for _ in $(seq 100); do [[ -e "$tmp/handback-start" ]] && break; sleep 0.1; done
+	kill -TERM "$pid"
+	wait "$pid" || rc=$?
+	echo "$rc" >"$tmp/$2.rc"
+	[[ "$rc" == 0 && -e "$tmp/handback-done" ]] && grep -qE "$(wrote_re fin-wrote)\)$" <(cat "$tmp/$2.out" "$tmp/$2.err")
+}
+if term_in_finalize "$script" st-fin; then
+	ok "TERM during the handback: ignored until it ends; status 0 and the write named"
+else
+	bad "TERM during the handback: rc=$(cat "$tmp/st-fin.rc") done=$([[ -e "$tmp/handback-done" ]] && echo yes || echo no) $(tr '\n' '|' <"$tmp/st-fin.err")"
+fi
+reset_state
+
+# A nested --root run inside a root lane is refused instead of waiting on its
+# own lane's lock.
+rm -f "$marker"
+nest_rc=$(pause_run "$script" st-nested 'touch /work/lane/tmp/ran-19142' --root -- XPF_VMTR_ROOT_LANE=1)
+if [[ "$nest_rc" == 2 && ! -e "$marker" ]] && grep -q '^vm-test-run: refusing a nested --root run' <(cat "$tmp/st-nested.out" "$tmp/st-nested.err"); then
+	ok "nested --root run: refused (status 2), the command never runs"
+else
+	bad "nested --root run: rc=$nest_rc $(tr '\n' '|' <"$tmp/st-nested.err")"
+fi
 
 # The proof predicate itself, against test files (the probe text is taken from
 # the script; only its path is replaced).
@@ -650,8 +735,8 @@ if [[ "$have_userns" -eq 1 ]] &&
 fi
 
 # #19162 mutations.
-# shellcheck disable=SC2016 # a sed program: the $ is literal
-if mutant no-state-refusal 's/if \[\[ "$as_root" -eq 1 \&\& "$allow_xpf_state" -ne 1 \]\]; then/if false; then/'; then
+# shellcheck disable=SC2016 # sed programs: the $ is literal
+if mutant no-state-refusal 's/if \[ "$VMTR_ALLOW_XPF_STATE" != 1 \]; then/if false; then/'; then
 	reset_state
 	touch "$state/ha-peer-epoch.lock"
 	if ! state_refuses "$tmp/no-state-refusal.sh" m8 && [[ -e "$marker" ]]; then
@@ -661,8 +746,8 @@ if mutant no-state-refusal 's/if \[\[ "$as_root" -eq 1 \&\& "$allow_xpf_state" -
 	fi
 	reset_state
 fi
-# shellcheck disable=SC2016 # a sed program: the $ is literal
-if mutant no-writer-report 's/if \[\[ -n "$new" \]\]; then/if false; then/'; then
+# shellcheck disable=SC2016
+if mutant no-writer-report 's/^\tif \[ -n "$new" \]; then$/\tif false; then/'; then
 	if ! writer_named "$tmp/no-writer-report.sh" m9 && [[ "$(cat "$tmp/m9.rc")" == 3 ]]; then
 		ok "mutation no-writer-report: the writer cell fails, with the status still 3"
 	else
@@ -670,19 +755,45 @@ if mutant no-writer-report 's/if \[\[ -n "$new" \]\]; then/if false; then/'; the
 	fi
 fi
 # Each run takes its OWN lock file: everything works, nothing is serialized.
-# shellcheck disable=SC2016 # a sed program: the $ is literal
-if mutant no-root-lock 's|flock /run/xpf-vm-test-run-root.lock|flock /run/xpf-vm-test-run-root.$$.lock|'; then
+# shellcheck disable=SC2016
+if mutant no-root-lock 's|-E 75 /run/xpf-root-lane.lock|-E 75 /run/xpf-root-lane.$$.lock|'; then
 	if ! two_lanes "$tmp/no-root-lock.sh" m11; then
 		ok "mutation no-root-lock: the two-lane cell fails (unserialized lanes)"
 	else
 		bad "mutation no-root-lock: the two-lane cell still passes"
 	fi
 fi
-if mutant no-interrupt-report 's/if wait_unfrozen soft; then xpf_state_report || true; fi/:/'; then
+if mutant no-interrupt-report 's/if wait_unfrozen soft; then interrupted_report || true; fi/:/'; then
 	if ! term_reports "$tmp/no-interrupt-report.sh" m12 && [[ "$(cat "$tmp/m12.rc")" == 143 ]]; then
 		ok "mutation no-interrupt-report: the TERM cell fails, with the status still 143"
 	else
 		bad "mutation no-interrupt-report: the TERM cell still passes (rc $(cat "$tmp/m12.rc"))"
+	fi
+fi
+if mutant finalize-interruptible "/^\t# until the handback completes, so a signal here cannot cut it short/{n;n;s/^\ttrap '' INT TERM$/\t:/}"; then
+	if ! term_in_finalize "$tmp/finalize-interruptible.sh" m13; then
+		ok "mutation finalize-interruptible: the TERM-in-handback cell fails (rc $(cat "$tmp/m13.rc"))"
+	else
+		bad "mutation finalize-interruptible: the TERM-in-handback cell still passes"
+	fi
+fi
+# shellcheck disable=SC2016
+if mutant no-nested-check 's/^if \[\[ "$as_root" -eq 1 \&\& -n "${XPF_VMTR_ROOT_LANE:-}" \]\]; then$/if false; then/'; then
+	reset_state
+	rm -f "$marker"
+	rc=$(pause_run "$tmp/no-nested-check.sh" m14 'touch /work/lane/tmp/ran-19142' --root -- XPF_VMTR_ROOT_LANE=1)
+	if [[ -e "$marker" ]]; then
+		ok "mutation no-nested-check: the nested run is admitted (the marker was created)"
+	else
+		bad "mutation no-nested-check: the nested cell still refuses (rc $rc)"
+	fi
+fi
+# The lock wait counted as unseen time again: B reports a pause.
+if mutant lockwait-counted 's/w = t1 - t0 - lw$/w = t1 - t0/'; then
+	if ! lock_wait_not_a_pause "$tmp/lockwait-counted.sh" m15; then
+		ok "mutation lockwait-counted: the lock-wait cell fails (the wait reads as a pause)"
+	else
+		bad "mutation lockwait-counted: the lock-wait cell still passes"
 	fi
 fi
 if mutant inverted-compare 's/comm -13 /comm -12 /'; then
