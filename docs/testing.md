@@ -133,8 +133,13 @@ The script also prepares the runner environment:
     overhead, not a stall attributed to `incus pause`. A slow start before
     the heartbeat runs counts too; the selftest's "unseen time" cell is
     exactly that false positive.
-  - No test has paused a real VM mid-run yet, so which branch a real pause
-    trips is not established.
+  - One real gate pause has been observed. On udp:xpf-testrunner3,
+    2026-11-16 07:20:22Z-07:21:56Z (94 s), an idle 1500 s run reported
+    `paused-for=93s`, all from heartbeat gaps (workstation 1500.1 s, runner
+    monotonic 1500.0 s). The guest's CLOCK_MONOTONIC ran through the pause:
+    even the run's own `sleep 1500` finished 1500 s after it started. The
+    wall branch is kept for a guest whose clock stops. No selftest pauses a
+    real VM; that needs a scratch runner.
 
   A positive `paused-for` adds a line saying a timeout or timing-sensitive
   result from the run is VOID unless re-run clean; `paused-for=unknown`
