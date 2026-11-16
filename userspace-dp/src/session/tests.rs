@@ -11884,11 +11884,18 @@ fn reverse_match_key_zeroes_only_the_domain_7160() {
 // while leaving exactly that question open, so each cause is asserted to move
 // its OWN counter and to leave the other two alone.
 //
-// Both `touch_if_stale` and `account_packet` are driven, because they resolve
-// through different functions (`record_by_key` vs `record_by_key_mut`) and a
-// miss in one but not the other would be a materially different story than a
-// miss in both — which is what the cluster measurement actually observed
-// (`idle ~= age` on every frozen row means BOTH missed).
+// Both `touch_if_stale` and `account_packet_at` are driven, because they
+// resolve through different functions (`record_by_key` vs
+// `record_by_key_mut`) and a miss in one but not the other would be a
+// materially different story than a miss in both — which is what the cluster
+// measurement actually observed (`idle ~= age` on every frozen row means BOTH
+// missed).
+//
+// #19129: `account_packet_at` is the production entry (poll_descriptor's only
+// caller). Since #18742 (a4a277f189) the `#[cfg(test)]` `account_packet`
+// wrapper first reads the row's time through `record_by_key`, so on a miss it
+// probes twice and counts two misses; driving it here measured the test
+// helper, not the `record_by_key_mut` resolver this cell names.
 #[test]
 fn lookup_miss_counters_separate_the_three_causes_7919() {
     let mut table = SessionTable::new();
@@ -11906,7 +11913,7 @@ fn lookup_miss_counters_separate_the_three_causes_7919() {
     // CONTROL FIRST. A hit must move NOTHING — without this the assertions
     // below pass for a counter that increments on every lookup.
     table.touch_if_stale(&key, install_ns + 1);
-    table.account_packet(&key, 100, 0, 0);
+    table.account_packet_at(&key, 100, 0, 0, install_ns + 1);
     assert_eq!(
         table.lookup_miss_counts(),
         (0, 0, 0),
@@ -11926,13 +11933,13 @@ fn lookup_miss_counters_separate_the_three_causes_7919() {
     );
 
     // The SAME cause through the &mut resolver, which is the one
-    // `account_packet` uses. Both must count, or a frozen-counters-but-live-
+    // `account_packet_at` uses. Both must count, or a frozen-counters-but-live-
     // idle-timer split would be invisible.
-    table.account_packet(&absent, 100, 0, 0);
+    table.account_packet_at(&absent, 100, 0, 0, install_ns + 2);
     assert_eq!(
         table.lookup_miss_counts(),
         (2, 0, 0),
-        "account_packet resolves through record_by_key_mut and must count the \
+        "account_packet_at resolves through record_by_key_mut and must count the \
          same cause; counting only the shared-ref path would hide exactly the \
          asymmetry #7919 used to diagnose this"
     );
@@ -11961,7 +11968,7 @@ fn lookup_miss_counters_separate_the_three_causes_7919() {
     let mut aliased = key_v6();
     aliased.src_port = aliased.src_port.wrapping_add(3);
     table.debug_force_handle(&aliased, installed_handle);
-    table.account_packet(&aliased, 100, 0, 0);
+    table.account_packet_at(&aliased, 100, 0, 0, install_ns + 4);
     assert_eq!(
         table.lookup_miss_counts(),
         (2, 1, 1),
