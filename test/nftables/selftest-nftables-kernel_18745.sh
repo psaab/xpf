@@ -27,6 +27,19 @@
 # more, and the leg was red over a complete run for that alone. What
 # the scan no longer notices is a non-kernel test DELETED from source; that
 # deletion is in the diff that makes it.
+# The scan's limits (a sed over source, not the compiler):
+#   - it recognises one shape, a single-line `func TestXxx(<name> *testing.T)`.
+#     A test it misses (split signature, unnamed or `_` parameter, a renamed
+#     `testing` import, a type alias, a non-ASCII name) still fails the leg as
+#     "unscanned" when it runs and passes. One it misses that ALSO does not
+#     run is in neither set, and nothing here sees it;
+#   - it ignores build constraints, so a test file excluded by a build tag or
+#     platform suffix would fail as "did not PASS" (none in pkg/nftables has
+#     one today);
+#   - it cannot tell a declaration from matching text in a block comment or
+#     raw string, which would also fail as "did not PASS";
+#   - it covers top-level tests only. A subtest's SKIP or FAIL line still fails
+#     the leg, but a subtest that is never created is not noticed.
 # The 36 kernel-cell names below stay a manual pin: deleting or renaming a
 # kernel cell must fail here until the list is deliberately updated. The
 # shell censuses prove runner discovery and reachability, not coverage of Go
