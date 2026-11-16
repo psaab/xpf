@@ -640,8 +640,11 @@ test-rust: lint-rust-baseline check-userspace-dt-needed
 	# Leg 0: compile bench invariants only; benches are never executed.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
 	# Leg 1: full release suite; overflow checks remain off by design.
+	# --no-fail-fast (#19133): without it cargo stops at the first red test
+	# binary, so a red unit cell hid every userspace-dp/tests/* target.
+	# scripts/test-rust-leg1-selftest.sh pins it (make test-rust-leg1-lib).
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
-		--bins --tests -- --test-threads=1
+		--bins --tests --no-fail-fast -- --test-threads=1
 	# Leg 2: validate the exact target-qualified oracle, then run one debug argv.
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp python3 scripts/debug-leg-census.py --manifest userspace-dp/Cargo.toml --cargo "$(CARGO)" --toolchain "$$pinned"
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml \
@@ -1125,6 +1128,13 @@ endif
 .PHONY: test-clean-shared-cargo-lib
 test-clean-shared-cargo-lib:
 	sh ./scripts/clean-shared-cargo-selftest.sh
+
+# #19133: test-rust leg 1 reports every target. Extracts leg 1 from
+# `make -n test-rust` and runs it on a fixture crate with a red unit cell and a
+# red tests/ target; both must report. Needs cargo and the pinned toolchain.
+.PHONY: test-rust-leg1-lib
+test-rust-leg1-lib:
+	bash ./scripts/test-rust-leg1-selftest.sh
 
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
