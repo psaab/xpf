@@ -16,11 +16,21 @@
 # and reported a whole-package PASS (#18841 review). A name filter that
 # comes from the caller rots exactly the way a hand-maintained one does
 # (#6743 r2-N3).
-# The expected 216-test package count and the 36 kernel-cell names below are
-# manual pins. A changed package test count or a missing named kernel cell
-# fails closed; any new or renamed kernel cell requires a deliberate review
-# and update of the list and count. The shell censuses prove runner discovery
-# and reachability, not coverage of Go test source names.
+# Which tests must PASS is read from the package's own source (#19141):
+# every top-level `func TestXxx(t *testing.T)` in pkg/nftables/*_test.go,
+# compared NAME FOR NAME with the `--- PASS:` lines. A declared test that did
+# not PASS means the run was narrowed (or the test failed); a PASS the scan
+# did not find means the scan is narrower than the compiler, and either one
+# fails. The package total used to be a hand-set count. It was right when it
+# landed (216, 6b11dee651) and went stale two commits later, when #18728's
+# tests landed from a branch cut before the count existed; #19088 added one
+# more, and the leg was red over a complete run for that alone. What
+# the scan no longer notices is a non-kernel test DELETED from source; that
+# deletion is in the diff that makes it.
+# The 36 kernel-cell names below stay a manual pin: deleting or renaming a
+# kernel cell must fail here until the list is deliberately updated. The
+# shell censuses prove runner discovery and reachability, not coverage of Go
+# test source names.
 #
 # A SKIP line, top-level or subtest, is a failure here, because under
 # XPF_REQUIRE_NETNS=1 every skip arm these cells have means the forcing
@@ -117,8 +127,36 @@ if [ "$rc" -ne 0 ]; then
 	fail=1
 fi
 passed=$(printf '%s\n' "$out" | grep -cE '^--- PASS: Test[^[:space:]]+[[:space:]]' || true)
-if [ "$passed" -ne 216 ]; then
-	echo "FAIL: expected all 216 pkg/nftables tests to PASS, got $passed — the package was narrowed or its expected cell count changed"
+# The declared set, from the same tree `go test ./pkg/nftables/` compiles: a
+# top-level Test function per Go's rule (no lowercase letter after "Test").
+declared=$(sed -n -E 's/^func (Test([A-Z0-9_][A-Za-z0-9_]*)?)\([A-Za-z_][A-Za-z0-9_]* \*testing\.T\).*/\1/p' ./pkg/nftables/*_test.go 2>/dev/null | sort)
+declared_count=$(printf '%s\n' "$declared" | grep -c . || true)
+ran=$(printf '%s\n' "$out" | sed -n -E 's/^--- PASS: (Test[^[:space:]]*)[[:space:]].*/\1/p' | sort)
+if [ "$declared_count" -eq 0 ]; then
+	echo "FAIL: found no Test functions in ./pkg/nftables/*_test.go — the scan cannot say which tests had to run"
+	fail=1
+fi
+# "missing NAME": declared, did not PASS. "unscanned NAME": PASSed, not found
+# by the scan. The separator cannot be a Go identifier.
+set_diff=$(printf '%s\n%s\n%s\n' "$declared" '--' "$ran" | awk '
+	$0 == "--" { second = 1; next }
+	$0 == "" { next }
+	!second { d[$0] = 1; next }
+	{ r[$0] = 1 }
+	END {
+		for (n in d) if (!(n in r)) print "missing " n
+		for (n in r) if (!(n in d)) print "unscanned " n
+	}' | sort)
+missing=$(printf '%s\n' "$set_diff" | sed -n 's/^missing //p')
+unscanned=$(printf '%s\n' "$set_diff" | sed -n 's/^unscanned //p')
+if [ -n "$missing" ]; then
+	echo "FAIL: $(printf '%s\n' "$missing" | grep -c .) of the $declared_count Test functions in ./pkg/nftables/*_test.go did not PASS — the package run was narrowed, or they failed:"
+	printf '%s\n' "$missing" | sed 's/^/      /'
+	fail=1
+fi
+if [ -n "$unscanned" ]; then
+	echo "FAIL: tests PASSed that the source scan did not find — the scan is narrower than the compiler, so it cannot vouch for the run; fix the scan:"
+	printf '%s\n' "$unscanned" | sed 's/^/      /'
 	fail=1
 fi
 kernel_list_count=$(printf '%s\n' "$expected_kernel_cells" | grep -cE '^Test[^[:space:]]+$' || true)
