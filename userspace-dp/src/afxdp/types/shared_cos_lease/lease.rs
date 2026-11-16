@@ -1127,6 +1127,42 @@ impl SharedCoSQueueLease {
             .map(|v| v.equal_flow.fail_open_count.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
+    /// #19100 v6.1: this worker's part of the exact class's configured rate,
+    /// from ONE coherent observation of its v8 allotment: the existing
+    /// seqlock reader (`snapshot_epoch_v8`) returns the epoch's grant cap and
+    /// this worker's share of it together (Codex v6 P1-4: two independent
+    /// loads could pair a cap and a share from different epochs). The share
+    /// is a slice of a burst-inclusive cap, so it is used as a fraction of
+    /// the cap and applied to `rate_bytes`. `None` without v8, with an empty
+    /// cap, or when the seqlock read gives up (the caller then falls back).
+    pub(in crate::afxdp) fn v8_worker_share_of_rate(&self, id: usize, rate_bytes: u64) -> Option<u64> {
+        let (cap, share, _grace, _tag) = self.snapshot_epoch_v8(id)?;
+        if cap == 0 {
+            return None;
+        }
+        Some((rate_bytes as u128 * share.min(cap) as u128 / cap as u128) as u64)
+    }
+
+    /// #19100 (test-only): publish an epoch's grant cap and worker `id`'s
+    /// share under an even sequence (a completed rotation).
+    #[cfg(test)]
+    pub(in crate::afxdp) fn publish_epoch_share_for_test(&self, id: usize, cap: u64, share: u64) {
+        let v8 = self.v8.as_ref().expect("v8 lease");
+        v8.epoch.epoch_total_grant_cap.store(cap, Ordering::Relaxed);
+        v8.worker_fair_share[id].store(share, Ordering::Relaxed);
+        let seq = v8.epoch.epoch_seq.load(Ordering::Acquire);
+        v8.epoch.epoch_seq.store((seq | 1) + 1, Ordering::Release);
+    }
+
+    /// #19100 (test-only): leave the epoch sequence odd, as a rotation
+    /// writer stalled mid-write does.
+    #[cfg(test)]
+    pub(in crate::afxdp) fn stall_epoch_writer_for_test(&self) {
+        let v8 = self.v8.as_ref().expect("v8 lease");
+        let seq = v8.epoch.epoch_seq.load(Ordering::Acquire);
+        v8.epoch.epoch_seq.store(seq | 1, Ordering::Release);
+    }
+
     /// #9117: the per-worker fair share this lease last published. Test-only
     /// accessor so a cell can assert the PRECONDITION of the mid-epoch-newcomer
     /// shape (share published as 0) rather than assuming its setup produced it.

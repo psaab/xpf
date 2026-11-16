@@ -237,7 +237,25 @@ pub(super) struct Arm {
     /// queue full. A rate below what the worker gets lets the queue empty,
     /// so the set of backlogged non-exact bindings changes mid-window.
     pub(super) nonexact_offered_bytes: Vec<Option<u64>>,
+    /// #19100: distinct non-exact flows per worker (default 4); each
+    /// worker's arrivals cycle over them. Per-flow bytes are measured.
+    pub(super) nonexact_flows: Vec<u16>,
+    /// #19100: the arm's cells read per-flow bytes. Flow-fair buckets are
+    /// seeded from OS entropy (`cos_flow_hash_seed_from_os`), so two flows
+    /// occasionally share a bucket and cannot be told apart; such a run is
+    /// re-drawn (new seeds) up to `ATTRIBUTION_ATTEMPTS` times.
+    pub(super) needs_per_flow: bool,
+    /// #19100 v6.1 (Codex v6 P1-2): the packet-cost model. Exact and
+    /// non-exact packet sizes, and a fixed per-packet cost charged against
+    /// the worker's TX capacity on top of the bytes (0 = bytes only).
+    pub(super) exact_len: usize,
+    pub(super) nonexact_len: usize,
+    pub(super) packet_overhead_bytes: u64,
 }
+
+/// #19100: attempts to draw bucket seeds that keep every backlogged worker's
+/// flows attributable (a 4-flow collision is about 0.6% per worker per run).
+const ATTRIBUTION_ATTEMPTS: u32 = 4;
 
 impl Arm {
     /// `workers` workers capped at `cap_gbit`, one exact class configured at
@@ -266,6 +284,11 @@ impl Arm {
             nonexact_surplus_weight: 1,
             worker_tx_cap_override: vec![None; workers],
             nonexact_offered_bytes: vec![None; workers],
+            nonexact_flows: vec![4; workers],
+            needs_per_flow: false,
+            exact_len: FRAME,
+            nonexact_len: FRAME,
+            packet_overhead_bytes: 0,
         }
     }
 
@@ -293,7 +316,7 @@ pub(super) struct Outcome {
     /// queued on some worker and sent nothing.
     pub(super) longest_exact_class_stall_ns: Vec<u64>,
     pub(super) exact_root_parks: u64,
-    exact_queue_parks: u64,
+    pub(super) exact_queue_parks: u64,
     /// The measured window's length.
     pub(super) window_ns: u64,
     /// Per exact class, from the start of the window to the first step in
@@ -309,6 +332,33 @@ pub(super) struct Outcome {
     /// the enqueue did not admit (the simulation's depth cap or admission).
     pub(super) exact_arrived_bytes: Vec<u64>,
     pub(super) exact_dropped_bytes: Vec<u64>,
+    /// #19100: non-exact bytes sent in the window per worker per flow
+    /// (`Arm::nonexact_flows` order).
+    /// `None` for a worker whose flows could not be attributed (two flows
+    /// in one flow-fair bucket, or several flows on a FIFO queue).
+    pub(super) nonexact_flow_bytes: Vec<Option<Vec<u64>>>,
+    /// #19100 attribution: per-worker drain counters over the window.
+    pub(super) diag: Vec<SimDiag>,
+    /// #19100 (Codex v6.1 P2-6): per worker, this simulation's colocated
+    /// turn counters over the measurement window only (warm-up subtracted).
+    pub(super) turns: Vec<crate::afxdp::types::V61TestCounters>,
+}
+
+/// #19100 attribution counters, per worker, over the measured window.
+#[derive(Clone, Debug, Default)]
+pub(super) struct SimDiag {
+    /// Drain calls that sent exact / non-exact bytes, and those bytes.
+    pub(super) exact_drains: u64,
+    pub(super) exact_drain_bytes: u64,
+    pub(super) nonexact_drains: u64,
+    pub(super) nonexact_drain_bytes: u64,
+    /// Drain calls that sent nothing while this worker's non-exact queue
+    /// held backlog (with TX credit to spend).
+    pub(super) noop_with_nonexact_backlog: u64,
+    /// Steps the worker entered with no TX credit (paying a batch's debt).
+    pub(super) tx_blocked_steps: u64,
+    /// Steps on which any worker had published exact demand.
+    pub(super) demand_steps: u64,
 }
 
 /// The marks of `Outcome::exact_class_bytes_by_mark`.
@@ -363,6 +413,59 @@ impl Outcome {
             self.exact_queue_parks,
         )
     }
+}
+
+/// #19100: the source port of non-exact flow `flow` on worker `w`.
+fn nonexact_flow_port(w: usize, flow: u16) -> u16 {
+    40_000 + (w as u16) * 100 + flow
+}
+
+/// #19100: bytes of each of worker `w`'s non-exact flows still queued, from
+/// the flow-fair buckets. A worker's flows must land in distinct buckets,
+/// or the per-flow attribution is undefined and the harness says so.
+fn nonexact_flow_queued(binding: &BindingWorker, queue_idx: usize, flows: u16) -> Option<Vec<u64>> {
+    let flows = flows.max(1);
+    let queue = &binding.cos.cos_interfaces.get(&IFX).expect("root").queues[queue_idx];
+    let Some(ffs) = queue.flow_fair_state.as_ref() else {
+        // A FIFO queue: one flow, or nothing queued (a worker with no
+        // non-exact traffic, whose queue never promoted).
+        let queued = queued_bytes(binding, queue_idx);
+        if flows > 1 && queued > 0 {
+            return None;
+        }
+        let mut out = vec![0; usize::from(flows)];
+        out[0] = queued;
+        return Some(out);
+    };
+    let buckets: Vec<usize> = (0..flows)
+        .map(|f| {
+            let key = test_session_key(nonexact_flow_port(binding.slot as usize, f), 5200 + u16::from(NONEXACT_QUEUE));
+            cos_flow_bucket_index(ffs.flow_hash_seed, Some(&key))
+        })
+        .collect();
+    for (i, b) in buckets.iter().enumerate() {
+        if buckets[..i].contains(b) {
+            return None;
+        }
+    }
+    Some(buckets.iter().map(|b| ffs.flow_bucket_bytes[*b]).collect())
+}
+
+/// `simulate`, re-drawn while a backlogged worker's flows are not
+/// attributable and the arm needs per-flow bytes (see `Arm::needs_per_flow`).
+pub(super) fn simulate_attributed(arm: &Arm, seed: u64) -> Outcome {
+    let mut outcome = simulate(arm, seed);
+    for _ in 1..ATTRIBUTION_ATTEMPTS {
+        let attributable = !arm.needs_per_flow
+            || (0..arm.workers)
+                .filter(|w| arm.nonexact_backlogged[*w])
+                .all(|w| outcome.nonexact_flow_bytes[w].is_some());
+        if attributable {
+            break;
+        }
+        outcome = simulate(arm, seed);
+    }
+    outcome
 }
 
 pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
@@ -452,8 +555,15 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
     let mut descs: Vec<XdpDesc> = Vec::new();
     let mut exact_credit = vec![vec![0u64; workers]; classes];
     let mut exact_flow_cursor = vec![vec![0u16; workers]; classes];
-    let mut nonexact_port: Vec<u16> = (0..workers).map(|w| 40_000 + (w as u16) * 100).collect();
+    let mut diag = vec![SimDiag::default(); workers];
+    let mut nonexact_cursor = vec![0u16; workers];
+    let mut flow_admitted: Vec<Vec<u64>> = (0..workers)
+        .map(|w| vec![0u64; usize::from(arm.nonexact_flows[w].max(1))])
+        .collect();
+    let mut flow_base: Vec<Vec<u64>> = flow_admitted.clone();
+    let mut flow_measurable = vec![false; workers];
     let mut base_nonexact = vec![0u64; workers];
+    let mut base_turns = vec![crate::afxdp::types::V61TestCounters::default(); workers];
     let mut base_exact = vec![0u64; workers];
     let mut base_class = vec![0u64; classes];
     let mut last_progress = vec![0u64; workers];
@@ -499,8 +609,8 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                     continue;
                 }
                 exact_credit[c][w] += class.offered_bytes[w] * STEP_NS / 1_000_000_000;
-                while exact_credit[c][w] >= FRAME as u64 {
-                    exact_credit[c][w] -= FRAME as u64;
+                while exact_credit[c][w] >= arm.exact_len as u64 {
+                    exact_credit[c][w] -= arm.exact_len as u64;
                     let admitted = queued_bytes(&bindings[w], c) < EXACT_MAX_DEPTH && {
                         let flows = class.flows[w].max(1);
                         exact_flow_cursor[c][w] = (exact_flow_cursor[c][w] + 1) % flows;
@@ -508,13 +618,13 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                             + (c as u16) * 1_000
                             + (w as u16) * 100
                             + exact_flow_cursor[c][w];
-                        let item = sim_item(EXACT_QUEUE_IDS[c], port, now);
+                        let item = sim_item_len(EXACT_QUEUE_IDS[c], port, now, arm.exact_len);
                         sim_enqueue(&mut bindings[w], EXACT_QUEUE_IDS[c], item)
                     };
                     if now >= measure_ns {
-                        arrived[c] += FRAME as u64;
+                        arrived[c] += arm.exact_len as u64;
                         if !admitted {
-                            dropped[c] += FRAME as u64;
+                            dropped[c] += arm.exact_len as u64;
                         }
                     }
                 }
@@ -530,11 +640,14 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                         }
                         nonexact_credit[w] -= FRAME as u64;
                     }
-                    nonexact_port[w] = 40_000 + (w as u16) * 100 + ((nonexact_port[w] + 1) % 4);
-                    let item = sim_item(NONEXACT_QUEUE, nonexact_port[w], now);
+                    let flows = arm.nonexact_flows[w].max(1);
+                    nonexact_cursor[w] = (nonexact_cursor[w] + 1) % flows;
+                    let port = nonexact_flow_port(w, nonexact_cursor[w]);
+                    let item = sim_item_len(NONEXACT_QUEUE, port, now, arm.nonexact_len);
                     if !sim_enqueue(&mut bindings[w], NONEXACT_QUEUE, item) {
                         break;
                     }
+                    flow_admitted[w][usize::from(nonexact_cursor[w])] += arm.nonexact_len as u64;
                 }
             }
         }
@@ -555,11 +668,21 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
             let poll_cap = cap_per_step[w] * period as i64;
             tx_credit[w] = (tx_credit[w] + poll_cap).min(TX_CREDIT_MAX.max(poll_cap));
             let binding = &mut bindings[w];
+            let in_window = now >= measure_ns;
+            if in_window {
+                if tx_credit[w] <= 0 {
+                    diag[w].tx_blocked_steps += 1;
+                }
+                if !backlog.peer_exact_demand_queue_mask(u32::MAX).is_empty() {
+                    diag[w].demand_steps += 1;
+                }
+            }
             for _ in 0..MAX_PASSES {
                 if tx_credit[w] <= 0 {
                     break;
                 }
                 let before = tx_total(binding);
+                let nonexact_before = queue_sent(binding, nonexact_idx);
                 drains_in_step += 1;
                 let serviced = drain_shaped_tx(binding, now, &mut recycles);
                 descs.clear();
@@ -570,7 +693,23 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                 let _ = reap_tx_completions(binding, &mut recycles);
                 recycles.clear();
                 let sent = tx_total(binding) - before;
-                tx_credit[w] -= sent as i64;
+                let packets_sent = descs.len() as u64;
+                let nonexact_sent = queue_sent(binding, nonexact_idx) - nonexact_before;
+                if in_window {
+                    let d = &mut diag[w];
+                    if nonexact_sent > 0 {
+                        d.nonexact_drains += 1;
+                        d.nonexact_drain_bytes += nonexact_sent;
+                    }
+                    if sent > nonexact_sent {
+                        d.exact_drains += 1;
+                        d.exact_drain_bytes += sent - nonexact_sent;
+                    }
+                    if sent == 0 && queued_bytes(binding, nonexact_idx) > 0 {
+                        d.noop_with_nonexact_backlog += 1;
+                    }
+                }
+                tx_credit[w] -= (sent + packets_sent * arm.packet_overhead_bytes) as i64;
                 if serviced.is_none() || sent == 0 {
                     break;
                 }
@@ -600,15 +739,27 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
                 }
                 root_lease.consume(granted);
             }
-            backlog.consume_residual_surplus_budget(u64::MAX);
+            // #19100 v3 (Codex): empty the residual pool through its own
+            // reset (zero tokens, new generation), not by spending it.
+            backlog.reset_residual_surplus_budget(now);
             for (w, binding) in bindings.iter().enumerate() {
                 base_nonexact[w] = queue_sent(binding, nonexact_idx);
+                base_turns[w] = binding.cos.cos_interfaces[&IFX].v61_test;
                 base_exact[w] = tx_total(binding) - base_nonexact[w];
                 last_sent[w] = base_nonexact[w];
                 last_progress[w] = now;
             }
             for (c, base) in base_class.iter_mut().enumerate() {
                 *base = class_sent(&bindings, c);
+            }
+            for w in 0..workers {
+                flow_measurable[w] = false;
+                if let Some(queued) = nonexact_flow_queued(&bindings[w], nonexact_idx, arm.nonexact_flows[w]) {
+                    flow_measurable[w] = true;
+                    for (f, base) in flow_base[w].iter_mut().enumerate() {
+                        *base = flow_admitted[w][f] - queued[f];
+                    }
+                }
             }
         } else if now > measure_ns {
             for (w, binding) in bindings.iter().enumerate() {
@@ -677,6 +828,32 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         .enumerate()
         .map(|(w, b)| queue_sent(b, nonexact_idx) - base_nonexact[w])
         .collect();
+    let nonexact_flow_bytes: Vec<Option<Vec<u64>>> = (0..workers)
+        .map(|w| {
+            if !flow_measurable[w] {
+                return None;
+            }
+            let queued = nonexact_flow_queued(&bindings[w], nonexact_idx, arm.nonexact_flows[w])?;
+            Some(
+                (0..flow_admitted[w].len())
+                    .map(|f| flow_admitted[w][f] - queued[f] - flow_base[w][f])
+                    .collect(),
+            )
+        })
+        .collect();
+    // #19100 v3 (Codex): per-flow bytes are admissions less what is still
+    // queued, so a post-admission drop would count as sent. Reconcile each
+    // worker's flow sum with its committed non-exact TX bytes.
+    for (w, flows) in nonexact_flow_bytes.iter().enumerate() {
+        let Some(flows) = flows else { continue };
+        let sum: u64 = flows.iter().sum();
+        assert_eq!(
+            sum, nonexact_bytes[w],
+            "harness: worker {w}: per-flow bytes {sum} != committed non-exact TX {} \
+             (a post-admission drop?)",
+            nonexact_bytes[w]
+        );
+    }
     let exact_bytes: Vec<u64> = bindings
         .iter()
         .enumerate()
@@ -709,6 +886,23 @@ pub(super) fn simulate(arm: &Arm, seed: u64) -> Outcome {
         exact_class_bytes_by_mark: by_mark,
         exact_arrived_bytes: arrived,
         exact_dropped_bytes: dropped,
+        nonexact_flow_bytes,
+        diag,
+        turns: bindings
+            .iter()
+            .enumerate()
+            .map(|(w, b)| {
+                let now = b.cos.cos_interfaces[&IFX].v61_test;
+                let base = base_turns[w];
+                crate::afxdp::types::V61TestCounters {
+                    funded_builds: now.funded_builds - base.funded_builds,
+                    minimum_builds: now.minimum_builds - base.minimum_builds,
+                    turn_submits: now.turn_submits - base.turn_submits,
+                    turn_bytes: now.turn_bytes - base.turn_bytes,
+                    turn_packets: now.turn_packets - base.turn_packets,
+                }
+            })
+            .collect(),
     }
 }
 
@@ -736,7 +930,7 @@ pub(super) fn check_every_seed(
     let mut failures = Vec::new();
     let mut reports = Vec::new();
     for seed in SEEDS {
-        let outcome = simulate(arm, seed);
+        let outcome = simulate_attributed(arm, seed);
         let report = outcome.report(&format!("{name} seed {seed:#x}"));
         let verdict = if outcome.total_gbps() > 1.01 * SHAPING_GBIT {
             Err(format!(

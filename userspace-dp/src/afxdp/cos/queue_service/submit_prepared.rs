@@ -105,6 +105,7 @@ pub(super) fn submit_prepared(
                 phase,
                 batch_bytes,
                 bytes,
+                packets,
                 items,
             );
             if committed_len > 0 && sidecar_len > 0 {

@@ -502,7 +502,7 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
     select_cos_surplus_batch_filtered(
         root,
         now_ns,
-        false,
+        SurplusPass::Ordinary,
         None,
         RootGrantLimit::FULL,
         &mut local_scratch,
@@ -510,11 +510,36 @@ pub(in crate::afxdp) fn select_cos_surplus_batch(
     )
 }
 
+/// Which surplus pass is selecting (#19025, #19100).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SurplusPass {
+    /// The ordinary surplus pass: every eligible queue, and a root shortfall
+    /// parks the queue until the root can cover its head.
+    Ordinary,
+    /// A colocated turn (`residual::build_colocated_nonexact_turn_batch`):
+    /// non-exact queues only; a root shortfall skips the queue WITHOUT
+    /// parking it (an attempt that cannot be built leaves the queue as it
+    /// found it); and at most `max_packets` packets from the queue THIS
+    /// selection serves, as a true packet limit in the builder
+    /// (`build_cos_batch_from_queue_capped`; Codex v6.2 P2-2: the former
+    /// head-length byte estimate let mixed sizes exceed it). Codex v6.1 P2-4:
+    /// no budget from another queue's head. A turn spends at most the whole
+    /// packets its opportunity credit holds (the minimum: one).
+    Colocated { max_packets: u64 },
+}
+
+impl SurplusPass {
+    #[inline]
+    fn colocated(self) -> bool {
+        !matches!(self, SurplusPass::Ordinary)
+    }
+}
+
 #[inline]
 pub(super) fn select_cos_surplus_batch_filtered(
     root: &mut CoSInterfaceRuntime,
     now_ns: u64,
-    nonexact_only: bool,
+    pass: SurplusPass,
     nonexact_surplus_budget: Option<u64>,
     root_limit: RootGrantLimit,
     local_scratch: &mut VecDeque<TxRequest>,
@@ -535,7 +560,7 @@ pub(super) fn select_cos_surplus_batch_filtered(
                 continue;
             }
             // #19025: the owed-share pass serves non-exact queues only.
-            if nonexact_only && queue.config.exact {
+            if pass.colocated() && queue.config.exact {
                 continue;
             }
             if !queue.config.exact {
@@ -596,6 +621,10 @@ pub(super) fn select_cos_surplus_batch_filtered(
                 );
             }
             if root.tokens < head_len {
+                // A turn never parks (`SurplusPass::Colocated`).
+                if pass.colocated() {
+                    continue;
+                }
                 // #18748: whether this queue parks still demanding its reservation.
                 let parks_with_demand = queue.config.exact && queue.hot.tokens >= head_len;
                 if let Some(wake_tick) = estimate_cos_queue_wakeup_tick(
@@ -631,11 +660,16 @@ pub(super) fn select_cos_surplus_batch_filtered(
             } else {
                 queue.hot.surplus_deficit
             };
-            if let Some(batch) = build_cos_batch_from_queue(
+            let max_packets = match pass {
+                SurplusPass::Colocated { max_packets } => usize::try_from(max_packets).unwrap_or(usize::MAX),
+                SurplusPass::Ordinary => TX_BATCH_SIZE,
+            };
+            if let Some(batch) = build_cos_batch_from_queue_capped(
                 queue,
                 queue_idx,
                 root.tokens,
                 secondary_budget,
+                max_packets,
                 CoSServicePhase::Surplus,
                 local_scratch,
                 prepared_scratch,

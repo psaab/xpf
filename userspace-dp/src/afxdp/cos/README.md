@@ -46,7 +46,22 @@ mod.rs for further file-level breakdown.
   uncapped `cos_queue_front`. Budgeting the uncapped head covered a head the
   builder never took: when the capped head was larger, the build returned
   nothing, the over-target bucket's rate never decayed, and the queue stopped
-  for good.
+  for good.- **Colocated turns are worker-local and bounded (#19025, #19100).**
+  `queue_service::residual::build_colocated_nonexact_turn_batch` gives a
+  non-exact queue on an exact class's worker a turn after exact service.
+  - **Credits.** Paid from local byte and packet credits, which committed exact
+    work earns at phi/(1-phi) (`v61_accrue_turn_credit`, Q32 fixed point,
+    remainders rescaled across rate changes) and committed turns pay
+    (`v61_settle_turn`, called from both settle arms with the submit's true
+    packet count).
+  - **Never the shared residual pool.** Turns are never debited to it.
+  - **Turn size.** A funded turn's packet limit is enforced in the builder
+    (`build_cos_batch_from_queue_capped`). The minimum is one packet per
+    1 ms epoch, out of debt only.
+  - **State hygiene.** A turn attempt never parks a queue, and never stamps
+    #18748's floor hold.
+  - **The shipped contract and its trades:** `docs/cos-traffic-shaping.md`,
+    "Colocated Non-Exact Service Beside an Exact Class".
 - **Flow-fair gate is `flow_fair_state.is_some()` (#1735).** The runtime
   `CoSQueueRuntime::flow_fair()` accessor returns
   `flow_fair_state.is_some()`, NOT `config.flow_fair`. The invariant

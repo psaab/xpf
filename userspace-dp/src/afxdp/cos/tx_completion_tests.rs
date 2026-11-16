@@ -178,6 +178,7 @@ fn apply_cos_send_result_counts_nonexact_bytes_when_exact_queue_backlogged() {
         CoSServicePhase::Surplus,
         1500,
         1500,
+        1,
         std::collections::VecDeque::new(),
     );
 
@@ -242,6 +243,7 @@ fn apply_cos_send_result_counts_nonexact_bytes_when_peer_exact_queue_backlogged(
         CoSServicePhase::Surplus,
         1500,
         1500,
+        1,
         std::collections::VecDeque::new(),
     );
 
@@ -370,6 +372,7 @@ fn apply_cos_send_result_counts_same_worker_sibling_exact_backlog() {
         CoSServicePhase::Surplus,
         1500,
         1500,
+        1,
         std::collections::VecDeque::new(),
     );
 
@@ -435,6 +438,7 @@ fn apply_cos_send_result_debits_shared_residual_surplus_budget() {
         CoSServicePhase::Surplus,
         1500,
         1500,
+        1,
         std::collections::VecDeque::new(),
     );
 
@@ -497,6 +501,7 @@ fn apply_cos_prepared_result_debits_shared_residual_surplus_budget() {
         CoSServicePhase::Surplus,
         1500,
         1500,
+        1,
         std::collections::VecDeque::new(),
     );
 
@@ -572,6 +577,7 @@ fn apply_cos_send_result_nonempty_retry_readds_restored_bytes() {
         CoSServicePhase::Surplus,
         batch_bytes,
         1500,
+        1,
         retry,
     );
 
@@ -651,6 +657,7 @@ fn apply_cos_prepared_result_nonempty_retry_readds_restored_bytes() {
         CoSServicePhase::Surplus,
         batch_bytes,
         1500,
+        1,
         retry,
     );
 

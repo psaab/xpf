@@ -136,6 +136,7 @@ pub(super) fn submit_local(
                 phase,
                 batch_bytes,
                 bytes,
+                packets,
                 items,
             );
             // #1229 v7 + #5157: account per-bucket bytes for the
