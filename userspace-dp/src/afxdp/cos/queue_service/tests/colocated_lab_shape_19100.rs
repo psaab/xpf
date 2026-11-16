@@ -684,3 +684,36 @@ fn diag_v61_gate() {
     println!("DIAG61 colo {:.3} accruals {} | checks {} demand-empty {} behind {} bytecredit>0 {} opp-ok {} funded {} | share {} den {}",
         o.nonexact_gbps(9), V61_ACCRUALS.load(Relaxed), d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]);
 }
+
+/// #19100 (seat 2 review, P2-1), report-only: #19025's accepted on/off trade
+/// re-measured on the #19100 mechanism. The README's 2.1-2.4 Gb/s figure was
+/// measured on #19025's claims and floor-hold stamping, both removed by
+/// #19100. R2 is #19025's shape: 4 workers capped at 10 Gb/s, exact 24 of a
+/// 25 Gb/s root, offered 14 on worker 0, which is the colocated instance.
+/// Exact on/off at 100/100 us, 1/1 ms and 5/5 ms; 96 KB and default roots.
+#[test]
+#[ignore = "report-only: R2 on/off on the #19100 mechanism"]
+fn meas_r2_onoff_19100() {
+    for (burst, label) in [(96_000u64, "96k"), (SHAPING_BYTES / 100, "default")] {
+        for (on_ns, off_ns) in [(100_000u64, 100_000u64), (1_000_000, 1_000_000), (5_000_000, 5_000_000)] {
+            let mut arm = Arm::new(4, 10, 24, &[14]);
+            arm.root_burst_bytes = burst;
+            arm.exact_arrivals = Arrivals::OnOff { on_ns, off_ns };
+            for seed in [SEEDS[0], SEEDS[1]] {
+                let o = simulate(&arm, seed);
+                let peers = (1..4).map(|w| o.nonexact_gbps(w)).sum::<f64>() / 3.0;
+                println!(
+                    "R2ONOFF {label:>7} {:>5}/{:<5}us seed {seed:#x} | colocated {:.3} peers {:.3} | \
+                     unserved {} us | best-effort {:.2} | exact {:.2}",
+                    on_ns / 1_000,
+                    off_ns / 1_000,
+                    o.nonexact_gbps(0),
+                    peers,
+                    o.longest_unserved_ns[0] / 1_000,
+                    o.nonexact_total_gbps(),
+                    o.exact_gbps(),
+                );
+            }
+        }
+    }
+}

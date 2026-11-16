@@ -108,12 +108,19 @@ where
                     Ok(mut slot) => *slot = Some(msg),
                     Err(poisoned) => *poisoned.into_inner() = Some(msg),
                 }
-                // Mark dead. Relaxed is fine — the panic_slot mutex
-                // publishes the message; the dead flag is a one-shot
-                // diagnostic, not a synchronization barrier.
+                // Mark dead with Release. The panic_slot mutex publishes the
+                // message, but the dead flag IS a synchronization edge: the
+                // coordinator's dead-worker sweep reads it with Acquire
+                // (`retire_worker_holders_where`) and then zeroes this
+                // worker's CoS exact-backlog slots
+                // (`clear_worker_cos_backlog_slots`, #19025/#19100). Release
+                // orders every backlog publication this worker made before its
+                // panic ahead of the flag, so the sweep cannot be overtaken by
+                // a late nonzero publish that its one-shot latch would never
+                // revisit (Codex, #19100 stack review P1).
                 runtime_atomics
                     .dead
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                    .store(true, std::sync::atomic::Ordering::Release);
             }
         })
 }

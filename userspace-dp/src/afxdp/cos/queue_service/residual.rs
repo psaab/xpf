@@ -468,12 +468,11 @@ pub(super) fn nonexact_surplus_budget_under_exact_demand(
     if let Some(backlog) = shared_exact_backlog {
         root.nonexact_surplus_under_exact_tokens = 0;
         root.nonexact_surplus_under_exact_last_refill_ns = now_ns;
-        // #19025: only a binding with non-exact backlog asks, and so holds a
-        // claim. One whose surplus pass runs with nothing non-exact queued
-        // (its exact pass fell through, or only a surplus-sharing exact
-        // queue waits) would reserve a part of the residual that nobody
-        // spends. The budget bounds non-exact queues only, so with none
-        // queued it is never read.
+        // The budget bounds non-exact queues only, so with none queued it is
+        // never read: skip the pool's refill. (Under #19025's per-binding
+        // claims this was an invariant, since asking reserved a claim. #19100
+        // removed the claims; asking reserves nothing, and this exit is now
+        // an optimisation only.)
         if !root
             .queues
             .iter()
@@ -481,10 +480,10 @@ pub(super) fn nonexact_surplus_budget_under_exact_demand(
         {
             return Some(0);
         }
-        // #19025: the interface-wide residual pool, with this binding's
-        // per-epoch claim on it (`SharedCoSExactBacklog::nonexact_surplus_budget`).
-        // #19100 v6-local: the shared residual pool without #19025's
-        // per-binding claims (#18748 v3's metering), for non-turn surplus.
+        // The interface-wide residual pool (#18748's metering), first-come,
+        // for ordinary (non-turn) surplus. `binding_slot` is unused since
+        // #19100 removed #19025's per-binding claims; dropping the parameter
+        // is filed as a follow-up so this fold changes no signature.
         let _ = binding_slot;
         return Some(backlog.residual_surplus_budget(now_ns, residual_rate, residual_burst));
     }

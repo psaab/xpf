@@ -46,7 +46,8 @@ mod.rs for further file-level breakdown.
   uncapped `cos_queue_front`. Budgeting the uncapped head covered a head the
   builder never took: when the capped head was larger, the build returned
   nothing, the over-target bucket's rate never decayed, and the queue stopped
-  for good.- **Colocated turns are worker-local and bounded (#19025, #19100).**
+  for good.
+- **Colocated turns are worker-local and bounded (#19025, #19100).**
   `queue_service::residual::build_colocated_nonexact_turn_batch` gives a
   non-exact queue on an exact class's worker a turn after exact service.
   - **Credits.** Paid from local byte and packet credits, which committed exact
@@ -292,9 +293,14 @@ mod.rs for further file-level breakdown.
 - **The colocated non-exact turn (#19025, #19023).** Shared interfaces
   meter all ordinary non-exact surplus under exact demand with ONE
   interface-wide residual token bucket in `SharedCoSExactBacklog` (private
-  interfaces use the per-root bucket), so ordinary non-exact traffic stays
-  within the residual whichever bindings send it, and residual one binding
-  cannot use stays available to the others. The bucket is first-come.
+  interfaces use the per-root bucket), so ordinary non-exact traffic is held
+  to the residual, and residual one binding cannot use stays available to the
+  others. The bucket is first-come.
+  It is read before transmit and debited after it, with a saturating debit.
+  So bindings whose read-to-debit windows overlap can overspend it by up to
+  (concurrent spenders − 1) × one batch per window, and that excess is
+  forgiven, not carried. This predates the #19100 stack (fb33f3ae9a);
+  reserve-before-submit is #19144.
   #19025 added a turn for the colocated non-exact queue on a binding whose
   exact class was just served, first drawn on that bucket through accruing
   per-binding claims. #19100 removed the claims and made the turn
@@ -315,14 +321,32 @@ mod.rs for further file-level breakdown.
   part instead; it double-credited intervals when n changed, stranded parts
   a slow binding could not spend and let a part larger than the worker
   starve the exact class, so it was replaced (docs/log/19025.md).
-  Accepted trade: when an exact class flips idle and busy (R2 at on/off
-  100/100 us, 96 KB root), the colocated instance gets 2.1-2.4 Gb/s against
-  3.0 on #18748 alone, while total best-effort rises (15.7-15.8 against
-  14.8-15.1). It is served throughout, never unserved for more than 1 ms.
-  On #18748 alone it used its whole worker in its exact-free time; the
-  turns refresh its floor hold, so every worker holds alike (coordinator,
-  2026-11-10, unless #19025's seats show a measured harm). Not
-  addressed: the reserved amount is still the configured rate, so a
+  On/off trade, re-measured on #19100 (`meas_r2_onoff_19100`,
+  report-only). The shape is R2: 4 workers at 10 Gb/s, exact 24 of 25,
+  offered 14 on worker 0, which is the colocated instance; exact flips idle
+  and busy; 96 KB root; exact 7.00 Gb/s in every column. Each value is the
+  colocated instance's rate / its longest unserved stretch / total
+  best-effort:
+
+  | on/off | #18748 alone | #19025 (claims, removed) | #19100 (shipped) |
+  |---|---|---|---|
+  | 100/100 us | 3.00 / 141 us / 14.8-15.0 | 2.2 / 141 us / 15.7-15.8 | 3.00 / 141 us / 14.3-14.7 |
+  | 1/1 ms | 3.00 / 1.4 ms / 8.9 | 2.0 / 238 us / 8.5 | 3.00 / 196 us / 8.6 |
+  | 5/5 ms | 2.25 / 7.0 ms / 8.4 | 1.9-2.0 / 1.1 ms / 8.0 | 2.37 / 200 us / 8.0 |
+
+  On the default root, the longest unserved stretch is 141 us / 1.4 ms /
+  7.0 ms on #18748 alone against 141 / 488 / 488 us on #19100. Best-effort
+  is 18.0 / 16.4 / 13.4 against 18.0 / 16.4 / 12.8.
+
+  - #19100's turns close #18748's multi-millisecond unserved stretches.
+  - The colocated rate is equal or higher.
+  - The cost is up to about 4% of total best-effort in the longer flips
+    (5/5 ms: 8.0 against 8.4 at 96 KB; 12.8 against 13.4 on the default
+    root). This is measured, not attributed.
+  - #19025's 2.1-2.4 Gb/s trade came from its claims and its floor-hold
+    stamping, which #19100 removed. A turn now reads the floor without
+    stamping it.
+  Not addressed: the reserved amount is still the configured rate, so a
   TX-capped exact class still over-reserves (#19023's other half). A
   worker that dies by panic never runs its CoS teardown, so the
   coordinator's dead-worker sweep clears its bindings' backlog slots
@@ -496,6 +520,15 @@ mod.rs for further file-level breakdown.
         local mask even on a root with no exact class, where a non-exact
         guarantee then succeeds at once. Scheduling there is unchanged; the
         CPU cost is unmeasured.
+      - The colocated turn adds two more (#19100). While a turn is pending,
+        each drain's turn attempt computes the local exact demand mask and,
+        with a valid pace, whether a demanding exact queue holds tokens for
+        its head. On a runnable flow-fair exact queue each calls
+        `cos_queue_front`, a linear scan of the active flow buckets, before
+        the exact selector's own. With the republish that is up to four
+        scans per demanding queue per pass. This is also unmeasured. An O(1)
+        credit-gate exit, a single walk, and a ≥ 1k-bucket probe are filed as
+        #19143.
     - What it costs in lease operations: on a root with an exact class, one
       acquire CAS per batch and one release CAS when a drain ends with
       unspent credit (a partial grant, a short TX ring), on top of the
