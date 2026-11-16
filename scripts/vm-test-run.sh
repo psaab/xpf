@@ -86,11 +86,15 @@
 # command wrote production state. The command's status is unchanged.
 # A probe that FAILS is not a clean directory: a --root run is refused (or,
 # with --allow-xpf-state, runs with the unknown state disclosed), and a failed
-# after-probe is disclosed. A --root leg holds a per-runner lock on the runner
-# (/run/xpf-vm-test-run-root.lock) from its observation to its report, so
-# overlapping root lanes wait for each other instead of both observing an
-# empty directory and claiming each other's writes. An INT/TERM still
-# reports what the command wrote and exits 130/143.
+# after-probe is disclosed. A --root leg runs its probe, command, after-probe
+# and report as ONE script on the runner under
+# `flock -w <wait> /run/xpf-root-lane.lock`, so the lock lives exactly as
+# long as the remote command: overlapping root lanes wait for each other
+# (the waiter names the holder) instead of both observing an empty directory
+# and claiming each other's writes. A nested --root run from inside a root
+# lane (XPF_VMTR_ROOT_LANE) is refused rather than waiting on itself. An
+# INT/TERM during the command reports what it wrote, best effort, and exits
+# 130/143; INT/TERM during the handback after it are ignored until it ends.
 #
 # Stream order (#19139): `incus exec` carries the command's stdout and stderr
 # as two separate streams, and the workstation merges them (`>log 2>&1`) in
@@ -681,87 +685,121 @@ xpf_state_probe() {
 	esac
 }
 
-# #19162: a --root leg holds a per-runner lock from its observation through
-# its report, so two root lanes on one runner can neither both observe an
-# empty directory nor claim each other's writes. The lock lives ON the
-# runner (any workstation's lanes share it): `flock` held by a remote process
-# whose stdin is a FIFO this script keeps open. It is released when this
-# script closes the FIFO, and also when this script dies, because closing the
-# `incus exec` client ends the remote process (both measured on
-# tcp:xpf-testrunner, 2026-11-16).
-root_lock_pid=
-root_lock_dir=
-root_lock_release() {
-	[[ -n "$root_lock_pid" ]] || return 0
-	# No redirection here: `exec` with no command applies its redirections to
-	# this shell, so `2>/dev/null` would silence every later line on stderr.
-	exec {root_lock_fd}>&-
-	kill "$root_lock_pid" 2>/dev/null || true
-	wait "$root_lock_pid" 2>/dev/null || true
-	rm -rf "$root_lock_dir"
-	root_lock_pid=
-}
-if [[ "$as_root" -eq 1 ]]; then
-	root_lock_dir=$(mktemp -d "${TMPDIR:-/tmp}/vmtr-rootlock.XXXXXX")
-	mkfifo "$root_lock_dir/f"
-	owner="lane=${name} pid=$$ host=$(hostname -s 2>/dev/null || echo unknown) since=$(date -u +%FT%TZ)"
-	incus exec "$runner" -- flock /run/xpf-vm-test-run-root.lock sh -c "printf '%s\n' '${owner}' >/run/xpf-vm-test-run-root.owner; echo VMTR_ROOT_LOCK_HELD; cat >/dev/null" \
-		<"$root_lock_dir/f" >"$root_lock_dir/out" 2>&1 &
-	root_lock_pid=$!
-	exec {root_lock_fd}>"$root_lock_dir/f"
-	lock_waited=0
-	until grep -q '^VMTR_ROOT_LOCK_HELD$' "$root_lock_dir/out" 2>/dev/null; do
-		if ! kill -0 "$root_lock_pid" 2>/dev/null; then
-			echo "vm-test-run: could not take the per-runner root lock on ${runner}: $(tr '\n' ' ' <"$root_lock_dir/out") (#19162)" >&2
-			root_lock_release
-			exit 2
-		fi
-		if [[ "$lock_waited" -eq 20 ]]; then
-			holder=$(incus exec "$runner" -- cat /run/xpf-vm-test-run-root.owner 2>/dev/null) || holder=unknown
-			echo "vm-test-run: waiting for another --root run on ${runner} to finish (holder: ${holder}) (#19162)" >&2
-		fi
-		if [[ "$lock_waited" -ge $((${XPF_TEST_RUNNER_WAIT_S:-7200} * 10)) ]]; then
-			echo "vm-test-run: still waiting for the per-runner root lock on ${runner}; giving up (#19162)" >&2
-			root_lock_release
-			exit 75
-		fi
-		sleep 0.1
-		lock_waited=$((lock_waited + 1))
-	done
+# #19162: a --root leg runs as ONE script on the runner, under
+# `flock -w <wait> /run/xpf-root-lane.lock`: the before-probe and admission,
+# the command, the after-probe and the report all run inside it, so the lock
+# lives exactly as long as the remote command that needs it. Two root lanes
+# on one runner therefore cannot both observe a clean directory, or claim
+# each other's writes. (An earlier draft held the lock from a separate,
+# FIFO-fed remote process. Its lifetime differed from the command's: it
+# could outlive a dead orchestrator through an inherited descriptor, or be
+# released while the command ran on. Codex on b7f.) A runner-user leg cannot
+# write /var/lib/xpf; it only warns about what it may read.
+if [[ "$as_root" -eq 1 && -n "${XPF_VMTR_ROOT_LANE:-}" ]]; then
+	echo "vm-test-run: refusing a nested --root run: this process runs inside a root lane (XPF_VMTR_ROOT_LANE), which holds ${runner}'s root-lane lock; it would wait on itself (#19162)" >&2
+	exit 2
 fi
-
-xpf_state_probe before
-if [[ "$before_status" == nonempty || "$before_status" == error ]]; then
+if [[ "$as_root" -eq 0 ]]; then
+	xpf_state_probe before
 	if [[ "$before_status" == nonempty ]]; then
-		listed=$(tr '\n' ' ' <<<"$before_entries")
-		seen="holds state an earlier root leg left (${listed% })"
-	else
-		seen="could not be inspected (${before_entries}), so it is not known to be clean"
+		echo "vm-test-run: warning: ${runner}:/var/lib/xpf holds state from an earlier root leg ($(tr '\n' ' ' <<<"$before_entries" | sed 's/ $//')); a test that reads it depends on that leg (#19162)" >&2
+	elif [[ "$before_status" == error ]]; then
+		echo "vm-test-run: warning: ${runner}:/var/lib/xpf could not be inspected (${before_entries}), so it is not known to be clean (#19162)" >&2
 	fi
-	if [[ "$as_root" -eq 1 && "$allow_xpf_state" -ne 1 ]]; then
-		echo "vm-test-run: refusing a --root run: ${runner}:/var/lib/xpf ${seen}, and tests read that production path. Move it aside when no root lane is running there, e.g. as root on the runner: d=/var/lib/xpf-residue/\$(date -u +%Y%m%dT%H%M%SZ); mkdir -p \$d && find /var/lib/xpf -mindepth 1 -maxdepth 1 -exec mv -t \$d {} + ; or pass --allow-xpf-state to run with it disclosed (#19162)" >&2
-		root_lock_release
+fi
+# The root-lane script. It reads its parameters from the environment the
+# remote command line exports (VMTR_*, XPF_STATE_DIR); the command itself
+# replaces @WRAPPED@.
+root_lane_sh=$(
+	cat <<'SH'
+# vm-test-run root lane (#19162): runs under the runner's root-lane lock.
+set -u
+# This invocation's own copy; bash keeps it open, so it can go now.
+rm -f -- "$0" 2>/dev/null
+# How long this lane waited for the lock: the workstation does not count it
+# as a pause (the heartbeat starts only after it).
+awk -v t0="${VMTR_PRELOCK_UPTIME:-}" '{ if (t0 != "") printf "%.1f\n", $1 - t0 }' /proc/uptime >"$VMTR_LOCKWAIT_FILE" 2>/dev/null || true
+export XPF_VMTR_ROOT_LANE=1
+printf '%s\n' "$VMTR_OWNER" >"$VMTR_ROOT_OWNER" 2>/dev/null || true
+probe() {
+	d=$XPF_STATE_DIR
+	if [ ! -e "$d" ] && [ ! -L "$d" ]; then echo XPF_STATE=absent; return; fi
+	if [ ! -d "$d" ]; then echo "XPF_STATE=error $d is not a directory"; return; fi
+	if ! l=$(ls -A1 "$d" 2>&1); then echo "XPF_STATE=error $l"; return; fi
+	if [ -z "$l" ]; then echo XPF_STATE=empty; else echo XPF_STATE=nonempty; printf '%s\n' "$l"; fi
+}
+entries() { printf '%s\n' "$1" | tail -n +2 | grep -v '^$'; }
+before=$(probe)
+bstatus=${before%%$'\n'*}
+printf '%s\n' "$before" >"$VMTR_BEFORE_FILE" 2>/dev/null || true
+seen=
+case "$bstatus" in
+XPF_STATE=nonempty) seen="holds state an earlier root leg left ($(entries "$before" | tr '\n' ' ' | sed 's/ $//'))" ;;
+XPF_STATE=error*) seen="could not be inspected (${bstatus#XPF_STATE=error }), so it is not known to be clean" ;;
+esac
+if [ -n "$seen" ]; then
+	if [ "$VMTR_ALLOW_XPF_STATE" != 1 ]; then
+		echo "vm-test-run: refusing a --root run: ${VMTR_RUNNER}:${XPF_STATE_DIR} ${seen}, and tests read that production path. Move it aside when no root lane is running there, e.g. as root on the runner: d=/var/lib/xpf-residue/\$(date -u +%Y%m%dT%H%M%SZ); mkdir -p \$d && find /var/lib/xpf -mindepth 1 -maxdepth 1 -exec mv -t \$d {} + ; or pass --allow-xpf-state to run with it disclosed (#19162)" >&2
 		exit 2
 	fi
-	echo "vm-test-run: warning: ${runner}:/var/lib/xpf ${seen}; a test that reads it depends on that (#19162)" >&2
+	echo "vm-test-run: warning: ${VMTR_RUNNER}:${XPF_STATE_DIR} ${seen}; a test that reads it depends on that (#19162)" >&2
 fi
-# xpf_state_report: after a --root command (or its interruption), name what
-# it added to /var/lib/xpf. Best effort: a failed probe is disclosed, never
-# allowed to change the command's status.
-xpf_state_report() {
+report() {
+	after=$(probe)
+	astatus=${after%%$'\n'*}
+	case "$astatus" in
+	XPF_STATE=error*)
+		echo "vm-test-run: could not inspect ${VMTR_RUNNER}:${XPF_STATE_DIR} after the --root command (${astatus#XPF_STATE=error }); whether it wrote production state is unknown (#19162)" >&2
+		return 0 ;;
+	esac
+	case "$bstatus" in
+	XPF_STATE=error*)
+		if [ -n "$(entries "$after")" ]; then
+			echo "vm-test-run: ${VMTR_RUNNER}:${XPF_STATE_DIR} holds $(entries "$after" | tr '\n' ' ' | sed 's/ $//') after the --root command; the before-probe failed, so what it added is unknown (#19162)" >&2
+		fi
+		return 0 ;;
+	esac
+	new=$(comm -13 <(entries "$before" | sort) <(entries "$after" | sort) | tr '\n' ' ')
+	if [ -n "$new" ]; then
+		echo "vm-test-run: this --root command wrote production state to ${VMTR_RUNNER}:${XPF_STATE_DIR}: ${new% } (#19162)" >&2
+	fi
+}
+cmd_pid=
+on_signal() {
+	trap '' TERM INT HUP
+	if [ -n "$cmd_pid" ]; then kill "$cmd_pid" 2>/dev/null; fi
+	report
+	exit "$1"
+}
+trap 'on_signal 143' TERM
+trap 'on_signal 130' INT
+trap 'on_signal 129' HUP
+(
+@WRAPPED@
+) &
+cmd_pid=$!
+wait "$cmd_pid"
+rc=$?
+trap - TERM INT HUP
+report
+rm -f -- "$VMTR_BEFORE_FILE" 2>/dev/null
+exit "$rc"
+SH
+)
+# interrupted_report: the workstation's best effort after INT/TERM ended the
+# root command (and with it, its lock): compare the lane's recorded
+# before-state with what is there now. Another root lane may already run.
+interrupted_report() {
+	local before_rec new
+	before_rec=$(incus exec "$runner" -- cat "${lane_before}" 2>/dev/null) || before_rec=
 	xpf_state_probe after
-	if [[ "$after_status" == error ]]; then
-		echo "vm-test-run: could not inspect ${runner}:/var/lib/xpf after the --root command (${after_entries}); whether it wrote production state is unknown (#19162)" >&2
+	if [[ -z "$before_rec" || "$after_status" == error || "${before_rec%%$'\n'*}" == XPF_STATE=error* ]]; then
+		echo "vm-test-run: the --root command was interrupted; what it wrote to ${runner}:/var/lib/xpf is unknown (#19162)" >&2
 		return 0
 	fi
-	if [[ "$before_status" == error ]]; then
-		[[ -n "$after_entries" ]] && echo "vm-test-run: ${runner}:/var/lib/xpf holds $(tr '\n' ' ' <<<"$after_entries"| sed 's/ $//') after the --root command; the before-probe failed, so what it added is unknown (#19162)" >&2
-		return 0
-	fi
-	local new
-	new=$(comm -13 <(sort <<<"$before_entries") <(sort <<<"$after_entries") | grep -v '^$' | tr '\n' ' ') || true
+	new=$(comm -13 <(printf '%s\n' "$before_rec" | tail -n +2 | grep -v '^$' | sort) <(printf '%s\n' "$after_entries" | grep -v '^$' | sort) | tr '\n' ' ') || true
 	if [[ -n "$new" ]]; then
-		echo "vm-test-run: this --root command wrote production state to ${runner}:/var/lib/xpf: ${new% } (#19162)" >&2
+		echo "vm-test-run: this --root command wrote production state to ${runner}:/var/lib/xpf: ${new% } (#19162; after an interruption, best effort)" >&2
 	fi
 }
 
@@ -825,50 +863,56 @@ rc=0
 # already recorded in rc; this step cannot change it. A Ctrl-C or TERM to
 # this script runs the same step before exiting 130/143.
 root_handback() {
-	# Not interruptible: a second Ctrl-C must not leave the repair half-done.
-	trap '' INT TERM
+	# Its callers ignore INT/TERM around it: a second Ctrl-C must not leave the
+	# repair half-done. It does not touch the traps itself (F9: resetting them
+	# here re-armed the default action mid-finalization).
 	incus exec "$runner" -- find "${base}" /home/runner/go /home/runner/.cargo /home/runner/.cache \
 		-xdev ! -user runner -exec chown -h runner:runner {} + >/dev/null 2>&1 || true
-	trap - INT TERM
 }
-# root_interrupted <status>: the INT/TERM path of a --root leg. End the
-# command, report what it left (#19162), hand files back, release the lock,
-# and exit with the signal's conventional status.
+# root_interrupted <status>: INT/TERM during a --root command. End the
+# command (closing the client ends the remote lane, and its lock), report
+# best effort, hand files back, exit with the signal's status.
 root_interrupted() {
 	trap '' INT TERM
-	# `|| true`: under set -e a failing last command of an && list (wait
-	# returns the killed command's 143) would exit before the report.
 	if [[ -n "${root_cmd_pid:-}" ]]; then
 		kill "$root_cmd_pid" 2>/dev/null || true
 		wait "$root_cmd_pid" 2>/dev/null || true
 	fi
-	if wait_unfrozen soft; then xpf_state_report || true; fi
+	if wait_unfrozen soft; then interrupted_report || true; fi
 	root_handback
-	root_lock_release
 	exit "$1"
 }
 if [[ "$as_root" -eq 1 ]]; then
 	trap 'root_interrupted 130' INT
 	trap 'root_interrupted 143' TERM
+	# Per invocation: two runs of one lane name must not share (and
+	# overwrite) the script or the before-state record.
+	lane_script="${base}/tmp/.vmtr-root-lane.$$.sh"
+	lane_before="${base}/tmp/.vmtr-xpf-before.$$"
+	lane_lockwait="${base}/tmp/.vmtr-lockwait.$$"
+	# The replacement is QUOTED: bash 5.2's patsub_replacement would otherwise
+	# turn every `&` in the command (`2>&1`, `&&`) into the matched pattern.
+	printf '%s\n' "${root_lane_sh/@WRAPPED@/"$wrapped"}" |
+		incus exec "$runner" -- bash -c "mkdir -p '${base}/tmp' && cat >'${lane_script}'"
+	owner="lane=${name} pid=$$ host=$(hostname -s 2>/dev/null || echo unknown) since=$(date -u +%FT%TZ)"
+	lock_wait=${XPF_TEST_RUNNER_WAIT_S:-7200}
+	lane_env="export XPF_STATE_DIR=/var/lib/xpf VMTR_ROOT_OWNER=/run/xpf-root-lane.owner VMTR_BEFORE_FILE='${lane_before}' VMTR_LOCKWAIT_FILE='${lane_lockwait}' VMTR_ALLOW_XPF_STATE=${allow_xpf_state} VMTR_RUNNER='${runner}' VMTR_OWNER='${owner}'"
+	lock_wait_note="if ! flock -n /run/xpf-root-lane.lock true 2>/dev/null; then echo \"vm-test-run: waiting for another --root run on ${runner} to finish (holder: \$(cat /run/xpf-root-lane.owner 2>/dev/null || echo unknown)) (#19162)\" >&2; fi"
 	ws_t0=$(ws_now)
 	# In the background, so a TERM to this script runs root_interrupted now
 	# rather than after the command ends (bash defers traps for a foreground
 	# child). A non-interactive shell gives it /dev/null as stdin.
-	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${wrapped}" &
+	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${lane_env}; ${lock_wait_note}; export VMTR_PRELOCK_UPTIME=\$(cut -d' ' -f1 /proc/uptime); exec flock -w ${lock_wait} -E 75 /run/xpf-root-lane.lock bash '${lane_script}'" &
 	root_cmd_pid=$!
 	wait "$root_cmd_pid" || rc=$?
 	root_cmd_pid=
 	ws_t1=$(ws_now)
-	trap - INT TERM
+	# Finalization: the remote lane already reported. INT/TERM are IGNORED
+	# until the handback completes, so a signal here cannot cut it short
+	# (Codex on b7f, F9); the command's status is already in rc.
+	trap '' INT TERM
 	root_handback
-	# #19162: name what this command left in /var/lib/xpf, then let the next
-	# root lane in.
-	if wait_unfrozen soft; then
-		xpf_state_report
-	else
-		echo "vm-test-run: ${runner} stayed FROZEN after the --root command; /var/lib/xpf was not inspected (#19162)" >&2
-	fi
-	root_lock_release
+	trap - INT TERM
 else
 	ws_t0=$(ws_now)
 	incus exec "$runner" -- su - runner -c "${stream_prefix}${env_prefix}; ${wrapped}" || rc=$?
@@ -877,11 +921,20 @@ fi
 
 # #19142: the pause verdict (see "Disclosure" above).
 clock=
+lock_waited=0
 if wait_unfrozen soft; then
 	clock=$(incus exec "$runner" -- bash -c "cat '${clock_file}' 2>/dev/null; rm -f '${clock_file}' '${clock_file}.tmp'" 2>/dev/null) || clock=
+	# #19162: a --root lane's wait for the root-lane lock is not a pause.
+	if [[ "$as_root" -eq 1 ]]; then
+		lock_waited=$(incus exec "$runner" -- bash -c "cat '${lane_lockwait}' 2>/dev/null; rm -f '${lane_lockwait}'" 2>/dev/null) || lock_waited=0
+		[[ "$lock_waited" =~ ^[0-9]+(\.[0-9]+)?$ ]] || lock_waited=0
+		if awk -v w="$lock_waited" 'BEGIN { exit !(w >= 1) }'; then
+			echo "vm-test-run: waited ${lock_waited}s for ${runner}'s root-lane lock; not counted as a pause (#19162)" >&2
+		fi
+	fi
 fi
-pause_report=$(awk -v t0="$ws_t0" -v t1="$ws_t1" -v rec="$clock" 'BEGIN {
-	w = t1 - t0
+pause_report=$(awk -v t0="$ws_t0" -v t1="$ws_t1" -v lw="$lock_waited" -v rec="$clock" 'BEGIN {
+	w = t1 - t0 - lw
 	if (split(rec, f, " ") < 4 || f[2] < f[1]) {
 		printf "unknown %.1f", w
 		exit
