@@ -25,7 +25,11 @@ Rows sharing a label are one mutant. For each mutant this runner:
                 /run/xpf-testguard-vm-boot-id, skips: that is not a survival),
                 or go test hit its -timeout (a run that consumed its whole budget
                 is never scored: a runner PAUSED by a gate harness fires the
-                timeout on resume and fails whichever test was running, #19142);
+                timeout on resume and fails whichever test was running, #19142).
+                One exception: when the focused run timed out, the TARGET alone
+                is re-run; if it then fails without a timeout (and with `expect`,
+                when given), the cell is KILLED, "confirmed alone": a mutant that
+                makes some OTHER cell hang must not VOID its own target's kill;
        KILLED   the target test failed (attributed by NAME) and, when the spec
                 gives one, its own output contains `expect`;
        KILLED-OTHER  something failed, but not the target as specified;
@@ -120,6 +124,18 @@ def run_pkg(cwd, pkg, pattern, env, wrapper):
     return passes, fails, skips, marks, out, build, timedout, r
 
 
+def confirm_alone(dst, tgt, expect, env, wrapper):
+    """Re-run only the target. True when it FAILS with no timeout (and with
+    expect in its own output, when expect is given)."""
+    for pkg, _, _ in PKGS:
+        p, f, sk, mk, o, b, to, r = run_pkg(dst, pkg, "^" + tgt + "$", env, wrapper)
+        if b or to:
+            return False
+        if tgt in f:
+            return not expect or expect in "".join(o.get(tgt, []))
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--src", required=True)
@@ -196,6 +212,8 @@ def main():
         ended = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
         if build:
             verdict = "VOID build failure: " + (last.stdout + last.stderr)[-400:].replace("\n", " | ")
+        elif timedout and tgt and confirm_alone(dst, tgt, expect, env, wrapper):
+            verdict = "KILLED by target %s (confirmed alone; the focused run timed out on another test)" % tgt
         elif timedout:
             verdict = "VOID go test timed out (a paused runner? check the gate logs for %s-%s UTC)" % (started, ended)
         elif not need <= present:
