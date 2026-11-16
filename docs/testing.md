@@ -18,7 +18,14 @@ second runner on each host was added 2026-11-09, when one free runner was
 saturated; the third udp runner on 2026-11-10, while long tcp gate cells kept
 both tcp runners paused): Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU at low CPU priority, 32 GiB RAM,
 150 GiB disk, Go per `go.mod`, and Rust per `userspace-dp/rust-toolchain.toml`.
-They also carry the deadcode gate's own Go release at `/usr/lib/go-<version>`
+Each Go release is installed once into its own directory
+(`/usr/local/go-<version>`, `/usr/lib/go-<version>`) and never replaced in
+place. The build Go is published by flipping the `go`/`gofmt` links in
+`/usr/local/bin` and `/usr/bin` (a new symlink renamed over the old one), so
+an upgrade is safe with lanes running: a running lane keeps its tree, and a
+crash leaves the old or the new link. Old versions stay until an explicit
+`--gc-toolchains`, which is refused while a lane is live. They also carry the
+deadcode gate's own Go release at `/usr/lib/go-<version>`
 (`DEADCODE_GO_VERSION` in `scripts/resolve-deadcode-go.sh`), and export
 `XPF_DEADCODE_REQUIRE=1` from `/etc/profile.d/xpf-testrunner.sh`, so a runner
 without it FAILS the deadcode legs instead of skipping them (#19152; before
@@ -29,8 +36,8 @@ the checkout:
 
 ```bash
 scripts/provision-testrunner.sh --runner udp:xpf-testrunner
-scripts/provision-testrunner.sh --runner udp:xpf-testrunner --toolchains-only  # update an existing runner;
-# replacing a toolchain is refused (exit 75) while a lane is live: drain it first
+scripts/provision-testrunner.sh --runner udp:xpf-testrunner --toolchains-only  # update an existing runner
+scripts/provision-testrunner.sh --runner udp:xpf-testrunner --gc-toolchains    # drop unpublished versions (idle only)
 ```
 
 Run tests from the worktree:
