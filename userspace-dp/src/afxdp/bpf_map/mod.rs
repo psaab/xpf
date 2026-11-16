@@ -507,7 +507,7 @@ pub(super) struct ConntrackCtx<'a> {
 /// Mirrors C `struct session_key` — 16 bytes, packed.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
-struct BpfSessionKeyV4 {
+pub(crate) struct BpfSessionKeyV4 {
     src_ip: [u8; 4], // __be32, network byte order
     dst_ip: [u8; 4], // __be32, network byte order
     src_port: u16,   // __be16, network byte order
@@ -519,7 +519,7 @@ struct BpfSessionKeyV4 {
 /// Mirrors C `struct session_value` — full connection state.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct BpfSessionValueV4 {
+pub(crate) struct BpfSessionValueV4 {
     state: u8,
     // __u16 to fit SESS_FLAG_NPTV6 (bit 8, 0x100), which overflows a u8
     // (#5460), and the cluster-origin bit (bit 9, #10227). The compiler
@@ -595,7 +595,7 @@ struct BpfSessionValueV4 {
 /// Mirrors C `struct session_key_v6` — 40 bytes, packed.
 #[repr(C, packed)]
 #[derive(Clone, Copy, Default)]
-struct BpfSessionKeyV6 {
+pub(crate) struct BpfSessionKeyV6 {
     src_ip: [u8; 16],
     dst_ip: [u8; 16],
     src_port: u16, // __be16, network byte order
@@ -658,7 +658,7 @@ fn bpf_session_key_v6(
 /// Mirrors C `struct session_value_v6` — full connection state with 128-bit IPs.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct BpfSessionValueV6 {
+pub(crate) struct BpfSessionValueV6 {
     state: u8,
     // __u16 to fit SESS_FLAG_NPTV6 (bit 8), the cluster-origin bit (bit 9,
     // #10227), see BpfSessionValueV4::flags (#5460). Layout matches C

@@ -184,7 +184,9 @@ impl<K, V, const N: usize> ShardedMap<K, V, N> {
         &self.shards
     }
 
-    /// Shard count (`N`), for caps and test fixtures.
+    /// Shard count (`N`), for test fixtures. Production reads `N` directly,
+    /// so this is test-only (#19155).
+    #[cfg(test)]
     #[inline]
     pub(crate) const fn shard_count(&self) -> usize {
         N
