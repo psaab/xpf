@@ -10,6 +10,15 @@ std::thread_local! {
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 
+// #18641: test-only, the last activation's prewarm timings on this thread
+// (set by `handle_activated_rgs`), so a cell can read the instrument's counts
+// without parsing stderr.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static LAST_PREWARM_TIMINGS_18641:
+        std::cell::Cell<Option<PrewarmTimings>> = const { std::cell::Cell::new(None) };
+}
+
 pub(in crate::afxdp) fn demote_shared_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -121,6 +130,12 @@ pub(in crate::afxdp) struct PrewarmTimings {
     /// Forward steering publishes attempted (each may write several rows).
     pub(in crate::afxdp) forward_steering_writes: usize,
     pub(in crate::afxdp) workers: usize,
+    /// Per-worker `UpsertSynced` pushes the fan-out queued, and those
+    /// `push_bounded` REFUSED at the queue bound (#18641; #19145 design
+    /// round, check (a)). A refused push leaves that worker to materialize
+    /// the session from the shared map on its first packet.
+    pub(in crate::afxdp) worker_pushes: usize,
+    pub(in crate::afxdp) worker_pushes_refused: usize,
     /// Candidate keys, the locked entry walk and reverse synthesis.
     pub(in crate::afxdp) collect: std::time::Duration,
     pub(in crate::afxdp) forward_steering: std::time::Duration,
@@ -362,10 +377,12 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 synced_replica_entry(forward)
             };
             let mut pending = worker_queue::lock_recover(commands);
-            worker_queue::push_bounded(
+            let queued = worker_queue::push_bounded(
                 &mut pending,
                 WorkerCommand::UpsertSynced(replica),
             );
+            timings.worker_pushes += 1;
+            timings.worker_pushes_refused += usize::from(!queued);
         }
         timings.forward_fanout += fanout_started.elapsed();
     }
@@ -410,10 +427,12 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // reverse-prewarm UpsertSynced for a poisoned worker queue.
             let mut pending = worker_queue::lock_recover(commands);
-            worker_queue::push_bounded(
+            let queued = worker_queue::push_bounded(
                 &mut pending,
                 WorkerCommand::UpsertSynced(synced_replica_entry(&reverse)),
             );
+            timings.worker_pushes += 1;
+            timings.worker_pushes_refused += usize::from(!queued);
         }
         timings.reverse_fanout += fanout_started.elapsed();
     }

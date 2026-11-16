@@ -17,9 +17,7 @@
 //!   over-reaches to every forward.
 
 use super::*;
-use crate::afxdp::bpf_map::{
-    RECORDER_ONLY_MAP_FD, clear_session_map_writes, session_map_writes,
-};
+use crate::afxdp::bpf_map::{RECORDER_ONLY_MAP_FD, clear_session_map_writes, session_map_writes};
 
 /// A coordinator on the split-RG forwarding fixture, with one worker:
 /// - LAN egress on RG2, WAN on RG1;
@@ -30,6 +28,15 @@ use crate::afxdp::bpf_map::{
 /// imported through the production verb, which files the forward in S under
 /// RG1 and in the reverse-prewarm index under both RGs.
 fn imported(rg1_active: bool, rg2_active: bool) -> (Coordinator, SessionKey) {
+    let (coordinator, forward, _queue) = imported_with_queue(rg1_active, rg2_active);
+    (coordinator, forward)
+}
+
+/// [`imported`], also returning the worker's command queue.
+fn imported_with_queue(
+    rg1_active: bool,
+    rg2_active: bool,
+) -> (Coordinator, SessionKey, Arc<Mutex<VecDeque<WorkerCommand>>>) {
     let mut coordinator = Coordinator::new();
     coordinator.set_forwarding_for_test(test_forwarding_state_split_rgs());
     coordinator
@@ -40,11 +47,10 @@ fn imported(rg1_active: bool, rg2_active: bool) -> (Coordinator, SessionKey) {
             }),
             ..Default::default()
         }));
+    let queue = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
-        WorkerRuntimeRecord::for_test(test_worker_handle(Arc::new(Mutex::new(
-            VecDeque::new(),
-        )))),
+        WorkerRuntimeRecord::for_test(test_worker_handle(Arc::clone(&queue))),
         None,
     );
     coordinator
@@ -68,7 +74,7 @@ fn imported(rg1_active: bool, rg2_active: bool) -> (Coordinator, SessionKey) {
         coordinator.synced_session_contains(&forward),
         "FIXTURE: the import must file the forward in the shared map ({imported:?})"
     );
-    (coordinator, forward)
+    (coordinator, forward, queue)
 }
 
 fn activate(coordinator: &Coordinator) {
@@ -184,7 +190,10 @@ fn a_key_rehomed_between_the_prewarm_and_the_republish_is_still_written_18641() 
 
     activate(&coordinator);
 
-    assert!(rehomed.get(), "FIXTURE: the re-home at the prewarm seam must have run");
+    assert!(
+        rehomed.get(),
+        "FIXTURE: the re-home at the prewarm seam must have run"
+    );
     assert_eq!(
         coordinator
             .sessions
@@ -237,4 +246,47 @@ fn a_transiently_failed_republish_write_still_leaves_the_row_18641() {
          republish's retry): {writes} successful write(s), present={present}. Records: \
          {records:?}"
     );
+}
+
+/// #18641 instrument (#19145 design round, check (a)): the activation timing
+/// line counts the prewarm's worker pushes and those refused at the queue
+/// bound, so a takeover's refused fraction is read per activation, not from
+/// the process-wide `worker_command_queue_drops` total.
+///
+/// - With room in the queue, every push is queued: the split-RG fixture
+///   prewarms one forward and one reverse to one worker, so 2 pushes and
+///   0 refused.
+/// - With the worker's queue at `MAX_PENDING_WORKER_COMMANDS`, both are
+///   refused.
+#[test]
+fn the_activation_instrument_counts_worker_pushes_refused_at_the_bound_18641() {
+    for full in [false, true] {
+        let (coordinator, _forward, queue) = imported_with_queue(false, true);
+        {
+            let mut pending = queue.lock().expect("queue");
+            pending.clear();
+            if full {
+                while pending.len() < crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+                    pending.push_back(WorkerCommand::VacateAllSharedExactSlots);
+                }
+            }
+        }
+        crate::afxdp::shared_ops::LAST_PREWARM_TIMINGS_18641.with(|last| last.set(None));
+        activate(&coordinator);
+        let timings = crate::afxdp::shared_ops::LAST_PREWARM_TIMINGS_18641
+            .with(|last| last.get())
+            .expect("FIXTURE: the activation must have run the prewarm");
+        assert_eq!(
+            (timings.forwards, timings.reverses, timings.workers),
+            (1, 1, 1),
+            "FIXTURE: one forward and one reverse prewarmed to one worker ({timings:?})"
+        );
+        let want_refused = if full { 2 } else { 0 };
+        assert_eq!(
+            (timings.worker_pushes, timings.worker_pushes_refused),
+            (2, want_refused),
+            "full={full}: the instrument must count every worker push and each one refused at \
+             the queue bound ({timings:?})"
+        );
+    }
 }

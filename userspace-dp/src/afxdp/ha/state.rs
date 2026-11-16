@@ -334,7 +334,7 @@ impl crate::afxdp::Coordinator {
         // ALWAYS, so an activation that republished nothing still reports
         // where its prewarm went. The crash-takeover A/B reads it.
         eprintln!(
-            "xpf-ha: RG activation {:?} timing: prewarm {} us (collect {} us; {} forwards: steering {} us for {} publishes, fanout {} us; {} reverses: shared {} us, steering {} us, fanout {} us; {} workers), republish {} us for {} entries",
+            "xpf-ha: RG activation {:?} timing: prewarm {} us (collect {} us; {} forwards: steering {} us for {} publishes, fanout {} us; {} reverses: shared {} us, steering {} us, fanout {} us; {} workers; {} worker pushes, {} refused at the queue bound), republish {} us for {} entries",
             activated_rgs,
             prewarm_elapsed.as_micros(),
             prewarm.collect.as_micros(),
@@ -347,9 +347,14 @@ impl crate::afxdp::Coordinator {
             prewarm.reverse_steering.as_micros(),
             prewarm.reverse_fanout.as_micros(),
             prewarm.workers,
+            prewarm.worker_pushes,
+            prewarm.worker_pushes_refused,
             republish_elapsed.as_micros(),
             republished,
         );
+        #[cfg(test)]
+        crate::afxdp::shared_ops::LAST_PREWARM_TIMINGS_18641
+            .with(|last| last.set(Some(*prewarm)));
         // #1636 option C: an RG just became forwarding-active on this
         // node. Repopulate the kernel neighbor cache for the now-active
         // next-hops (entries may have aged to NUD_FAILED while this node
