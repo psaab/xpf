@@ -74,7 +74,17 @@ The script also prepares the runner environment:
     with the entries listed.
   - A runner-user run warns.
   - After a `--root` command, every entry it added is named on stderr: that
-    command wrote production state, so its test needs a redirect.
+    command wrote production state, so its test needs a redirect. An
+    interrupted (INT/TERM) root leg reports too, and keeps its 130/143.
+  - The probe reports absent, empty, nonempty or error. A FAILED probe never
+    reads as clean: `--root` is refused, or runs with the unknown state
+    disclosed under `--allow-xpf-state`.
+  - A `--root` leg holds a per-runner lock, `/run/xpf-vm-test-run-root.lock`
+    on the runner, from that observation to that report. A second root lane
+    on the same runner prints `waiting for another --root run ... (holder:
+    ...)` and starts only when the first has reported. The lock is held by a
+    remote `flock` whose stdin this script keeps open, so it is released
+    even if this script is killed.
     `testguard-run.sh` overlays `/` for root runs (#19084), so only a root
     command outside it can write there.
 - The command's stdout and stderr come back as ONE stream, in the order they
