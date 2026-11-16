@@ -591,6 +591,50 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
 /// longest prefix wins, equal-length ties pick the LOWEST ifindex.
 /// The per-family twins and the divergent session_glue scan are
 /// gone; this wrapper only fixes the `RowsThenLedger` source set.
+/// #19171: whether a fresh lookup for the destination `target` is contradicted
+/// by the connected ledger, so a re-resolution must not adopt it.
+///
+/// **True when all of these hold:**
+/// - the answer is a local candidate (ForwardCandidate or MissingNeighbor on a
+///   non-fabric egress);
+/// - the destination has a KNOWN connected owner
+///   (`connected_owner_rg_for_target_in_table`, the HA-independent ledger,
+///   which still names a peer-owned prefix the FIB withholds, #15742);
+/// - the answer's egress is not the destination's connected interface
+///   (`connected_ifindex_for_target_in_table`).
+///
+/// **That is a gateway-route mis-resolution of a connected destination**
+/// (#15958b's term). On a split node the peer-owned LAN prefix is withheld from
+/// the transit FIB, and the FIB answers a LAN client with the WAN default route,
+/// an active local ForwardCandidate. A re-resolution that adopts it can STORE
+/// the WAN egress for a client whose RG is the peer's.
+///
+/// **HA-free.** A caller that sees `true` keeps the session's stored resolution
+/// and lets its HA stage judge that. It is the core of the reply's own retain
+/// verdict (`rehome_or_retain_fabric_redirect`: #15958b's connected-interface
+/// equality, #16524's re-home for an unknown owner), applied whatever the
+/// stored shape.
+pub(in crate::afxdp) fn fresh_resolution_contradicts_connected_owner(
+    forwarding: &ForwardingState,
+    stored: SessionDecision,
+    target: IpAddr,
+    fresh: ForwardingResolution,
+) -> bool {
+    let local_candidate = matches!(
+        fresh.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) && fresh.egress_ifindex > 0
+        && !super::forwarding::ingress_is_fabric(forwarding, fresh.egress_ifindex);
+    if !local_candidate {
+        return false;
+    }
+    let table = install_table_name_for_session(forwarding, stored, target);
+    if connected_owner_rg_for_target_in_table(forwarding, target, table) <= 0 {
+        return false;
+    }
+    fresh.egress_ifindex != connected_ifindex_for_target_in_table(forwarding, target, table)
+}
+
 pub(in crate::afxdp) fn connected_ifindex_for_target_in_table(
     forwarding: &ForwardingState,
     target: IpAddr,

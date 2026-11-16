@@ -500,3 +500,55 @@ fn a_refresh_after_the_withholding_publish_never_stores_the_wan_egress_19171() {
          whose RG is the peer's (stored={stored:?})"
     );
 }
+
+/// The guard's exemption: a fresh answer that IS the client's connected
+/// interface is adopted, even for a client with a known connected owner. Here
+/// RG2 is still active here, no prefix is withheld, and the client's live
+/// neighbor has changed since install (a new MAC on `reth1.0`). The refresh
+/// must store the fresh MAC, not keep the stale stored one (#11373).
+#[test]
+fn a_refresh_still_adopts_a_connected_clients_fresh_neighbor_19171() {
+    let key = reverse_key(40_107);
+    let mut sessions = SessionTable::new();
+    let installed = install_local_reverse(&mut sessions, &key);
+    let state = forwarding(false);
+    let moved = Arc::new(ShardedNeighborMap::new());
+    let fresh_mac = [0x02, 0, 0, 0, 0x61, 0x77];
+    moved.insert(
+        (LAN, IpAddr::V4(CLIENT)),
+        crate::afxdp::types::NeighborEntry { mac: fresh_mac },
+    );
+    assert_ne!(
+        installed.resolution.neighbor_mac,
+        Some(fresh_mac),
+        "FIXTURE: the live neighbor moved since install"
+    );
+    let _ = super::commands::handle_refresh_owner_rgs(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        &state,
+        &BTreeMap::from([(1, rg(true)), (2, rg(true))]),
+        &moved,
+        vec![2],
+        NOW_NS,
+        NOW_SECS,
+    );
+    let stored = sessions
+        .entry_with_origin(&key)
+        .expect("the refresh retains the reverse")
+        .0
+        .resolution;
+    assert_eq!(
+        (
+            stored.disposition,
+            stored.egress_ifindex,
+            stored.neighbor_mac
+        ),
+        (
+            ForwardingDisposition::ForwardCandidate,
+            LAN,
+            Some(fresh_mac)
+        ),
+        "a fresh answer on the client's own connected interface is adopted (stored={stored:?})"
+    );
+}

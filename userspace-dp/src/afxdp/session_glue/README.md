@@ -63,6 +63,35 @@ retain is healed by the next FIB bump, as for a `ForwardCandidate`.
 Mechanism and live evidence:
 `docs/fabric-cross-chassis-fwd.md` (#18659), `docs/log/18659.md`.
 
+## The HA commands never store a gateway mis-resolution (#19171)
+
+`DemoteOwnerRGS` and `RefreshOwnerRGS` (`commands/demote_owner_rgs.rs`,
+`commands/refresh_owner_rgs.rs`) re-resolve with a cache-free lookup and STORE
+the result.
+- **The problem on a split node.** The withholding publish (#15742) removes a
+  peer-owned LAN prefix from the transit FIB, so that lookup answers a LAN
+  client with the WAN default route. A command that runs after that publish
+  stored the WAN egress for a client whose RG is the peer's. The refresh's wide
+  scan reaches a not-yet-demoted local reverse the same way.
+- **What it did NOT do.** The session-hit arm's #16217 conversion still served
+  each WAN-arrival reply over the fabric. The stored row, though, stayed WAN
+  until the next forwarding-generation change. Until then it served the
+  embedded-ICMP return out the WAN, and relabelled the session's owner RG from
+  that egress.
+- **The guard.** Both commands now pass the lookup through
+  `fresh_resolution_contradicts_connected_owner` (`resolution.rs`): a local
+  answer whose egress is not the client's connected interface, for a client
+  with a known connected owner, is not adopted. The stored resolution goes to
+  the pipeline's HA stage instead, exactly as it does with the prefix present,
+  and the command stores the fabric redirect.
+  - An unknown owner (a routed destination, #16524) adopts the fresh answer.
+  - So does an answer on the client's own connected interface: a changed
+    neighbor is still restamped, as #11373 requires.
+- **Open:** a reply arriving over the fabric link (rows A2-fabric and B of
+  #19171) skips #16217 by design (anti-loop) and still takes the fresh answer.
+  Its reachability is topology-dependent; the ignored cells in
+  `demote_connected_owner_19171_tests.rs` pin it.
+
 ## Command ingest is budgeted (`apply_worker_commands`, #7201)
 
 `apply_worker_commands` is the worker's consumer for its

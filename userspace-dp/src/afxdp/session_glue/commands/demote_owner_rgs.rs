@@ -80,6 +80,21 @@ pub(in crate::afxdp::session_glue) fn handle_demote_owner_rgs(
                 decision,
             )
             .resolution;
+            // #19171: a cache-free answer the connected ledger contradicts
+            // (on a split node, the WAN default route for a client whose LAN
+            // prefix the FIB withholds) is never adopted, and so never
+            // STORED. The stored resolution goes to the pipeline's HA stage
+            // instead, as it does with the prefix present.
+            let looked_up_resolution = if fresh_resolution_contradicts_connected_owner(
+                forwarding,
+                decision,
+                resolution_target,
+                looked_up_resolution,
+            ) {
+                decision.resolution
+            } else {
+                looked_up_resolution
+            };
             // #17047: single consolidated pipeline (lookup supplied
             // above); #15958b/#16524 verdicts unchanged.
             let resolution = super::super::reresolve_stored_session(
