@@ -1256,7 +1256,10 @@ schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
   A persistently failing export then costs one full export every 30 s
   instead of every 4 s. The price: a drain requested during the tail can be
   refused even though the export has just recovered, until the next attempt
-  (at most 30 s away) succeeds. Retry the drain then. This backoff applies only to
+  succeeds. That attempt starts after up to 30 s of backoff from the moment
+  the failed attempt completes, plus any scheduling and lock delay (and a
+  drain that starts during a failing attempt also waits for it to end).
+  Retry the drain then. This backoff applies only to
   the cold-prime re-drive; other retries of a failing bulk (a forced resync,
   an aged unacknowledged bulk, the barrier re-prime) keep their own earlier
   cadence (#19135);

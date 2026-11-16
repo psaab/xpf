@@ -6145,8 +6145,10 @@ it.
         #19115 lab measured the cost of a 4 s cadence under a persistent
         failure: +3.7 % of a core at 10k sessions and +7.3 % at about
         24.6k. A drain requested during the tail can be refused although
-        the export has just recovered, until the next attempt (at most 30 s
-        away) succeeds.
+        the export has just recovered, until the next attempt succeeds:
+        after up to 30 s of backoff from the moment the failed attempt
+        completes, plus scheduling and lock delay. A window that opens
+        during a failing attempt also waits for that attempt to end.
     - It resets on a successful send (BulkEnd written), a discharge, the
       runtime being wired, and a new debt generation.
     - It never touches the #18752 owed age or last failure.

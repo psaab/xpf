@@ -72,16 +72,20 @@ import (
 //     remaining backoff, the scheduling and lock delay and that attempt's
 //     own successful time-to-pending add up to less than 5 s. This is what
 //     admits a drain after a transient (the #19115 lab, D-B).
-//   - 8 s, 16 s, then 30 s, the cap: sustained failure. After three
-//     consecutive failures the export has been failing for 7 s or more, and
-//     a drain opened now would be refused for the debt anyway unless the
-//     very next attempt succeeds. Growing the backoff cuts the cost of a
+//   - 8 s, 16 s, then 30 s, the cap: sustained failure. The tail starts at
+//     the FOURTH consecutive failure, about 7 s into the episode (the third
+//     still earns the 4 s step), and a drain opened then would be refused
+//     for the debt anyway unless the very next attempt succeeds. Growing
+//     the backoff cuts the cost of a
 //     persistently failing export, a full owner-RG export attempt each time
 //     (the lab measured +3.7 % of a core at 10k sessions and +7.3 % at about
 //     24.6k at the 4 s cadence), to one attempt per 30 s at the cap. The
 //     price: a drain whose window opens during the tail can be refused even
-//     if the export has just recovered, until the next attempt (at most 30 s
-//     away) succeeds; the operator retries the drain.
+//     if the export has just recovered, until the next attempt succeeds. That
+//     attempt starts after up to 30 s of backoff from the moment the failed
+//     attempt completes, plus scheduling and lock delay; a window that opens
+//     during a failing attempt also waits for that attempt to end. The
+//     operator retries the drain.
 //
 // A success (BulkEnd written), a discharge, the runtime being wired and a new
 // debt generation reset it to the first step; it never touches the #18752
