@@ -45,6 +45,11 @@ func synRecvConn19125(t *testing.T) (net.Conn, func(state string, uid uint32)) {
 	t.Cleanup(func() { conn.Close() })
 	skey, _ := procAddr4(server)
 	ckey, _ := procAddr4(conn.LocalAddr().(*net.TCPAddr))
+	setRow19125 = func(state, client string, uid uint32) string {
+		return fmt.Sprintf("   0: %s %s %s 00000000:00000000 00:00000000 00000000  %4d        0 4242 1 0000000000000000 100 0 0 10 0\n",
+			skey, client, state, uid)
+	}
+	clientKey19125 = ckey
 	set := func(state string, uid uint32) {
 		row := fmt.Sprintf("   0: %s %s %s 00000000:00000000 00:00000000 00000000  %4d        0 4242 1 0000000000000000 100 0 0 10 0\n",
 			skey, ckey, state, uid)
@@ -52,6 +57,14 @@ func synRecvConn19125(t *testing.T) (net.Conn, func(state string, uid uint32)) {
 	}
 	return conn, set
 }
+
+// setRow19125 / clientKey19125 are set by synRecvConn19125 for the cells that
+// write rows other than this connection's own (an unrelated tuple, a
+// malformed state).
+var (
+	setRow19125    func(state, client string, uid uint32) string
+	clientKey19125 string
+)
 
 // stubSleep19125 replaces the re-read wait. onCall runs at each wait (1-based
 // count) and may rewrite the fixture; after limit calls it returns an error,
@@ -160,20 +173,25 @@ func TestVerifyLoopbackServerConnOtherStatesNotRetried_19125(t *testing.T) {
 	}
 }
 
-// The wait honours the dial's context: a cancelled context ends it at once,
-// with the refusal, instead of sleeping out the full bound (about 1 s).
+// The wait honours the dial's context: a deadline that expires INSIDE a
+// re-read step ends that step at once, instead of sleeping it out. (A context
+// already done is caught by the lookup's own check before any sleep, so the
+// step here is made long and the deadline lands inside it.)
 func TestVerifyLoopbackServerConnSynRecvWaitHonoursContext_19125(t *testing.T) {
 	conn, set := synRecvConn19125(t)
 	set("03", 0)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	orig := synRecvRereadDelays19125
+	synRecvRereadDelays19125 = []time.Duration{2 * time.Second}
+	t.Cleanup(func() { synRecvRereadDelays19125 = orig })
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
 	start := time.Now()
 	err := verifyLoopbackServerConn(ctx, conn)
 	if err == nil {
-		t.Fatal("accepted a SYN_RECV server with a cancelled context")
+		t.Fatal("accepted a SYN_RECV server after its context expired")
 	}
-	if el := time.Since(start); el > 200*time.Millisecond {
-		t.Fatalf("a cancelled context still waited %s; the wait must end with the context", el)
+	if el := time.Since(start); el > time.Second {
+		t.Fatalf("a deadline inside a 2 s step still waited %s; the step must end with the context", el)
 	}
 }
 
@@ -216,10 +234,186 @@ func TestDialContextSynRecvWaitUsesDialContext_19125(t *testing.T) {
 		conn.Close()
 		t.Fatal("DialContext accepted a server half stuck in SYN_RECV")
 	}
-	if !strings.Contains(err.Error(), "still SYN_RECV") {
-		t.Fatalf("err = %v, want the SYN_RECV refusal (the pinned row was not the one read?)", err)
+	if !strings.Contains(err.Error(), "still SYN_RECV") && !strings.Contains(err.Error(), "lookup did not complete") {
+		t.Fatalf("err = %v, want the #19125 SYN_RECV or deadline refusal (the pinned row was not the one read?)", err)
 	}
 	if el := time.Since(start); el > 600*time.Millisecond {
 		t.Fatalf("DialContext waited %s under a 100 ms dial context; the wait must use the dial's context", el)
+	}
+}
+
+// The intended schedule, asserted INDEPENDENTLY of the production slice (Codex
+// P3 / r24 P3-1 on 9eb7a29006): these step values, 868 ms of sleeps, inside
+// the 1 s overall budget.
+func TestSynRecvScheduleIsTheIntendedOne_19125(t *testing.T) {
+	ms := time.Millisecond
+	want := []time.Duration{1 * ms, 2 * ms, 5 * ms, 10 * ms, 20 * ms, 40 * ms, 80 * ms, 160 * ms, 250 * ms, 300 * ms}
+	if len(synRecvRereadDelays19125) != len(want) {
+		t.Fatalf("schedule has %d steps, want %d", len(synRecvRereadDelays19125), len(want))
+	}
+	var sum time.Duration
+	for i, d := range synRecvRereadDelays19125 {
+		if d != want[i] {
+			t.Errorf("step %d = %s, want %s", i, d, want[i])
+		}
+		sum += d
+	}
+	if sum != 868*ms || sum > time.Second {
+		t.Fatalf("schedule sums to %s, want 868ms (and never above 1s)", sum)
+	}
+	if synRecvBudget19125 != time.Second {
+		t.Fatalf("overall budget %s, want 1s", synRecvBudget19125)
+	}
+}
+
+// Success after SEVERAL re-reads: SYN_RECV on the first four reads.
+func TestVerifyLoopbackServerConnSucceedsAfterSeveralRereads_19125(t *testing.T) {
+	conn, set := synRecvConn19125(t)
+	set("03", 0)
+	sleeps := stubSleep19125(t, 100, func(n int) {
+		if n == 4 {
+			set("01", 0)
+		}
+	})
+	if err := VerifyLoopbackServerConn(conn); err != nil {
+		t.Fatalf("uid-0 server that left SYN_RECV on the 5th read was refused: %v", err)
+	}
+	if *sleeps != 4 {
+		t.Fatalf("re-reads = %d, want 4", *sleeps)
+	}
+}
+
+// What a re-read finds AFTER SYN_RECV is held to the full rule (Codex P3 on
+// 9eb7a29006): TIME_WAIT (uid 0), no row, a malformed row, an unreadable
+// table, or only an unrelated root-owned ESTABLISHED row on another tuple.
+// Each must refuse; a check that trusted the post-wait read's default uid
+// would accept them.
+func TestVerifyLoopbackServerConnPostRetryTransitionsRefused_19125(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		next func(t *testing.T, set func(string, uint32))
+	}{
+		{"SYN_RECV -> TIME_WAIT (uid 0)", func(t *testing.T, set func(string, uint32)) { set("06", 0) }},
+		{"SYN_RECV -> no row", func(t *testing.T, set func(string, uint32)) { writeListenTables(t, listenHeader, listenHeader) }},
+		{"SYN_RECV -> malformed row", func(t *testing.T, set func(string, uint32)) {
+			writeListenTables(t, listenHeader+setRow19125("ZZ", clientKey19125, 0), listenHeader)
+		}},
+		{"SYN_RECV -> table unreadable", func(t *testing.T, set func(string, uint32)) {
+			d := t.TempDir() // a directory: reading it fails
+			t.Cleanup(SetProcNetTCPPathsForTest(d, d))
+		}},
+		{"SYN_RECV -> only an unrelated root-owned ESTABLISHED row", func(t *testing.T, set func(string, uint32)) {
+			writeListenTables(t, listenHeader+setRow19125("01", "0100007F:0001", 0), listenHeader)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn, set := synRecvConn19125(t)
+			set("03", 0)
+			sleeps := stubSleep19125(t, 100, func(n int) {
+				if n == 1 {
+					tc.next(t, set)
+				}
+			})
+			if err := VerifyLoopbackServerConn(conn); err == nil {
+				t.Fatalf("%s: accepted; only an ESTABLISHED uid-0 row for THIS tuple may pass", tc.name)
+			}
+			if *sleeps != 1 {
+				t.Fatalf("%s: re-reads = %d, want 1 (a non-SYN_RECV read ends the wait)", tc.name, *sleeps)
+			}
+		})
+	}
+}
+
+// A lookup that does not return is abandoned at the deadline (Codex P2 on
+// 9eb7a29006): the batcher's own wait is not cancellable.
+func TestVerifyLoopbackServerConnLookupIsCancellable_19125(t *testing.T) {
+	conn, _ := synRecvConn19125(t)
+	orig := lookupPeerFn19125
+	lookupPeerFn19125 = func(c, s net.Addr) PeerIdentity {
+		time.Sleep(2 * time.Second)
+		return PeerIdentity{UID: 0, OK: true, Local: true}
+	}
+	t.Cleanup(func() { lookupPeerFn19125 = orig })
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err := verifyLoopbackServerConn(ctx, conn)
+	if err == nil || !strings.Contains(err.Error(), "lookup did not complete") {
+		t.Fatalf("err = %v, want the lookup-deadline refusal", err)
+	}
+	if el := time.Since(start); el > 600*time.Millisecond {
+		t.Fatalf("a blocked lookup held the dial %s past a 100 ms deadline", el)
+	}
+}
+
+// A result that arrives once the context is done is never used, even an
+// ESTABLISHED uid 0 (Codex P2 on 9eb7a29006). The lookup cancels the caller's
+// context and then answers, so both are ready together; repeated so a
+// select-order race cannot hide a missing post-check.
+func TestVerifyLoopbackServerConnNoResultAfterCancel_19125(t *testing.T) {
+	conn, _ := synRecvConn19125(t)
+	orig := lookupPeerFn19125
+	t.Cleanup(func() { lookupPeerFn19125 = orig })
+	for i := 0; i < 64; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		lookupPeerFn19125 = func(c, s net.Addr) PeerIdentity {
+			cancel()
+			return PeerIdentity{UID: 0, OK: true, Local: true}
+		}
+		err := verifyLoopbackServerConn(ctx, conn)
+		cancel()
+		if err == nil {
+			t.Fatalf("iteration %d: a result that arrived after cancellation was accepted", i)
+		}
+	}
+}
+
+// The overall budget covers lookups AND sleeps (Codex P2 on 9eb7a29006): with
+// no caller deadline and slow lookups that keep reporting SYN_RECV, the
+// verification still ends within about 1 s.
+func TestVerifyLoopbackServerConnOverallBudget_19125(t *testing.T) {
+	conn, _ := synRecvConn19125(t)
+	orig := lookupPeerFn19125
+	lookupPeerFn19125 = func(c, s net.Addr) PeerIdentity {
+		time.Sleep(300 * time.Millisecond)
+		return PeerIdentity{Local: true, Detail: "peer socket is in TCP state 3, not established", synRecv: true}
+	}
+	t.Cleanup(func() { lookupPeerFn19125 = orig })
+	start := time.Now()
+	if err := VerifyLoopbackServerConn(conn); err == nil {
+		t.Fatal("a server half that never left SYN_RECV was accepted")
+	}
+	if el := time.Since(start); el > 1400*time.Millisecond {
+		t.Fatalf("verification took %s; the overall budget is 1s across lookups and sleeps", el)
+	}
+}
+
+// doneButOpenCtx19125 reports an error from Err() while its Done channel never
+// closes, so a select can only take the result: the shape in which a lookup's
+// answer and the deadline are ready together.
+type doneButOpenCtx19125 struct {
+	context.Context
+	done chan struct{}
+	err  error
+}
+
+func (c *doneButOpenCtx19125) Done() <-chan struct{} { return c.done }
+func (c *doneButOpenCtx19125) Err() error            { return c.err }
+
+// A lookup's result is used only if the context is still live once it has
+// arrived (Codex P2 on 9eb7a29006). Deterministic: the context turns done
+// while the lookup runs, and the select can only take the result.
+func TestLookupPeerCtxDropsResultAfterDone_19125(t *testing.T) {
+	ctx := &doneButOpenCtx19125{Context: context.Background(), done: make(chan struct{})}
+	orig := lookupPeerFn19125
+	lookupPeerFn19125 = func(c, s net.Addr) PeerIdentity {
+		ctx.err = context.DeadlineExceeded
+		return PeerIdentity{UID: 0, OK: true, Local: true}
+	}
+	t.Cleanup(func() { lookupPeerFn19125 = orig })
+	a := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+	id, err := lookupPeerCtx19125(ctx, a, a)
+	if err == nil || id.OK {
+		t.Fatalf("id=%+v err=%v: a result that arrived after the context was done was used", id, err)
 	}
 }
