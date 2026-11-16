@@ -246,6 +246,12 @@ fn lock_shared_publish<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
         Err(TryLockError::WouldBlock) => {}
     }
     SHARED_SESSION_PUBLISH_LOCK_CONTENDED.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    SHARED_PUBLISH_WOULD_BLOCK_19147.with(|probe| {
+        if let Some(probe) = probe.borrow().as_ref() {
+            probe();
+        }
+    });
     lock_shared_recover(m)
 }
 
@@ -739,6 +745,12 @@ std::thread_local! {
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     /// #19147 (review, seat r23 P3-2): test-only seam AFTER the shared lock
     /// is released and BEFORE the deferred BPF ops are committed.
+    /// #19147 (review, Codex re-check P3): test-only probe, fired on THIS
+    /// thread when a shared-session publish is about to BLOCK on a lock
+    /// another thread holds. A cell uses it as a deterministic handshake: the
+    /// publisher has provably reached the shared lock.
+    pub(in crate::afxdp) static SHARED_PUBLISH_WOULD_BLOCK_19147:
+        std::cell::RefCell<Option<Box<dyn Fn()>>> = std::cell::RefCell::new(None);
     pub(in crate::afxdp) static BETWEEN_UNLOCK_AND_COMMIT_19147:
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
