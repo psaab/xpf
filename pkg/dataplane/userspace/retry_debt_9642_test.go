@@ -1669,17 +1669,16 @@ func TestRetryDebtBlocksTakeoverReadiness9642(t *testing.T) {
 	t.Parallel()
 	healthy := func(t *testing.T) *Manager {
 		t.Helper()
-		return &Manager{
+		return managerWithModeForTest(&Manager{
 			proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 			lastStatus: ProcessStatus{
 				Enabled:         true,
 				ForwardingArmed: true,
 				Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
 			},
-			mode:              ModeUserspaceCompat,
 			xskLivenessProven: true,
 			eventStream:       boundEventStream(t),
-		}
+		}, ModeUserspaceCompat)
 	}
 	t.Run("indebted_not_ready", func(t *testing.T) {
 		t.Parallel()

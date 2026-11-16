@@ -49,14 +49,14 @@ func TestDeferredFullSnapshotBlocksTakeoverReadiness12235(t *testing.T) {
 
 func healthyTakeoverManager12235(t *testing.T) *Manager {
 	t.Helper()
-	m := &Manager{
+	m := managerWithModeForTest(&Manager{
 		lastStatus: ProcessStatus{
 			Enabled: true, ForwardingArmed: true,
 			Capabilities: UserspaceCapabilities{ForwardingSupported: true},
 		},
-		mode: ModeUserspaceCompat, xskLivenessProven: true,
-		eventStream: boundEventStream(t),
-	}
+		xskLivenessProven: true,
+		eventStream:       boundEventStream(t),
+	}, ModeUserspaceCompat)
 	m.proc = selfProc(t)
 	return m
 }

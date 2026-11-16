@@ -47,7 +47,7 @@ func tempDir17881(t *testing.T) string {
 func startHelper17881(t *testing.T, binary, dir string) (*Manager, error) {
 	t.Helper()
 	m := New()
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.controlRequestHook = func(_ ControlRequest, status *ProcessStatus) error {
 		if status != nil {
 			status.PID = 4242

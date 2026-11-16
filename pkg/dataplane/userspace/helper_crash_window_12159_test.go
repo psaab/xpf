@@ -87,7 +87,7 @@ os._exit(7)
 		EventSocket:   filepath.Join(dir, "events.sock"),
 	}
 	m := New()
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.controlRequestHook = func(_ ControlRequest, status *ProcessStatus) error {
 		if status != nil {
 			status.PID = 4242

@@ -125,3 +125,35 @@ func itoa18711(n int) string {
 	}
 	return string(b[i:])
 }
+
+// managerWithModeForTest publishes md through setModeLocked, the mode field's
+// only writer (#18711), for fixtures built as a Manager struct literal.
+func managerWithModeForTest(m *Manager, md DataplaneMode) *Manager {
+	m.setModeLocked(md)
+	return m
+}
+
+// In-package test fixtures publish the mode through setModeLocked too
+// (managerWithModeForTest for struct literals), so Mode() and the field agree
+// in every fixture: no fixture writes the field directly or initialises it in
+// a struct literal (r24 P3-3 on 95356af84b).
+func TestModeFieldNotWrittenDirectlyByFixtures18711(t *testing.T) {
+	assign := regexp.MustCompile(`(?m)^\s*\w+\.mode = Mode[A-Za-z]+\s*$`)
+	literal := regexp.MustCompile(`(?m)^\s*mode:\s*Mode[A-Za-z]+,`)
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range files {
+		data, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if loc := assign.FindIndex(data); loc != nil {
+			t.Errorf("%s writes the mode field directly (%q); use setModeLocked", f, data[loc[0]:loc[1]])
+		}
+		if loc := literal.FindIndex(data); loc != nil {
+			t.Errorf("%s initialises mode in a struct literal (%q); wrap it in managerWithModeForTest", f, data[loc[0]:loc[1]])
+		}
+	}
+}

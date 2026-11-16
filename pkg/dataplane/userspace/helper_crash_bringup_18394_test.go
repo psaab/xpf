@@ -103,7 +103,7 @@ func TestEnsureSpawnedReadyHelperReapedBeforeStopCounts18394(t *testing.T) {
 		EventSocket:   filepath.Join(dir, "e.sock"),
 	}
 	m := New()
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.restartTimerFn = func(time.Duration, func()) {}
 	m.controlRequestHook = func(_ ControlRequest, status *ProcessStatus) error {
 		if status != nil {

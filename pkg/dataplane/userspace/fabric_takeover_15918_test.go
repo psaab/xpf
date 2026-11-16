@@ -14,7 +14,7 @@ import (
 
 func healthyFabricManager15918(t *testing.T, fabrics []FabricSnapshot) *Manager {
 	t.Helper()
-	return &Manager{
+	return managerWithModeForTest(&Manager{
 		proc:      &exec.Cmd{Process: &os.Process{Pid: 1}},
 		clusterHA: true,
 		lastStatus: ProcessStatus{
@@ -22,11 +22,10 @@ func healthyFabricManager15918(t *testing.T, fabrics []FabricSnapshot) *Manager 
 			ForwardingArmed: true,
 			Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
 		},
-		mode:              ModeUserspaceCompat,
 		xskLivenessProven: true,
 		eventStream:       boundEventStream(t),
 		lastSnapshot:      &ConfigSnapshot{Fabrics: fabrics},
-	}
+	}, ModeUserspaceCompat)
 }
 
 func TestTakeoverReadyFabricInstallable15918(t *testing.T) {

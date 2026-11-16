@@ -791,7 +791,7 @@ func TestCrashRetryReadyWaitTimeoutKeepsElectionDebt18869(t *testing.T) {
 		return uid
 	}
 	t.Cleanup(func() { helperDirTrustUID = oldDirUID })
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.disableCtrlMapHook = &fakeCtrlMap{stored: userspaceCtrlValue{Enabled: 1}, haveStored: true}
 	m.restartTimerFn = func(time.Duration, func()) {}
 	// An earlier crash episode is already not-ready and has no grace; this

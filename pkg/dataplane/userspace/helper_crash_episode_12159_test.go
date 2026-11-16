@@ -55,7 +55,7 @@ func startNMHelper12159(t *testing.T, script string, timer func(time.Duration, f
 		t.Fatal(err)
 	}
 	m := New()
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.controlRequestHook = func(_ ControlRequest, status *ProcessStatus) error {
 		if status != nil {
 			status.PID = 4242

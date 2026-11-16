@@ -38,7 +38,7 @@ func boundEventStream(t *testing.T) *EventStream {
 }
 
 func TestTakeoverReadyReportsSessionMirrorFailure(t *testing.T) {
-	m := &Manager{
+	m := managerWithModeForTest(&Manager{
 		proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 		lastStatus: ProcessStatus{
 			Enabled:         true,
@@ -47,11 +47,10 @@ func TestTakeoverReadyReportsSessionMirrorFailure(t *testing.T) {
 				ForwardingSupported: true,
 			},
 		},
-		mode:                ModeUserspaceCompat,
 		xskLivenessProven:   true,
 		sessionMirrorFailed: true,
 		sessionMirrorErr:    "dial unix /tmp/userspace-dp-sessions.sock: connect: no such file or directory",
-	}
+	}, ModeUserspaceCompat)
 
 	ready, reasons := m.TakeoverReady()
 	if ready {
@@ -87,7 +86,7 @@ func TestTakeoverReadyReportsACapabilityDisarmReason(t *testing.T) {
 	// imported: it is a SPECIMEN of the class, and pinning it to a particular
 	// constant is what tied this cell to a gate that then went away.
 	const specimen = "userspace three-color policers require color-blind mode and a supported then action"
-	m := &Manager{
+	m := managerWithModeForTest(&Manager{
 		proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 		lastStatus: ProcessStatus{
 			Enabled:         true,
@@ -97,9 +96,8 @@ func TestTakeoverReadyReportsACapabilityDisarmReason(t *testing.T) {
 				UnsupportedReasons:  []string{specimen},
 			},
 		},
-		mode:              ModeUserspaceCompat,
 		xskLivenessProven: true,
-	}
+	}, ModeUserspaceCompat)
 
 	ready, reasons := m.TakeoverReady()
 	if ready {
@@ -166,7 +164,7 @@ func TestShouldStandbyNeighborPrewarmLockedThrottlesRecentRun(t *testing.T) {
 }
 
 func TestTakeoverReadyAllowsStandbyWithReadyBindingsWithoutLivenessProof(t *testing.T) {
-	m := &Manager{
+	m := managerWithModeForTest(&Manager{
 		proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 		lastStatus: ProcessStatus{
 			Enabled:         true,
@@ -191,13 +189,12 @@ func TestTakeoverReadyAllowsStandbyWithReadyBindingsWithoutLivenessProof(t *test
 				},
 			},
 		},
-		mode: ModeUserspaceCompat,
 		haGroups: map[int]HAGroupStatus{
 			1: {RGID: 1, Active: false},
 			2: {RGID: 2, Active: false},
 		},
 		eventStream: boundEventStream(t),
-	}
+	}, ModeUserspaceCompat)
 
 	ready, reasons := m.TakeoverReady()
 	if !ready {
@@ -218,16 +215,15 @@ func TestTakeoverReadyAllowsStandbyWithReadyBindingsWithoutLivenessProof(t *test
 // keys on listener-up, not helper-connected.
 func TestTakeoverReadyRequiresEventStreamListenerBound(t *testing.T) {
 	newHealthyManager := func() *Manager {
-		return &Manager{
+		return managerWithModeForTest(&Manager{
 			proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 			lastStatus: ProcessStatus{
 				Enabled:         true,
 				ForwardingArmed: true,
 				Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
 			},
-			mode:              ModeUserspaceCompat,
 			xskLivenessProven: true,
-		}
+		}, ModeUserspaceCompat)
 	}
 
 	t.Run("ListenerBindFailed", func(t *testing.T) {
@@ -292,7 +288,7 @@ func hasReasonSubstr(reasons []string, substr string) bool {
 }
 
 func TestTakeoverReadyRequiresLivenessProofOnActiveNode(t *testing.T) {
-	m := &Manager{
+	m := managerWithModeForTest(&Manager{
 		proc: &exec.Cmd{Process: &os.Process{Pid: 1}},
 		lastStatus: ProcessStatus{
 			Enabled:         true,
@@ -317,11 +313,10 @@ func TestTakeoverReadyRequiresLivenessProofOnActiveNode(t *testing.T) {
 				},
 			},
 		},
-		mode: ModeUserspaceCompat,
 		haGroups: map[int]HAGroupStatus{
 			1: {RGID: 1, Active: true},
 		},
-	}
+	}, ModeUserspaceCompat)
 
 	ready, reasons := m.TakeoverReady()
 	if ready {

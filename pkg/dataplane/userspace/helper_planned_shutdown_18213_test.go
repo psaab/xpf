@@ -20,7 +20,7 @@ func spawnSupervisedHelper18213(t *testing.T) (*Manager, *exec.Cmd, *restartReco
 	rec := &restartRecorder{}
 	m := New()
 	m.restartTimerFn = rec.arm
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	dir := t.TempDir()
 	m.cfg.ControlSocket = filepath.Join(dir, "c.sock")
 	m.lastStatus = ProcessStatus{

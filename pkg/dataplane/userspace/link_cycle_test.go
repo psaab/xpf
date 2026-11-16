@@ -171,7 +171,7 @@ func TestNotifyLinkCycleStrictModePublishesFailClosedCtrlFlags(t *testing.T) {
 		HeartbeatTimeoutMS: userspaceHeartbeatTimeoutMS,
 	})
 	m.configuredMode = ModeUserspaceStrict
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.neighborsPrewarmed = true
 	m.ctrlWasEnabled = true
 	m.xskLivenessProven = true

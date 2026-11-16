@@ -21,7 +21,7 @@ func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *test
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.procGen = 1
 	m.clusterHA = true
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.lastStatus = ProcessStatus{
 		Enabled:             true,
 		ForwardingArmed:     true,
@@ -52,7 +52,7 @@ func TestTakeoverReadinessWaitsForReplacementHelperSessionInventory12160(t *test
 	m.bindOwedInventoryDebtLocked()
 	debtGeneration := m.sessionInventoryDebtGen
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.lastStatus = ProcessStatus{
 		Enabled:         true,
 		ForwardingArmed: true,
@@ -157,7 +157,7 @@ func TestInventoryDebtBindsAtSpawnAfterReset12160(t *testing.T) {
 	m.proc = cmd2
 	m.startHelperSupervisorLocked(cmd2)
 	newGen, debt := m.procGen, m.sessionInventoryDebtGen
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.lastStatus = ProcessStatus{
 		Enabled:         true,
 		ForwardingArmed: true,
@@ -195,7 +195,7 @@ func TestInventoryBulkRequestThrottled12160(t *testing.T) {
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.procGen = 2
 	m.clusterHA = true
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.lastStatus = ProcessStatus{
 		Enabled:         true,
 		ForwardingArmed: true,
@@ -227,7 +227,7 @@ func repairOverflowManager18661(t *testing.T) *Manager {
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.procGen = 19
 	m.clusterHA = true
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.lastStatus = ProcessStatus{
 		Enabled:         true,
 		ForwardingArmed: true,

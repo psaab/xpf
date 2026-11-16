@@ -72,7 +72,7 @@ func spawnSupervisedChild(t *testing.T) (*Manager, *exec.Cmd, *restartRecorder) 
 	rec := &restartRecorder{}
 	m := New()
 	m.restartTimerFn = rec.arm
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.eventStream = es
 	m.eventStreamCancel = cancel
 	m.cfg.ControlSocket = filepath.Join(dir, "c.sock")

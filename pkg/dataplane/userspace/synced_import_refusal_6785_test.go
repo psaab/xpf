@@ -111,7 +111,7 @@ func primeTakeoverReady10788(t *testing.T, m *Manager) {
 		ForwardingArmed: true,
 		Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
 	}
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.xskLivenessProven = true
 	m.eventStream = boundEventStream(t)
 }

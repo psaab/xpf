@@ -858,8 +858,11 @@ type Manager struct {
 	// modeSnapshot mirrors mode for the lock-free Mode() (#18711). A demotion
 	// handler must not wait on mu, whose holders can sit in 3 s round trips
 	// against a wedged helper (an abandoned UpdateRGActive). setModeLocked is
-	// its only writer, under mu, so it never disagrees with mode for longer
-	// than one store.
+	// its only writer, under mu. The atomic store is the public mode
+	// transition's linearization point: between the field write and the
+	// store, Mode() returns the previous mode, a valid read before
+	// publication. That interval is not a wall-clock bound, since a writer
+	// can be descheduled there.
 	modeSnapshot       atomic.Int32
 	configuredMode     DataplaneMode // user-configured desired mode (from config)
 	lastHASyncTime     time.Time     // throttle HA watchdog sync to avoid control socket contention

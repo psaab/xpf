@@ -970,7 +970,7 @@ func TestSetClusterSyncedSessionV4MirrorSuccessClearsStickyFailure(t *testing.T)
 		ForwardingArmed: true,
 		Capabilities:    UserspaceCapabilities{ForwardingSupported: true},
 	}
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.xskLivenessProven = true
 	// #5273: takeover-readiness now also gates on a bound event-stream listener.
 	m.eventStream = boundEventStream(t)
