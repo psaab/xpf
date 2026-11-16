@@ -259,36 +259,6 @@ thread_local! {
 /// tables and the peer-facing expiry probe see node-level proof.
 /// Only ever advances Opening/Pending wires to Established; never
 /// regresses a close or an already-established row.
-/// #16223: advance the shared entries for `key` (any stored
-/// orientation, including the SNAT-translated stored key) to
-/// Established. Companion to the ct-slice bulk maintenance for
-/// callers that already know the completed tuple key.
-pub(in crate::afxdp) fn advance_shared_handshake_for_tuple(
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    key: &SessionKey,
-) {
-    let established = crate::session::TcpHandshakeState::Established.to_wire();
-    let reverse_a = crate::session::reverse_session_key(key, crate::nat::NatDecision::default());
-    let mut sessions = lock_shared_recover(shared_sessions);
-    let targets: Vec<SessionKey> = sessions
-        .keys()
-        .filter(|stored| {
-            let s = *stored;
-            (s.src_ip == key.src_ip && s.dst_ip == key.dst_ip && s.src_port == key.src_port && s.dst_port == key.dst_port)
-                || (s.src_ip == key.dst_ip && s.dst_ip == key.src_ip && s.src_port == key.dst_port && s.dst_port == key.src_port)
-                || (s.src_ip == reverse_a.src_ip && s.dst_ip == reverse_a.dst_ip && s.src_port == reverse_a.src_port && s.dst_port == reverse_a.dst_port)
-        })
-        .cloned()
-        .collect();
-    for target in targets {
-        if let Some(entry) = sessions.get_mut(&target) {
-            if entry.tcp_handshake_state != established {
-                entry.tcp_handshake_state = established;
-            }
-        }
-    }
-}
-
 pub(in crate::afxdp) fn restamp_shared_handshake_established(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     forward_key: &SessionKey,
