@@ -62,6 +62,12 @@ The synced tree has no `.git`, so anything derived from `git describe` or a
 commit count reads as `unknown`/`0` on a runner. A test whose premise depends
 on those values must pin them, as `deploy-lib-selftest.sh`'s `older-only`
 cell now pins `DEB_GIT_COUNT`.
+`make selftest` itself stops at once on a runner: its prerequisite
+`close-keyword-lint` lints `origin/master..HEAD`, which needs `.git`. Run the
+suite there as `sh scripts/run-selftests.sh` (what `make selftest` runs after
+that lint), and run `make close-keyword-lint` on the workstation. Legs that
+run git themselves (for example `scripts/no-git-stash-selftest.sh`, which uses
+`git grep`) still fail on a runner for the same reason.
 
 The runners share their lab host's CPUs with that host's cluster. A gate
 measurement cell therefore pauses every runner on that host
