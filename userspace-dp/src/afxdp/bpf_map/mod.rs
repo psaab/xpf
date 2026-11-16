@@ -2198,6 +2198,10 @@ pub(super) fn retire_worker_steering_rows(map: SteeringMap<'_>, worker_id: u32) 
 /// that authority does. Every authoritative removal (`remove_shared_session` and its
 /// callers) runs on a path holding a WORKER handle, so the holder is substituted here
 /// rather than threading a second map through each call site.
+///
+/// #19147: the removal primitive itself now releases the coordinator's held rows
+/// under the shared lock. Explicit calls remain only where a tuple permit or lease
+/// covers them (`session_delta.rs`, the admission shed, the HA delete).
 pub(super) fn release_coordinator_session_rows(map: SteeringMap<'_>, owner: &SessionKey) {
     release_all_session_rows(
         SteeringMap {
@@ -2208,6 +2212,15 @@ pub(super) fn release_coordinator_session_rows(map: SteeringMap<'_>, owner: &Ses
     );
 }
 
+/// #19147 (review, seat r23 P3-2): the BPF operations a coordinator release
+/// decided on, to be performed after the shared-session lock is released
+/// (`commit_deferred_steering_ops`).
+#[derive(Debug, Default)]
+pub(in crate::afxdp) struct DeferredSteeringOps {
+    deletes: smallvec::SmallVec<[SteeringRow; 4]>,
+    restores: smallvec::SmallVec<[SteeringRow; 4]>,
+}
+
 /// #19147: give up exactly the rows the COORDINATOR holds for `owner`, and
 /// nothing else. The shared store calls this on every removal of `owner`'s
 /// shared entry (`remove_shared_session_if`), because a coordinator claim
@@ -2215,15 +2228,45 @@ pub(super) fn release_coordinator_session_rows(map: SteeringMap<'_>, owner: &Ses
 /// [`release_coordinator_session_rows`] it names no row: a removal of an
 /// entry the coordinator never claimed is a registry lookup with no BPF
 /// syscall, and an unowned row is left to the releases that name it.
-pub(super) fn release_coordinator_held_rows(map: SteeringMap<'_>, owner: &SessionKey) {
-    release_session_rows(
-        SteeringMap {
-            holder: SteeringHolder::Coordinator,
-            ..map
-        },
+///
+/// This is phase 1: the registry bookkeeping only, with NO BPF syscall
+/// (#19147 review, seat r23 P3-2). The removal primitive runs it under the
+/// global shared-session lock, which every new-flow publish takes; a BPF
+/// delete there measured ~1 ms in its tail and raised contending lockers'
+/// p999 ~10x during a removal burst. Phase 2, `commit_deferred_steering_ops`,
+/// runs after that lock. There is deliberately no one-step form: every caller,
+/// tests included, runs the two phases the way the removal primitive does.
+pub(in crate::afxdp) fn release_coordinator_held_rows_deferred(
+    owners: &SteeringRowOwners,
+    owner: &SessionKey,
+) -> DeferredSteeringOps {
+    let mut deletes = smallvec::SmallVec::new();
+    let mut restores = smallvec::SmallVec::new();
+    owners.release_entry(
         owner,
+        SteeringHolder::Coordinator,
         &[],
+        |row| deletes.push(*row),
+        |row, _action| restores.push(*row),
     );
+    DeferredSteeringOps { deletes, restores }
+}
+
+/// #19147 (review, seat r23 P3-2): phase 2, after the shared-session lock:
+/// each op is re-checked under its row-shard lock (`commit_deferred_row`), so a
+/// replacement that claimed and wrote a row in between keeps it.
+pub(in crate::afxdp) fn commit_deferred_steering_ops(map: SteeringMap<'_>, ops: DeferredSteeringOps) {
+    let write = |row: &SteeringRow, action: u8| {
+        let _ = write_steering_row(map, &session_key_for_row(row), action);
+    };
+    for row in &ops.deletes {
+        map.owners
+            .commit_deferred_row(row, false, |row| delete_steering_row(map, row, None), write);
+    }
+    for row in &ops.restores {
+        map.owners
+            .commit_deferred_row(row, true, |row| delete_steering_row(map, row, None), write);
+    }
 }
 
 pub(super) fn release_all_session_rows(map: SteeringMap<'_>, owner: &SessionKey) {

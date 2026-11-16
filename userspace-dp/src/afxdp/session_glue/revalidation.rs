@@ -671,11 +671,12 @@ fn delete_terminal_half(
         shared.owner_rg_indexes,
         key,
     );
-    // #9560 round 3: shared authority for this key is gone, so the coordinator's claim
-    // on its rows goes too. The coordinator claims what it publishes for shared
-    // authority (HA import, bringup replay, activation prewarm); a claim left behind
-    // here is one no worker teardown can ever release.
-    release_coordinator_session_rows(session_map, key);
+    // #19147 (review, seat r23 P3-1): no explicit coordinator release here.
+    // The removal primitive released the coordinator's held rows for this
+    // key under the shared lock. A second, identity-blind release here, after
+    // that lock dropped and with no tuple permit, could drop a concurrent HA
+    // import's claim on a new incarnation of the key (and BPF-delete its row
+    // before any worker installs it).
     replicate_session_delete_repairing(
         shared.peer_worker_commands,
         shared.worker_commands_by_id,

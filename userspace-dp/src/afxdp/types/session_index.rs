@@ -718,25 +718,46 @@ impl SharedSessionOwnerRgIndexes {
     }
 
     /// #19147: release the rows the coordinator holds for `owner`, whose
-    /// shared entry was just removed. The caller is the removal primitive,
-    /// still holding the shared-session lock, so a concurrent publisher of a
-    /// replacement under the same key cannot have claimed yet (it publishes
-    /// under that lock and claims after), and this release cannot drop its
-    /// claim. Lock order: shared sessions, then the registry's holdings and
-    /// row shards; no registry path takes a shared-session lock.
-    pub(in crate::afxdp) fn release_coordinator_claims(&self, owner: &SessionKey) {
+    /// shared entry was just removed: the registry BOOKKEEPING only (phase 1).
+    /// The caller is the removal primitive, still holding the shared-session
+    /// lock, so a concurrent publisher of a replacement under the same key
+    /// cannot have claimed yet (it publishes under that lock and claims
+    /// after), and this release cannot drop its claim. The BPF operations it
+    /// decided on are returned, for `commit_coordinator_release` after the lock
+    /// (#19147 review, seat r23 P3-2). Lock order: shared sessions, then the
+    /// registry's holdings and row shards; no registry path takes a
+    /// shared-session lock.
+    pub(in crate::afxdp) fn release_coordinator_claims_deferred(
+        &self,
+        owner: &SessionKey,
+    ) -> Option<crate::afxdp::bpf_map::DeferredSteeringOps> {
+        let steering = self.coordinator_steering.get()?;
+        Some(crate::afxdp::bpf_map::release_coordinator_held_rows_deferred(
+            &steering.owners,
+            owner,
+        ))
+    }
+
+    /// #19147 (review, seat r23 P3-2): perform the BPF operations
+    /// `release_coordinator_claims_deferred` decided on. The caller runs this
+    /// AFTER releasing the shared-session lock; each op is re-checked under
+    /// its row-shard lock.
+    pub(in crate::afxdp) fn commit_coordinator_release(
+        &self,
+        ops: crate::afxdp::bpf_map::DeferredSteeringOps,
+    ) {
         let Some(steering) = self.coordinator_steering.get() else {
             return;
         };
         let maps = steering.maps.load();
         let fd = maps.session_map_fd.as_ref().map_or(-1, |fd| fd.fd);
-        crate::afxdp::bpf_map::release_coordinator_held_rows(
+        crate::afxdp::bpf_map::commit_deferred_steering_ops(
             crate::afxdp::bpf_map::SteeringMap {
                 fd,
                 owners: &steering.owners,
                 holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
             },
-            owner,
+            ops,
         );
     }
 }
