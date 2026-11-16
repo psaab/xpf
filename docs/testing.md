@@ -51,6 +51,17 @@ The script also prepares the runner environment:
   The command's exit status is recorded first, so this step cannot change it.
   Ctrl-C or TERM runs the same step before exiting 130/143.
 - Lane names are `[A-Za-z0-9._-]+` and must not be all dots.
+- The command's stdout and stderr come back as ONE stream, in the order they
+  were written (#19139). `incus exec` carries the two as separate streams, and
+  a workstation `>log 2>&1` merges them in arrival order. cargo writes
+  `Running <target>` and `error: test failed` to stderr while libtest writes
+  results to stdout, so a merged log once spliced `error: test failed ...`
+  into the middle of `test X ... FAILED` and moved `Running` lines away from
+  their tests. The command therefore runs with `exec 2>&1` on the runner, and
+  nothing arrives on the workstation's stderr from it. `--separate-stderr`
+  keeps the two apart for a caller that parses stdout alone; their relative
+  order is then not preserved. `make test-vm-test-run-lib` pins this with a
+  mock incus whose transport holds stdout until the command exits.
 - It exports a runner-local `GOCACHE`, because the Makefile's default
   (`/var/worktrees/.cache/go-build`) exists only on the workstation. Root
   legs get a separate one.

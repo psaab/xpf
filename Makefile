@@ -1126,6 +1126,12 @@ endif
 test-clean-shared-cargo-lib:
 	sh ./scripts/clean-shared-cargo-selftest.sh
 
+# #19139: vm-test-run.sh keeps a command's stdout/stderr in write order
+# (hermetic: mock incus, control + mutation cells).
+.PHONY: test-vm-test-run-lib
+test-vm-test-run-lib:
+	bash ./scripts/vm-test-run-selftest.sh
+
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
