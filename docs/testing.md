@@ -62,6 +62,38 @@ The script also prepares the runner environment:
   keeps the two apart for a caller that parses stdout alone; their relative
   order is then not preserved. `make test-vm-test-run-lib` pins this with a
   mock incus whose transport holds stdout until the command exits.
+- A reused lane does not re-test a previous cargo binary (#19134). cargo calls
+  a crate fresh when no source is newer than its artefacts, and the lane's
+  target dir outlives every sync, so a tree carrying OLDER mtimes than the
+  lane's last build (another worktree, an older commit) once re-ran the old
+  binary in "Finished ... in 0.0s". The sync keeps tar's archive mtimes and
+  keeps the target dir only when nothing is in doubt. A per-lane ledger,
+  `/work/<lane>/.xpf-src-ledger.json`, records the synced tree's identity (a
+  hash over every path, its content and mode) and, per path, the hash, mtime
+  and mode the sync wrote. The next sync deletes the target dir when ANY of
+  these holds:
+  - the tree's identity differs;
+  - a file of the previous tree differs from what the sync wrote (content,
+    mtime or mode), was deleted, or was created on the runner. Files under
+    `__pycache__/` are ignored, since no build reads them;
+  - the ledger is missing, unreadable, or in an older format;
+  - scanning either tree hits an error.
+
+  Clocks never enter the decision. The cost: ANY change to the tree, and any
+  runner-side change, costs a full rebuild of the lane; only an unchanged
+  re-sync keeps the incremental build. The one residual: a runner-side change
+  that restores both a file's bytes AND its exact mtime cannot be told from
+  no change.
+
+  The clean stays inside the lane. Before anything touches `/work/<lane>`,
+  the sync opens it from `/work` without following a symlink. It must be a
+  directory on `/work`'s filesystem with no mount point at or under it
+  (`/proc/self/mountinfo`). The target dir is then deleted through directory
+  fds, never following a symlink, refusing a directory on another
+  filesystem, and making an unreadable directory of its own readable first.
+  On any doubt about the path the sync refuses (exit 2) and deletes nothing.
+  `make test-vm-test-run-sync-lib` drives every case found in review with
+  real cargo under a mock incus.
 - It exports a runner-local `GOCACHE`, because the Makefile's default
   (`/var/worktrees/.cache/go-build`) exists only on the workstation. Root
   legs get a separate one.
