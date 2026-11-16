@@ -1,5 +1,18 @@
 use super::*;
 
+// #18641: test-only seam in the RG-activation prewarm. It runs once, after
+// `prewarm_reverse_synced_sessions_for_owner_rgs` has snapshotted its
+// candidates and RELEASED the shared-session lock, and before it publishes or
+// fans out anything. A `sync_session` delete is served on its own socket and
+// thread, off the server lock `update_ha_state` runs under (#452,
+// `server/handlers/mod.rs`), so it can land exactly here; the cells run one at
+// this point.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static PREWARM_AFTER_COLLECT_HOOK_18641:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
 pub(in crate::afxdp) fn demote_shared_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -218,6 +231,13 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         }
         (forward_entries, reverse_entries)
     };
+    #[cfg(test)]
+    PREWARM_AFTER_COLLECT_HOOK_18641.with(|hook| {
+        let hook = hook.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
     if forward_entries.is_empty() && reverse_entries.is_empty() {
         return;
     }
