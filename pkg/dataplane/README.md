@@ -2597,9 +2597,23 @@ P2-1, R23 NEW-1):
 - each interface gets ONE attempt per mode;
 - a refusal returns `ErrXDPOccupied` at once, with no generic attempt and no
   occupant probe ("not probed");
-- the interface stays fail-closed until the next apply, or the next refresh
-  that re-resolves it. The reconcile clears its revalidation flag either way,
-  as it did before #19110.
+- the interface stays fail-closed (no XDP, fence-dropped transit), and the
+  failure becomes attach DEBT (codex-d NEW P2-1,
+  `pkg/dataplane/userspace/refresh_attach_debt_19110.go`):
+  - a configured RETH data member in the debt is a takeover-readiness reason
+    while the peer is alive, the `xdp_missing_data_member` blocker. Its scope is
+    F4's: a lone owner gets an ERROR log and the metric instead;
+  - the status loop retries the debt on a LATER tick, 1 s after the failure
+    and doubling to 30 s, never by sleeping under the mutex. A successful
+    compile makes it due at once;
+  - an interface leaves the debt when a pass attaches it, when another path
+    attached it, or when it is no longer a required ingress attachment.
+
+  Before this, nothing retried the attach: the status-loop revalidation flag
+  and the daemon worker's retry debt both cleared on a successful publication,
+  F4 saw only generic fallbacks, and the box-wide XSK liveness proof stayed
+  latched, so a standby with a member that had NO XDP could still report
+  takeover-ready.
 
 Waiting would buy nothing: a refresh never has a dead process's stale link to
 wait out, so a refusal there is the persistent kind (an upper device,
@@ -2713,6 +2727,10 @@ deliberate:
   neither is ready. On a cold boot no node owns the RGs until the degraded
   fallback (`DefaultDegradedPromoteTimeout`, 2 min). A crash takeover is NOT
   delayed: on a genuine peer loss the election bypasses readiness.
+
+A member with NO XDP at all (a failed refresh attach) is the companion
+`xdp_missing_data_member` reason, with the same two scope choices; see "The
+refresh never waits" above.
 
 Cells:
 - `xdp_attach_occupied_19110_test.go` and `xdp_stale_link_release_19110_test.go`
