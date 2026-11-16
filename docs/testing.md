@@ -73,9 +73,12 @@ The script also prepares the runner environment:
   and mode the sync wrote. The next sync deletes the target dir when ANY of
   these holds:
   - the tree's identity differs;
-  - a file of the previous tree differs from what the sync wrote (content,
-    mtime or mode), was deleted, or was created on the runner. Files under
-    `__pycache__/` are ignored, since no build reads them;
+  - a path of the previous tree differs from what the sync wrote (a file's
+    content, mtime or mode; a directory's existence or mode), was deleted, or
+    was created on the runner. The one exemption: an entry the RUNNER created
+    inside a `__pycache__` directory (Python bytecode from a test run). A
+    SYNCED `__pycache__` path is in the tree's identity like any other, so a
+    tracked file there that a build reads still counts;
   - the ledger is missing, unreadable, or in an older format;
   - scanning either tree hits an error.
 
@@ -85,12 +88,28 @@ The script also prepares the runner environment:
   that restores both a file's bytes AND its exact mtime cannot be told from
   no change.
 
-  The clean stays inside the lane. Before anything touches `/work/<lane>`,
-  the sync opens it from `/work` without following a symlink. It must be a
-  directory on `/work`'s filesystem with no mount point at or under it
-  (`/proc/self/mountinfo`). The target dir is then deleted through directory
-  fds, never following a symlink, refusing a directory on another
-  filesystem, and making an unreadable directory of its own readable first.
+  The clean stays inside the lane, under this threat model:
+  - **In scope:** a runner is single-tenant and every writer on it is one of
+    our own lanes. What is defended against is ACCIDENTAL aliasing that exists
+    when the sync starts: a lane that is a symlink to another lane
+    (`/work/alias -> /work/other`), a bind mount under a lane, or a stale lane.
+  - **Out of scope:** a concurrent adversary renaming lanes or adding bind
+    mounts while a sync runs. In particular, a same-filesystem bind mount
+    added under the target after the check is not seen.
+
+  Within that model, ONE process run as root does every destructive step:
+  removing and creating `src.new`, handing files to `runner`, the
+  extraction, the clean, and the swap. It holds the lane's directory fd
+  throughout:
+  - it opens `/work/<lane>` from `/work` without following a symlink, and
+    requires a directory on `/work`'s filesystem with no mount point at or
+    under it (`/proc/self/mountinfo`);
+  - every deletion and chown goes through directory fds, never follows a
+    symlink, and checks each directory's identity and filesystem, the target
+    dir's root included;
+  - an unreadable directory is repaired through an `O_PATH` handle on that
+    same object, never by name.
+
   On any doubt about the path the sync refuses (exit 2) and deletes nothing.
   `make test-vm-test-run-sync-lib` drives every case found in review with
   real cargo under a mock incus.
@@ -106,7 +125,18 @@ The script also prepares the runner environment:
   - the workstation's elapsed time is compared with the runner's monotonic
     elapsed time, minus 2 s of exec overhead (a clock that stops).
 
-  A nonzero `paused-for` adds a line saying a timeout or timing-sensitive
+  This is a conservative stall heuristic, not proof either way:
+  - `paused-for=0` means below the detection threshold, not pause-free. A
+    stopped-clock pause under about 2 s, or heartbeat gaps that each stay
+    under 2 s, read as 0.
+  - A positive value means a possible stall, including exec and start-up
+    overhead, not a stall attributed to `incus pause`. A slow start before
+    the heartbeat runs counts too; the selftest's "unseen time" cell is
+    exactly that false positive.
+  - No test has paused a real VM mid-run yet, so which branch a real pause
+    trips is not established.
+
+  A positive `paused-for` adds a line saying a timeout or timing-sensitive
   result from the run is VOID unless re-run clean; `paused-for=unknown`
   means the runner's clock record could not be read. A `--root` run prints
   `vm-proof=present|absent`: the proof is `/run/xpf-testguard-vm-boot-id`

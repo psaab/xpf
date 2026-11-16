@@ -20,6 +20,11 @@
 #   - older tree (the issue): B, older than A's build, into A's lane;
 #   - runner-side edit; restored after build (edit, build, original bytes
 #     back); deleted after build (a build script probing a deleted file);
+#   - a tracked __pycache__/value.txt read by include_str!, changed with an
+#     OLDER mtime (synced paths are all in the tree's identity);
+#   - runner-created bytecode under __pycache__/ KEEPS the build, while a
+#     runner-created file, or an empty directory, elsewhere cleans it;
+#   - a previous tree that cannot be scanned (a mode-000 file) cleans it;
 #   - build-script-only partial build: a build script compiled, then failed
 #     at run time, then the tree changed the build script;
 #   - artefacts ahead of the clock (a clock stepped back after the build);
@@ -29,11 +34,17 @@
 #     must be refused, and a sentinel in the other lane's target survives;
 #   - a bind mount under the lane must be refused, and a sentinel in the
 #     mounted directory survives (needs `unshare -Urm`; SKIP without it).
-# Mutations, each KILLED only when its cell observably runs the stale binary
-# or loses its sentinel: no tree-identity check (older tree runs value=1); no
-# runner-side-change check (restored after build runs value=9); following a
-# symlinked lane (the alias sentinel is deleted); no mount check (the
-# bind-mount sentinel is deleted).
+# Mutations, each KILLED only when its cell observably runs the stale binary,
+# loses its sentinel, or (for the exemption) cleans when it should keep: no
+# tree-identity check (older tree runs value=1); no runner-side-change check
+# (restored after build runs value=9); following a symlinked lane (the alias
+# sentinel is deleted); no mount check (the bind-mount sentinel is deleted);
+# __pycache__ excluded from the scan again (the tracked input runs value=1);
+# no bytecode exemption (runner-created bytecode cleans the build).
+# Threat model (docs/testing.md): the runner is single-tenant and every writer
+# is one of our own lanes, so the confinement cells cover ACCIDENTAL aliasing
+# present when the sync starts. A concurrent process renaming lanes or adding
+# bind mounts mid-sync is out of scope and not simulated.
 # Needs cargo; exits 77 (SKIP) without it.
 # The cell and mutant checks are single-quoted on purpose: they are eval'd
 # after the cell has run.
@@ -61,7 +72,8 @@ cat >"$tmp/bin/incus" <<'MOCK'
 #!/usr/bin/env bash
 # Mock incus (#19134 selftest): the runner side runs locally, /work/ rewritten
 # into $MOCK_ROOT, `chown ... runner:runner` dropped (the selftest's own user
-# owns everything).
+# owns everything). The lane step (`python3 -I -c <program> sync /work/ <name>`)
+# runs as this user, so it hands nothing to runner.
 case "${1:-}" in
 info) echo "Status: RUNNING"; exit 0 ;;
 exec) shift 2; [[ "${1:-}" == -- ]] && shift ;;
@@ -78,6 +90,11 @@ test)
 	exec test "${@//\/work\//$MOCK_ROOT/work/}" ;;
 find) exit 0 ;;
 systemd-detect-virt) echo kvm; exit 0 ;;
+python3)
+	shift
+	args=()
+	for a in "$@"; do args+=("${a//\/work\//$MOCK_ROOT/work/}"); done
+	exec python3 "${args[@]}" ;;
 bash) [[ "${2:-}" == -c || "${2:-}" == -lc ]] || exit 92; exec bash -c "$(rewrite "$3")" ;;
 su)
 	if [[ "${2:-}" == - ]]; then
@@ -145,12 +162,26 @@ RS
 	printf 'fn main() {\n    println!("value={}", env!("PROBE_VALUE"));\n}\n' >"$1/src/main.rs"
 	finish_tree "$1" "$3"
 }
+# make_cache_tree <dir> <value> <mtime>: the value comes from a TRACKED
+# __pycache__/value.txt (force-added past a .gitignore that names the
+# directory, as in this repository), read by include_str!.
+make_cache_tree() {
+	new_tree "$1"
+	mkdir -p "$1/__pycache__"
+	echo "$2" >"$1/__pycache__/value.txt"
+	echo '__pycache__/' >"$1/.gitignore"
+	printf 'fn main() {\n    println!("value={}", include_str!("../__pycache__/value.txt").trim());\n}\n' >"$1/src/main.rs"
+	(cd "$1" && git add -f __pycache__/value.txt .gitignore Cargo.toml src/main.rs)
+	finish_tree "$1" "$3"
+}
 make_tree "$tmp/A" 1 "2020-06-01 00:00:00"
 make_tree "$tmp/B" 2 "2001-01-01 00:00:00"
 make_tree "$tmp/C" 2 "1999-01-01 00:00:00"
 make_probe_tree "$tmp/D" "2010-01-01 00:00:00"
 make_script_tree "$tmp/E1" 1 "2015-01-01 00:00:00"
 make_script_tree "$tmp/E2" 2 "2005-01-01 00:00:00"
+make_cache_tree "$tmp/F1" 1 "2015-01-01 00:00:00"
+make_cache_tree "$tmp/F2" 2 "2005-01-01 00:00:00"
 
 # lane <script> <tree> <name> <out> <command>: run the command on the mock
 # runner from <tree>, syncing it into lane <name>; the status goes to <out>.rc.
@@ -236,6 +267,30 @@ unreadable() {
 	chmod 000 "$tmp/work/$2/target/debug/deps"
 	lane "$1" "$tmp/B" "$2" "$3" "$run_cmd"
 }
+cache_input() {
+	lane "$1" "$tmp/F1" "$2" "$3.prep" "$run_cmd"
+	lane "$1" "$tmp/F2" "$2" "$3" "$run_cmd"
+}
+bytecode() {
+	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
+	lane "$1" "$tmp/A" "$2" "$3.py" "mkdir -p src/__pycache__ __pycache__ && echo x >src/__pycache__/m.cpython-313.pyc && echo y >__pycache__/top.cpython-313.pyc"
+	lane "$1" "$tmp/A" "$2" "$3" "$run_cmd"
+}
+stray_file() {
+	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
+	lane "$1" "$tmp/A" "$2" "$3.mk" "echo x >src/stray.txt"
+	lane "$1" "$tmp/A" "$2" "$3" "$run_cmd"
+}
+stray_dir() {
+	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
+	lane "$1" "$tmp/A" "$2" "$3.mk" "mkdir src/empty"
+	lane "$1" "$tmp/A" "$2" "$3" "$run_cmd"
+}
+scan_error() {
+	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
+	lane "$1" "$tmp/A" "$2" "$3.mk" "chmod 000 src/main.rs"
+	lane "$1" "$tmp/A" "$2" "$3" "$run_cmd"
+}
 middle() {
 	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
 	lane "$1" "$tmp/B" "$2" "$3.mid" "true"
@@ -295,6 +350,16 @@ cell "artefacts ahead of the clock: a changed tree still rebuilds (value=2)" ahe
 	rebuilt "$tmp/ahead.out" "the synced tree changed" 2
 cell "unreadable deps: a mode-000 target/debug/deps is still cleaned and the tree rebuilds (value=2)" unreadable unread \
 	rebuilt "$tmp/unread.out" "the synced tree changed" 2
+cell "tracked __pycache__ input: a changed value.txt with an OLDER mtime rebuilds (value=2)" cache_input cache \
+	rebuilt "$tmp/cache.out" "the synced tree changed" 2
+cell "runner-created bytecode under __pycache__/ keeps the build" bytecode pyc \
+	eval 'kept "$tmp/pyc.out" && ! compiled "$tmp/pyc.out" && printed "$tmp/pyc.out" 1'
+cell "runner-created file elsewhere cleans the build (value=1, recompiled)" stray_file stray \
+	rebuilt "$tmp/stray.out" "the last run changed 1" 1
+cell "runner-created empty directory cleans the build (directories are scanned)" stray_dir sdir \
+	rebuilt "$tmp/sdir.out" "the last run changed 1" 1
+cell "previous tree unscannable (a mode-000 file) cleans the build" scan_error scanerr \
+	rebuilt "$tmp/scanerr.out" "could not scan the previous tree" 1
 cell "unbuilt middle sync: C after an unbuilt B rebuilds (value=2)" middle middle \
 	eval 'compiled "$tmp/middle.out" && printed "$tmp/middle.out" 2'
 cell "no ledger: a lane whose ledger is gone is cleaned (value=1, recompiled)" no_ledger noledger \
@@ -331,6 +396,8 @@ mutate() {
 mutate no-identity 's/^        if ledger_tree != identity(new):$/        if False:/' older m1 'printed "$tmp/no-identity.out" 1'
 mutate no-runner-check 's/^            if changed or gone:$/            if False:/' runner_restore m2 'printed "$tmp/no-runner-check.out" 9'
 mutate follow-symlink 's/^    return os.open(name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=pfd)$/    return os.open(name, DIR_FLAGS, dir_fd=pfd)/' alias_lane m3 'grep -qx sentinel-gone "$tmp/follow-symlink.out"'
+mutate blanket-pycache 's/^        if stat.S_ISDIR(st.st_mode):  # a directory: existence and mode$/        if stat.S_ISDIR(st.st_mode) and entry.name == "__pycache__":\n            continue\n&/' cache_input m5 'printed "$tmp/blanket-pycache.out" 1'
+mutate no-pycache-exemption 's/ and not (rel not in ledger_files and runner_cache(rel))//' bytecode m6 'cleaned "$tmp/no-pycache-exemption.out" "the last run changed" && compiled "$tmp/no-pycache-exemption.out"'
 if [[ "$have_userns" -eq 1 ]]; then
 	mutate no-mount-check 's/^    return found$/    return []/' bind_lane m4 'grep -qx sentinel-gone "$tmp/no-mount-check.out"'
 fi
