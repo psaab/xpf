@@ -2002,6 +2002,14 @@ type Daemon struct {
 	removeStableRethLLFn    func(int)
 	clearRethServicesFn     func(int)
 	stableLLConfirmAbsentFn func(int) error
+	// #18716 fold 3: stableLL serializes every add and remove of the
+	// stable router link-local and fences a resign's delayed removal
+	// against a newer tenure (stable_ll_tenure_18716.go). Seams:
+	// addStableRethLLFn replaces the add after the tenure bump;
+	// stableLLReleaseHoldFn parks a resign's release before its check.
+	stableLL              stableLLTenure
+	addStableRethLLFn     func(int)
+	stableLLReleaseHoldFn func(int)
 
 	// linkDelFn removes a network interface. Defaults to netlink.LinkDel;
 	// overridden in tests so the #8372 fabric-overlay reaper can be driven

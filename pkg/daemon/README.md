@@ -5644,10 +5644,12 @@ because in legacy mode the rg_active write is not where it seems:
 1. **The cluster handler** (`handleClusterEventMerged`):
    1. resigns the event RG's RETH VRRP BEFORE any helper round trip;
    2. removes the stable router link-local (the shared IPv6 default-router
-      identity, which VRRP does not manage) as soon as the VRRP resign
-      barrier settles (`stableLLReleaseBarrier`). The barrier settles after
-      the VIPs are off AND after the last priority-0 advert of the burst
-      (pkg/vrrp settles a forced resign's barrier after its burst, fold 2).
+      identity, which VRRP does not manage) once the VRRP resign barrier
+      settles (`resignRethRGReleasingLL` and `stableLLReleaseBarrier`, fold 3;
+      see "One remover" below). The barrier settles after the VIPs are off
+      AND after the burst's send attempts have completed or unwound. A nil
+      verdict does not prove each advert reached the wire (pkg/vrrp settles
+      nil on a send error too).
       This step must not come earlier, because the stable link-local sorts
       below the per-node link-locals. It is therefore the VRRP IPv6 advert
       source and the master source the peer learned. Removed before the
@@ -5709,10 +5711,41 @@ promotions on the peer have to be kept apart:
 With the helper down, the ack resolves from the actual release
 (`awaitRethVIPRelease`), and the release now includes the stable link-local:
 the VRRP VIPs leaving is not enough while the IPv6 default-router address is
-still here. `stableLLReleaseBarrier` settles only after it has removed the
+still here. `stableLLReleaseBarrier` settles only after it has released the
 address and re-read the kernel (`stableLinkLocalConfirmedAbsent`). If the
 VRRP barrier does not settle within the 500 ms release bound (a wedged run
-loop, so no burst is coming), the address is removed anyway and the ack fails.
+loop), the address is released anyway (same tenure check) and the ack fails.
+A delayed burst can still resume after that deletion: its adverts then go out
+from a per-node source the peer's #16018 gate drops, and the peer takes over
+on master-down expiry instead. A release that finds the RG re-activated keeps
+the address and fails the ack with `errStableLLSuperseded`.
+
+**One remover, fenced by tenure (fold 3).** The BACKUP event is published
+BEFORE the forced resign's burst, so a BACKUP-arm removal (or a reconcile tick
+between the two) could still take the burst's source away, and a delayed
+resign could delete a NEWER tenure's address. `stableLLTenure`
+(`stable_ll_tenure_18716.go`) closes both:
+- every add (`addStableRethLinkLocal`: the MASTER arm, the reconcile tick,
+  config apply, direct mode) and every removal runs under one mutex, and
+  every add bumps the RG's tenure;
+- every daemon-initiated forced resign (the helper-down handler, the plain
+  handler resign, the reconcile posture net and the bootstrap rollback's
+  relinquish) goes through `resignRethRGReleasingLL`. A mechanical census
+  (`TestEveryForcedResignOwnsTheLinkLocal18716`) fails the build's tests on
+  any other `ResignRG(` or `resignRethRG(` call. That captures the tenure and registers the resign
+  as pending;
+- while any resign of the RG is pending, `removeStableRethLinkLocal` (the
+  BACKUP arm, the reconcile tick) does nothing;
+- the resign's release, after its barrier settles, removes the address only
+  if the tenure is unchanged and no other resign of the RG is still pending.
+  The check, the delete and the absence read all happen under the add's
+  mutex, so a promotion cannot land between them.
+  - A re-activation in between: the address is kept, and the release reports
+    `errStableLLSuperseded`.
+  - Another pending resign: it reports `errStableLLHandedOn`, and the last
+    one removes.
+- the plain handler resign and the bootstrap relinquish keep the VRRP
+  barrier alone as their fence, as before fold 3.
 In the target shape no handler write happens, so the release alone decides the
 ack.
 
@@ -5734,12 +5767,14 @@ the peer-loss transient.
 - On the election path both nodes act on their own events, so in shapes 1
   and 3 an equal-priority overlap runs from the peer's force to this node's
   resign. It is no longer stretched by helper timeouts, but it is not zero.
-- **The stable link-local is not break-before-make by construction.** The
-  peer adds it (NODAD) on its MASTER event. That comes at least its 1 ms
-  takeover timer plus `becomeMaster` after the first priority-0 advert. This
-  node's netlink delete runs microseconds after the last advert: an ordering
-  of microseconds against milliseconds, not a guarantee. It cannot move
-  earlier without losing the burst's source (above).
+- **The stable link-local is not break-before-make.** A BACKUP peer that
+  admits a priority-0 advert resets its master-down timer to 1 ms, then
+  promotes and adds the address (NODAD). A peer can also promote on its own
+  election, unconstrained by that timer. This node deletes the address only
+  after all of its targeted instances' bursts settle, a goroutine hand-off
+  and a netlink delete later. That is usually well behind the peer's add, but
+  nothing bounds it: the two nodes can briefly hold the address together. It
+  cannot move earlier without losing the burst's source (above).
 - The services clear and the write in the BACKUP arm still run on the one
   VRRP event goroutine, now bounded per RG.
 

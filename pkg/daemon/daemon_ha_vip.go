@@ -272,7 +272,18 @@ func (d *Daemon) directRemoveVIPs(rgID int) int {
 // #16686), a configured link-local on one unit replaces the stable LL on
 // THAT unit only, and the netdev is selected by unit.VlanID > 0 — a tagged
 // unit 0 lives on <member>.<vlan-id>, not the bare member.
+//
+// #18716 fold 3: every add bumps the RG's stable link-local tenure under
+// stableLL.mu, so a forced resign's delayed removal sees a re-activation and
+// keeps the new tenure's address (stable_ll_tenure_18716.go).
 func (d *Daemon) addStableRethLinkLocal(rgID int) {
+	d.stableLL.mu.Lock()
+	defer d.stableLL.mu.Unlock()
+	d.stableLL.bumpLocked(rgID)
+	if d.addStableRethLLFn != nil {
+		d.addStableRethLLFn(rgID)
+		return
+	}
 	if d.store == nil {
 		return
 	}
@@ -304,11 +315,25 @@ func addStableLLToInterface(ifName string, ll net.IP) {
 }
 
 // removeStableRethLinkLocal removes the stable router link-local address
-// from all RETH interfaces for the given RG. Called on BACKUP transition.
-// The sweep set is Config.RemoveNetdevs (#17049): every unit's
-// VlanID-selected netdev plus the bare member, with no placement predicate,
-// so an address installed by an older rule is still found.
+// from all RETH interfaces for the given RG. Called on BACKUP transition
+// and by the reconcile tick. #18716 fold 3: while a forced resign of the RG
+// is pending it does nothing; that resign removes the address after its
+// priority-0 burst, whose IPv6 source it is (stable_ll_tenure_18716.go).
 func (d *Daemon) removeStableRethLinkLocal(rgID int) {
+	d.stableLL.mu.Lock()
+	defer d.stableLL.mu.Unlock()
+	if d.stableLL.pendingLocked(rgID) {
+		slog.Debug("stable router link-local removal deferred to the pending RETH resign", "rg", rgID)
+		return
+	}
+	d.deleteStableRethLinkLocalLocked(rgID)
+}
+
+// deleteStableRethLinkLocalLocked does the removal. Caller holds stableLL.mu.
+// The sweep set is Config.RemoveNetdevs (#17049): every unit's VlanID-selected
+// netdev plus the bare member, with no placement predicate, so an address
+// installed by an older rule is still found.
+func (d *Daemon) deleteStableRethLinkLocalLocked(rgID int) {
 	if d.removeStableRethLLFn != nil {
 		d.removeStableRethLLFn(rgID)
 		return

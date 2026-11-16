@@ -496,65 +496,6 @@ func (d *Daemon) legacyHelperDownFenceSilentAck(rethResign vipReleaseBarrier, si
 	return nil
 }
 
-// stableLLReleaseBarrier wraps the legacy helper-down resign barrier (#18716
-// review P2-2, fold 2). When the VRRP barrier settles (the VIPs are off the
-// interface AND the forced resign's priority-0 burst is on the wire), it
-// removes the stable router link-local, then confirms it absent with a fresh
-// kernel read. The wrapper settles only after both, so the failover fence also
-// waits for the IPv6 default-router address.
-//
-// Why after the burst: the stable link-local sorts below the per-node
-// link-locals, so it is the VRRP IPv6 advert source and the master source the
-// peer learned. Removed earlier, the burst would go out from a deleted address,
-// or (after the address watcher re-resolves) from a per-node source the peer's
-// #16018 gate drops as an unknown master, and an IPv6-only RETH would fall back
-// to master-down expiry. Residual: the peer adds the address (NODAD) on its
-// MASTER event, at least its 1 ms takeover timer plus becomeMaster after the
-// first priority-0 advert, while this netlink delete runs microseconds after
-// the last one. Not ordered by construction, but microseconds against
-// milliseconds.
-//
-// If the VRRP barrier does not settle within the release bound (the run loop is
-// wedged, so no burst is coming), the link-local is removed anyway and the
-// wrapper reports the failure. A nil inner barrier stays nil.
-func (d *Daemon) stableLLReleaseBarrier(rgID int, inner vipReleaseBarrier) vipReleaseBarrier {
-	if inner == nil {
-		return nil
-	}
-	timeout := d.rethVIPReleaseTimeout
-	if timeout <= 0 {
-		timeout = rethVIPReleaseTimeout
-	}
-	b := &stableLLBarrier{done: make(chan struct{})}
-	go func() {
-		defer close(b.done)
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
-		select {
-		case <-inner.Done():
-			b.err = inner.Err()
-		case <-timer.C:
-			b.err = fmt.Errorf("RETH VRRP release not complete after %s", timeout)
-		}
-		d.removeStableRethLinkLocal(rgID)
-		if b.err == nil {
-			b.err = d.stableLinkLocalConfirmedAbsent(rgID)
-		}
-	}()
-	return b
-}
-
-type stableLLBarrier struct {
-	done chan struct{}
-	err  error // written before done closes
-}
-
-func (b *stableLLBarrier) Done() <-chan struct{} { return b.done }
-
-// Err is the VRRP release verdict, then the link-local's absence; valid once
-// Done has closed.
-func (b *stableLLBarrier) Err() error { return b.err }
-
 // stableLinkLocalConfirmedAbsent returns nil only when rgID's stable router
 // link-local is on none of the RG's netdevs, read fresh from the kernel. It is
 // the link-local half of directVIPsConfirmedAbsent, for legacy VRRP mode,

@@ -109,6 +109,38 @@ func TestResignBurstKeepsTheLearnedLinkLocalSource18716(t *testing.T) {
 			removed := make(chan struct{})
 			var gateOnce sync.Once
 			var prio0Delivered atomic.Int32
+			// Fold 3 (Codex P2-1): the BACKUP event is published before the
+			// burst, and the daemon's BACKUP arm must not remove the
+			// link-local then. The first priority-0 send is held until a
+			// consumer has taken that BACKUP event, so the event lands while
+			// the burst is gated; the consumer, like the fold-3 BACKUP arm
+			// with a resign pending, leaves the address alone.
+			backupSeen := make(chan struct{})
+			go func() {
+				for ev := range oldMgr.Events() {
+					if ev.State == StateBackup {
+						close(backupSeen)
+						return
+					}
+				}
+			}()
+			type prio0Pkt struct {
+				src      net.IP
+				onIface  bool // the source was still on the interface
+				admitted bool // the peer's #16018 gate admits it
+				learned  net.IP
+			}
+			var pktMu sync.Mutex
+			var pkts []prio0Pkt
+			peerAdmits := func(src net.IP) (bool, net.IP) {
+				peer.mu.Lock()
+				defer peer.mu.Unlock()
+				if !peer.lastMasterIPv6Known {
+					return true, nil
+				}
+				learned := append(net.IP(nil), peer.lastMasterIPv6[:]...)
+				return learned.Equal(src), learned
+			}
 			previous := sendPacketFn
 			sendPacketFn = func(sender *vrrpInstance, pkt *VRRPPacket, isIPv6 bool) error {
 				if !isIPv6 {
@@ -121,12 +153,22 @@ func TestResignBurstKeepsTheLearnedLinkLocalSource18716(t *testing.T) {
 				if sender == old && pkt.Priority == 0 {
 					gateOnce.Do(func() {
 						select {
+						case <-backupSeen:
+						case <-time.After(500 * time.Millisecond):
+						}
+						select {
 						case <-removed:
 						case <-time.After(100 * time.Millisecond):
 						}
 					})
 				}
 				src := sender.getLocalIPv6()
+				if sender == old && pkt.Priority == 0 {
+					admitted, learned := peerAdmits(src)
+					pktMu.Lock()
+					pkts = append(pkts, prio0Pkt{src: src, onIface: src != nil && addrs.has(src), admitted: admitted, learned: learned})
+					pktMu.Unlock()
+				}
 				if src == nil || !addrs.has(src) {
 					// IPV6_PKTINFO pins the source; the kernel rejects a
 					// source that is no longer on the interface.
@@ -173,6 +215,24 @@ func TestResignBurstKeepsTheLearnedLinkLocalSource18716(t *testing.T) {
 			}
 			if prio0Delivered.Load() == 0 {
 				t.Fatal("no priority-0 advert reached the peer: the burst lost its source address")
+			}
+			select {
+			case <-backupSeen:
+			default:
+				t.Fatal("setup: the BACKUP event was never consumed, so the cell did not gate the burst behind it")
+			}
+			<-removed
+			pktMu.Lock()
+			got := append([]prio0Pkt(nil), pkts...)
+			pktMu.Unlock()
+			if len(got) != 3 {
+				t.Fatalf("the old master sent %d priority-0 adverts, want the 3-advert burst: %+v", len(got), got)
+			}
+			for i, p := range got {
+				if !p.src.Equal(stableLL) || !p.onIface || !p.admitted {
+					t.Fatalf("priority-0 advert %d: source %v (on the interface: %v), admitted by the peer: %v (learned master %v); want every advert from the stable link-local %v and admitted",
+						i+1, p.src, p.onIface, p.admitted, p.learned, stableLL)
+				}
 			}
 			claimed := peerClaimAt.Load()
 			if took := time.Duration(claimed - firstPrio0At.Load()); claimed == 0 || took > 50*time.Millisecond {
