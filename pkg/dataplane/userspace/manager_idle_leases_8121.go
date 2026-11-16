@@ -82,11 +82,6 @@ func (m *Manager) ensurePersistentNatLeaseTypedPoolProtocolLocked() error {
 		MinProtocolPersistentNatLeaseTypedPool, "typed pool identity")
 }
 
-func (m *Manager) ensurePersistentNatLeaseScopeProtocolLocked() error {
-	return m.ensurePersistentNatLeaseProtocolLocked(
-		MinProtocolPersistentNatLeaseScope, "scope")
-}
-
 // ensurePersistentNatLeasePagingProtocolLocked gates the two lease
 // EXPORTS on a helper that pages them (#16589). Below v71 the helper
 // ignores lease_export and answers the whole population in one

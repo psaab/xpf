@@ -536,8 +536,9 @@ Guard layers (`build-userspace-xdp.sh`):
    **Remediation message split (#5363):** the two ABI arms print
    *different* operator guidance because they diagnose different faults.
    An **embedded-vs-Go-SSOT drift** (`validateUserspaceShimSpecWith`
-   expected-shape arms + `validateSharedMapExpectedABI` +
-   the `userspace_bindings`/`userspace_ingress_ifaces` drift errors) means
+   expected-shape arms + the `userspace_bindings`/`userspace_ingress_ifaces`
+   drift errors; the per-map `validateSharedMapExpectedABI` went with the
+   DNAT steering tables it checked, #17229/#19151) means
    the embedded shim binary drifted from its Go-side source contract, so
    it prints `userspaceShimGenerateRemediation` — "Re-run `make
    generate-userspace-xdp`." A **live-pin mismatch**

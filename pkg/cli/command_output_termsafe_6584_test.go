@@ -119,7 +119,6 @@ var declaredUnsanitizedForks = []forkExemption{
 	{"../grpcapi", "exec_timeout.go", "combinedOutputTimeout", "exec helper, not a display site"},
 	{"../grpcapi", "exec_timeout.go", "combinedOutputTimeoutUnlimited", "exec helper; delegates to diagcmd (#17203)"},
 	{"../grpcapi", "exec_timeout.go", "outputTimeout", "exec helper"},
-	{"../grpcapi", "exec_timeout.go", "outputTimeoutUnlimited", "exec helper; delegates to diagcmd (#17203)"},
 	{"../grpcapi", "exec_timeout.go", "runTimeout", "exec helper; discards output; delegates to diagcmd (#17203)"},
 	{"../diagcmd", "diagcmd.go", "CombinedOutputTimeout", "shared exec helper (#17203), not a display site"},
 	{"../diagcmd", "diagcmd.go", "OutputTimeout", "shared exec helper (#17203)"},

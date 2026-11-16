@@ -335,23 +335,6 @@ func TestIngressGateReturnsEarly_7588(t *testing.T) {
 	}
 }
 
-// ifBlockAfter7588 returns the body of the first braced block at or after
-// off, brace-matched so a nested block cannot terminate it early. Kept for
-// the synthetic mutation cells' readability; production paths use
-// braceMatch7588 directly.
-func ifBlockAfter7588(src string, off int) (string, bool) {
-	open := strings.IndexByte(src[off:], '{')
-	if open < 0 {
-		return "", false
-	}
-	open += off
-	end := braceMatch7588(src, open)
-	if end < 0 {
-		return "", false
-	}
-	return src[open:end], true
-}
-
 // stripRustCommentsAndStrings7588 blanks // and /* */ comments and string /
 // char literals (including raw strings) to spaces, preserving length and
 // newlines, so a guard can neither be satisfied nor broken by prose or

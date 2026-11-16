@@ -354,31 +354,6 @@ func (g *grpcCluster) ResetFailover() error {
 	return g.systemAction("cluster-rejoin")
 }
 
-// configuredRGs returns the redundancy-group IDs from the typed state.
-// It FAILS CLOSED (#5044) rather than guessing a hardcoded set: a fetch
-// error or an empty RG set is an error, never the pre-#5044 {0,1,2}
-// guess that stranded RG>=3 (see configuredRGsFromState).
-func (g *grpcCluster) configuredRGs() ([]int, error) {
-	st, err := g.haState()
-	return configuredRGsFromState(st, err)
-}
-
-func configuredRGsFromState(st *pb.GetClusterHAStateResponse, stateErr error) ([]int, error) {
-	if stateErr != nil {
-		return nil, fmt.Errorf("enumerate configured redundancy groups: %w", stateErr)
-	}
-	groups := st.GetRedundancyGroups()
-	if len(groups) == 0 {
-		return nil, fmt.Errorf("enumerate configured redundancy groups: " +
-			"no redundancy groups found in cluster HA state")
-	}
-	out := make([]int, 0, len(groups))
-	for _, rg := range groups {
-		out = append(out, int(rg.GetId()))
-	}
-	return out, nil
-}
-
 // LocalRejoinComplete reports whether the local node has left the
 // ForceSecondary drain for EVERY configured redundancy group (#5138):
 // every RG in the typed state has weight > 0. ForceSecondary pins
