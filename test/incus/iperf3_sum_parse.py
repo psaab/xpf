@@ -16,7 +16,7 @@ import math
 import re
 import sys
 import statistics
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 # Match `[SUM]   <start>-<end>   sec  <transferred> <unit>  <rate> <rate-unit>/sec`.
 # Capture (rate_value, rate_unit_prefix).
@@ -298,10 +298,10 @@ def failover_stream_verdict(
 #      about a quarter of crash runs, master's included, by which side of a
 #      retransmission a stream landed on.
 #
-# With a clock window but no stop in it (a fast takeover), the crash cell is
-# judged over a window with MEASURED edges (the sysrq command's dispatch, and
-# fw1's peer-lost stamp), at both of its ends (#19123,
-# measured_bounded_anchor below).
+# With no stop near the crash (a fast takeover), the crash cell is judged
+# over a window with MEASURED edges on CLOCK_MONOTONIC (the sysrq command's
+# dispatch, and fw1's peer-lost receipt), at both of its ends (#19123,
+# measured_window below).
 # Without a clock window that holds the crash, the cell first looks for the
 # aggregate's stop within ±1 s of the integer anchor (iperf3's own clock, no
 # clock reading needed). Without one it falls back to the integer verdict
@@ -958,131 +958,226 @@ def resolve_anchor(
 # stopped together, so the stop reads above find nothing; the clock window
 # (it runs to the sysrq exec's return) is seconds wide; and the integer
 # anchor's ±1 s VOIDed 8 of 10 such runs. Both edges of a window that holds
-# the crash can still be MEASURED, with no throughput model:
+# the crash can still be MEASURED, with no throughput model, and on
+# CLOCK_MONOTONIC only: a realtime clock can step between two readings and
+# move an edge across the crash (#19123 review, cycle 2). iperf3's interval
+# clock IS the LAN host's CLOCK_MONOTONIC, less its zero.
 #
-#   - T_lo, the sysrq command's dispatch on iperf3's interval clock. The
-#     orchestrator's stamp just before the exec maps onto the LAN host's
-#     clock with the measured offset (-rtt/2). That clock maps onto the
-#     interval clock through the clock's zero, and the zero is bounded from
-#     ABOVE by arrival stamps: test-failover stamps every line the client
-#     writes with the LAN host's CLOCK_REALTIME as it arrives
-#     (failover_start_arrival_stamper), and a line can only arrive after
-#     iperf3 emitted it at its interval's end, so zero <= stamp - end. (The
-#     start.timestamp is NOT that zero: iperf3 3.20 takes it on
-#     CLOCK_REALTIME at PARAM_EXCHANGE and starts the interval clock later,
-#     on CLOCK_MONOTONIC, at TEST_START.) The stamps near the crash must agree
-#     within _ARRIVAL_SPREAD and the zero must not precede start.timestamp,
-#     or the clock was not continuous and there is no window.
-#   - T_hi, the survivor's own record that the crash had happened: fw1's
-#     "marking peer lost" stamp, mapped onto the orchestrator's clock with
-#     fw1's measured offset (+rtt/2) and onto the interval clock through the
-#     zero's lower bound, start.timestamp. It must be stamped after the
-#     dispatch, or it is not this crash's and there is no window.
+#   - T_lo, the sysrq command's dispatch on the interval clock: the
+#     orchestrator's CLOCK_MONOTONIC read just before the exec ("dispatch"),
+#     mapped onto the LAN host's clock with the LAN host's offset (-rtt/2,
+#     less the rate budget), minus the zero's UPPER bound. test-failover
+#     stamps every line the client writes with the LAN host's CLOCK_MONOTONIC
+#     as it arrives (failover_start_arrival_stamper); a line arrives only
+#     after iperf3 emitted it at its interval's end, so zero <= stamp - end.
+#   - T_hi, the survivor's own record that the crash had happened: the
+#     journal's CLOCK_MONOTONIC receipt stamp of fw1's "marking peer lost",
+#     mapped onto the orchestrator's clock with fw1's offset and onto the LAN
+#     host's (each +rtt/2, plus the rate budget), minus the zero's LOWER
+#     bound: the LAN host's CLOCK_MONOTONIC read before the client was
+#     launched (failover_arrival_launch). It must follow the dispatch, or it
+#     is not this crash's and there is no window.
+#
+# Each monotonic reading carries its host's boot id, and one host's readings
+# must share one. Each host's offset is read before the crash and again after
+# the run; the two must agree within their rtts plus the rate budget. A window
+# wider than _MAX_WIDTH is declined: fw1 detects a silent peer within about
+# 2.2 s even under the sync-recency guard, so a wider one means fw1's stamp is
+# not this crash's detection (or the exec stalled). It could not confirm PASS
+# anyway, and with T_hi near the telemetry's end it could FAIL both ends.
 #
 # bounded_stream_cell judges the window at BOTH ends with resume evidence
-# from T_hi on: PASS needs every stream within 3 s of T_lo, COST a stream past
-# 3 s from T_hi, a disagreement is VOID, and a PASS or COST also needs every
-# judged stream to stay up for 3 s after its read resume (a stray burst is not
-# a resume). "A true COST cannot read PASS" rests on three premises:
-#   (i)  T_lo <= the true crash: each min-RTT offset reading is right to
-#        +/-rtt/2; a line is stamped after iperf3 emitted it, which is after
-#        its interval's end; and the LAN host's CLOCK_REALTIME is continuous
-#        across the stamps used and the dispatch reading (checked: the stamps
-#        agree within _ARRIVAL_SPREAD and none implies a zero before
-#        start.timestamp);
-#   (ii) the true crash <= T_hi: fw1 declares its peer lost only after fw0's
-#        heartbeats stop (the stamp must also follow the dispatch), and
-#        start.timestamp precedes the interval clock's zero (iperf3 takes it
-#        at PARAM_EXCHANGE, the zero at TEST_START);
-#   (iii) the in-interval resume read is late or exact. It can be EARLY by up
-#        to an interval after a late burst (stream_resume_instants), as on
-#        the precise path; the stay-up requirement limits it.
-# With a stop seen but rejected (it contradicts the clock mapping), or
-# without the stamps, fw1's stamp or a clock reading, the cell is the integer
-# three-anchor cell as before.
-_ARRIVAL_SPREAD = 0.25
-_ARRIVAL_WINDOW = (10.0, 1.0)
+# from T_hi on; a disagreement is VOID. A PASS or COST must then also hold
+# with each stream's resume taken at the END of its first data interval (an
+# upper bound; never the in-interval read, which a late resume with a fast
+# first burst reads early), measured from T_lo. And each stream must be
+# observed carrying data in every interval from that one through
+# RESUME_COST_SECONDS past its end. "PASS is never a true COST or FAIL, and
+# COST never a true FAIL" rests on three premises:
+#   (i)   launch <= zero <= stamp - end on the LAN host's CLOCK_MONOTONIC:
+#         the launch reading returns before the client starts, iperf3 starts
+#         its interval clock after it starts, and it writes an interval's line
+#         only after that interval's end (iperf3 3.20 iperf_api.c);
+#   (ii)  fw0 crashed before fw1's "marking peer lost" receipt stamp (fw1
+#         declares its peer lost only after fw0's heartbeats stop; journald
+#         stamps an entry when it receives it), and fw1 lost no peer between
+#         the dispatch and the crash;
+#   (iii) a min-RTT offset reading is right to +/-rtt/2 at its midpoint, and
+#         two hosts' CLOCK_MONOTONIC never step and advance within
+#         _CLOCK_RATE of each other (NTP slews each by at most 500 ppm). The
+#         boot-id and agreement checks test this premise at the run's ends.
+# With a stop seen but rejected (it contradicts the precise path's clock
+# mapping), or without any reading, the cell is the integer three-anchor cell
+# as before. Where the bounded cell is VOID, the CLI keeps the integer cell's
+# verdict when its three anchors agree, so the bounded path never leaves the
+# gate worse than master (#19123 review, R24 NEW-C).
+_CLOCK_RATE = 1e-3
+_MAX_WIDTH = 4.0
+# Interval boundaries are contiguous when they agree to this many seconds.
+_CONTIGUOUS = 1e-3
 
 
-def arrival_zero_bound(arrivals: str, at: float) -> Optional[Tuple[float, float, int]]:
-    """``(zero_hi, spread, n)`` from the client's arrival stamps: the LAN-host
-    CLOCK_REALTIME instant no later than which the interval clock's zero
-    lies, over the interval lines ending in ``[at - 10, at + 1]``; None with
-    fewer than three such lines. ``arrivals`` holds ``<epoch>\t<line>``."""
-    samples = []
-    for row in arrivals.splitlines():
-        stamp, sep, raw = row.partition("\t")
-        if not sep:
+class MonoReading(NamedTuple):
+    """One host's CLOCK_MONOTONIC minus the orchestrator's, read at ``at``
+    (orchestrator CLOCK_MONOTONIC) over a round trip of ``rtt`` seconds."""
+
+    offset: float
+    rtt: float
+    at: float
+    boot: str
+
+
+def _boot_id(text: str) -> str:
+    """A boot id as journald prints it: /proc prints dashes, journald none."""
+    return text.replace("-", "").lower()
+
+
+def parse_crash_readings(text: Optional[str]) -> Optional[dict]:
+    """test-failover's readings file, or None when malformed or incomplete.
+
+    Lines: ``dispatch <mono>``; ``<lan|fw1> <pre|post> <offset> <rtt> <at>
+    <boot_id>`` (failover_mono_reading); ``fw1 lost <fw1 mono> <boot_id>``.
+    Every line appears once."""
+    if text is None:
+        return None
+    out = {}
+    for row in text.splitlines():
+        fields = row.split()
+        if not fields:
             continue
         try:
-            epoch = float(stamp)
-            event = json.loads(raw, parse_constant=_reject_json_constant)
+            if fields[0] == "dispatch" and len(fields) == 2:
+                key, value = "dispatch", float(fields[1])
+                numbers = (value,)
+            elif fields[:2] == ["fw1", "lost"] and len(fields) == 4:
+                key, value = "lost", (float(fields[2]), _boot_id(fields[3]))
+                numbers = value[:1]
+            elif fields[0] in ("lan", "fw1") and fields[1] in ("pre", "post") and len(fields) == 6:
+                key = (fields[0], fields[1])
+                value = MonoReading(
+                    float(fields[2]), float(fields[3]), float(fields[4]), _boot_id(fields[5])
+                )
+                numbers = value[:3]
+            else:
+                return None
+        except ValueError:
+            return None
+        if key in out or not all(math.isfinite(number) for number in numbers):
+            return None
+        out[key] = value
+    needed = {"dispatch", "lost", ("lan", "pre"), ("lan", "post"), ("fw1", "pre"), ("fw1", "post")}
+    if set(out) != needed:
+        return None
+    if any(out[(host, when)].rtt < 0 for host in ("lan", "fw1") for when in ("pre", "post")):
+        return None
+    return out
+
+
+def arrival_zero_bounds(arrivals: Optional[str]) -> Optional[Tuple[float, float, str, int]]:
+    """``(launch, zero_hi, boot, n)`` from the client's arrival file: the LAN
+    host's CLOCK_MONOTONIC read before the client started (a lower bound for
+    the interval clock's zero), and the least ``stamp - end`` over the ``n``
+    stamped interval lines (an upper bound). A line stamped before the launch
+    reading is not this run's and is skipped. None without the launch line or
+    any stamped interval line."""
+    if arrivals is None:
+        return None
+    launch = boot = None
+    samples = []
+    for row in arrivals.splitlines():
+        head, sep, rest = row.partition("\t")
+        if not sep:
+            continue
+        if head == "launch":
+            value, _, tail = rest.partition("\t")
+            if launch is not None:
+                return None  # two launches: not one run's file
+            try:
+                launch = float(value)
+            except ValueError:
+                return None
+            boot = _boot_id(tail.strip()) or None
+            continue
+        try:
+            stamp = float(head)
+            event = json.loads(rest, parse_constant=_reject_json_constant)
         except ValueError:
             continue
-        if not isinstance(event, dict) or event.get("event") != "interval":
+        if not math.isfinite(stamp) or not isinstance(event, dict) or event.get("event") != "interval":
             continue
         data = event.get("data")
         summary = data.get("sum") if isinstance(data, dict) else None
         end = summary.get("end") if isinstance(summary, dict) else None
-        if isinstance(end, bool) or not isinstance(end, (int, float)) or epoch != epoch:
+        if isinstance(end, bool) or not isinstance(end, (int, float)) or not math.isfinite(end):
             continue
-        if at - _ARRIVAL_WINDOW[0] <= end <= at + _ARRIVAL_WINDOW[1]:
-            samples.append(epoch - end)
-    if len(samples) < 3:
+        samples.append((stamp, end))
+    if launch is None or boot is None or not math.isfinite(launch):
         return None
-    zero_hi = min(samples)
-    return zero_hi, max(samples) - zero_hi, len(samples)
+    zeros = [stamp - end for stamp, end in samples if stamp >= launch]
+    if not zeros:
+        return None
+    return launch, min(zeros), boot, len(zeros)
 
 
-def measured_bounded_anchor(
-    text: str,
-    at: float,
-    *,
-    before: Optional[float],
-    offset: Optional[float],
-    rtt: Optional[float],
-    arrivals: Optional[str],
-    peer_lost: Optional[float],
-    peer_offset: Optional[float],
-    peer_rtt: Optional[float],
-) -> Optional[EventAnchor]:
-    """``[T_lo, T_hi]`` that holds the crash, as ``EventAnchor(T_lo, T_hi - T_lo)``
-    with ``bounded`` set, from measured edges only; None when a reading is
-    missing, the arrival stamps show a clock discontinuity, or fw1's
-    peer-lost stamp does not follow the dispatch."""
-    if None in (before, offset, rtt, arrivals, peer_lost, peer_offset, peer_rtt):
-        return None
-    if rtt < 0 or peer_rtt < 0:
-        return None
-    start = json_stream_start_epoch(text)
-    if start is None:
-        return None
-    bound = arrival_zero_bound(arrivals, at)
-    if bound is None:
-        return None
-    zero_hi, spread, samples = bound
-    if spread > _ARRIVAL_SPREAD:
-        return None  # the stamps near the crash disagree: the clock stepped
-    if zero_hi < start:
-        return None  # a zero before the connect stamp: the clock stepped back
-    # iperf3 takes start.timestamp before it starts the interval clock, so it
-    # is the zero's lower bound on a continuous clock (premise ii).
-    zero_lo = start
-    peer_earliest = peer_lost - peer_offset - peer_rtt / 2
-    if peer_earliest < before:
-        return None  # fw1 lost its peer before the sysrq was sent: not this crash
-    t_lo = before + offset - rtt / 2 - zero_hi
-    t_hi = peer_lost - peer_offset + peer_rtt / 2 + offset + rtt / 2 - zero_lo
+def _mapping_error(reading: MonoReading, at: float) -> float:
+    """How far ``reading`` can be off when used at orchestrator time ``at``."""
+    return reading.rtt / 2 + _CLOCK_RATE * abs(at - reading.at)
+
+
+def measured_window(
+    arrivals: Optional[str], readings: Optional[dict]
+) -> Tuple[Optional[EventAnchor], str]:
+    """``(anchor, reason)``: ``EventAnchor(T_lo, T_hi - T_lo)`` with ``bounded``
+    set, on iperf3's interval clock, from the measured edges above; None and
+    the reason when a reading is missing or a check fails."""
+    zero = arrival_zero_bounds(arrivals)
+    if zero is None:
+        return None, "no launch reading or no stamped interval line"
+    if readings is None:
+        return None, "the clock readings are missing or malformed"
+    launch, zero_hi, lan_boot, samples = zero
+    if zero_hi < launch:
+        return None, "an arrival stamp implies an interval zero before the client's launch"
+    lost, lost_boot = readings["lost"]
+    for host, boot in (("lan", lan_boot), ("fw1", lost_boot)):
+        pre, post = readings[(host, "pre")], readings[(host, "post")]
+        if pre.boot != boot or post.boot != boot:
+            return None, f"{host}'s monotonic readings span more than one boot"
+        if abs(post.offset - pre.offset) > (
+            (pre.rtt + post.rtt) / 2 + _CLOCK_RATE * abs(post.at - pre.at)
+        ):
+            return None, (
+                f"{host}'s clock offset moved from {pre.offset:+.6f}s to {post.offset:+.6f}s "
+                "over the run, beyond the readings' rtts and the rate budget"
+            )
+    lan, fw1 = readings[("lan", "pre")], readings[("fw1", "pre")]
+    dispatch = readings["dispatch"]
+    lost_at = lost - fw1.offset
+    lost_error = _mapping_error(fw1, lost_at)
+    if lost_at - lost_error < dispatch:
+        return None, "fw1 lost its peer before the sysrq was sent: not this crash"
+    t_lo = dispatch + lan.offset - _mapping_error(lan, dispatch) - zero_hi
+    lost_latest = lost_at + lost_error
+    t_hi = lost_latest + lan.offset + _mapping_error(lan, lost_latest) - launch
+    if t_hi - t_lo > _MAX_WIDTH:
+        return None, (
+            f"the window is {t_hi - t_lo:.2f}s wide, over {_MAX_WIDTH:g}s: fw1's peer-lost "
+            "stamp is too late to be this crash's detection"
+        )
     anchor = EventAnchor(
         t_lo,
         t_hi - t_lo,
-        f"crash bounded by the sysrq command's dispatch (zero from {samples} arrival "
-        f"stamps, spread {spread:.3f}s) and fw1's peer-lost stamp, on iperf3's interval "
-        f"clock (LAN offset {offset:+.3f}s rtt {rtt:.3f}s, fw1 offset {peer_offset:+.3f}s "
-        f"rtt {peer_rtt:.3f}s)",
+        f"crash bounded by the sysrq command's dispatch and fw1's peer-lost receipt on "
+        f"CLOCK_MONOTONIC (zero in [{launch:.3f}, {zero_hi:.3f}] from the launch reading and "
+        f"{samples} arrival stamps; LAN offset {lan.offset:+.3f}s rtt {lan.rtt:.3f}s, fw1 "
+        f"offset {fw1.offset:+.3f}s rtt {fw1.rtt:.3f}s)",
     )
     anchor.bounded = True
-    return anchor
+    return anchor, "measured"
+
+
+def measured_bounded_anchor(arrivals: Optional[str], readings: Optional[dict]):
+    return measured_window(arrivals, readings)[0]
 
 
 def stop_seen(
@@ -1097,8 +1192,9 @@ def stop_seen(
     """Whether a stop candidate exists near the crash (in ``at`` ±1 s, or from
     1.5 s before the clock window to its end). Called when ``resolve_anchor``
     found no anchor, a True means it SAW a stop and rejected it: the stop lies
-    before the mapped dispatch, so the clock mapping reads late, and a window
-    built on that mapping cannot be trusted (#19123 review)."""
+    before the mapped dispatch, so the precise path's clock mapping reads
+    late; the bounded window does not override that contradiction (#19123
+    review)."""
     lo, hi = at - 1, at + 1
     window = clock_window(text, before, after, offset, rtt)
     if window is not None:
@@ -1109,22 +1205,39 @@ def stop_seen(
         return False
 
 
-def _unsustained_resumes(text: str, anchor: EventAnchor, streams) -> List[int]:
-    """The judged streams whose read resume is not followed by data in every
-    whole interval up to RESUME_COST_SECONDS after it (premise iii)."""
-    rows, _ = _oracle_interval_rows(text, True)
+def _first_data_intervals(rows, latest: float, streams) -> Dict[int, Optional[Tuple[float, float]]]:
+    """Each stream's first interval with data among those starting at or after
+    ``latest`` (they hold no byte that can predate the event), or None."""
+    instants = stream_resume_instants(rows, EventAnchor(latest, 0.0, "bounded"))
+    return {
+        stream: instants[stream][2] if stream in instants else None
+        for stream in streams
+    }
+
+
+def _uncovered_resumes(rows, firsts) -> List[int]:
+    """The streams not observed carrying data in EVERY interval from their
+    first data interval through RESUME_COST_SECONDS past its end: a missing
+    interval (a gap, or telemetry that ends) or an empty one fails."""
     intervals = _stream_intervals(rows)
-    latencies = resume_latencies(text, anchor, json_stream=True, streams=streams)
     out = []
-    for stream, (data, _, interval) in sorted(latencies.items()):
-        if data is None or interval is None:
+    for stream, first in sorted(firsts.items()):
+        if first is None:
             continue
-        resume = anchor.seconds + data
-        span = [
-            bps for start, end, bps in intervals.get(stream, [])
-            if start >= interval[0] and end <= resume + RESUME_COST_SECONDS
-        ]
-        if any(bps <= 0 for bps in span):
+        horizon = first[1] + RESUME_COST_SECONDS
+        cursor, covered = first[0], False
+        for start, end, bps in intervals.get(stream, []):
+            if start < first[0] - _CONTIGUOUS:
+                continue
+            if abs(start - cursor) > _CONTIGUOUS:
+                break  # a missing interval
+            if bps <= 0:
+                break  # an empty one
+            cursor = end
+            if cursor >= horizon - _CONTIGUOUS:
+                covered = True
+                break
+        if not covered:
             out.append(stream)
     return out
 
@@ -1139,8 +1252,10 @@ def bounded_stream_cell(
     """The crash cell over a bounded window: ``precise_stream_cell`` at its
     earliest end (latencies from ``anchor.seconds``) and at its latest end
     (from ``anchor.latest``), both with resume evidence only from intervals
-    starting at or after ``anchor.latest``. The same verdict at both ends is
-    the verdict; any disagreement is VOID."""
+    starting at or after ``anchor.latest``. A disagreement is VOID. A PASS or
+    COST must also hold with every judged stream's resume at the END of its
+    first data interval, measured from the earliest end, and with data in
+    every interval through RESUME_COST_SECONDS past that end; else VOID."""
     earliest = EventAnchor(anchor.seconds, anchor.uncertainty, anchor.source)
     latest = EventAnchor(anchor.latest, 0.0, anchor.source)
     status_lo, message_lo = precise_stream_cell(
@@ -1153,21 +1268,36 @@ def bounded_stream_cell(
         f" [{event_label} bounded to [{anchor.seconds:.3f}, {anchor.latest:.3f}]s, judged at "
         f"both ends: {status_lo} at the earliest, {status_hi} at the latest]"
     )
-    if status_lo == status_hi and status_lo in ("PASS", "COST"):
-        judged = _pre_event_streams(_oracle_interval_rows(text, True)[0], anchor.seconds)
-        unsustained = _unsustained_resumes(text, latest, judged)
-        if unsustained:
+    if status_lo != status_hi:
+        return "VOID", (
+            f"the bounded {event_label} window cannot place the streams: the verdict changes "
+            f"between its ends" + note + f"; at the earliest end: {message_lo}"
+        )
+    if status_lo in ("PASS", "COST"):
+        rows, _ = _oracle_interval_rows(text, True)
+        firsts = _first_data_intervals(
+            rows, anchor.latest, _pre_event_streams(rows, anchor.seconds)
+        )
+        line = RESUME_COST_SECONDS if status_lo == "PASS" else RESUME_FAIL_SECONDS
+        late = sorted(
+            stream for stream, first in firsts.items()
+            if first is None or first[1] - anchor.seconds > line
+        )
+        if late:
+            return "VOID", (
+                f"the bounded {event_label} window cannot confirm {status_lo}: streams "
+                f"{', '.join(map(str, late))} have a first data interval ending more than "
+                f"{line:g}s after the window's earliest end, so only the in-interval read puts "
+                f"their resume inside {line:g}s" + note
+            )
+        uncovered = _uncovered_resumes(rows, firsts)
+        if uncovered:
             return "VOID", (
                 f"the bounded {event_label} window's resume evidence is not sustained: streams "
-                f"{', '.join(map(str, unsustained))} carry no data in some interval within "
-                f"{RESUME_COST_SECONDS:g}s of their read resume" + note
+                f"{', '.join(map(str, uncovered))} are not observed carrying data in every "
+                f"interval through {RESUME_COST_SECONDS:g}s past their first data interval" + note
             )
-    if status_lo == status_hi:
-        return status_lo, message_lo + note
-    return "VOID", (
-        f"the bounded {event_label} window cannot place the streams: the verdict changes "
-        f"between its ends" + note + f"; at the earliest end: {message_lo}"
-    )
+    return status_lo, message_lo + note
 
 
 def integer_stream_cell(
@@ -1201,30 +1331,18 @@ def _add_bounded_window_args(parser) -> None:
     parser.add_argument(
         "--client-arrivals",
         default=None,
-        help="the client's arrival stamps (<LAN-host epoch>TAB<line>), from "
-        "failover_start_arrival_stamper",
+        help="the client's arrival file: a launch line, then <LAN-host CLOCK_MONOTONIC>TAB<line> "
+        "(failover_arrival_launch, failover_start_arrival_stamper)",
     )
     parser.add_argument(
-        "--peer-lost-epoch",
-        type=float,
+        "--crash-readings",
         default=None,
-        help="the survivor's 'marking peer lost' stamp, on its own clock",
-    )
-    parser.add_argument(
-        "--peer-clock-offset",
-        type=float,
-        default=None,
-        help="survivor clock minus orchestrator clock, seconds",
-    )
-    parser.add_argument(
-        "--peer-clock-rtt",
-        type=float,
-        default=None,
-        help="round trip of the reading that produced --peer-clock-offset",
+        help="the dispatch, offset and peer-lost CLOCK_MONOTONIC readings "
+        "(parse_crash_readings)",
     )
 
 
-def _read_arrivals(path):
+def _read_text(path):
     if not path:
         return None
     try:
@@ -1266,10 +1384,7 @@ def print_crash_anchor(argv) -> int:
     )
     if anchor is None and not seen:
         bounded = measured_bounded_anchor(
-            text, args.crash_at, before=args.crash_epoch, offset=args.client_clock_offset,
-            rtt=args.client_clock_rtt, arrivals=_read_arrivals(args.client_arrivals),
-            peer_lost=args.peer_lost_epoch, peer_offset=args.peer_clock_offset,
-            peer_rtt=args.peer_clock_rtt,
+            _read_text(args.client_arrivals), parse_crash_readings(_read_text(args.crash_readings))
         )
         if bounded is not None:
             print(f"{bounded.seconds:.3f} {bounded.uncertainty:.3f} bounded")
@@ -1357,13 +1472,14 @@ def main() -> int:
     precise_inputs = (
         args.crash_epoch, args.crash_epoch_after, args.failback_epoch,
         args.client_clock_offset, args.client_clock_rtt, args.client_arrivals,
-        args.peer_lost_epoch, args.peer_clock_offset, args.peer_clock_rtt,
+        args.crash_readings,
     )
     if not args.straggler_cost and any(value is not None for value in precise_inputs):
         parser.error("the epoch and clock flags need --straggler-cost")
 
     text = sys.stdin.read()
-    arrivals = _read_arrivals(args.client_arrivals)
+    arrivals = _read_text(args.client_arrivals)
+    readings = parse_crash_readings(_read_text(args.crash_readings))
 
     def legacy_check(at, label):
         return failover_stream_verdict(
@@ -1383,16 +1499,24 @@ def main() -> int:
         ):
             # #19123: no stop to anchor on (a fast takeover); a window with
             # measured edges, judged at both ends.
-            anchor = measured_bounded_anchor(
-                text, at, before=before, offset=args.client_clock_offset,
-                rtt=args.client_clock_rtt, arrivals=arrivals,
-                peer_lost=args.peer_lost_epoch, peer_offset=args.peer_clock_offset,
-                peer_rtt=args.peer_clock_rtt,
-            )
+            anchor = measured_bounded_anchor(arrivals, readings)
         if anchor is not None and anchor.bounded:
             status, message = bounded_stream_cell(
                 text, anchor, args.streams, event_label=label
             )
+            if status == "VOID":
+                # Never worse than master: where the bounded window cannot
+                # decide, master's integer cell does whenever its three
+                # anchors agree.
+                fallback, fallback_message = integer_three_anchor_cell(
+                    text, at, args.streams, json_stream=args.json_stream, event_label=label
+                )
+                if fallback != "VOID":
+                    status, anchor = fallback, None
+                    message = (
+                        fallback_message + f" [#19123: the bounded window is VOID ({message}); "
+                        "the three integer anchors agree, so their verdict stands, as on master]"
+                    )
         elif anchor is not None:
             status, message = precise_stream_cell(
                 text, anchor, args.streams, json_stream=True, event_label=label

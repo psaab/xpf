@@ -25,22 +25,135 @@ failover_start_main_iperf() {
 	' _ "$duration" "$target" "$port" "$streams" "$log" "$pidfile" "$wall" "$interval"
 }
 
-# failover_start_arrival_stamper <log> <pidfile>  (#19123, opt-in)
-#   Stamps every line the main client writes to <log> with the LAN host's
-#   CLOCK_REALTIME ($EPOCHREALTIME) as it arrives, into <log>.arrivals as
-#   "<epoch>\t<line>". iperf3 emits an interval line only after that
-#   interval's end, so stamp - end bounds the interval clock's zero from above
-#   (iperf3_sum_parse.py arrival_zero_bound). tail follows the file by inotify
-#   (-s 0.1 caps the poll fallback) and exits with the client supervisor in
-#   <pidfile>. Without bash 5's EPOCHREALTIME the stamps are empty and the
-#   parser takes no bounded window.
+# #19123: the readings that bound a fast-takeover crash on iperf3's interval
+# clock (iperf3_sum_parse.py measured_window). Every one is a CLOCK_MONOTONIC
+# reading: a realtime clock can step between two readings, a monotonic one
+# cannot, and a boot id names the boot it counts from. Each costs a python3
+# start on the host it reads; without python3 a reading is missing and the
+# parser takes no bounded window.
+
+# failover_mono_now -- this host's CLOCK_MONOTONIC, seconds.
+failover_mono_now() {
+	python3 -I -c 'import time; print("%.6f" % time.clock_gettime(time.CLOCK_MONOTONIC))'
+}
+
+# failover_mono_reading <instance> [samples]
+#   "<offset> <rtt> <at> <boot_id>": the instance's CLOCK_MONOTONIC minus
+#   this host's, from the least-RTT of <samples> (default 3) round trips.
+#   <at> is this host's CLOCK_MONOTONIC at that round trip's midpoint, where
+#   the offset is right to +/-rtt/2; <boot_id> is the instance's. Exits
+#   nonzero when no round trip answered.
+failover_mono_reading() {
+	python3 -I - "$1" "${2:-3}" <<'PY'
+import subprocess
+import sys
+import time
+
+instance, samples = sys.argv[1], int(sys.argv[2])
+probe = (
+    "import time; "
+    "print('%.6f' % time.clock_gettime(time.CLOCK_MONOTONIC), "
+    "open('/proc/sys/kernel/random/boot_id').read().strip())"
+)
+best = None
+for _ in range(samples):
+    sent = time.clock_gettime(time.CLOCK_MONOTONIC)
+    try:
+        out = subprocess.run(
+            ["timeout", "10", "incus", "exec", instance, "--", "python3", "-I", "-c", probe],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=15,
+        ).stdout.split()
+    except (OSError, subprocess.SubprocessError):
+        continue
+    back = time.clock_gettime(time.CLOCK_MONOTONIC)
+    if len(out) != 2:
+        continue
+    try:
+        remote = float(out[0])
+    except ValueError:
+        continue
+    rtt, mid = back - sent, (sent + back) / 2
+    if best is None or rtt < best[1]:
+        best = (remote - mid, rtt, mid, out[1])
+if best is None:
+    sys.exit(1)
+print("%.6f %.6f %.6f %s" % best)
+PY
+}
+
+# failover_arrival_launch <log>
+#   On the LAN host, make <log>.arrivals hold one line,
+#   "launch<TAB><CLOCK_MONOTONIC><TAB><boot_id>", read BEFORE the client
+#   starts: iperf3 starts its interval clock later, so this bounds the clock's
+#   zero from below. Call it just before failover_start_main_iperf. The file
+#   is emptied first, so a failed reading leaves no stale launch line. Best
+#   effort: it never fails the caller (test-failover runs under set -e).
+failover_arrival_launch() {
+	incus exec "$CLUSTER_LAN_HOST" -- bash -c '
+		: >"$1.arrivals"
+		python3 -I - "$1.arrivals" <<"PY" 2>/dev/null
+import sys, time
+stamp = time.clock_gettime(time.CLOCK_MONOTONIC)
+boot = open("/proc/sys/kernel/random/boot_id").read().strip()
+with open(sys.argv[1], "w") as out:
+    out.write("launch\t%.6f\t%s\n" % (stamp, boot))
+PY
+	' _ "$1" &>/dev/null || :
+}
+
+# failover_start_arrival_stamper <log> <pidfile>
+#   Appends every line the main client writes to <log> to <log>.arrivals as
+#   "<CLOCK_MONOTONIC><TAB><line>", stamped on the LAN host as it is read.
+#   iperf3 emits an interval line only after that interval's end, so
+#   stamp - end bounds the interval clock's zero from above
+#   (iperf3_sum_parse.py arrival_zero_bounds). tail follows the file by
+#   inotify (-s 0.1 caps the poll fallback) and exits with the client
+#   supervisor in <pidfile>; one python3 reader stamps the lines. Best
+#   effort, like failover_arrival_launch.
 failover_start_arrival_stamper() {
 	incus exec "$CLUSTER_LAN_HOST" -- bash -c '
 		pid=$(cat "$2" 2>/dev/null) || exit 0
 		case "$pid" in ""|*[!0-9]*) exit 0 ;; esac
-		stamp() { while IFS= read -r line; do printf "%s\t%s\n" "${EPOCHREALTIME:-}" "$line"; done; }
-		{ tail -s 0.1 --pid="$pid" -n +1 -F "$1" 2>/dev/null | stamp >"$1.arrivals"; } </dev/null >/dev/null 2>&1 &
-	' _ "$1" "$2" &>/dev/null
+		{ tail -s 0.1 --pid="$pid" -n +1 -F "$1" 2>/dev/null | python3 -I -c "
+import sys, time
+for line in iter(sys.stdin.readline, \"\"):
+    sys.stdout.write(\"%.6f\t%s\" % (time.clock_gettime(time.CLOCK_MONOTONIC), line))
+    sys.stdout.flush()
+" >>"$1.arrivals"; } </dev/null >/dev/null 2>&1 &
+	' _ "$1" "$2" &>/dev/null || :
+}
+
+# failover_peer_lost_mono <instance> <offset> <boot_id> <dispatch>
+#   The journal's CLOCK_MONOTONIC receipt stamp of <instance>'s first xpfd
+#   "marking peer lost" entry on boot <boot_id> from 1 s before <dispatch>
+#   (this host's CLOCK_MONOTONIC, mapped through <offset> as read by
+#   failover_mono_reading; the second covers the mapping's error) to 5 s
+#   after it (the detection ceiling), as "<CLOCK_MONOTONIC> <boot_id>";
+#   nothing when there is none. The window is on <instance>'s own monotonic
+#   clock, so its realtime skew does not matter. Reads the whole journal so
+#   nothing is cut off mid-pipe; never fails the caller.
+failover_peer_lost_mono() {
+	timeout 30 incus exec "$1" -- journalctl -u xpfd --no-pager -o json --since -30min 2>/dev/null |
+		python3 -I -c '
+import json, sys
+offset, boot, dispatch = float(sys.argv[1]), sys.argv[2].replace("-", "").lower(), float(sys.argv[3])
+floor, ceiling, found = dispatch + offset - 1, dispatch + offset + 5, None
+for row in sys.stdin:
+    if found is not None:
+        continue
+    try:
+        entry = json.loads(row)
+        mono = int(entry["__MONOTONIC_TIMESTAMP"]) / 1e6
+        entry_boot = str(entry["_BOOT_ID"]).replace("-", "").lower()
+    except (ValueError, KeyError, TypeError):
+        continue
+    message = entry.get("MESSAGE")
+    if entry_boot == boot and floor <= mono <= ceiling and isinstance(message, str) \
+            and "cluster: peer heartbeat timeout, marking peer lost" in message:
+        found = "%.6f %s" % (mono, entry_boot)
+if found is not None:
+    print(found)
+' "$2" "$3" "$4" 2>/dev/null || :
 }
 
 # failover_stop_main_iperf <pidfile> <target> <port> <streams>

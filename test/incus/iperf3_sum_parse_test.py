@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -1265,45 +1266,85 @@ class PreciseCrashAnchorTests(unittest.TestCase):
         )
 
 
-# #19123: the crash cell over a window with MEASURED edges. The rows below
-# are SYNTHETIC runs whose every truth is specified independently of the
-# parser: the crash instant on iperf3's interval clock, each stream's resume,
-# iperf3's startup gap (start.timestamp -> interval zero), the arrival
-# stamps' latency and any clock step, the sysrq dispatch and fw1's peer-lost
-# stamp, and both clock offsets. Bytes are the exact overlap of each
+# #19123: the crash cell over a window with MEASURED edges, on CLOCK_MONOTONIC.
+# The rows below are SYNTHETIC runs whose every truth is specified
+# independently of the parser: the crash instant on iperf3's interval clock,
+# each stream's resume, the gap from the client's launch reading to the
+# interval zero, the arrival stamps' latency, the sysrq dispatch, fw1's
+# peer-lost receipt, both hosts' monotonic offsets and the LAN host's clock
+# rate, plus the REALTIME clocks (start.timestamp, the orchestrator's epochs),
+# which the window must not read. Bytes are the exact overlap of each
 # interval with each stream's on-time, so no rate model is assumed.
 _STREAMS = (5, 7, 9, 11, 13, 15, 17, 19)
+_ZERO = 5000.0  # the LAN host's CLOCK_MONOTONIC at iperf3's interval zero
+_RT_LAN = 1800000000.0 - _ZERO  # the LAN host's CLOCK_REALTIME minus its CLOCK_MONOTONIC
 
 
 class _SyntheticCrashRun:
     """One test-failover crash run, generated from specified truths."""
 
     def __init__(self, *, crash=58.4, resumes=None, startup=0.30, lat=0.005,
-                 dispatch_latency=0.15, detect_delay=0.8, lan_offset=0.02,
-                 lan_rtt=0.15, fw1_offset=-0.01, fw1_rtt=0.15, rate=3e9,
-                 factors=None, step=None, duration=75, stamped=None,
-                 reported_lan_offset=None):
+                 dispatch_latency=0.15, detect_delay=0.8, lan_offset=37.25, lan_rtt=0.15,
+                 fw1_offset=-912.5, fw1_rtt=0.15, lan_rate=0.0, pre_lead=1.0, post_lag=60.0,
+                 rate=3e9, factors=None, duration=75, stamped=None, missing=None,
+                 stale=False, launch_shift=0.0, rt_offset=0.02, reported_rt_offset=None,
+                 rt_step=0.0, lan_rt_step=0.0, readings=None):
         self.crash = crash
         self.resumes = {s: crash + 1.0 for s in _STREAMS}
         self.resumes.update(resumes or {})
-        self.start_rt = 1800000000.0
-        self.zero = self.start_rt + startup          # interval zero, LAN realtime
-        dispatch = crash - dispatch_latency          # on the interval clock
-        self.at = int(dispatch)                      # harness $SECONDS difference
-        self.before = self.zero + dispatch - lan_offset
+        launch = _ZERO - startup
+        # The LAN host's monotonic clock runs (1 + lan_rate) as fast as the
+        # orchestrator's around the dispatch instant o_ref.
+        o_ref = _ZERO + crash - dispatch_latency - lan_offset
+
+        def lan(o):
+            return o + lan_offset + lan_rate * (o - o_ref)
+
+        def orch(t):
+            return o_ref + (t - lan_offset - o_ref) / (1 + lan_rate)
+
+        lost = orch(_ZERO + crash + detect_delay) + fw1_offset
+        pre_at, post_at = o_ref - pre_lead, o_ref + post_lag
+        lines = {
+            "dispatch": f"dispatch {o_ref:.6f}",
+            "lan pre": f"lan pre {lan(pre_at) - pre_at:.6f} {lan_rtt:.6f} {pre_at:.6f} "
+                       "1111aaaa-0000-0000-0000-00000000000a",
+            "lan post": f"lan post {lan(post_at) - post_at:.6f} {lan_rtt:.6f} {post_at:.6f} "
+                        "1111aaaa-0000-0000-0000-00000000000a",
+            "fw1 pre": f"fw1 pre {fw1_offset:.6f} {fw1_rtt:.6f} {pre_at:.6f} "
+                       "2222bbbb-0000-0000-0000-00000000000b",
+            "fw1 post": f"fw1 post {fw1_offset:.6f} {fw1_rtt:.6f} {post_at:.6f} "
+                        "2222bbbb-0000-0000-0000-00000000000b",
+            "fw1 lost": f"fw1 lost {lost:.6f} 2222bbbb00000000000000000000000b",
+        }
+        lines.update(readings or {})
+        self.readings = "\n".join(line for line in lines.values() if line) + "\n"
+        # Realtime, for the precise path only: the orchestrator's CLOCK_REALTIME
+        # is its CLOCK_MONOTONIC plus rt_orch, stepped by rt_step after the
+        # realtime offset reading (which reads rt_offset, or a misread).
+        rt_orch = _RT_LAN + lan_offset - rt_offset
+        self.at = int(crash - dispatch_latency)
+        self.before = o_ref + rt_orch + rt_step
         self.after = self.before + 15.0
-        # A misread offset (the clock mapping reads late) without touching truth.
-        self.lan = (lan_offset if reported_lan_offset is None else reported_lan_offset, lan_rtt)
-        detected = self.zero + crash + detect_delay - lan_offset   # orchestrator clock
-        self.peer = (detected + fw1_offset, fw1_offset, fw1_rtt)
-        lines = [json.dumps({"event": "start", "data": {"timestamp": {
-            "timemillisecs": int(round(self.start_rt * 1000))}}}, separators=(",", ":"))]
-        arrivals = []
+        # A LAN realtime step of lan_rt_step after start.timestamp and before the
+        # realtime offset reading: the reading carries it, start.timestamp does not.
+        reported = rt_offset if reported_rt_offset is None else reported_rt_offset
+        self.rt = (reported + lan_rt_step, lan_rtt)
+        start_rt = launch + startup / 2 + _RT_LAN       # PARAM_EXCHANGE, between launch and zero
+        text = [json.dumps({"event": "start", "data": {"timestamp": {
+            "timemillisecs": int(round(start_rt * 1000))}}}, separators=(",", ":"))]
+        arrivals = [f"launch\t{launch + launch_shift:.6f}\t1111aaaa-0000-0000-0000-00000000000a"]
+        if stale:   # an older run's stamper, still appending its own lines
+            arrivals += [f"{launch - 20 + k:.6f}\t" + json.dumps(
+                {"event": "interval", "data": {"sum": {"start": k - 1.0, "end": float(k)}}})
+                for k in range(1, 6)]
         for k in range(duration):
             a, b = float(k), float(k + 1)
             factor = (factors or {}).get(k, 1.0)
             rows = []
             for s in _STREAMS:
+                if k in (missing or {}).get(s, ()):
+                    continue
                 on = max(0.0, min(b, crash) - a)
                 resume = self.resumes[s]
                 if isinstance(resume, tuple):       # back at resume[0], silent again at resume[1]
@@ -1317,43 +1358,62 @@ class _SyntheticCrashRun:
             line = json.dumps({"event": "interval", "data": {"streams": rows, "sum": {
                 "start": a, "end": b, "seconds": 1.0, "bytes": total // 8,
                 "bits_per_second": total}}}, separators=(",", ":"))
-            lines.append(line)
-            stamp = self.zero + b + lat
-            if step is not None and b >= step[0]:
-                stamp += step[1]
+            text.append(line)
             if stamped is None or stamped(b):
-                arrivals.append(f"{stamp:.6f}\t{line}")
-        self.text = "\n".join(lines) + "\n"
+                arrivals.append(f"{_ZERO + b + lat:.6f}\t{line}")
+        self.text = "\n".join(text) + "\n"
         self.arrivals = "\n".join(arrivals) + "\n"
 
-    def anchor(self, module, **override):
-        args = dict(before=self.before, offset=self.lan[0], rtt=self.lan[1],
-                    arrivals=self.arrivals, peer_lost=self.peer[0],
-                    peer_offset=self.peer[1], peer_rtt=self.peer[2])
-        args.update(override)
-        return module.measured_bounded_anchor(self.text, self.at, **args)
+    def anchor(self, module, arrivals=None, readings=None):
+        return module.measured_bounded_anchor(
+            self.arrivals if arrivals is None else arrivals,
+            module.parse_crash_readings(self.readings if readings is None else readings),
+        )
 
-    def judge(self, module, **override):
-        anchor = self.anchor(module, **override)
+    def judge(self, module):
+        anchor = self.anchor(module)
         if anchor is None:
             return "no window", ""
         return module.bounded_stream_cell(self.text, anchor, 8)
 
-    def cli(self, tmp):
-        path = os.path.join(tmp, "arrivals")
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(self.arrivals)
-        result = subprocess.run(
-            [sys.executable, _PARSER_PATH, "--failover-check", "--json-stream",
-             "--streams", "8", "--min-throughput-gbps", "1", "--crash-at", str(self.at),
-             "--straggler-cost", "--emit-metrics",
-             "--crash-epoch", repr(self.before), "--crash-epoch-after", repr(self.after),
-             "--client-clock-offset", repr(self.lan[0]), "--client-clock-rtt", repr(self.lan[1]),
-             "--client-arrivals", path, "--peer-lost-epoch", repr(self.peer[0]),
-             "--peer-clock-offset", repr(self.peer[1]), "--peer-clock-rtt", repr(self.peer[2])],
-            input=self.text, capture_output=True, text=True,
-        )
-        lines = result.stdout.splitlines()
+    def holds(self, module):
+        """Whether the window holds the crash: the cardinal edge property."""
+        anchor = self.anchor(module)
+        if anchor is None:
+            return "no window", ""
+        inside = anchor.seconds <= self.crash <= anchor.latest
+        return ("holds" if inside else "misses"), f"[{anchor.seconds}, {anchor.latest}]"
+
+    def files(self, tmp):
+        paths = os.path.join(tmp, "arrivals"), os.path.join(tmp, "readings")
+        for path, body in zip(paths, (self.arrivals, self.readings)):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(body)
+        return ["--client-arrivals", paths[0], "--crash-readings", paths[1]]
+
+    def realtime_args(self):
+        return ["--crash-at", str(self.at),
+                "--crash-epoch", repr(self.before), "--crash-epoch-after", repr(self.after),
+                "--client-clock-offset", repr(self.rt[0]), "--client-clock-rtt", repr(self.rt[1])]
+
+    def cli(self, tmp, module=None):
+        """The --failover-check crash line and METRIC lines: the parser as a
+        subprocess, or ``module.main()`` in-process (for a mutant)."""
+        argv = ["--failover-check", "--json-stream", "--streams", "8",
+                "--min-throughput-gbps", "1", "--straggler-cost", "--emit-metrics",
+                *self.realtime_args(), *self.files(tmp)]
+        if module is None:
+            stdout = subprocess.run([sys.executable, _PARSER_PATH, *argv], input=self.text,
+                                    capture_output=True, text=True).stdout
+        else:
+            saved = sys.argv, sys.stdin, sys.stdout
+            sys.argv, sys.stdin, sys.stdout = [_PARSER_PATH, *argv], io.StringIO(self.text), io.StringIO()
+            try:
+                module.main()
+                stdout = sys.stdout.getvalue()
+            finally:
+                sys.argv, sys.stdin, sys.stdout = saved
+        lines = stdout.splitlines()
         return lines[1], [line for line in lines if line.startswith("METRIC ")]
 
 
@@ -1367,6 +1427,7 @@ def _assert_flips(test, anchor, replacement, judge, expected):
     mutant = types.SimpleNamespace(**_mutant(anchor, replacement))
     status, reason = judge(mutant)
     test.assertNotEqual(status, expected, f"mutant did not flip the row: {reason}")
+    return status
 
 
 # A REAL fast-takeover crash log (#19034 udp PR H1, g5-19034-logs/pr-udp-h1-1794699622),
@@ -1376,43 +1437,117 @@ def _assert_flips(test, anchor, replacement, judge, expected):
 _PRE_19123_RUN = ("failover-crash-fast-takeover-udp.jsonl", 58,
                   (1794699715.273589580, 1794699720.459956343, -0.051, 0.155))
 
+# The review's counterexamples (#19123 cycles 1 and 2) as runs.
+_TRUE_COST = {"resumes": {11: 58.4 + 3.05}}                       # 3.05 s: a straggler
+_FAST_BURST_COST = {"resumes": {11: 61.45}, "factors": {61: 2.0}}  # read 61.0, truly 61.45
+_FAST_BURST_FAIL = {"resumes": {11: 68.45}, "factors": {68: 2.0}}  # read 68.0, truly 10.05 s
+
 
 class BoundedCrashWindowTests(unittest.TestCase):
     """#19123: a fast takeover leaves no stop; the crash cell is judged at both
-    ends of a window whose edges are measured: the sysrq dispatch through the
-    client's arrival stamps, and fw1's own peer-lost stamp."""
+    ends of a window whose edges are measured on CLOCK_MONOTONIC: the sysrq
+    dispatch through the client's launch reading and arrival stamps, and fw1's
+    peer-lost receipt."""
 
     def setUp(self):
         import iperf3_sum_parse as module
 
         self.module = module
 
+    # -- the window's edges ------------------------------------------------
     def test_the_window_holds_the_specified_crash(self):
         run = _SyntheticCrashRun()
         anchor = run.anchor(self.module)
         self.assertTrue(anchor.bounded)
-        self.assertLessEqual(anchor.seconds, run.crash)
-        self.assertGreaterEqual(anchor.latest, run.crash)
-        # T_lo = dispatch - rtt/2 - stamp latency, independent of the 0.30 s startup gap.
-        self.assertAlmostEqual(anchor.seconds, run.crash - 0.15 - 0.075 - 0.005, delta=1e-6)
+        self.assertEqual(run.holds(self.module)[0], "holds")
+        # T_lo = dispatch - rtt/2 - rate budget (1 ms over the 1 s lead) - stamp latency.
+        self.assertAlmostEqual(anchor.seconds, run.crash - 0.15 - 0.075 - 0.001 - 0.005, delta=1e-6)
 
+    def test_the_window_always_holds_the_crash(self):
+        for startup in (0.0, 0.3, 0.5):
+            for delay in (0.001, 0.8, 2.2):
+                for rtts in ((0.0, 0.0), (0.15, 0.15)):
+                    for rate in (-9e-4, 0.0, 9e-4):
+                        with self.subTest(startup=startup, delay=delay, rtts=rtts, rate=rate):
+                            run = _SyntheticCrashRun(
+                                startup=startup, detect_delay=delay, lan_rtt=rtts[0],
+                                fw1_rtt=rtts[1], lan_rate=rate, pre_lead=30.0)
+                            self.assertEqual(run.holds(self.module)[0], "holds")
+
+    def test_realtime_steps_do_not_move_the_window(self):
+        # Codex cycle 2 P1-1/P1-2: a realtime step between a reading and its
+        # use moved an edge across the crash. The window reads no realtime.
+        plain = _SyntheticCrashRun().anchor(self.module)
+        for step in (-6.0, -0.2, 0.2, 6.0):
+            with self.subTest(step=step):
+                stepped = _SyntheticCrashRun(rt_step=step).anchor(self.module)
+                self.assertEqual((plain.seconds, plain.latest), (stepped.seconds, stepped.latest))
+
+    def test_a_late_sysrq_exec_takes_no_window(self):
+        # Codex cycle 2 P1-2's trace: the exec runs 6 s after the dispatch and
+        # a stream dies at the crash. fw1's receipt is on its own monotonic
+        # clock, so the window would hold the crash, but it is 7 s wide: over
+        # the cap, no window, and the CLI never reads PASS.
+        run = _SyntheticCrashRun(crash=64.0, dispatch_latency=6.0, resumes={11: None})
+        self.assertIsNone(run.anchor(self.module))
+        with tempfile.TemporaryDirectory() as tmp:
+            line, metrics = run.cli(tmp)
+        self.assertFalse(line.startswith("PASS "), line)
+        self.assertIn("METRIC crash_anchor_bounded=0", metrics)
+
+    def test_a_far_late_peer_loss_takes_no_window(self):
+        # R24 NEW-B: an unrelated peer loss 8 s after the crash.
+        self.assertIsNone(_SyntheticCrashRun(detect_delay=8.0).anchor(self.module))
+
+    def test_slow_detection_is_void_but_keeps_an_agreed_integer_verdict(self):
+        # R24 NEW-C: 2.0 s detection (the sync-recency guard) widens the window
+        # to 2.9 s; the bounded cell cannot confirm a true PASS, and master's
+        # integer cell, all three anchors agreeing, decides it as before.
+        run = _SyntheticCrashRun(detect_delay=2.0)
+        status, reason = run.judge(self.module)
+        self.assertEqual(status, "VOID", reason)
+        with tempfile.TemporaryDirectory() as tmp:
+            line, metrics = run.cli(tmp)
+        self.assertTrue(line.startswith("PASS "), line)
+        self.assertIn("the three integer anchors agree", line)
+        self.assertIn("METRIC crash_anchor_bounded=0", metrics)
+
+    def test_a_pre_crash_rate_drop_does_not_move_the_window(self):
+        plain = _SyntheticCrashRun().anchor(self.module)
+        dropped = _SyntheticCrashRun(factors={58: 0.5}).anchor(self.module)
+        self.assertEqual((plain.seconds, plain.latest), (dropped.seconds, dropped.latest))
+
+    # -- the verdicts --------------------------------------------------------
     def test_a_true_pass_is_pass(self):
         status, reason = _SyntheticCrashRun().judge(self.module)
         self.assertEqual(status, "PASS", reason)
         self.assertIn("PASS at the earliest, PASS at the latest", reason)
 
-    def test_the_review_counterexample_true_cost_is_never_pass(self):
-        # P1-1: iperf3 starts its interval clock 0.30 s after start.timestamp;
-        # a stream resumes 3.05 s after the crash. Mapping through
-        # start.timestamp read 2.95/2.85 s: PASS/PASS.
-        run = _SyntheticCrashRun(startup=0.30, resumes={11: 58.4 + 3.05})
-        status, reason = run.judge(self.module)
-        self.assertNotEqual(status, "PASS", reason)
+    def test_a_true_cost_is_never_pass(self):
+        status, reason = _SyntheticCrashRun(**_TRUE_COST).judge(self.module)
         self.assertEqual(status, "VOID", reason)
+        # Realtime steps reach no edge: on the orchestrator (Codex cycle 2
+        # P1-1), and a 0.2 s LAN step between the start stamp and the offset
+        # reading (R24 NEW-A).
+        for steps in ({"rt_step": -6.0}, {"rt_step": 6.0}, {"lan_rt_step": 0.2}):
+            with self.subTest(**steps), tempfile.TemporaryDirectory() as tmp:
+                line, _ = _SyntheticCrashRun(**steps, **_TRUE_COST).cli(tmp)
+                self.assertFalse(line.startswith("PASS "), line)
+
+    def test_a_late_resume_with_a_fast_first_burst_is_never_pass(self):
+        # Codex cycle 2 P1-3: the in-interval read puts the resume at 61.0
+        # (PASS at both ends); the interval's END bounds it at 62.0.
+        status, reason = _SyntheticCrashRun(**_FAST_BURST_COST).judge(self.module)
+        self.assertEqual(status, "VOID", reason)
+        self.assertIn("cannot confirm PASS", reason)
+
+    def test_a_true_fail_with_a_fast_first_burst_is_never_cost(self):
+        status, reason = _SyntheticCrashRun(**_FAST_BURST_FAIL).judge(self.module)
+        self.assertEqual(status, "VOID", reason)
+        self.assertIn("cannot confirm COST", reason)
 
     def test_a_straggler_past_the_latest_edge_is_cost(self):
-        run = _SyntheticCrashRun(resumes={11: 58.4 + 4.8})
-        status, reason = run.judge(self.module)
+        status, reason = _SyntheticCrashRun(resumes={11: 58.4 + 4.8}).judge(self.module)
         self.assertEqual(status, "COST", reason)
 
     def test_a_dead_stream_is_fail(self):
@@ -1420,46 +1555,84 @@ class BoundedCrashWindowTests(unittest.TestCase):
         self.assertEqual(status, "FAIL", reason)
 
     def test_an_unrelated_dip_then_a_delayed_crash_cannot_pass_a_dead_stream(self):
-        # P1-2: a 40 % dip in [58,59) unrelated to the crash, the sysrq landing
-        # later at 59.10 s, and a stream that carries pre-crash bytes in
-        # [59,60) and then dies.
         for factors in ({57: 0.4}, {58: 0.4}):
             with self.subTest(dip=factors):
                 run = _SyntheticCrashRun(crash=59.10, factors=factors, resumes={11: None})
                 status, reason = run.judge(self.module)
                 self.assertEqual(status, "FAIL", reason)
 
-    def test_a_pre_crash_rate_drop_does_not_move_the_window(self):
-        # P2-3: traffic at half rate until the crash; the window has no rate model.
-        plain = _SyntheticCrashRun().anchor(self.module)
-        dropped = _SyntheticCrashRun(factors={58: 0.5}).anchor(self.module)
-        self.assertEqual((plain.seconds, plain.latest), (dropped.seconds, dropped.latest))
-        status, reason = _SyntheticCrashRun(factors={58: 0.5}).judge(self.module)
-        self.assertEqual(status, "PASS", reason)
+    # -- coverage after the resume (Codex cycle 2 P2-4, R24 F2) -------------
+    def test_a_burst_then_silence_is_void(self):
+        status, reason = _SyntheticCrashRun(resumes={11: (60.0, 60.6)}).judge(self.module)
+        self.assertEqual(status, "VOID", reason)
+        self.assertIn("not sustained", reason)
 
-    def test_a_clock_step_among_the_stamps_takes_no_window(self):
-        run = _SyntheticCrashRun(step=(54.0, 0.5))
-        self.assertIsNone(run.anchor(self.module))
+    def test_telemetry_ending_inside_the_three_seconds_is_void(self):
+        run = _SyntheticCrashRun(resumes={11: (60.0, 60.6)}, duration=61)
+        status, reason = run.judge(self.module)
+        self.assertEqual(status, "VOID", reason)
 
-    def test_a_zero_before_the_start_stamp_takes_no_window(self):
-        # A backward step before the window: every stamp 0.5 s early.
-        run = _SyntheticCrashRun(step=(0.0, -0.5))
-        self.assertIsNone(run.anchor(self.module))
+    def test_a_missing_interval_inside_the_three_seconds_is_void(self):
+        status, reason = _SyntheticCrashRun(missing={11: (62,)}).judge(self.module)
+        self.assertEqual(status, "VOID", reason)
 
+    def test_silence_only_in_the_third_second_is_void(self):
+        status, reason = _SyntheticCrashRun(resumes={11: (59.8, 63.0)}).judge(self.module)
+        self.assertEqual(status, "VOID", reason)
+
+    # -- readings that take no window ---------------------------------------
     def test_a_peer_loss_before_the_dispatch_takes_no_window(self):
-        run = _SyntheticCrashRun(detect_delay=-1.0)
-        self.assertIsNone(run.anchor(self.module))
+        self.assertIsNone(_SyntheticCrashRun(detect_delay=-1.0).anchor(self.module))
 
-    def test_a_missing_reading_takes_no_window(self):
+    def test_an_offset_that_moved_over_the_run_takes_no_window(self):
+        for key, line in (
+            ("lan post", "lan post 37.75 0.15 5098.0 1111aaaa-0000-0000-0000-00000000000a"),
+            ("fw1 post", "fw1 post -906.5 0.15 5098.0 2222bbbb-0000-0000-0000-00000000000b"),
+        ):
+            with self.subTest(key=key):
+                self.assertIsNone(_SyntheticCrashRun(readings={key: line}).anchor(self.module))
+
+    def test_readings_from_another_boot_take_no_window(self):
         run = _SyntheticCrashRun()
-        for missing in ("arrivals", "peer_lost", "peer_offset", "offset"):
-            with self.subTest(missing=missing):
-                self.assertIsNone(run.anchor(self.module, **{missing: None}))
+        lost_elsewhere = run.readings.replace(" 2222bbbb00000000000000000000000b", " 3333cccc")
+        self.assertIsNone(run.anchor(self.module, readings=lost_elsewhere))
+        rows = run.readings.splitlines()
+        post = next(i for i, row in enumerate(rows) if row.startswith("lan post"))
+        rows[post] = rows[post].rsplit(" ", 1)[0] + " 4444dddd"
+        self.assertIsNone(run.anchor(self.module, readings="\n".join(rows) + "\n"))
+        launch_elsewhere = run.arrivals.replace("1111aaaa-0000-0000-0000-00000000000a", "5555eeee", 1)
+        self.assertIsNone(run.anchor(self.module, arrivals=launch_elsewhere))
 
+    def test_a_zero_before_the_launch_reading_takes_no_window(self):
+        self.assertIsNone(_SyntheticCrashRun(launch_shift=0.5).anchor(self.module))
+
+    def test_an_older_runs_stamps_are_skipped(self):
+        plain = _SyntheticCrashRun().anchor(self.module)
+        stale = _SyntheticCrashRun(stale=True).anchor(self.module)
+        self.assertEqual((plain.seconds, plain.latest), (stale.seconds, stale.latest))
+
+    def test_a_missing_or_malformed_reading_takes_no_window(self):
+        run = _SyntheticCrashRun()
+        for key in ("dispatch", "lan pre", "lan post", "fw1 pre", "fw1 post", "fw1 lost"):
+            with self.subTest(missing=key):
+                self.assertIsNone(_SyntheticCrashRun(readings={key: None}).anchor(self.module))
+        rows = run.readings.splitlines()
+        for name, bad in (
+            ("short", rows[:1] + [rows[1].rsplit(" ", 1)[0]] + rows[2:]),
+            ("duplicate", rows + rows[:1]),
+            ("nan", [rows[0].split()[0] + " nan"] + rows[1:]),
+            ("negative rtt", rows[:1] + [rows[1].replace(" 0.150000 ", " -0.150000 ", 1)] + rows[2:]),
+            ("unknown", rows + ["fw0 pre 1 1 1 x"]),
+        ):
+            with self.subTest(malformed=name):
+                self.assertIsNone(run.anchor(self.module, readings="\n".join(bad) + "\n"))
+        self.assertIsNone(run.anchor(self.module, arrivals=run.arrivals.split("\n", 1)[1]))
+        self.assertIsNone(run.anchor(self.module, arrivals=run.arrivals.split("\n", 1)[0] + "\n"))
+
+    # -- the CLI ---------------------------------------------------------------
     def test_the_cli_judges_the_window_and_reports_it(self):
-        run = _SyntheticCrashRun()
         with tempfile.TemporaryDirectory() as tmp:
-            line, metrics = run.cli(tmp)
+            line, metrics = _SyntheticCrashRun().cli(tmp)
         self.assertTrue(line.startswith("PASS "), line)
         self.assertIn("bounded to [", line)
         self.assertIn("METRIC crash_anchor_precise=0", metrics)
@@ -1469,15 +1642,9 @@ class BoundedCrashWindowTests(unittest.TestCase):
         run = _SyntheticCrashRun()
         anchor = run.anchor(self.module)
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "arrivals")
-            with open(path, "w", encoding="utf-8") as handle:
-                handle.write(run.arrivals)
             result = subprocess.run(
-                [sys.executable, _PARSER_PATH, "--print-crash-anchor", "--crash-at", str(run.at),
-                 "--crash-epoch", repr(run.before), "--crash-epoch-after", repr(run.after),
-                 "--client-clock-offset", repr(run.lan[0]), "--client-clock-rtt", repr(run.lan[1]),
-                 "--client-arrivals", path, "--peer-lost-epoch", repr(run.peer[0]),
-                 "--peer-clock-offset", repr(run.peer[1]), "--peer-clock-rtt", repr(run.peer[2])],
+                [sys.executable, _PARSER_PATH, "--print-crash-anchor", *run.realtime_args(),
+                 *run.files(tmp)],
                 input=run.text, capture_output=True, text=True, check=True,
             )
         self.assertEqual(
@@ -1499,202 +1666,296 @@ class BoundedCrashWindowTests(unittest.TestCase):
         self.assertTrue(lines[1].startswith("VOID the integer failover anchor"), lines[1])
         self.assertIn("METRIC crash_anchor_bounded=0", lines)
 
-    def test_the_arrival_stamper_stamps_each_line_and_exits_with_the_client(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            bin_dir = os.path.join(tmp, "bin")
-            os.makedirs(bin_dir)
-            incus = os.path.join(bin_dir, "incus")
-            with open(incus, "w", encoding="utf-8") as f:
-                f.write(
-                    "#!/usr/bin/env bash\n"
-                    '[[ "$1" == exec && "$3" == -- ]] || exit 90\n'
-                    "shift 3\n"
-                    'exec "$@"\n'
-                )
-            os.chmod(incus, 0o755)
-            env = os.environ.copy()
-            env["PATH"] = bin_dir + os.pathsep + env["PATH"]
-            script = r'''
-source "$1"
-CLUSTER_LAN_HOST=mock-lan
-log="$2/client.log"
-: >"$log"
-sleep 30 & sup=$!
-echo "$sup" >"$2/client.pid"
-failover_start_arrival_stamper "$log" "$2/client.pid"
-sleep 0.5
-t0=$EPOCHREALTIME
-for i in 1 2 3; do printf '{"event":"interval","n":%d}\n' "$i" >>"$log"; sleep 0.3; done
-sleep 0.5
-t1=$EPOCHREALTIME
-kill "$sup"
-for _ in {1..30}; do pgrep -f "tail -s 0.1 --pid=$sup" >/dev/null || break; sleep 0.1; done
-pgrep -f "tail -s 0.1 --pid=$sup" >/dev/null && exit 21
-echo "$t0 $t1"
-'''
-            result = subprocess.run(
-                ["bash", "-c", script, "test",
-                 os.path.join(os.path.dirname(__file__), "failover-client-lib.sh"), tmp],
-                capture_output=True, text=True, env=env, timeout=20,
-            )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            t0, t1 = map(float, result.stdout.split())
-            with open(os.path.join(tmp, "client.log.arrivals"), encoding="utf-8") as handle:
-                rows = [line.split("\t", 1) for line in handle.read().splitlines()]
-        self.assertEqual([json.loads(raw)["n"] for _, raw in rows], [1, 2, 3])
-        stamps = [float(stamp) for stamp, _ in rows]
-        self.assertEqual(stamps, sorted(stamps))
-        self.assertTrue(all(t0 <= stamp <= t1 for stamp in stamps), (t0, stamps, t1))
-
-    # Executable mutants: each removes one measured edge or guard and must flip
-    # its row.
-    def test_mutant_mapping_through_the_start_stamp_turns_a_true_cost_into_pass(self):
-        run = _SyntheticCrashRun(startup=0.30, resumes={11: 58.4 + 3.05})
-        replacement = "    zero_hi, spread, samples = bound\n    zero_hi = start\n"
-        _assert_flips(self, "    zero_hi, spread, samples = bound\n", replacement,
-                      run.judge, "VOID")
-        mutant = types.SimpleNamespace(**_mutant("    zero_hi, spread, samples = bound\n", replacement))
-        self.assertEqual(run.judge(mutant)[0], "PASS")
-
-    def test_mutant_judging_at_the_latest_end_turns_a_true_cost_into_pass(self):
-        run = _SyntheticCrashRun(startup=0.30, resumes={11: 58.4 + 3.05})
-        anchor = "    if status_lo == status_hi:\n        return status_lo, message_lo + note\n"
-        replacement = "    if True:\n        return status_hi, message_hi + note\n"
-        _assert_flips(self, anchor, replacement, run.judge, "VOID")
-        mutant = types.SimpleNamespace(**_mutant(anchor, replacement))
-        self.assertEqual(run.judge(mutant)[0], "PASS")
-
-    def test_mutant_resume_evidence_from_the_earliest_edge_flips_a_dead_row(self):
-        # The interval starting 59.0 s lies inside [T_lo, crash): stream 11's
-        # pre-crash bytes there must not read as a resume.
-        run = _SyntheticCrashRun(crash=59.15, resumes={11: None})
-        _assert_flips(
-            self,
-            "    earliest = EventAnchor(anchor.seconds, anchor.uncertainty, anchor.source)\n",
-            "    earliest = EventAnchor(anchor.seconds, 0.0, anchor.source)\n",
-            run.judge, "FAIL",
-        )
-
-    def window(self, run):
-        return lambda module: ("window" if run.anchor(module) else "no window", "")
-
-    def test_mutant_without_the_attribution_guard_bounds_an_early_peer_loss(self):
-        _assert_flips(
-            self,
-            "        return None  # fw1 lost its peer before the sysrq was sent: not this crash\n",
-            "        pass\n",
-            self.window(_SyntheticCrashRun(detect_delay=-1.0)), "no window",
-        )
-
-    def test_mutant_without_the_continuity_check_bounds_a_stepped_clock(self):
-        _assert_flips(
-            self,
-            "        return None  # the stamps near the crash disagree: the clock stepped\n",
-            "        pass\n",
-            self.window(_SyntheticCrashRun(step=(54.0, 0.5))), "no window",
-        )
-
-    def test_mutant_without_the_start_stamp_check_bounds_a_zero_before_it(self):
-        _assert_flips(
-            self,
-            "        return None  # a zero before the connect stamp: the clock stepped back\n",
-            "        pass\n",
-            self.window(_SyntheticCrashRun(step=(0.0, -0.5))), "no window",
-        )
-
     # R24 F1: a stop that the precise path SAW and rejected (it lies before the
-    # mapped dispatch, so the mapping reads late) keeps the integer cell. The
-    # whole fleet is down for an interval (a stop at 58.4 s); the LAN offset
-    # is misread 0.3 s late; a stream truly resumes 3.05 s after the crash.
+    # mapped dispatch: the realtime offset is misread 0.3 s late) keeps the
+    # integer cell. The whole fleet is down for an interval (a stop at 58.4 s);
+    # a stream truly resumes 3.05 s after the crash.
     def stop_rejected_run(self):
         resumes = {s: 60.2 for s in _STREAMS}
         resumes[11] = 58.4 + 3.05
-        return _SyntheticCrashRun(startup=0.01, resumes=resumes, reported_lan_offset=0.32)
+        return _SyntheticCrashRun(startup=0.01, resumes=resumes, reported_rt_offset=0.32)
 
     def test_a_rejected_stop_keeps_the_integer_cell(self):
         run = self.stop_rejected_run()
-        self.assertIsNone(self.module.resolve_anchor(
-            run.text, run.at, before=run.before, after=run.after, offset=run.lan[0],
-            rtt=run.lan[1], crash=True,
-        ))
-        self.assertTrue(self.module.stop_seen(
-            run.text, run.at, before=run.before, after=run.after, offset=run.lan[0], rtt=run.lan[1],
-        ))
+        realtime = dict(before=run.before, after=run.after, offset=run.rt[0], rtt=run.rt[1])
+        self.assertIsNone(self.module.resolve_anchor(run.text, run.at, crash=True, **realtime))
+        self.assertTrue(self.module.stop_seen(run.text, run.at, **realtime))
         with tempfile.TemporaryDirectory() as tmp:
             line, metrics = run.cli(tmp)
         self.assertNotIn("bounded to [", line)
         self.assertFalse(line.startswith("PASS "), line)
         self.assertIn("METRIC crash_anchor_bounded=0", metrics)
 
-    def test_mutant_admitting_a_rejected_stop_turns_a_true_cost_into_pass(self):
+    # -- the helpers that take the readings, run against an incus mock -------
+    def _lib(self, script, tmp, journal=None):
+        bin_dir = os.path.join(tmp, "bin")
+        os.makedirs(bin_dir, exist_ok=True)
+        with open(os.path.join(bin_dir, "incus"), "w", encoding="utf-8") as f:
+            f.write('#!/usr/bin/env bash\n[[ "$1" == exec && "$3" == -- ]] || exit 90\n'
+                    'shift 3\nexec "$@"\n')
+        if journal is not None:
+            with open(os.path.join(bin_dir, "journalctl"), "w", encoding="utf-8") as f:
+                f.write(f"#!/usr/bin/env bash\ncat {journal!r}\n")
+        for name in os.listdir(bin_dir):
+            os.chmod(os.path.join(bin_dir, name), 0o755)
+        env = os.environ.copy()
+        env["PATH"] = bin_dir + os.pathsep + env["PATH"]
+        lib = os.path.join(os.path.dirname(os.path.abspath(__file__)), "failover-client-lib.sh")
+        return subprocess.run(["bash", "-c", 'source "$1"; CLUSTER_LAN_HOST=mock-lan\n' + script,
+                               "test", lib, tmp], capture_output=True, text=True, env=env,
+                              timeout=30)
+
+    @staticmethod
+    def _boot():
+        with open("/proc/sys/kernel/random/boot_id", encoding="utf-8") as handle:
+            return handle.read().strip()
+
+    def test_the_launch_reading_and_the_stamper_write_one_runs_arrival_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._lib(r'''
+log="$2/client.log"
+printf 'launch\t1.0\tstale\nstale line\n' >"$log.arrivals"
+t0=$(failover_mono_now)
+failover_arrival_launch "$log"
+: >"$log"
+sleep 30 & sup=$!
+echo "$sup" >"$2/client.pid"
+failover_start_arrival_stamper "$log" "$2/client.pid"
+sleep 0.5
+for i in 1 2 3; do printf '{"event":"interval","n":%d}\n' "$i" >>"$log"; sleep 0.3; done
+sleep 0.5
+t1=$(failover_mono_now)
+kill "$sup"
+for _ in {1..30}; do pgrep -f "tail -s 0.1 --pid=$sup" >/dev/null || break; sleep 0.1; done
+pgrep -f "tail -s 0.1 --pid=$sup" >/dev/null && exit 21
+echo "$t0 $t1"
+''', tmp)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            t0, t1 = map(float, result.stdout.split())
+            with open(os.path.join(tmp, "client.log.arrivals"), encoding="utf-8") as handle:
+                rows = [line.split("\t") for line in handle.read().splitlines()]
+        self.assertEqual(rows[0][0], "launch")
+        self.assertEqual(rows[0][2], self._boot())
+        launch = float(rows[0][1])
+        self.assertEqual([json.loads(raw)["n"] for _, raw in rows[1:]], [1, 2, 3])
+        stamps = [float(stamp) for stamp, _ in rows[1:]]
+        self.assertTrue(t0 <= launch <= stamps[0], (t0, launch, stamps))
+        self.assertEqual(stamps, sorted(stamps))
+        self.assertLessEqual(stamps[-1], t1)
+
+    def test_a_mono_reading_is_offset_rtt_midpoint_and_boot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._lib("failover_mono_reading mock-fw1 3", tmp)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        offset, rtt, at, boot = result.stdout.split()
+        self.assertLessEqual(abs(float(offset)), float(rtt) / 2 + 1e-6)   # one host, one clock
+        self.assertGreater(float(at), 0.0)
+        self.assertEqual(boot, self._boot())
+
+    def test_the_peer_lost_read_takes_the_first_matching_entry_on_the_boot(self):
+        marker = "cluster: peer heartbeat timeout, marking peer lost"
+        entries = [
+            {"__MONOTONIC_TIMESTAMP": "990000000", "_BOOT_ID": "aa", "MESSAGE": marker},   # before
+            {"__MONOTONIC_TIMESTAMP": "1001000000", "_BOOT_ID": "bb", "MESSAGE": marker},  # other boot
+            {"__MONOTONIC_TIMESTAMP": "1001500000", "_BOOT_ID": "aa", "MESSAGE": "other"},
+            {"__MONOTONIC_TIMESTAMP": "1002000000", "_BOOT_ID": "aa", "MESSAGE": "x " + marker},
+            {"__MONOTONIC_TIMESTAMP": "1003000000", "_BOOT_ID": "aa", "MESSAGE": marker},
+        ]
+        late = [{"__MONOTONIC_TIMESTAMP": "1005500000", "_BOOT_ID": "aa", "MESSAGE": marker}]
+        with tempfile.TemporaryDirectory() as tmp:
+            journal = os.path.join(tmp, "journal.json")
+            with open(journal, "w", encoding="utf-8") as handle:
+                handle.write("not json\n" + "".join(json.dumps(e) + "\n" for e in entries) * 400)
+            # dispatch 100 s on this host, fw1 = this host + 900 s: [999, 1005] on fw1.
+            result = self._lib("failover_peer_lost_mono mock-fw1 900 a-a 100; echo rc=$?",
+                               tmp, journal=journal)
+            with open(journal, "w", encoding="utf-8") as handle:
+                handle.write("".join(json.dumps(e) + "\n" for e in entries[:3] + late))
+            beyond = self._lib("failover_peer_lost_mono mock-fw1 900 a-a 100; echo rc=$?",
+                               tmp, journal=journal)
+        self.assertEqual(result.stdout.split("\n")[:2], ["1002.000000 aa", "rc=0"], result.stderr)
+        self.assertEqual(beyond.stdout.strip(), "rc=0", beyond.stderr)
+
+    # Executable mutants: each removes one measured edge, budget or guard and
+    # must flip its row.
+    def test_mutant_zero_from_the_launch_reading_moves_the_lower_edge_past_the_crash(self):
+        _assert_flips(
+            self,
+            "    t_lo = dispatch + lan.offset - _mapping_error(lan, dispatch) - zero_hi\n",
+            "    t_lo = dispatch + lan.offset - _mapping_error(lan, dispatch) - launch\n",
+            _SyntheticCrashRun().holds, "holds",
+        )
+
+    def test_mutant_zero_from_the_stamps_moves_the_upper_edge_before_the_crash(self):
+        run = _SyntheticCrashRun(detect_delay=0.001, lan_rtt=0.0, fw1_rtt=0.0)
+        _assert_flips(
+            self,
+            "    t_hi = lost_latest + lan.offset + _mapping_error(lan, lost_latest) - launch\n",
+            "    t_hi = lost_latest + lan.offset + _mapping_error(lan, lost_latest) - zero_hi\n",
+            run.holds, "holds",
+        )
+
+    def test_mutant_without_the_rate_budget_moves_the_lower_edge_past_the_crash(self):
+        run = _SyntheticCrashRun(lan_rate=-9e-4, pre_lead=30.0, dispatch_latency=0.0, lat=0.0,
+                                 lan_rtt=0.0, fw1_rtt=0.0)
+        _assert_flips(
+            self,
+            "    return reading.rtt / 2 + _CLOCK_RATE * abs(at - reading.at)\n",
+            "    return reading.rtt / 2\n",
+            run.holds, "holds",
+        )
+
+    def test_mutant_without_the_agreement_check_bounds_a_moved_offset(self):
+        line = "lan post 37.75 0.15 5098.0 1111aaaa-0000-0000-0000-00000000000a"
+        run = _SyntheticCrashRun(readings={"lan post": line})
+        _assert_flips(
+            self,
+            "        if abs(post.offset - pre.offset) > (\n",
+            "        if False and abs(post.offset - pre.offset) > (\n",
+            run.holds, "no window",
+        )
+
+    def test_mutant_without_the_boot_check_bounds_another_boots_stamp(self):
+        run = _SyntheticCrashRun()
+        run.readings = run.readings.replace(" 2222bbbb00000000000000000000000b", " 3333cccc")
+        _assert_flips(
+            self,
+            "        if pre.boot != boot or post.boot != boot:\n",
+            "        if False:\n",
+            run.holds, "no window",
+        )
+
+    def test_mutant_without_the_width_cap_bounds_a_far_late_peer_loss(self):
+        _assert_flips(
+            self,
+            "    if t_hi - t_lo > _MAX_WIDTH:\n",
+            "    if False:\n",
+            _SyntheticCrashRun(detect_delay=8.0).holds, "no window",
+        )
+
+    def test_mutant_without_the_integer_fallback_leaves_slow_detection_void(self):
+        run = _SyntheticCrashRun(detect_delay=2.0)
+
+        def cli(module):
+            with tempfile.TemporaryDirectory() as tmp:
+                line, _ = run.cli(tmp, module)
+            return line.split(" ", 1)[0], line
+
+        _assert_flips(self, '                if fallback != "VOID":\n',
+                      "                if False:\n", cli, "PASS")
+
+    def test_mutant_without_the_attribution_guard_bounds_an_early_peer_loss(self):
+        _assert_flips(
+            self,
+            '        return None, "fw1 lost its peer before the sysrq was sent: not this crash"\n',
+            "        pass\n",
+            _SyntheticCrashRun(detect_delay=-1.0).holds, "no window",
+        )
+
+    def test_mutant_without_the_launch_check_bounds_a_zero_before_it(self):
+        _assert_flips(
+            self,
+            "    if zero_hi < launch:\n",
+            "    if False:\n",
+            _SyntheticCrashRun(launch_shift=0.5).holds, "no window",
+        )
+
+    def test_mutant_keeping_an_older_runs_stamps_takes_no_window(self):
+        _assert_flips(
+            self,
+            "    zeros = [stamp - end for stamp, end in samples if stamp >= launch]\n",
+            "    zeros = [stamp - end for stamp, end in samples]\n",
+            _SyntheticCrashRun(stale=True).holds, "holds",
+        )
+
+    def test_mutant_reading_pass_in_interval_turns_a_true_cost_into_pass(self):
+        status = _assert_flips(
+            self,
+            "        line = RESUME_COST_SECONDS if status_lo == \"PASS\" else RESUME_FAIL_SECONDS\n",
+            "        line = 99.0 if status_lo == \"PASS\" else RESUME_FAIL_SECONDS\n",
+            _SyntheticCrashRun(**_FAST_BURST_COST).judge, "VOID",
+        )
+        self.assertEqual(status, "PASS")
+
+    def test_mutant_reading_cost_in_interval_turns_a_true_fail_into_cost(self):
+        status = _assert_flips(
+            self,
+            "        line = RESUME_COST_SECONDS if status_lo == \"PASS\" else RESUME_FAIL_SECONDS\n",
+            "        line = RESUME_COST_SECONDS if status_lo == \"PASS\" else 99.0\n",
+            _SyntheticCrashRun(**_FAST_BURST_FAIL).judge, "VOID",
+        )
+        self.assertEqual(status, "COST")
+
+    def test_mutant_judging_at_the_earliest_end_only_turns_a_true_cost_row_decided(self):
+        _assert_flips(
+            self,
+            "    if status_lo != status_hi:\n",
+            "    if False:\n",
+            _SyntheticCrashRun(**_TRUE_COST).judge, "VOID",
+        )
+
+    def test_mutant_resume_evidence_from_the_earliest_edge_flips_a_dead_row(self):
+        # The interval starting 59.0 s lies inside [T_lo, crash): stream 11's
+        # pre-crash bytes there must not read as a resume.
+        _assert_flips(
+            self,
+            "    earliest = EventAnchor(anchor.seconds, anchor.uncertainty, anchor.source)\n",
+            "    earliest = EventAnchor(anchor.seconds, 0.0, anchor.source)\n",
+            _SyntheticCrashRun(crash=59.15, resumes={11: None}).judge, "FAIL",
+        )
+
+    def test_mutant_accepting_an_empty_interval_passes_a_burst(self):
+        status = _assert_flips(
+            self,
+            "                break  # an empty one\n",
+            "                pass\n",
+            _SyntheticCrashRun(resumes={11: (60.0, 60.6)}).judge, "VOID",
+        )
+        self.assertEqual(status, "PASS")
+
+    def test_mutant_accepting_a_gap_passes_a_missing_interval(self):
+        status = _assert_flips(
+            self,
+            "                break  # a missing interval\n",
+            "                pass\n",
+            _SyntheticCrashRun(missing={11: (62,)}).judge, "VOID",
+        )
+        self.assertEqual(status, "PASS")
+
+    def test_mutant_without_the_horizon_passes_telemetry_that_ends(self):
+        status = _assert_flips(
+            self,
+            "        horizon = first[1] + RESUME_COST_SECONDS\n",
+            "        horizon = first[1]\n",
+            _SyntheticCrashRun(resumes={11: (60.0, 60.6)}, duration=61).judge, "VOID",
+        )
+        self.assertEqual(status, "PASS")
+
+    def test_mutant_with_a_two_second_horizon_passes_third_second_silence(self):
+        status = _assert_flips(
+            self,
+            "        horizon = first[1] + RESUME_COST_SECONDS\n",
+            "        horizon = first[1] + 2.0\n",
+            _SyntheticCrashRun(resumes={11: (59.8, 63.0)}).judge, "VOID",
+        )
+        self.assertEqual(status, "PASS")
+
+    # The window no longer reads the realtime mapping the rejected stop
+    # contradicts, so admitting the stop is not unsound by itself; the cell
+    # keeps the precise path's integer fallback there all the same.
+    def test_mutant_admitting_a_rejected_stop_takes_the_bounded_window(self):
         run = self.stop_rejected_run()
+        realtime = dict(before=run.before, after=run.after, offset=run.rt[0], rtt=run.rt[1])
 
         def judge(module):
-            if module.stop_seen(run.text, run.at, before=run.before, after=run.after,
-                                offset=run.lan[0], rtt=run.lan[1]):
+            if module.stop_seen(run.text, run.at, **realtime):
                 return "integer", ""
             return run.judge(module)
 
+        anchor = "    try:\n        return data_stop_anchor(text, lo, hi) is not None\n"
         replacement = "    try:\n        return False and data_stop_anchor(text, lo, hi) is not None\n"
-        _assert_flips(
-            self, "    try:\n        return data_stop_anchor(text, lo, hi) is not None\n",
-            replacement, judge, "integer",
-        )
-        mutant = types.SimpleNamespace(**_mutant(
-            "    try:\n        return data_stop_anchor(text, lo, hi) is not None\n", replacement))
-        self.assertEqual(judge(mutant)[0], "PASS")
-
-    # R24 F2: a stream whose read resume is a burst that then goes silent is
-    # not a resume. Stream 11 carries data only in [60.0, 60.6) after the crash.
-    def test_an_unsustained_resume_is_void(self):
-        run = _SyntheticCrashRun(resumes={11: (60.0, 60.6)})
-        status, reason = run.judge(self.module)
-        self.assertEqual(status, "VOID", reason)
-        self.assertIn("not sustained", reason)
-
-    def test_mutant_without_the_stay_up_check_passes_a_burst(self):
-        run = _SyntheticCrashRun(resumes={11: (60.0, 60.6)})
-        _assert_flips(
-            self,
-            "        if unsustained:\n",
-            "        if False:\n",
-            run.judge, "VOID",
-        )
-
-    # The arrival stamps: at least three near the crash, and only near it.
-    def test_two_stamps_near_the_crash_take_no_window(self):
-        run = _SyntheticCrashRun(stamped=lambda end: end < 48.0 or end in (55.0, 56.0))
-        self.assertIsNone(run.anchor(self.module))
-
-    def test_mutant_accepting_fewer_than_three_stamps_bounds_it(self):
-        run = _SyntheticCrashRun(stamped=lambda end: end < 48.0 or end in (55.0, 56.0))
-        _assert_flips(self, "    if len(samples) < 3:\n", "    if len(samples) < 1:\n",
-                      self.window(run), "no window")
-
-    def test_stamps_only_far_from_the_crash_take_no_window(self):
-        # The stamper stopped well before the crash: no local mapping.
-        run = _SyntheticCrashRun(stamped=lambda end: end < 40.0)
-        self.assertIsNone(run.anchor(self.module))
-
-    def test_mutant_reaching_far_stamps_bounds_it(self):
-        run = _SyntheticCrashRun(stamped=lambda end: end < 40.0)
-        _assert_flips(self, "_ARRIVAL_WINDOW = (10.0, 1.0)\n", "_ARRIVAL_WINDOW = (100.0, 1.0)\n",
-                      self.window(run), "no window")
-
-    # The old T_hi < T_lo guard is gone: with fw1's stamp after the dispatch,
-    # T_hi - T_lo >= fw1 rtt + LAN rtt, so the window always has width.
-    def test_the_window_always_has_width(self):
-        for startup in (0.0, 0.3, 2.0):
-            for delay in (0.001, 0.8, 2.5):
-                for rtts in ((0.0, 0.0), (0.15, 0.15)):
-                    with self.subTest(startup=startup, delay=delay, rtts=rtts):
-                        run = _SyntheticCrashRun(startup=startup, detect_delay=delay,
-                                                 lan_rtt=rtts[0], fw1_rtt=rtts[1])
-                        anchor = run.anchor(self.module)
-                        self.assertIsNotNone(anchor)
-                        self.assertGreaterEqual(anchor.uncertainty, 0.0)
-                        self.assertLessEqual(anchor.seconds, run.crash)
-                        self.assertGreaterEqual(anchor.latest, run.crash)
+        status = _assert_flips(self, anchor, replacement, judge, "integer")
+        self.assertNotEqual(status, "PASS")
 
 
 if __name__ == "__main__":
