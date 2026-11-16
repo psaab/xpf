@@ -7,6 +7,10 @@
 
 use super::*;
 
+/// Test-only (#19153 fold 2): since fold 1 the poll path materializes through
+/// [`apply_deferred_shared_materialization`]; these wrappers serve the cells
+/// that drive one materialize of a capture directly.
+#[cfg(test)]
 pub(super) fn materialize_shared_session_hit(sessions: &mut SessionTable,
 shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
 resolved: &mut ResolvedSessionLookup,
@@ -39,7 +43,8 @@ tcp_flags: u8,) -> (SessionLookup, bool) {
 /// guard).
 ///
 /// #19153: the materialize joins the worker install protocol, as every other
-/// worker install does ([`materialize_capture`]). A refused permit, an absent
+/// worker install does ([`materialize_capture`]). Test-only, like its
+/// non-adopted twin above. A refused permit, an absent
 /// shared row, a shared row that no longer names the captured incarnation, or
 /// a refused install returns `install_failed = true` and changes nothing.
 /// What the poll path then does with the packet is
@@ -50,6 +55,7 @@ tcp_flags: u8,) -> (SessionLookup, bool) {
 /// under its lease. A materialize that took no permit could land after a
 /// worker's delete, from the shared row the coordinator had not removed yet,
 /// and restore the revoked incarnation for the rest of the flow's life.
+#[cfg(test)]
 pub(super) fn materialize_shared_session_hit_adopted(sessions: &mut SessionTable,
 shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
 resolved: &mut ResolvedSessionLookup,
@@ -70,10 +76,11 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(captured) = resolv
     ) {
         CaptureMaterialize::Core(
             MaterializeOutcome::Installed(lookup) | MaterializeOutcome::SharedLocal(lookup),
+            _,
         ) => (lookup, false),
         // The #10612 miss shape: nothing installed, nothing failed.
         CaptureMaterialize::CaptureFenced
-        | CaptureMaterialize::Core(MaterializeOutcome::StaleReplayFenced) => {
+        | CaptureMaterialize::Core(MaterializeOutcome::StaleReplayFenced, _) => {
             (resolved.lookup.clone(), false)
         }
         CaptureMaterialize::Refused
@@ -81,6 +88,7 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(captured) = resolv
             MaterializeOutcome::SharedAbsent
             | MaterializeOutcome::Superseded
             | MaterializeOutcome::InstallRefused,
+            _,
         ) => (resolved.lookup.clone(), true),
     };
 }
@@ -96,13 +104,14 @@ pub(in crate::afxdp::session_glue) enum CaptureMaterialize {
     /// sibling's permit, a publisher or a clear fence), or this worker's own
     /// local incumbent refuses a non-adopted install (#10582).
     Refused,
-    /// The core ran under the permit.
-    Core(MaterializeOutcome),
+    /// The core ran under the permit: what it did, and how the current row it
+    /// read compares with the capture (fold 2: judged before it installed).
+    Core(MaterializeOutcome, MaterializeDivergence),
 }
 
 /// #19153: materialize a resolve's capture. Claims the pair, runs
-/// [`materialize_current_shared_under_permit`] with the capture's identity as
-/// the expected incarnation, and drops the permit.
+/// [`materialize_current_shared_under_permit`] against the capture (its
+/// identity, then the fold-2 classification), and drops the permit.
 ///
 /// Two refusals cost no claim. A stale capture is fenced first (#10612). A
 /// live local incumbent at the key (not a peer replica) refuses a non-adopted
@@ -147,86 +156,123 @@ pub(in crate::afxdp::session_glue) fn materialize_capture(
     else {
         return CaptureMaterialize::Refused;
     };
-    let outcome = materialize_current_shared_under_permit(
+    let (outcome, divergence) = materialize_current_shared_under_permit(
         sessions,
         shared_sessions,
         forwarding,
         &captured.key,
         Some(CapturedIncarnation::of(captured)),
+        Some(captured),
         install_inputs,
         &install_permits,
     );
     drop(install_permits);
-    CaptureMaterialize::Core(outcome)
+    CaptureMaterialize::Core(outcome, divergence)
 }
 
-/// #19153 fold 1 (Codex P1): what a materialize means for THIS packet, whose
-/// resolve, Owner verdict and deferred effects (the promotion, the forwarding
+/// #19153 fold 2: what a materialize means for THIS packet, whose resolve,
+/// Owner verdict and deferred effects (the promotion, the forwarding
 /// revalidation) were all derived from the capture.
 ///
-/// The rule: a promotion may publish only content equal to what the worker
-/// row holds after the materialize. When the installed decision and metadata
-/// (what a promotion writes) equal the capture's, the capture-derived effects
-/// describe the installed row and stand. Otherwise they are dropped, the
-/// packet is kept out of the flow cache, and the next packet resolves the
-/// installed row as an ordinary worker hit and promotes it: two packets.
+/// One rule, classify before apply: under the permit, the core compares the
+/// current shared row with the capture BEFORE it installs anything
+/// ([`materialize_divergence`]). Equal: the row is installed with this
+/// packet's effects and every capture-derived effect stands. Different: the
+/// current row is installed clean (none of this packet's state) and the
+/// packet is dropped. No difference is exempt: the packet forwards on the
+/// capture's decision only when the capture describes the installed row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(in crate::afxdp) enum MaterializeDivergence {
-    /// Installed content equal to the capture, or no materialize ran, or one
-    /// of the pre-#19153-fold arms (a refusal, the #10612 fence) whose packet
-    /// handling is unchanged.
+    /// The current row equals the capture on everything this packet's
+    /// handling read, or no capture was classified (a refusal or the #10612
+    /// capture fence, whose packet handling is unchanged).
     #[default]
     None,
-    /// The installed row differs from the capture only in fields that cannot
-    /// change this packet's translation, egress or admission
-    /// ([`materialize_divergence`] lists them). The packet forwards once on
-    /// the capture's decision; the promotion and the forwarding revalidation
-    /// are dropped and the flow cache is not seeded.
-    ForwardOnce,
-    /// The installed row differs in the decision (NAT, routing table,
-    /// resolution: disposition and egress) or in metadata that names the
-    /// packet's translation, egress or authority; or the captured incarnation
-    /// is gone (shared absent) or replaced (superseded: another NAT or
-    /// session id). The packet is NOT forwarded on the capture's decision: the
-    /// poll path recycles its frame, as the input-filter drop after the Owner
-    /// verdict does. The next packet resolves current state.
+    /// The current row differs from the capture in a compared field, or the
+    /// captured incarnation is gone (shared absent) or replaced (superseded:
+    /// another NAT or session id). The core installed the current row, if at
+    /// all, without this packet's TCP flags or fabric adoption; the deferred
+    /// promotion and forwarding revalidation are dropped; the poll path
+    /// recycles the frame, as the input-filter drop after the Owner verdict
+    /// does. The next packet resolves current state.
     Drop,
 }
 
-impl MaterializeDivergence {
-    /// Whether this packet must stay out of the flow cache.
-    pub(in crate::afxdp) fn suppresses_flow_cache_seed(self) -> bool {
-        !matches!(self, Self::None)
-    }
-}
-
-/// #19153 fold 1: classify how the installed `decision`/`metadata` differ
-/// from the capture's. Every `SessionMetadata` field is named (no `..`), so a
-/// new field fails to compile until it is classified here.
+/// #19153 fold 2: classify the CURRENT shared row against the resolve's
+/// capture, before the core installs anything. `current` is the replica the
+/// core is about to install, with its zero-to-live leak derivation already
+/// applied. `live_leak` memoizes the leak incarnation forwarding names now
+/// for the row's target (the core fills it when it derived one).
 ///
-/// Forwarding-relevant (any difference is `Drop`):
+/// Every field of `SyncedSessionEntry` and of `SessionMetadata` is named (no
+/// `..`), so a new field fails to compile until it is classified here.
+///
+/// Compared (any difference is `Drop`):
 /// - the whole `SessionDecision` (resolution: disposition, egress, next hop;
 ///   the NAT decision; the install table domain and check);
-/// - `ingress_zone`, `egress_zone`, `ingress_zone_check`, `egress_zone_check`
-///   (the admitting zone pair and its vintage: the Owner verdict and policy);
-/// - `ingress_ifindex`, `ingress_vlan_id`, `forward_ingress_vlan_id` (the
-///   ingress identity a reply leaves through);
-/// - `nat_scope_ifindex`, `nat64_reverse` (translation);
-/// - `owner_rg_id`, `fabric_ingress` (HA ownership and fabric redirect);
-/// - `is_reverse`, `forward_wire_alias_origin` (direction and alias
-///   provenance);
-/// - `policy_id` (the admitting policy: authority).
+/// - every `SessionMetadata` field: zones and their vintage, ingress
+///   identity, NAT scope and NAT64 reverse, owner RG, fabric ingress,
+///   direction and alias provenance, the admitting policy id, session
+///   logging, the idle timeout, and the policy counter (`policy_counter_idx`
+///   feeds the TUN-origin exemption, `policy_counter.is_some()` bypasses the
+///   #10612 replay fence, so neither is accounting-only; the bound counter is
+///   compared by identity);
+/// - `source_nat_static` (SNAT provenance, which SNAT revalidation reads);
+/// - the leak incarnation (#9951), as the incarnation each row RESOLVES
+///   under: a nonzero stamp is itself; a zero stamp is unstamped and resolves
+///   on current forwarding, exactly as a stamp equal to the live incarnation
+///   does. So a zero capture equals a row the core stamped from current
+///   forwarding (its zero-to-live derivation for peer-synced rows) or a
+///   sibling stamped with the live incarnation, and differs from a revoked
+///   stamp;
+/// - for TCP, the close class and the handshake stage, decoded as
+///   `upsert_synced_with_origin` decodes them (an unknown or legacy 0 stage
+///   is Established, 0 close is open); other protocols install neither.
 ///
-/// Metadata-only (`ForwardOnce`): `log_session_init`, `log_session_close`
-/// (session logging), `inactivity_timeout_ns` (idle timeout),
-/// `policy_counter_idx`, `policy_counter` (hit-counter attribution). None of
-/// them changes where this packet goes or how it is translated.
+/// Not compared, and why (none of them is read by this packet's resolve or
+/// verdict, and each is rewritten on the normal path):
+/// - `key`: the core re-read the row under the capture's key;
+/// - `session_id`: judged by `promote::same_synced_incarnation`, the one
+///   identity rule, before this classification;
+/// - `origin`: the ownership marker that promotion and demotion rewrite with
+///   the content unchanged (`shared_ops/owner_rg.rs`); the core installs by
+///   the current origin (`Installed` or `SharedLocal`), and the Owner verdict
+///   reads origin only on the foreign path, which never materializes;
+/// - `generation`: the HA install generation, bumped by every re-import of
+///   the same incarnation;
+/// - `tcp_flags`: the publisher's last-seen flags;
+/// - `fwd_packets`, `rev_packets`, `sibling_last_seen_ns`, `last_served_ns`:
+///   node-level service evidence and packet clocks, restamped as the flow is
+///   served (`shared_ops/restamp.rs`);
+/// - `pptp_call_ids`: read only on re-export; local publishes write 0;
+/// - `persistent_lease_hold`: the publisher's lease reference, which the core
+///   joins on the current row's exact hold.
 pub(in crate::afxdp) fn materialize_divergence(
-    captured_decision: &SessionDecision,
-    captured: &SessionMetadata,
-    installed_decision: &SessionDecision,
-    installed: &SessionMetadata,
+    forwarding: &ForwardingState,
+    captured: &SyncedSessionEntry,
+    current: &SyncedSessionEntry,
+    live_leak: &mut Option<u64>,
 ) -> MaterializeDivergence {
+    let SyncedSessionEntry {
+        key: _,
+        decision,
+        metadata,
+        source_nat_static,
+        leak_incarnation,
+        origin: _,
+        protocol,
+        tcp_flags: _,
+        generation: _,
+        session_id: _,
+        tcp_close_class,
+        tcp_handshake_state,
+        rev_packets: _,
+        fwd_packets: _,
+        sibling_last_seen_ns: _,
+        last_served_ns: _,
+        pptp_call_ids: _,
+        persistent_lease_hold: _,
+    } = current;
     let SessionMetadata {
         ingress_zone,
         egress_zone,
@@ -247,49 +293,96 @@ pub(in crate::afxdp) fn materialize_divergence(
         inactivity_timeout_ns,
         policy_counter_idx,
         policy_counter,
-    } = installed;
-    let forwarding_differs = installed_decision != captured_decision
-        || *ingress_zone != captured.ingress_zone
-        || *egress_zone != captured.egress_zone
-        || *ingress_zone_check != captured.ingress_zone_check
-        || *egress_zone_check != captured.egress_zone_check
-        || *ingress_ifindex != captured.ingress_ifindex
-        || *ingress_vlan_id != captured.ingress_vlan_id
-        || *forward_ingress_vlan_id != captured.forward_ingress_vlan_id
-        || *nat_scope_ifindex != captured.nat_scope_ifindex
-        || *owner_rg_id != captured.owner_rg_id
-        || *fabric_ingress != captured.fabric_ingress
-        || *is_reverse != captured.is_reverse
-        || *forward_wire_alias_origin != captured.forward_wire_alias_origin
-        || *nat64_reverse != captured.nat64_reverse
-        || *policy_id != captured.policy_id;
-    if forwarding_differs {
-        return MaterializeDivergence::Drop;
-    }
-    let metadata_differs = *log_session_init != captured.log_session_init
-        || *log_session_close != captured.log_session_close
-        || *inactivity_timeout_ns != captured.inactivity_timeout_ns
-        || *policy_counter_idx != captured.policy_counter_idx
-        || match (policy_counter, &captured.policy_counter) {
+    } = metadata;
+    let was = &captured.metadata;
+    let differs = *decision != captured.decision
+        || *ingress_zone != was.ingress_zone
+        || *egress_zone != was.egress_zone
+        || *ingress_zone_check != was.ingress_zone_check
+        || *egress_zone_check != was.egress_zone_check
+        || *ingress_ifindex != was.ingress_ifindex
+        || *ingress_vlan_id != was.ingress_vlan_id
+        || *forward_ingress_vlan_id != was.forward_ingress_vlan_id
+        || *nat_scope_ifindex != was.nat_scope_ifindex
+        || *owner_rg_id != was.owner_rg_id
+        || *fabric_ingress != was.fabric_ingress
+        || *is_reverse != was.is_reverse
+        || *forward_wire_alias_origin != was.forward_wire_alias_origin
+        || *nat64_reverse != was.nat64_reverse
+        || *log_session_init != was.log_session_init
+        || *log_session_close != was.log_session_close
+        || *policy_id != was.policy_id
+        || *inactivity_timeout_ns != was.inactivity_timeout_ns
+        || *policy_counter_idx != was.policy_counter_idx
+        || match (policy_counter, &was.policy_counter) {
             (Some(left), Some(right)) => !Arc::ptr_eq(left, right),
             (None, None) => false,
             _ => true,
-        };
-    if metadata_differs {
-        MaterializeDivergence::ForwardOnce
+        }
+        || *source_nat_static != captured.source_nat_static
+        || (*protocol == PROTO_TCP
+            && (crate::session::TcpCloseClass::from_wire(*tcp_close_class)
+                != crate::session::TcpCloseClass::from_wire(captured.tcp_close_class)
+                || installed_handshake_stage(*tcp_handshake_state)
+                    != installed_handshake_stage(captured.tcp_handshake_state)))
+        || (*leak_incarnation != captured.leak_incarnation && {
+            let live = *live_leak.get_or_insert_with(|| live_leak_incarnation(forwarding, current));
+            resolves_under(*leak_incarnation, live) != resolves_under(captured.leak_incarnation, live)
+        });
+    if differs {
+        MaterializeDivergence::Drop
     } else {
         MaterializeDivergence::None
     }
 }
 
+/// The handshake stage `upsert_synced_with_origin` installs for a TCP wire
+/// byte: an unknown or legacy 0 byte installs as Established.
+fn installed_handshake_stage(wire: u8) -> crate::session::TcpHandshakeState {
+    crate::session::TcpHandshakeState::from_wire(wire)
+        .unwrap_or(crate::session::TcpHandshakeState::Established)
+}
+
+/// #9951: the incarnation a row with leak stamp `stamp` resolves under. A
+/// zero stamp carries no provenance and resolves on current forwarding, which
+/// is the live incarnation `live` (0 when the target rides no leak).
+fn resolves_under(stamp: u64, live: u64) -> u64 {
+    if stamp == 0 { live } else { stamp }
+}
+
+/// #9951: the leak incarnation forwarding names NOW for `entry`'s resolution
+/// target, or 0 when its resolution rides no leak.
+fn live_leak_incarnation(forwarding: &ForwardingState, entry: &SyncedSessionEntry) -> u64 {
+    let target = if entry.metadata.is_reverse {
+        entry.key.dst_ip
+    } else {
+        let flow = SessionFlow {
+            src_ip: entry.key.src_ip,
+            dst_ip: entry.key.dst_ip,
+            forward_key: entry.key.clone(),
+        };
+        resolution_target_for_session(&flow, entry.decision)
+    };
+    leak_incarnation_for_session(forwarding, entry.decision, target).unwrap_or(0)
+}
+
 /// #19153 fold 1: drops of packets whose materialize found the captured
-/// incarnation gone, replaced, or installed with forwarding-relevant
-/// differences ([`MaterializeDivergence::Drop`]). Internal counter, no log.
+/// incarnation gone, replaced, or a current row that differs from the
+/// capture ([`MaterializeDivergence::Drop`]). No log. Fold 2 (r24 P3):
+/// exported as `ProcessStatus.materialize_divergence_drops` and the
+/// Prometheus counter `xpf_userspace_materialize_divergence_drops_total`, so
+/// a gate can check that a normal takeover drops nothing here.
 pub(in crate::afxdp) static MATERIALIZE_DIVERGENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
 /// Bump [`MATERIALIZE_DIVERGENCE_DROPS`] for one recycled packet.
 pub(in crate::afxdp) fn note_materialize_divergence_drop() {
     MATERIALIZE_DIVERGENCE_DROPS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The status surface's read of [`MATERIALIZE_DIVERGENCE_DROPS`]
+/// (`Coordinator::materialize_divergence_drops`).
+pub(in crate::afxdp) fn materialize_divergence_drops() -> u64 {
+    MATERIALIZE_DIVERGENCE_DROPS.load(Ordering::Relaxed)
 }
 
 /// #19153: the identity a resolve captured from a shared row, the incarnation
@@ -309,13 +402,19 @@ impl CapturedIncarnation {
     }
 }
 
-/// #19153: the per-packet install inputs of a materialize.
+/// #19153: the per-packet install inputs of a materialize. Fold 2: both are
+/// this packet's state, applied only to a row the classification found equal
+/// to the capture.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::afxdp) struct MaterializeInstall {
     pub(in crate::afxdp) now_ns: u64,
-    /// The packet's TCP flags, stamped on the installed row.
+    /// The packet's TCP flags, stamped on an installed row equal to the
+    /// capture (its close state and timeout derive from them). A row that
+    /// differs keeps its own carried flags.
     pub(in crate::afxdp) tcp_flags: u8,
-    /// #16217: the replica may replace a non-peer-synced local incumbent.
+    /// #16217: the replica may replace a non-peer-synced local incumbent. The
+    /// adoption gate judged this packet against the shared state it read, so
+    /// a row that differs from the capture never gets it.
     pub(in crate::afxdp) fabric_adopted: bool,
 }
 
@@ -362,8 +461,8 @@ pub(in crate::afxdp) enum MaterializeOutcome {
 /// until the install.
 ///
 /// The row installed is what shared authority holds NOW, never a caller's
-/// earlier copy. `expected` (a resolve's capture) only decides whether the
-/// caller's packet resolved against this incarnation
+/// earlier copy. `expected` (the identity of a resolve's capture) first
+/// decides whether the caller's packet resolved against this incarnation
 /// (`promote::same_synced_incarnation`, the one identity rule); a mismatch is
 /// `Superseded` and installs nothing. This is also how the zero-id case is
 /// handled: a shared id of 0 matches on the NAT decision alone, and even then
@@ -371,12 +470,26 @@ pub(in crate::afxdp) enum MaterializeOutcome {
 /// installed, so a legacy peer's same-NAT reuse of the tuple cannot install
 /// the stale capture.
 ///
-/// Order: every check runs before the first side effect (joining the
-/// publisher's persistent lease hold), so every outcome but `Installed` and
-/// `SharedLocal` changes nothing. Lock order is the permits, then the shared
-/// lock, as in promotion and the HA import (a lease, then the shared lock).
-/// The shared lock is released before the install, and a permit is never
-/// waited for, so no cycle exists.
+/// #19153 fold 2, classify before apply: with a full capture
+/// (`classify_against`, whose identity must be `expected`) the current row is
+/// compared with it ([`materialize_divergence`]) after the re-read and BEFORE
+/// any install. The returned divergence is what the packet may do:
+/// - `None`: the row is installed with this packet's TCP flags (its close
+///   state and timeout) and fabric adoption, exactly as before;
+/// - `Drop`: the row is installed clean, with its own carried flags and no
+///   adoption (it may then be refused by a local incumbent), and the caller
+///   drops the packet. An absent or superseded capture is `Drop` too, with
+///   nothing installed.
+///
+/// An identity-only caller (`classify_against` `None`) gets `None` and the
+/// packet's effects, as before fold 2.
+///
+/// Order: every check, the leak derivation and the classification run before
+/// the first side effect (joining the publisher's persistent lease hold), so
+/// every outcome but `Installed` and `SharedLocal` changes nothing. Lock order
+/// is the permits, then the shared lock, as in promotion and the HA import (a
+/// lease, then the shared lock). The shared lock is released before the
+/// install, and a permit is never waited for, so no cycle exists.
 ///
 /// Cost: runs once per materialize attempt, which is once per flow per worker
 /// unless the attempt is refused. A refused attempt is retried by the flow's
@@ -386,31 +499,45 @@ pub(in crate::afxdp) enum MaterializeOutcome {
 /// claiming. A refusal inside this core (a persistent hold that cannot be
 /// joined, a directory conflict, a companion the claim does not cover) pays
 /// the claim (allocations), the shared re-read and the release on each
-/// attempt. No logging.
+/// attempt. The classification is field compares, plus at most one leak
+/// lookup, shared with the zero-to-live derivation. No logging.
+#[expect(clippy::too_many_arguments, reason = "#19153 fold 2: the core's permit witness, identity, capture and install inputs; one caller per mode")]
 pub(in crate::afxdp) fn materialize_current_shared_under_permit(
     sessions: &mut SessionTable,
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     forwarding: &ForwardingState,
     key: &SessionKey,
     expected: Option<CapturedIncarnation>,
+    classify_against: Option<&SyncedSessionEntry>,
     install_inputs: MaterializeInstall,
     permits: &[crate::afxdp::bpf_map::InstallPermit],
-) -> MaterializeOutcome {
+) -> (MaterializeOutcome, MaterializeDivergence) {
     debug_assert!(
         permits.iter().any(|permit| permit.covers(key)),
         "#19153: materialize under permits that do not fence {key:?}"
+    );
+    debug_assert!(
+        classify_against.is_none() || expected == classify_against.map(CapturedIncarnation::of),
+        "#19153: a classified capture must be the expected incarnation"
     );
     let MaterializeInstall {
         now_ns,
         tcp_flags,
         fabric_adopted,
     } = install_inputs;
+    // A capture whose incarnation is gone or replaced: the packet resolved
+    // against state shared authority no longer names.
+    let gone = if classify_against.is_some() {
+        MaterializeDivergence::Drop
+    } else {
+        MaterializeDivergence::None
+    };
     // Re-read under the permits, and copy out only an incarnation the caller
     // may install. One clone, inside the lock.
     let (mut replica, shared_origin) = {
         let shared = lock_shared_recover(shared_sessions);
         let Some(current) = shared.get(key) else {
-            return MaterializeOutcome::SharedAbsent;
+            return (MaterializeOutcome::SharedAbsent, gone);
         };
         if let Some(expected) = expected
             && !super::promote::same_synced_incarnation(
@@ -419,37 +546,42 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
                 current,
             )
         {
-            return MaterializeOutcome::Superseded;
+            return (MaterializeOutcome::Superseded, gone);
         }
         (synced_replica_entry(current), current.origin)
     };
+    // A zero token carries no leak provenance and is recomputed locally
+    // for peer-synced rows. A nonzero token was computed before this
+    // shared row was published (and survives demotion), so preserve it as
+    // revocation evidence. Read-only; the classification below reuses the
+    // live incarnation it computed.
+    let mut live_leak = None;
+    if shared_origin.is_peer_synced() && replica.leak_incarnation == 0 {
+        let live = live_leak_incarnation(forwarding, &replica);
+        live_leak = Some(live);
+        replica.leak_incarnation = live;
+    }
+    // #19153 fold 2: classify BEFORE anything is applied.
+    let divergence = match classify_against {
+        Some(captured) => materialize_divergence(forwarding, captured, &replica, &mut live_leak),
+        None => MaterializeDivergence::None,
+    };
     let companion_key = reverse_session_key(&replica.key, replica.decision.nat);
     if !permits.iter().any(|permit| permit.covers(&companion_key)) {
-        return MaterializeOutcome::InstallRefused;
+        return (MaterializeOutcome::InstallRefused, divergence);
     }
     // #10612 (N2): the fence judges the content installed.
     if synced_entry_is_stale_replay(shared_origin, &replica.metadata, forwarding) {
         note_stale_replay_fence_drop();
-        return MaterializeOutcome::StaleReplayFenced;
+        return (MaterializeOutcome::StaleReplayFenced, divergence);
     }
-    // A zero token carries no leak provenance and is recomputed locally
-    // for peer-synced rows. A nonzero token was computed before this
-    // shared row was published (and survives demotion), so preserve it as
-    // revocation evidence.
-    if shared_origin.is_peer_synced() && replica.leak_incarnation == 0 {
-        let target = if replica.metadata.is_reverse {
-            replica.key.dst_ip
-        } else {
-            let flow = SessionFlow {
-                src_ip: replica.key.src_ip,
-                dst_ip: replica.key.dst_ip,
-                forward_key: replica.key.clone(),
-            };
-            resolution_target_for_session(&flow, replica.decision)
-        };
-        replica.leak_incarnation =
-            leak_incarnation_for_session(forwarding, replica.decision, target).unwrap_or(0);
-    }
+    // What the install may take from this packet: everything when the row
+    // equals the capture, nothing when it differs (Codex P2-1: an RST or FIN
+    // that is dropped must not have closed or reset the row first).
+    let (packet_tcp_flags, allow_replace_local) = match divergence {
+        MaterializeDivergence::None => (Some(tcp_flags), fabric_adopted),
+        MaterializeDivergence::Drop => (None, false),
+    };
     let incumbent_persistent_hold = sessions.persistent_lease_hold_for(&replica.key);
     // The first side effect. A shared row's hold belongs to its publisher,
     // not this worker. Acquire one local reference on that exact allocator
@@ -467,7 +599,7 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
             expected_translated,
             now_ns,
         ) {
-            return MaterializeOutcome::InstallRefused;
+            return (MaterializeOutcome::InstallRefused, divergence);
         }
         Some(hold.with_owner(crate::nat::PersistentLeaseOwner::LocalWorker))
     } else {
@@ -475,10 +607,11 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
     };
     // #17058: build the install via the one shared mapping
     // (`into_session_install`), then apply the materialize overrides:
-    // the shared-hit origin and the packet's tcp_flags, and the locally
-    // acquired persistent hold (the shared row's hold belongs to its
-    // publisher). Every other field (id, close/handshake state,
-    // counters, SNAT provenance) is the replica's carried value.
+    // the shared-hit origin, this packet's tcp_flags when the row equals the
+    // capture, and the locally acquired persistent hold (the shared row's
+    // hold belongs to its publisher). Every other field (id, close/handshake
+    // state, counters, SNAT provenance, and a differing row's tcp_flags) is
+    // the replica's carried value.
     // Snapshot the post-install reads first: `into_session_install`
     // consumes the replica, and the lookup/stamp below still need them.
     let replica_key = replica.key.clone();
@@ -489,11 +622,13 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
     let replica_leak_incarnation = replica.leak_incarnation;
     let mut install = replica.into_session_install(now_ns);
     install.origin = shared_origin.materialized_shared_hit_origin();
-    install.tcp_flags = tcp_flags;
+    if let Some(packet_tcp_flags) = packet_tcp_flags {
+        install.tcp_flags = packet_tcp_flags;
+    }
     install.persistent_lease_hold = acquired_persistent_hold;
     let materialized = sessions.upsert_synced_with_origin(
         install,
-        fabric_adopted,
+        allow_replace_local,
     );
     if materialized {
         // The install replaced and discarded the incumbent table entry. Its
@@ -517,7 +652,7 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
     if !materialized {
         // A refused shared repair must not mutate the incumbent local row's
         // leak provenance; failed clobber attempts return InstallRefused.
-        return MaterializeOutcome::InstallRefused;
+        return (MaterializeOutcome::InstallRefused, divergence);
     }
     // The stamp is evidence for the materialized replica only.
     if replica_leak_incarnation != 0 {
@@ -533,38 +668,37 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
             leak_incarnation: replica_leak_incarnation,
         },
     };
-    if shared_origin.is_peer_synced() {
+    let outcome = if shared_origin.is_peer_synced() {
         MaterializeOutcome::Installed(lookup)
     } else {
         MaterializeOutcome::SharedLocal(lookup)
-    }
+    };
+    (outcome, divergence)
 }
 
 /// Materialize a shared entry only after the packet's Owner verdict.
 ///
-/// #19153 fold 1 (Codex P1): the resolve captured the shared row, and this
+/// #19153 folds 1 and 2: the resolve captured the shared row, and this
 /// packet's Owner verdict, its deferred promotion and its deferred forwarding
 /// revalidation were all derived from that capture. The materialize installs
-/// what shared holds NOW. So the outcome decides what the packet may still do
-/// (`resolved.materialize_divergence`):
+/// what shared holds NOW, and classifies it against the capture before it
+/// installs (`materialize_current_shared_under_permit`). The classification
+/// decides what the packet may still do (`resolved.materialize_divergence`):
 ///
-/// - installed content equal to the capture (`MaterializeDivergence::None`):
-///   every capture-derived effect describes the installed row and stands;
-/// - installed content differing only in metadata that cannot change this
-///   packet's translation, egress or admission (`ForwardOnce`): the packet
-///   forwards once on the capture's decision, and the promotion and the
-///   revalidation are dropped, so neither writes the capture's content over
-///   the installed row; the seed is suppressed;
-/// - installed content differing in anything else, or the captured
-///   incarnation absent or superseded in shared (`Drop`): the same drops, and
-///   the poll site recycles the packet instead of forwarding it on a decision
-///   shared no longer names.
+/// - `MaterializeDivergence::None` (the current row equals the capture on
+///   every compared field): the row was installed with this packet's effects,
+///   and every capture-derived effect describes it and stands;
+/// - `Drop` (any compared field differs, or the captured incarnation is absent
+///   or superseded in shared): the current row was installed without this
+///   packet's effects (or nothing was, for absent or superseded); the
+///   promotion and the revalidation are dropped, so neither writes the
+///   capture's content over the installed row; and the poll site recycles the
+///   packet instead of forwarding it on a decision shared no longer names.
 ///
 /// The next packet resolves the installed row as a worker hit (or current
 /// shared state) and promotes normally: two packets.
 ///
-/// Every `deferred_*` effect of `ResolvedFlowSessionDecision`, on a
-/// divergence:
+/// Every `deferred_*` effect of `ResolvedFlowSessionDecision`, on `Drop`:
 /// - `deferred_synced_promotion`: DROPPED. It carries the capture's decision
 ///   and metadata, which the flip would write over the installed row and then
 ///   publish as `SharedPromote`;
@@ -578,9 +712,10 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
 /// - the #13938 owner-hit replay (`authority_deferred`): false for a shared
 ///   hit (`ResolvedSessionLookup::shared`), so nothing is replayed.
 ///
-/// Refusals keep their pre-fold handling: the packet forwards on the capture
-/// (`install_failed`, seed suppressed, promotion dropped), and the #10612
-/// fence keeps its miss shape.
+/// Refusals keep their pre-fold handling: a held pair, a #10582 local
+/// incumbent, or a refused install of a row equal to the capture forwards on
+/// the capture (`install_failed`, seed suppressed, promotion dropped), and the
+/// #10612 fence of an unchanged row keeps its miss shape.
 pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
     sessions: &mut SessionTable,
     // #19153: the shared map the resolve captured the entry from, re-read
@@ -615,28 +750,29 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
             fabric_adopted: resolved.fabric_adopted,
         },
     ) {
-        CaptureMaterialize::Core(
-            MaterializeOutcome::Installed(installed) | MaterializeOutcome::SharedLocal(installed),
-        ) => (
-            false,
-            materialize_divergence(
-                &captured.decision,
-                &captured.metadata,
-                &installed.decision,
-                &installed.metadata,
-            ),
-        ),
-        CaptureMaterialize::CaptureFenced
-        | CaptureMaterialize::Core(MaterializeOutcome::StaleReplayFenced) => {
-            (false, MaterializeDivergence::None)
+        // The #10612 miss shape: nothing installed, nothing failed.
+        CaptureMaterialize::CaptureFenced => (false, MaterializeDivergence::None),
+        CaptureMaterialize::Refused => (true, MaterializeDivergence::None),
+        CaptureMaterialize::Core(outcome, divergence) => {
+            let install_failed = match outcome {
+                MaterializeOutcome::Installed(installed)
+                | MaterializeOutcome::SharedLocal(installed) => {
+                    // What was installed is what was classified: a row judged
+                    // equal carries the capture's decision.
+                    debug_assert!(
+                        divergence != MaterializeDivergence::None
+                            || installed.decision == captured.decision,
+                        "#19153: an installed row classified equal differs from the capture"
+                    );
+                    false
+                }
+                MaterializeOutcome::StaleReplayFenced => false,
+                MaterializeOutcome::SharedAbsent
+                | MaterializeOutcome::Superseded
+                | MaterializeOutcome::InstallRefused => true,
+            };
+            (install_failed, divergence)
         }
-        CaptureMaterialize::Refused
-        | CaptureMaterialize::Core(MaterializeOutcome::InstallRefused) => {
-            (true, MaterializeDivergence::None)
-        }
-        CaptureMaterialize::Core(
-            MaterializeOutcome::SharedAbsent | MaterializeOutcome::Superseded,
-        ) => (true, MaterializeDivergence::Drop),
     };
     resolved.install_failed = install_failed;
     resolved.materialize_divergence = divergence;

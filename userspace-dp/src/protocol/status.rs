@@ -660,6 +660,14 @@ pub(crate) struct ProcessStatus {
     /// older helpers. Surfaced as `xpf_tuple_gate_poison_recoveries_total`.
     #[serde(rename = "tuple_gate_poison_recoveries", default)]
     pub tuple_gate_poison_recoveries: u64,
+    /// #19153 fold 2 (r24 P3): packets dropped because their shared-hit
+    /// materialize found a current shared row that differs from the
+    /// resolve's capture, or the captured incarnation gone
+    /// (`session_glue::MATERIALIZE_DIVERGENCE_DROPS`). Additive / defaulted
+    /// for compatibility with older helpers. Surfaced as
+    /// `xpf_userspace_materialize_divergence_drops_total`.
+    #[serde(rename = "materialize_divergence_drops", default)]
+    pub materialize_divergence_drops: u64,
     /// #9506 counter slice: IPsec-inner (D11/D13/D14) deny-cause + queue
     /// counters, projected from one
     /// `crate::afxdp::ipsec_inner::ipsec_inner_counters_snapshot()` call.

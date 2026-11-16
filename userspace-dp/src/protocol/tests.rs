@@ -792,6 +792,38 @@ fn process_status_shared_session_poison_recoveries_roundtrip() {
     assert_eq!(legacy.shared_session_poison_recoveries, 0);
 }
 
+// #19153 fold 2 (r24 P3): round-trip + backward-compat pin for the
+// materialize-divergence drop counter. The wire key feeds
+// pkg/dataplane/userspace/protocol_status.go and the Prometheus counter
+// `xpf_userspace_materialize_divergence_drops_total`, which a gate reads to
+// check that a normal takeover drops nothing here. A key rename on either side
+// decodes silently as zero, the reassuring value the gate is looking for, so
+// the tag is pinned on both sides (Go: `TestMaterializeDivergenceStatusWire19153`).
+#[test]
+fn process_status_materialize_divergence_drops_roundtrip_19153() {
+    let status = ProcessStatus {
+        materialize_divergence_drops: 19153,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["materialize_divergence_drops"], 19153);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.materialize_divergence_drops, 19153);
+
+    // An older helper's payload (key absent) decodes with a zero default.
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    legacy_value
+        .as_object_mut()
+        .expect("ProcessStatus serializes to an object")
+        .remove("materialize_divergence_drops")
+        .expect("new key present before strip");
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("older payload decodes");
+    assert_eq!(legacy.materialize_divergence_drops, 0);
+}
+
 // #2315: round-trip + backward-compat pin for the GRE-decap RFC 6040
 // §4.2 illegal-combination drop counter. The wire key feeds
 // pkg/dataplane/userspace/protocol.go and the Prometheus counter

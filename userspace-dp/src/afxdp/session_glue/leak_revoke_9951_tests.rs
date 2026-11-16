@@ -17,6 +17,10 @@
 //! Cells R1-R4 (#10312 follow-up, PR #10399 P1) cover the same provenance
 //! for RI-native reverses: the three reverse leak-incarnation arms must
 //! stamp the CLIENT RI's leak view, not MAIN.
+//! Cells L1-L3 (#19153 fold 2, Codex P2-2) cover a materialize whose current
+//! shared row's leak provenance differs from the resolve's capture: a revoked
+//! stamp drops the packet; the live stamp, and the core's own zero-to-live
+//! derivation, are equal to an unstamped capture.
 
 use super::*;
 use crate::session::{ForwardingGenerationStamp, install_table_identity};
@@ -1582,4 +1586,197 @@ fn unresolvable_ri_provenance_never_stamps_main_leak_10312() {
         None,
         "R5: Unresolvable must not stamp MAIN incarnation {main_incarnation}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// #19153 fold 2 (Codex P2-2): a materialize compares the current shared row's
+// leak provenance with the capture's before it installs anything.
+// ---------------------------------------------------------------------------
+
+/// What one poll-path materialize left behind (cells L1-L3).
+struct LeakCapture19153 {
+    divergence: crate::afxdp::session_glue::MaterializeDivergence,
+    /// The worker row's origin and leak stamp.
+    worker: Option<(SessionOrigin, Option<u64>)>,
+    shared_origin: Option<SessionOrigin>,
+    /// The removed leak's incarnation (revoked on the re-added view).
+    old: u64,
+    /// The re-added leak's incarnation (live).
+    live: u64,
+}
+
+/// One resolve + Owner verdict + materialize of peer row A (leak stamp 0, as
+/// an HA import publishes it; this worker holds no row) on the forwarding
+/// view where the flow's leak was removed and re-added with identical
+/// geometry. `b_stamp(old, live)` is the leak stamp of the row B the
+/// capture..claim hook publishes (same incarnation and content otherwise);
+/// `None` publishes nothing.
+fn materialize_leak_capture_19153(b_stamp: Option<fn(u64, u64) -> u64>) -> LeakCapture19153 {
+    let original = leak_snapshot();
+    let with_leak = build_forwarding_state(&original);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let flow = leak_flow();
+    let miss =
+        lookup_forwarding_resolution_for_session(&with_leak, &neighbors, &flow, noroute_decision())
+            .resolution;
+    assert_eq!(miss.disposition, ForwardingDisposition::ForwardCandidate);
+    let decision = SessionDecision {
+        resolution: miss,
+        nat: NatDecision::default(),
+        install_table_domain: 0,
+        install_table_check: 0,
+    };
+    let old = crate::afxdp::forwarding::leak_incarnation_for_resolution(&with_leak, flow.dst_ip, None)
+        .expect("19153 fixture: the original leak");
+    let mut removed = original;
+    removed.routes.remove(0);
+    let without_leak = rebuild_with_previous(&removed, &with_leak);
+    let readded = rebuild_with_previous(&leak_snapshot(), &without_leak);
+    let live = crate::afxdp::forwarding::leak_incarnation_for_resolution(&readded, flow.dst_ip, None)
+        .expect("19153 fixture: the re-added leak");
+    assert_ne!(old, live, "premise: a re-added leak is a new incarnation");
+
+    let shared_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
+    let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+    let a = SyncedSessionEntry { sibling_last_seen_ns: 0, last_served_ns: 0, key: flow.forward_key.clone(),
+    decision,
+    metadata: leak_metadata(),
+    leak_incarnation: 0,
+    origin: SessionOrigin::SyncImport,
+    protocol: PROTO_TCP,
+    tcp_flags: 0x10,
+    generation: 0,
+    session_id: 0x1915_3951,
+    tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
+            persistent_lease_hold: None,
+    source_nat_static: None, };
+    publish_shared_session(
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+        &a,
+    );
+    if let Some(b_stamp) = b_stamp {
+        let mut b = a.clone();
+        b.leak_incarnation = b_stamp(old, live);
+        let (sessions, nat, wire, indexes) = (
+            Arc::clone(&shared_sessions),
+            Arc::clone(&shared_nat_sessions),
+            Arc::clone(&shared_forward_wire_sessions),
+            shared_owner_rg_indexes.clone(),
+        );
+        set_materialize_before_claim_hook_for_test(move || {
+            publish_shared_session(&sessions, &nat, &wire, &indexes, &b);
+        });
+    }
+
+    let mut sessions = SessionTable::new();
+    let resolved = resolve_flow_session_decision(
+        &mut sessions,
+        SteeringMap::unshared_for_test(-1),
+        SharedSessionRefs {
+            sessions: &shared_sessions,
+            nat_sessions: &shared_nat_sessions,
+            forward_wire_sessions: &shared_forward_wire_sessions,
+            owner_rg_indexes: &shared_owner_rg_indexes,
+            peer_worker_commands: &peer_worker_commands,
+            worker_commands_by_id: empty_worker_commands_by_id(),
+            conntrack: ConntrackFds { v4: -1, v6: -1 },
+            tick: Tick::from_parts(2_000_000, 1),
+        },
+        &readded,
+        &BTreeMap::new(),
+        &neighbors,
+        &flow,
+        PROTO_TCP,
+        0x10,
+        12,
+        0,
+        false,
+        false,
+        0,
+        0,
+        crate::afxdp::session_glue::SessionHitVerdict::Owner,
+    )
+    .expect("19153 fixture: the shared hit resolves");
+    LeakCapture19153 {
+        divergence: resolved.materialize_divergence,
+        worker: sessions
+            .entry_with_origin(&flow.forward_key)
+            .map(|(_, _, origin)| (origin, sessions.leak_incarnation(&flow.forward_key))),
+        shared_origin: shared_sessions
+            .lock()
+            .expect("shared sessions")
+            .get(&flow.forward_key)
+            .map(|entry| entry.origin),
+        old,
+        live,
+    }
+}
+
+/// L1 (Codex P2-2): the resolve captured A unstamped and resolved it on the
+/// live leak; before the claim, shared became B, the same incarnation and
+/// geometry but stamped with the REMOVED leak's incarnation. Resolving B
+/// would revoke it (#9951 ABA), so A's decision does not describe B: Drop.
+/// B is installed with its own stamp, nothing is promoted.
+#[test]
+fn capture_replacement_with_a_revoked_leak_stamp_drops_19153() {
+    let got = materialize_leak_capture_19153(Some(|old, _live| old));
+    assert_eq!(
+        got.divergence,
+        crate::afxdp::session_glue::MaterializeDivergence::Drop,
+        "a current row carrying the revoked leak incarnation must not let the capture's decision stand"
+    );
+    assert_eq!(
+        got.worker,
+        Some((SessionOrigin::SharedMaterialize, Some(got.old))),
+        "B must be installed with its own (revoked) provenance, as current content"
+    );
+    assert_eq!(
+        got.shared_origin,
+        Some(SessionOrigin::SyncImport),
+        "the capture-derived promotion ran (published SharedPromote) for a dropped packet"
+    );
+}
+
+/// L2: B is stamped with the LIVE leak incarnation (a sibling materialized
+/// and stamped it). An unstamped capture resolves on current forwarding,
+/// which is that incarnation, so the two are equal: no drop, the promotion
+/// stands.
+#[test]
+fn capture_replacement_with_the_live_leak_stamp_is_equal_19153() {
+    let got = materialize_leak_capture_19153(Some(|_old, live| live));
+    assert_eq!(
+        got.divergence,
+        crate::afxdp::session_glue::MaterializeDivergence::None,
+        "the live stamp is what an unstamped capture resolved under"
+    );
+    assert_eq!(got.worker, Some((SessionOrigin::SharedPromote, Some(got.live))));
+    assert_eq!(got.shared_origin, Some(SessionOrigin::SharedPromote));
+}
+
+/// L3, the legitimate derivation the lead named: no race at all. The core
+/// recomputes a zero token from current forwarding for a peer-synced row and
+/// stamps the live incarnation, which differs from the capture's raw 0. That
+/// is the same incarnation the resolve used, so it must not read as a
+/// divergence: every takeover materialize of a leak-riding flow would drop
+/// its first packet if it did.
+#[test]
+fn zero_leak_stamp_derived_from_the_live_leak_is_equal_19153() {
+    let got = materialize_leak_capture_19153(None);
+    assert_eq!(
+        got.divergence,
+        crate::afxdp::session_glue::MaterializeDivergence::None,
+        "the zero-to-live derivation must not classify as a divergence"
+    );
+    assert_eq!(
+        got.worker,
+        Some((SessionOrigin::SharedPromote, Some(got.live))),
+        "the derived stamp is the live incarnation, and the promotion stands"
+    );
+    assert_eq!(got.shared_origin, Some(SessionOrigin::SharedPromote));
 }

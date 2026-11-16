@@ -278,6 +278,7 @@ pub(crate) fn project_status(state: &mut ServerState) {
     state.status.wg_uncovered_queue_poison_recoveries =
         state.afxdp.wg_uncovered_queue_poison_recoveries();
     state.status.tuple_gate_poison_recoveries = state.afxdp.tuple_gate_poison_recoveries();
+    state.status.materialize_divergence_drops = state.afxdp.materialize_divergence_drops();
     // #9506 counter slice: IPsec-inner deny-cause + queue counters. ONE
     // snapshot call for all twelve fields — the projection below is a pure
     // member copy, so a field can only disagree with its counter if the

@@ -542,6 +542,7 @@ pub(crate) fn run() -> Result<(), String> {
             wg_uncovered_queue_orphan_total: 0,
             wg_uncovered_queue_poison_recoveries: 0,
             tuple_gate_poison_recoveries: 0,
+            materialize_divergence_drops: 0,
             ipsec_inner_permit_forward_armed_total: 0,
             session_delete_replica_dropped: 0,
             session_delete_replica_drop_repaired: 0,
