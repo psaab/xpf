@@ -87,12 +87,17 @@ The script also prepares the runner environment:
   - The probe reports absent, empty, nonempty or error. A FAILED probe never
     reads as clean: `--root` is refused, or runs with the unknown state
     disclosed under `--allow-xpf-state`.
-  - A `--root` leg holds a per-runner lock, `/run/xpf-vm-test-run-root.lock`
-    on the runner, from that observation to that report. A second root lane
-    on the same runner prints `waiting for another --root run ... (holder:
-    ...)` and starts only when the first has reported. The lock is held by a
-    remote `flock` whose stdin this script keeps open, so it is released
-    even if this script is killed.
+  - A `--root` leg runs as ONE script on the runner under
+    `flock -w <wait> /run/xpf-root-lane.lock`: the probe, the command, the
+    after-probe and the report all run inside it, so the lock lives exactly
+    as long as the remote command. A second root lane on the same runner
+    prints `waiting for another --root run ... (holder: ...)` and starts only
+    after the first has reported. Its wait is disclosed and not counted as a
+    pause. A nested `--root` run from inside a root lane
+    (`XPF_VMTR_ROOT_LANE`) is refused rather than waiting on itself.
+  - INT/TERM during the command ends it and reports what it wrote, best
+    effort, with 130/143. INT/TERM during the handback after it are ignored
+    until it completes.
     `testguard-run.sh` overlays `/` for root runs (#19084), so only a root
     command outside it can write there.
 - The command's stdout and stderr come back as ONE stream, in the order they
