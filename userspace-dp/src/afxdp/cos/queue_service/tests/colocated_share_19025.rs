@@ -277,17 +277,18 @@ fn colocated_turn_needs_its_turn_and_local_exact_demand_and_serves_nonexact_only
     );
 }
 
-/// #19025 on #18748 v3: only a binding with non-exact backlog claims a part
-/// of the residual. #18748's Codex P1 cell found the gap: an exact-only
-/// worker whose exact pass kept falling through to the non-exact build asked
-/// for the residual budget with nothing to send and held a claim, so the
-/// best-effort worker beside it got about half the residual (56,250,000
-/// against 74,995,000 bytes for 2,500-byte packets). Here slot 0 holds exact
-/// demand (24 of 25 Gb/s) and no non-exact backlog, and asks halfway through
-/// an epoch. Slot 1, the only binding with non-exact work, must still be able
-/// to spend the whole residual pool. Mutant: claim without non-exact backlog.
+/// #19025 on #18748 v3: a binding with no non-exact backlog takes nothing
+/// from the residual. #18748's Codex P1 cell found the gap under #19025's
+/// claims: an exact-only worker whose exact pass kept falling through to the
+/// non-exact build asked for the residual budget with nothing to send and held
+/// a claim, so the best-effort worker beside it got about half the residual
+/// (56,250,000 against 74,995,000 bytes for 2,500-byte packets). #19100
+/// removed the claims; the property is now owed by the shared pool itself:
+/// slot 0 holds exact demand (24 of 25 Gb/s) and no non-exact backlog, and
+/// asks halfway through an epoch; slot 1, the only binding with non-exact
+/// work, must still find the whole pool it found before slot 0 asked.
 #[test]
-fn a_binding_without_nonexact_backlog_claims_no_residual_19025() {
+fn a_binding_without_nonexact_backlog_takes_no_residual_19025() {
     let mut exact_only = lab_runtime(&[24 * GBIT], SHAPING_BYTES / 100);
     let (rate, burst) =
         residual_rate_and_burst(&exact_only, 24 * GBIT).expect("premise: exact demand");
@@ -296,6 +297,7 @@ fn a_binding_without_nonexact_backlog_claims_no_residual_19025() {
     // A second of refill: the pool is the residual's whole burst.
     let _ = backlog.residual_surplus_budget(epoch_start - 1_000_000_000, rate, burst);
     let now = epoch_start + 500_000;
+    let before = backlog.residual_surplus_budget(now, rate, burst);
     assert!(
         exact_only
             .queues
@@ -310,12 +312,11 @@ fn a_binding_without_nonexact_backlog_claims_no_residual_19025() {
         24 * GBIT,
         Some(&backlog),
     );
-    let pool = backlog.residual_surplus_budget(now, rate, burst);
-    assert!(pool > 0, "premise: the residual pool holds credit");
+    assert!(before > 0, "premise: the residual pool holds credit");
     assert_eq!(
-        backlog.nonexact_surplus_budget(1, now, rate, burst),
-        pool,
-        "slot 0 asked with nothing non-exact queued and reserved part of the residual"
+        backlog.residual_surplus_budget(now, rate, burst),
+        before,
+        "slot 0 asked with nothing non-exact queued and took part of the residual"
     );
 }
 

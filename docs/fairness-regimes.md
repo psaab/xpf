@@ -2290,21 +2290,13 @@ Each carries a RED-on-revert unit test.
   (`the_colocated_turn_never_sends_past_the_residual_budget_19025`,
   `the_colocated_turn_leaves_the_pool_floor_19025`). The pool
   alone is first-come, and peers that poll it on every pass drained it before
-  a busy exact worker's turn came (simulation R1: 0.41 Gb/s), so each
-  binding that asks in a 1 ms epoch (a binding asks only while it has
-  non-exact backlog) also reserves an equal claim on that epoch's residual (`SharedCoSExactBacklog::nonexact_surplus_budget`): it
-  may spend its own unspent claim plus the pool beyond every current claim,
-  and claims lapse after their epoch. A claim accrues over its epoch: others
-  may not spend the accrued, unspent part of it, so a binding that asks
-  rarely finds its part however often its peers poll. On #18748 cycle 3,
-  where no root is held, peers polled about 20 times as often, and without
-  accrual the R2 colocated instance fell to 0.067 Gb/s. The turn's gate is
-  now an empty budget, and the selector skips a head the budget cannot
-  cover; before, the turn waited for a full UMEM frame. Claims order who
-  may spend and never
-  add credit, so conservation stays the pool's; a lapsed claim is back in
-  the pool within one epoch, so the residual stays work-conserving and an
-  idle or dead binding cannot hold a part.
+  a busy exact worker's turn came (simulation R1: 0.41 Gb/s). #19025
+  therefore gave each binding that asked in a 1 ms epoch an accruing claim
+  on that epoch's residual. #19100 removed the claims: the colocated turn is
+  now worker-local, paid from credit that the worker's own committed exact
+  work earns, and never draws on the pool. So the pool is first-come again,
+  for ordinary non-exact surplus only (docs/cos-traffic-shaping.md,
+  "Colocated Non-Exact Service Beside an Exact Class").
   A first version (f15d2f08bd) metered each binding with a private
   `residual / n` part instead (n = bindings publishing non-exact backlog).
   Review (Codex, #19025) found it was not a sound replacement for the shared

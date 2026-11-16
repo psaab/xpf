@@ -3,8 +3,8 @@
 //! bindings last published in each interface's `SharedCoSExactBacklog` stays
 //! there. A stale exact-demand mask keeps the dead binding's exact rate
 //! reserved, so every surviving binding's non-exact surplus stays held to the
-//! residual for the life of the backlog object, and its claim on the residual
-//! pool would hold a part until it lapsed (one epoch). The dead-worker sweep
+//! residual for the life of the backlog object. (#19025's per-binding claim
+//! on the residual pool went with #19100.) The dead-worker sweep
 //! must clear every slot the dead worker's bindings own, and only those.
 
 use super::*;
@@ -62,21 +62,6 @@ fn dead_worker_sweep_clears_its_cos_backlog_slots_19025() {
             backlog.clone(),
         )])));
 
-    // Both bindings hold a claim on the residual pool.
-    let (rate, burst) = (125_000_000u64, 10_000_000u64);
-    let start = 1_000_000_000u64;
-    let _ = backlog.residual_surplus_budget(start, rate, burst);
-    // Mid-epoch: at an epoch boundary nothing has accrued, so a claim the
-    // sweep failed to clear would reserve nothing and the last assertion
-    // could not see it.
-    let now = start + 50_500_000;
-    let _ = backlog.nonexact_surplus_budget(2, now, rate, burst);
-    let pool = backlog.residual_surplus_budget(now, rate, burst);
-    assert!(
-        backlog.nonexact_surplus_budget(3, now, rate, burst) < pool,
-        "control: the dead worker's fresh claim reserves part of the pool before the sweep"
-    );
-
     // Control: both workers alive, nothing is cleared.
     coordinator.retire_dead_worker_holders();
     assert!(
@@ -99,10 +84,8 @@ fn dead_worker_sweep_clears_its_cos_backlog_slots_19025() {
         backlog.peer_exact_demand_queue_mask(2).counts(1),
         "the sweep must clear only the dead worker's slots: worker 1's demand was cleared too"
     );
-    assert_eq!(
-        backlog.nonexact_surplus_budget(3, now, rate, burst),
-        backlog.residual_surplus_budget(now, rate, burst),
-        "after the sweep the survivor's budget must be the whole pool: the dead worker's \
-         claim survived"
-    );
+    // #19100 removed #19025's per-binding claims on the residual pool, so a
+    // dead worker can hold no part of it; what it can still hold, its
+    // published exact demand (which reserves its rate and shrinks every
+    // survivor's residual) and its queued bytes, is asserted above.
 }
