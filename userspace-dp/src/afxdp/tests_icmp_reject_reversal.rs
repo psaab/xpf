@@ -1762,6 +1762,15 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         internal_prefix: "fd35:1940:0027::/48".to_string(),
         external_prefix: "2602:fd41:0070::/48".to_string(),
     }]);
+    // #19164: the client's live neighbor. The ICMP return now takes the
+    // reply's route, and a reply serves the reverse's stored MAC only while
+    // that MAC is still the live neighbor (#11315, `cached_session_resolution`).
+    forwarding.neighbors.insert(
+        (24, IpAddr::V6(internal_client)),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        },
+    );
 
     let forward_key = SessionKey {
         addr_family: libc::AF_INET6 as u8,

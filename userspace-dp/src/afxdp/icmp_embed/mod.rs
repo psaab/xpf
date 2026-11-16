@@ -12,14 +12,26 @@
 //! match arms.
 //!
 //! **Return path (#19164).** An ICMP error that quotes a client's FORWARD
-//! packet goes back to the client by the matched REVERSE session's route,
-//! looked up FRESH with the same lookup variant a reply on that reverse uses
-//! (`return_resolution.rs` `fresh_reverse_resolution`). The poll arm then
-//! finalizes it as it always has (`finalize_embedded_icmp_resolution_parts`:
-//! the HA snapshot, the fabric redirect, the #16053 owner-RG promotion).
+//! packet goes back to the client by the route a REPLY on the matched reverse
+//! session would take (`return_resolution.rs` `fresh_reverse_resolution`):
+//! - **the reply's lookup variant**, with its #11315 revalidated cached
+//!   fallback and nothing more;
+//! - **unless the connected ledger contradicts it.** A local answer whose
+//!   egress is not the client's connected interface, for a client with a known
+//!   connected owner, is a gateway-route mis-resolution: on a split node the
+//!   peer-owned prefix is withheld from the FIB (#15742), and the FIB answers
+//!   with the WAN default route. There the STORED resolution is kept, master's
+//!   value.
+//!
+//! The poll arm then finalizes it as it always has
+//! (`finalize_embedded_icmp_resolution_parts`: the HA snapshot, the fabric
+//! redirect, the #16053 owner-RG promotion).
 //! - Before #19164 the stored resolution was used verbatim. After an RG
 //!   activation an import-time FabricRedirect sent the error over the fabric
 //!   to the demoted peer; after a FIB change it left by the old route.
+//! - The return never falls back to a stored value the reply would refuse: a
+//!   stale stamp, a #11315 MAC/egress mismatch, a #1873 re-owned tunnel or a
+//!   vanished installing table gives the same answer a reply would get.
 //!
 //! Wrapper functions in this file delegate directly to children via
 //! qualified-path calls (NOT `pub(super) use ...`) — that pattern
@@ -1404,9 +1416,8 @@ mod return_resolution_15771 {
     }
 }
 
-// Repro: the embedded-ICMP return path uses a STORED reverse resolution
-// verbatim, where the reply path re-resolves it (#19145 design round,
-// the R-read).
+// #19164: the embedded-ICMP return path takes the route a reply on the
+// matched reverse would take (found by the #19145 design round's R-read).
 #[cfg(test)]
 #[path = "stale_reverse_return_tests.rs"]
 mod stale_reverse_return_tests;

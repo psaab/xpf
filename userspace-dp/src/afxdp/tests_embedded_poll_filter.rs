@@ -2414,7 +2414,16 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
     ]);
     let mut snapshot = nat_snapshot_with_fabric();
     snapshot.policies.clear();
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    // #19164: the client's live neighbor. The ICMP return now takes the
+    // reply's route, and a reply serves the reverse's stored MAC only while
+    // that MAC is still the live neighbor (#11315, `cached_session_resolution`).
+    forwarding.neighbors.insert(
+        (24, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -2682,10 +2691,23 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
         }],
         ..Default::default()
     });
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    // #19164: the client's live neighbor. The ICMP return now takes the
+    // reply's route, and a reply serves the reverse's stored MAC only while
+    // that MAC is still the live neighbor (#11315, `cached_session_resolution`).
+    forwarding.neighbors.insert(
+        (26, IpAddr::V4(Ipv4Addr::new(10, 0, 62, 102))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
-    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    // #19164: the client lives on `reth3.0`'s subnet (10.0.62.0/24), so the
+    // FIB, like the stored delivery, reaches it out the RG3 interface. The
+    // ICMP return now takes the reply's route; a client the FIB places on the
+    // LAN would be delivered out the LAN, and RG3 would never be judged.
+    let client_ip = Ipv4Addr::new(10, 0, 62, 102);
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;
@@ -2911,6 +2933,572 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
         dbg.policy_deny, 0,
         "non-ForwardCandidate refusal must not emit a policy deny"
     );
+}
+
+/// #19164 (review fold 2): the unowned #16053 shape with the production split
+/// FIB. RG3 (`reth3.0`, the client's subnet 10.0.62.0/24) is the peer's, so its
+/// connected prefix is withheld from this node's transit FIB (#15742), and the
+/// FIB answers the client with the WAN default route (RG1, active). The local
+/// reverse was resolved out `reth3.0` while RG3 was active here, and its stamp
+/// is stale (the poll pass stamps the forwarding generation, #11373).
+///
+/// Master denies this PMTUD error: the stored delivery is HA-inactive. The
+/// first fold adopted the fresh WAN answer instead, so the #16053 promotion
+/// read RG1 as active and queued the PTB out the WAN (measured). The
+/// connected-owner guard keeps master's verdict.
+#[test]
+fn poll_descriptor_unowned_peer_owned_stale_local_reverse_pmtud_denied_19164() {
+    // The poll drivers run on a fixed clock (now_secs=123); the HA
+    // lease must be active at THAT time, not at wall-clock now.
+    let now_secs = 123;
+    let ha_state = BTreeMap::from([
+        (
+            1,
+            HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        ),
+        (
+            2,
+            HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        ),
+    ]);
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.policies.clear();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth3.0".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-3".to_string(),
+        ifindex: 26,
+        redundancy_group: 3,
+        // The production split shape: RG3 is the peer's, so its connected
+        // prefix is withheld from this node's transit FIB (#15742).
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:03:00:01".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.0.62.1/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.neighbors.insert(
+        (26, IpAddr::V4(Ipv4Addr::new(10, 0, 62, 102))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 62, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        snat_ip,
+        server_ip,
+        snat_port,
+        80,
+        PROTO_TCP,
+        TEST_FABRIC_MAC,
+    );
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    n6472_patch_ptb(&mut frame, 34);
+    frame[14 + 8] = 64;
+    frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
+    let outer_csum = checksum16(&frame[14..34]);
+    frame[14 + 10..14 + 12].copy_from_slice(&outer_csum.to_be_bytes());
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            meta,
+            &forwarding,
+            &ha_state,
+            now_secs
+        ),
+        ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: TEST_WAN_ZONE_ID,
+            ifindex: None
+        },
+        "unowned-claim PMTUD stamp must be Ambiguous at stage 9 (#16053)"
+    );
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert!(sessions.install_with_protocol(
+        forward_key.clone(),
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 26,
+                tx_ifindex: 26,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(client_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some(TEST_LAN_MAC),
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_dst: None,
+                rewrite_src_port: Some(snat_port),
+                rewrite_dst_port: None,
+                source_nat_icmp: None,
+                nat64: false,
+                nptv6: false,
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata { forward_wire_alias_origin: false,
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Reverse companion whose cached delivery egresses the RG-3
+    // interface (26): owner RG 3 is not forwarding-active locally.
+    {
+        let reverse_key = crate::session::reverse_session_key(
+            &forward_key,
+            NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_dst: None,
+            rewrite_src_port: Some(snat_port),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+            },
+        );
+        assert!(
+            sessions.install_with_protocol_with_origin(
+            reverse_key,
+            SessionDecision {
+                resolution: ForwardingResolution {
+                    disposition: ForwardingDisposition::ForwardCandidate,
+                    local_ifindex: 0,
+                    egress_ifindex: 26,
+                    tx_ifindex: 26,
+                    tunnel_endpoint_id: 0,
+                    next_hop: Some(IpAddr::V4(client_ip)),
+                    neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                    src_mac: Some(TEST_LAN_MAC),
+                    tx_vlan_id: 0,
+                    source_ifindex: 0,
+                    route_mtu: 0,
+                    transport_route_mtu: 0,
+                },
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(snat_ip)),
+                    rewrite_dst: None,
+                    rewrite_src_port: Some(snat_port),
+                    rewrite_dst_port: None,
+                    source_nat_icmp: None,
+                    nat64: false,
+                    nptv6: false,
+                    }
+                    .reverse(
+                        IpAddr::V4(client_ip),
+                        IpAddr::V4(server_ip),
+                        client_port,
+                        80
+                    ),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            SessionMetadata { forward_wire_alias_origin: false,
+                ingress_zone: TEST_WAN_ZONE_ID,
+                egress_zone: TEST_LAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 0,
+                fabric_ingress: false,
+                is_reverse: true,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            crate::session::SessionOrigin::ReverseFlow,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+            )
+        );
+    }
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    let fib = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+        &forwarding,
+        &Arc::new(ShardedNeighborMap::new()),
+        IpAddr::V4(client_ip),
+    )
+    .resolution;
+    assert_eq!(
+        (fib.disposition, fib.egress_ifindex),
+        (ForwardingDisposition::ForwardCandidate, 12),
+        "FIXTURE: with RG3's prefix withheld, the FIB answers its client with the WAN default route \
+         ({fib:?})"
+    );
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0);
+    assert!(
+        binding.scratch.scratch_forwards.is_empty(),
+        "an unowned client's PTB must not be forwarded by the WAN default route the split FIB \
+         answers (#16053, #19164)"
+    );
+    assert_eq!(binding.scratch.scratch_recycle.len(), 1, "recycled exactly once");
+    assert_eq!(dbg.ha_inactive, 1, "the unowned delivery must count HA-inactive once, as on master");
+    assert_eq!(dbg.policy_deny, 0, "no policy deny");
+}
+
+/// #19164 (review fold 2): the same split shape, with the reverse's stored
+/// resolution the FabricRedirect a demote leaves behind. The error arrives over
+/// the fabric, where the reply skips its retain verdict and takes the WAN answer
+/// (#19171). The error must not: whatever it forwards (master queues one
+/// forward here), it must not leave by the WAN egress.
+#[test]
+fn poll_descriptor_unowned_peer_owned_stored_redirect_pmtud_not_out_the_wan_19164() {
+    // The poll drivers run on a fixed clock (now_secs=123); the HA
+    // lease must be active at THAT time, not at wall-clock now.
+    let now_secs = 123;
+    let ha_state = BTreeMap::from([
+        (
+            1,
+            HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        ),
+        (
+            2,
+            HAGroupRuntime {
+            active: true,
+            watchdog_timestamp: now_secs,
+            lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+            },
+        ),
+    ]);
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.policies.clear();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth3.0".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-3".to_string(),
+        ifindex: 26,
+        redundancy_group: 3,
+        // The production split shape: RG3 is the peer's, so its connected
+        // prefix is withheld from this node's transit FIB (#15742).
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:03:00:01".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.0.62.1/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let mut forwarding = build_forwarding_state(&snapshot);
+    forwarding.neighbors.insert(
+        (26, IpAddr::V4(Ipv4Addr::new(10, 0, 62, 102))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    let router_ip = Ipv4Addr::new(10, 0, 0, 1);
+    let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
+    let client_ip = Ipv4Addr::new(10, 0, 62, 102);
+    let server_ip = Ipv4Addr::new(1, 1, 1, 1);
+    let snat_port: u16 = 40000;
+    let client_port: u16 = 12345;
+    let mut frame = build_icmp_te_frame_v4_with_mac(
+        router_ip,
+        snat_ip,
+        server_ip,
+        snat_port,
+        80,
+        PROTO_TCP,
+        TEST_FABRIC_MAC,
+    );
+    let [_, _, hi, lo] = TEST_WAN_ZONE_ID.to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    n6472_patch_ptb(&mut frame, 34);
+    frame[14 + 8] = 64;
+    frame[14 + 10..14 + 12].copy_from_slice(&[0, 0]);
+    let outer_csum = checksum16(&frame[14..34]);
+    frame[14 + 10..14 + 12].copy_from_slice(&outer_csum.to_be_bytes());
+    let meta = UserspaceDpMeta {
+        magic: USERSPACE_META_MAGIC,
+        version: USERSPACE_META_VERSION,
+        length: std::mem::size_of::<UserspaceDpMeta>() as u16,
+        ingress_ifindex: 21,
+        l3_offset: 14,
+        l4_offset: 34,
+        payload_offset: 42,
+        pkt_len: frame.len() as u16,
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_ICMP,
+        config_generation: 7,
+        fib_generation: 9,
+        ..UserspaceDpMeta::default()
+    };
+    assert_eq!(
+        parse_zone_encoded_fabric_ingress_from_frame(
+            &frame,
+            meta,
+            &forwarding,
+            &ha_state,
+            now_secs
+        ),
+        ZoneEncodedFabricStamp::Ambiguous {
+            zone_id: TEST_WAN_ZONE_ID,
+            ifindex: None
+        },
+        "unowned-claim PMTUD stamp must be Ambiguous at stage 9 (#16053)"
+    );
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client_ip),
+        dst_ip: IpAddr::V4(server_ip),
+        src_port: client_port,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    assert!(sessions.install_with_protocol(
+        forward_key.clone(),
+        SessionDecision {
+            resolution: ForwardingResolution {
+                disposition: ForwardingDisposition::ForwardCandidate,
+                local_ifindex: 0,
+                egress_ifindex: 26,
+                tx_ifindex: 26,
+                tunnel_endpoint_id: 0,
+                next_hop: Some(IpAddr::V4(client_ip)),
+                neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+                src_mac: Some(TEST_LAN_MAC),
+                tx_vlan_id: 0,
+                source_ifindex: 0,
+                route_mtu: 0,
+                transport_route_mtu: 0,
+            },
+            nat: NatDecision {
+                rewrite_src: Some(IpAddr::V4(snat_ip)),
+                rewrite_dst: None,
+                rewrite_src_port: Some(snat_port),
+                rewrite_dst_port: None,
+                source_nat_icmp: None,
+                nat64: false,
+                nptv6: false,
+            },
+            install_table_domain: 0,
+            install_table_check: 0,
+        },
+        SessionMetadata { forward_wire_alias_origin: false,
+            ingress_zone: TEST_LAN_ZONE_ID,
+            egress_zone: TEST_WAN_ZONE_ID,
+            ingress_zone_check: 0,
+            egress_zone_check: 0,
+            ingress_ifindex: 0,
+            ingress_vlan_id: 0,
+            forward_ingress_vlan_id: None,
+            owner_rg_id: 0,
+            fabric_ingress: false,
+            is_reverse: false,
+            nat64_reverse: None,
+            log_session_init: false,
+            log_session_close: false,
+            policy_id: 0,
+            inactivity_timeout_ns: None,
+            policy_counter_idx: 0,
+            policy_counter: None,
+            nat_scope_ifindex: None,
+        },
+        123_000_000_000,
+        PROTO_TCP,
+        0x18,
+    ));
+    // Reverse companion whose cached delivery egresses the RG-3
+    // interface (26): owner RG 3 is not forwarding-active locally.
+    {
+        let reverse_key = crate::session::reverse_session_key(
+            &forward_key,
+            NatDecision {
+            rewrite_src: Some(IpAddr::V4(snat_ip)),
+            rewrite_dst: None,
+            rewrite_src_port: Some(snat_port),
+            rewrite_dst_port: None,
+            source_nat_icmp: None,
+            nat64: false,
+            nptv6: false,
+            },
+        );
+        assert!(
+            sessions.install_with_protocol_with_origin(
+            reverse_key,
+            SessionDecision {
+                resolution: crate::afxdp::forwarding::resolve_fabric_redirect(&forwarding)
+                    .expect("PROBE: the fabric redirect resolves"),
+                nat: NatDecision {
+                    rewrite_src: Some(IpAddr::V4(snat_ip)),
+                    rewrite_dst: None,
+                    rewrite_src_port: Some(snat_port),
+                    rewrite_dst_port: None,
+                    source_nat_icmp: None,
+                    nat64: false,
+                    nptv6: false,
+                    }
+                    .reverse(
+                        IpAddr::V4(client_ip),
+                        IpAddr::V4(server_ip),
+                        client_port,
+                        80
+                    ),
+                install_table_domain: 0,
+                install_table_check: 0,
+            },
+            SessionMetadata { forward_wire_alias_origin: false,
+                ingress_zone: TEST_WAN_ZONE_ID,
+                egress_zone: TEST_LAN_ZONE_ID,
+                ingress_zone_check: 0,
+                egress_zone_check: 0,
+                ingress_ifindex: 0,
+                ingress_vlan_id: 0,
+                forward_ingress_vlan_id: None,
+                owner_rg_id: 0,
+                fabric_ingress: false,
+                is_reverse: true,
+                nat64_reverse: None,
+                log_session_init: false,
+                log_session_close: false,
+                policy_id: 0,
+                inactivity_timeout_ns: None,
+                policy_counter_idx: 0,
+                policy_counter: None,
+                nat_scope_ifindex: None,
+            },
+            crate::session::SessionOrigin::ReverseFlow,
+            123_000_000_000,
+            PROTO_TCP,
+            0x18,
+            )
+        );
+    }
+    let (batch, dbg) = txn_run_descriptor_checked(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        &frame,
+        meta,
+        true,
+    );
+    let fib = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
+        &forwarding,
+        &Arc::new(ShardedNeighborMap::new()),
+        IpAddr::V4(client_ip),
+    )
+    .resolution;
+    assert_eq!(
+        (fib.disposition, fib.egress_ifindex),
+        (ForwardingDisposition::ForwardCandidate, 12),
+        "FIXTURE: with RG3's prefix withheld, the FIB answers its client with the WAN default route \
+         ({fib:?})"
+    );
+    assert_eq!(batch.invalid_fabric_stamp_drops, 0);
+    assert_eq!(
+        binding.scratch.scratch_forwards.len(),
+        1,
+        "as on master, one forward is queued"
+    );
+    // A WAN forward queues to the WAN answer's TX binding (the VLAN parent),
+    // not to its unit, so both identities are excluded.
+    let target = binding.scratch.scratch_forwards[0].target_ifindex;
+    assert!(
+        target != fib.egress_ifindex && target != fib.tx_ifindex,
+        "an unowned client's PTB must not leave by the WAN default route the split FIB answers \
+         (#19164, #19171): queued to {target}, WAN egress {} / tx {}",
+        fib.egress_ifindex,
+        fib.tx_ifindex
+    );
+    assert_eq!(dbg.policy_deny, 0, "no policy deny, as on master");
 }
 
 // ---------------------------------------------------------------------------
