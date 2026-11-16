@@ -6109,6 +6109,15 @@ fn purge_release_against_defaulted_forwarding_frees_nothing_and_counts_nothing_8
         "precondition: the reservation must be held"
     );
 
+    // #18802: the reconcile site's state, in full. `stop_inner(false)` both
+    // defaults `coord.forwarding` and PUBLISHES that default view before the
+    // purge runs. Since #16575 (8bb8d11e56) the synced delete the purge
+    // drives releases the holder-less reservation itself, against the
+    // published view; with only the argument defaulted, that release found
+    // the live allocators and freed and counted the port, so this cell no
+    // longer modelled the reconcile site.
+    coordinator.set_forwarding_for_test(ForwardingState::default());
+
     // Exactly what the reconcile caller would pass if it read `self.forwarding`.
     let purged = coordinator.purge_remapped_tunnel_sessions(&[7], &ForwardingState::default());
 
