@@ -27,9 +27,13 @@ Rows sharing a label are one mutant. For each mutant this runner:
                 is never scored: a runner PAUSED by a gate harness fires the
                 timeout on resume and fails whichever test was running, #19142).
                 One exception: when the focused run timed out, the TARGET alone
-                is re-run; if it then fails without a timeout (and with `expect`,
-                when given), the cell is KILLED, "confirmed alone": a mutant that
-                makes some OTHER cell hang must not VOID its own target's kill;
+                is re-run in its own package, and that rerun is DECISIVE: the cell
+                is KILLED, "confirmed alone", only if the rerun fails the target
+                with no timeout, with `expect` (when given) in the target's own
+                output, and with the nonce present in the rerun's own binary. The
+                verdict line then reports the rerun's target status, nonce and
+                window, and its output is saved. A mutant that makes some OTHER
+                cell hang must not VOID its own target's kill;
        KILLED   the target test failed (attributed by NAME) and, when the spec
                 gives one, its own output contains `expect`;
        KILLED-OTHER  something failed, but not the target as specified;
@@ -124,16 +128,29 @@ def run_pkg(cwd, pkg, pattern, env, wrapper):
     return passes, fails, skips, marks, out, build, timedout, r
 
 
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
+
+
 def confirm_alone(dst, tgt, expect, env, wrapper):
-    """Re-run only the target. True when it FAILS with no timeout (and with
-    expect in its own output, when expect is given)."""
-    for pkg, _, _ in PKGS:
+    """Re-run only the target, in the package that has it. Returns the rerun's
+    own evidence: killed (the target FAILED with no timeout, no build failure,
+    and expect in its own output when given), its status, the binary it ran
+    in, the nonce markers of that run, its window and its raw output."""
+    out = {"killed": False, "status": "absent", "binary": "", "present": set(),
+           "started": utcnow(), "ended": "", "raw": ""}
+    for pkg, binary, _ in PKGS:
         p, f, sk, mk, o, b, to, r = run_pkg(dst, pkg, "^" + tgt + "$", env, wrapper)
-        if b or to:
-            return False
-        if tgt in f:
-            return not expect or expect in "".join(o.get(tgt, []))
-    return False
+        if tgt not in p | f | sk and not b and not to:
+            continue  # not this package
+        out["binary"], out["raw"] = binary, r.stdout + r.stderr
+        out["present"] = {x.split()[2] for x in mk if x.split()[1] == "PRESENT"}
+        out["status"] = "fail" if tgt in f else "skip" if tgt in sk else "pass" if tgt in p else "absent"
+        out["killed"] = (not b and not to and tgt in f and
+                         (not expect or expect in "".join(o.get(tgt, []))))
+        break
+    out["ended"] = utcnow()
+    return out
 
 
 def main():
@@ -212,8 +229,12 @@ def main():
         ended = datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")
         if build:
             verdict = "VOID build failure: " + (last.stdout + last.stderr)[-400:].replace("\n", " | ")
-        elif timedout and tgt and confirm_alone(dst, tgt, expect, env, wrapper):
-            verdict = "KILLED by target %s (confirmed alone; the focused run timed out on another test)" % tgt
+        elif timedout and tgt and (conf := confirm_alone(dst, tgt, expect, env, wrapper))["killed"] \
+                and conf["binary"] in need and conf["binary"] in conf["present"]:
+            verdict = ("KILLED by target %s (confirmed alone, decisive rerun: target %s, nonce in %s, %s-%s UTC; "
+                       "the focused run timed out on another test)" % (
+                           tgt, conf["status"], conf["binary"], conf["started"], conf["ended"]))
+            raw.append("== DECISIVE RERUN ==\n" + conf["raw"])
         elif timedout:
             verdict = "VOID go test timed out (a paused runner? check the gate logs for %s-%s UTC)" % (started, ended)
         elif not need <= present:
@@ -232,7 +253,7 @@ def main():
             verdict = "KILLED-OTHER (target %s did not fail)" % (tgt or "-")
         print("== %s: %s [target %s] [killers %s] [nonce in %s] [%s-%s UTC]" % (
             label, verdict, tstat, ",".join(killers) or "-", ",".join(sorted(present)), started, ended), flush=True)
-        if not verdict.startswith("KILLED by target"):
+        if not verdict.startswith("KILLED by target") or "confirmed alone" in verdict:
             with open(os.path.join(logs, label + ".json"), "w") as fh:
                 fh.write("\n".join(raw))
         shutil.rmtree(dst, ignore_errors=True)

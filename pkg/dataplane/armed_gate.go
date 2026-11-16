@@ -214,6 +214,30 @@ func (m *Manager) ObsoleteRegistryAccesses() uint64 {
 	return m.obsoleteRegistryAccesses
 }
 
+// peekEntryProgramLocked is the loaded XDP entry program, read for IDENTITY
+// only: nil when absent or when the registry is obsolete. Unlike
+// lookupProgramLocked it has NO side effect: no lookup hook, no obsolete-access
+// count and no log, so a caller holding its own mutex (the userspace takeover
+// readiness, #19110) never reaches the obsolete-registry WARN. It makes no
+// syscall.
+func (m *Manager) peekEntryProgramLocked() *ebpf.Program {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.programs[m.xdpEntryProgramLocked()]
+	if p == nil || m.registryObsoleteLocked() {
+		return nil
+	}
+	return p
+}
+
+// EntryProgramIdentity returns the loaded XDP entry program for identity
+// comparison and identification (#19110), or nil when none is loaded or the
+// registry is obsolete. It never logs, counts or makes a syscall: see
+// peekEntryProgramLocked.
+func (m *Manager) EntryProgramIdentity() *ebpf.Program {
+	return m.peekEntryProgramLocked()
+}
+
 // lookupProgramLocked is lookupMapLocked for the m.programs registry
 // (different value type, same uniform rule).
 func (m *Manager) lookupProgramLocked(name string) (p *ebpf.Program, present bool, st registryState) {

@@ -41,6 +41,7 @@ type fakeKernel19110 struct {
 	mu      sync.Mutex
 	devs    map[string]*fakeDev19110
 	lookups int
+	byName  map[string]int
 	onLook  map[string]func() // runs inside the lookup of that name
 	idCalls int
 	ids     map[*ebpf.Program]uint32
@@ -52,6 +53,10 @@ type fakeKernel19110 struct {
 func (k *fakeKernel19110) state(name string) (memberXDPState, error) {
 	k.mu.Lock()
 	k.lookups++
+	if k.byName == nil {
+		k.byName = map[string]int{}
+	}
+	k.byName[name]++
 	hook := k.onLook[name]
 	k.mu.Unlock()
 	if hook != nil {
@@ -242,21 +247,28 @@ func TestMissingDataMemberTrueTwinReadiness19110(t *testing.T) {
 	}
 }
 
-// A SLOW pass: member A is observed attached, then B's lookup is slow, and A
-// loses its attachment meanwhile. The verdict is aged from its EARLIEST
-// observation (A's), so it reads not-ready instead of serving A's old positive
-// evidence as fresh.
+// A SLOW pass with DISTINCT observation times: A's lookup is slow, so A is
+// observed at T0 and B at T0+4s; A loses its attachment during B's lookup. At
+// T0+4s the EARLIEST observation (A's) has expired and the latest (B's) is
+// fresh. The verdict is aged from the earliest, so it reads not-ready instead
+// of serving A's old positive evidence as fresh.
 func TestMissingDataMemberSlowPassReadsNotReady19110(t *testing.T) {
 	f := newMemberFixture19110(t, true)
 	f.m.observeDataMembers()
 	wantReady19110(t, f.m, "fixture")
+	f.k.onLook["ge-0-0-1"] = func() { f.k.advance(memberVerdictMaxAge + time.Second) } // A's lookup is slow
 	f.k.onLook["ge-0-0-2"] = func() {
-		f.k.advance(memberVerdictMaxAge + 2*time.Second) // B's lookup is slow ...
 		f.k.mu.Lock()
-		f.k.devs["ge-0-0-1"].prog = 0 // ... and A loses its attachment meanwhile
+		f.k.devs["ge-0-0-1"].prog = 0 // A loses its attachment while B is looked up
 		f.k.mu.Unlock()
 	}
 	f.m.observeDataMembers()
+	f.m.mu.Lock()
+	a, b := f.m.memberVerdict.obs["ge-0-0-1"].at, f.m.memberVerdict.obs["ge-0-0-2"].at
+	f.m.mu.Unlock()
+	if !b.After(a) || f.k.clock().Sub(b) > memberVerdictMaxAge || f.k.clock().Sub(a) <= memberVerdictMaxAge {
+		t.Fatalf("fixture: want A expired and B fresh (A at %v, B at %v, now %v)", a, b, f.k.clock())
+	}
 	wantNotReady19110(t, f.m, "A's positive evidence is older than the verdict window", "unverified")
 }
 
@@ -373,7 +385,8 @@ func TestMissingDataMemberAbsentNetdevMeansNotReady19110(t *testing.T) {
 }
 
 // An administratively DISABLED member is not a required attachment: never a
-// blocker, even when absent and even when the verdict is stale.
+// blocker, even when absent and even when the verdict is stale, and the tick
+// does not even look it up.
 func TestMissingDataMemberDisabledMemberIsNotABlocker19110(t *testing.T) {
 	f := newMemberFixture19110(t, false)
 	cfg := f4Config19110(true)
@@ -381,8 +394,15 @@ func TestMissingDataMemberDisabledMemberIsNotABlocker19110(t *testing.T) {
 	f.m.refreshGenericDataMembers(cfg)
 	f.k.mu.Lock()
 	delete(f.k.devs, "ge-0-0-1")
+	before := f.k.byName["ge-0-0-1"]
 	f.k.mu.Unlock()
 	f.m.observeDataMembers()
+	f.k.mu.Lock()
+	looked := f.k.byName["ge-0-0-1"] - before
+	f.k.mu.Unlock()
+	if looked != 0 {
+		t.Errorf("the tick looked up a disabled member %d time(s); it is not a required attachment", looked)
+	}
 	wantReady19110(t, f.m, "a disabled member")
 	f.k.advance(memberVerdictMaxAge + time.Second)
 	wantReady19110(t, f.m, "a disabled member under a stale verdict")
@@ -530,4 +550,76 @@ func TestStatusLoopObservesAfterUnlock19110(t *testing.T) {
 	if !found {
 		t.Error("statusLoop does not call observeDataMembers immediately after m.mu.Unlock()")
 	}
+}
+
+// Before the first observation there is no verdict for this configuration:
+// every required member is unverified.
+func TestMissingDataMemberBeforeTheFirstObservation19110(t *testing.T) {
+	f := newMemberFixture19110(t, false)
+	wantNotReady19110(t, f.m, "readiness before any tick", "unverified")
+}
+
+// A COLD cache: readiness before any tick makes no lookup and no program info
+// query; identification happens only on the tick.
+func TestMissingDataMemberColdCacheReadinessMakesNoQuery19110(t *testing.T) {
+	f := newMemberFixture19110(t, false)
+	l0, i0, _ := f.k.counts()
+	ready19110(f.m, true)
+	f.m.HATakeoverReadiness()
+	if l1, i1, _ := f.k.counts(); l1 != l0 || i1 != i0 {
+		t.Errorf("readiness on a cold cache made %d lookup(s) and %d program info query(ies)", l1-l0, i1-i0)
+	}
+}
+
+// A disabled untagged unit 0 collapses onto the base netdev, so the base row is
+// administratively disabled (baseRowAdminDisabled) and structural admission
+// refuses it: not a blocker. The control is a VLAN-tagged unit 0, which has
+// its own netdev, so the base row stays required.
+func TestMissingDataMemberDisabledUnitZeroOnTheSameDevice19110(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		vlan    int
+		blocker bool
+	}{{"untagged unit 0 (same netdev)", 0, false}, {"VLAN unit 0 (own netdev)", 50, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newMemberFixture19110(t, false)
+			cfg := f4Config19110(true)
+			cfg.Interfaces.Interfaces["ge-0/0/1"] = &config.InterfaceConfig{
+				Name: "ge-0/0/1", RedundantParent: "reth1",
+				Units: map[int]*config.InterfaceUnit{0: {Number: 0, Disable: true, VlanID: tc.vlan}},
+			}
+			f.m.refreshGenericDataMembers(cfg)
+			f.k.set("ge-0-0-1", 29, 0) // the attach paths left it unattached
+			f.m.observeDataMembers()
+			ready, reasons := ready19110(f.m, true)
+			if tc.blocker && ready {
+				t.Errorf("%s: the base row is required and unattached, yet ready (%v)", tc.name, reasons)
+			}
+			if !tc.blocker && !ready {
+				t.Errorf("%s: the base row is administratively disabled, yet not ready: %v", tc.name, reasons)
+			}
+		})
+	}
+}
+
+// A known non-Ethernet member stays excluded when the verdict goes stale (no new
+// tick) and when the loaded program cannot be identified: "required?" is
+// decided by framing, independent of attachment freshness and of the program.
+func TestMissingDataMemberNonEthernetExclusionSurvivesStalenessAndIdentification19110(t *testing.T) {
+	f := newMemberFixture19110(t, false)
+	f.k.mu.Lock()
+	f.k.devs["ge-0-0-1"] = &fakeDev19110{ifindex: 29, notAttachable: true}
+	f.k.mu.Unlock()
+	f.m.observeDataMembers()
+	wantReady19110(t, f.m, "a non-Ethernet member")
+	f.k.advance(memberVerdictMaxAge + time.Second)
+	wantReady19110(t, f.m, "a non-Ethernet member under a stale verdict")
+
+	g := newMemberFixture19110(t, false)
+	g.k.mu.Lock()
+	g.k.devs["ge-0-0-1"] = &fakeDev19110{ifindex: 29, notAttachable: true}
+	g.k.idErr = errors.New("bpf obj info: permission denied")
+	g.k.mu.Unlock()
+	g.m.observeDataMembers()
+	wantReady19110(t, g.m, "a non-Ethernet member while the program is unidentified")
 }
