@@ -103,6 +103,9 @@ mod shared_session_refs_16185_tests;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "policy_batch_materialize_race_tests.rs"]
+mod policy_batch_materialize_race_tests;
 
 #[cfg(test)]
 #[path = "deleted_first_policy_purge_9526_tests.rs"]
