@@ -10,19 +10,24 @@
 //! which returns the failure as `NatFailure::SourceNat`. Both of its callers,
 //! in `poll_descriptor/mod.rs`, record that failure and recycle the frame. The
 //! old guard counted `source_nat_decision_for_flow(` inside mod.rs only, read 0
-//! after the move, and stopped before checking anything else. This guard
-//! follows the decision to where it is:
+//! after the move, and stopped before checking anything else.
+//!
+//! WHAT A FAILURE DOES is proven by behaviour, not here: the unit cells in
+//! `src/afxdp/tests_snat_failure_terminates_19132.rs` drive a SYN whose pool
+//! cannot allocate through the normal path and the missing-neighbor seed
+//! (recorded, recycled once, never forwarded, transmitted, installed or
+//! parked), and an erroring source-NAT decision through the flowless-fragment
+//! retry (`Drop`). Two rounds of review showed a text scan of those arms
+//! cannot prove termination: a terminator under a condition or commented out,
+//! or an extra arm on a closing-brace line, all passed it.
+//!
+//! This guard keeps the census of WHERE the decision lives, which a behavioural
+//! cell cannot see (a new, unreviewed decision site):
 //!   - a crate-wide census of runtime `source_nat_decision_for_flow(` calls:
 //!     exactly the composer and the flowless-fragment retry (frag_assoc.rs);
 //!   - the composer propagates a failure as `NatFailure::SourceNat`;
-//!   - the flowless-fragment retry's match has exactly two arms, an `Ok(..)`
-//!     translate arm and `_ => RetryFlowlessFragmentNat::Drop`, so every error
-//!     reaches the drop (an inserted `Err(_) => Unchanged` arm fails);
-//!   - exactly two composer callers, both in poll_descriptor/mod.rs. Each one's
-//!     `NatFailure::SourceNat` arm records the failure and THEN terminates:
-//!     the recorder only counts, it does not drop. The normal caller recycles
-//!     and `continue`s; the missing-neighbor seed `break 'missing_neighbor`s
-//!     with `StageOutcome::RecycleAndContinue`;
+//!   - exactly two composer callers, both in poll_descriptor/mod.rs (the normal
+//!     new-session path and the missing-neighbor seed, each covered by a cell);
 //!   - no legacy Option helper and no `unwrap_or_default` fail-open on the
 //!     decision path;
 //!   - the plan and capability docs describe this layout.
@@ -100,48 +105,7 @@ fn window(source: &str, line: usize, len: usize) -> Vec<&str> {
     source.lines().skip(line - 1).take(len).collect()
 }
 
-/// The lines of the `{ .. }` block that opens at the first `{` on or after
-/// `lines[start]`, through its matching `}` (these blocks hold no braces inside
-/// string or char literals).
-fn block_from<'a>(lines: &[&'a str], start: usize) -> Option<Vec<&'a str>> {
-    let mut depth = 0i32;
-    let mut opened = false;
-    for (offset, line) in lines[start..].iter().enumerate() {
-        for ch in line.chars() {
-            match ch {
-                '{' => {
-                    depth += 1;
-                    opened = true;
-                }
-                '}' => depth -= 1,
-                _ => {}
-            }
-        }
-        if opened && depth <= 0 {
-            return Some(lines[start..=start + offset].to_vec());
-        }
-    }
-    None
-}
 
-/// The arm heads (lines holding `=>`) at depth 1 of a `match .. { .. }` block.
-fn match_arm_heads<'a>(block: &[&'a str]) -> Vec<&'a str> {
-    let mut depth = 0i32;
-    let mut heads = Vec::new();
-    for line in block {
-        if depth == 1 && line.contains("=>") {
-            heads.push(line.trim());
-        }
-        for ch in line.chars() {
-            match ch {
-                '{' => depth += 1,
-                '}' => depth -= 1,
-                _ => {}
-            }
-        }
-    }
-    heads
-}
 
 #[test]
 fn snat_contract_documents_current_fail_closed_runtime() {
@@ -185,59 +149,18 @@ fn snat_contract_documents_current_fail_closed_runtime() {
         }
     }
 
-    // 3. The flowless-fragment retry drops on any failure: its match is exactly
-    //    an `Ok(..)` arm and `_ => Drop`, so no arm can catch an error first.
-    let frag = read(&repo_root, FRAG_RETRY);
-    let frag_lines: Vec<&str> = frag.lines().collect();
-    for (file, line) in decision_sites.iter().filter(|(f, _)| f == FRAG_RETRY) {
-        let heads = block_from(&frag_lines, line - 1).map(|b| match_arm_heads(&b)).unwrap_or_default();
-        let exact = heads.len() == 2
-            && heads[0].starts_with("Ok(")
-            && heads[1] == "_ => RetryFlowlessFragmentNat::Drop,";
-        if !exact {
-            problems.push(format!(
-                "{file}:{line}: the flowless-fragment source-NAT match must be exactly an `Ok(..)` arm and \
-                 `_ => RetryFlowlessFragmentNat::Drop,` so every error drops; found arms {heads:?}"
-            ));
-        }
-    }
-
-    // 4. Exactly two composer callers, both in poll_descriptor/mod.rs (the
-    //    normal new-session path and the missing-neighbor seed), each recording
-    //    a NatFailure::SourceNat before the frame is recycled.
-    let poll = read(&repo_root, POLL);
+    // 3. Exactly two composer callers, both in poll_descriptor/mod.rs: the
+    //    normal new-session path and the missing-neighbor seed. What each one
+    //    does with a failure is proven by tests_snat_failure_terminates_19132.
     let composer_in_poll = composer_sites.iter().filter(|(f, _)| f == POLL).count();
     if composer_sites.len() != 2 || composer_in_poll != 2 {
         problems.push(format!(
-            "{COMPOSER_CALL} should have exactly two runtime callers, both in {POLL}; found {composer_sites:?}"
+            "{COMPOSER_CALL} should have exactly two runtime callers, both in {POLL}; found {composer_sites:?}. \
+             A new caller needs a behavioural fail-closed cell beside tests_snat_failure_terminates_19132"
         ));
     }
-    for (file, line) in composer_sites.iter().filter(|(f, _)| f == POLL) {
-        let w = window(&poll, *line, 60);
-        let body = w
-            .iter()
-            .position(|l| l.contains("NatFailure::SourceNat("))
-            .and_then(|arm| block_from(&w, arm))
-            .map(|b| b.join("\n"))
-            .unwrap_or_default();
-        let recorded = body.find("record_source_nat_failure(");
-        // The terminator must come after the record: the recorder only counts.
-        let terminated = recorded.is_some_and(|at| {
-            let rest = &body[at..];
-            (rest.contains("scratch_recycle.push(") && rest.contains("continue;"))
-                || (rest.contains("break 'missing_neighbor") && rest.contains("StageOutcome::RecycleAndContinue"))
-        });
-        if recorded.is_none() || !terminated {
-            problems.push(format!(
-                "{file}:{line}: the NatFailure::SourceNat arm must call record_source_nat_failure and then drop the \
-                 packet (recycle + continue, or break 'missing_neighbor StageOutcome::RecycleAndContinue); \
-                 recorded={} dropped={terminated}",
-                recorded.is_some()
-            ));
-        }
-    }
 
-    // 5. No legacy Option helper and no unwrap_or_default fail-open on the
+    // 4. No legacy Option helper and no unwrap_or_default fail-open on the
     //    decision path.
     for rel in DECISION_PATH_FILES {
         let source = read(&repo_root, rel);
@@ -251,7 +174,7 @@ fn snat_contract_documents_current_fail_closed_runtime() {
         }
     }
 
-    // 6. The plan doc describes the current runtime boundary.
+    // 5. The plan doc describes the current runtime boundary.
     let plan_rel = "docs/pr/1373-retire-ebpf-dataplane/plan-1377-snat-pools.md";
     let plan = read(&repo_root, plan_rel);
     for required in [
@@ -278,7 +201,7 @@ fn snat_contract_documents_current_fail_closed_runtime() {
         }
     }
 
-    // 7. The capability docs.
+    // 6. The capability docs.
     for rel in ["docs/userspace-dataplane-architecture.md", "docs/userspace-dataplane-gaps.md"] {
         check_capability_doc(&mut problems, rel, &read(&repo_root, rel));
     }
