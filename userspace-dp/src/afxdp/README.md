@@ -28,7 +28,9 @@ sync.
     poison any wall-clock age and falsely mark a healthy worker unready,
     which the control plane can read as a hung worker and turn into a
     spurious VRRP failover / route withdrawal.
-- `worker/` — the per-worker poll loop (`mod.rs` runs the dispatch).
+- `worker/` — the per-worker poll loop. `loop_body/mod.rs::worker_loop` runs
+  each iteration, `lifecycle.rs::poll_binding` polls one binding, and
+  `mod.rs` holds the `BindingWorker` struct (see `worker/README.md`).
 - `parser.rs` — pure control-plane parsers (#947) for the two L2/L3
   learning shapes that drive the dynamic-neighbor cache: ARP replies
   (`classify_arp`) and IPv6 Neighbor Advertisements
@@ -1592,6 +1594,12 @@ sync.
   BPF session map mirror so the CLI / GC see the same sessions.
 - `types/` — shared structs: `BindingPlan`, `BindingStatus`,
   `WorkerRuntimeAtomics`, `SharedCoSQueueLease`, `BatchCounters`, …
+- `poll_descriptor/` — the per-packet RX descriptor pipeline. `mod.rs` holds
+  the poll-loop body extracted from the monolithic `afxdp.rs` (#1054), and its
+  stages live in siblings such as `flow_cache_hit.rs`, `session_admission.rs`,
+  `prerouting_dnat.rs`, `transit_policy.rs`, `host_inbound_policy.rs`,
+  `nat_exception.rs` (the source-NAT decision) and `frag_assoc.rs` (fragment
+  association).
 
     **#8271 — both ICMP-error arms parse the DECAPPED frame.** The NAT64
     ICMP-error arm and the embedded-ICMP reversal arm each CLASSIFY on
@@ -1615,6 +1623,36 @@ sync.
     untagged one the mis-paired read lands on a valid version nibble and fails
     as a miss, so an untagged fixture passes under the defect for the wrong
     reason.
+
+- `forwarding_build/` — the `ConfigSnapshot → ForwardingState` translation
+  (#1342): `mod.rs` orchestrates a linear sequence of per-entity sibling
+  builders.
+- `icmp_embed/` — the embedded-ICMP error path: reverse NAT and forwarding
+  resolution for ICMP / ICMPv6 errors whose embedded inner header matches an
+  existing session.
+- `shared_ops/` — the cross-worker shared session maps: publish (`store.rs`),
+  lookup, restamp, owner-RG indexes, reverse synthesis, and their counters.
+- `ha/` — HA session state on the helper side: export to and import from the
+  peer (`export.rs`, `session_import.rs`), HA group state, session domains,
+  counter queries and tunnel purge.
+- `bpf_map/` — the BPF maps shared with the XDP shim: pinning (`pin.rs`),
+  conntrack-map I/O and value builders (`conntrack_io.rs`,
+  `publish_conntrack.rs`), the control row, steering owners, the tuple gate,
+  metrics, and the HA map (`ha.rs`, including the monotonic
+  `heartbeat_fresh_mono` check the worker-liveness clock above relies on).
+- `wg/` — clean-room WireGuard tunnel termination: engine, framing,
+  allowed-IPs LPM, cookies, encap and decap (design:
+  `docs/pr/wireguard-clean/plan.md`). The control thread that drives it is
+  `coordinator/wg_control/`.
+- `mirror/` — port mirroring: the clone fast path (`fast_path.rs`) and the
+  mirror-target resolver (`resolver.rs`).
+- `neighbor_dispatch/` — test-only: the `mirror_tests` child module of the
+  sibling file `neighbor_dispatch.rs` (`xfrmi_6710_tests.rs`). The production
+  code is `neighbor_dispatch.rs`.
+
+The index is checked: `userspace-dp/tests/afxdp_readme_index_17341_guard.rs`
+fails when a subdirectory of `afxdp/` (other than `testdata*`) has no entry
+here, or an entry names something that no longer exists (#17341).
 
 ## Manager-neighbor replace generation envelope (#5864 → #6034 → #10035)
 
