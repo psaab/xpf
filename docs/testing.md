@@ -29,7 +29,8 @@ the checkout:
 
 ```bash
 scripts/provision-testrunner.sh --runner udp:xpf-testrunner
-scripts/provision-testrunner.sh --runner udp:xpf-testrunner --toolchains-only  # update an existing runner
+scripts/provision-testrunner.sh --runner udp:xpf-testrunner --toolchains-only  # update an existing runner;
+# replacing a toolchain is refused (exit 75) while a lane is live: drain it first
 ```
 
 Run tests from the worktree:
