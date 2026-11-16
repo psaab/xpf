@@ -5395,10 +5395,32 @@ group is confirmed released`. When the fence is NOT acked, the
   new owner gets sick too: its election stays in the hold unless the peer
   resigns at weight 0 or transfers the RG out.
 
-The helper-side part of each RG's demotion still runs per RG, in turn. It
-may wait on the Manager's `m.mu` behind the wedged helper's round trips
-(#18711). That delays the rg_active bookkeeping and the next RG's handler,
-but no longer the VIP release.
+The helper-side part of each RG's demotion still runs per RG, in turn.
+Nothing before its bounded write waits on the userspace Manager's `m.mu`
+(#18711). That lock's holders can sit in 3 s round trips against the wedged
+helper, for example an abandoned `UpdateRGActive`.
+- `Manager.Mode()`, read by `injectBlackholeRoutes` on every demotion, is
+  lock-free: a mirror published by `setModeLocked`, the mode's only writer.
+- The reconcile pass releases a helper-down demotion's direct VIPs FIRST,
+  above its per-RG takeover readiness. `TakeoverReadyForPeer` takes `m.mu`.
+
+Every other dataplane call on the demotion edge before the write is a
+lock-free atomic read:
+- `HelperElectionNotReady` (whose liveness tracker has its own lock),
+  `HelperExitedUnexpectedly`, `HelperControlUnresponsive` and
+  `HelperElectionReason`;
+- the VIP removal, which is netlink only;
+- the RG accessors `d.dataplane()` and `HA()`.
+
+The 5 s demotion prep is skipped when the control socket was silent at entry,
+and the write itself is bounded (#18701/#18715). The connected-route
+republish runs only on activation. What can still wait on `m.mu`:
+- the write itself, bounded by design;
+- the 5 s prep, but only when the control socket still answered at entry,
+  and bounded;
+- after the write, the fence acknowledgement and the next RG's own
+  handler;
+- in legacy VRRP mode, the resign, which comes after the 5 s prep (#18716).
 
 Direct mode only, pinned: in legacy VRRP mode a not-ready helper causes no
 direct-VIP add or remove on either path, because VRRP owns those addresses

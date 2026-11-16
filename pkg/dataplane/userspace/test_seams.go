@@ -17,7 +17,7 @@ func NewSessionInventoryOverflowManagerForTest(eventStream *EventStream) *Manage
 	m.proc = &exec.Cmd{Process: &os.Process{Pid: os.Getpid()}}
 	m.procGen = 19
 	m.clusterHA = true
-	m.mode = ModeUserspaceCompat
+	m.setModeLocked(ModeUserspaceCompat)
 	m.lastStatus = ProcessStatus{
 		Enabled:         true,
 		ForwardingArmed: true,
@@ -248,4 +248,22 @@ func (m *Manager) ReleaseHeldRGsForTesting(rgIDs []int) {
 	if m.heldRGReleaseFn != nil {
 		m.heldRGReleaseFn(rgIDs)
 	}
+}
+
+// NewModeManagerForTest returns a fresh Manager whose runtime mode is mode,
+// published through setModeLocked like every production writer (#18711).
+func NewModeManagerForTest(mode DataplaneMode) *Manager {
+	m := New()
+	m.mu.Lock()
+	m.setModeLocked(mode)
+	m.mu.Unlock()
+	return m
+}
+
+// HoldMuForTest takes the Manager's mu and returns its release, so a cell can
+// stand in for a holder sitting in a round trip against a wedged helper (an
+// abandoned UpdateRGActive, #18711).
+func (m *Manager) HoldMuForTest() (release func()) {
+	m.mu.Lock()
+	return m.mu.Unlock
 }

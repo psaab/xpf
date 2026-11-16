@@ -854,7 +854,13 @@ type Manager struct {
 	// before recordApplyResultLocked stamps DetachedWithErrors.
 	detachDebtAlarm string
 
-	mode               DataplaneMode // current active runtime mode
+	mode DataplaneMode // current active runtime mode; write ONLY via setModeLocked
+	// modeSnapshot mirrors mode for the lock-free Mode() (#18711). A demotion
+	// handler must not wait on mu, whose holders can sit in 3 s round trips
+	// against a wedged helper (an abandoned UpdateRGActive). setModeLocked is
+	// its only writer, under mu, so it never disagrees with mode for longer
+	// than one store.
+	modeSnapshot       atomic.Int32
 	configuredMode     DataplaneMode // user-configured desired mode (from config)
 	lastHASyncTime     time.Time     // throttle HA watchdog sync to avoid control socket contention
 	lastRGActivateTime time.Time     // wall clock of last update_ha_state; statusLoop skips HA sync for 2s
@@ -1288,11 +1294,22 @@ func (m *Manager) SetOnXSKBound(fn func()) {
 	m.OnXSKBound = fn
 }
 
-// Mode returns the current active dataplane runtime mode.
+// Mode returns the current active dataplane runtime mode. It is LOCK-FREE
+// (#18711): the daemon's demotion path calls it (injectBlackholeRoutes ->
+// userspaceDataplaneActiveFor) before its bounded rg_active write, and mu's
+// holders can sit in 3 s round trips against a wedged helper, so taking mu
+// here delayed each RG's demotion behind the previous RG's abandoned write.
+// The zero value is ModeEBPFOnly, as for the field, so a manager that never
+// applied a status reads the same as before.
 func (m *Manager) Mode() DataplaneMode {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.mode
+	return DataplaneMode(m.modeSnapshot.Load())
+}
+
+// setModeLocked is the ONLY writer of mode, and publishes it to the lock-free
+// Mode() (#18711). Caller holds mu.
+func (m *Manager) setModeLocked(md DataplaneMode) {
+	m.mode = md
+	m.modeSnapshot.Store(int32(md))
 }
 
 // SetConfiguredMode sets the user-configured desired dataplane mode.

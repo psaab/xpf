@@ -1586,6 +1586,20 @@ func (d *Daemon) reconcileRGState() {
 	// it — the gate is an authority boundary, not per-RG actuation.
 	d.reconcileRG0ConfigOwnership()
 
+	// #18701/#18711: with an unresponsive local helper, release every
+	// non-owned RG's direct VIPs FIRST, before any call in this pass that can
+	// wait on the userspace Manager's mu. The per-RG takeover readiness below
+	// (takeoverReadinessForRG -> TakeoverReadyForPeer) takes it, and its
+	// holders can sit in 3 s round trips against the wedged helper (an
+	// abandoned UpdateRGActive), so a release placed after that loop (#18701)
+	// waited behind them. The predicate reads only lock-free helper state and
+	// cluster state. The per-RG loop below also uses it to skip the demotion
+	// prep and bound the rg_active=false write.
+	reconcileHelperDown := d.isNoRethVRRP() && d.helperDownForDemotion()
+	if reconcileHelperDown {
+		d.releaseDirectVIPsHelperDown("reconcile-helper-down")
+	}
+
 	// #2114: ONE dataplane snapshot per reconcile pass (plan §5.3 rule 1),
 	// shared across the per-RG actuation loop below — a mid-pass cell clear
 	// must not let one RG actuate through the old backend while a later RG
@@ -1685,16 +1699,10 @@ func (d *Daemon) reconcileRGState() {
 	// publication) re-evaluates exactly once per reconcile pass.
 	anyRGChanged := false
 
-	// #18701: with an unresponsive local helper, release every non-owned RG's
-	// direct VIPs BEFORE any per-RG helper round trip below, and skip the
-	// demotion prep and bound the rg_active=false write in the loop. Without
-	// this, an RG that still needs its demotion applied runs the 5 s prep and
-	// an unbounded write before its own VIP reconcile, and a later RG waits
-	// behind both.
-	reconcileHelperDown := noRethVRRP && d.helperDownForDemotion()
-	if reconcileHelperDown {
-		d.releaseDirectVIPsHelperDown("reconcile-helper-down")
-	}
+	// The helper-down VIP release ran at the top of this pass (#18711,
+	// reconcileHelperDown). Without it, an RG that still needs its demotion
+	// applied runs the 5 s prep and an unbounded write before its own VIP
+	// reconcile, and a later RG waits behind both (#18701).
 
 	for _, rgID := range rgIDs {
 		clusterPri := d.cluster.IsLocalPrimary(rgID)

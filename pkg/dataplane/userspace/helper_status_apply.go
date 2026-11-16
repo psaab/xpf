@@ -414,7 +414,7 @@ func (m *Manager) flushStaleBPFStateOnCtrlEnableLocked() {
 	m.initialCtrlCleanupDone = true
 }
 
-// applyRuntimeModeLocked derives m.mode from the resolved ctrl state and the
+// applyRuntimeModeLocked derives m.mode (via setModeLocked, #18711) from the resolved ctrl state and the
 // XSK liveness verdict, then stamps the strict flag into ctrl so the XDP shim
 // reports strict degraded drops separately.
 func (m *Manager) applyRuntimeModeLocked(ctrl *userspaceCtrlValue) {
@@ -434,17 +434,17 @@ func (m *Manager) applyRuntimeModeLocked(ctrl *userspaceCtrlValue) {
 		// Degraded userspace mode keeps the shim attached. Compat still only
 		// permits local/control kernel delivery; it is not eBPF-only transit.
 		if m.configuredMode == ModeUserspaceStrict {
-			m.mode = ModeUserspaceStrict
+			m.setModeLocked(ModeUserspaceStrict)
 		} else {
-			m.mode = ModeUserspaceCompat
+			m.setModeLocked(ModeUserspaceCompat)
 		}
 	case m.xskLivenessProven && m.configuredMode == ModeUserspaceStrict:
-		m.mode = ModeUserspaceStrict
+		m.setModeLocked(ModeUserspaceStrict)
 	case m.xskLivenessProven:
-		m.mode = ModeUserspaceCompat
+		m.setModeLocked(ModeUserspaceCompat)
 	default:
 		// ctrl enabled but liveness not yet proven — still probing.
-		m.mode = ModeUserspaceCompat
+		m.setModeLocked(ModeUserspaceCompat)
 	}
 	// Set strict flag in ctrl so the XDP shim reports strict degraded drops
 	// separately while keeping transit fail-closed in both modes.
