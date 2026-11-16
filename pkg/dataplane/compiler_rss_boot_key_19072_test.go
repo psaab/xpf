@@ -296,7 +296,15 @@ func TestRSSHashKeyForBootUsesTheBootStore19072(t *testing.T) {
 	}
 	bootID, err := readRSSBootID(rssBootIDPath)
 	if err != nil {
-		t.Skipf("no kernel boot_id here (%v); the wrapper fell back to a process key", err)
+		// No kernel boot_id on this host: the wrapper's contract is then the
+		// process-key fallback, which binds nothing and so stores nothing
+		// (TestRSSBootKeyFallsBackToAProcessKey19072 pins the same with a
+		// missing path). Check that instead of skipping, so the cell examines
+		// the wrapper on every host (#19104).
+		if _, serr := os.Stat(rssBootKeyPath); !os.IsNotExist(serr) {
+			t.Fatalf("no kernel boot_id here (%v), yet the wrapper stored a boot key (stat err %v)", err, serr)
+		}
+		return
 	}
 	stored, err := readRSSBootKeyFile(rssBootKeyPath, bootID)
 	if err != nil {

@@ -215,12 +215,24 @@
 # #19104's priv-absent site and by one "other" site added since bd1a23d3fe;
 # neither is banked here, so this tree reds by exactly those two, as master
 # does.
-total        = 654
+# #19104 resolves both:
+# - other: the #19072 site (pkg/dataplane/compiler_rss_boot_key_19072_test.go,
+#   "no kernel boot_id here") is UN-SKIPPED. Without a kernel boot_id the
+#   wrapper's contract is the process-key fallback, which stores nothing, and
+#   the cell now checks that. other stays 495.
+# - priv-absent: a floor CORRECTION, not a new skip. ff5707da66 (#19049)
+#   added "cannot read current netns link" without banking it (census 152 vs
+#   floor 151). 943fecb4f8 (#19088) then removed that site together with four
+#   banked ones and lowered the floor by all five, so the floor ended one
+#   below the census (147 vs 146, then 141 vs 140) with no live unbanked site
+#   left. The floor is raised by that one: priv-absent 140 -> 141, total
+#   654 -> 655.
+total        = 655
 
 # Privilege-dependent, split by DIRECTION because that split is the finding:
 # no single run examines both groups. Running the suite as root does not close
 # the gap, it swaps which subjects go unexamined.
-priv-absent  = 140
+priv-absent  = 141
 priv-present = 18
 
 # Everything else: environment-, tool- and fixture-gated skips.
