@@ -2064,8 +2064,57 @@ unaffected.
 **What step 1 does not do: close the #19145 race.** Both the prewarm and the
 republish write from a snapshot taken before a concurrent `sync_session`
 delete can land. Step 1 narrows the S-forward window to the republish's own
-collect-to-publish span; it does not close it. #19145 tracks the fences
-that do.
+collect-to-publish span; it does not close it. The fences in the next
+section do.
+
+## An activation writes nothing a concurrent delete has removed (#19145)
+
+The prewarm and the republish write from snapshots taken under the
+shared-session lock and released. A `sync_session` delete is served off the
+server lock (#452), so it can land between a snapshot and its writes. Each
+layer is now fenced against that.
+
+**Steering** (`publish_steering_while_shared`):
+- An activation steering write is a coordinator claim in the #9560 registry.
+  Every authoritative removal of a shared entry removes it under the shared
+  lock and THEN releases the coordinator claim.
+- So the write checks that the shared map still holds the snapshot's
+  incarnation and publishes under ONE shared-lock hold.
+  - A removal that ran first is seen, and nothing is written.
+  - A removal that runs after releases the new claim.
+- This applies to the prewarm's forward and reverse writes and to the
+  republish.
+
+**Shared reverse** (`publish_shared_session_if`): a synthesized reverse is
+admitted only while the forward incarnation it came from is present, checked
+under the insert's own lock hold.
+
+**Worker restores** (`WorkerCommand::PrewarmSynced`):
+- They are applied like `UpsertSynced`, but only while the shared map
+  (carried as a `SharedSessionsHandle`) still holds the incarnation, checked
+  when the worker applies them.
+- A delete after that check pushed its `DeleteSynced` later in the same
+  queue, so it still removes the install.
+
+**Lock order: shared-session → registry holdings shard → registry row
+shard.** No code takes a shared-ops lock while it holds a registry shard.
+- The census is at `steering_owners.rs` `lock()`.
+- Debug builds enforce it: each shard guard counts itself on its thread, and
+  `lock_shared_recover` and `lock_shared_publish` assert the count is zero.
+
+**The cells,** in `ha_prewarm_resurrection_18641_tests.rs`, each checking
+six properties:
+- controls in two shapes. When the forward's owner RG activates, the
+  republish writes its steering row. When only the reverse's RG activates,
+  the prewarm does.
+- a real peer delete at each seam:
+  - after the prewarm's snapshot (`PREWARM_AFTER_COLLECT_HOOK_18641`), in
+    both shapes;
+  - after the prewarm's admitted reverse publish
+    (`PREWARM_AFTER_REVERSE_PUBLISH_HOOK_19145`);
+  - after the republish's snapshot (`REPUBLISH_AFTER_COLLECT_HOOK_19145`). The
+cost is measured by `activation_cost_bench_19145` and recorded in
+`docs/log/19145.md`.
 
 ## The reverse-prewarm index is add-only while live, un-filed at removal (#7209)
 

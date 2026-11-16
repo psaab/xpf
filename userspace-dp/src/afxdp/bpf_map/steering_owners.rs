@@ -228,13 +228,88 @@ fn key_shard_idx(key: &SessionKey) -> usize {
     key_shard_idx_with(*SHARD_SEED, key)
 }
 
-fn lock<T>(shard: &PaddedShard<Mutex<T>>) -> MutexGuard<'_, T> {
+// #19145 LOCK ORDER: shared-session lock → holdings shard → row shard.
+//
+// The registry's shard locks are the innermost locks around a steering row.
+// - **holdings before row** is this registry's own rule (see the module doc).
+// - **shared-session before both** is new in #19145. The RG-activation
+//   steering fence (`shared_ops::owner_rg::publish_steering_while_shared`)
+//   publishes while it holds the shared-session lock, so its check and its
+//   coordinator claim are atomic against a removal.
+// - **Nothing may take a shared-ops lock while a registry shard is held.**
+//
+// The census, at c61aa074f0 + #18641 step 1: every shard lock is taken
+// through `lock()` below, and the only code that runs under one is this
+// file's bookkeeping and the caller closures in `bpf_map/mod.rs`:
+// - `publish_session_rows`: `write_steering_row`, `delete_steering_row` and
+//   `session_key_for_row`;
+// - `release_session_rows`: a slice `position` lookup, `delete_steering_row`,
+//   `session_key_for_row` and `write_steering_row`;
+// - `publish_session_map_key`: `write_steering_row`;
+// - `delete_live_session_key`: `delete_steering_row` and
+//   `write_steering_row`;
+// - `retire_worker_steering_rows`: `delete_steering_row`,
+//   `session_key_for_row` and `write_steering_row`.
+// Those do BPF syscalls and touch the test recorder's thread-local, and take
+// no lock other than `shard_is_locked`'s `try_lock` on a registry shard.
+//
+// Debug builds ENFORCE the order. Each shard guard counts itself on its
+// thread, and `shared_ops::lock_shared_recover` / `lock_shared_publish`
+// assert the count is zero (`registry_shard_held_by_this_thread`).
+#[cfg(debug_assertions)]
+std::thread_local! {
+    static REGISTRY_SHARDS_HELD: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// #19145: whether this thread holds a steering-registry shard lock. Always
+/// false in release builds; the debug count backs the lock-order assertion.
+pub(crate) fn registry_shard_held_by_this_thread() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        REGISTRY_SHARDS_HELD.with(|held| held.get() > 0)
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
+}
+
+/// A registry shard guard. It is the `MutexGuard` plus, in debug builds, this
+/// thread's held-shard count (#19145).
+struct ShardGuard<'a, T> {
+    guard: MutexGuard<'a, T>,
+}
+
+impl<T> std::ops::Deref for ShardGuard<'_, T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.guard
+    }
+}
+
+impl<T> std::ops::DerefMut for ShardGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.guard
+    }
+}
+
+impl<T> Drop for ShardGuard<'_, T> {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        REGISTRY_SHARDS_HELD.with(|held| held.set(held.get() - 1));
+    }
+}
+
+fn lock<T>(shard: &PaddedShard<Mutex<T>>) -> ShardGuard<'_, T> {
     // Poison-tolerant (engineering-style): a panic under one shard's lock must not
     // wedge every later steering write that lands in the same shard.
-    shard
+    let guard = shard
         .get()
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(debug_assertions)]
+    REGISTRY_SHARDS_HELD.with(|held| held.set(held.get() + 1));
+    ShardGuard { guard }
 }
 
 /// Clear `claim` from `owner`'s claim on `row` and report what is left of the row.
@@ -289,11 +364,11 @@ fn held_rows(
 }
 
 impl SteeringRowOwners {
-    fn row_shard(&self, row: &SteeringRow) -> MutexGuard<'_, FastMap<SteeringRow, Owners>> {
+    fn row_shard(&self, row: &SteeringRow) -> ShardGuard<'_, FastMap<SteeringRow, Owners>> {
         lock(self.rows.shard_at(row_shard_idx(row)))
     }
 
-    fn holdings_shard(&self, key: &SessionKey) -> MutexGuard<'_, FastMap<SessionKey, Held>> {
+    fn holdings_shard(&self, key: &SessionKey) -> ShardGuard<'_, FastMap<SessionKey, Held>> {
         lock(self.holdings.shard_at(key_shard_idx(key)))
     }
 
@@ -370,7 +445,7 @@ impl SteeringRowOwners {
             .filter(|held| !rows.iter().any(|(row, _)| row == held))
             .collect();
         for row in &stale {
-            self.release_locked(Some(&mut holdings), row, owner, claim, &mut delete, &mut restore);
+            self.release_locked(Some(&mut *holdings), row, owner, claim, &mut delete, &mut restore);
         }
         Ok(())
     }
@@ -396,7 +471,7 @@ impl SteeringRowOwners {
         for row in rows.iter().chain(held.iter()) {
             if !released.contains(row) {
                 released.push(*row);
-                self.release_locked(Some(&mut holdings), row, owner, claim, &mut delete, &mut restore);
+                self.release_locked(Some(&mut *holdings), row, owner, claim, &mut delete, &mut restore);
             }
         }
     }
@@ -413,7 +488,7 @@ impl SteeringRowOwners {
     ) -> OwnerRemoval {
         let claim = holder.claim();
         let mut holdings = self.holdings_shard(owner);
-        self.release_locked(Some(&mut holdings), row, owner, claim, &mut delete, &mut restore)
+        self.release_locked(Some(&mut *holdings), row, owner, claim, &mut delete, &mut restore)
     }
 
     /// Drop every WORKER claim WITHOUT a BPF delete, preserving coordinator
@@ -471,7 +546,7 @@ impl SteeringRowOwners {
             let owners: SmallVec<[SessionKey; 8]> = holdings.keys().cloned().collect();
             for owner in &owners {
                 for row in held_rows(&holdings, owner, claim) {
-                    self.release_locked(Some(&mut holdings), &row, owner, claim, &mut delete, &mut restore);
+                    self.release_locked(Some(&mut *holdings), &row, owner, claim, &mut delete, &mut restore);
                     retired += 1;
                 }
             }
@@ -995,6 +1070,33 @@ mod tests {
             assert!(row_shard_idx(&r) < NUM_SHARDS);
             assert!(key_shard_idx(&key(u32::from(byte), u16::from(byte))) < NUM_SHARDS);
         }
+    }
+
+    /// #19145: the lock order is enforced, not just written down. A shared-ops
+    /// lock taken while a registry shard is held must trip the debug
+    /// assertion. The fence's own order (shared, then registry) is exercised
+    /// by every activation cell that publishes with the recorder descriptor.
+    #[test]
+    #[should_panic(expected = "#19145 lock order")]
+    fn a_shared_ops_lock_inside_a_registry_shard_trips_the_order_assertion_19145() {
+        let owners = SteeringRowOwners::default();
+        let _row = owners.row_shard(&row(7));
+        let inner = std::sync::Mutex::new(());
+        let _inner = crate::afxdp::shared_ops::lock_shared_recover(&inner);
+    }
+
+    /// #19145: the held-shard count returns to zero when a guard drops, so a
+    /// later shared-ops lock on the same thread is not refused.
+    #[test]
+    fn the_registry_shard_count_returns_to_zero_19145() {
+        let owners = SteeringRowOwners::default();
+        {
+            let _row = owners.row_shard(&row(7));
+            assert!(registry_shard_held_by_this_thread());
+        }
+        assert!(!registry_shard_held_by_this_thread());
+        publish(&owners, &key(0, 1000), W0, &[7]);
+        assert!(!registry_shard_held_by_this_thread());
     }
 
     #[test]

@@ -403,11 +403,9 @@ fn update_ha_state_prewarms_split_rg_reverse_sessions_on_activation() {
         commands.front(),
         Some(WorkerCommand::RefreshOwnerRGS { owner_rgs }) if owner_rgs == &vec![1]
     ));
-    assert!(commands.iter().any(|command| matches!(
-        command,
-        WorkerCommand::UpsertSynced(session)
-            if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
-    )));
+    assert!(commands.iter().any(|command| command
+        .synced_upsert()
+        .is_some_and(|session| session.metadata.is_reverse && session.metadata.owner_rg_id == 2)));
 }
 
 #[test]
@@ -661,11 +659,11 @@ fn prewarm_recovers_from_poisoned_shared_session_mutex() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     assert!(
-        commands.iter().any(|command| matches!(
-            command,
-            WorkerCommand::UpsertSynced(session) if session.metadata.is_reverse
-        )),
-        "worker must receive the recovered reverse UpsertSynced"
+        // #19145: the prewarm restores through `PrewarmSynced`.
+        commands.iter().any(|command| command
+            .synced_upsert()
+            .is_some_and(|session| session.metadata.is_reverse)),
+        "worker must receive the recovered reverse restore"
     );
 }
 
@@ -12717,11 +12715,10 @@ fn pbr_stamped_split_rg_reverse_prewarm_uses_native_table_12086() {
             .expect("commands")
             .iter()
             .any(|command| {
-                matches!(
-                    command,
-                    WorkerCommand::UpsertSynced(session)
-                        if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
-                )
+                // #19145: the prewarm restores through `PrewarmSynced`.
+                command.synced_upsert().is_some_and(|session| {
+                    session.metadata.is_reverse && session.metadata.owner_rg_id == 2
+                })
             }),
         "activation of RG 2 must enqueue its reverse companion for prewarm",
     );
@@ -13603,3 +13600,10 @@ fn owner_rg_export_abandon_by_client_window_when_page1_was_lost_18752() {
 // module, so it shares this file's private fixtures.
 #[path = "ha_activation_steering_18641_tests.rs"]
 mod activation_steering_18641;
+// #18641: the activation prewarm against a concurrent delete (resurrection).
+// A child module, so it shares this file's private fixtures.
+#[path = "ha_prewarm_resurrection_18641_tests.rs"]
+mod prewarm_resurrection_18641;
+// #19145: the activation cost bench (ignored; run in release).
+#[path = "ha_activation_cost_bench_19145_tests.rs"]
+mod activation_cost_bench_19145;

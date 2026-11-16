@@ -1,5 +1,95 @@
 use super::*;
 
+// #18641: test-only seam in the RG-activation prewarm. It runs once, after
+// `prewarm_reverse_synced_sessions_for_owner_rgs` has snapshotted its
+// candidates and RELEASED the shared-session lock, and before it publishes or
+// fans out anything. A `sync_session` delete is served on its own socket and
+// thread, off the server lock `update_ha_state` runs under (#452,
+// `server/handlers/mod.rs`), so it can land exactly here; the cells run one at
+// this point.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static PREWARM_AFTER_COLLECT_HOOK_18641:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+// #19145: the same kind of seam inside the republish, after it has
+// snapshotted its entries and released the shared lock, before it writes.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static REPUBLISH_AFTER_COLLECT_HOOK_19145:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+// #19145: a seam in the prewarm, after a reverse has been admitted into the
+// shared map and before that reverse's steering write. It runs once, on the
+// first admitted reverse.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static PREWARM_AFTER_REVERSE_PUBLISH_HOOK_19145:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
+/// #19145: whether `shared` still holds the incarnation of `key` that an
+/// earlier snapshot saw (`session_id`). Presence is required. A zero
+/// `session_id` on either side is an unknown incarnation and matches, which is
+/// the same "same incarnation" rule `publish_shared_session_if` applies.
+pub(in crate::afxdp) fn shared_holds_incarnation(
+    shared: &FastMap<SessionKey, SyncedSessionEntry>,
+    key: &SessionKey,
+    session_id: u64,
+) -> bool {
+    shared.get(key).is_some_and(|current| {
+        session_id == 0 || current.session_id == 0 || current.session_id == session_id
+    })
+}
+
+/// #19145: an activation steering write for snapshot entry `key`, made only
+/// while the shared map still holds that incarnation, with the check and the
+/// write under ONE shared-lock hold. Returns `None` when it wrote nothing
+/// because the incarnation is gone, else whether the publish succeeded.
+///
+/// **Why the shared lock is enough** (#9560 round 3, `steering_owners.rs`).
+/// This write is a COORDINATOR claim, and a row is deleted only when its last
+/// owner goes. Every authoritative removal of a shared entry removes it under
+/// the shared lock and only THEN calls `release_coordinator_session_rows`
+/// (or, for `delete_synced`, its coordinator steering delete).
+/// - If a removal ran first, the check sees the entry gone, and nothing is
+///   claimed.
+/// - If a removal runs after, its release comes after its removal, so it
+///   comes after this claim and drops it.
+/// Before this fence, a claim re-made after the release had no release left
+/// to drop it, and the row outlived the session.
+///
+/// **Lock order** is shared → steering row shard. The registry's row-shard
+/// closures only issue BPF syscalls, and this publish takes no shared map,
+/// so nothing takes the two in the other order.
+fn publish_steering_while_shared(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    session_map: SteeringMap<'_>,
+    key: &SessionKey,
+    decision: crate::session::SessionDecision,
+    metadata: &crate::session::SessionMetadata,
+    session_id: u64,
+    forwarding: &ForwardingState,
+) -> Option<bool> {
+    let shared = lock_shared_recover(shared_sessions);
+    if !shared_holds_incarnation(&shared, key, session_id) {
+        return None;
+    }
+    let published = publish_session_map_entry_for_session(
+        session_map,
+        key,
+        decision,
+        metadata,
+        forwarding.has_routing_domains,
+        forwarding.has_multiple_zones,
+    )
+    .is_ok();
+    drop(shared);
+    Some(published)
+}
+
 pub(in crate::afxdp) fn demote_shared_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -260,7 +350,10 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             {
                 forward_entries.push(entry.clone());
                 if allow_reverse_prewarm {
-                    reverse_entries.push(reverse);
+                    // #19145: with the forward incarnation it was synthesized
+                    // from, so its publish can require that forward to still
+                    // be present.
+                    reverse_entries.push((reverse, entry.key.clone(), entry.session_id));
                 }
             }
         }
@@ -269,6 +362,13 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     timings.collect = collect_started.elapsed();
     timings.forwards = forward_entries.len();
     timings.reverses = reverse_entries.len();
+    #[cfg(test)]
+    PREWARM_AFTER_COLLECT_HOOK_18641.with(|hook| {
+        let hook = hook.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
     if forward_entries.is_empty() && reverse_entries.is_empty() {
         return timings;
     }
@@ -290,16 +390,17 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         let publish_forward =
             publish_session_map && !republished_by_caller.contains(&forward.key);
         timings.forward_steering_writes += usize::from(publish_forward);
+        // #19145: written only while the shared map still holds this forward.
         if publish_forward
-            && publish_session_map_entry_for_session(
+            && publish_steering_while_shared(
+                shared_sessions,
                 session_map,
                 &forward.key,
                 forward.decision,
                 &forward.metadata,
-                forwarding.has_routing_domains,
-                forwarding.has_multiple_zones,
-            )
-            .is_err()
+                forward.session_id,
+                forwarding,
+            ) == Some(false)
         {
             fwd_publish_errors += 1;
             // #1789: fold the activation-prewarm forward publish failures
@@ -325,9 +426,13 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 synced_replica_entry(forward)
             };
             let mut pending = worker_queue::lock_recover(commands);
+            // #19145: applied only while the shared map still holds it.
             worker_queue::push_bounded(
                 &mut pending,
-                WorkerCommand::UpsertSynced(replica),
+                WorkerCommand::PrewarmSynced {
+                    entry: replica,
+                    shared: SharedSessionsHandle(Arc::clone(shared_sessions)),
+                },
             );
         }
         timings.forward_fanout += fanout_started.elapsed();
@@ -339,30 +444,47 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             timings.forward_steering_writes
         );
     }
-    for reverse in reverse_entries {
+    for (reverse, forward_key, forward_session_id) in reverse_entries {
         let shared_started = std::time::Instant::now();
-        publish_shared_session(
+        // #19145: the reverse is admitted only while the forward incarnation
+        // it was synthesized from is still present, checked under the insert's
+        // own lock hold. A delete since the snapshot removed both halves; an
+        // unconditional publish re-inserted an orphaned reverse.
+        let published = publish_shared_session_if(
             shared_sessions,
             shared_nat_sessions,
             shared_forward_wire_sessions,
             shared_owner_rg_indexes,
             &reverse,
+            |shared| shared_holds_incarnation(shared, &forward_key, forward_session_id),
         );
         let steering_started = std::time::Instant::now();
         timings.reverse_shared += steering_started - shared_started;
+        if !published {
+            continue;
+        }
+        #[cfg(test)]
+        PREWARM_AFTER_REVERSE_PUBLISH_HOOK_19145.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
         if publish_session_map {
             // #1789: the reverse-prewarm publish in the same activation
             // path was still swallowed with `let _ =`; count it like the
             // forward loop above.
-            if publish_session_map_entry_for_session(
+            // #19145: written only while the shared map still holds the
+            // reverse just published (a delete since then removed it).
+            if publish_steering_while_shared(
+                shared_sessions,
                 session_map,
                 &reverse.key,
                 reverse.decision,
                 &reverse.metadata,
-                forwarding.has_routing_domains,
-                forwarding.has_multiple_zones,
-            )
-            .is_err()
+                reverse.session_id,
+                forwarding,
+            ) == Some(false)
             {
                 SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
             }
@@ -373,9 +495,13 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // reverse-prewarm UpsertSynced for a poisoned worker queue.
             let mut pending = worker_queue::lock_recover(commands);
+            // #19145: applied only while the shared map still holds it.
             worker_queue::push_bounded(
                 &mut pending,
-                WorkerCommand::UpsertSynced(synced_replica_entry(&reverse)),
+                WorkerCommand::PrewarmSynced {
+                    entry: synced_replica_entry(&reverse),
+                    shared: SharedSessionsHandle(Arc::clone(shared_sessions)),
+                },
             );
         }
         timings.reverse_fanout += fanout_started.elapsed();
@@ -420,37 +546,49 @@ pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
         let sessions = lock_shared_recover(shared_sessions);
         keys.iter()
             .filter_map(|key| {
-                sessions
-                    .get(key)
-                    .map(|e| (e.key.clone(), e.decision, e.metadata.clone(), e.origin))
+                sessions.get(key).map(|e| {
+                    (e.key.clone(), e.decision, e.metadata.clone(), e.origin, e.session_id)
+                })
             })
             .collect()
     };
+    #[cfg(test)]
+    REPUBLISH_AFTER_COLLECT_HOOK_19145.with(|hook| {
+        let hook = hook.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
     let mut published = 0u32;
     let mut errors = 0u32;
-    for (key, decision, metadata, origin) in &entries {
+    for (key, decision, metadata, origin, session_id) in &entries {
         // #10612 (N1): skip stale-zone rows (fence BEFORE the BPF publish,
         // mirroring prewarm). BPF-only gap: narrow race, heals on demotion.
         if crate::afxdp::session_glue::synced_entry_is_stale_replay(*origin, metadata, forwarding) {
             crate::afxdp::session_glue::note_stale_replay_fence_drop();
             continue;
         }
-        if publish_session_map_entry_for_session(
+        // #19145: written only while the shared map still holds the entry this
+        // snapshot read. Since #18641 step 1, this is the only activation
+        // writer of an owner-index forward's row.
+        match publish_steering_while_shared(
+            shared_sessions,
             session_map,
             key,
             *decision,
             metadata,
-            forwarding.has_routing_domains,
-            forwarding.has_multiple_zones,
-        )
-        .is_ok()
-        {
-            published += 1;
-        } else {
-            errors += 1;
-            // #1789: feed the activation-republish failures into the same
-            // always-on total as every other USERSPACE_SESSIONS publish site.
-            SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
+            *session_id,
+            forwarding,
+        ) {
+            None => continue,
+            Some(true) => published += 1,
+            Some(false) => {
+                errors += 1;
+                // #1789: feed the activation-republish failures into the same
+                // always-on total as every other USERSPACE_SESSIONS publish
+                // site.
+                SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
     if errors > 0 {

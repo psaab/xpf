@@ -72,6 +72,9 @@ pub(in crate::afxdp::session_glue) fn dispatch_worker_commands(
             WorkerCommand::UpsertSynced(entry) => {
                 super::handle_upsert_synced_command(ctx, entry);
             }
+            WorkerCommand::PrewarmSynced { entry, shared } => {
+                super::handle_prewarm_synced_command(ctx, entry, &shared);
+            }
             WorkerCommand::UpsertLocal(entry) => {
                 super::handle_upsert_local(ctx.sessions, entry, ctx.now_ns);
             }

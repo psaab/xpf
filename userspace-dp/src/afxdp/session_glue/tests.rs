@@ -8894,13 +8894,11 @@ fn demote_reactivate_preserves_tun_origin_across_shared_aliases_10405() {
     let upsert_origin = |key: &SessionKey| {
         pending
             .iter()
-            .filter_map(|cmd| match cmd {
-                WorkerCommand::UpsertSynced(entry)
-                    if entry.key == *key && !entry.metadata.is_reverse =>
-                {
-                    Some(entry.origin)
-                }
-                _ => None,
+            // #19145: the reactivation prewarm restores through `PrewarmSynced`.
+            .filter_map(|cmd| {
+                cmd.synced_upsert()
+                    .filter(|entry| entry.key == *key && !entry.metadata.is_reverse)
+                    .map(|entry| entry.origin)
             })
             .next()
     };
@@ -10772,15 +10770,13 @@ fn prewarm_reverse_synced_sessions_for_owner_rgs_restores_shared_promote_forward
     assert_eq!(reverse.metadata.owner_rg_id, 2);
     let commands = worker_commands[0].lock().expect("commands");
     assert_eq!(commands.len(), 2);
-    assert!(matches!(
-        &commands[0],
-        WorkerCommand::UpsertSynced(session) if session.origin == SessionOrigin::SharedPromote
-    ));
-    assert!(matches!(
-        &commands[1],
-        WorkerCommand::UpsertSynced(session)
-            if session.metadata.is_reverse && session.metadata.owner_rg_id == 2
-    ));
+    // #19145: the prewarm restores through `PrewarmSynced`.
+    assert!(commands[0]
+        .synced_upsert()
+        .is_some_and(|session| session.origin == SessionOrigin::SharedPromote));
+    assert!(commands[1].synced_upsert().is_some_and(|session| {
+        session.metadata.is_reverse && session.metadata.owner_rg_id == 2
+    }));
 }
 
 #[test]
@@ -22619,10 +22615,8 @@ fn prewarm_skips_stale_zone_entries_10612() {
         .lock()
         .expect("worker commands")
         .iter()
-        .filter_map(|cmd| match cmd {
-            WorkerCommand::UpsertSynced(entry) => Some(entry.key.clone()),
-            _ => None,
-        })
+        // #19145: the prewarm restores through `PrewarmSynced`.
+        .filter_map(|cmd| cmd.synced_upsert().map(|entry| entry.key.clone()))
         .collect();
     assert!(
         !fanned.contains(&stale_key),

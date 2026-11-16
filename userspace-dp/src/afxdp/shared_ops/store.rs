@@ -203,6 +203,12 @@ pub(crate) static SHARED_SESSION_POISON_RECOVERIES: AtomicU64 = AtomicU64::new(0
 /// unpoisoned path for subsequent locks so the Poisoned arm stays cold.
 #[inline]
 pub(in crate::afxdp) fn lock_shared_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // #19145 lock order (steering_owners.rs): shared-ops locks come BEFORE the
+    // steering registry's shards, never inside one.
+    debug_assert!(
+        !crate::afxdp::bpf_map::registry_shard_held_by_this_thread(),
+        "#19145 lock order: a shared-ops lock taken while a steering-registry shard is held"
+    );
     match m.lock() {
         Ok(guard) => guard,
         Err(poisoned) => {
@@ -232,6 +238,12 @@ pub(in crate::afxdp) fn lock_shared_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T
 /// (which `try_lock` reports only when the mutex is FREE).
 #[inline]
 fn lock_shared_publish<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    // #19145 lock order (steering_owners.rs): shared-ops locks come BEFORE the
+    // steering registry's shards, never inside one.
+    debug_assert!(
+        !crate::afxdp::bpf_map::registry_shard_held_by_this_thread(),
+        "#19145 lock order: a shared-ops lock taken while a steering-registry shard is held"
+    );
     SHARED_SESSION_PUBLISH_LOCK_ACQUISITIONS.fetch_add(1, Ordering::Relaxed);
     match m.try_lock() {
         Ok(guard) => return guard,
@@ -372,6 +384,33 @@ pub(in crate::afxdp) fn publish_shared_session(
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
     entry: &SyncedSessionEntry,
 ) {
+    publish_shared_session_if(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        entry,
+        |_| true,
+    );
+}
+
+/// [`publish_shared_session`] gated by `admit`, which runs on the shared
+/// map under the SAME lock hold as the insert. Returns whether it published.
+///
+/// #19145: the RG-activation prewarm synthesizes reverse companions from a
+/// snapshot taken before it releases the shared lock. A delete in between
+/// removes the forward and its reverse, and an unconditional publish then
+/// re-inserted an orphaned reverse. The prewarm admits a reverse only while
+/// its forward incarnation is still present. That check cannot be made before
+/// calling this: a delete could land between the check and the insert.
+pub(in crate::afxdp) fn publish_shared_session_if(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    entry: &SyncedSessionEntry,
+    admit: impl FnOnce(&FastMap<SessionKey, SyncedSessionEntry>) -> bool,
+) -> bool {
     // #4800: in test builds only, hold the shared side of the counter lock for
     // the whole publish, so a reading test excludes this mover without the
     // caller having to opt in — no caller can be forgotten the way a
@@ -390,6 +429,9 @@ pub(in crate::afxdp) fn publish_shared_session(
         // #2402: recover poison so a peer-sync / promote publish is never
         // silently dropped because a worker panicked under this lock.
         let mut sessions = lock_shared_publish(shared_sessions);
+        if !admit(&*sessions) {
+            return false;
+        }
         // #16223: monotonic handshake stage at the single publish
         // choke point — a republication of the same incarnation
         // (install-time publish, HA resend, barrier replay) must not
@@ -634,6 +676,7 @@ pub(in crate::afxdp) fn publish_shared_session(
             }
         }
     }
+    true
 }
 
 /// Update policy identity in every shared alias without replacing the entry.

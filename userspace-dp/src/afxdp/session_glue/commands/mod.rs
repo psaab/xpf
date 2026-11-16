@@ -31,6 +31,7 @@ mod delete_synced_if_table_unknown;
 mod demote_owner_rgs;
 mod export_owner_rg_sessions;
 mod list_sessions_by_policy;
+mod prewarm_synced;
 mod query_session_counters;
 mod refresh_owner_rgs;
 mod upsert_local;
@@ -61,8 +62,10 @@ pub(in crate::afxdp::session_glue) use worker_command_drain::take_worker_command
 pub(in crate::afxdp::session_glue) use worker_command_helpers::{
     handle_delete_local_control_command, handle_delete_synced_conditional_command,
     handle_demote_owner_rgs_command, handle_install_pptp_association, handle_install_pptp_call,
-    handle_delete_policy_batch_command, handle_refresh_owner_rgs_command, handle_upsert_synced_command,
+    handle_delete_policy_batch_command, handle_refresh_owner_rgs_command,
+    handle_upsert_synced_command,
 };
+pub(in crate::afxdp::session_glue) use prewarm_synced::handle_prewarm_synced_command;
 mod worker_command_dispatch;
 
 // #4805: the activation-refresh path computes the per-session

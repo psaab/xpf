@@ -1102,9 +1102,48 @@ impl PolicyReadCollector {
     }
 }
 
+/// #19145: the shared synced-session map, carried by an activation-prewarm
+/// restore so the worker can re-check it when it applies the restore. `Debug`
+/// prints no contents: a command dump must not dump the shared map.
+#[derive(Clone)]
+pub(in crate::afxdp) struct SharedSessionsHandle(
+    pub(in crate::afxdp) Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+);
+
+impl std::fmt::Debug for SharedSessionsHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharedSessionsHandle")
+    }
+}
+
+#[cfg(test)]
+impl WorkerCommand {
+    /// The synced entry an `UpsertSynced` or a `PrewarmSynced` carries: the
+    /// two install the same way, and a cell about what was queued for install
+    /// must not care which one the producer used (#19145).
+    pub(in crate::afxdp) fn synced_upsert(&self) -> Option<&SyncedSessionEntry> {
+        match self {
+            Self::UpsertSynced(entry) | Self::PrewarmSynced { entry, .. } => Some(entry),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(in crate::afxdp) enum WorkerCommand {
     UpsertSynced(SyncedSessionEntry),
+    /// #19145: an RG-activation prewarm restore. It is applied exactly like
+    /// `UpsertSynced`, but only while `shared` still holds the entry's
+    /// incarnation, checked when the worker applies it. The prewarm builds
+    /// these from a snapshot. A delete that lands after the snapshot pushes its
+    /// `DeleteSynced` AHEAD of them, and an unconditional upsert re-installed
+    /// the closed session. A delete that lands after the worker's check pushes
+    /// its `DeleteSynced` later in the same FIFO, so it still removes the
+    /// install.
+    PrewarmSynced {
+        entry: SyncedSessionEntry,
+        shared: SharedSessionsHandle,
+    },
     InstallPptpAssociation(crate::session::pptp::PptpCall),
     UpsertLocal(SyncedSessionEntry),
     DeleteSynced(SessionKey),
