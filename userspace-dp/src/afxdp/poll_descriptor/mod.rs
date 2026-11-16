@@ -3128,6 +3128,9 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                     tick: crate::afxdp::session_glue::Tick::from_ns(now_ns),
                                 },
                                 worker_ctx.forwarding,
+                                // #18552 (B1): the same HA view the resolve
+                                // above judged this hit with.
+                                worker_ctx.ha_state,
                                 meta.tcp_flags,
                                 worker_id,
                                 crate::afxdp::session_glue::SessionHitVerdict::Owner,

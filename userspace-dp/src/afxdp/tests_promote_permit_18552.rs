@@ -319,12 +319,45 @@ impl Fixture {
                 tick: Tick::from_ns(now_ns),
             },
             forwarding,
+            &self.ha_state,
             0x10,
             0,
             SessionHitVerdict::Owner,
             &mut resolved,
             &mut Vec::new(),
         );
+    }
+
+    /// One owner-verdict REPLY hit on the promotable reverse companion of the
+    /// original incarnation. The owner reply re-resolves to the client's local
+    /// LAN egress (ifindex 6), as `resolve.rs` does before arming the deferred
+    /// promotion; the promotion then runs under `self.ha_state`.
+    fn promote_reply_on_hit(&mut self) {
+        let reply = self.local_reply();
+        let mut row = self
+            .worker_sessions
+            .synced_entry_for(&reply)
+            .expect("premise: the worker holds the reply companion");
+        assert!(row.metadata.is_reverse, "premise: the reply row is the reverse companion");
+        row.decision.resolution = ForwardingResolution {
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            next_hop: Some(self.original.key.src_ip),
+            ..test_resolution()
+        };
+        let forwarding = self.coordinator.forwarding.clone();
+        self.promote_row_on_hit(&row, &forwarding);
+    }
+
+    /// Worker F, worker R, shared F and shared R origins of the original pair.
+    fn pair_origins(&self) -> [Option<SessionOrigin>; 4] {
+        let (forward, reply) = (self.key(), self.local_reply());
+        [
+            self.worker_origin(&forward).map(|(_, origin)| origin),
+            self.worker_origin(&reply).map(|(_, origin)| origin),
+            self.shared(&forward).map(|entry| entry.origin),
+            self.shared(&reply).map(|entry| entry.origin),
+        ]
     }
 
     /// The (session id, NAT, origin) the shared row for `key` names.
@@ -354,10 +387,26 @@ fn assert_legs(cell: &str, legs: &[(bool, &str)]) {
 /// worker's holder bit, the shared forward row and its reverse companion, and
 /// a cluster-synced conntrack row (what the Go mirror write leaves).
 fn seeded_fixture(v6: bool) -> Fixture {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
+    assert!(
+        !crate::afxdp::session_glue::synced_entry_allows_local_replace(&ha_state, RG, now_secs),
+        "premise: the fixture must model an ACTIVE owner, where the #9678 gate applies"
+    );
+    seeded_fixture_in(v6, forwarding(), ha_state)
+}
+
+/// As `seeded_fixture`, under `forwarding` and the HA view `ha_state` (the
+/// coordinator's and the worker's).
+fn seeded_fixture_in(
+    v6: bool,
+    forwarding: ForwardingState,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+) -> Fixture {
     clear_session_map_writes();
     clear_conntrack_rows_for_test();
     let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(forwarding());
+    coordinator.set_forwarding_for_test(forwarding);
     let commands = Arc::new(Mutex::new(VecDeque::new()));
     coordinator.workers.register(
         0,
@@ -380,13 +429,7 @@ fn seeded_fixture(v6: bool) -> Fixture {
             }),
             ..Default::default()
         }));
-    let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
     coordinator.ha.rg_runtime.store(Arc::new(ha_state.clone()));
-    assert!(
-        !crate::afxdp::session_glue::synced_entry_allows_local_replace(&ha_state, RG, now_secs),
-        "premise: the fixture must model an ACTIVE owner, where the #9678 gate applies"
-    );
     let original = peer_row(v6, LOCAL_PORT, SEED_GENERATION, SEED_SESSION_ID);
     let late = peer_row(v6, LATE_PORT, LATE_GENERATION, LATE_SESSION_ID);
     let mut fx = Fixture {
@@ -1512,4 +1555,268 @@ fn superseded_promotion_does_not_seed_flow_cache_18552() {
             ),
         ],
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fold 2, B1 (Codex P1-4 = r24 P2-1(a), the lead's Option B): a REPLY-first
+// promotion. The #9678 import gate and the #9714 peer-delete guard read only
+// the FORWARD row, so a reverse companion R promoted alone left F `SyncImport`
+// and both gates blind. A reverse hit now promotes F with R, under the same
+// permit, when F is present, promotable, current, and its owner RG is locally
+// active in the hit's HA view.
+// ---------------------------------------------------------------------------
+
+const PAIR_PROMOTED: [Option<SessionOrigin>; 4] = [Some(SessionOrigin::SharedPromote); 4];
+
+/// B1, import. After a reply-first promotion a late different-translation
+/// import of F meets the #9678 gate: T1 stays, T2 is never reserved, and
+/// nothing is published or steered.
+fn assert_reply_first_promotion_stops_late_import(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    fx.promote_reply_on_hit();
+    let after_promotion = fx.pair_origins();
+    clear_session_map_writes();
+    let outcome = fx.coordinator.upsert_synced_session(fx.late.clone());
+    fx.drain_worker();
+    let late_reply = fx.late_reply();
+    assert_legs(
+        &format!(
+            "reply-first vs import (v6={v6}; after the reply hit worker F/R, shared F/R = \
+             {after_promotion:?}; import {outcome:?})"
+        ),
+        &[
+            (
+                after_promotion == PAIR_PROMOTED,
+                "pair: the reply hit did not promote F with R in the worker and in shared",
+            ),
+            (
+                outcome == SyncedImportOutcome::Applied,
+                "outcome: the #9678 refusal reports Applied (deliberately silent)",
+            ),
+            (
+                fx.shared_identity(&key)
+                    == Some((SEED_SESSION_ID, snat(v6, LOCAL_PORT), SessionOrigin::SharedPromote)),
+                "shared: the late import replaced the promoted forward",
+            ),
+            (!fx.port_is_free(206, LOCAL_PORT), "allocator: the late import freed T1"),
+            (fx.port_is_free(207, LATE_PORT), "allocator: the late import reserved T2"),
+            (
+                fx.shared(&late_reply).is_none() && fx.worker_origin(&late_reply).is_none(),
+                "companion: the late row's reverse companion was published or installed",
+            ),
+            (
+                session_map_writes().is_empty(),
+                "steering: the refused import steered a tuple",
+            ),
+            (
+                fx.pair_origins() == PAIR_PROMOTED,
+                "pair: the promoted pair did not survive the late import",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn reply_first_promotion_stops_late_import_v4_18552() {
+    assert_reply_first_promotion_stops_late_import(false);
+}
+
+#[test]
+fn reply_first_promotion_stops_late_import_v6_18552() {
+    assert_reply_first_promotion_stops_late_import(true);
+}
+
+/// B1, delete. After a reply-first promotion a peer delete of F reads the
+/// promoted shared forward before its lease and is refused by the early #9714
+/// check (`RefusedLocalOwned`); both rows survive, in the worker and in shared.
+fn assert_reply_first_promotion_refuses_peer_delete(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    fx.promote_reply_on_hit();
+    let after_promotion = fx.pair_origins();
+    let outcome = fx
+        .coordinator
+        .session_domain()
+        .delete_synced(fx.key(), SyncedDeleteMode::PEER, false);
+    fx.drain_worker();
+    assert_legs(
+        &format!(
+            "reply-first vs peer delete (v6={v6}; after the reply hit worker F/R, shared F/R = \
+             {after_promotion:?}; delete {outcome:?}; then {:?})",
+            fx.pair_origins()
+        ),
+        &[
+            (
+                after_promotion == PAIR_PROMOTED,
+                "pair: the reply hit did not promote F with R in the worker and in shared",
+            ),
+            (
+                outcome == SyncedDeleteOutcome::RefusedLocalOwned,
+                "outcome: the peer delete of F was not refused as locally owned (#9714)",
+            ),
+            (
+                fx.pair_origins() == PAIR_PROMOTED,
+                "pair: the peer delete removed or demoted F or R",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn reply_first_promotion_refuses_peer_delete_v4_18552() {
+    assert_reply_first_promotion_refuses_peer_delete(false);
+}
+
+#[test]
+fn reply_first_promotion_refuses_peer_delete_v6_18552() {
+    assert_reply_first_promotion_refuses_peer_delete(true);
+}
+
+/// B1, split RG. F's owner RG (1, the WAN egress that holds the SNAT
+/// allocation) is NOT active here; R's reply egress (the LAN row, moved to RG 2)
+/// is. The reply hit promotes R only: F's owner stays authoritative for the
+/// pair, so its import of a new translation legitimately applies to F.
+fn assert_split_rg_reply_first_promotes_reply_only(v6: bool) {
+    let mut forwarding = forwarding();
+    forwarding
+        .egress
+        .get_mut(&6)
+        .expect("LAN egress row")
+        .redundancy_group = 2;
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive = HAGroupRuntime {
+        active: false,
+        watchdog_timestamp: now_secs,
+        lease: HAForwardingLease::Inactive,
+    };
+    let split_view = BTreeMap::from([(RG, inactive), (2, active_rg(now_secs))]);
+    assert!(
+        !crate::afxdp::session_glue::owner_rg_is_locally_active(&split_view, RG, now_secs)
+            && crate::afxdp::session_glue::owner_rg_is_locally_active(&split_view, 2, now_secs),
+        "premise: F's owner RG 1 is inactive here and the reply's RG 2 is active"
+    );
+    let mut fx = seeded_fixture_in(v6, forwarding, split_view);
+    let key = fx.key();
+    assert_eq!(
+        fx.worker_sessions
+            .entry_with_origin(&key)
+            .map(|(_, metadata, _)| metadata.owner_rg_id),
+        Some(RG),
+        "premise: F is owned by RG 1"
+    );
+    fx.promote_reply_on_hit();
+    let after_promotion = fx.pair_origins();
+    let outcome = fx.coordinator.upsert_synced_session(fx.late.clone());
+    fx.drain_worker();
+    assert_legs(
+        &format!(
+            "split-RG reply-first (v6={v6}; after the reply hit worker F/R, shared F/R = \
+             {after_promotion:?}; import {outcome:?})"
+        ),
+        &[
+            (
+                after_promotion
+                    == [
+                        Some(SessionOrigin::SyncImport),
+                        Some(SessionOrigin::SharedPromote),
+                        Some(SessionOrigin::SyncImport),
+                        Some(SessionOrigin::SharedPromote),
+                    ],
+                "pair: the reply hit must promote R only and leave F synced (F's owner RG is \
+                 not active here)",
+            ),
+            (
+                outcome == SyncedImportOutcome::Applied
+                    && fx.shared_identity(&key)
+                        == Some((LATE_SESSION_ID, snat(v6, LATE_PORT), SessionOrigin::SyncImport)),
+                "import: F's owner's import of T2 must apply and be published",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn split_rg_reply_first_promotes_reply_only_v4_18552() {
+    assert_split_rg_reply_first_promotes_reply_only(false);
+}
+
+#[test]
+fn split_rg_reply_first_promotes_reply_only_v6_18552() {
+    assert_split_rg_reply_first_promotes_reply_only(true);
+}
+
+/// B1, F not current. The reply hit lands while F's shared row already names a
+/// successor (a new session id; same translation, so R's key and its own
+/// shared row are unchanged). R alone is promoted, and F (worker row, shared
+/// row, origin bit, steering) is untouched: the successor's queued upsert
+/// repairs F. The TRUE twin runs first: the same hit with F current promotes
+/// the pair, so the cell discriminates on F's incarnation alone.
+fn assert_reply_first_skips_superseded_forward(v6: bool) {
+    let mut control = seeded_fixture(v6);
+    control.promote_reply_on_hit();
+    let control_pair = control.pair_origins();
+
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let mut successor = fx.original.clone();
+    successor.session_id = LATE_SESSION_ID;
+    successor.generation = LATE_GENERATION;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &fx.coordinator.sessions.synced,
+        &fx.coordinator.sessions.nat,
+        &fx.coordinator.sessions.forward_wire,
+        &fx.coordinator.sessions.owner_rg_indexes,
+        &successor,
+    );
+    let successor_identity =
+        Some((LATE_SESSION_ID, snat(v6, LOCAL_PORT), SessionOrigin::SyncImport));
+    assert_eq!(fx.shared_identity(&key), successor_identity, "premise: shared F is superseded");
+    clear_session_map_writes();
+
+    fx.promote_reply_on_hit();
+
+    assert_legs(
+        &format!(
+            "reply-first, F not current (v6={v6}; control pair {control_pair:?}; worker F/R, \
+             shared F/R = {:?})",
+            fx.pair_origins()
+        ),
+        &[
+            (
+                control_pair == PAIR_PROMOTED,
+                "twin: with F current, the reply hit did not promote the pair",
+            ),
+            (
+                fx.worker_origin(&fx.local_reply()).map(|(_, origin)| origin)
+                    == Some(SessionOrigin::SharedPromote),
+                "reply: R was not promoted",
+            ),
+            (
+                fx.worker_origin(&key) == Some((snat(v6, LOCAL_PORT), SessionOrigin::SyncImport)),
+                "forward: the superseded worker F was flipped",
+            ),
+            (
+                fx.shared_identity(&key) == successor_identity,
+                "forward: shared F (the successor) was overwritten",
+            ),
+            (
+                fx.conntrack_peer_synced() == Some(true),
+                "forward: F's conntrack origin bit was cleared",
+            ),
+            (
+                !session_map_writes().iter().any(|write| write.key == key),
+                "forward: F's steering row was re-published",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn reply_first_skips_superseded_forward_v4_18552() {
+    assert_reply_first_skips_superseded_forward(false);
+}
+
+#[test]
+fn reply_first_skips_superseded_forward_v6_18552() {
+    assert_reply_first_skips_superseded_forward(true);
 }

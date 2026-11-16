@@ -1182,14 +1182,15 @@ gate cluster.
 stopping node's sync backlog, so more synced imports land after activation.
 Such an import does not replace a local session the new owner already holds
 (#9678, deliberate). Since #18552 that also covers a session a worker is
-promoting at that moment: the promotion holds the tuple's install permit until
-its shared publish and sibling fan-out, and the import judges ownership with an
-HA view loaded after its tuple lease, so an RG that activated while it waited
-counts as active. A promotion that a held tuple defers keeps that packet out of
-the flow cache, so a later owner packet retries it. It does reach
-`USERSPACE_SESSIONS` through the worker
-fan-out (verified in #18550/#18551). Post-takeover loss leads are tracked in
-#18550/#18551.
+promoting at that moment, including a reply-first promotion, which promotes the
+forward row with its reverse when the forward's owner RG is local (in a split
+RG the forward's owner stays authoritative): the promotion holds the tuple's
+install permit until its shared publish and sibling fan-out, and the import
+judges ownership with an HA view loaded after its tuple lease, so an RG that
+activated while it waited counts as active. A promotion that a held tuple
+defers keeps that packet out of the flow cache, so a later owner packet retries
+it. It does reach `USERSPACE_SESSIONS` through the worker fan-out (verified in
+#18550/#18551). Post-takeover loss leads are tracked in #18550/#18551.
 
 ### Manual failover refused 11-29 s after a peer restart — FIXED IN SOURCE (#18541, #18374), NOT YET LIVE-VALIDATED
 

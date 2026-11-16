@@ -291,7 +291,7 @@ Measured in the #18550 review with the poll harness:
 | lapsed row, `ping; gre` | | 1 | 1 | 1 (counted, not delivered) |
 | lapsed row, `any-service` | | 1 | 0 | 1 (delivered) |
 
-**Promotion vs late import (#18552, closed).** A worker promotes a peer row in
+**Promotion vs late import (#18552).** A worker promotes a peer row in
 two steps. It flips its own table row to `SharedPromote`, then publishes the
 shared row. The #9678 gate reads only the shared row. So an import that ran
 between the two steps saw the older peer row and proceeded. It did the same if
@@ -317,7 +317,23 @@ the shared publish and the sibling fan-out. It takes the permit with
   cache. The row stays promotable, and the next resolved hit retries.
 - **Promotion holds the permit first.** The import's lease waits for it (up to
   its 100 ms acquire budget, or it reports `RejectedGateBusy`). The import then
-  re-reads a `SharedPromote` row, which the #9678 gate stops.
+  re-reads a `SharedPromote` FORWARD row, which the #9678 gate stops. The gate
+  (and the #9714 peer-delete guard) reads only the forward row, so this holds
+  for a forward-hit promotion, and for a reverse-hit promotion only when the
+  forward was promoted with it (next bullet).
+- **Reply-first promotion (fold 2, Option B).** A reply hit promotes its
+  reverse companion R. When this worker also holds the forward F as a
+  promotable peer row, F is the current incarnation (`synced_row_incarnation`)
+  and F's owner RG is locally active in the HA view the hit's own verdict
+  used, F is flipped, published, origin-cleared, steered and fanned out with R,
+  under the same permit (it already claims `[R, F]`). Every check for both
+  rows runs before either flip. Otherwise R is promoted alone, as before.
+  Forward hits are unchanged and never promote their reverse.
+- **Split RG: F's owner stays authoritative.** When F's owner RG is not active
+  here (the RG that holds the flow's source-NAT allocation lives on the peer),
+  only R is promoted. F stays a peer row, so the peer's imports and deletes of
+  F legitimately apply: that is the owner replacing or ending its own flow.
+  Imports and deletes still meet #9714 for R where it applies.
 - **Origin bit.** The conntrack origin-bit clear uses
   `update_session_cluster_synced_origin_under_permit`. The gated variant needs
   an Idle tuple and would decline silently under the promotion's own permit.
@@ -333,9 +349,10 @@ the shared publish and the sibling fan-out. It takes the permit with
   worker mints its own id for such a row). Generation is not compared: the
   worker row does not store it, and a same-incarnation resend bumps it.
   Otherwise nothing changes: the queued `UpsertSynced` or `DeleteSynced`
-  repairs the row, and a later hit promotes the current incarnation. Without this, the stale row overwrote shared
-  authority (or resurrected a deleted forward without its companion), and the
-  queued repair was then refused as a local-ownership clobber.
+  repairs the row, and a later hit promotes the current incarnation. Without
+  this, the stale row overwrote shared authority (or resurrected a deleted
+  forward without its companion), and the queued repair was then refused as a
+  local-ownership clobber.
 - **Every check runs before the flip.** The #10612 stale-replay fence used to
   return after the flip, leaving the worker row `SharedPromote` and the shared
   row peer-synced. It now runs first and flips nothing, so no outcome other
@@ -353,9 +370,10 @@ the shared publish and the sibling fan-out. It takes the permit with
   owned (a sibling promoted it; shared authority already protects the flow) or
   a stale-replay fence (permanent until a purge) does not suppress the seed.
 - **Refusal costs no allocation.** While a holder lasts (a lease's drain, up to
-  100 ms, or a whole clear), every resolved hit retries. A non-allocating pre-check
-  (`TupleGate::install_claim_would_refuse`) refuses then without the keys and
-  permits Vecs, the admission Arc and a gate-entry insert and rollback.
+  100 ms, or a whole clear), every resolved hit retries. A non-allocating
+  pre-check (`TupleGate::install_claim_would_refuse`) refuses then without the
+  keys and permits Vecs, the admission Arc and a gate-entry insert and
+  rollback.
   `try_acquire_installs` stays the authority.
 - **The importer judges ownership after its lease.** It loaded its HA view
   before the lease, to prepare the lease keys. An import that waited on the
@@ -390,7 +408,25 @@ Pinned by:
   - the permit spans the sibling fan-out, a lease on only the reply tuple
     refuses the promotion, and an in-window peer delete is refused by #9714;
   - on the real poll pipeline and flow cache: a refused promotion and a
-    superseded one do not seed the cache, and a later owner packet promotes.
+    superseded one do not seed the cache, and a later owner packet promotes;
+  - reply-first: a reply hit promotes the pair, after which a late
+    different-translation import of F is stopped by #9678 and a peer delete of
+    F is refused by #9714 (`RefusedLocalOwned`); in a split RG only R is
+    promoted and F's owner's import applies; with F superseded only R is
+    promoted.
+
+What is NOT covered (residuals, `docs/log/18552.md` has the detail):
+
+- The coordinator's RG demote (`demote_shared_owner_rgs`) rewrites shared rows
+  without the tuple gate, so it is not serialized against a promotion that
+  straddles it (pre-existing, r23 P3-3).
+- A worker replica whose shared row was deleted but whose `DeleteSynced` push
+  was refused on a full worker queue stays peer-synced and is no longer
+  promoted (it used to resurrect the deleted shared row). It forwards until it
+  idles out. The census of every shared-removal path found no LIVE flow left
+  in this state.
+- No cell covers NAT64 or NPTv6 pairs; the pair keys come from
+  `reverse_session_key`, which handles them, but that is a code read.
 
 - `afxdp/tests_late_synced_publish_18550.rs`: v4 and v6; the late-publish,
   shared-local and worker-local shapes;

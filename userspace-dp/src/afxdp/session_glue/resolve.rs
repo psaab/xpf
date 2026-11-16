@@ -310,6 +310,7 @@ pub(in crate::afxdp) fn resolve_flow_session_decision(
         session_map,
         shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, shared.tick),
         forwarding,
+        ha_state,
         tcp_flags,
         worker_id,
         verdict,
