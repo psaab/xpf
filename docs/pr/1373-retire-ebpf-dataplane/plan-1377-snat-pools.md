@@ -51,18 +51,26 @@ matched but is unavailable". The packet path converts unavailable pool results
 into `record_source_nat_failure` exceptions and recycles the packet before
 session creation or forwarding.
 
-The current fail-closed runtime call sites are the two
-`source_nat_decision_for_flow(...)` paths in
-`userspace-dp/src/afxdp/poll_descriptor/mod.rs`:
+These are the current fail-closed runtime decision sites; #17021 moved the
+first two into one composer (#19132). `userspace-dp/tests/snat_contract_doc_guard.rs`
+pins this layout with a crate-wide census:
 
-- `poll_descriptor/mod.rs:1963` - normal new-session path: the source NAT
-  lookup fails closed before the NAT decision is installed. This is the single
-  SNAT fallback the merge path uses whether or not a pre-routing DNAT is
-  present (the source side of the merged decision still fails closed before
-  merge/session creation).
-- `poll_descriptor/mod.rs:3691` - pending-neighbor/session-build retry path:
-  the source NAT lookup fails closed before the missing-neighbor seed session
-  is installed. Same single-fallback shape as the new-session path.
+- `session_glue/forward_commit.rs`: `compose_outbound_source_nat` makes the
+  `source_nat_decision_for_flow(...)` decision for BOTH packet paths and returns
+  a failed decision as `Err(NatFailure::SourceNat(failure))`. It never forwards
+  untranslated. Its two callers are in `poll_descriptor/mod.rs`:
+  - normal new-session path: the `NatFailure::SourceNat` arm calls
+    `record_source_nat_failure` and recycles the frame before the NAT decision
+    is installed. This is the single SNAT fallback the merge path uses whether
+    or not a pre-routing DNAT is present.
+  - pending-neighbor/session-build retry path (the missing-neighbor seed): the
+    same arm records the failure and recycles the frame before the seed session
+    is installed.
+- `poll_descriptor/frag_assoc.rs`: the flowless-fragment NAT retry (#10957) makes
+  its own `source_nat_decision_for_flow(...)` decision and DROPS the fragment on
+  any failure, which is fail-closed. It does not call
+  `record_source_nat_failure`, so a pool failure there leaves no source-NAT
+  exception: a counting gap, not a fail-open.
 
 > #3121 reduction (was four sites): NPTv6 outbound source translation now
 > COMPOSES with destination NAT. Each path (the normal new-session Permit-NAT
@@ -76,7 +84,7 @@ The current fail-closed runtime call sites are the two
 > call each (4 → 2). The #1377 fail-closed contract is unchanged: NPTv6
 > short-circuits before the SNAT fallback and cannot fail in the pool sense
 > (it is a stateless prefix rewrite with no pool allocation), and BOTH
-> remaining `source_nat_decision_for_flow(...)` calls still convert an
+> remaining `source_nat_decision_for_flow(...)` calls still converted an
 > unavailable pool result into a `record_source_nat_failure` exception and
 > recycle the packet before session creation or forwarding.
 
