@@ -433,6 +433,77 @@ What is NOT covered (residuals, `docs/log/18552.md` has the detail):
 - `afxdp/session_glue/lapsed_replica_reimport_18550_tests.rs`: v4 and v6;
   the lapsed-row revive cell, plus standby, live-anchor and local-row controls.
 
+**Materialize-on-miss vs the commit-time policy-delete batch (#19153).** A
+worker that misses its own table and finds the flow in the shared map
+materializes the shared row into its table
+(`session_glue::materialize_shared_session_hit_adopted`). That is how a node
+serves every flow it took over in a failover. Until #19153 the materialize took
+no tuple-gate permit. The commit-time policy-delete batch
+(`ha/session_domain.rs::delete_policy_batch`, #10512, the session
+invalidation of #6948) does this:
+
+- it leases every item key and captured companion;
+- it pushes `DeletePolicyBatch` to every worker and waits for all acks;
+- only then does it remove the shared rows, probe the workers and repair.
+
+A worker that had acked could take the flow's next packet in between, find
+the shared row the coordinator had not removed yet, and materialize the
+revoked incarnation again. The probe then found it and republished its mirror
+row, and it kept forwarding under the revoked decision until it idled out.
+
+Now the materialize joins the worker install protocol:
+
+- **The permit.** It takes the non-blocking install permit on the captured
+  key and its companion tuple, after the non-allocating
+  `install_claim_would_refuse` pre-check. A held lease (the batch, an HA
+  import or delete, a pressure shed) refuses it.
+- **The re-read.** Under the permit it re-reads the shared row
+  (`materialize_current_shared_under_permit`). A permit alone is not enough:
+  the shared entry was captured at resolve time, and a lease can remove the
+  shared rows and drop between that capture and the permit.
+- **What it installs.** It installs only if the shared row still names the
+  incarnation the resolve captured (`same_synced_incarnation`, the identity
+  rule #18552's promotion uses). That means the same NAT decision, always, and
+  the same session id when the shared id is non-zero. What it installs is the
+  CURRENT shared content, never the capture. So a zero-id (legacy) shared row
+  that matches on the NAT decision alone installs its current state, not the
+  capture's.
+- **A refusal.** A refused permit, an absent or superseded shared row, or a
+  refused install returns `install_failed`. The packet forwards on its resolved
+  decision, the poll seed gate keeps it out of the flow cache
+  (`poll_descriptor/mod.rs`, `flow_cache_install_failed`), and the next packet
+  resolves and retries. The persistent-hold acquire runs after every check, so
+  a refusal changes nothing.
+
+The lock order is the permit, then the shared lock. That is the order of
+promotion and the HA import (a lease, then the shared lock), and the permit is
+never waited for. The cost is once per materialize (per flow per worker),
+never per packet.
+
+Pinned by:
+
+- `afxdp/session_glue/policy_batch_materialize_race_tests.rs`: the end-to-end
+  repro. A mock worker runs the real `DeletePolicyBatch` handler, then
+  materializes the next packet before it acks. The batch must not leave the
+  revoked incarnation on the worker.
+- `afxdp/session_glue/materialize_permit_19153_tests.rs`, one property per
+  cell:
+  - a completed removal between the capture and the materialize;
+  - a held lease on the pair or on the reply tuple alone, then a retry;
+  - a superseded capture (new id, or new translation), reported `Superseded`;
+  - the control, including a locally owned shared row (`SharedLocal`);
+  - zero-id: the current content is installed;
+  - the identity predicate's table, and its #18552 consumer on a NAT-only
+    change.
+- `afxdp/session_glue/shared_replica_hold_17683_tests.rs`: a refused
+  materialize takes no persistent hold.
+- `afxdp/tests_promote_permit_18552.rs`: on the real poll pipeline, a refused
+  materialize forwards but does not seed the flow cache, and the next packet
+  after the lease drops materializes.
+
+Not covered: how often the race fires on a live cluster. Measuring it needs a
+policy commit that invalidates active failed-over flows under load.
+
 **#7209 — an admitted import with no kernel session map is now visible.** After
 the reservation, `upsert_synced_session` publishes the row to the kernel session
 map. That publish sat behind one conjunction:

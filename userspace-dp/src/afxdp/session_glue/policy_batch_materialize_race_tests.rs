@@ -84,8 +84,14 @@ fn materialize_next_packet(
         shared_entry: Some(entry),
         authority_deferred: false,
     };
-    let (_, install_failed) =
-        materialize_shared_session_hit(sessions, &mut resolved, forwarding, now_ns, 0x10);
+    let (_, install_failed) = materialize_shared_session_hit(
+        sessions,
+        shared,
+        &mut resolved,
+        forwarding,
+        now_ns,
+        0x10,
+    );
     Some(!install_failed)
 }
 
@@ -147,11 +153,16 @@ fn a_materialize_after_a_policy_batch_worker_delete_does_not_outlive_the_batch()
 
     let stop = Arc::new(AtomicBool::new(false));
     let ready = Arc::new(AtomicBool::new(false));
+    // #19153: under cfg(test) each thread owns its tuple gate (#18834). The
+    // coordinator's batch runs on this thread, so the mock worker adopts this
+    // thread's gate, as a production worker shares the one process gate.
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
     let worker = {
         let (commands, stop, ready) = (Arc::clone(&commands), Arc::clone(&stop), Arc::clone(&ready));
         let shared = Arc::clone(&coordinator.sessions.synced);
         let key = forward_key.clone();
         std::thread::spawn(move || {
+            crate::afxdp::bpf_map::adopt_tuple_gate_for_test(gate);
             let forwarding = ForwardingState::default();
             let mut sessions = SessionTable::new();
             let mut seen = WorkerObservations::default();

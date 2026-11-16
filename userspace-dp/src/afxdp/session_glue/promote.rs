@@ -220,22 +220,48 @@ fn run_promote_before_fanout_hook() {
     }
 }
 
-/// #18552 (review F2): which incarnation the SHARED row for `key` names,
-/// judged against THIS worker's row for `key`.
+/// #18552 (review F2) and #19153: THE synced-incarnation identity rule. This
+/// is the single place it lives. Both callers use it:
+///
+/// - #18552 promotion (`synced_row_incarnation`) judges the worker row (`nat`,
+///   `session_id`) against the current shared row `entry`;
+/// - #19153 materialize-on-miss (`materialize_shared_session_hit_adopted`)
+///   judges the shared row it captured at resolve time against the current
+///   shared row `entry`, re-read under its install permit.
+///
+/// `entry` names the same incarnation iff its NAT decision equals `nat`
+/// (mandatory, always compared) and, when `entry.session_id` is non-zero, its
+/// session id equals `session_id`.
 ///
 /// Identity is the RT_FLOW session id plus the NAT decision: the two fields
 /// both the worker row and `SyncedSessionEntry` carry. The worker row does not
 /// store the peer's install generation, and a same-incarnation resend bumps
 /// the generation (the peer stamps every send from one climbing counter), so
-/// generation is deliberately not compared: such a resend is still `Current`.
-/// A new incarnation of a reused 5-tuple carries a different session id, and
-/// a translation change a different NAT decision; either is `Superseded`.
+/// generation is deliberately not compared: such a resend is the same
+/// incarnation. A new incarnation of a reused 5-tuple carries a different
+/// session id, and a translation change a different NAT decision; either is a
+/// different incarnation.
 ///
 /// A shared session id of 0 is the unknown/legacy sentinel (a peer that
-/// predates the field). The worker never stores 0: it mints a node-local id
-/// for such a row (`session/install.rs`), so the ids cannot match and only
-/// the NAT decision is compared. The harm F2 guards against (a freed T1, a
-/// late companion) needs a different translation, which that still catches.
+/// predates the field). Then only the NAT decision is compared. The worker
+/// never stores 0: it mints a node-local id for such a row
+/// (`session/install.rs`), so the ids could not match anyway. The harm F2
+/// guards against (a freed T1, a late companion) needs a different
+/// translation, which the NAT comparison still catches.
+pub(in crate::afxdp) fn same_synced_incarnation(
+    nat: NatDecision,
+    session_id: u64,
+    entry: &SyncedSessionEntry,
+) -> bool {
+    entry.decision.nat == nat && (entry.session_id == 0 || entry.session_id == session_id)
+}
+
+/// #18552 (review F2): which incarnation the SHARED row for `key` names,
+/// judged against THIS worker's row for `key`, by [`same_synced_incarnation`]
+/// (the session id plus the NAT decision, never the generation, and the NAT
+/// decision alone for a shared id of 0). A same-incarnation resend is
+/// `Current`; a new incarnation of a reused 5-tuple or a translation change is
+/// `Superseded`.
 ///
 /// Called under the promotion's install permit, which excludes every import
 /// and delete lease of the tuple, so the answer holds until the permit drops.
@@ -269,10 +295,7 @@ pub(in crate::afxdp) fn synced_row_incarnation(
     let shared = lock_shared_recover(shared_sessions);
     match shared.get(key) {
         None => SyncedRowIncarnation::SharedAbsent,
-        Some(entry)
-            if entry.decision.nat != nat
-                || (entry.session_id != 0 && entry.session_id != session_id) =>
-        {
+        Some(entry) if !same_synced_incarnation(nat, session_id, entry) => {
             SyncedRowIncarnation::Superseded
         }
         Some(entry) if !entry.origin.is_peer_synced() => SyncedRowIncarnation::SharedLocal,
@@ -726,6 +749,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
 
     super::apply_deferred_shared_materialization(
         sessions,
+        shared.sessions,
         forwarding,
         shared.tick.ns,
         tcp_flags,

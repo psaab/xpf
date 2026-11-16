@@ -185,8 +185,28 @@ fn inbound_count(fixture: &LeaseFixture) -> u32 {
         .inbound_flows
 }
 
+/// Materialize `entry` as the shared hit the resolve captured, with shared
+/// authority still naming it (#19153: the materialize re-reads the shared row
+/// under its install permit and installs only the incarnation it names).
 fn materialize(
     sessions: &mut SessionTable,
+    entry: crate::afxdp::SyncedSessionEntry,
+    forwarding: &ForwardingState,
+    now_ns: u64,
+) -> bool {
+    let shared = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    shared
+        .lock()
+        .expect("shared map")
+        .insert(entry.key.clone(), entry.clone());
+    materialize_against(sessions, &shared, entry, forwarding, now_ns)
+}
+
+/// [`materialize`] against the caller's shared map, which may no longer name
+/// `entry` (#19153).
+fn materialize_against(
+    sessions: &mut SessionTable,
+    shared: &Arc<std::sync::Mutex<crate::afxdp::FastMap<SessionKey, crate::afxdp::SyncedSessionEntry>>>,
     entry: crate::afxdp::SyncedSessionEntry,
     forwarding: &ForwardingState,
     now_ns: u64,
@@ -195,6 +215,7 @@ fn materialize(
     let (_, install_failed) =
         super::resolve::materialize_shared_session_hit_adopted(
             sessions,
+            shared,
             &mut resolved,
             forwarding,
             now_ns,
@@ -326,6 +347,7 @@ fn materialized_shared_wire_alias_releases_replaced_incumbent_hold_17683() {
     let (_, install_failed) =
         super::resolve::materialize_shared_session_hit_adopted(
             &mut sessions,
+            &shared_sessions,
             &mut resolved,
             &fixture.forwarding,
             NOW_NS + 4,
@@ -545,4 +567,67 @@ fn stale_hold_cannot_release_same_key_reminted_lease_17683() {
         false,
         remint_ns + 4,
     );
+}
+
+/// #19153: a refused materialize takes no persistent hold. The local hold
+/// acquire is the materialize's first side effect, and it runs only after the
+/// install permit and the shared re-read succeed. Were it taken before them
+/// and not released on their refusals, every refused packet would leak one
+/// inbound reference on the publisher's lease. Refusals: a held lease on the
+/// pair (an HA import or delete, or the commit-time policy-delete batch), and
+/// a shared row that no longer names the captured entry. The control
+/// installs and takes exactly one local reference.
+#[test]
+fn refused_materialize_acquires_no_persistent_hold_19153() {
+    let fixture = lease_fixture(NOW_NS);
+    let owner_hold = acquire_owner_hold(&fixture, NOW_NS + 2);
+    let captured = shared_entry_with_owner_hold(&fixture, owner_hold);
+    let shared = Arc::new(std::sync::Mutex::new(crate::afxdp::FastMap::default()));
+    shared
+        .lock()
+        .expect("shared map")
+        .insert(captured.key.clone(), captured.clone());
+    let mut sessions = SessionTable::new();
+    assert_eq!(inbound_count(&fixture), 1, "premise: only the publisher holds the lease");
+
+    let companion = crate::session::reverse_session_key(&captured.key, captured.decision.nat);
+    let lease = crate::afxdp::bpf_map::global_tuple_gate()
+        .acquire_lease([captured.key.clone(), companion])
+        .expect("premise: the idle pair leases");
+    let leased_failed =
+        materialize_against(&mut sessions, &shared, captured.clone(), &fixture.forwarding, NOW_NS + 3);
+    let after_lease = (sessions.len(), inbound_count(&fixture));
+    drop(lease);
+
+    let removed = shared.lock().expect("shared map").remove(&captured.key);
+    let absent_failed =
+        materialize_against(&mut sessions, &shared, captured.clone(), &fixture.forwarding, NOW_NS + 4);
+    let after_absent = (sessions.len(), inbound_count(&fixture));
+
+    shared
+        .lock()
+        .expect("shared map")
+        .insert(captured.key.clone(), captured.clone());
+    let control_failed =
+        materialize_against(&mut sessions, &shared, captured.clone(), &fixture.forwarding, NOW_NS + 5);
+
+    assert!(removed.is_some(), "premise: the shared row was present to remove");
+    assert!(
+        leased_failed && after_lease == (0, 1),
+        "held lease: the materialize must be refused with no row and no local hold \
+         (install_failed={leased_failed}, rows/inbound refs={after_lease:?})"
+    );
+    assert!(
+        absent_failed && after_absent == (0, 1),
+        "absent shared row: the materialize must be refused with no row and no local hold \
+         (install_failed={absent_failed}, rows/inbound refs={after_absent:?})"
+    );
+    assert!(
+        !control_failed && sessions.len() == 1 && inbound_count(&fixture) == 2,
+        "control: the current shared row must install with exactly one local hold \
+         (install_failed={control_failed}, rows={}, inbound refs={})",
+        sessions.len(),
+        inbound_count(&fixture)
+    );
+    assert_eq!(sessions.persistent_lease_hold_for(&captured.key), Some(owner_hold));
 }
