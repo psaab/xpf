@@ -26,10 +26,35 @@
 #   --separate-stderr
 #              keep the command's stderr apart from its stdout (see below);
 #              for a caller that parses stdout alone.
+#   --allow-unproven-root
+#              run a --root leg even when the runner has no VM proof for its
+#              current boot (see "Disclosure" below); vm-proof=absent is
+#              still printed.
 #
 #   If the runner is FROZEN (a gate cell pauses its same-host runner while it
 #   measures), the script waits for it to resume, up to XPF_TEST_RUNNER_WAIT_S
 #   seconds (default 7200), then exits 75.
+#
+# Disclosure (#19142): every run ends with one line on stderr,
+#   vm-test-run: paused-for=<s>s (workstation <s>s, runner monotonic <s>s,
+#   heartbeat gaps <s>s)
+# A gate cell PAUSES the runners of the host it measures (`incus pause`), and
+# a run inside a paused runner freezes with it. Nothing in the run's output
+# said so, and a timeout from such a run reads as a hang, a flake or a
+# regression. Two clocks catch a pause either way the guest clock behaves
+# across it: a 1 Hz heartbeat on the runner sums gaps of more than 2 s on its
+# CLOCK_MONOTONIC (a guest clock that jumps across the pause), and the
+# workstation's elapsed time is compared with the runner's monotonic elapsed
+# time, minus 2 s of exec overhead (a guest clock that stops). A nonzero
+# paused-for adds a second line saying that a timeout or timing-sensitive
+# result from the run is VOID unless re-run clean; paused-for=unknown means the
+# runner's clock record could not be read.
+# A --root leg also prints vm-proof=present|absent. The proof is
+# /run/xpf-testguard-vm-boot-id holding the current boot ID, root-owned and
+# mode 444, written by scripts/mark-test-vm.sh (testguard-run.sh applies the
+# same test). Without it testguard-run.sh runs even a root leg inside
+# `unshare -Urp`, where every privileged cell SKIPs. So a --root run without
+# the proof is refused (exit 2) unless --allow-unproven-root is given.
 #
 # Stream order (#19139): `incus exec` carries the command's stdout and stderr
 # as two separate streams, and the workstation merges them (`>log 2>&1`) in
@@ -85,6 +110,7 @@ name=""
 as_root=0
 sync=1
 merge_stderr=1
+allow_unproven_root=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--runner) runner="$2"; shift 2 ;;
@@ -92,6 +118,7 @@ while [[ $# -gt 0 ]]; do
 	--root) as_root=1; shift ;;
 	--no-sync) sync=0; shift ;;
 	--separate-stderr) merge_stderr=0; shift ;;
+	--allow-unproven-root) allow_unproven_root=1; shift ;;
 	--) shift; break ;;
 	-h|--help) sed -n '2,43p' "$0"; exit 0 ;;
 	*) echo "vm-test-run: unknown argument: $1 (use -- before the command)" >&2; exit 2 ;;
@@ -120,19 +147,28 @@ base="/work/${name}"
 runner_status() {
 	incus info "$runner" 2>/dev/null | awk 'tolower($1) == "status:" {print toupper($2); exit}'
 }
-waited=0
-while [[ "$(runner_status)" == "FROZEN" ]]; do
-	if [[ "$waited" -eq 0 ]]; then
-		echo "vm-test-run: ${runner} is FROZEN by a gate cell; waiting for it to resume ..." >&2
+# wait_unfrozen [soft]: wait (up to XPF_TEST_RUNNER_WAIT_S) while the runner
+# is FROZEN; exits 75 when it never resumes, or with "soft" returns 1 instead
+# (after the command, whose status must survive).
+wait_unfrozen() {
+	local waited=0
+	while [[ "$(runner_status)" == "FROZEN" ]]; do
+		if [[ "$waited" -eq 0 ]]; then
+			echo "vm-test-run: ${runner} is FROZEN by a gate cell; waiting for it to resume ..." >&2
+		fi
+		if [[ "$waited" -ge "${XPF_TEST_RUNNER_WAIT_S:-7200}" ]]; then
+			echo "vm-test-run: ${runner} still FROZEN after ${waited}s; giving up" >&2
+			[[ "${1:-}" == soft ]] && return 1
+			exit 75
+		fi
+		sleep 15
+		waited=$((waited + 15))
+	done
+	if [[ "$waited" -gt 0 ]]; then
+		echo "vm-test-run: ${runner} no longer FROZEN after ${waited}s (state: $(runner_status))" >&2
 	fi
-	if [[ "$waited" -ge "${XPF_TEST_RUNNER_WAIT_S:-7200}" ]]; then
-		echo "vm-test-run: ${runner} still FROZEN after ${waited}s; giving up" >&2
-		exit 75
-	fi
-	sleep 15
-	waited=$((waited + 15))
-done
-[[ "$waited" -gt 0 ]] && echo "vm-test-run: ${runner} no longer FROZEN after ${waited}s (state: $(runner_status))" >&2
+}
+wait_unfrozen
 
 # The runner must be a VM that was provisioned as a test runner.
 if ! incus exec "$runner" -- test -f /etc/xpf-testrunner 2>/dev/null; then
@@ -452,6 +488,83 @@ env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPD
 # #19139: one stream, in write order (see "Stream order" above).
 stream_prefix=""
 [[ "$merge_stderr" -eq 1 ]] && stream_prefix="exec 2>&1; "
+# #19142: the VM proof for a root leg (see "Disclosure" above). The same test
+# testguard-run.sh applies; prints present or absent.
+vm_proof_sh=$(
+	cat <<'SH'
+# vm-proof (#19142)
+p=/run/xpf-testguard-vm-boot-id
+b=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null) || b=
+if [ -n "$b" ] && [ -f "$p" ] && [ ! -L "$p" ] &&
+	[ "$(stat -c '%u %a' "$p" 2>/dev/null)" = "0 444" ] &&
+	[ "$(cat "$p" 2>/dev/null)" = "$b" ]; then
+	echo present
+else
+	echo absent
+fi
+SH
+)
+if [[ "$as_root" -eq 1 ]]; then
+	vm_proof=$(incus exec "$runner" -- bash -c "$vm_proof_sh" 2>/dev/null) || vm_proof=
+	[[ "$vm_proof" == present || "$vm_proof" == absent ]] || vm_proof=unknown
+	echo "vm-test-run: vm-proof=${vm_proof} on ${runner} (#19142)" >&2
+	if [[ "$vm_proof" != present && "$allow_unproven_root" -ne 1 ]]; then
+		echo "vm-test-run: refusing a --root run without the VM proof: testguard-run.sh would run it inside unshare -Urp, where every privileged cell SKIPs. As root on the runner, run scripts/mark-test-vm.sh (the proof is in /run, so once per boot), or pass --allow-unproven-root to run with vm-proof=${vm_proof} disclosed (#19142)" >&2
+		exit 2
+	fi
+fi
+
+# #19142: the runner-side heartbeat (see "Disclosure" above). It writes
+# "<start> <last> <gaps> <samples>" (CLOCK_MONOTONIC ns) to its file once a
+# second and on SIGTERM, exits 0 on SIGTERM (so bash prints no job notice into
+# the command's output), and stops on its own if its shell goes away. It is
+# passed inside single quotes, so it must contain none.
+heartbeat_py=$(
+	cat <<'PY'
+import os, signal, sys, time
+SECOND = 1000000000
+path, parent = sys.argv[1], os.getppid()
+start = last = time.monotonic_ns()
+gaps = samples = 0
+def save(now):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as handle:
+        handle.write(f"{start} {now} {gaps} {samples}\n")
+    os.replace(tmp, path)
+def sample():
+    global last, gaps, samples
+    now = time.monotonic_ns()
+    if now - last > 2 * SECOND:
+        gaps += now - last - SECOND
+    last, samples = now, samples + 1
+    save(now)
+def stop(*_):
+    sample()
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+save(start)
+while os.getppid() == parent:
+    time.sleep(1)
+    sample()
+PY
+)
+if [[ "$heartbeat_py" == *"'"* ]]; then
+	echo "vm-test-run: internal error: the heartbeat program contains a single quote" >&2
+	exit 2
+fi
+clock_file="${base}/tmp/.vmtr-clock.$$.${RANDOM}"
+# The command starts only once the heartbeat has written its first record (or
+# after 3 s), so a short command still leaves one.
+clock_start="mkdir -p '${base}/tmp'; python3 -I -c '${heartbeat_py}' '${clock_file}' </dev/null >/dev/null 2>&1 & vmtr_hb=\$!; disown \$vmtr_hb 2>/dev/null; vmtr_n=0; while [ ! -s '${clock_file}' ] && [ \$vmtr_n -lt 60 ]; do sleep 0.05; vmtr_n=\$((vmtr_n + 1)); done; "
+# The command runs in a subshell between newlines, so its own `exit` and a
+# trailing `# comment` behave as before; its status is the run's.
+clock_stop="vmtr_rc=\$?; kill \$vmtr_hb 2>/dev/null; for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do kill -0 \$vmtr_hb 2>/dev/null || break; sleep 0.1; done; exit \$vmtr_rc"
+wrapped="${clock_start}(
+${cmd}
+); ${clock_stop}"
+# ws_now: the workstation's own uptime clock, which no NTP step moves.
+ws_now() { awk '{print $1}' /proc/uptime; }
+
 rc=0
 # A root leg keeps HOME=/home/runner (for the toolchains), so whatever it
 # wrote under runner's lane dir, module cache, cargo dir or cache is
@@ -470,10 +583,42 @@ root_handback() {
 if [[ "$as_root" -eq 1 ]]; then
 	trap 'root_handback; exit 130' INT
 	trap 'root_handback; exit 143' TERM
-	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}" || rc=$?
+	ws_t0=$(ws_now)
+	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${wrapped}" || rc=$?
+	ws_t1=$(ws_now)
 	trap - INT TERM
 	root_handback
 else
-	incus exec "$runner" -- su - runner -c "${stream_prefix}${env_prefix}; ${cmd}" || rc=$?
+	ws_t0=$(ws_now)
+	incus exec "$runner" -- su - runner -c "${stream_prefix}${env_prefix}; ${wrapped}" || rc=$?
+	ws_t1=$(ws_now)
+fi
+
+# #19142: the pause verdict (see "Disclosure" above).
+clock=
+if wait_unfrozen soft; then
+	clock=$(incus exec "$runner" -- bash -c "cat '${clock_file}' 2>/dev/null; rm -f '${clock_file}' '${clock_file}.tmp'" 2>/dev/null) || clock=
+fi
+pause_report=$(awk -v t0="$ws_t0" -v t1="$ws_t1" -v rec="$clock" 'BEGIN {
+	w = t1 - t0
+	if (split(rec, f, " ") < 4 || f[2] < f[1]) {
+		printf "unknown %.1f", w
+		exit
+	}
+	g = (f[2] - f[1]) / 1e9
+	h = f[3] / 1e9
+	x = w - g - 2
+	if (x < 0) x = 0
+	p = (h > x) ? h : x
+	printf "%d %.1f %.1f %.1f", int(p), w, g, h
+}')
+read -r paused w_s g_s h_s <<<"$pause_report"
+if [[ "$paused" == unknown ]]; then
+	echo "vm-test-run: paused-for=unknown (workstation ${w_s}s; no runner clock record) (#19142)" >&2
+else
+	echo "vm-test-run: paused-for=${paused}s (workstation ${w_s}s, runner monotonic ${g_s}s, heartbeat gaps ${h_s}s) (#19142)" >&2
+	if [[ "$paused" -gt 0 ]]; then
+		echo "vm-test-run: this run was paused or stalled for about ${paused}s: a timeout or timing-sensitive result from it is VOID unless re-run clean (#19142)" >&2
+	fi
 fi
 exit "$rc"

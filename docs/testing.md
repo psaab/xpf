@@ -94,6 +94,30 @@ The script also prepares the runner environment:
   On any doubt about the path the sync refuses (exit 2) and deletes nothing.
   `make test-vm-test-run-sync-lib` drives every case found in review with
   real cargo under a mock incus.
+- Every run discloses pauses, and every root run its VM proof (#19142). A
+  gate cell pauses the runners of the host it measures (`incus pause`), and a
+  run inside a paused runner freezes with it, silently: a timeout from such a
+  run reads as a hang, a flake or a regression. The run's last stderr line is
+  `vm-test-run: paused-for=<s>s (workstation <s>s, runner monotonic <s>s,
+  heartbeat gaps <s>s)`. Two clocks cover both ways a guest clock can behave
+  across a pause:
+  - a 1 Hz heartbeat on the runner sums CLOCK_MONOTONIC gaps over 2 s (a
+    clock that jumps);
+  - the workstation's elapsed time is compared with the runner's monotonic
+    elapsed time, minus 2 s of exec overhead (a clock that stops).
+
+  A nonzero `paused-for` adds a line saying a timeout or timing-sensitive
+  result from the run is VOID unless re-run clean; `paused-for=unknown`
+  means the runner's clock record could not be read. A `--root` run prints
+  `vm-proof=present|absent`: the proof is `/run/xpf-testguard-vm-boot-id`
+  holding the current boot ID, root-owned and mode 444, written by
+  `scripts/mark-test-vm.sh`. Without it, `testguard-run.sh` runs root legs
+  inside `unshare -Urp`, where every privileged cell SKIPs. So a root run
+  without the proof is refused (exit 2) unless `--allow-unproven-root` is
+  given. The proof lives in `/run`, so each runner needs it again after every
+  boot. `make test-vm-test-run-lib` checks the disclosure lines on every run
+  and simulates both pause shapes with a mock incus. It does not pause a real
+  VM; that needs a scratch runner.
 - It exports a runner-local `GOCACHE`, because the Makefile's default
   (`/var/worktrees/.cache/go-build`) exists only on the workstation. Root
   legs get a separate one.
