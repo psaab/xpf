@@ -48,8 +48,8 @@ impl crate::afxdp::Coordinator {
     /// a re-kick error. Both fail the FullResync un-ACKed for retry.
     /// #17127: unpaged entry point for direct Rust callers. This is the
     /// only shape a caller that does not page needs — a fresh kick. The
-    /// control-socket handler uses `kick_owner_rg_export_v2` for paged
-    /// requests, which validates the request marker and opaque
+    /// control-socket handler uses `kick_owner_rg_export_v2_client` for
+    /// paged requests, which validates the request marker and opaque
     /// continuation token before reaching the same implementation.
     /// The legacy `kick_owner_rg_export(.., continuation: bool)` shape
     /// was removed: it let a caller express a continuation WITHOUT a
@@ -66,13 +66,11 @@ impl crate::afxdp::Coordinator {
         self.kick_owner_rg_export_inner(owner_rgs, max, ExportKick::Fresh, 0)
     }
 
-    /// #9856: v2 control-socket entry point. Every request carries the
-    /// protocol marker; continuations additionally carry the helper
-    /// incarnation and sequence from the preceding page. #17127: the
-    /// five refusal arms here and in `_inner` (bad version, zero-token
-    /// continuation, page-1-with-token, no-open-window continuation,
-    /// token mismatch) are each asserted by a named test in
-    /// `ha_tests.rs` (`owner_rg_export_v2_refuses_*`).
+    /// `kick_owner_rg_export_v2_client` with client window 0, for the
+    /// `ha_tests.rs` cells. Test-only (#19155): #18752 moved the
+    /// control-socket handler to the `_client` form, which left this with
+    /// no production caller.
+    #[cfg(test)]
     pub fn kick_owner_rg_export_v2(
         &self,
         owner_rgs: &[i32],
@@ -93,9 +91,15 @@ impl crate::afxdp::Coordinator {
         )
     }
 
-    /// #18752: `kick_owner_rg_export_v2` carrying the client's own window id,
-    /// recorded on the window a fresh kick opens (ignored on a continuation).
-    /// The control-socket handler uses this form.
+    /// #9856: v2 control-socket entry point. Every request carries the
+    /// protocol marker; continuations additionally carry the helper
+    /// incarnation and sequence from the preceding page. #18752: it also
+    /// carries the client's own window id, recorded on the window a fresh
+    /// kick opens (ignored on a continuation). #17127: the five refusal
+    /// arms here and in `_inner` (bad version, zero-token continuation,
+    /// page-1-with-token, no-open-window continuation, token mismatch) are
+    /// each asserted by a named test in `ha_tests.rs`
+    /// (`owner_rg_export_v2_refuses_*`).
     #[allow(clippy::too_many_arguments)]
     pub fn kick_owner_rg_export_v2_client(
         &self,
