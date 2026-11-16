@@ -62,6 +62,22 @@ The script also prepares the runner environment:
   keeps the two apart for a caller that parses stdout alone; their relative
   order is then not preserved. `make test-vm-test-run-lib` pins this with a
   mock incus whose transport holds stdout until the command exits.
+- A lane never re-tests a previous cargo binary (#19134). cargo calls a crate
+  fresh when no source is newer than its artefacts, and the lane's target dir
+  outlives every sync, so a tree carrying OLDER mtimes than the lane's last
+  build (another worktree, an older commit) once re-ran the old binary in
+  "Finished ... in 0.0s". The sync therefore does not keep the workstation's
+  mtimes. A per-lane ledger, `/work/<lane>/.xpf-src-ledger.json`, maps each
+  path to its content hash and the time the lane first saw that content:
+  - an unchanged file gets its ledger time back, so the incremental build
+    survives;
+  - a new or changed file, or one the previous run modified on the runner,
+    gets the sync time;
+  - a lane with no ledger restamps every file once.
+  The tree is extracted to `src.new` and swapped in after the restamp.
+  Hashing costs about 2 s per sync of a full worktree.
+  `make test-vm-test-run-sync-lib` drives this with real cargo under a mock
+  incus.
 - It exports a runner-local `GOCACHE`, because the Makefile's default
   (`/var/worktrees/.cache/go-build`) exists only on the workstation. Root
   legs get a separate one.
