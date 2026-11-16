@@ -796,9 +796,11 @@ three priority-0 adverts, and only then settles the armed `ResignBarrier`s
 A daemon waiter is never left hanging. `resign_settle_18716_test.go` pins each
 case.
 Every other `becomeBackup` still settles them at the end of the transition. So
-for a forced resign, a completed barrier means "VIPs off AND priority 0 on the
-wire". The daemon relies on that: it removes the stable router link-local on
-barrier completion. That address sorts below the per-node link-locals, so
+for a forced resign, a nil verdict means the VIPs were removed AND the
+priority-0 send attempts have completed or unwound. It does NOT mean each
+advert reached the wire: a send failure or a panic in a send also settles nil
+(above). The daemon relies only on the ordering: it removes the stable router
+link-local after barrier completion, never during the send attempts. That address sorts below the per-node link-locals, so
 `resolveIPv6LinkLocal` picks it as the IPv6 advert source and the peer learns
 it as the master source. Removed before the burst, the burst would go out from
 a deleted address, or from a re-resolved per-node source that the peer's

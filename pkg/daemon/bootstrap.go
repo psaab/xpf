@@ -729,7 +729,10 @@ func (d *Daemon) relinquishClusterForBootstrap() []bootstrapTeardownStep {
 	sort.Ints(rgIDs)
 
 	for _, rgID := range rgIDs {
-		barrier := d.resignRethRG(rgID)
+		// #18716 fold 3: this forced resign too owns the stable router
+		// link-local's removal until its burst ends; the step keeps
+		// awaiting the VRRP barrier alone, as before.
+		barrier, _ := d.resignRethRGReleasingLL(rgID, d.resignRethRG)
 		if barrier == nil {
 			// Nothing to release for this RG — no RETH tenure to hand over.
 			continue

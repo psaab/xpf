@@ -917,20 +917,25 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 			// (NODAD) on its MASTER event. It is also this node's VRRP IPv6
 			// advert source (it sorts lowest) and the master source the
 			// peer learned, so it must still be here for the priority-0
-			// burst (fold 2): stableLLReleaseBarrier removes it as soon as
-			// the VRRP barrier settles, which is after the last priority-0
-			// advert, and before any helper round trip finishes. The
+			// burst (fold 2). resignRethRGReleasingLL (fold 3) registers
+			// this resign as the link-local's only remover until the VRRP
+			// barrier settles, after the burst's send attempts; it then
+			// removes the address unless the RG was re-activated in
+			// between, and the fence waits for that. The
 			// RA/DHCP services are cleared in the VRRP BACKUP arm
 			// (handleVRRPEvent), the first point where this RG's state reads
 			// inactive; clearRethServicesForRG snapshots that state.
-			rethResign = d.stableLLReleaseBarrier(ev.GroupID, d.resignRethRG(ev.GroupID))
+			_, rethResign = d.resignRethRGReleasingLL(ev.GroupID, d.resignRethRG)
 			rethResignDone = true
 		}
 		if clusterDemotionEdge && d.dataplane() != nil && !controlSilentAtEntry {
 			d.tryPrepareUserspaceRGDemotion(ev.GroupID)
 		}
 		if !noRethVRRP && !rethResignDone && rethResignEdge {
-			rethResign = d.resignRethRG(ev.GroupID)
+			// #18716 fold 3: this resign too owns the stable link-local's
+			// removal until its burst ends; the fence keeps the VRRP
+			// barrier alone, as before.
+			rethResign, _ = d.resignRethRGReleasingLL(ev.GroupID, d.resignRethRG)
 		}
 		// Deactivation: blackhole routes first (if transitioning
 		// to inactive), then clear rg_active.
@@ -1446,11 +1451,11 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			// healthy helper keeps prep, write, then link-local and services.
 			//
 			// Fold 2: only the services move to the front. The stable
-			// link-local stays at the end of this arm: this BACKUP event is
-			// emitted before the forced resign's priority-0 burst, and the
-			// link-local is that burst's IPv6 source. On the resign path the
-			// cluster handler's stableLLReleaseBarrier removes it right after
-			// the burst instead.
+			// link-local is the forced resign's priority-0 burst source, and
+			// this BACKUP event is emitted BEFORE that burst. Fold 3: the
+			// removeStableRethLinkLocal call at the end of this arm does
+			// nothing while a resign of this RG is pending; the resign
+			// removes the address after its burst.
 			desiredActive, _ := s.CurrentDesired()
 			helperDown := !desiredActive && d.dataplane() != nil && d.helperDownForDemotion()
 			controlSilent := helperDown && d.helperControlSilentForPrep()
@@ -1954,7 +1959,9 @@ func (d *Daemon) reconcileRGState() {
 			case vrrpPostureNeedsResign:
 				slog.Warn("reconcile: VRRP posture mismatch — cluster=secondary but VRRP=MASTER, resigning",
 					"rg", rgID)
-				d.vrrpMgr.ResignRG(rgID)
+				// #18716 fold 3: the stable link-local leaves after
+				// this resign's burst, not on the BACKUP event.
+				d.resignRethRGReleasingLL(rgID, func(rg int) vipReleaseBarrier { return d.vrrpMgr.ResignRG(rg) })
 			}
 		}
 
