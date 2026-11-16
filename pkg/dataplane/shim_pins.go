@@ -141,7 +141,7 @@ func removeUserspaceShimXDPLinkPinsExcept(dir string, keep map[int]bool) {
 		if err == nil && keep[ifindex] {
 			continue
 		}
-		reclaimStaleXDPLinkPin(filepath.Join(dir, name)).log(ifindex)
+		reclaimStaleXDPLinkPin(filepath.Join(dir, name)).log(ifindex, false)
 	}
 }
 
@@ -213,14 +213,20 @@ func (r xdpReclaimResult) String() string {
 	return fmt.Sprintf("%s: %v", r.outcome, r.err)
 }
 
-func (r xdpReclaimResult) log(ifindex int) {
+// quiet demotes both lines to DEBUG: the userspace per-member retry repeats on
+// a backoff and logs on change itself (codex-e).
+func (r xdpReclaimResult) log(ifindex int, quiet bool) {
+	info, warn := slog.Info, slog.Warn
+	if quiet {
+		info, warn = slog.Debug, slog.Debug
+	}
 	switch {
 	case r.outcome == reclaimNoPin:
 	case r.err == nil:
-		slog.Info("reclaimed stale XDP link pin", "ifindex", ifindex, "pin", r.path,
+		info("reclaimed stale XDP link pin", "ifindex", ifindex, "pin", r.path,
 			"outcome", string(r.outcome), "detach_ms", r.detachMS, "issue", "#19110")
 	default:
-		slog.Warn("stale XDP link pin not fully reclaimed; the attach waits out the kernel's release",
+		warn("stale XDP link pin not fully reclaimed; the attach waits out the kernel's release",
 			"ifindex", ifindex, "pin", r.path, "outcome", string(r.outcome), "err", r.err, "issue", "#19110")
 	}
 }

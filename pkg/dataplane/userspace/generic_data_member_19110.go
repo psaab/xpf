@@ -80,10 +80,6 @@ func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
 	// (Codex delta P2-2).
 	m.genericDataMemberCfg = cfg
 	reasons, changed := m.setGenericDataMembersLocked(members)
-	// A successful compile attach pass just ran: the next status tick re-runs
-	// the refresh reconcile, which drops any attach debt the compile repaid
-	// (codex-d NEW P2-1).
-	m.makeRefreshAttachDebtDueLocked()
 	m.mu.Unlock()
 	if changed {
 		logGenericDataMembers(reasons)
@@ -93,17 +89,12 @@ func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
 // resolveGenericDataMembers maps the config's local RETH data members to their
 // ifindexes. It takes no Manager lock.
 func (m *Manager) resolveGenericDataMembers(cfg *config.Config) map[int]string {
-	if cfg == nil || cfg.Chassis.Cluster == nil {
+	names := localDataMemberNames(cfg)
+	if names == nil {
 		return nil
 	}
-	members := cfg.RethToPhysical()
-	names := make([]string, 0, len(members))
-	for _, phys := range members {
-		names = append(names, config.LinuxIfName(phys))
-	}
-	sort.Strings(names)
 	out := map[int]string{}
-	for _, name := range slices.Compact(names) {
+	for _, name := range names {
 		if ifindex, err := ifindexByNameFn(name); err == nil {
 			out[ifindex] = name
 		}

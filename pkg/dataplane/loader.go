@@ -425,7 +425,7 @@ func (m *Manager) attachUserspaceShimXDP(result *CompileResult) error {
 		if genericOnly && !tunnel {
 			continue // a VLAN child: its parent's program covers it
 		}
-		m.reclaimBeforeAttach(pass, ifidx)
+		m.reclaimBeforeAttach(pass, ifidx, false)
 		if tunnel || genericOnly {
 			if err := m.attachWithin(pass, ifidx, true); err != nil && !isAlreadyAttached(err) {
 				if errors.Is(err, ErrXDPOccupied) {

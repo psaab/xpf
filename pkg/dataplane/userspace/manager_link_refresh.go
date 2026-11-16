@@ -275,10 +275,10 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 // takeover guard, which is recomputed after the loop. An attach failure must
 // not fail this publish, because the helper's snapshot update is still correct
 // and the unshimmed interface is fail-closed (no program, fence-dropped
-// transit), never fail-open. It is recorded as attach DEBT instead: a RETH
-// data member in it is a takeover-readiness reason while the peer is alive,
-// and the status loop retries it on a later tick (codex-d NEW P2-1,
-// refresh_attach_debt_19110.go).
+// transit), never fail-open. This reconcile keeps NO record of the failure: a
+// configured RETH data member is a readiness reason, and retried, from LIVE
+// kernel state by name (missing_data_member_19110.go), so no partial pass or
+// stale snapshot can erase or misdirect the obligation (codex-e).
 //
 // Detach half is intentionally NOT done here: detaching an obsolete ifindex
 // before the helper accepts next would repeat the #5485 bypass if the
@@ -301,10 +301,6 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 		tracked = m.bpfShim.XDPLinks()
 	}
 	var batch []dataplane.ShimXDPAttachRequest
-	// #19110 (codex-d NEW P2-1): what this pass tried and what it left with no
-	// attachment, for the readiness debt and its retry
-	// (refresh_attach_debt_19110.go).
-	attempted, failed := map[int]bool{}, map[int]error{}
 	for _, ifindex := range buildUserspaceIngressIfindexes(next) {
 		if ifindex == 0 {
 			continue
@@ -329,7 +325,6 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 			// sequence is spelled out here. Production goes through
 			// AttachShimXDPInterfaces below.
 			attach := m.attachInterfaceXDPHook
-			attempted[int(ifindex)] = true
 			if err := attach(int(ifindex), forceGeneric); err != nil {
 				if attachErrIsAlreadyAttached(err) {
 					continue
@@ -341,7 +336,7 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 						err = gerr
 					}
 				}
-				failed[int(ifindex)] = err
+				logRefreshAttachFailure(int(ifindex), err)
 			}
 			continue
 		}
@@ -352,9 +347,8 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 	// not N, while this caller holds m.mu.
 	if len(batch) > 0 {
 		for ifindex, err := range m.bpfShim.AttachShimXDPInterfaces(batch) {
-			attempted[ifindex] = true
 			if err != nil && !attachErrIsAlreadyAttached(err) {
-				failed[ifindex] = err
+				logRefreshAttachFailure(ifindex, err)
 			}
 		}
 	}
@@ -371,10 +365,18 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 			logGenericDataMembers(reasons)
 		}
 	}
-	// After the member re-resolve, so a failed member is logged by name. A
-	// failure is readiness debt and is retried on a later status tick; it no
-	// longer waits for an unrelated apply (codex-d NEW P2-1).
-	m.noteRefreshAttachOutcomeLocked(attempted, failed, time.Now())
+}
+
+// logRefreshAttachFailure logs one failed refresh attach. The refresh is
+// event-driven, so this is once per link event, not per tick. A configured RETH
+// data member is then owned by the per-member retry
+// (missing_data_member_19110.go), which re-resolves it by NAME on a later
+// status tick and keeps it a readiness reason until the kernel shows the shim
+// attached.
+func logRefreshAttachFailure(ifindex int, err error) {
+	slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; the interface stays "+
+		"fail-closed, and a configured RETH data member is retried by name on a later status tick",
+		"ifindex", ifindex, "err", err, "issue", "#14133")
 }
 
 // refreshRxVlanAttachAdmissionLocked adds the RX-VLAN activation precondition
