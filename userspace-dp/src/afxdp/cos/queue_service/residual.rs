@@ -272,7 +272,8 @@ pub(in crate::afxdp) fn v61_minimum_credits(root: &CoSInterfaceRuntime) -> bool 
 /// charged in, so short exact batches earn proportionally less). Q32, with
 /// the sub-unit remainders carried exactly under a fixed denominator and
 /// rescaled across a change. Credits carry debt (signed) and are capped above
-/// at one TX batch: 64 frames of bytes, 64 packets.
+/// at one TX batch, 64 frames of bytes and 64 packets, and the cap bounds the
+/// whole represented balance (a full bank keeps no remainder).
 ///
 /// Progress bound (Codex v6.2 P1, v6.3 P1). Let V = credit + rem / d in Q32
 /// units, and r / d' the exact ratio above, whose numerator r >= 1 whenever
@@ -359,17 +360,30 @@ pub(in crate::afxdp) fn v61_accrue_turn_credit(
     let add = (num / den).min(i64::MAX as u128) as i64;
     root.v6_credit_rem = (num % den) as u64;
     let frame = crate::afxdp::tx_frame_capacity() as i64;
-    root.v61_byte_credit = root
-        .v61_byte_credit
-        .saturating_add(add)
-        .min((64 * frame) << V61_CREDIT_SHIFT);
+    // The cap bounds the WHOLE represented balance: at the cap the sub-unit
+    // remainder is dropped too, so a full bank is exactly the cap and the
+    // interval bound "earned + 64 + 1" holds without a fractional excess
+    // (Codex v6.3 P2: a retained remainder above a full bank let 66 turn
+    // packets through against 66 - 1/d allowed).
+    let byte_cap = (64 * frame) << V61_CREDIT_SHIFT;
+    let byte_credit = root.v61_byte_credit.saturating_add(add);
+    if byte_credit >= byte_cap {
+        root.v61_byte_credit = byte_cap;
+        root.v6_credit_rem = 0;
+    } else {
+        root.v61_byte_credit = byte_credit;
+    }
     let opp_num = ((sent_packets as u128 * residual as u128) << V61_CREDIT_SHIFT) + root.v61_opp_rem as u128;
     let opp_add = (opp_num / den).min(i64::MAX as u128) as i64;
     root.v61_opp_rem = (opp_num % den) as u64;
-    root.v61_opp_credit = root
-        .v61_opp_credit
-        .saturating_add(opp_add)
-        .min(V61_OPP_CAP_PACKETS << V61_CREDIT_SHIFT);
+    let opp_cap = V61_OPP_CAP_PACKETS << V61_CREDIT_SHIFT;
+    let opp_credit = root.v61_opp_credit.saturating_add(opp_add);
+    if opp_credit >= opp_cap {
+        root.v61_opp_credit = opp_cap;
+        root.v61_opp_rem = 0;
+    } else {
+        root.v61_opp_credit = opp_credit;
+    }
 }
 
 /// #19100: settle a committed turn at its TRUE committed counts (Codex v6.1

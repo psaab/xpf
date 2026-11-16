@@ -507,13 +507,13 @@ cross-worker state, and it never touches the shared residual pool.
 **Bounds, per worker, over any interval.** Write E_p (E_b) for the packets
 (bytes) earned in the interval: the sum over exact commits of that commit's
 phi/(1-phi) times its committed packets (bytes). Then:
-- turn packets < E_p + 64 + 1 + 2^-32;
-- turn bytes < E_b + 64 TX frames + one frame + 2^-32 bytes.
+- turn packets ≤ E_p + 64 + 1;
+- turn bytes ≤ E_b + 64 TX frames + one frame.
 
 The terms:
-- 64 packets / 64 frames is the banked cap;
-- one packet and one frame is the minimum's debt;
-- 2^-32 is the fractional remainder a full bank still retains above its cap.
+- 64 packets / 64 frames is the banked cap. The cap bounds the whole
+  represented balance, so a full bank keeps no fractional remainder.
+- one packet and one frame is the minimum's debt.
 
 **Coarser form.** Since phi ≤ 1/32 and turn counts are integers, turn packets
 ≤ floor(committed exact packets / 31) + 65.

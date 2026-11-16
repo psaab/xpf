@@ -1349,3 +1349,48 @@ fn a_sub_32_byte_per_second_residual_still_repays_the_minimum_19100() {
         }
     }
 }
+
+/// #19100 (Codex v6.3 P2): the cap bounds the WHOLE represented balance, so
+/// the interval bound "turn packets <= earned + 64 + 1" holds exactly. This is
+/// Codex's counterexample: r = F x Q, d = 31 x F x Q + 1, shaping = 32 x F x Q
+/// + 1 (F a TX frame, Q = 2^32), so phi/(1-phi) = r/d, just under 1/31.
+/// 2,015 exact packets of F bytes fill both banks. A full bank must hold no
+/// remainder. Spend the bank (64 packets), commit 30 exact packets, take a
+/// minimum, commit one more. The 31 packets earned 31 r/d = 1 - 1/d packets,
+/// so a second minimum (66 turn packets against 1 - 1/d + 64 + 1) must not be
+/// allowed. With the remainder kept above the cap, the 31 packets' integer
+/// accrual was exactly one packet, and the second minimum went. Mutants: the
+/// byte remainder kept at the cap; the packet remainder kept at the cap.
+#[test]
+fn a_full_bank_carries_no_fraction_past_its_cap_19100() {
+    const Q: u64 = 1 << V61_CREDIT_SHIFT;
+    let f = crate::afxdp::tx_frame_capacity() as u64;
+    let (r, d) = (f * Q, 31 * f * Q + 1);
+    let mut root = lab_runtime(&[d], SHAPING_BYTES / 100);
+    root.shaping_rate_bytes = d + r;
+    for _ in 0..2_015 {
+        v61_accrue_turn_credit(&mut root, 0, f, 1);
+    }
+    assert_eq!(
+        (root.v61_byte_credit, root.v61_opp_credit),
+        (((64 * f) << V61_CREDIT_SHIFT) as i64, (64u64 << V61_CREDIT_SHIFT) as i64),
+        "premise: both banks are full"
+    );
+    assert_eq!(
+        (root.v6_credit_rem, root.v61_opp_rem),
+        (0, 0),
+        "a full bank must hold no fraction above its cap"
+    );
+    v61_settle_turn(&mut root, 64 * f, 64);
+    for _ in 0..30 {
+        v61_accrue_turn_credit(&mut root, 0, f, 1);
+    }
+    assert!(v61_minimum_credits(&root), "premise: the first minimum is allowed");
+    v61_settle_turn(&mut root, f, 1);
+    v61_accrue_turn_credit(&mut root, 0, f, 1);
+    assert!(
+        !v61_minimum_credits(&root),
+        "after the bank, one minimum and 31 exact packets (earned 1 - 1/d packets), a second \
+         minimum would send 66 turn packets against earned + 64 + 1 < 66"
+    );
+}
