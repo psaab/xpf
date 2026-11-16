@@ -517,11 +517,12 @@ func TestStaticNHTRestoreUnreadableFailsClosed19083(t *testing.T) {
 
 // TestStaticNHTBindingParserRealFRR19083 (R24 NEW-1): the binding parser reads
 // REAL `show ip|ipv6 nht route-map` output, captured on FRR 10.5.1 (udp fw1:
-// v4 bound and none 2026-11-13, v6 none 2026-11-15) and FRR 10.6.0 (loss fw1,
-// 2026-11-15, both families bound). A file's version is in its name; the
-// expected binding is in the table. Five of the eight version x family x state
-// cells are captured; both families print through the same zebra function
-// (show_vrf_nht_rm, parameterized by AFI), so the layout is family-agnostic.
+// v4 bound and none 2026-11-13, v6 none 2026-11-15) and FRR 10.6.0 (loss fw1:
+// both families bound 2026-11-15, both none 2026-11-16 on master 0.0.30534).
+// A file's version is in its name; the expected binding is in the table. Seven
+// of the eight version x family x state cells are captured. 10.5.1 v6 bound
+// needs a vtysh write (uncaptured below); both families print through the
+// same zebra function (show_vrf_nht_rm, parameterized by AFI).
 func TestStaticNHTBindingParserRealFRR19083(t *testing.T) {
 	table := map[string]string{
 		"show_ip_nht_routemap_bound-10.5.1_19083.txt":   "xpf-cluster-nht-19083",
@@ -529,6 +530,8 @@ func TestStaticNHTBindingParserRealFRR19083(t *testing.T) {
 		"show_ipv6_nht_routemap_none-10.5.1_19083.txt":  "",
 		"show_ip_nht_routemap_bound-10.6.0_19083.txt":   clusterStaticNHTRouteMap19083,
 		"show_ipv6_nht_routemap_bound-10.6.0_19083.txt": clusterStaticNHTRouteMap19083,
+		"show_ip_nht_routemap_none-10.6.0_19083.txt":    "",
+		"show_ipv6_nht_routemap_none-10.6.0_19083.txt":  "",
 	}
 	for file, want := range table {
 		t.Run(file, func(t *testing.T) {
@@ -547,8 +550,6 @@ func TestStaticNHTBindingParserRealFRR19083(t *testing.T) {
 	// reason it is not one yet. Nothing else may be missing.
 	uncaptured := map[string]string{
 		"show_ipv6_nht_routemap_bound-10.5.1_19083.txt": "needs a vtysh WRITE on a 10.5.1 node (no tcp/udp node binds a map); not read-only",
-		"show_ip_nht_routemap_none-10.6.0_19083.txt":    "loss is the only 10.6.0 cluster; captured read-only by lane H2 lab 2's restore phase",
-		"show_ipv6_nht_routemap_none-10.6.0_19083.txt":  "loss is the only 10.6.0 cluster; captured read-only by lane H2 lab 2's restore phase",
 	}
 	for _, v := range []string{"10.5.1", "10.6.0"} {
 		for _, af := range []string{"ip", "ipv6"} {
