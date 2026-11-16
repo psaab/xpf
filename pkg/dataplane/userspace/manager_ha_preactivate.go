@@ -50,6 +50,12 @@ import (
 type transferPreActivation struct {
 	until       time.Time
 	routesReady bool
+	// readyEpoch is the helper epoch the routes were published under
+	// (#19167 fold 2). The entry counts for the helper only while it still
+	// equals m.helperEpoch, which every helper reset and every spawn
+	// advances: readiness belongs to one helper incarnation by
+	// construction, whatever ordering reached it.
+	readyEpoch uint64
 }
 
 // BeginTransferPreActivation marks rgIDs pre-active until the deadline,
@@ -80,8 +86,13 @@ func (m *Manager) BeginTransferPreActivation(rgIDs []int, until time.Time) uint6
 		if m.transferPreActive == nil {
 			m.transferPreActive = make(map[int]transferPreActivation)
 		}
-		ready := m.transferPreActiveLocked(rgID, now) && m.transferPreActive[rgID].routesReady
-		m.transferPreActive[rgID] = transferPreActivation{until: until, routesReady: ready}
+		entry := transferPreActivation{until: until}
+		if prev := m.transferPreActive[rgID]; m.transferPreActiveLocked(rgID, now) {
+			// Re-Begin of a live entry only moves the deadline; its
+			// readiness stays bound to the epoch it was published under.
+			entry.routesReady, entry.readyEpoch = prev.routesReady, prev.readyEpoch
+		}
+		m.transferPreActive[rgID] = entry
 	}
 	return m.helperEpoch
 }
@@ -92,17 +103,13 @@ var errPreActivationHelperChanged = errors.New(
 	"the userspace helper was reset or replaced after the pre-activation began; " +
 		"its route republish may have reached a helper that no longer exists, so the transfer runs break-before-make")
 
-// dropTransferPreActivationRoutesLocked is the helper-reset half of #19167
-// fold 1: every pre-active entry goes back to routes-pending (the routes went
-// to the helper that is gone) and the epoch moves, so a Publish still in flight
-// for the old helper is refused. The deadline is kept; the caller's release or
-// the deadline ends the entry. Caller holds m.mu.
+// dropTransferPreActivationRoutesLocked is the helper-reset half of #19167:
+// the epoch moves, so a Publish still in flight for the old helper is refused
+// and every entry made ready under the old helper stops counting (readyEpoch,
+// fold 2). The deadline is kept; the caller's release or the deadline ends the
+// entry. Caller holds m.mu.
 func (m *Manager) dropTransferPreActivationRoutesLocked() {
 	m.helperEpoch++
-	for rgID, entry := range m.transferPreActive {
-		entry.routesReady = false
-		m.transferPreActive[rgID] = entry
-	}
 }
 
 // PublishTransferPreActivation marks rgIDs ROUTES-READY and sends the effective
@@ -129,6 +136,7 @@ func (m *Manager) PublishTransferPreActivation(rgIDs []int, epoch uint64) error 
 	for _, rgID := range rgIDs {
 		if entry, ok := m.transferPreActive[rgID]; ok {
 			entry.routesReady = true
+			entry.readyEpoch = epoch
 			m.transferPreActive[rgID] = entry
 		}
 	}
@@ -201,8 +209,22 @@ func (m *Manager) transferPreActiveLocked(rgID int, now time.Time) bool {
 
 // transferPreActiveForHelperLocked reports whether rgID is pre-active AND
 // routes-ready at now: the only stage the helper may see as active (#19167).
+// Fold 2: ready means ready for THIS helper. The entry's routes were published
+// under the current helper epoch, a helper process is live, and it holds a
+// published snapshot. Readiness reached while no helper was running, or under
+// a helper since replaced, does not count, whatever the ordering.
 func (m *Manager) transferPreActiveForHelperLocked(rgID int, now time.Time) bool {
-	return m.transferPreActiveLocked(rgID, now) && m.transferPreActive[rgID].routesReady
+	if !m.transferPreActiveLocked(rgID, now) {
+		return false
+	}
+	entry := m.transferPreActive[rgID]
+	return entry.routesReady && entry.readyEpoch == m.helperEpoch && m.helperHoldsPublishedSnapshotLocked()
+}
+
+// helperHoldsPublishedSnapshotLocked reports whether a helper process is live
+// and has been sent a snapshot it acknowledged. Caller holds m.mu.
+func (m *Manager) helperHoldsPublishedSnapshotLocked() bool {
+	return m.proc != nil && m.proc.Process != nil && m.publishedSnapshot != 0
 }
 
 // supersedeTransferPreActiveLocked is called from UpdateRGActive: a real

@@ -2,6 +2,8 @@ package userspace
 
 import (
 	"errors"
+	"github.com/psaab/xpf/pkg/config"
+	"os/exec"
 	"testing"
 	"time"
 )
@@ -187,5 +189,161 @@ func TestHelperResetDropsPreActivationReadiness19167(t *testing.T) {
 	pollPublish19167(t, m)
 	if got := rec.last(t); got[1] {
 		t.Fatalf("helper inventory %v after a helper reset: the pre-active RG1 stayed open on routes the new helper never got", got)
+	}
+}
+
+// snapshotPublished19167 records that the live helper acknowledged a snapshot,
+// which fold 2's helper-facing predicate requires.
+func snapshotPublished19167(m *Manager) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.publishedSnapshot == 0 {
+		m.publishedSnapshot = 1
+	}
+}
+
+// Fold 2 (codex-d P2-1, ordering 1), through the REAL spawn path. H1 is gone
+// (reset) and the helper is absent when Begin runs. The route publish only
+// folds into the retained snapshot (Retained: no evidence any helper holds the
+// routes). Even a Publish under that absent-helper epoch must not open the RG
+// on H2: H2 spawns, its snapshot replay lands, and the poll publishes RG1
+// inactive.
+func TestReadinessReachedWithNoHelperDoesNotSurviveTheSpawn19167(t *testing.T) {
+	m, rec := newPreActivateManager18559(t)
+	m.restartTimerFn = func(time.Duration, func()) {}
+	m.mu.Lock()
+	m.resetAfterHelperGoneLocked()
+	m.proc = nil // H1 exited
+	m.mu.Unlock()
+
+	epoch := m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
+	if outcome, err := m.PublishRouteOverlaySnapshotOutcome(nil, nil, nil, false); err != nil || outcome != RouteOverlayRetained {
+		t.Fatalf("route publish with no helper = (%v, %v), want (RouteOverlayRetained, nil): it reached no helper", outcome, err)
+	}
+	_ = m.PublishTransferPreActivation([]int{1}, epoch) // a caller that publishes anyway
+
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	m.mu.Lock()
+	m.proc = cmd
+	m.startHelperSupervisorLocked(cmd) // H2: the real spawn path
+	m.publishedSnapshot = 9            // H2's snapshot replay landed
+	m.mu.Unlock()
+
+	pollPublish19167(t, m)
+	if got := rec.last(t); got[1] {
+		t.Fatalf("helper inventory %v: H2 was told RG1 is active from readiness reached while no helper ran", got)
+	}
+}
+
+// Fold 2: the helper-facing predicate itself. Readiness counts only at the
+// current epoch, with a live helper process that holds a published snapshot.
+// The two process conditions sit behind the epoch check on every ordering the
+// API allows, so they are pinned here against constructed state.
+func TestReadinessRequiresALiveHelperWithAPublishedSnapshot19167(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(m *Manager)
+		want  bool
+	}{
+		{"control: current epoch, live helper, published snapshot", func(*Manager) {}, true},
+		{"helper process gone", func(m *Manager) { m.proc = nil }, false},
+		{"no published snapshot", func(m *Manager) { m.publishedSnapshot = 0 }, false},
+		{"older epoch", func(m *Manager) { m.helperEpoch++ }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _ := newPreActivateManager18559(t)
+			m.mu.Lock()
+			defer m.mu.Unlock()
+			m.transferPreActive = map[int]transferPreActivation{
+				1: {until: time.Now().Add(time.Minute), routesReady: true, readyEpoch: m.helperEpoch},
+			}
+			tc.setup(m)
+			if got := m.transferPreActiveForHelperLocked(1, time.Now()); got != tc.want {
+				t.Fatalf("helper-facing pre-activation = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Fold 2 (codex-d P2-2): a helper reset clears the route dedup hash, which
+// describes what the GONE helper acknowledged.
+func TestHelperResetClearsTheRouteDedupHash19167(t *testing.T) {
+	m, _ := newPreActivateManager18559(t)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.lastSnapshotHash = [32]byte{1}
+	m.resetAfterHelperGoneLocked()
+	if m.lastSnapshotHash != ([32]byte{}) {
+		t.Fatal("the route dedup hash survived the helper reset: a replacement helper could be reported \"unchanged\" for content it never received")
+	}
+}
+
+// Fold 2 (codex-d P2-2): the route publisher's duplicate skip reports
+// Unchanged only for the LIVE helper's acknowledged snapshot. The control: a
+// second identical publish on the live helper is Unchanged. The constructed
+// state: the old helper's hash is still in place and no snapshot is published
+// (a replacement helper before its replay, the pre-fold-2 state). That is
+// Retained, not Unchanged.
+func TestRouteDedupIsUnchangedOnlyOnTheLiveHelper19167(t *testing.T) {
+	stubRuleListHermetic(t)
+	cfg := overlayTestConfig()
+	rec := &applyRecorder9520{}
+	m := newRepublishManager9520(mustBuildSnapshot(t, cfg, config.UserspaceConfig{}, 7, 0), rec)
+	overlay := []config.RouteOverlayEntry{{Destination: "0.0.0.0/0", NextHop: "172.16.80.1", Policy: "wan-failover"}}
+	if outcome, err := m.PublishRouteOverlaySnapshotOutcome(cfg, overlay, nil, false); err != nil || outcome != RouteOverlayPublished {
+		t.Fatalf("setup: first publish = (%v, %v), want (RouteOverlayPublished, nil)", outcome, err)
+	}
+	if outcome, err := m.PublishRouteOverlaySnapshotOutcome(cfg, overlay, nil, false); err != nil || outcome != RouteOverlayUnchanged {
+		t.Fatalf("control: identical publish on the live helper = (%v, %v), want (RouteOverlayUnchanged, nil)", outcome, err)
+	}
+	m.mu.Lock()
+	m.publishedSnapshot = 0
+	m.mu.Unlock()
+	if outcome, err := m.PublishRouteOverlaySnapshotOutcome(cfg, overlay, nil, false); err != nil || outcome != RouteOverlayRetained {
+		t.Fatalf("dedup with no published snapshot = (%v, %v), want (RouteOverlayRetained, nil): a hash no live helper acknowledged is not evidence", outcome, err)
+	}
+}
+
+// Fold 2 positive control, at a non-zero epoch: the binding must not block a
+// legitimate pre-activation on the NEW helper. After a reset and a real spawn
+// with its replay, a fresh Begin and Publish opens RG1, and a re-Begin (a
+// deadline extension) keeps it open.
+func TestFreshPublishOnTheNewHelperOpens19167(t *testing.T) {
+	m, rec := newPreActivateManager18559(t)
+	m.restartTimerFn = func(time.Duration, func()) {}
+	m.mu.Lock()
+	m.resetAfterHelperGoneLocked()
+	m.proc = nil
+	m.mu.Unlock()
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
+	m.mu.Lock()
+	m.proc = cmd
+	m.startHelperSupervisorLocked(cmd)
+	m.publishedSnapshot = 9
+	if m.helperEpoch == 0 {
+		m.mu.Unlock()
+		t.Fatal("setup: the epoch did not move, so this control would run at epoch 0")
+	}
+	m.mu.Unlock()
+
+	epoch := m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
+	if err := m.PublishTransferPreActivation([]int{1}, epoch); err != nil && err.Error() != "userspace_ctrl map not loaded" {
+		t.Fatalf("Publish on the new helper: %v", err)
+	}
+	if got := rec.last(t); !got[1] {
+		t.Fatalf("helper inventory %v: a pre-activation published on the new helper did not open RG1", got)
+	}
+	m.BeginTransferPreActivation([]int{1}, time.Now().Add(2*time.Minute)) // extend
+	pollPublish19167(t, m)
+	if got := rec.last(t); !got[1] {
+		t.Fatalf("helper inventory %v: a re-Begin closed a pre-activation open on the new helper", got)
 	}
 }

@@ -355,14 +355,37 @@ An entry has two stages (#19167):
   - `PublishTransferPreActivation(rgIDs, epoch)` is refused when the epoch
     moved: the republished routes may have gone to a helper that no longer
     exists.
-  - A helper reset also returns every pre-active entry to routes-pending. A
-    replacement helper therefore never sees a pre-activation as active before
-    its snapshot replay, and the transfer falls back to #18559's
-    break-before-make.
-- **The daemon opens forwarding only on a republish that reached the helper.**
-  It does so on a published or unchanged outcome
-  (`republishConnectedRGOutcome`), never on a skipped one (resetting, no
-  config, no route publisher) or a failed one.
+  - **Fold 2 makes the binding structural.** Publish stores the epoch in the
+    entry (`readyEpoch`). The helper-facing view counts an entry only when
+    all three hold:
+    - its routes are ready at the CURRENT epoch;
+    - a helper process is live;
+    - that process holds a published snapshot
+      (`transferPreActiveForHelperLocked`, `helperHoldsPublishedSnapshotLocked`).
+
+    Readiness reached while no helper ran, or under a helper since
+    replaced, never counts on the next one, whatever the ordering. That
+    closes codex-d's fold-1 finding: a Begin with the helper absent,
+    then a spawn with the old ready bit kept. Fold 1's "a reset returns
+    every entry to routes-pending" is replaced by the epoch check rather
+    than kept beside it.
+- **The daemon opens forwarding only on a republish that reached a running
+  helper.**
+  - It does so on a published or unchanged outcome
+    (`republishConnectedRGOutcome`), never on a skipped or failed one.
+  - The route publisher reports which of three outcomes happened
+    (`PublishRouteOverlaySnapshotOutcome`):
+    - **published:** the live helper acknowledged a new snapshot;
+    - **unchanged:** a duplicate skip, reported only when a live helper holds
+      a published snapshot;
+    - **retained:** a helper-down fold (#16643), no snapshot yet, or a
+      duplicate skip with no live published helper. The daemon reads it as
+      skipped.
+  - A helper reset clears `lastSnapshotHash`, which described what the gone
+    helper acknowledged. The restart replay records it again for the new
+    helper. That closes codex-d's second fold-1 finding: an "unchanged"
+    dedup against the old helper's hash, for a replacement helper that never
+    received that snapshot.
 - **Not covered here:** the pre-activation deadline's expiry holes, tracked by
   #19103.
 

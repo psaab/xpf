@@ -649,6 +649,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		pub := attachHelper19093(m, nil)
 		firstApplyHA19093(t, m, pub)
 
+		snapshotPublished19167(m)
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
 		opened := pub.published(t, "PublishTransferPreActivation", func() {
 			if err := m.PublishTransferPreActivation([]int{1}, preActivateEpoch19167(m)); err != nil {
@@ -681,6 +682,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 		pub := attachHelper19093(m, nil)
 		firstApplyHA19093(t, m, pub)
+		snapshotPublished19167(m)
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
 		if err := m.UpdateRGActive(1, true); err != nil {
 			t.Logf("promotion tail: %v", err)
@@ -703,6 +705,7 @@ func TestRGActiveInheritedPinUnderTransferPreActivation19093(t *testing.T) {
 		rg, wd := newRGActiveArrays19093(t, map[uint32]uint8{1: 1})
 		m := newRGActiveImportManager19093(t, rg, wd, 0, 1, 2)
 		pub := attachHelper19093(m, nil)
+		snapshotPublished19167(m)
 		m.BeginTransferPreActivation([]int{1}, time.Now().Add(-time.Second))
 		if got := firstApplyHA19093(t, m, pub); got[1].Active {
 			t.Error("with the pre-activation lapsed, the publish showed RG1 ACTIVE: BASE came from " +

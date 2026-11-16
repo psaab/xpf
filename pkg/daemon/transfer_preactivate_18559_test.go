@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"reflect"
 	"slices"
 	"strings"
@@ -270,5 +271,35 @@ func TestPreActivationPublishCarriesTheBeginEpoch19167(t *testing.T) {
 	}
 	if dp.publishedEpoch != 42 {
 		t.Fatalf("Publish got epoch %d, want the Begin epoch 42", dp.publishedEpoch)
+	}
+}
+
+// retainedRoutesDP19167 is a pre-activation dataplane whose route publisher
+// reports a retained-only fold: the helper is down or has no published
+// snapshot, so no running helper holds the routes.
+type retainedRoutesDP19167 struct {
+	*fakePreActivateDP
+}
+
+func (f retainedRoutesDP19167) PublishRouteOverlaySnapshotOutcome(*config.Config, []config.RouteOverlayEntry, map[string]bool, bool) (dpuserspace.RouteOverlayOutcome, error) {
+	f.recordCall("publish")
+	return dpuserspace.RouteOverlayRetained, nil
+}
+
+// #19167 fold 2 (codex-d P2-1): a retained-only route publish is no evidence
+// that a running helper holds the routes. The pre-activation must abort with
+// no helper publish, not read it as "unchanged".
+func TestRetainedRoutePublishNeverOpensForwarding19167(t *testing.T) {
+	d, dp := newPreActivateDaemon18559(t)
+	d.setDataplane(retainedRoutesDP19167{dp})
+	if err := d.beginTransferPreActivation([]int{1}); err == nil {
+		t.Fatal("a route publish that reached no helper still reported the pre-activation opened")
+	}
+	got := dp.callsSnapshot()
+	if !slices.Contains(got, "publish") {
+		t.Fatalf("setup: calls %v: the route publish never ran", got)
+	}
+	if slices.Contains(got, "ha-publish") {
+		t.Fatalf("calls %v: the helper was told to open forwarding on routes no helper holds", got)
 	}
 }
