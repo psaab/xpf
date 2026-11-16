@@ -691,7 +691,7 @@ func TestReclaimNeverDetachesALinkRegisteredMeanwhile19110(t *testing.T) {
 	}
 	t.Cleanup(func() { reclaimAfterCheckHook = old })
 
-	m.reclaimBeforeAttach(newXDPAttachPass(), 29)
+	m.reclaimBeforeAttach(newXDPAttachPass(), 29, false)
 	<-racerDone
 	if loadedWhileRegistered.Load() {
 		t.Error("the reclaim loaded (and would detach) a pin whose ifindex a concurrent attacher had " +
@@ -992,5 +992,47 @@ func TestPinDirGuardPrecedesTheKernelAttach19110(t *testing.T) {
 	if guard > attach {
 		t.Errorf("guardPinDir (%s) runs after link.AttachXDP (%s): a test reaching the production pin "+
 			"directory panics while holding a real kernel link", fset.Position(guard), fset.Position(attach))
+	}
+}
+
+// #19110 (codex-e): the userspace per-member retry repeats on a backoff and
+// logs on change itself, so its attach is Quiet: the shim's own reclaim WARN is
+// DEBUG for it. The TRUE twin is the same stuck reclaim on a normal attach.
+func TestQuietAttachDemotesTheReclaimWarning19110(t *testing.T) {
+	for _, quiet := range []bool{false, true} {
+		t.Run(fmt.Sprintf("quiet=%v", quiet), func(t *testing.T) {
+			h := newReclaimHarness19110(t)
+			dir := withTempPinDir9847(t)
+			if err := os.MkdirAll(filepath.Join(dir, "xdp_5", "keep"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			h.load = func(path string) (reclaimableXDPLink, error) {
+				return h.fake(path, errors.New("detach failed"), errors.New("unpin failed")), nil
+			}
+			t.Cleanup(SetXDPTransitionSeamForTest(func(string, int, bool) (bool, error) { return true, nil }))
+			logs := captureLogs(t)
+			res := New().AttachShimXDPInterfaces([]ShimXDPAttachRequest{{Ifindex: 5, Quiet: quiet}})
+			if res[5] != nil {
+				t.Fatalf("attach: %v", res[5])
+			}
+			warns, debugs := 0, 0
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if !strings.Contains(line, "stale XDP link pin not fully reclaimed") {
+					continue
+				}
+				switch {
+				case strings.Contains(line, "level=WARN"):
+					warns++
+				case strings.Contains(line, "level=DEBUG"):
+					debugs++
+				}
+			}
+			if quiet && (warns != 0 || debugs == 0) {
+				t.Errorf("a Quiet attach logged the stuck reclaim at WARN %d time(s) (DEBUG %d); want DEBUG only", warns, debugs)
+			}
+			if !quiet && warns == 0 {
+				t.Error("fixture: a normal attach did not WARN about the stuck reclaim")
+			}
+		})
 	}
 }

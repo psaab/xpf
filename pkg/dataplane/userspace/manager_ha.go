@@ -1010,9 +1010,9 @@ func (m *Manager) takeoverReadyLocked(peerAlive bool) (bool, []string) {
 	// #19110 F4: a RETH data member in unintended generic XDP mode. Only with
 	// a live peer; see generic_data_member_19110.go.
 	reasons = append(reasons, m.genericDataMemberReasonsLocked(peerAlive)...)
-	// #19110 (codex-d NEW P2-1): a RETH data member whose refresh attach
-	// failed has NO XDP at all; same scope as F4. See
-	// refresh_attach_debt_19110.go.
+	// #19110: a configured RETH data member the kernel shows with NO shim XDP
+	// on its current ifindex (live, by name); same scope as F4. See
+	// missing_data_member_19110.go.
 	reasons = append(reasons, m.missingDataMemberReasonsLocked(peerAlive)...)
 	// #15918: a fabric the daemon marked populated is not takeover-ready
 	// unless the helper can actually install it. The predicate mirrors the

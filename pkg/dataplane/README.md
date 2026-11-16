@@ -2597,23 +2597,55 @@ P2-1, R23 NEW-1):
 - each interface gets ONE attempt per mode;
 - a refusal returns `ErrXDPOccupied` at once, with no generic attempt and no
   occupant probe ("not probed");
-- the interface stays fail-closed (no XDP, fence-dropped transit), and the
-  failure becomes attach DEBT (codex-d NEW P2-1,
-  `pkg/dataplane/userspace/refresh_attach_debt_19110.go`):
-  - a configured RETH data member in the debt is a takeover-readiness reason
-    while the peer is alive, the `xdp_missing_data_member` blocker. Its scope is
-    F4's: a lone owner gets an ERROR log and the metric instead;
-  - the status loop retries the debt on a LATER tick, 1 s after the failure
-    and doubling to 30 s, never by sleeping under the mutex. A successful
-    compile makes it due at once;
-  - an interface leaves the debt when a pass attaches it, when another path
-    attached it, or when it is no longer a required ingress attachment.
+- the interface stays fail-closed (no XDP, fence-dropped transit). The
+  reconcile keeps NO record of the failure. A configured RETH data member is
+  covered from LIVE kernel state instead
+  (`pkg/dataplane/userspace/missing_data_member_19110.go`):
+  - **the live verdict, on the status tick:** once per tick (1 s), OFF the
+    mutex, each configured local RETH data member is looked up by NAME
+    (netlink, 250 ms socket timeout). The positive evidence is XDP attached to
+    its CURRENT ifindex with the shim's own entry program ID. The tick stores
+    the verdict with its timestamp, built from scratch: a failed lookup is
+    "unverified", never the previous answer carried forward;
+  - **readiness serves that verdict** and does no lookup (the shim program's
+    ID is read once per loaded program): it is called under
+    the mutex that `UpdateRGActive` (the HA cutover) also needs, by the
+    daemon's RG reconcile loop (every 2 s and on each triggered pass, once per
+    RG; its result reaches the election through `SetRGReady`) and by the
+    metrics scrape. A verdict older than 3 s, or one that does not cover a
+    configured member yet, is "unverified". In steady state the served
+    verdict is at most one tick old. A member without positive evidence is
+    the reason "... has no XDP shim attached (kind)", blocker
+    `xdp_missing_data_member`. The scope is F4's: peer alive blocks; a lone
+    owner gets an ERROR log and the peer-alive-form metric instead;
+  - **retry:** keyed by member NAME, OFF the mutex. After each status tick
+    releases it, a single-flight goroutine attempts each member that is still
+    missing when due (1 s, doubling to 30 s). It resolves the name to an
+    ifindex immediately before the attach, attaches only that freshly
+    resolved index, then reads the kernel again as the evidence. An absent
+    netdev or an admission refusal (by name, against the config authority)
+    keeps the obligation and advances the backoff. The state clears only on
+    positive evidence or when the name leaves the configured members;
+  - logs are on change, keyed on a stable failure kind (errno, refusal,
+    admission reason, absent, foreign program), never on `Error()`, which
+    embeds elapsed time. The retry's attach is `Quiet`, so the shim's own
+    reclaim and fallback lines are DEBUG;
+  - cost: every tick, one netlink lookup per configured member (the
+    verdict). One attempt adds a second lookup, the admission's `ethtool`
+    subprocess(es) (each bounded by the wrapper's 15 s timeout plus 5 s
+    WaitDelay), one pin reclaim and one `BPF_LINK_CREATE` (rtnl), all off the
+    mutex. The pass stores the verdict BEFORE its attempts, and it is
+    single-flight, so a slow attempt delays only the next pass; if one ever
+    holds the verdict past 3 s, readiness reads "unverified", not a stale
+    "attached".
 
-  Before this, nothing retried the attach: the status-loop revalidation flag
-  and the daemon worker's retry debt both cleared on a successful publication,
-  F4 saw only generic fallbacks, and the box-wide XSK liveness proof stayed
-  latched, so a standby with a member that had NO XDP could still report
-  takeover-ready.
+  Two earlier designs kept a record of failed attaches instead. Review showed
+  a pass that merely SKIPPED the member (admission refusal, a stale snapshot,
+  the netdev briefly absent) could erase it, and its retry could chase a dead
+  or REUSED ifindex after a second recreate (codex-e). Before #19110 nothing
+  retried the attach at all, F4 saw only generic fallbacks, and the box-wide
+  XSK liveness proof stayed latched, so a standby with a member that had NO
+  XDP could still report takeover-ready.
 
 Waiting would buy nothing: a refresh never has a dead process's stale link to
 wait out, so a refusal there is the persistent kind (an upper device,

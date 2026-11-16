@@ -109,13 +109,18 @@ type Manager struct {
 	// compile's config. Refresh and revalidation re-resolve ITS members
 	// (Codex delta P2-2). Guarded by mu.
 	genericDataMemberCfg *config.Config
-	// refreshAttachDebt is the #14133 refresh reconcile's failed attaches
-	// (ifindex -> error text) from its latest pass, retried on a later status
-	// tick at refreshAttachRetryAt with refreshAttachBackoff (codex-d NEW P2-1,
-	// refresh_attach_debt_19110.go). All guarded by mu.
-	refreshAttachDebt    map[int]string
-	refreshAttachRetryAt time.Time
-	refreshAttachBackoff time.Duration
+	// #19110 missing-data-member retry (missing_data_member_19110.go):
+	// memberAttachRetry is the per-member-NAME backoff state and memberVerdict
+	// the last tick's live verdict, both guarded by mu;
+	// memberRetryInFlight makes the off-lock retry single-flight;
+	// shimProgID caches the shim entry program's kernel ID per loaded
+	// program, guarded by mu. shimProgIDHook and memberAttachHook are seams
+	// for the cells.
+	memberAttachRetry   map[string]*memberAttachRetry
+	memberVerdict       memberXDPVerdict
+	memberRetryInFlight atomic.Bool
+	shimProgID          shimProgIDCache
+	shimProgIDHook      func() (uint32, bool)
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.
