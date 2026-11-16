@@ -50,6 +50,16 @@
 #   the signal measured, and still reads below the threshold), the refusal
 #   dropped (the command runs), the boot-ID comparison dropped (a stale proof
 #   reads present). None of this pauses a real VM.
+#
+# #19162, runner state (the mock maps the runner's /var/lib/xpf into the
+# sandbox): a --root run with an empty directory runs and prints no #19162
+# line; with an entry it is refused (status 2, the entry named) and the
+# command never runs; --allow-xpf-state runs it with the entry listed; a
+# runner-user run warns and runs; after a --root command the entries it ADDED
+# are named (only those: a pre-existing entry is not), and the command's
+# status survives. Mutations: the refusal dropped (the command runs), the
+# after-run report dropped, and the before/after comparison inverted (names
+# the old entry, not the new one).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -89,13 +99,16 @@ bash)
 			echo "${MOCK_VM_PROOF:-present}"
 			exit 0
 		fi
-		exec bash -c "${3//\/work\//$MOCK_ROOT/work/}"
+		# #19162: the runner's /var/lib/xpf lives in the sandbox too.
+		one=${3//\/work\//$MOCK_ROOT/work/}
+		exec bash -c "${one//\/var\/lib\/xpf/$MOCK_ROOT/varlibxpf}"
 	fi
 	[[ "${2:-}" == -lc ]] || exit 92
 	body=$3 ;;
 *) exit 93 ;;
 esac
 body=${body//\/work\//$MOCK_ROOT/work/}
+body=${body//\/var\/lib\/xpf/$MOCK_ROOT/varlibxpf}
 rc=0
 held="$MOCK_ROOT/held.$$"
 # #19142: MOCK_PRE_DELAY_S delays the start, time a frozen guest clock never
@@ -331,6 +344,78 @@ else
 	bad "--allow-unproven-root: rc=$allow_rc $(tr '\n' '|' <"$tmp/allow.err")"
 fi
 
+# #19162: the runner's /var/lib/xpf, mapped by the mock to $tmp/varlibxpf.
+state="$tmp/varlibxpf"
+reset_state() { rm -rf "$state" && mkdir -p "$state"; }
+# state_refuses <script> <tag>: with an entry present, --root is refused
+# before the command runs, and the entry is named.
+state_refuses() {
+	local rc
+	rm -f "$marker"
+	rc=$(pause_run "$1" "$2" 'touch /work/lane/tmp/ran-19142' --root)
+	[[ "$rc" == 2 && ! -e "$marker" ]] &&
+		grep -q '^vm-test-run: refusing a --root run: .*/var/lib/xpf holds state .*ha-peer-epoch.lock' "$tmp/$2.err"
+}
+# writer_named <script> <tag>: a --root command that adds an entry (and exits
+# 3) has exactly that entry named, and its status survives.
+writer_named() {
+	local rc
+	reset_state
+	rc=$(pause_run "$1" "$2" 'touch /var/lib/xpf/transit-gate-owned; exit 3' --root)
+	[[ "$rc" == 3 ]] &&
+		grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: transit-gate-owned (#19162)' "$tmp/$2.err"
+}
+# only_new_named <script> <tag>: with a pre-existing entry (allowed), only the
+# entry the command added is named.
+only_new_named() {
+	local rc
+	reset_state
+	touch "$state/fabric-auth-grace"
+	rc=$(pause_run "$1" "$2" 'touch /var/lib/xpf/unkeyed-authority-grace' --root --allow-xpf-state)
+	[[ "$rc" == 0 ]] &&
+		grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: unkeyed-authority-grace (#19162)' "$tmp/$2.err"
+}
+reset_state
+rm -f "$marker"
+clean_rc=$(pause_run "$script" st-clean 'touch /work/lane/tmp/ran-19142' --root)
+if [[ "$clean_rc" == 0 && -e "$marker" ]] && ! grep -q '(#19162)' "$tmp/st-clean.err"; then
+	ok "xpf-state empty: a --root run proceeds, with no #19162 line"
+else
+	bad "xpf-state empty: rc=$clean_rc $(tr '\n' '|' <"$tmp/st-clean.err")"
+fi
+reset_state
+touch "$state/ha-peer-epoch.lock"
+if state_refuses "$script" st-refuse; then
+	ok "xpf-state present: the --root run is refused (status 2), the entry named, and the command never runs"
+else
+	bad "xpf-state present: $(tr '\n' '|' <"$tmp/st-refuse.err")"
+fi
+rm -f "$marker"
+st_allow_rc=$(pause_run "$script" st-allow 'touch /work/lane/tmp/ran-19142' --root --allow-xpf-state)
+if [[ "$st_allow_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*ha-peer-epoch.lock' "$tmp/st-allow.err"; then
+	ok "--allow-xpf-state: the --root command runs, with the entry listed"
+else
+	bad "--allow-xpf-state: rc=$st_allow_rc $(tr '\n' '|' <"$tmp/st-allow.err")"
+fi
+rm -f "$marker"
+st_user_rc=$(pause_run "$script" st-user 'touch /work/lane/tmp/ran-19142')
+if [[ "$st_user_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*ha-peer-epoch.lock' "$tmp/st-user.err"; then
+	ok "xpf-state present, runner-user leg: it runs, with a warning naming the entry"
+else
+	bad "xpf-state present, runner-user leg: rc=$st_user_rc $(tr '\n' '|' <"$tmp/st-user.err")"
+fi
+if writer_named "$script" st-writer; then
+	ok "xpf-state writer: a --root command that adds an entry has it named, and its status (3) survives"
+else
+	bad "xpf-state writer: rc=$(cat "$tmp/st-writer.rc") $(tr '\n' '|' <"$tmp/st-writer.err")"
+fi
+if only_new_named "$script" st-new; then
+	ok "xpf-state writer: only the entry the command added is named, not the one already there"
+else
+	bad "xpf-state only-new: rc=$(cat "$tmp/st-new.rc") $(tr '\n' '|' <"$tmp/st-new.err")"
+fi
+reset_state
+
 # The proof predicate itself, against test files (the probe text is taken from
 # the script; only its path is replaced).
 probe() { sed -n '/^# vm-proof (#19142)$/,/^fi$/p' "$1" | sed "s|^p=/run/xpf-testguard-vm-boot-id\$|p=$tmp/proof/id|"; }
@@ -459,6 +544,35 @@ if [[ "$have_userns" -eq 1 ]] &&
 		bad "mutation no-boot-check: the stale-proof cell still reads absent"
 	fi
 fi
+
+# #19162 mutations.
+# shellcheck disable=SC2016 # a sed program: the $ is literal
+if mutant no-state-refusal 's/if \[\[ "$as_root" -eq 1 \&\& "$allow_xpf_state" -ne 1 \]\]; then/if false; then/'; then
+	reset_state
+	touch "$state/ha-peer-epoch.lock"
+	if ! state_refuses "$tmp/no-state-refusal.sh" m8 && [[ -e "$marker" ]]; then
+		ok "mutation no-state-refusal: the --root command runs over the state (the marker was created)"
+	else
+		bad "mutation no-state-refusal: the refusal cell still passes"
+	fi
+	reset_state
+fi
+# shellcheck disable=SC2016 # a sed program: the $ is literal
+if mutant no-writer-report 's/if \[\[ -n "$xpf_state_new" \]\]; then/if false; then/'; then
+	if ! writer_named "$tmp/no-writer-report.sh" m9 && [[ "$(cat "$tmp/m9.rc")" == 3 ]]; then
+		ok "mutation no-writer-report: the writer cell fails, with the status still 3"
+	else
+		bad "mutation no-writer-report: the writer cell still passes"
+	fi
+fi
+if mutant inverted-compare 's/comm -13 /comm -12 /'; then
+	if ! only_new_named "$tmp/inverted-compare.sh" m10 && [[ "$(cat "$tmp/m10.rc")" == 0 ]]; then
+		ok "mutation inverted-compare: the only-new cell fails, with the status still 0"
+	else
+		bad "mutation inverted-compare: the only-new cell still passes"
+	fi
+fi
+reset_state
 
 echo "vm-test-run selftest: ${pass} passed, ${fail} failed, ${skip} skipped"
 [[ "$fail" -eq 0 ]]

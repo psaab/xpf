@@ -65,6 +65,18 @@ The script also prepares the runner environment:
   The command's exit status is recorded first, so this step cannot change it.
   Ctrl-C or TERM runs the same step before exiting 130/143.
 - Lane names are `[A-Za-z0-9._-]+` and must not be all dots.
+- It checks the runner's `/var/lib/xpf`, the daemon's production state
+  directory (#19162). Tests read paths there (HA epoch lock, fabric-auth
+  grace, transit-gate ownership), so state an earlier root leg left changes
+  their verdicts.
+  - A `--root` run is refused (exit 2) while the directory holds anything, and
+    the message gives a move-aside recipe. `--allow-xpf-state` runs it anyway
+    with the entries listed.
+  - A runner-user run warns.
+  - After a `--root` command, every entry it added is named on stderr: that
+    command wrote production state, so its test needs a redirect.
+    `testguard-run.sh` overlays `/` for root runs (#19084), so only a root
+    command outside it can write there.
 - The command's stdout and stderr come back as ONE stream, in the order they
   were written (#19139). `incus exec` carries the two as separate streams, and
   a workstation `>log 2>&1` merges them in arrival order. cargo writes
