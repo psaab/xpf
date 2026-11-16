@@ -371,6 +371,9 @@ run_bash scripts/testguard-overlay-selftest.sh
 # row and malformed rows, and greens on an exact fixture match. Hermetic
 # (recorded analyser output via DEADCODE_OUTPUT); no toolchain.
 run_bash scripts/go-deadcode-gate-selftest.sh
+# #19152: a runner's Go toolchain is replaced only on a drained runner, and
+# never left missing (hermetic: functions sourced, download stubbed).
+run_bash scripts/provision-testrunner-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
 run_shell scripts/scratch-pinning-selftest.sh
 # #14647: the affected-Go-test selector must seed from non-Go paths and

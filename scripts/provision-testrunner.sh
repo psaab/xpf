@@ -33,10 +33,12 @@
 #
 # --toolchains-only installs only the two Go toolchains and the profile entry,
 # skipping apt, rustup and the account setup: use it to bring an already
-# provisioned runner up to date. Each toolchain unpacks beside its target
-# directory and is renamed into place, and an installed toolchain of the right
-# version is left alone. A lane running on the runner is therefore unaffected
-# unless the build Go version itself changes. --print-versions prints the
+# provisioned runner up to date. An installed toolchain of the right version
+# is left alone. REPLACING one is refused (exit 75) while a lane is live (a
+# runner process, a process under /work, or a held --root lane lock): drain
+# the runner first. The new tree is unpacked beside the old one and checked,
+# then swapped in by rename; the old tree is renamed back if the swap fails
+# and removed only after it succeeds (scripts/provision-testrunner-selftest.sh). --print-versions prints the
 # derived versions and touches nothing. A runner that is not RUNNING (a FROZEN
 # one is paused by a gate cell) is refused with exit 75 and left alone.
 set -euo pipefail
@@ -56,6 +58,9 @@ derive_versions() {
 	done
 }
 
+# Sourced (scripts/provision-testrunner-selftest.sh): define the functions
+# below and stop; the selftest calls them against a scratch tree.
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
 case "${1:-}" in
 --print-versions)
 	derive_versions
@@ -92,27 +97,84 @@ case "${1:-}" in
 	exit 0
 	;;
 esac
+fi
+
+# lane_activity: print evidence of a live test lane, nothing when idle. A lane
+# is any `runner` process except its idle systemd --user session, any process
+# whose cwd is under /work, or a --root lane holding vm-test-run's per-runner
+# lock (#19162).
+lane_activity() {
+	local p c
+	ps -eo user=,pid=,args= | awk '$1 == "runner" && $3 != "/usr/lib/systemd/systemd" && $3 != "(sd-pam)" { print "runner process: " $0 }'
+	for p in /proc/[0-9]*; do
+		c=$(readlink "$p/cwd" 2>/dev/null) || continue
+		case "$c" in /work/*) echo "pid ${p#/proc/} has cwd $c" ;; esac
+	done
+	if [[ -e /run/xpf-vm-test-run-root.lock ]] && ! flock -n /run/xpf-vm-test-run-root.lock true; then
+		echo "a --root lane holds /run/xpf-vm-test-run-root.lock"
+	fi
+}
+
+# fetch_go <version> <dest>: unpack the go<version> release tarball into
+# <dest> (creating <dest>/go).
+fetch_go() {
+	curl -fsSL "https://go.dev/dl/go${1}.linux-amd64.tar.gz" | tar -C "$2" -xzf -
+}
+
+# install_go <version> <dir>: install go<version> at <dir> unless it is already
+# there (#19152; fold of Codex on b7e).
+#   - A REPLACEMENT happens only on a drained runner: with a live lane it is
+#     refused (exit 75) and nothing changes, because removing a toolchain a
+#     build is using breaks that build.
+#   - The new tree is unpacked beside <dir>, and checked to report go<version>.
+#   - The old tree is renamed aside, the new one renamed in, and the old one
+#     removed only after that succeeds. If renaming the new one in fails, the
+#     old one is renamed back, so <dir> is never missing or half-written.
+install_go() {
+	local ver=$1 dir=$2 parent stage aside busy
+	if "$dir/bin/go" version 2>/dev/null | grep -q " go$ver "; then
+		return 0
+	fi
+	if [[ -e "$dir" ]]; then
+		busy=$(lane_activity)
+		if [[ -n "$busy" ]]; then
+			echo "provision-testrunner: refusing to replace $dir with go$ver while a lane is live; drain the runner first:" >&2
+			printf '  %s\n' "$busy" | head -5 >&2
+			return 75
+		fi
+	fi
+	parent=$(dirname "$dir")
+	stage=$(mktemp -d "$parent/.go-$ver.stage.XXXXXX")
+	if ! fetch_go "$ver" "$stage" || ! "$stage/go/bin/go" version 2>/dev/null | grep -q " go$ver "; then
+		rm -rf "$stage"
+		echo "provision-testrunner: the downloaded toolchain is not go$ver; $dir left as it was" >&2
+		return 2
+	fi
+	if [[ -e "$dir" ]]; then
+		aside="$parent/.go-aside.$$.$RANDOM"
+		mv -T "$dir" "$aside"
+		if ! switch_into_place "$stage/go" "$dir"; then
+			mv -T "$aside" "$dir"
+			rm -rf "$stage"
+			echo "provision-testrunner: could not move go$ver into $dir; the previous toolchain is restored" >&2
+			return 2
+		fi
+		rm -rf "$aside"
+	else
+		switch_into_place "$stage/go" "$dir"
+	fi
+	rmdir "$stage"
+}
+# switch_into_place <src> <dst>: one rename (a hook for the selftest).
+switch_into_place() { mv -T "$1" "$2"; }
+
+[[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 # In the VM, as root.
 systemd-detect-virt --vm -q || { echo "provision-testrunner: refusing to run outside a VM" >&2; exit 2; }
 go_ver=${XPF_GO_VERSION:?run this from the workstation as: scripts/provision-testrunner.sh --runner <remote:instance>}
 dc_ver=${XPF_DEADCODE_GO_VERSION:?run this from the workstation as: scripts/provision-testrunner.sh --runner <remote:instance>}
 scope=${XPF_PROVISION_SCOPE:-full}
-
-# install_go <version> <dir>: install go<version> at <dir> unless it is already
-# there. It unpacks beside <dir> and renames into place, so <dir> is never
-# half-written.
-install_go() {
-	local ver=$1 dir=$2 tmp
-	if "$dir/bin/go" version 2>/dev/null | grep -q " go$ver "; then
-		return 0
-	fi
-	tmp=$(mktemp -d "$(dirname "$dir")/.go-$ver.XXXXXX")
-	curl -fsSL "https://go.dev/dl/go${ver}.linux-amd64.tar.gz" | tar -C "$tmp" -xzf -
-	rm -rf "$dir"
-	mv "$tmp/go" "$dir"
-	rmdir "$tmp"
-}
 
 if [[ "$scope" == full ]]; then
 	export DEBIAN_FRONTEND=noninteractive
