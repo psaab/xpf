@@ -29,7 +29,7 @@
 # deletion is in the diff that makes it.
 # The scan's limits (a sed over source, not the compiler):
 #   - it recognises one shape, a single-line `func TestXxx(<name> *testing.T)`.
-#     A test it misses (split signature, unnamed or `_` parameter, a renamed
+#     A test it misses (split signature, an unnamed parameter, a renamed
 #     `testing` import, a type alias, a non-ASCII name) still fails the leg as
 #     "unscanned" when it runs and passes. One it misses that ALSO does not
 #     run is in neither set, and nothing here sees it;
