@@ -1158,6 +1158,14 @@ test-vm-test-run-lib:
 test-rust-leg1-lib:
 	bash ./scripts/test-rust-leg1-selftest.sh
 
+# #19134: a reused vm-test-run.sh lane never re-tests the previous cargo
+# binary: the target dir is cleaned on any doubt, and the clean stays inside
+# the lane (real cargo, mock incus; the bind-mount cell needs unshare -Urm).
+# Needs cargo.
+.PHONY: test-vm-test-run-sync-lib
+test-vm-test-run-sync-lib:
+	bash ./scripts/vm-test-run-sync-selftest.sh
+
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The

@@ -45,8 +45,35 @@
 # The sync copies tracked plus untracked-but-not-ignored files of the current
 # worktree (uncommitted edits included), preserving mtimes so cargo and go
 # keep their incremental state. Files deleted locally are deleted on the
-# runner too: the source tree is replaced on every sync, the target dir is
-# not. No .git is copied; GOFLAGS gets -buildvcs=false.
+# runner too: the source tree is replaced on every sync. No .git is copied;
+# GOFLAGS gets -buildvcs=false.
+#
+# The lane's target dir is kept only when nothing is in doubt (#19134).
+# cargo calls a crate fresh when no source is newer than its artefacts, so a
+# kept target dir re-tested an OLD binary whenever the synced sources were
+# older than the last build (another worktree, an older commit) or the last
+# run changed a file on the runner and the sync put the original back. No
+# mtime-based repair is attempted: the user chose "clean on any doubt". A
+# per-lane ledger (/work/<name>/.xpf-src-ledger.json) records the synced
+# tree's identity (a hash over every path, its content and mode) and, per
+# path, the hash, mtime and mode the sync wrote. The next sync deletes the
+# lane's target dir when ANY of these holds:
+#   - the synced tree's identity differs from the ledger's;
+#   - a file in the previous tree differs from what the sync wrote (content,
+#     mtime or mode), or was deleted, or was created on the runner (outside
+#     __pycache__/ directories, which no build reads);
+#   - the ledger is missing, unreadable, or in an older format;
+#   - scanning either tree hit an error.
+# Clocks never enter the decision. The cost is a full rebuild of the lane
+# after any change to the tree; an unchanged re-sync keeps the incremental
+# build. Residual: a runner-side change that restores both a file's bytes AND
+# its exact mtime is indistinguishable from no change.
+# The deletion is confined to the lane: before anything touches it, the lane
+# is opened from /work without following a symlink, and must be a directory
+# on /work's filesystem with no mount point at or under it
+# (/proc/self/mountinfo). The target dir is deleted through directory fds,
+# never following a symlink and refusing a directory on another filesystem.
+# On any doubt about the path, the sync refuses (exit 2) instead.
 #
 # The command runs via `bash -lc` in /work/<name>/src with
 # CARGO_TARGET_DIR=/work/<name>/target, TMPDIR=/work/<name>/tmp and
@@ -117,10 +144,267 @@ if [[ "$(incus exec "$runner" -- systemd-detect-virt --vm 2>/dev/null || true)" 
 	exit 2
 fi
 
+# #19134: the lane check, the keep-or-clean decision and the swap of the
+# synced tree into place (see "The lane's target dir" above). Runs on the
+# runner as `runner`: python3 -I - {check|sync} /work/ <name>. Exit 3 is a
+# refusal it explains on stderr.
+lane_py=$(
+	cat <<'PY'
+import hashlib, json, os, re, stat, sys
+
+mode, parent_arg, name = sys.argv[1], sys.argv[2], sys.argv[3]
+LEDGER, FORMAT = ".xpf-src-ledger.json", 3
+SKIP_DIRS = {"__pycache__"}
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
+
+
+class Refuse(Exception):
+    pass
+
+
+def mounts_under(path):
+    """Mount points at or below path, from /proc/self/mountinfo."""
+    found = []
+    with open("/proc/self/mountinfo", encoding="utf-8", errors="surrogateescape") as handle:
+        for line in handle:
+            fields = line.split()
+            if len(fields) < 5:
+                raise Refuse(f"unparseable /proc/self/mountinfo line: {line.strip()!r}")
+            point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[4])
+            if point == path or point.startswith(path + "/"):
+                found.append(point)
+    return found
+
+
+def open_lane(pfd):
+    return os.open(name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=pfd)
+
+
+def lane():
+    """(parent fd, lane fd), or (parent fd, None) when the lane does not exist yet.
+    Refuses unless the lane is a plain directory on /work's filesystem with no
+    mount point at or under it."""
+    parent = os.path.realpath(parent_arg)
+    pfd = os.open(parent, DIR_FLAGS)
+    path = os.path.join(parent, name)
+    try:
+        lfd = open_lane(pfd)
+    except FileNotFoundError:
+        return pfd, None
+    except OSError as exc:
+        raise Refuse(f"{path} is not a plain directory ({exc.strerror})") from exc
+    if os.fstat(lfd).st_dev != os.fstat(pfd).st_dev:
+        raise Refuse(f"{path} is on another filesystem than {parent}")
+    mounts = mounts_under(path)
+    if mounts:
+        raise Refuse(f"mount point(s) under the lane: {', '.join(mounts[:3])}")
+    return pfd, lfd
+
+
+def open_dir(dfd, entry_name, st):
+    """Open a directory entry already lstat'ed as a directory, without following
+    a symlink; a directory the owner cannot read is made readable first."""
+    try:
+        fd = os.open(entry_name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=dfd)
+    except PermissionError:
+        os.chmod(entry_name, 0o700, dir_fd=dfd)
+        fd = os.open(entry_name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=dfd)
+    got = os.fstat(fd)
+    if (got.st_dev, got.st_ino) != (st.st_dev, st.st_ino):
+        os.close(fd)
+        raise Refuse(f"{entry_name} changed while it was being opened")
+    return fd
+
+
+def digest_fd(fd):
+    h = hashlib.blake2b(digest_size=16)
+    while True:
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            return h.hexdigest()
+        h.update(chunk)
+
+
+def scan(dfd, prefix, out):
+    """Every non-directory entry under dfd: {path: [digest, mtime_ns, mode]}."""
+    for entry in list(os.scandir(dfd)):
+        st = os.lstat(entry.name, dir_fd=dfd)
+        rel = prefix + entry.name
+        if stat.S_ISDIR(st.st_mode):
+            if entry.name in SKIP_DIRS:
+                continue
+            cfd = open_dir(dfd, entry.name, st)
+            try:
+                scan(cfd, rel + "/", out)
+            finally:
+                os.close(cfd)
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            digest = "L:" + os.readlink(entry.name, dir_fd=dfd)
+        elif stat.S_ISREG(st.st_mode):
+            ffd = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+            try:
+                digest = digest_fd(ffd)
+            finally:
+                os.close(ffd)
+        else:
+            digest = f"T:{stat.S_IFMT(st.st_mode)}"
+        out[rel] = [digest, st.st_mtime_ns, stat.S_IMODE(st.st_mode)]
+    return out
+
+
+def scan_tree(lfd, top):
+    fd = os.open(top, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=lfd)
+    try:
+        return scan(fd, "", {})
+    finally:
+        os.close(fd)
+
+
+def identity(files):
+    h = hashlib.sha256()
+    for rel in sorted(files):
+        h.update(f"{rel}\0{files[rel][0]}\0{files[rel][2]:o}\n".encode("utf-8", "surrogateescape"))
+    return h.hexdigest()
+
+
+def purge(dfd, dev):
+    """Delete everything inside dfd, fd-relatively, never following a symlink
+    and refusing a directory on another filesystem."""
+    for entry in list(os.scandir(dfd)):
+        st = os.lstat(entry.name, dir_fd=dfd)
+        if stat.S_ISDIR(st.st_mode):
+            if st.st_dev != dev:
+                raise Refuse(f"{entry.name} is on another filesystem")
+            cfd = open_dir(dfd, entry.name, st)
+            try:
+                purge(cfd, dev)
+            finally:
+                os.close(cfd)
+            os.rmdir(entry.name, dir_fd=dfd)
+        else:
+            os.unlink(entry.name, dir_fd=dfd)
+
+
+def remove_dir(lfd, entry_name, dev):
+    try:
+        st = os.lstat(entry_name, dir_fd=lfd)
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refuse(f"{entry_name} in the lane is not a directory")
+    fd = open_dir(lfd, entry_name, st)
+    try:
+        purge(fd, dev)
+    finally:
+        os.close(fd)
+    os.rmdir(entry_name, dir_fd=lfd)
+
+
+def read_ledger(lfd):
+    try:
+        fd = os.open(LEDGER, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=lfd)
+    except FileNotFoundError:
+        return None, "no ledger"
+    except OSError as exc:
+        return None, f"unreadable ledger ({exc.strerror})"
+    try:
+        with os.fdopen(fd, encoding="utf-8") as handle:
+            ledger = json.load(handle)
+    except (OSError, ValueError) as exc:
+        return None, f"unreadable ledger ({exc})"
+    if not (isinstance(ledger, dict) and ledger.get("v") == FORMAT
+            and isinstance(ledger.get("tree"), str) and isinstance(ledger.get("files"), dict)):
+        return None, "ledger in an older format"
+    return ledger, None
+
+
+def sync():
+    pfd, lfd = lane()
+    if lfd is None:
+        raise Refuse("the lane does not exist after the sync created it")
+    dev = os.fstat(lfd).st_dev
+    reasons = []
+    ledger, why = read_ledger(lfd)
+    if why:
+        reasons.append(why)
+    try:
+        new = scan_tree(lfd, "src.new")
+    except OSError as exc:
+        new = None
+        reasons.append(f"could not scan the synced tree ({exc})")
+    if ledger is not None and new is not None:
+        ledger_tree, ledger_files = ledger["tree"], ledger["files"]
+        if ledger_tree != identity(new):
+            reasons.append("the synced tree changed")
+        try:
+            old = scan_tree(lfd, "src")
+        except FileNotFoundError:
+            old = {}
+        except OSError as exc:
+            old = None
+            reasons.append(f"could not scan the previous tree ({exc})")
+        if old is not None:
+            changed = sorted(rel for rel, rec in old.items() if ledger_files.get(rel) != rec)
+            gone = sorted(rel for rel in ledger_files if rel not in old)
+            if changed or gone:
+                reasons.append(f"the last run changed {len(changed)} and removed {len(gone)} file(s) on the runner"
+                               f" (e.g. {', '.join((changed + gone)[:3])})")
+    if reasons:
+        try:
+            st = os.lstat("target", dir_fd=lfd)
+        except FileNotFoundError:
+            st = None
+        if st is not None:
+            if not stat.S_ISDIR(st.st_mode):
+                raise Refuse("the lane's target is not a directory")
+            tfd = open_dir(lfd, "target", st)
+            try:
+                purge(tfd, dev)
+            finally:
+                os.close(tfd)
+        print(f"vm-test-run: cleaned the lane's target dir: {'; '.join(reasons)} (#19134)", file=sys.stderr)
+    else:
+        print("vm-test-run: kept the lane's build: same tree, no runner-side changes (#19134)", file=sys.stderr)
+    remove_dir(lfd, "src", dev)
+    os.rename("src.new", "src", src_dir_fd=lfd, dst_dir_fd=lfd)
+    if new is None:
+        try:
+            os.unlink(LEDGER, dir_fd=lfd)
+        except FileNotFoundError:
+            pass
+        return
+    tmp = LEDGER + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=lfd)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        json.dump({"v": FORMAT, "tree": identity(new), "files": new}, handle)
+    os.replace(tmp, LEDGER, src_dir_fd=lfd, dst_dir_fd=lfd)
+
+
+try:
+    if mode == "check":
+        lane()
+    elif mode == "sync":
+        sync()
+    else:
+        raise SystemExit(f"lane_py: unknown mode {mode!r}")
+except Refuse as exc:
+    print(f"vm-test-run: refusing: {exc} (#19134)", file=sys.stderr)
+    sys.exit(3)
+PY
+)
 if [[ "$sync" -eq 1 ]]; then
-	incus exec "$runner" -- bash -c "rm -rf '${base}/src' && mkdir -p '${base}/src' '${base}/target' '${base}/tmp' && chown -R runner:runner '${base}'"
+	if ! printf '%s\n' "$lane_py" | incus exec "$runner" -- su runner -c "python3 -I - check /work/ '${name}'"; then
+		echo "vm-test-run: ${base} is not a plain lane directory on ${runner}; refusing (#19134)" >&2
+		exit 2
+	fi
+	incus exec "$runner" -- bash -c "rm -rf '${base}/src.new' && mkdir -p '${base}/src.new' '${base}/target' '${base}/tmp' && chown -R runner:runner '${base}'"
 	(cd "$top" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) |
-		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src'"
+		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src.new'"
+	if ! printf '%s\n' "$lane_py" | incus exec "$runner" -- su runner -c "python3 -I - sync /work/ '${name}'"; then
+		echo "vm-test-run: could not decide whether to keep the lane's build, or clean it safely, on ${runner}; refusing rather than risk testing a stale build (#19134)" >&2
+		exit 2
+	fi
 	# testguard-run.sh runs Go tests in a private network namespace with no
 	# network, so a cold module cache fails there as "setup failed". Fetch the
 	# modules first, outside the guard. With a warm cache this is quick and
