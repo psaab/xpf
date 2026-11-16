@@ -3887,6 +3887,11 @@ fn upsert_synced_session_reports_capacity_refusal_6785() {
         None,
     );
 
+    // #19130: since #18687 (5e2a5a05af) the shared-map bound is the 3N
+    // aggregate (N local rows + 2N peer forward/reverse entries), so seed the N
+    // local rows its sibling cells seed. A full symmetric-peer logical set then
+    // fits exactly, and the next NEW forward is the first past 3N.
+    seed_local_shared_rows(&coordinator, LOGICAL_CEILING);
     // A full symmetric-peer logical set fits and must all report Applied — the
     // control that stops this cell from passing on "always RejectedCapacity".
     for i in 0..LOGICAL_CEILING {
@@ -6622,6 +6627,9 @@ fn cap_rejected_forward_leaves_no_orphan_reverse_8015() {
     // Fact 3, re-measured: a forward delete takes its synthesized companion.
     coordinator.delete_synced_session(seed_key.clone(), false);
     let synced = coordinator.sessions.synced.lock().expect("shared sessions");
+    // #19130: the 3N fixture (#18687) seeds one local row; it is not part of
+    // the pair and must survive the pair's delete.
+    let local_seed = synced_entry_port(3000, 0).key;
     assert!(
         !synced.contains_key(&seed_key),
         "the forward must be removed by its own delete"
@@ -6631,11 +6639,16 @@ fn cap_rejected_forward_leaves_no_orphan_reverse_8015() {
         "a forward delete must take the synthesized companion with it — \
          `delete_synced_session_gen` derives it from the stored forward (#8015)"
     );
+    assert!(
+        synced.contains_key(&local_seed),
+        "a forward delete must not take the unrelated local row the 3N fixture seeded"
+    );
     assert_eq!(
         synced.len(),
-        0,
-        "forward delete must leave ZERO entries: the pair is complete on the way \
-         in and on the way out"
+        synced_len_before - 2,
+        "forward delete must remove EXACTLY its pair, forward and companion, \
+         leaving only the seeded local row: the pair is complete on the way in \
+         and on the way out"
     );
 }
 
