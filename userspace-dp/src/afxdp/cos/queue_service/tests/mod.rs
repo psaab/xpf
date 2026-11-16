@@ -110,6 +110,7 @@ mod fairness;
 mod exact_starvation_18748;
 mod root_reservation_18748;
 mod cos_drain_sim;
+mod capped_head_19098;
 mod colocated_share_19025;
 
 // #13065 (source finding D1-14) FAIL-ON-REVERT modularity guard: every

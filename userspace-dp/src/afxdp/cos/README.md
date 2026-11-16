@@ -38,6 +38,15 @@ mod.rs for further file-level breakdown.
 
 ## Notable invariants
 
+- **A non-exact selector budgets the head its builder takes (#19098).**
+  `build_cos_batch_from_queue` pops through the cap-aware
+  `cos_queue_peek_min_bucket` at `compute_drain_target_bps`, which skips
+  buckets above their per-flow target. The non-exact guarantee and surplus
+  selectors budget that same capped head (`nonexact_builder_head`), not the
+  uncapped `cos_queue_front`. Budgeting the uncapped head covered a head the
+  builder never took: when the capped head was larger, the build returned
+  nothing, the over-target bucket's rate never decayed, and the queue stopped
+  for good.
 - **Flow-fair gate is `flow_fair_state.is_some()` (#1735).** The runtime
   `CoSQueueRuntime::flow_fair()` accessor returns
   `flow_fair_state.is_some()`, NOT `config.flow_fair`. The invariant
