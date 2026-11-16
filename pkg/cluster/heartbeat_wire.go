@@ -79,6 +79,17 @@ const (
 	// echo section and never see it.
 	heartbeatClockMagic       = "XPFT"
 	heartbeatClockTrailerSize = 4 + 8
+	// heartbeatReadinessMagic marks the optional #19140 takeover-readiness
+	// section: magic(4) + a 256-bit bitmap (32 bytes, bit n of byte n/8, LSB
+	// first) of the wire RG ids whose takeover readiness (rg.Ready) is false
+	// on the sender. Data RGs only: the RG0 bit is never set, and a receiver
+	// ignores it. It follows the clock section (or the echo, or the HA
+	// version) INSIDE the body, so it is MAC-covered like XPFT, and before the
+	// fixed-tail epoch and auth trailers. Older readers stop before it and
+	// never see it. It is emitted only when some RG is not ready, and it is
+	// per-frame state: a frame without it means "every RG ready".
+	heartbeatReadinessMagic       = "XPFR"
+	heartbeatReadinessTrailerSize = 4 + 32
 	// heartbeatAuthMagic marks the optional #4107 PSK/HMAC auth trailer.
 	// Distinct from heartbeatMagic ("BPFX") so a reader can unambiguously
 	// detect a trailer at the tail of a frame. The trailer is appended AFTER
@@ -126,6 +137,10 @@ const (
 //	  peer session/sequence received by the sender.
 //	  Optional "XPFT" clock section (#18585): the sender's wall clock as
 //	  int64 unix nanoseconds, used only to MEASURE peer clock offset.
+//	  Optional "XPFR" readiness section (#19140): a 256-bit bitmap of the
+//	  wire RG ids whose takeover readiness is false on the sender (data RGs
+//	  only), present only when some RG is not ready. A RETH member-shim
+//	  election debt yields only to a peer that does not flag the RG here.
 //
 // The echo trailer is additive and appears before optional fixed-tail
 // authentication/epoch trailers. Older readers ignore it after the version
@@ -155,6 +170,12 @@ type HeartbeatPacket struct {
 	// 83->82 monitors) rather than being dropped itself. It is a measurement
 	// input only — nothing authenticates, elects or signs with it.
 	WallClockUnixNano int64
+	// TakeoverNotReady is the #19140 readiness section: the wire RG ids
+	// whose takeover readiness is false on the sender. Empty means the
+	// section is absent (every RG ready, or an older sender). Like the clock
+	// section it is reserved ahead of the best-effort monitors, and it is
+	// MAC-covered.
+	TakeoverNotReady []uint8
 }
 
 // HeartbeatGroup is a per-RG entry in the heartbeat.
@@ -340,14 +361,19 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 	if pkt.WallClockUnixNano != 0 {
 		clockTrailerSize = heartbeatClockTrailerSize
 	}
-	versionReserve := heartbeatVersionTrailerSize + echoTrailerSize + clockTrailerSize
+	readinessTrailerSize := 0
+	if len(pkt.TakeoverNotReady) > 0 {
+		readinessTrailerSize = heartbeatReadinessTrailerSize
+	}
+	optionalSections := echoTrailerSize + clockTrailerSize + readinessTrailerSize
+	versionReserve := heartbeatVersionTrailerSize + optionalSections
 	if pkt.SoftwareVersion != "" {
 		version = []byte(pkt.SoftwareVersion)
 		if len(version) > maxHeartbeatSoftwareVersionSize {
 			version = version[:maxHeartbeatSoftwareVersionSize]
 		}
-		if off+heartbeatVersionTrailerSize+len(version)+echoTrailerSize+clockTrailerSize <= maxHeartbeatSize-tailReserve {
-			versionReserve = heartbeatVersionTrailerSize + len(version) + echoTrailerSize + clockTrailerSize
+		if off+heartbeatVersionTrailerSize+len(version)+optionalSections <= maxHeartbeatSize-tailReserve {
+			versionReserve = heartbeatVersionTrailerSize + len(version) + optionalSections
 		} else {
 			version = nil
 		}
@@ -419,6 +445,14 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 			off += len(heartbeatClockMagic)
 			binary.LittleEndian.PutUint64(buf[off:off+8], uint64(pkt.WallClockUnixNano))
 			off += 8
+		}
+		if readinessTrailerSize != 0 {
+			copy(buf[off:off+len(heartbeatReadinessMagic)], heartbeatReadinessMagic)
+			off += len(heartbeatReadinessMagic)
+			for _, id := range pkt.TakeoverNotReady {
+				buf[off+int(id)/8] |= 1 << (id % 8)
+			}
+			off += 32
 		}
 	}
 	return buf[:off]
@@ -530,6 +564,21 @@ func UnmarshalHeartbeat(data []byte) (*HeartbeatPacket, error) {
 			string(data[off:off+len(heartbeatClockMagic)]) == heartbeatClockMagic {
 			off += len(heartbeatClockMagic)
 			pkt.WallClockUnixNano = int64(binary.LittleEndian.Uint64(data[off : off+8]))
+			off += 8
+		}
+		// #19140: the optional readiness section, after the clock (or the
+		// echo, or the HA version). On a keyed frame from an older sender
+		// these bytes are the epoch marker, which matches the magic with
+		// probability 2^-32 per key; a false read can only withhold a
+		// member-shim yield (the incumbent keeps the RG), never force one.
+		if off+heartbeatReadinessTrailerSize <= len(data) &&
+			string(data[off:off+len(heartbeatReadinessMagic)]) == heartbeatReadinessMagic {
+			off += len(heartbeatReadinessMagic)
+			for i := 0; i < 256; i++ {
+				if data[off+i/8]&(1<<(uint(i)%8)) != 0 {
+					pkt.TakeoverNotReady = append(pkt.TakeoverNotReady, uint8(i))
+				}
+			}
 		}
 	}
 

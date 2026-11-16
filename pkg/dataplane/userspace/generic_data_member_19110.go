@@ -90,6 +90,7 @@ func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
 	// own snapshot's, so a stale retained publication cannot replace them
 	// (Codex delta P2-2).
 	m.genericDataMemberCfg = cfg
+	m.publishMemberShimVerdictLocked() // #19140: a new membership authority
 	reasons, changed := m.setGenericDataMembersLocked(members)
 	m.mu.Unlock()
 	if changed {

@@ -4164,6 +4164,99 @@ Gated end-to-end on `set chassis cluster dhcp-lease-synchronization`
 (`config.ClusterConfig.DHCPLeaseSync`); standalone / knob-off renders the Kea
 config bit-identical to pre-#2239 (no control-socket, no hook).
 
+## RETH member-shim debt (#19140)
+
+`RethMemberShimMonitorIface` (`__reth-member-shim__`) is the election debt the
+daemon installs on a data RG whose RETH member has positively lost its XDP
+shim (`pkg/daemon/README.md`, "A primary whose RETH data member lost its XDP
+shim yields the RG"). The link stays up, so the interface monitor charges
+nothing, and #19110 readiness gates only a standby's promotion. Without this
+debt, a primary at full weight black-holed that member's transit
+indefinitely.
+
+- **Cost `RethMemberShimMonitorCost` = 254, the arm floor.** It joins the
+  floor MAX group in `monitorDebtTotalLocked`, with the dataplane-arm and
+  startup-sync debts, so it composes to weight 1 and never stacks to 0. A
+  lone owner keeps the RG; one broken RETH member must not resign every RETH
+  and RG0. It is in `reservedMonitorNames`, so a config apply's monitor
+  reconcile cannot drop it.
+- **The #12164 yield is keyed on FLOOR debt.** `floorDebtLocked` is arm debt
+  plus member-shim debt. It is used by the preempt yield
+  (`verifiedArmDebtPeer`), the non-preempt yield and the committed-transfer
+  pin release. A charged owner yields only to a peer with GREATER raw weight
+  that wins the scaled ordering and holds a live echo lease.
+- **The receiver-side sticky hold stays keyed on ARM debt only.** When the
+  new owner is charged too, both nodes are at the floor and equally broken.
+  Releasing the hold would let raw preempt move the RG back for nothing.
+  Cell `TestMemberShimBothChargedAfterYieldStays19140`.
+- **The member-shim yield needs the peer's readiness (`floorYieldDebtLocked`).**
+  The heartbeat's `takeoverReady` is weight-only, and a peer can be not-ready
+  at weight 255 for a reason that installs no floor debt. Several such reasons
+  leave it unable to forward the RG, or a whole RETH of it (table below). So
+  each heartbeat carries an optional MAC-covered `XPFR` readiness section
+  (`heartbeat_wire.go`): a 256-bit bitmap of the data RGs whose `rg.Ready` is
+  false on the sender, never RG0.
+  - The receiver records it per frame (`PeerGroupState.takeoverNotReady`): a
+    frame without it clears it, and peer loss drops it.
+  - A member-shim owner yields only to a peer that does not flag the RG.
+  - **The flag must come from a frame admitted after the charge.** Installing
+    the debt runs an election at once, against the peer's LAST frame, which
+    can predate a not-ready edge the peer has not yet advertised. A yield on
+    that frame hands the RG to a not-ready peer. That peer then promotes
+    DEGRADED through `peerYieldedOwnership`, and nothing hands the RG back.
+    Each admitted frame stamps `PeerGroupState.frame` from
+    `Manager.peerFrameCount`. The charge records the count in
+    `memberShimChargedAtFrame`, and the yield needs `peer.frame` above it.
+    That delays the yield by at most one heartbeat interval, on a producer
+    that already waits a 10 s grace.
+  - Arm debt ignores the flag and keeps #12164's never-strands contract
+    (`TestNonPreemptArmDebtYieldNeverStrandsUnreadyPeer12164`): a node with
+    no armed dataplane forwards nothing.
+  - **Older peers.** An older peer sends no section and reads as ready, so a
+    mixed-version pair keeps the #12164 behaviour: the yield goes, and a
+    not-ready peer promotes degraded through `peerYieldedOwnership`. The table
+    below is that residual.
+  - **Why a section and not a reserved monitor entry.** An older receiver
+    would list a reserved monitor entry as a DOWN peer monitor, and the monitor
+    section is capped at 255 entries.
+  - **Compatibility.** The section sits after `XPFT`, before the fixed-tail
+    epoch and auth trailers, so older readers never parse it.
+  - **Frame size.** A maximal keyed frame (255 groups, all data RGs flagged,
+    echo, clock, epoch, auth) is at most 1440 of the 1472-byte bound before
+    monitors.
+
+  Cells: `readiness_section_19140_test.go`. They cover the round trip, the
+  real pre-section decoder, MAC coverage, the maximal frame, the sender
+  flagging data RGs only, the receiver's per-frame bit with RG0 ignored, and
+  the yield toward a flagged peer, an older peer and under arm debt, and after
+  the peer becomes ready. They also cover a charge that lands while the owner's
+  latest frame predates the peer's not-ready edge
+  (`stale-frame-at-charge-keeps`).
+
+| Peer not-ready reason (readiness-only: no floor debt, peer at weight 255) | Source | Class |
+|---|---|---|
+| `userspace helper not running` (intentional stop or respawn) | `pkg/dataplane/userspace/manager_ha.go:923` | 2: cannot forward the RG |
+| `helper not enabled`, `forwarding unsupported` | `manager_ha.go:926`, `:932` | 2 |
+| `forwarding not armed`, `dataplane not active` | `manager_ha.go:936`, `:939` | 2 |
+| `XSK liveness failed` / `not proven` | `manager_ha.go:942`, `:945` | 2 |
+| `HA state clear` / `replay pending` | `manager_ha.go:1005`, `:1008` | 2 (inferred: HA inventory not converged) |
+| `vip interface X not found` / `down` (direct mode) | `pkg/daemon/daemon_ha_vip.go:78`, `:82` | 2: that RETH |
+| interface-monitor `X missing` / `down` at a partial weight | `pkg/cluster/monitor.go:1756`, `:1762` | 2: that RETH |
+| legacy VRRP instance not built | `pkg/daemon/daemon_ha_userspace_readiness.go:253` | 2 |
+| the peer's own shim-less member, inside its 10 s grace | `missing_data_member_19110.go` readiness | 2: that RETH (transient) |
+| `fabric forwarding path not ready` | `pkg/daemon/daemon_ha.go:1669-1671` | 1: forwards locally |
+| session mirror, repair overflow, inventory debt, snapshot retry | `manager_ha.go:952`, `:965`, `:968`/`:972`, `:983`/`:988` | 1: forwards, state may be stale |
+
+- **The #18715 ownerless re-promotion guard stays arm-only.** A node with one
+  broken RETH member reclaiming an ownerless RG beats leaving it ownerless;
+  #19110 readiness still gates it.
+
+Cells: `member_shim_debt_19140_test.go`, E1 to E9 (yield to a healthy peer,
+two charged nodes do not move, never stranded, lone owner keeps, floor
+composition, the yield holds while the debt does, a healthy primary never
+yields to a charged standby and its healthy-standby twin, both charged after
+a yield stays, the committed-owner hand-back).
+
 ## A clamped monitor weight is visible to the operator (#6589)
 
 An out-of-range `interface-monitor ... weight` is bounded to `[0,255]` by

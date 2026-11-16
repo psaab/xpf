@@ -350,11 +350,11 @@ expect_field() {
 	fi
 }
 
-# ── 1. The adapter census: 6 iperf smokes + 8 cells smokes ──────────
+# ── 1. The adapter census: 6 iperf smokes + 9 cells smokes ──────────
 #
 # #9922 F-155: ONE adapter can no longer cover both classes. The six smokes
 # that emit an iperf3 throughput cell keep ha-smoke (PASS headline FIXED to
-# throughput_gbps, figure required); the eight smokes that emit cells only take
+# throughput_gbps, figure required); the nine smokes that emit cells only take
 # smoke-cells (PASS/FAIL headline FIXED to cells_passed). The declared sets
 # below are CLAIMs; the discovery in 1b and the Makefile cross-check in 1f
 # test them.
@@ -375,6 +375,7 @@ DECLARED_CELLS_SMOKES=(
 	persistent-nat-failover
 	dhcp-lease-failover
 	wg-interop
+	member-shim-loss-failover
 )
 
 # 1a. Every declared gate exists, carries its summary echo(s), and its OWN
@@ -519,7 +520,7 @@ fi
 for g in "${DECLARED_IPERF_SMOKES[@]}"; do score_gate "$g" ha-smoke; done
 for g in "${DECLARED_CELLS_SMOKES[@]}"; do score_gate "$g" smoke-cells; done
 if ((census_covered == census_total)); then
-	ok "adapter census: own adapter covers all $census_total declared gates (6 ha-smoke + 8 smoke-cells)"
+	ok "adapter census: own adapter covers all $census_total declared gates (6 ha-smoke + 9 smoke-cells)"
 else
 	bad "adapter census: covered $census_covered of $census_total declared gates"
 fi
@@ -569,7 +570,7 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	# The unprefixed scripts run under test- gates (Makefile wraps
 	# each source as --gate test-<script-name>).
 	gate="$g"
-	case "$g" in persistent-nat-failover | dhcp-lease-failover | wg-interop) gate="test-$g" ;; esac
+	case "$g" in persistent-nat-failover | dhcp-lease-failover | wg-interop | member-shim-loss-failover) gate="test-$g" ;; esac
 	mkline=$(grep -E -- "--gate $gate " "$SCRIPT_DIR/../../Makefile" | head -1)
 	case "$mkline" in
 	*"--adapter ha-smoke"*) mk_adapter="ha-smoke" ;;
@@ -583,7 +584,7 @@ for g in "${DECLARED_IPERF_SMOKES[@]}" "${DECLARED_CELLS_SMOKES[@]}"; do
 	fi
 done
 if [[ -z "$map_bad" ]]; then
-	ok "adapter census: Makefile --adapter matches iperf emission for all 14 smoke gates"
+	ok "adapter census: Makefile --adapter matches iperf emission for all 15 smoke gates"
 else
 	bad "adapter census: Makefile/script adapter mismatch:$map_bad"
 fi
@@ -1777,8 +1778,9 @@ hermetic_target=$(sed -n '/^test-wire-properties:/,/^$/p' "$makefile")
 if [[ -z "$hermetic_target" ]]; then
 	bad "#12140: hermetic gate lookup swept ZERO lines for test-wire-properties — the target was renamed or removed (empty sweep)"
 # The pin counts every cluster --gate invocation in the Makefile: 25 on master
-# at 5e3655d536, 26 with #18583's test-rg-move-soak, and 31 with five #11769 CoS gates.
-elif [[ "$helper_gate_count" == "31" && "${#missing_helper_gates[@]}" == "0" &&
+# at 5e3655d536, 26 with #18583's test-rg-move-soak, 31 with five #11769 CoS gates,
+# and 32 with #19140's test-member-shim-loss-failover.
+elif [[ "$helper_gate_count" == "32" && "${#missing_helper_gates[@]}" == "0" &&
 	"$hermetic_target" != *"--require-helper-attestation"* ]]; then
 	ok "#12140: all $helper_gate_count cluster gate invocations require helper provenance; hermetic gate is excluded"
 else

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math"
 	"net"
+	"slices"
 	"sort"
 	"strconv"
 	"syscall"
@@ -642,6 +643,15 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		})
 	}
 
+	// #19140: every data RG whose takeover readiness is false. RG0 is never
+	// flagged: it carries no RETH and is never a member-shim yield target.
+	for _, rg := range m.groups {
+		if rg.GroupID != 0 && !rg.Ready {
+			pkt.TakeoverNotReady = append(pkt.TakeoverNotReady, wireRGID(rg.GroupID))
+		}
+	}
+	slices.Sort(pkt.TakeoverNotReady)
+
 	// #18540: the planned-shutdown resign markers go FIRST, so the
 	// monitor-section cap (#14704) can never truncate them away.
 	pkt.Monitors = append(pkt.Monitors, m.plannedShutdownWireMonitorsLocked()...)
@@ -789,6 +799,7 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
+	m.peerFrameCount++ // #19140: orders this frame against a member-shim charge
 
 	wasAlive := m.peerAlive
 	// The peer incarnation the previous admitted frame came from, read
@@ -854,10 +865,17 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 		localSession = m.LocalProcessToken()
 		localSequence = m.hbCounter.Load()
 	}
+	var notReady map[uint8]bool // #19140: built once per frame, below
 	for _, g := range pkt.Groups {
 		// #8337: key by the LOCAL config id the wire byte resolves to, which is
 		// how every reader of m.peerGroups indexes it.
 		localID := m.localRGIDForWireByte(g.GroupID)
+		if notReady == nil {
+			notReady = make(map[uint8]bool, len(pkt.TakeoverNotReady))
+			for _, id := range pkt.TakeoverNotReady {
+				notReady[id] = true
+			}
+		}
 		peerSession, peerSequence := uint64(0), uint64(0)
 		peerEchoSession, peerEchoSequence := uint64(0), uint64(0)
 		if echoSupported {
@@ -897,6 +915,8 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 			heartbeatEchoLeaseUntil:   leaseUntil,
 			peerWasPrimaryThisSession: wasPrimary || NodeState(g.State) == StatePrimary,
 			takeoverReady:             int(g.Weight) > maxRedundancyGroupWeight-DataplaneArmMonitorCost,
+			takeoverNotReady:          localID != 0 && notReady[g.GroupID],
+			frame:                     m.peerFrameCount,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace

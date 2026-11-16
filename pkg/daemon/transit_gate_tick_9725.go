@@ -177,6 +177,9 @@ func (d *Daemon) reassertTransitGate(stage string) {
 		// gate reports ready.
 		d.applyTransitElectionDebt(kernelReady && opened && !notReady, crashLooping)
 	}
+	// #19140: a primary whose RETH data member lost its XDP shim yields the
+	// RG to a healthy peer (member_shim_debt_19140.go).
+	d.applyMemberShimDebt()
 }
 
 // closeTransitUntilAttached establishes the boot fence without changing the

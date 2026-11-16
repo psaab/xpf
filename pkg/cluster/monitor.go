@@ -1269,6 +1269,7 @@ var reservedMonitorNames = []string{
 	ipAggregateMonitorName,
 	DataplaneArmMonitorIface,
 	HelperCrashLoopMonitorIface,
+	RethMemberShimMonitorIface,
 	startupSyncHoldMonitorIface,
 	PlannedShutdownMonitorIface,
 }

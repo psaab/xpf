@@ -226,6 +226,17 @@ func (a *LegacyDataPlaneAdapter) HelperControlUnresponsive() bool {
 	return m.HelperControlUnresponsive()
 }
 
+// DataMemberShimVerdict forwards the #19140 lock-free RETH data-member
+// classification. ok is false without a manager or before the first
+// publication.
+func (a *LegacyDataPlaneAdapter) DataMemberShimVerdict() (DataMemberShimVerdict, bool) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return DataMemberShimVerdict{}, false
+	}
+	return m.DataMemberShimVerdict()
+}
+
 // HelperExitedUnexpectedly forwards the #18791 signal that an unexpected-exit
 // replacement has not yet become forwarding-ready, including after spawn. The
 // daemon's VIP-first demotion keys on it separately from control responsiveness.

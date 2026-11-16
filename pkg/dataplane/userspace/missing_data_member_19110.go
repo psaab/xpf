@@ -353,6 +353,7 @@ func (m *Manager) observeDataMembers() {
 		m.shimProgID = cache
 	}
 	m.memberVerdict = v
+	m.publishMemberShimVerdictLocked() // #19140
 	logs := m.memberLogChangesLocked(v)
 	m.mu.Unlock()
 	for _, l := range logs {
@@ -421,57 +422,24 @@ func sortedObsNames(obs map[string]memberObservation) []string {
 }
 
 // missingDataMemberReasonsLocked is the readiness half. It serves the last
-// tick's verdict and makes no syscall. Caller holds m.mu.
+// tick's verdict and makes no syscall: every member classified missing or
+// unverified by classifyDataMembersLocked is a reason. Caller holds m.mu.
 func (m *Manager) missingDataMemberReasonsLocked(peerAlive bool) []string {
 	if !peerAlive {
 		return nil
 	}
-	cfg := m.genericDataMemberCfg
-	members := localDataMembers(cfg)
-	if len(members) == 0 {
+	members, checked := m.classifyDataMembersLocked()
+	if !checked {
 		return nil
-	}
-	prog := m.entryProgramLocked()
-	if prog == nil {
-		return nil // no shim program loaded: a distinct state, already blocked elsewhere
-	}
-	v := m.memberVerdict
-	stale := ""
-	switch {
-	case v.cfg != cfg:
-		stale = "unverified: not yet observed against the current configuration"
-	case v.prog != prog:
-		stale = "unverified: not yet observed against the loaded shim program"
-	case v.progErr != "":
-		stale = "unverified: the loaded shim program could not be identified: " + v.progErr
-	case v.oldest.IsZero() || memberNow().Sub(v.oldest) > memberVerdictMaxAge:
-		stale = "unverified: no observation in the last " + memberVerdictMaxAge.String()
 	}
 	var reasons []string
 	for _, mem := range members {
-		if mem.disabled {
-			continue // not required: pure config, under any verdict
-		}
-		o, observed := v.obs[mem.linuxName]
-		detail := stale
-		if observed && v.cfg == cfg && o.kind == "excluded:non-ethernet" {
-			if o.linkGen == m.memberLink[mem.linuxName].gen {
-				continue // not required: framing, for this config and this device, under any verdict age
-			}
-			detail = "unverified: the member's device changed after it was observed as non-Ethernet"
-		} else if detail == "" {
-			switch {
-			case !observed:
-				detail = "unverified: not observed yet"
-			case o.kind == "" || strings.HasPrefix(o.kind, "excluded"):
-				continue
-			default:
-				detail = o.detail
-			}
+		if mem.Status != DataMemberShimMissing && mem.Status != DataMemberShimUnverified {
+			continue
 		}
 		reasons = append(reasons, fmt.Sprintf("userspace data interface %s %s (%s); not retried automatically: "+
-			"recovery is the next compile or a link-refresh event", mem.linuxName, missingDataMemberReasonMarker,
-			detail))
+			"recovery is the next compile or a link-refresh event", mem.LinuxName, missingDataMemberReasonMarker,
+			mem.Detail))
 	}
 	return reasons
 }

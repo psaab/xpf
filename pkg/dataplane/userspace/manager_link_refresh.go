@@ -86,6 +86,7 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	// membership authority, like the reconcile below, and by name, the same
 	// lookups that reconcile makes under m.mu.
 	m.noteDataMemberLinksLocked(resolveDataMemberIfindexes(m.genericDataMemberCfg), linuxName)
+	m.publishMemberShimVerdictLocked() // #19140: a device change downgrades a framing exclusion
 
 	current := m.lastSnapshot
 	if current == nil || current.Config == nil || !configuredInterfaceLinkName(current.Config, linuxName) {

@@ -1091,6 +1091,24 @@ thing standing between those two states.
 
 ## What Was Fixed Recently
 
+### A shim-less RETH member moves the RG (#19140) — NEEDS LIVE GATE
+
+A primary whose RETH data member lost its XDP shim kept full weight and
+black-holed that member's transit until a commit (#19110 removed the
+background re-attach). The daemon now charges the RG a floor debt
+(`__reth-member-shim__`, weight 1) after 10 s of positive missing evidence. The
+RG then yields to a healthy peer; a lone owner keeps it
+(`pkg/daemon/README.md`). Smoke: `make test-member-shim-loss`, with criteria
+pre-registered in `docs/log/19140.md`.
+
+**Wire note.** The heartbeat gains an optional `XPFR` section: a MAC-covered
+bitmap of the sender's not-ready data RGs, placed after `XPFT` and before the
+epoch and auth trailers. There is no HA protocol version bump: older readers
+never parse it. The member-shim yield needs the peer not to flag the RG. With
+an older peer, the yield follows #12164 and may hand the RG to a peer that is
+not ready for a reason that installs no floor debt (`pkg/cluster/README.md`,
+"RETH member-shim debt").
+
 ### P0: Barrier delivery during bulk sync — FIXED (PR #407)
 
 Barrier acks and bulk acks now route through a dedicated priority channel

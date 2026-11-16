@@ -5256,6 +5256,84 @@ Cells, in `demotion_route_order_18620_test.go`:
 - the failed-write cell;
 - `helper_release_republish_18620_test.go`, for the hook wiring.
 
+## A primary whose RETH data member lost its XDP shim yields the RG (#19140)
+
+#19110 makes a configured RETH data member with no XDP shim (absent, not
+attached, a foreign program) a takeover-readiness reason. That stops a
+STANDBY from taking the RG. It did nothing for the PRIMARY: the link is up, so
+the interface monitor charges no weight, and readiness gates only promotion.
+Meanwhile the #10302 fence drops that member's kernel-path transit and AF_XDP
+never sees it. Nothing re-attaches automatically (#19110 removed that), so the
+RG's traffic on that RETH was black-holed until a commit or a link event.
+
+The producer (`member_shim_debt_19140.go`) runs on the transit-gate tick
+(`reassertTransitGate`: every second and on every XDP link event). It reads
+#19110's readiness classification lock-free (`DataMemberShimVerdict`,
+`pkg/dataplane/README.md`).
+
+**How it decides:**
+1. **Positive evidence only.**
+   - MISSING starts or extends an episode, keyed per member.
+   - ATTACHED ends it.
+   - NOT-REQUIRED (administratively disabled, or non-Ethernet framing for
+     this config and device) never accrues debt and does not block a clear.
+   - UNVERIFIED changes nothing: an episode is held, neither advanced nor
+     reset, and debt is neither installed nor cleared. A snapshot older than
+     3 s, or none at all, is unverified for every member. A primary is never
+     demoted on the absence of evidence.
+2. **Grace.** An RG is charged `cluster.RethMemberShimMonitorIface` (cost 254,
+   weight 1) when one of its members has been continuously missing for
+   `memberShimDebtGrace` (10 s) and is missing NOW. Only the RGs of the RETHs
+   that member serves are charged, never RG0.
+3. **Clear-hold.** The debt clears once every member of the RG has been
+   attached or not-required for `memberShimClearHold` (10 s) and is so NOW. A
+   flutter inside the hold keeps it.
+4. **Config removal.** An RG whose RETH members all left the configuration
+   loses its debt.
+5. **Every node is charged, standby too.** Two equally broken nodes tie at the
+   floor and nothing moves. A healthy primary never yields to a charged
+   standby, because the yield needs the PEER to be heavier.
+
+Grace and clear-hold are named constants with no config knob (coordinator
+decision, 2026-11-16).
+
+**What the election does with it** (`pkg/cluster/README.md`, "RETH
+member-shim debt"):
+- a charged owner yields to a heavier, verified peer (#12164);
+- a lone owner keeps the RG at weight 1;
+- two charged nodes do not move.
+
+The yield goes only to a peer whose heartbeat does not flag the RG not-ready
+(the `XPFR` readiness section, `pkg/cluster/README.md`). An older peer sends no
+flag and keeps the #12164 behaviour (a degraded handoff rather than an
+ownerless RG); the class table there is that mixed-version residual.
+
+**What it does not do:** re-attach the shim (recovery is still a commit or a
+link event), demote RG0, or act on unverified evidence.
+
+**What an operator sees:**
+
+    cluster: a RETH data member of this redundancy group has no XDP shim; charging the RG member-shim election debt (weight 1): ...
+
+at ERROR, with `rg`, `member`, `detail` and `missing_for`. When it clears:
+
+    cluster: RETH member-shim election debt cleared
+
+at INFO, with `why`. `show chassis cluster status` lists
+`__reth-member-shim__` among the RG's monitor failures. The member itself is
+already on `xpf_userspace_ha_takeover_blocker` (#19110). The per-RG debt gauge
+`xpf_cluster_rg_member_shim_debt{rg}` is deferred to #19170 (it needs collector
+wiring and the deps audit); until then those two surfaces are the signal.
+
+Cells, in `member_shim_debt_19140_test.go`:
+- **D1:** the grace, on the member's RG only;
+- **D2:** unverified and stale evidence install and clear nothing;
+- **D3:** the clear-hold, and a flutter inside it;
+- **D4:** config removal;
+- **D5:** not-required members;
+- **D6:** unverified holds the episode;
+- **the tick wiring.**
+
 ## A demotion with an unresponsive helper releases the VIPs first (#18701)
 
 The order above (rg_active=false, then the withdrawals, then the direct VIP

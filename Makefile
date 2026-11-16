@@ -76,7 +76,7 @@ clean_cargo_verdict := $(strip \
 clean_cargo_verdict := $(or $(firstword $(clean_cargo_verdict)),remove)
 
 # eBPF compilation flags
-.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-connectivity-mtr-selftest test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
+.PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-connectivity-mtr-selftest test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-member-shim-loss test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
 
 all: generate build build-ctl
 
@@ -1972,6 +1972,16 @@ test-ha-crash:
 		--gate test-ha-crash --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		-- ./test/incus/test-ha-crash.sh
+
+# #19140: a primary whose RETH data member loses its XDP shim yields the RG.
+# Pre-registered criteria in docs/log/19140.md. MEMBER_SHIM_ARGS selects a
+# variant: --both, --lone or --standby (empty: the main arm).
+MEMBER_SHIM_ARGS ?=
+test-member-shim-loss:
+	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/harness-result.sh run \
+		--gate test-member-shim-loss-failover --adapter smoke-cells --env $(HARNESS_ENV) --cluster \
+		--require-helper-attestation \
+		-- ./test/incus/member-shim-loss-failover.sh $(MEMBER_SHIM_ARGS)
 
 # #11378: IPv4 FBF fallback after a simulated ISP-B neighbor failure. Keep
 # gate execution, executable attestation, and the destructive smoke in one

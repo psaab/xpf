@@ -2793,6 +2793,36 @@ Cells:
 The real-kernel cells are registered in `pkg/memlockcensus`. Record:
 `docs/log/19110.md`.
 
+### The published member classification (#19140)
+
+`classifyDataMembersLocked` (`member_shim_verdict_19140.go`) is the readiness
+classification above, structured. It classifies each configured local RETH
+data member as one of:
+- **attached;**
+- **missing:** absent, not attached, or a foreign program;
+- **unverified;**
+- **not-required.**
+
+`missingDataMemberReasonsLocked` formats readiness reasons from it (missing
+and unverified members). So readiness and the published view cannot
+disagree; `TestMemberShimVerdictMatchesReadiness19140` pins that.
+
+The classification is published under the mutex into an `atomic.Pointer`
+whenever an input changes:
+- an observation pass;
+- a link-generation bump in `RefreshInterfaceRowsForLink`, so a device change
+  downgrades a framing exclusion to unverified at once;
+- a compile, a new membership authority.
+
+`(*Manager).DataMemberShimVerdict()`, and its `LegacyDataPlaneAdapter`
+passthrough, reads it LOCK-FREE. The daemon's member-shim debt producer
+(#19140) must not wait on the mutex that the HA cutover holds across helper
+round trips (#18711). The snapshot carries:
+- the config it was classified against;
+- `At`, the verdict's earliest observation. A reader judges the age itself,
+  because a stalled tick loop publishes nothing new;
+- `Checked`: false when there is no configured member or no shim program.
+
 ## Arm-coverage proof (#5275, observe-only)
 
 `armproof.go` computes whether the dataplane is genuinely armed for the

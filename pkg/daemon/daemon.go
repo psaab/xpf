@@ -168,7 +168,10 @@ type Daemon struct {
 	// transitGateMu serializes every sysctl/barrier actuation with the periodic
 	// kernel-truth census. A wake callback can arrive from any dataplane writer,
 	// while the tick is the completeness guarantee for writers no observer sees.
-	transitGateMu       sync.Mutex
+	transitGateMu sync.Mutex
+	// memberShim is the #19140 RETH member-shim debt producer's episode
+	// state. Guarded by transitGateMu.
+	memberShim          memberShimTracker
 	transitGateWakeOnce sync.Once
 	transitGateWake     chan struct{}
 

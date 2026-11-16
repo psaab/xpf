@@ -132,8 +132,9 @@ harness_adapt() {
 # The two HA-smoke adapters share one summary parse and differ ONLY in the
 # headline (#9922 F-155). Six smokes emit an iperf3 throughput cell
 # (failover, rolling-upgrade, double, stress, chained, active-active) and keep ha-smoke;
-# eight emit cells only (connectivity, wire-properties, ha-crash,
-# persistent-nat, dhcp-lease, private-rg, restart-connectivity, wg-interop)
+# nine emit cells only (connectivity, wire-properties, ha-crash,
+# persistent-nat, dhcp-lease, private-rg, restart-connectivity, wg-interop,
+# member-shim-loss)
 # and take smoke-cells. The Makefile mapping is census-checked against direct
 # throughput verdicts or the shared ha_smoke_iperf_verdicts caller in
 # harness-result-selftest.sh, so a future mis-mapping reds instead of silently

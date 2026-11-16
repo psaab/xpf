@@ -123,6 +123,12 @@ type Manager struct {
 	// ifindex (#19110), bumped by the link-refresh path on a device change.
 	// Guarded by mu.
 	memberLink map[string]memberLinkState
+	// memberShimVerdict (#19140) is the readiness classification of every
+	// configured RETH data member, republished under m.mu whenever an input
+	// changes (an observation pass, a link-generation bump, a compile) and
+	// read lock-free by the daemon's member-shim debt producer
+	// (DataMemberShimVerdict).
+	memberShimVerdict atomic.Pointer[DataMemberShimVerdict]
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.
