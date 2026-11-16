@@ -12,6 +12,16 @@
 //! Each cell has a control (a working pool, or an egress with an address)
 //! that takes the other outcome, so a cell cannot pass on a fixture that never
 //! reaches the failure.
+//!
+//! Fold (Codex on b7f, F1): recycle-then-`return` passed the one-descriptor
+//! cells, but it ends the whole pass: later descriptors are never read and
+//! the end-of-pass lifecycle never runs. The pass cell below puts a valid
+//! packet AFTER the failing one in the same RX batch and requires it to be
+//! processed. Neither an injected nor a held packet can carry this case: a
+//! held pass creates no session (#18560, `held_pass_creates_no_session`), and
+//! an injected packet is admitted on its own path and never reached the
+//! source-NAT composer when driven (measured: no failure recorded). A
+//! following RX descriptor is the reachable discriminator.
 
 use super::poll_descriptor::frag_assoc::{retry_flowless_fragment_nat, RetryFlowlessFragmentNat};
 use super::test_fixtures::*;
@@ -201,4 +211,45 @@ fn flowless_fragment_source_nat_error_drops_19132() {
             "{label}: a source-NAT error must drop the tail, not pass it untranslated or translate it"
         );
     }
+}
+
+#[test]
+fn source_nat_failure_lets_the_pass_finish_19132() {
+    // The rule covers only the failing source, so the following packet (from
+    // another LAN host) forwards untranslated under the same policy.
+    let mut rule = pool_rule(5000, 4999); // empty range: every allocation fails
+    rule.source_addresses = vec!["10.0.61.102/32".to_string()];
+    let mut snapshot = nat_snapshot();
+    snapshot.source_nat_rules = vec![rule];
+    let forwarding = build_forwarding_state(&snapshot);
+    let ha_state = txn_ha_state();
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 24, 0);
+    binding.interface = Arc::<str>::from("reth1.0");
+    let mut sessions = SessionTable::new();
+    let dst = Ipv4Addr::new(8, 8, 8, 8);
+    let failing_src = Ipv4Addr::new(10, 0, 61, 102);
+    let failing = build_txn_tcp_syn_frame_v4(failing_src, dst, 12345, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
+    let next_src = Ipv4Addr::new(10, 0, 61, 103);
+    let next = build_txn_tcp_syn_frame_v4(next_src, dst, 12345, 443, TCP_FLAG_SYN, TEST_LAN_MAC);
+    let deliveries = Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
+    let (batch, dbg) = txn_run_pass_19132(
+        &mut binding,
+        &mut sessions,
+        &forwarding,
+        &ha_state,
+        None,
+        &[
+            (&failing, meta_v4_19132(failing_src, dst, failing.len())),
+            (&next, meta_v4_19132(next_src, dst, next.len())),
+        ],
+        &deliveries,
+    );
+    assert_eq!(dbg.rx, 2, "anti-vacuity: both descriptors reached the poll body");
+    assert_eq!(batch.nat_alloc_fail, 1, "the first packet's source-NAT failure is recorded");
+    assert_eq!(
+        batch.validated_packets, 2,
+        "the pass must go on to the descriptor that follows the failed packet"
+    );
+    assert_eq!(dbg.forward, 1, "the following packet (no NAT rule) is forwarded");
+    assert_eq!(binding.scratch.scratch_recycle.len(), 1, "only the failed packet is recycled");
 }
