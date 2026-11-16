@@ -110,8 +110,10 @@ where
                 }
                 // Mark dead with Release. The panic_slot mutex publishes the
                 // message, but the dead flag IS a synchronization edge: the
-                // coordinator's dead-worker sweep reads it with Acquire
-                // (`retire_worker_holders_where`) and then zeroes this
+                // coordinator's dead-worker sweep reads it with Acquire in
+                // `retire_selected_worker_holders` (status.rs; the selection
+                // predicate in `retire_dead_worker_holders` reads it Relaxed,
+                // and only the Acquire read gates the sweep) and then zeroes this
                 // worker's CoS exact-backlog slots
                 // (`clear_worker_cos_backlog_slots`, #19025/#19100). Release
                 // orders every backlog publication this worker made before its
