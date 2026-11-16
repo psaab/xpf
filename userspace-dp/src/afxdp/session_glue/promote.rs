@@ -280,6 +280,61 @@ pub(in crate::afxdp) fn synced_row_incarnation(
     }
 }
 
+/// #18552 (B1: Codex P1-4 = r24 P2-1(a), the lead's Option B): the forward
+/// row F that a reverse-hit promotion of its companion R promotes with it,
+/// under the same permit (which already claims `[R, F]`). Returns F's stored
+/// decision and metadata and the shared entry to publish for it, read BEFORE
+/// any flip. `None` means R is promoted alone:
+///
+/// - `key` is not a reverse companion: forward hits are unchanged, and a
+///   forward hit never promotes its reverse;
+/// - this worker holds no promotable-synced forward F under `forward_key`
+///   whose own companion is `key`;
+/// - F's owner RG is not locally active in `ha_state`, the HA view the hit's
+///   own verdict used. In a split RG, F's owner (which holds the source-NAT
+///   allocation) stays authoritative for the pair, so its imports and deletes
+///   legitimately apply to F; an owner of 0 (unknown) is not "ours" either;
+/// - shared authority does not name F's current incarnation
+///   (`synced_row_incarnation`): F is being replaced or deleted, and its
+///   queued worker command repairs it.
+///
+/// Why F at all: the #9678 import gate and the #9714 peer-delete guard read
+/// only the FORWARD row. With R promoted alone, F stayed `SyncImport`, so a
+/// late different-translation import of F passed #9678 and freed T1, and a
+/// peer delete of F passed #9714 and took R with it.
+fn reverse_hit_forward_partner(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    key: &SessionKey,
+    metadata: &SessionMetadata,
+    forward_key: &SessionKey,
+) -> Option<(SessionDecision, SessionMetadata, SyncedSessionEntry)> {
+    if !metadata.is_reverse {
+        return None;
+    }
+    let (forward_decision, forward_metadata, forward_origin) =
+        sessions.entry_with_origin(forward_key)?;
+    if !forward_origin.is_promotable_synced()
+        || forward_metadata.is_reverse
+        || reverse_session_key(forward_key, forward_decision.nat) != *key
+    {
+        return None;
+    }
+    if !owner_rg_is_locally_active(ha_state, forward_metadata.owner_rg_id, now_secs) {
+        return None;
+    }
+    if synced_row_incarnation(sessions, shared_sessions, forward_key)
+        != SyncedRowIncarnation::Current
+    {
+        return None;
+    }
+    let mut forward_entry = sessions.synced_entry_for(forward_key)?;
+    forward_entry.origin = SessionOrigin::SharedPromote;
+    Some((forward_decision, forward_metadata, forward_entry))
+}
+
 /// #18552: what one synced-promotion attempt did. Every outcome other than
 /// `Promoted` leaves the worker row, shared authority, the conntrack origin
 /// bit, steering and the sibling queues exactly as they were: every check runs
@@ -371,6 +426,13 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 /// [`SyncedPromotion::suppresses_flow_cache_seed`] says which outcomes keep
 /// the packet out of the flow cache, and why.
 ///
+/// #18552 (B1): the import and peer-delete gates read only the FORWARD row, so
+/// a reverse hit also promotes its forward F with R, under the same permit,
+/// when F is ours and current ([`reverse_hit_forward_partner`]); otherwise R is
+/// promoted alone. In a split RG (F's owner RG not active here) F's owner,
+/// which holds the source-NAT allocation, stays authoritative for the pair, so
+/// its imports and deletes of F apply. A forward hit never promotes its reverse.
+///
 /// The compatibility wrapper keeps the pre-#1346 13-argument shape for tests;
 /// the production variant adds the two conntrack fds to invalidate only origin.
 fn promote_synced_session_with_conntrack(
@@ -378,6 +440,7 @@ fn promote_synced_session_with_conntrack(
     session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
     forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
     key: &SessionKey,
     decision: SessionDecision,
     metadata: SessionMetadata,
@@ -419,13 +482,16 @@ fn promote_synced_session_with_conntrack(
     // either refuses this promotion or waits for it and re-reads a shared row
     // that is already `SharedPromote`, which its #9678 gate stops. Never
     // blocks: a refusal changes nothing and the next resolved hit retries.
-    let reverse_key = reverse_session_key(key, decision.nat);
+    // `companion_key` is the other half of the pair: the reply tuple for a
+    // forward hit, the forward tuple for a reverse hit.
+    let companion_key = reverse_session_key(key, decision.nat);
     let gate = crate::afxdp::bpf_map::global_tuple_gate();
     // Review r24 P3-1: refuse without allocating while a holder lasts.
-    if gate.install_claim_would_refuse(&[key, &reverse_key]) {
+    if gate.install_claim_would_refuse(&[key, &companion_key]) {
         return (promoted, SyncedPromotion::Deferred);
     }
-    let Ok(install_permits) = gate.try_acquire_installs([key.clone(), reverse_key]) else {
+    let Ok(install_permits) = gate.try_acquire_installs([key.clone(), companion_key.clone()])
+    else {
         return (promoted, SyncedPromotion::Deferred);
     };
     // #18552 (review F2): an import or delete that completed BEFORE the permit
@@ -438,6 +504,18 @@ fn promote_synced_session_with_conntrack(
     if incarnation != SyncedRowIncarnation::Current {
         return (promoted, SyncedPromotion::NotCurrent(incarnation));
     }
+    // #18552 (B1): a reverse hit promotes its forward F too, when F is ours
+    // and current. Decided here, with every R check, before ANY flip; when F
+    // does not qualify, R is promoted alone.
+    let forward_partner = reverse_hit_forward_partner(
+        sessions,
+        shared.sessions,
+        ha_state,
+        shared.tick.secs,
+        key,
+        &promoted,
+        &companion_key,
+    );
     // #13939/#17092: `promote_synced_with_origin` strips any FIN/RST; the
     // Owner-only `Defer::None` replay (`apply_deferred_owner_hit`) after the
     // authority verdict re-applies the close and propagates it.
@@ -453,8 +531,6 @@ fn promote_synced_session_with_conntrack(
     }) {
         return (promoted, SyncedPromotion::FlipDeclined);
     }
-    #[cfg(test)]
-    run_promote_after_flip_hook();
     // #17058: build from the live row via the one shared construction,
     // then apply the promote overrides (origin, promoted metadata,
     // decision, protocol and the packet's tcp_flags). Every other
@@ -475,6 +551,25 @@ fn promote_synced_session_with_conntrack(
     promoted_entry.origin = SessionOrigin::SharedPromote;
     promoted_entry.protocol = protocol;
     promoted_entry.tcp_flags = tcp_flags;
+    // #18552 (B1): flip F after R's entry is read, so no early return can
+    // leave F flipped. The flip carries no TCP flags or ack: the packet belongs
+    // to R, so F's TCP state is untouched (its last-seen is refreshed: a live
+    // reply is evidence the flow is alive). F keeps its own stored decision and
+    // metadata. A flip that does not apply leaves R promoted alone.
+    let forward_partner = forward_partner.filter(|(forward_decision, forward_metadata, _)| {
+        sessions.promote_synced_with_origin(SessionUpdate {
+            key: &companion_key,
+            decision: *forward_decision,
+            metadata: forward_metadata.clone(),
+            origin: SessionOrigin::SharedPromote,
+            now_ns: shared.tick.ns,
+            protocol: companion_key.protocol,
+            tcp_flags: 0,
+            ack: None,
+        })
+    });
+    #[cfg(test)]
+    run_promote_after_flip_hook();
     // The helper's promotion flips a peer-synced row to local ownership.
     // Clear only the origin bit in the conntrack mirror; counters,
     // timestamps, NAT state, and creation time remain untouched.
@@ -502,6 +597,30 @@ fn promote_synced_session_with_conntrack(
         crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
+    // #18552 (B1): the same legs for F: the origin bit (the permits fence F as
+    // the pair's companion key) and its steering row.
+    if let Some((forward_decision, forward_metadata, _)) = forward_partner.as_ref() {
+        crate::afxdp::bpf_map::update_session_cluster_synced_origin_under_permit(
+            shared.conntrack.v4,
+            shared.conntrack.v6,
+            &companion_key,
+            false,
+            &install_permits,
+        );
+        if publish_session_map_entry_for_session(
+            session_map,
+            &companion_key,
+            *forward_decision,
+            forward_metadata,
+            forwarding.has_routing_domains,
+            forwarding.has_multiple_zones,
+        )
+        .is_err()
+        {
+            crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
     publish_shared_session(
         shared.sessions,
         shared.nat_sessions,
@@ -509,9 +628,25 @@ fn promote_synced_session_with_conntrack(
         shared.owner_rg_indexes,
         &promoted_entry,
     );
+    if let Some((_, _, forward_entry)) = forward_partner.as_ref() {
+        publish_shared_session(
+            shared.sessions,
+            shared.nat_sessions,
+            shared.forward_wire_sessions,
+            shared.owner_rg_indexes,
+            forward_entry,
+        );
+    }
     #[cfg(test)]
     run_promote_before_fanout_hook();
     replicate_session_upsert(shared.peer_worker_commands, shared.worker_commands_by_id, &promoted_entry);
+    if let Some((_, _, forward_entry)) = forward_partner.as_ref() {
+        replicate_session_upsert(
+            shared.peer_worker_commands,
+            shared.worker_commands_by_id,
+            forward_entry,
+        );
+    }
     // #18552: released only after the shared publish and the fan-out.
     drop(install_permits);
     (promoted, SyncedPromotion::Promoted)
@@ -537,11 +672,16 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
     // No-conntrack leg: force `-1, -1` so a caller that grafted real
     // fds onto the bundle cannot leak them into this entry point.
     let shared = shared.with_conntrack_tick(ConntrackFds { v4: -1, v6: -1 }, shared.tick);
+    // No HA view on this test-only compatibility leg: no forward partner is
+    // ever "ours", so a reverse hit promotes its companion alone, as before
+    // #18552 (B1). Production enters through the `_with_conntrack` variant.
+    let no_ha_view = BTreeMap::new();
     promote_synced_session_with_conntrack(
         sessions,
         session_map,
         shared,
         forwarding,
+        &no_ha_view,
         key,
         decision,
         metadata,
@@ -561,6 +701,9 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     session_map: SteeringMap<'_>,
     shared: SharedSessionRefs<'_>,
     forwarding: &ForwardingState,
+    // #18552 (B1): the HA view this packet's resolve and verdict used; it
+    // decides whether a reverse hit's forward partner is locally owned.
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
     tcp_flags: u8,
     worker_id: u32,
     verdict: SessionHitVerdict,
@@ -604,6 +747,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
         session_map,
         shared,
         forwarding,
+        ha_state,
         &promotion.key,
         promotion.decision,
         promotion.metadata,
