@@ -202,4 +202,24 @@ XPF_CLUSTER_LOCK_TIMEOUT=99999999999999999999 "$WC" "case-j huge" -- true \
 	|| fail "(j) absurd timeout value broke acquire"
 ok "timeout env normalizes base-10 and degrades absurd values safely"
 
+# ── #19165: a lock tuple and a cluster env that name different clusters are
+#    refused before the lock is taken, and the command never runs. A matched
+#    pair runs; a private lock path (no cluster) is not checked.
+mkdir -p "$T/k"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+set +e
+XPF_CLUSTER_LOCK="$T/k/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/k/owner" XPF_CLUSTER_EPOCH="$T/k/epoch" \
+	BPFRX_CLUSTER_ENV="${REPO_ROOT}/test/incus/loss-userspace-cluster.env" \
+	"$WC" "case-k mismatch" -- touch "$T/k/ran" >"$T/k.out" 2>&1
+K_RC=$?
+set -e
+[[ $K_RC -eq 2 && ! -e "$T/k/ran" ]] || fail "(k) udp lock + loss env: expected refusal (2) with the command not run, got rc=$K_RC ran=$([[ -e "$T/k/ran" ]] && echo yes || echo no): $(tr '\n' '|' <"$T/k.out")"
+grep -q 'REFUSED: the lock tuple is the udp cluster.*resolves loss' "$T/k.out" || fail "(k) the refusal does not name both clusters: $(tr '\n' '|' <"$T/k.out")"
+[[ ! -s "$T/k/owner" ]] || fail "(k) the refused cell wrote an owner file: it took the lock"
+XPF_CLUSTER_LOCK="$T/k/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/k/owner" XPF_CLUSTER_EPOCH="$T/k/epoch" \
+	BPFRX_CLUSTER_ENV="${REPO_ROOT}/test/incus/udp-userspace-cluster.env" \
+	"$WC" "case-k matched" -- touch "$T/k/ran" >"$T/k2.out" 2>&1 || fail "(k) udp lock + udp env was refused: $(tr '\n' '|' <"$T/k2.out")"
+[[ -e "$T/k/ran" ]] || fail "(k) udp lock + udp env: the command did not run"
+ok "a lock tuple and a cluster env naming different clusters are refused before the lock (#19165); a matched pair runs"
+
 echo "ALL ${PASS} CASES PASS"
