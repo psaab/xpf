@@ -1393,3 +1393,10 @@ mod return_resolution_15771 {
         assert_eq!(resolution.neighbor_mac, Some(DEFAULT_MAC));
     }
 }
+
+// Repro: the embedded-ICMP return path uses a STORED reverse resolution
+// verbatim, where the reply path re-resolves it (#19145 design round,
+// the R-read).
+#[cfg(test)]
+#[path = "stale_reverse_return_tests.rs"]
+mod stale_reverse_return_tests;
