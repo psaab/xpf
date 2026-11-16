@@ -366,13 +366,14 @@ the shared publish and the sibling fan-out. It takes the permit with
   cache when the deferral needs a resolved hit to clear: a refused permit
   (transient), a superseded shared row (bounded by the worker's next command
   drain; a cache entry seeded from the old row would outlive the repair,
-  because a cache hit checks only that its backing row is live), and a
-  refused materialize of a reply's forward partner (`PartnerRefused`, fold 3).
-  A shared row that is absent (the queued delete evicts the cache itself),
-  already locally owned (a sibling promoted it; shared authority already
-  protects the flow), a stale-replay fence (permanent until a purge) or a
-  zero session id (never promoted, so nothing would retry it) does not
-  suppress the seed.
+  because a cache hit checks only that its backing row is live), a refused
+  materialize of a reply's forward partner (`PartnerRefused`, fold 3), and a
+  zero shared session id (`Unproven`, fold 4: never promoted, but a queued
+  same-NAT replacement installs in place without evicting the cache, so a
+  cached decision would outlive it). A shared row that is absent (the queued
+  delete evicts the cache itself), already locally owned (a sibling promoted
+  it; shared authority already protects the flow) or a stale-replay fence
+  (permanent until a purge) does not suppress the seed.
 - **Refusal costs no allocation.** While a holder lasts (a lease's drain, up to
   100 ms, or a whole clear), every resolved hit retries. A non-allocating
   pre-check (`TupleGate::install_claim_would_refuse`) refuses then without the
@@ -456,9 +457,14 @@ Pinned by:
   leave R promoted alone. With F absent here, the zero id is judged before
   shared F's owner RG, which is the value the import carried rather than this
   worker's own derivation. Both rows stay peer-synced and keep forwarding on
-  the synced path. The skip is TERMINAL and the packet may seed the flow cache:
-  nothing would ever retry it, and suppressing the seed would put every packet
-  of the flow on the slow path for its life. Cycle 2 instead reconciled a
+  the synced path. The skip is TERMINAL, and (fold 4, codex-c P2) the packet
+  does NOT seed the flow cache: a zero id cannot tell this row from a legacy
+  peer's same-NAT replacement whose `UpsertSynced` is still queued, that
+  upsert replaces the row in place without evicting the key's cache entries
+  (only a delete does), and a cache hit checks only that the backing row is
+  live, so a cached decision (its installing table, its egress) would keep
+  forwarding after the repair. Such flows therefore take the slow path for
+  every packet. Cycle 2 instead reconciled a
   zero-id row from shared and promoted it; Codex's re-check found that the
   reconcile installed shared's owner RG (0 from a legacy peer) over F's
   locally derived one, the equality test masked it, and the owner check that
@@ -485,9 +491,10 @@ a zero-id shared hit materialized but not promoted; a zero-id F on a reply
 (with R zero-id, and with R proven current) and a zero-id F absent here, each
 promoting nothing; Codex's exact shape (shared F owner 0, worker F owner
 active), where R is not promoted and the later peer delete takes the pair
-together; on the poll pipeline, a zero-id owner hit that is not promoted and
-seeds the cache; and the proven-current control (worker counters and view
-kept).
+together; on the poll pipeline, a zero-id owner hit that is neither promoted
+nor cached, and a zero-id replacement B (same NAT, another installing table)
+whose drained upsert the next packet is judged on, not A's cached decision;
+and the proven-current control (worker counters and view kept).
 
 What is NOT covered (residuals, `docs/log/18552.md` has the detail):
 
@@ -501,12 +508,14 @@ What is NOT covered (residuals, `docs/log/18552.md` has the detail):
   in this state.
 - No cell covers NAT64 or NPTv6 pairs; the pair keys come from
   `reverse_session_key`, which handles them, but that is a code read.
-- **Mixed-version ISSU (fold 3).** Sessions taken over from an old-version
-  peer whose sync records carry no session id (shared id 0) are not converted
-  to local ownership on the new owner. They keep forwarding as peer-synced
-  rows, so the old peer's later delete, or an import of a different
-  translation, can still drop one: the #9678 and #9714 gates protect only
-  promoted rows. Their shared copies also never carry the #9951/#10312 leak
+- **Mixed-version ISSU (folds 3 and 4).** Sessions taken over from an
+  old-version peer whose sync records carry no session id (shared id 0) are
+  not converted to local ownership on the new owner. They keep forwarding as
+  peer-synced rows, so the old peer's later delete, or an import of a
+  different translation, can still drop one: the #9678 and #9714 gates
+  protect only promoted rows. They are also never seeded into the flow cache,
+  so every packet of such a flow takes the slow path on the owner for the
+  flow's life (performance only). Their shared copies also never carry the #9951/#10312 leak
   stamp (only a promotion publishes it), so a worker that re-materializes one
   from shared after its leak route was removed does not revoke it; the worker
   row it already holds keeps its own materialize-time stamp.

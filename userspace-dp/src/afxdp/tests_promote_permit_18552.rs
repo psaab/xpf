@@ -1649,14 +1649,13 @@ fn superseded_promotion_does_not_seed_flow_cache_18552() {
     );
 }
 
-/// #18552 fold 3, on the real poll pipeline: a zero-id synced flow (a legacy
-/// peer's import: shared F and R carry session id 0; this worker minted its
-/// own) is never promoted, and its owner packet SEEDS the flow cache. The skip
-/// is TERMINAL, so nothing would ever retry it, and a suppressed seed would put
-/// every packet of the flow on the slow path for its life. The next packet
-/// rides the cache, and the flow stays peer-synced.
+/// #18552 folds 3 and 4, on the real poll pipeline: a zero-id synced flow (a
+/// legacy peer's import: shared F and R carry session id 0; this worker minted
+/// its own) is never promoted, and its owner packets do NOT seed the flow
+/// cache (fold 4, codex-c P2). The flow forwards on the slow path, packet by
+/// packet, and stays peer-synced.
 #[test]
-fn zero_id_owner_hit_is_not_promoted_and_seeds_the_cache_18552() {
+fn zero_id_owner_hit_is_neither_promoted_nor_cached_18552() {
     let mut fx = PollFixture::imported_with_session_id(Some(0));
     let shared_id = crate::afxdp::shared_ops::lock_shared_recover(&fx.shared)
         .get(&rg::forward_key())
@@ -1667,9 +1666,9 @@ fn zero_id_owner_hit_is_not_promoted_and_seeds_the_cache_18552() {
     assert_legs(
         &format!(
             "zero-id owner hit (shared id {shared_id:?}; first packet {first:?}; after it \
-             worker/shared/cached {after_first:?}; second packet {second:?}; worker/shared \
+             worker/shared/cached {after_first:?}; second packet {second:?}; worker/shared/cached \
              after it {:?})",
-            (fx.worker_origin(), fx.shared_origin())
+            (fx.worker_origin(), fx.shared_origin(), fx.cached())
         ),
         &[
             (
@@ -1689,13 +1688,88 @@ fn zero_id_owner_hit_is_not_promoted_and_seeds_the_cache_18552() {
                  shared",
             ),
             (
-                after_first.2,
-                "seed: the TERMINAL zero-id skip kept the packet out of the flow cache, so \
-                 every packet of the flow takes the slow path",
+                !after_first.2 && !fx.cached(),
+                "seed: a zero-id owner packet seeded the flow cache",
             ),
             (
-                second.cache_hits == 1 && second.session_hit == 0 && second.tx_wan == 1,
-                "cache: the next packet did not ride the flow cache",
+                second.session_hit == 1 && second.cache_hits == 0 && second.tx_wan == 1,
+                "slow path: the next packet did not resolve and forward on the slow path",
+            ),
+        ],
+    );
+}
+
+/// #18552 fold 4 (codex-c P2), on the real poll pipeline: a zero-id row's
+/// decision must not outlive the queued repair that replaces it. A legacy peer
+/// replaced A with B under the same tuple and translation, so shared names B
+/// (id 0) and B's `UpsertSynced` is queued here. B carries another installing
+/// table stamp, one this node does not have, so this node cannot forward B
+/// (`TableUnavailable`). The first owner packet hits A (`Unproven`): it forwards
+/// on A and must not seed the cache. Then B's upsert lands: same NAT, so no
+/// delete and nothing that evicts the key's cache entries. The next packet
+/// must be judged on B (not forwarded), not ride A's cached decision out
+/// reth0.80. The TRUE twin (the same flow, no replacement) forwards its second
+/// packet, so the drop is B's decision and nothing else.
+#[test]
+fn zero_id_replacement_is_not_served_from_a_stale_cache_18552() {
+    const B_TABLE: u32 = 0x0001_8552;
+    let run = |replace: bool| {
+        let mut fx = PollFixture::imported_with_session_id(Some(0));
+        let mut b = fx.forward.clone();
+        b.generation = fx.forward.generation + 2;
+        b.decision.install_table_domain = B_TABLE;
+        b.decision.install_table_check = B_TABLE;
+        assert!(
+            !fx.forwarding.install_tables.contains_key(&B_TABLE),
+            "premise: B's installing table is unknown on this node"
+        );
+        if replace {
+            fx.publish(&b);
+        }
+        let first = fx.lan_ack();
+        let cached_after_first = fx.cached();
+        if replace {
+            rg::apply_commands(
+                &mut fx.sessions,
+                &fx.forwarding,
+                &fx.ha,
+                vec![WorkerCommand::UpsertSynced(b)],
+            );
+        }
+        let worker_table = fx
+            .sessions
+            .entry_with_origin(&rg::forward_key())
+            .map(|(decision, _, origin)| (decision.install_table_domain, origin));
+        let second = fx.lan_ack();
+        (first, cached_after_first, worker_table, second)
+    };
+    let replaced = run(true);
+    let twin = run(false);
+    let (first, cached_after_first, worker_table, second) = replaced;
+    assert_legs(
+        &format!(
+            "stale cache after a zero-id replacement (first packet {first:?}, cached \
+             {cached_after_first}; worker table/origin after the drain {worker_table:?}; second \
+             packet {second:?}; twin {twin:?})"
+        ),
+        &[
+            (
+                first.session_hit == 1 && first.tx_wan == 1,
+                "premise: the first packet must hit A and forward out the WAN",
+            ),
+            (
+                worker_table == Some((B_TABLE, SessionOrigin::SyncImport)),
+                "premise: the drained upsert did not install B as this worker's peer row",
+            ),
+            (
+                twin.3.tx_wan == 1,
+                "twin: without the replacement the second packet must forward",
+            ),
+            (!cached_after_first, "seed: the zero-id packet seeded A's decision"),
+            (
+                second.cache_hits == 0 && second.session_hit == 1 && second.tx_wan == 0,
+                "stale: the next packet rode A's cached decision out reth0.80 instead of being \
+                 judged on B",
             ),
         ],
     );
@@ -2780,8 +2854,8 @@ fn forward_packet_row(fx: &Fixture) -> SyncedSessionEntry {
 /// first owner hit, not on the next. Worker F/R and shared F/R keep their ids,
 /// translations, origins (peer-synced), admitting policy and owner RG; nothing
 /// is steered, origin-cleared or fanned out; the packet forwards (no `Drop`)
-/// and may seed the flow cache, because the skip is TERMINAL and nothing would
-/// ever retry it.
+/// but does NOT seed the flow cache (fold 4, codex-c P2: a cached decision
+/// would outlive a queued same-NAT replacement).
 ///
 /// With `replacement` (Codex cycle-1 P2), the legacy peer has replaced A with
 /// B under the same tuple and translation (policy 22): B is published, its
@@ -2817,7 +2891,7 @@ fn assert_zero_id_hit_row_is_never_promoted(v6: bool, replacement: bool) {
     let mut legs = skipped_promotion_legs(&fx, worker_before, shared_before);
     let skipped = |hit: HitOutcome| {
         hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None
-            && !hit.seed_suppressed
+            && hit.seed_suppressed
     };
     legs.extend([
         (
@@ -2831,8 +2905,8 @@ fn assert_zero_id_hit_row_is_never_promoted(v6: bool, replacement: bool) {
         ),
         (
             skipped(first) && skipped(second),
-            "packet: the TERMINAL zero-id skip suppressed the seed or dropped the packet (it \
-             would put the flow on the slow path for its life)",
+            "packet: the zero-id skip dropped the packet, or let it seed the flow cache (a \
+             cached decision outlives a queued same-NAT replacement)",
         ),
     ]);
     let mut after_drain = None;
@@ -2887,7 +2961,7 @@ fn zero_id_replacement_is_never_promoted_v6_18552() {
 /// no divergence, so the packet's deferred promotion stands. That promotion
 /// must not promote what the materialize installed: the worker row stays a
 /// peer-synced `SharedMaterialize` replica, shared F/R are unchanged, nothing
-/// is fanned out, and the packet may seed the flow cache.
+/// is fanned out, and the packet does not seed the flow cache (fold 4).
 fn assert_zero_id_materialize_is_never_promoted(v6: bool) {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
@@ -2932,9 +3006,9 @@ fn assert_zero_id_materialize_is_never_promoted(v6: bool) {
             (fx.sibling_commands() == 0, "fan-out: the promotion replicated F to the sibling"),
             (
                 hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None
-                    && !hit.seed_suppressed,
-                "packet: the clean materialize diverged, or the TERMINAL zero-id skip suppressed \
-                 the seed",
+                    && hit.seed_suppressed,
+                "packet: the clean materialize diverged, or the zero-id skip let it seed \
+                 the flow cache",
             ),
         ],
     );
@@ -2953,7 +3027,8 @@ fn zero_id_materialize_is_never_promoted_v6_18552() {
 /// Fold 3, the forward partner. A reply hit on R whose forward row F carries
 /// the zero shared id promotes NOTHING: not F (never promoted), and not R (R
 /// alone would leave F peer-synced with nothing to retry it). The pair is
-/// unchanged in the worker and in shared, and the packet may seed the cache.
+/// unchanged in the worker and in shared, and the packet does not seed the
+/// cache (fold 4).
 /// Without `reply_proven`, R is a zero-id row too, the production shape (the
 /// HA reverse synthesizer gives a companion its forward's id); with it, shared
 /// R proves R current ([`prove_reply`]), so only F's zero id stops the pair.
@@ -2996,8 +3071,8 @@ fn assert_zero_id_forward_partner_promotes_nothing(v6: bool, reply_proven: bool)
             (fx.sibling_commands() == 0, "fan-out: a row was replicated to the sibling"),
             (
                 hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None
-                    && !hit.seed_suppressed,
-                "packet: the TERMINAL zero-id skip suppressed the seed or dropped the packet",
+                    && hit.seed_suppressed,
+                "packet: the zero-id skip dropped the packet or let it seed the flow cache",
             ),
         ],
     );
@@ -3090,8 +3165,8 @@ fn assert_zero_id_absent_forward_is_left_to_its_upsert(v6: bool) {
             (fx.sibling_commands() == 0, "fan-out: a row was replicated to the sibling"),
             (
                 hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None
-                    && !hit.seed_suppressed,
-                "packet: the TERMINAL zero-id skip suppressed the seed or dropped the packet",
+                    && hit.seed_suppressed,
+                "packet: the zero-id skip dropped the packet or let it seed the flow cache",
             ),
             (
                 forward_after_drain == Some((snat(v6, LOCAL_PORT), SessionOrigin::SyncImport)),
@@ -3177,8 +3252,8 @@ fn assert_owner_zero_forward_does_not_strand_the_reply(v6: bool) {
             ),
             (
                 hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None
-                    && !hit.seed_suppressed,
-                "packet: the TERMINAL zero-id skip suppressed the seed or dropped the packet",
+                    && hit.seed_suppressed,
+                "packet: the zero-id skip dropped the packet or let it seed the flow cache",
             ),
             (
                 delete == SyncedDeleteOutcome::Applied && after_delete == [None; 4],
