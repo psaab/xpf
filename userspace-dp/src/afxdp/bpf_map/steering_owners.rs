@@ -75,6 +75,21 @@
 //!     they could drop a concurrent import's claim on a new incarnation. The
 //!     ones in `session_delta.rs` and the admission shed run under a permit or
 //!     lease and stay.
+//! - **Residuals of the deferred release** (#19147 Codex re-check):
+//!   - **The pending ops are not crash-safe.** They are a local value between
+//!     the two phases, with no Drop-based commit and no durable retry. An
+//!     unwind or termination between the phases loses them, which can leave
+//!     an orphaned row or an unapplied restore. No fallible operation or user
+//!     callback sits in that gap today, and a whole-process restart clears
+//!     stale rows before spawning (`pkg/dataplane/userspace/process.go`).
+//!   - **A commit attempts, it does not guarantee.** BPF delete and restore
+//!     errors are discarded (`delete_steering_row`, `commit_deferred_steering_ops`),
+//!     and a teardown that publishes empty maps first leaves the commit an fd
+//!     of -1. There is no retry queue. This is the release's existing
+//!     best-effort policy, as for every other steering delete.
+//!   - **The late publisher** above is unchanged: the fence makes a racing
+//!     claim land whole, but a claim made after its key's removal still stands
+//!     for no shared authority.
 //!
 //! **Actions are recorded (#14650).** Each owner records the action byte it
 //! published. A physical row shared by owners with different actions is
@@ -266,6 +281,12 @@ std::thread_local! {
     /// that window.
     pub(crate) static RETIRE_COORDINATOR_BETWEEN_SWEEPS_19147:
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    /// #19147 (review, Codex re-check P3): test-only probe, fired on THIS
+    /// thread when its coordinator claim is about to BLOCK on the publication
+    /// lock (a `try_read` found it write-held). A cell uses it as a
+    /// deterministic handshake: the claimer has provably reached the fence.
+    pub(crate) static COORDINATOR_PUBLICATION_WOULD_BLOCK_19147:
+        std::cell::RefCell<Option<Box<dyn Fn()>>> = std::cell::RefCell::new(None);
 }
 
 impl Default for SteeringRowOwners {
@@ -370,6 +391,17 @@ impl SteeringRowOwners {
         holder: SteeringHolder,
     ) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
         matches!(holder, SteeringHolder::Coordinator).then(|| {
+            #[cfg(test)]
+            if matches!(
+                self.coordinator_publication.try_read(),
+                Err(std::sync::TryLockError::WouldBlock)
+            ) {
+                COORDINATOR_PUBLICATION_WOULD_BLOCK_19147.with(|probe| {
+                    if let Some(probe) = probe.borrow().as_ref() {
+                        probe();
+                    }
+                });
+            }
             self.coordinator_publication
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)

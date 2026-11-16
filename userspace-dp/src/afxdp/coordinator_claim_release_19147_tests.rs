@@ -420,6 +420,52 @@ fn the_stale_replay_purge_releases_the_coordinator_claim_19147() {
     );
 }
 
+/// #19147 (review, Codex re-check P3): a deterministic handshake with a
+/// racing thread, replacing a wait-and-hope timeout. The racer reports either
+/// that it is about to BLOCK on the fence under test (a would-block probe) or
+/// that it FINISHED (it was never fenced). The waiter needs one of the two;
+/// neither within the safety bound fails the cell, it never passes it.
+#[derive(Default)]
+struct Handshake19147 {
+    state: Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+
+impl Handshake19147 {
+    fn blocked(&self) {
+        self.state.lock().expect("handshake").0 = true;
+        self.changed.notify_all();
+    }
+
+    fn finished(&self) {
+        self.state.lock().expect("handshake").1 = true;
+        self.changed.notify_all();
+    }
+
+    /// Wait until the racer blocked on the fence or finished; returns
+    /// `finished`.
+    fn wait_blocked_or_finished(&self) -> bool {
+        let state = self.state.lock().expect("handshake");
+        let (state, timeout) = self
+            .changed
+            .wait_timeout_while(
+                state,
+                std::time::Duration::from_secs(60),
+                |(blocked, finished)| !*blocked && !*finished,
+            )
+            .expect("handshake");
+        assert!(
+            !timeout.timed_out(),
+            "FIXTURE: the racing thread neither reached the fence nor finished in 60 s"
+        );
+        state.1
+    }
+
+    fn was_blocked(&self) -> bool {
+        self.state.lock().expect("handshake").0
+    }
+}
+
 /// #19147 (review, Codex P2): a coordinator claim racing the wholesale retire
 /// must land WHOLE, before or after it, never split between its two sweeps.
 ///
@@ -431,6 +477,10 @@ fn the_stale_replay_purge_releases_the_coordinator_claim_19147() {
 /// half. That left a ghost row owner no held-only release can find. With the
 /// fix the claim blocks on the publication lock until the retire completes.
 ///
+/// The seam does not sleep and hope: it waits until the claimer either
+/// reports that it is about to block on the publication lock (the fence held)
+/// or has finished its claim inside the window (no fence).
+///
 /// The cell checks BOTH registry halves, then that a subsequent held-only
 /// release (what the removal primitive runs) finds the claim and leaves the
 /// row ownerless.
@@ -439,21 +489,24 @@ fn a_coordinator_claim_racing_the_wholesale_retire_lands_whole_19147() {
     let coordinator = recorded_coordinator();
     let entry = synced_entry_port(31_911, 0);
     let owners = Arc::clone(&coordinator.steering_owners);
-    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handshake = Arc::new(Handshake19147::default());
     let claimer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
     let landed_in_window = Arc::new(std::sync::atomic::AtomicBool::new(false));
     {
-        let (owners, claimed, claimer, landed_in_window) = (
+        let (owners, handshake, claimer, landed_in_window) = (
             Arc::clone(&owners),
-            Arc::clone(&claimed),
+            Arc::clone(&handshake),
             Arc::clone(&claimer),
             Arc::clone(&landed_in_window),
         );
         let entry = entry.clone();
         crate::afxdp::bpf_map::RETIRE_COORDINATOR_BETWEEN_SWEEPS_19147.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let thread_claimed = Arc::clone(&claimed);
+                let racer = Arc::clone(&handshake);
                 let handle = std::thread::spawn(move || {
+                    let probe = Arc::clone(&racer);
+                    crate::afxdp::bpf_map::COORDINATOR_PUBLICATION_WOULD_BLOCK_19147
+                        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || probe.blocked())));
                     crate::afxdp::bpf_map::publish_session_map_entry_for_session(
                         crate::afxdp::bpf_map::SteeringMap {
                             fd: RECORDER_ONLY_MAP_FD,
@@ -467,16 +520,10 @@ fn a_coordinator_claim_racing_the_wholesale_retire_lands_whole_19147() {
                         false,
                     )
                     .expect("the racing coordinator claim must publish");
-                    thread_claimed.store(true, std::sync::atomic::Ordering::Release);
+                    racer.finished();
                 });
-                // Give the claim every chance to land INSIDE the window.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-                while std::time::Instant::now() < deadline {
-                    if claimed.load(std::sync::atomic::Ordering::Acquire) {
-                        landed_in_window.store(true, std::sync::atomic::Ordering::Release);
-                        break;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(1));
+                if handshake.wait_blocked_or_finished() {
+                    landed_in_window.store(true, std::sync::atomic::Ordering::Release);
                 }
                 *claimer.lock().expect("claimer") = Some(handle);
             }));
@@ -494,6 +541,11 @@ fn a_coordinator_claim_racing_the_wholesale_retire_lands_whole_19147() {
     assert!(
         !landed_in_window.load(std::sync::atomic::Ordering::Acquire),
         "a coordinator claim landed BETWEEN the retire's two sweeps; it must wait for the whole retire"
+    );
+    assert!(
+        handshake.was_blocked(),
+        "the racing claim never BLOCKED on the publication lock the retire held, so the contested \
+         ordering was not exercised: this cell must fail, never pass, without it"
     );
     let row = crate::afxdp::bpf_map::session_map_row(&entry.key);
     let held = coordinator_held(&coordinator, &entry.key);
@@ -532,6 +584,10 @@ fn a_coordinator_claim_racing_the_wholesale_retire_lands_whole_19147() {
 /// has finished, and its claim survives. A release moved after the lock drops
 /// lets the replacement publish and claim first; the identity-blind release
 /// of key K then drops K''s claim.
+///
+/// The seam does not sleep and hope: it waits until the publisher either
+/// reports that it is about to block on the shared-session lock (the removal
+/// holds it) or has finished publishing and claiming (it does not).
 #[test]
 fn a_replacement_claimed_during_the_removal_keeps_its_claim_19147() {
     let coordinator = recorded_coordinator();
@@ -541,14 +597,17 @@ fn a_replacement_claimed_during_the_removal_keeps_its_claim_19147() {
     replacement.session_id = 0x19147;
     let sessions = Arc::clone(&coordinator.sessions);
     let owners = Arc::clone(&coordinator.steering_owners);
-    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let handshake = Arc::new(Handshake19147::default());
     let publisher: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
     {
-        let (claimed, publisher) = (Arc::clone(&claimed), Arc::clone(&publisher));
+        let (handshake, publisher) = (Arc::clone(&handshake), Arc::clone(&publisher));
         crate::afxdp::shared_ops::BEFORE_COORDINATOR_RELEASE_19147.with(|hook| {
             *hook.borrow_mut() = Some(Box::new(move || {
-                let thread_claimed = Arc::clone(&claimed);
+                let racer = Arc::clone(&handshake);
                 let handle = std::thread::spawn(move || {
+                    let probe = Arc::clone(&racer);
+                    crate::afxdp::shared_ops::SHARED_PUBLISH_WOULD_BLOCK_19147
+                        .with(|hook| *hook.borrow_mut() = Some(Box::new(move || probe.blocked())));
                     publish_shared_session(
                         &sessions.synced,
                         &sessions.nat,
@@ -569,15 +628,9 @@ fn a_replacement_claimed_during_the_removal_keeps_its_claim_19147() {
                         false,
                     )
                     .expect("the replacement's claim must publish");
-                    thread_claimed.store(true, std::sync::atomic::Ordering::Release);
+                    racer.finished();
                 });
-                // Give the replacement every chance to claim BEFORE the release.
-                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
-                while std::time::Instant::now() < deadline
-                    && !claimed.load(std::sync::atomic::Ordering::Acquire)
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
+                handshake.wait_blocked_or_finished();
                 *publisher.lock().expect("publisher") = Some(handle);
             }));
         });
@@ -607,6 +660,11 @@ fn a_replacement_claimed_during_the_removal_keeps_its_claim_19147() {
             .get(&entry.key)
             .is_some_and(|live| live.session_id == 0x19147),
         "FIXTURE: the replacement must be the live shared entry"
+    );
+    assert!(
+        handshake.was_blocked(),
+        "the replacement's publish never BLOCKED on the shared-session lock the removal held, so the \
+         contested ordering was not exercised: this cell must fail, never pass, without it"
     );
     assert!(
         coordinator_held(&coordinator, &entry.key) > 0,
