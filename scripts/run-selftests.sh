@@ -600,6 +600,11 @@ run_bash test/incus/mirror-census-selftest.sh
 # callers must overlap, and a flock-less mutant must hand out duplicates under
 # the same load. Private counter only; never the shared one. Needs bash+flock.
 run_bash scripts/next-deb-version-selftest.sh
+# #19139: vm-test-run.sh hands a command's stdout and stderr back in WRITE
+# order. Hermetic: a mock incus whose transport delivers stdout only after the
+# command exits; a control proves it reorders, a mutation cell proves the order
+# cell can fail. Needs bash and git.
+run_bash scripts/vm-test-run-selftest.sh
 # #8302: the harness result ledger. Hermetic -- fixtures only, no cluster.
 #
 # harness-result-selftest.sh drives the whole adapter table, whose reason for
