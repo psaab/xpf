@@ -2636,10 +2636,24 @@ P2-1, R23 NEW-1):
     verdict), and a member with known non-Ethernet framing
     (`ShimAttachRefused`), classified from every lookup whether or not the
     program could be identified, and kept across verdict staleness while the
-    verdict was made against the current config. Every tick re-observes it, so
-    a replacement device is reclassified on the next tick; a stalled tick loop
-    can leave it standing, because readiness must not do that I/O. These are
-    the refresh path's structural attach exclusions. NO shim program loaded is
+    verdict was made against the current config AND the member's device is
+    the one observed. Device identity is the member's **link generation**
+    (user decision after codex-h). `RefreshInterfaceRowsForLink` bumps it
+    first, before any early return, for each member whose device changed:
+    the member its event names (a re-create that kept its ifindex), and every
+    member whose ifindex, re-resolved by name, differs from the last one
+    recorded (add, remove, re-create; this also catches a member whose own
+    event the daemon's debounce coalesced into another name). The compile
+    records the baseline from the ifindexes it already resolves, so an
+    unrelated link event leaves the exemption alone. Each observation is
+    stamped with the generation read at pass start, before its lookup, and
+    readiness keeps the exemption only while the stamp equals the current
+    generation: a plain comparison, no I/O. So a member replaced by an
+    Ethernet NIC with no shim, under an unchanged config, is a blocker at
+    once (inside the freshness window too), and stays one with the tick loop
+    stalled; an observation that raced the replacement carries the old
+    generation and cannot exempt the new device. These are the refresh
+    path's structural attach exclusions. NO shim program loaded is
     a distinct state (the check is skipped; other reasons block); a loaded
     program that cannot be identified is not that state;
   - **identity without side effects:** readiness reads the loaded program
