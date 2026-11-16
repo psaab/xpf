@@ -257,9 +257,35 @@ pub(super) fn session_map_writes() -> Vec<SessionMapWriteRecord> {
 #[cfg(test)]
 pub(super) const RECORDER_ONLY_MAP_FD: c_int = i32::MAX - 1;
 
+// #18641 step 1 (Codex P1-5): a test-only, per-thread failure injector. The
+// next `n` steering writes of `key` fail with an injected error, BEFORE the
+// recorder sees them, so a failed write leaves no record (as a failed BPF
+// update leaves no row).
+#[cfg(test)]
+std::thread_local! {
+    pub(super) static FAIL_STEERING_WRITES_FOR: std::cell::RefCell<Option<(SessionKey, u32)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The BPF update of one steering row. Every caller runs it inside the row's owner-shard
 /// lock (a `SteeringRowOwners` write closure).
 fn write_steering_row(map: SteeringMap<'_>, key: &SessionKey, value: u8) -> io::Result<()> {
+    #[cfg(test)]
+    {
+        let inject = FAIL_STEERING_WRITES_FOR.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            match slot.as_mut() {
+                Some((target, left)) if target == key && *left > 0 => {
+                    *left -= 1;
+                    true
+                }
+                _ => false,
+            }
+        });
+        if inject {
+            return Err(io::Error::other("injected steering write failure (test)"));
+        }
+    }
     #[cfg(test)]
     SESSION_MAP_WRITES.with(|records| {
         records.borrow_mut().push(SessionMapWriteRecord {

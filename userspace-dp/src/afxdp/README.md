@@ -2034,13 +2034,25 @@ order/dedup contract and a large-N (N=M=200k) linear-time guard.
 ## Each forward steering row is written once per RG activation (#18641)
 
 `handle_activated_rgs` runs the reverse prewarm and then
-`republish_bpf_session_entries_for_owner_rgs`, in the same `update_ha_state`
+`republish_bpf_session_entries_for_keys`, in the same `update_ha_state`
 request, under the same `session_map.fd >= 0` condition.
 
 **What each step writes:**
 - **The republish** rewrites the steering row of every key in the `sessions`
-  owner-RG index (S). It re-reads the index and the shared map at that
-  moment, behind the stale-replay fence.
+  owner-RG index (S), behind the stale-replay fence.
+  - **The key set** is the PREWARM's own S snapshot, handed over in
+    `PrewarmOutcome`. So the keys the prewarm leaves and the keys the
+    republish writes are one set. A second read of the index could miss a
+    key that left S in between without being deleted (a re-homed owner RG),
+    and neither half would write it (review, r24 P3-1).
+  - **Each entry** is read from the shared map at republish time. A key
+    added to S after the snapshot (a late import) is published by the worker
+    that installs it (#18550).
+  - **A failed write is retried once** (review, Codex P1-5). The republish
+    is now the SOLE activation writer of an S-forward's row. Before step 1
+    the prewarm's write was a second attempt, and the retry restores exactly
+    those two attempts. A second failure is counted in
+    `SESSION_PUBLISH_ERRORS_SHARED`, as before.
 - **The prewarm** leaves those keys' forward rows to the republish (step 1).
   Before step 1 it published them as well, so every S-forward was written
   twice per activation. The duplicate is the same set of syscalls as the
@@ -2056,7 +2068,10 @@ that condition.
 
 **The cells**, in `ha_activation_steering_18641_tests.rs`:
 - an S-forward is written exactly once and is present afterwards;
-- a split-RG forward is still written once.
+- a split-RG forward is still written once;
+- a key re-homed out of S between the prewarm and the republish (not
+  deleted) is still written once;
+- a transiently failed republish write still leaves the row.
 
 The other prewarm callers pass fd −1 and publish nothing, so they are
 unaffected.

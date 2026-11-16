@@ -1,5 +1,15 @@
 use super::*;
 
+// #18641: test-only seam in the RG-activation prewarm. It runs once, after the
+// prewarm has snapshotted its candidates (and the owner-index set S it hands
+// to the republish) and released the shared-session lock, before it writes
+// anything.
+#[cfg(test)]
+std::thread_local! {
+    pub(in crate::afxdp) static PREWARM_AFTER_COLLECT_HOOK_18641:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
 pub(in crate::afxdp) fn demote_shared_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -120,6 +130,18 @@ pub(in crate::afxdp) struct PrewarmTimings {
     pub(in crate::afxdp) reverse_fanout: std::time::Duration,
 }
 
+/// What one RG-activation prewarm hands back: its timings and the owner-index
+/// key set (S) it took its snapshot of (#18641 step 1; #19145 review, seat r24
+/// P3-1). The caller's republish writes exactly this S, so the keys the prewarm
+/// left to the republish and the keys the republish writes are ONE snapshot.
+/// A second read of the index could miss a key that left S in between without
+/// being deleted (a re-homed owner RG), which neither would then write.
+#[derive(Debug, Default)]
+pub(in crate::afxdp) struct PrewarmOutcome {
+    pub(in crate::afxdp) timings: PrewarmTimings,
+    pub(in crate::afxdp) owner_index_keys: Vec<SessionKey>,
+}
+
 /// Pre-warm reverse companions in shared session maps at RG activation.
 ///
 /// With deterministic reverse companions (#310), the Go sync path already
@@ -152,11 +174,13 @@ pub(in crate::afxdp) struct PrewarmTimings {
 ///
 /// #18641 step 1: this function does NOT publish the forward steering row of
 /// a key in the `sessions` owner-RG index (S). Its only production caller,
-/// `handle_activated_rgs`, runs `republish_bpf_session_entries_for_owner_rgs`
+/// `handle_activated_rgs`, runs `republish_bpf_session_entries_for_keys`
 /// right after it, in the same request and under the same `fd >= 0`
-/// condition. That republish rewrites the row of every key in S, re-reading
-/// the index and the shared map at that moment and applying the same
-/// stale-replay fence. Publishing those rows here as well wrote each one twice
+/// condition, over THIS function's own S snapshot (`PrewarmOutcome`). That
+/// republish rewrites the row of every key in that S, reading each entry from
+/// the shared map at that moment, applying the same stale-replay fence, and
+/// retrying a failed write once (the second attempt this publish used to
+/// provide). Publishing those rows here as well wrote each one twice
 /// per activation: the same syscalls as the republish, whose own cost was
 /// measured at ~13-18 ms per RG (#18654). Forwards that are only in the
 /// reverse-prewarm index keep their
@@ -174,13 +198,16 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     owner_rgs: &[i32],
     now_secs: u64,
-) -> PrewarmTimings {
+) -> PrewarmOutcome {
     let mut timings = PrewarmTimings {
         workers: worker_commands.len(),
         ..PrewarmTimings::default()
     };
     if owner_rgs.is_empty() {
-        return timings;
+        return PrewarmOutcome {
+            timings,
+            owner_index_keys: Vec::new(),
+        };
     }
     let collect_started = std::time::Instant::now();
     let publish_session_map = session_map.fd >= 0;
@@ -202,7 +229,7 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         FastSet::default()
     };
     let candidate_keys = merge_owner_rg_candidate_keys(
-        owner_index_keys,
+        owner_index_keys.clone(),
         owner_rg_session_keys_serialized(
             shared_sessions,
             &shared_owner_rg_indexes.reverse_prewarm_sessions,
@@ -269,8 +296,18 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     timings.collect = collect_started.elapsed();
     timings.forwards = forward_entries.len();
     timings.reverses = reverse_entries.len();
+    #[cfg(test)]
+    PREWARM_AFTER_COLLECT_HOOK_18641.with(|hook| {
+        let hook = hook.borrow_mut().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    });
     if forward_entries.is_empty() && reverse_entries.is_empty() {
-        return timings;
+        return PrewarmOutcome {
+            timings,
+            owner_index_keys,
+        };
     }
     // Push forward entries to workers so their local SessionTables have
     // the promoted sessions. Without this, workers only have reverse
@@ -380,7 +417,10 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         }
         timings.reverse_fanout += fanout_started.elapsed();
     }
-    timings
+    PrewarmOutcome {
+        timings,
+        owner_index_keys,
+    }
 }
 
 /// Republish USERSPACE_SESSIONS BPF map entries for ALL shared sessions
@@ -393,6 +433,10 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
 /// originated sessions that were demoted then re-synced may not appear
 /// there. This function uses the comprehensive `sessions` owner-RG index
 /// to ensure no session is missed.
+///
+/// Test-only: the activation hands the prewarm's own S snapshot to
+/// [`republish_bpf_session_entries_for_keys`] (#18641 step 1).
+#[cfg(test)]
 pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
@@ -412,6 +456,29 @@ pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
         &shared_owner_rg_indexes.sessions,
         owner_rgs,
     );
+    republish_bpf_session_entries_for_keys(shared_sessions, session_map, &keys, forwarding)
+}
+
+/// [`republish_bpf_session_entries_for_owner_rgs`] over a key set the caller
+/// already holds. `handle_activated_rgs` passes the prewarm's owner-index
+/// snapshot (`PrewarmOutcome::owner_index_keys`), so the republish writes
+/// exactly the keys the prewarm left to it (#18641 step 1). A key ADDED to the
+/// index after that snapshot (a late import while the RG is activating) is not
+/// written here: a late import on a forwarding-active owner is published by
+/// the worker that installs it (#18550).
+///
+/// **A failed write is retried once, immediately** (#18641 step 1, Codex P1-5
+/// on its review). Since step 1, this is the SOLE activation writer of an
+/// owner-index forward's row. Before step 1 the prewarm wrote the row too, so
+/// one failure still left the other attempt. The retry restores exactly those
+/// two attempts. A row whose second attempt also fails is counted, as before,
+/// in `SESSION_PUBLISH_ERRORS_SHARED`.
+pub(in crate::afxdp) fn republish_bpf_session_entries_for_keys(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    session_map: SteeringMap<'_>,
+    keys: &[SessionKey],
+    forwarding: &ForwardingState,
+) -> u32 {
     // Collect entries under the lock, then release before BPF syscalls
     // to avoid blocking concurrent session insert/remove/lookup.
     let entries: Vec<_> = {
@@ -435,16 +502,20 @@ pub(in crate::afxdp) fn republish_bpf_session_entries_for_owner_rgs(
             crate::afxdp::session_glue::note_stale_replay_fence_drop();
             continue;
         }
-        if publish_session_map_entry_for_session(
-            session_map,
-            key,
-            *decision,
-            metadata,
-            forwarding.has_routing_domains,
-            forwarding.has_multiple_zones,
-        )
-        .is_ok()
-        {
+        let publish = || {
+            publish_session_map_entry_for_session(
+                session_map,
+                key,
+                *decision,
+                metadata,
+                forwarding.has_routing_domains,
+                forwarding.has_multiple_zones,
+            )
+            .is_ok()
+        };
+        // #18641 step 1 (Codex P1-5): the sole writer gets the second attempt
+        // the prewarm used to provide.
+        if publish() || publish() {
             published += 1;
         } else {
             errors += 1;

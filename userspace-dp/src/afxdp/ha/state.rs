@@ -297,7 +297,7 @@ impl crate::afxdp::Coordinator {
         // (userspace-xdp/src/lib.rs). So these phases sit on the
         // crash-takeover path either way.
         let prewarm_started = std::time::Instant::now();
-        let prewarm = prewarm_reverse_synced_sessions_for_owner_rgs(
+        let outcome = prewarm_reverse_synced_sessions_for_owner_rgs(
             &self.sessions.synced,
             &self.sessions.nat,
             &self.sessions.forward_wire,
@@ -311,6 +311,7 @@ impl crate::afxdp::Coordinator {
             now_secs,
         );
         let prewarm_elapsed = prewarm_started.elapsed();
+        let prewarm = &outcome.timings;
         let mut republished = 0;
         let mut republish_elapsed = std::time::Duration::ZERO;
         // #18641 step 1: this republish is the ONLY publish of the forward
@@ -319,11 +320,12 @@ impl crate::afxdp::Coordinator {
         // exactly the prewarm's `fd >= 0` condition, right after it.
         if session_map.fd >= 0 {
             let republish_started = std::time::Instant::now();
-            republished = republish_bpf_session_entries_for_owner_rgs(
+            // #18641 step 1: the prewarm's own S snapshot, so both halves of
+            // the hand-off use ONE key set.
+            republished = republish_bpf_session_entries_for_keys(
                 &self.sessions.synced,
-                &self.sessions.owner_rg_indexes,
                 session_map,
-                activated_rgs,
+                &outcome.owner_index_keys,
                 &self.forwarding,
             );
             republish_elapsed = republish_started.elapsed();

@@ -154,3 +154,87 @@ fn activation_still_writes_a_split_rg_forward_outside_the_owner_index_18641() {
          {writes} write(s), present={present}. Records: {records:?}"
     );
 }
+
+/// #18641 step 1 (review, seat r24 P3-1): the republish writes the prewarm's
+/// OWN owner-index snapshot. A key that leaves S between the prewarm's
+/// snapshot and the republish, without being deleted, must still be written:
+/// the prewarm skipped it as S, so the republish is its only writer. Before
+/// the hand-off the republish re-read the index and missed it, and neither
+/// half wrote the row.
+///
+/// The key leaves S[1] by a real re-home: at the prewarm seam, the same
+/// session is re-imported with owner RG 2, which is also active. It is not
+/// deleted, so its row must exist after the activation.
+#[test]
+fn a_key_rehomed_between_the_prewarm_and_the_republish_is_still_written_18641() {
+    let (coordinator, forward) = imported(false, true);
+    clear_session_map_writes();
+
+    let domain = coordinator.session_domain().clone();
+    let rehomed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let record = std::rc::Rc::clone(&rehomed);
+    crate::afxdp::shared_ops::PREWARM_AFTER_COLLECT_HOOK_18641.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            let mut entry = synced_entry_port(52_618, 1);
+            entry.metadata.owner_rg_id = 2;
+            let _ = domain.upsert_synced_session(entry);
+            record.set(true);
+        }));
+    });
+
+    activate(&coordinator);
+
+    assert!(rehomed.get(), "FIXTURE: the re-home at the prewarm seam must have run");
+    assert_eq!(
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("shared")
+            .get(&forward)
+            .map(|entry| entry.metadata.owner_rg_id),
+        Some(2),
+        "FIXTURE: the forward must still be shared, now owned by RG 2"
+    );
+    let (writes, present, records) = forward_steering(&forward);
+    assert!(
+        present && writes == 1,
+        "a forward re-homed out of S after the prewarm's snapshot (not deleted) must be \
+         written exactly once by the republish of that snapshot: {writes} write(s), \
+         present={present}. Records: {records:?}"
+    );
+}
+
+/// #18641 step 1 (review, Codex P1-5): the republish is the SOLE activation
+/// writer of an owner-index forward's row. A transiently failed write must
+/// not leave the forward without its row when the activation returns.
+/// Before step 1 the prewarm's write was a second attempt; the republish now
+/// retries once instead.
+///
+/// The forward's first steering write fails (the injector fails it before
+/// the recorder sees it, as a failed BPF update leaves no row). Its row must
+/// still be present afterwards.
+#[test]
+fn a_transiently_failed_republish_write_still_leaves_the_row_18641() {
+    let (coordinator, forward) = imported(false, true);
+    clear_session_map_writes();
+    crate::afxdp::bpf_map::FAIL_STEERING_WRITES_FOR
+        .with(|slot| *slot.borrow_mut() = Some((forward.clone(), 1)));
+
+    activate(&coordinator);
+
+    let injected_left = crate::afxdp::bpf_map::FAIL_STEERING_WRITES_FOR
+        .with(|slot| slot.borrow_mut().take().map(|(_, left)| left));
+    assert_eq!(
+        injected_left,
+        Some(0),
+        "FIXTURE: the injected failure must have been consumed by the forward's write"
+    );
+    let (writes, present, records) = forward_steering(&forward);
+    assert!(
+        present && writes == 1,
+        "after one transient failure the S-forward's row must still be written (by the \
+         republish's retry): {writes} successful write(s), present={present}. Records: \
+         {records:?}"
+    );
+}
