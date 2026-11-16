@@ -13,6 +13,7 @@ import (
 
 	"net/netip"
 
+	"github.com/cilium/ebpf"
 	"github.com/psaab/xpf/pkg/config"
 	"github.com/psaab/xpf/pkg/dataplane"
 	dpruntime "github.com/psaab/xpf/pkg/dataplane/runtime"
@@ -109,18 +110,15 @@ type Manager struct {
 	// compile's config. Refresh and revalidation re-resolve ITS members
 	// (Codex delta P2-2). Guarded by mu.
 	genericDataMemberCfg *config.Config
-	// #19110 missing-data-member retry (missing_data_member_19110.go):
-	// memberAttachRetry is the per-member-NAME backoff state and memberVerdict
-	// the last tick's live verdict, both guarded by mu;
-	// memberRetryInFlight makes the off-lock retry single-flight;
-	// shimProgID caches the shim entry program's kernel ID per loaded
-	// program, guarded by mu. shimProgIDHook and memberAttachHook are seams
-	// for the cells.
-	memberAttachRetry   map[string]*memberAttachRetry
-	memberVerdict       memberXDPVerdict
-	memberRetryInFlight atomic.Bool
-	shimProgID          shimProgIDCache
-	shimProgIDHook      func() (uint32, bool)
+	// #19110 missing-data-member readiness (missing_data_member_19110.go):
+	// memberVerdict is the last status tick's live verdict, shimProgID the
+	// tick's identification of the loaded entry program, and memberLogged
+	// the last-logged kind per member. All guarded by mu. entryProgramHook
+	// is a seam for the cells.
+	memberVerdict    memberXDPVerdict
+	shimProgID       shimProgIDCache
+	memberLogged     map[string]string
+	entryProgramHook func() *ebpf.Program
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.

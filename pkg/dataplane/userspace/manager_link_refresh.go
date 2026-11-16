@@ -275,10 +275,11 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 // takeover guard, which is recomputed after the loop. An attach failure must
 // not fail this publish, because the helper's snapshot update is still correct
 // and the unshimmed interface is fail-closed (no program, fence-dropped
-// transit), never fail-open. This reconcile keeps NO record of the failure: a
-// configured RETH data member is a readiness reason, and retried, from LIVE
-// kernel state by name (missing_data_member_19110.go), so no partial pass or
-// stale snapshot can erase or misdirect the obligation (codex-e).
+// transit), never fail-open. This reconcile keeps NO record of the failure,
+// and nothing retries it automatically: recovery is the next compile or a later
+// link-refresh event. A configured RETH data member is a readiness reason from
+// LIVE kernel state (missing_data_member_19110.go), so no partial pass or stale
+// snapshot can erase the obligation (codex-e).
 //
 // Detach half is intentionally NOT done here: detaching an obsolete ifindex
 // before the helper accepts next would repeat the #5485 bypass if the
@@ -368,14 +369,15 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 }
 
 // logRefreshAttachFailure logs one failed refresh attach. The refresh is
-// event-driven, so this is once per link event, not per tick. A configured RETH
-// data member is then owned by the per-member retry
-// (missing_data_member_19110.go), which re-resolves it by NAME on a later
-// status tick and keeps it a readiness reason until the kernel shows the shim
-// attached.
+// event-driven, so this is once per link event, not per tick. Nothing retries
+// the attach automatically (#19110, user decision): recovery is the next
+// compile or a later link-refresh event. A configured RETH data member stays a
+// readiness reason, from live kernel state (missing_data_member_19110.go),
+// until the kernel shows the shim attached.
 func logRefreshAttachFailure(ifindex int, err error) {
 	slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; the interface stays "+
-		"fail-closed, and a configured RETH data member is retried by name on a later status tick",
+		"fail-closed and is NOT retried automatically: recovery is the next compile (an operator commit) or "+
+		"a later link-refresh event. A configured RETH data member blocks takeover readiness until then",
 		"ifindex", ifindex, "err", err, "issue", "#14133")
 }
 

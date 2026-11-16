@@ -140,9 +140,10 @@ func xdpNativeUnsupportedByDriver(err error) bool {
 //
 // So each interface gets ONE attempt per mode. A refusal returns ErrXDPOccupied
 // with no generic attempt and no occupant probe. The interface stays
-// fail-closed. The userspace Manager covers a configured RETH data member from
-// live kernel state: a readiness reason and a per-name retry on a later status
-// tick (pkg/dataplane/userspace missing_data_member_19110.go).
+// fail-closed, and nothing retries it automatically: recovery is the next
+// compile (an operator commit) or a later link-refresh event. Meanwhile a
+// configured RETH data member in that state is a takeover-readiness reason
+// from live kernel state (pkg/dataplane/userspace missing_data_member_19110.go).
 // They are vars so the batch cells can give the pass a non-zero budget.
 var (
 	xdpRefreshOccupancyBudget time.Duration
@@ -232,7 +233,7 @@ var reclaimAfterCheckHook func(ifindex int)
 // register the interface between our check and our reclaim. We would then
 // load THIS process's fresh pin and detach it, and the registry would still
 // say "attached".
-func (m *Manager) reclaimBeforeAttach(pass *xdpAttachPass, ifindex int, quiet bool) {
+func (m *Manager) reclaimBeforeAttach(pass *xdpAttachPass, ifindex int) {
 	m.xdpOwnershipMu.Lock()
 	defer m.xdpOwnershipMu.Unlock()
 	if _, registered := m.xdpLinkFor(ifindex); registered {
@@ -242,7 +243,7 @@ func (m *Manager) reclaimBeforeAttach(pass *xdpAttachPass, ifindex int, quiet bo
 		h(ifindex)
 	}
 	r := reclaimStaleXDPLinkPin(filepath.Join(linkPinPath, fmt.Sprintf("xdp_%d", ifindex)))
-	r.log(ifindex, quiet)
+	r.log(ifindex)
 	if !r.clean() {
 		pass.reclaim[ifindex] = r.String()
 	}
@@ -256,10 +257,6 @@ func isAlreadyAttached(err error) bool {
 type ShimXDPAttachRequest struct {
 	Ifindex      int
 	ForceGeneric bool
-	// Quiet demotes this attach's own reclaim and fallback logs to DEBUG. The
-	// userspace per-member retry sets it: it repeats on a backoff and logs on
-	// change itself, keyed on a stable failure kind (#19110, codex-e).
-	Quiet bool
 }
 
 // AttachShimXDPInterfaces attaches the shim to interfaces outside a compile
@@ -281,16 +278,15 @@ func (m *Manager) AttachShimXDPInterfaces(reqs []ShimXDPAttachRequest) map[int]e
 	pass := newXDPAttachPassWithBudget(xdpRefreshOccupancyBudget, xdpRefreshDiagBudget)
 	out := make(map[int]error, len(reqs))
 	for _, r := range reqs {
-		out[r.Ifindex] = m.attachShimOne(pass, r)
+		out[r.Ifindex] = m.attachShimOne(pass, r.Ifindex, r.ForceGeneric)
 	}
 	return out
 }
 
 // attachShimOne is one interface's whole sequence within a pass.
-func (m *Manager) attachShimOne(pass *xdpAttachPass, r ShimXDPAttachRequest) error {
-	ifindex := r.Ifindex
-	m.reclaimBeforeAttach(pass, ifindex, r.Quiet)
-	if r.ForceGeneric {
+func (m *Manager) attachShimOne(pass *xdpAttachPass, ifindex int, forceGeneric bool) error {
+	m.reclaimBeforeAttach(pass, ifindex)
+	if forceGeneric {
 		err := m.attachWithin(pass, ifindex, true)
 		if isAlreadyAttached(err) {
 			return nil
@@ -307,11 +303,7 @@ func (m *Manager) attachShimOne(pass *xdpAttachPass, r ShimXDPAttachRequest) err
 	if m.settleFailedNativeAttach(ifindex) {
 		return nil // another attacher registered it meanwhile; leave its link alone
 	}
-	logAt := slog.Warn
-	if r.Quiet {
-		logAt = slog.Debug
-	}
-	logAt("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
+	slog.Warn("native XDP unavailable for userspace shim; falling back to generic (skb-mode)",
 		"ifindex", ifindex, "err", nerr, "path", "interface-link refresh",
 		"impact", "higher CPU, ~6 Gbps cap; fix driver/firmware to restore driver-mode XDP")
 	if err := m.attachWithin(pass, ifindex, true); err != nil {
