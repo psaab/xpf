@@ -10,8 +10,10 @@ export PATH
 # #19136: a `go` earlier in PATH than the real toolchain that re-invokes this
 # shim (a test fixture's wrapper handed the shim as its "real" go) made every
 # `go test` here start another testguard-run.sh: an unbounded recursion that
-# hung for an hour. Count the nesting and fail fast instead. Legitimate nesting
-# (a test that runs `go` under the guard) stays far below the limit.
+# hung for an hour. Count the nesting and fail fast instead. This bounds nesting
+# DEPTH (ancestry), not cycles: an 8-deep chain fails whether it loops or not,
+# so a legitimate chain that deep would fail too. None is known: the limit
+# fired 0 times in a full run-selftests.sh run (docs/log/19136.md).
 depth=${XPF_GO_SHIM_DEPTH:-0}
 case "$depth" in '' | *[!0-9]*) depth=0 ;; esac
 if [ "$depth" -ge 8 ]; then
