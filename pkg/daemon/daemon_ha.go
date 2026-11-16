@@ -735,17 +735,32 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		if rt := d.dataplane(); tr.Changed && rt != nil {
 			cur, _ := s.CurrentDesired()
 			republishReady := true
+			republishStarted := time.Now()
 			if cur {
 				republishReady = d.republishConnectedRGSync(ctx, "cluster-state")
 			}
+			republishTook := time.Since(republishStarted)
 			if cur && !republishReady {
 				slog.Warn("cluster: connected-route republish failed; skipping rg_active activation until a republish converges",
 					"rg", ev.GroupID)
-			} else if err := rt.HA().SetRGActive(ctx, ev.GroupID, cur); err != nil {
-				slog.Warn("failed to update rg_active from cluster event",
-					"rg", ev.GroupID, "active", cur, "err", err)
 			} else {
-				recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+				// #18641: per-RG timing of a cluster-event rg_active write.
+				// One line per edge (a state transition, hence Info). The
+				// crash-takeover A/B reads peer-lost -> the last RG's line;
+				// the #16270 republish is timed separately because it has
+				// never been measured.
+				setStarted := time.Now()
+				err := rt.HA().SetRGActive(ctx, ev.GroupID, cur)
+				slog.Info("cluster: rg_active write returned",
+					"rg", ev.GroupID, "active", cur, "ok", err == nil,
+					"republish_ms", float64(republishTook.Microseconds())/1000,
+					"set_rg_active_ms", float64(time.Since(setStarted).Microseconds())/1000)
+				if err != nil {
+					slog.Warn("failed to update rg_active from cluster event",
+						"rg", ev.GroupID, "active", cur, "err", err)
+				} else {
+					recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+				}
 			}
 		}
 		// Only remove blackholes once this node's desired state is

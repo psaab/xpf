@@ -99,6 +99,27 @@ pub(in crate::afxdp) fn merge_owner_rg_candidate_keys(
     forward
 }
 
+/// #18641: where one RG-activation prewarm spent its time, for the activation
+/// timing line in `handle_activated_rgs`. Log-only: nothing branches on it.
+/// The per-entry sections are sums of per-entry `Instant` deltas, so they add
+/// up to slightly less than the prewarm's wall time (the clock reads
+/// themselves are the difference).
+#[derive(Debug, Default, Clone, Copy)]
+pub(in crate::afxdp) struct PrewarmTimings {
+    pub(in crate::afxdp) forwards: usize,
+    pub(in crate::afxdp) reverses: usize,
+    /// Forward steering publishes attempted (each may write several rows).
+    pub(in crate::afxdp) forward_steering_writes: usize,
+    pub(in crate::afxdp) workers: usize,
+    /// Candidate keys, the locked entry walk and reverse synthesis.
+    pub(in crate::afxdp) collect: std::time::Duration,
+    pub(in crate::afxdp) forward_steering: std::time::Duration,
+    pub(in crate::afxdp) forward_fanout: std::time::Duration,
+    pub(in crate::afxdp) reverse_shared: std::time::Duration,
+    pub(in crate::afxdp) reverse_steering: std::time::Duration,
+    pub(in crate::afxdp) reverse_fanout: std::time::Duration,
+}
+
 /// Pre-warm reverse companions in shared session maps at RG activation.
 ///
 /// With deterministic reverse companions (#310), the Go sync path already
@@ -140,10 +161,15 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     owner_rgs: &[i32],
     now_secs: u64,
-) {
+) -> PrewarmTimings {
+    let mut timings = PrewarmTimings {
+        workers: worker_commands.len(),
+        ..PrewarmTimings::default()
+    };
     if owner_rgs.is_empty() {
-        return;
+        return timings;
     }
+    let collect_started = std::time::Instant::now();
     let publish_session_map = session_map.fd >= 0;
     let owner_rg_set: std::collections::BTreeSet<i32> = owner_rgs.iter().copied().collect();
     // #4069: dedup the forward and reverse-prewarm key sets in O(N+M) via a
@@ -218,8 +244,11 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         }
         (forward_entries, reverse_entries)
     };
+    timings.collect = collect_started.elapsed();
+    timings.forwards = forward_entries.len();
+    timings.reverses = reverse_entries.len();
     if forward_entries.is_empty() && reverse_entries.is_empty() {
-        return;
+        return timings;
     }
     // Push forward entries to workers so their local SessionTables have
     // the promoted sessions. Without this, workers only have reverse
@@ -234,6 +263,8 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     // yet applied the HA state update.
     let mut fwd_publish_errors = 0u32;
     for forward in &forward_entries {
+        let steering_started = std::time::Instant::now();
+        timings.forward_steering_writes += usize::from(publish_session_map);
         if publish_session_map
             && publish_session_map_entry_for_session(
                 session_map,
@@ -254,6 +285,8 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             // is one increment per failure, not a double count.
             SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
         }
+        let fanout_started = std::time::Instant::now();
+        timings.forward_steering += fanout_started - steering_started;
         for commands in worker_commands {
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // activation-prewarm UpsertSynced for a poisoned worker queue.
@@ -272,6 +305,7 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 WorkerCommand::UpsertSynced(replica),
             );
         }
+        timings.forward_fanout += fanout_started.elapsed();
     }
     if fwd_publish_errors > 0 {
         eprintln!(
@@ -281,6 +315,7 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         );
     }
     for reverse in reverse_entries {
+        let shared_started = std::time::Instant::now();
         publish_shared_session(
             shared_sessions,
             shared_nat_sessions,
@@ -288,6 +323,8 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
             shared_owner_rg_indexes,
             &reverse,
         );
+        let steering_started = std::time::Instant::now();
+        timings.reverse_shared += steering_started - shared_started;
         if publish_session_map {
             // #1789: the reverse-prewarm publish in the same activation
             // path was still swallowed with `let _ =`; count it like the
@@ -305,6 +342,8 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 SESSION_PUBLISH_ERRORS_SHARED.fetch_add(1, Ordering::Relaxed);
             }
         }
+        let fanout_started = std::time::Instant::now();
+        timings.reverse_steering += fanout_started - steering_started;
         for commands in worker_commands {
             // #1807: recover-and-push — `if let Ok` silently DROPPED the
             // reverse-prewarm UpsertSynced for a poisoned worker queue.
@@ -314,7 +353,9 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
                 WorkerCommand::UpsertSynced(synced_replica_entry(&reverse)),
             );
         }
+        timings.reverse_fanout += fanout_started.elapsed();
     }
+    timings
 }
 
 /// Republish USERSPACE_SESSIONS BPF map entries for ALL shared sessions

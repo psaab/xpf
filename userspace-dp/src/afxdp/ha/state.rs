@@ -288,12 +288,16 @@ impl crate::afxdp::Coordinator {
         // materialize heals the window. Extending debt to per-entry payloads
         // is out of scope — the named members are the three transition
         // commands only.
-        // #18641: time each activation phase; the republish is on the
-        // forwarding path of every interface-SNAT reply (a USERSPACE_SESSIONS
-        // miss on the SNAT address is passed to the kernel), so its duration
-        // is part of the crash-takeover outage.
+        // #18641: time each activation phase. Both the prewarm and the
+        // republish write the USERSPACE_SESSIONS steering rows the XDP shim
+        // redirects on, and they run before Go sees `SetRGActive` return and
+        // moves the VIPs. On a steering miss, a TCP/UDP packet still reaches
+        // the helper (which materializes from the shared map), but an ICMP
+        // echo to an interface-NAT address is passed to the kernel
+        // (userspace-xdp/src/lib.rs). So these phases sit on the
+        // crash-takeover path either way.
         let prewarm_started = std::time::Instant::now();
-        prewarm_reverse_synced_sessions_for_owner_rgs(
+        let prewarm = prewarm_reverse_synced_sessions_for_owner_rgs(
             &self.sessions.synced,
             &self.sessions.nat,
             &self.sessions.forward_wire,
@@ -307,25 +311,39 @@ impl crate::afxdp::Coordinator {
             now_secs,
         );
         let prewarm_elapsed = prewarm_started.elapsed();
+        let mut republished = 0;
+        let mut republish_elapsed = std::time::Duration::ZERO;
         if session_map.fd >= 0 {
             let republish_started = std::time::Instant::now();
-            let republished = republish_bpf_session_entries_for_owner_rgs(
+            republished = republish_bpf_session_entries_for_owner_rgs(
                 &self.sessions.synced,
                 &self.sessions.owner_rg_indexes,
                 session_map,
                 activated_rgs,
                 &self.forwarding,
             );
-            if republished > 0 {
-                eprintln!(
-                    "xpf-ha: republished {} USERSPACE_SESSIONS entries for activated RGs {:?} in {} us (reverse prewarm {} us)",
-                    republished,
-                    activated_rgs,
-                    republish_started.elapsed().as_micros(),
-                    prewarm_elapsed.as_micros()
-                );
-            }
+            republish_elapsed = republish_started.elapsed();
         }
+        // #18641: one line per activation (RG edges only, so rare), and
+        // ALWAYS, so an activation that republished nothing still reports
+        // where its prewarm went. The crash-takeover A/B reads it.
+        eprintln!(
+            "xpf-ha: RG activation {:?} timing: prewarm {} us (collect {} us; {} forwards: steering {} us for {} publishes, fanout {} us; {} reverses: shared {} us, steering {} us, fanout {} us; {} workers), republish {} us for {} entries",
+            activated_rgs,
+            prewarm_elapsed.as_micros(),
+            prewarm.collect.as_micros(),
+            prewarm.forwards,
+            prewarm.forward_steering.as_micros(),
+            prewarm.forward_steering_writes,
+            prewarm.forward_fanout.as_micros(),
+            prewarm.reverses,
+            prewarm.reverse_shared.as_micros(),
+            prewarm.reverse_steering.as_micros(),
+            prewarm.reverse_fanout.as_micros(),
+            prewarm.workers,
+            republish_elapsed.as_micros(),
+            republished,
+        );
         // #1636 option C: an RG just became forwarding-active on this
         // node. Repopulate the kernel neighbor cache for the now-active
         // next-hops (entries may have aged to NUD_FAILED while this node
