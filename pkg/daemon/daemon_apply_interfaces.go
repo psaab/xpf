@@ -25,9 +25,12 @@ type deferredIPVLAN struct {
 }
 
 // applyFabricIPVLAN creates the fabric-member IPVLAN overlays (fab0/fab1) for
-// cluster heartbeat + VRRP, deferring creation past XSK bind when the userspace
-// dataplane is active (an existing IPVLAN breaks zero-copy bind, #128), and
-// cleans up stale fabric IPVLAN overlays not in the current config. Extracted
+// cluster heartbeat + VRRP, and cleans up stale fabric IPVLAN overlays not in
+// the current config. Before the userspace dataplane's XSK bind it first
+// removes an existing overlay (an existing IPVLAN broke zero-copy bind, #128),
+// then re-creates it IN THIS APPLY; a creation failure is joined into the
+// commit. OnXSKBound re-ensures it after the bind. The creation was deferred
+// to OnXSKBound until dcc59c67df disabled that (#17343). Extracted
 // verbatim from applyConfigLocked (#4407); runs in the same slot, after the
 // interface-creation reconcile and before the RETH-MAC pre-check.
 func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
@@ -112,7 +115,8 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 			continue
 		}
 	}
-	// Register deferred IPVLAN creation callback on the userspace manager.
+	// Register the post-bind re-ensure (OnXSKBound) on the userspace manager.
+	// The overlays were already created above, in this apply (#17343).
 	if len(deferredOverlays) > 0 && bindingCtrl != nil {
 		bindingCtrl.SetOnXSKBound(func() { d.createDeferredFabricOverlays(deferredOverlays) })
 	}
@@ -307,9 +311,9 @@ func (d *Daemon) applyVRFReconcile(ctx context.Context, cfg *config.Config) (ctx
 // matching `fab*` chassis cluster fabric-interface / fabric1-interface leaves.
 // #18034: these devices are created BY this apply (applyFabricIPVLAN runs just
 // before the dataplane core), so a first apply from an empty config DB can
-// reach the post-networkd re-bind while one is still absent — e.g. deferred
-// past XSK bind when the userspace dataplane is active — and the re-bind must
-// not fail on its absence. Only fab* names are added, so a malformed fabric
+// reach the post-networkd re-bind while one is still absent (e.g. its in-apply
+// creation failed, a failure #6791 joins into the commit), and the re-bind
+// must not fail on its absence. Only fab* names are added, so a malformed fabric
 // leaf that aliases a non-fabric management interface cannot weaken that
 // interface's existing missing-link error.
 func chassisClusterFabricInterfaces(cfg *config.Config) map[string]bool {
@@ -349,8 +353,8 @@ func chassisClusterFabricInterfaces(cfg *config.Config) map[string]bool {
 // unit may not have a kernel link when it is unzoned; only a confirmed absence
 // for such a unit is skipped. A chassis cluster fabric interface from the SAME
 // config being applied (#18034) may likewise not exist yet when this runs —
-// its creation is itself part of this apply and can be deferred past XSK bind
-// — so only its confirmed absence is skipped. The fabric creation/reassertion
+// its creation is itself part of this apply and can fail there (joined into
+// the commit by #6791) — so only its confirmed absence is skipped. The fabric creation/reassertion
 // paths own binding it once it exists. Other lookup and bind failures remain
 // fatal.
 func (d *Daemon) rebindManagementVRFIfaces(cfg *config.Config) error {
