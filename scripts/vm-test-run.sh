@@ -15,8 +15,7 @@
 #
 #   --runner   test-runner instance (default: $XPF_TEST_RUNNER, else
 #              udp:xpf-testrunner). The provisioned runners are
-#              tcp:xpf-testrunner{,2}, udp:xpf-testrunner{,2,3,4} and
-#              loss:xpf-testrunner
+#              tcp:xpf-testrunner{,2} and udp:xpf-testrunner{,2,3,4}
 #              (docs/testing.md has the current list).
 #   --name     per-lane directory on the runner (default: the worktree's
 #              basename). Source lands in /work/<name>/src; cargo output in
@@ -175,7 +174,7 @@ while [[ $# -gt 0 ]]; do
 	--allow-unproven-root) allow_unproven_root=1; shift ;;
 	--allow-xpf-state) allow_xpf_state=1; shift ;;
 	--) shift; break ;;
-	-h|--help) sed -n '2,47p' "$0"; exit 0 ;;
+	-h|--help) sed -n '2,46p' "$0"; exit 0 ;;
 	*) echo "vm-test-run: unknown argument: $1 (use -- before the command)" >&2; exit 2 ;;
 	esac
 done
