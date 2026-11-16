@@ -313,6 +313,10 @@ impl crate::afxdp::Coordinator {
         let prewarm_elapsed = prewarm_started.elapsed();
         let mut republished = 0;
         let mut republish_elapsed = std::time::Duration::ZERO;
+        // #18641 step 1: this republish is the ONLY publish of the forward
+        // steering row of every key in the `sessions` owner-RG index. The
+        // prewarm above leaves those rows to it, so it must keep running on
+        // exactly the prewarm's `fd >= 0` condition, right after it.
         if session_map.fd >= 0 {
             let republish_started = std::time::Instant::now();
             republished = republish_bpf_session_entries_for_owner_rgs(

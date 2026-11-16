@@ -2031,6 +2031,42 @@ dedup — forward keys first, then not-yet-seen reverse keys in first-seen
 order — only the membership data structure changed. `ha_tests.rs` pins the
 order/dedup contract and a large-N (N=M=200k) linear-time guard.
 
+## Each forward steering row is written once per RG activation (#18641)
+
+`handle_activated_rgs` runs the reverse prewarm and then
+`republish_bpf_session_entries_for_owner_rgs`, in the same `update_ha_state`
+request, under the same `session_map.fd >= 0` condition.
+
+**What each step writes:**
+- **The republish** rewrites the steering row of every key in the `sessions`
+  owner-RG index (S). It re-reads the index and the shared map at that
+  moment, behind the stale-replay fence.
+- **The prewarm** leaves those keys' forward rows to the republish (step 1).
+  Before step 1 it published them as well, so every S-forward was written
+  twice per activation. The duplicate is the same set of syscalls as the
+  republish, whose own cost was measured at ~13-18 ms per RG (#18654); the
+  saving is to be measured by the #18641 A/B, not assumed.
+- **Forwards found only through the reverse-prewarm index keep their prewarm
+  publish.** These are split-RG forwards: the forward's own owner RG is not
+  the activated one, so the republish does not reach them (#287/#524).
+
+**The contract:** the republish is the ONLY writer of S-forward rows during
+an activation. It must keep running right after the prewarm, on exactly
+that condition.
+
+**The cells**, in `ha_activation_steering_18641_tests.rs`:
+- an S-forward is written exactly once and is present afterwards;
+- a split-RG forward is still written once.
+
+The other prewarm callers pass fd −1 and publish nothing, so they are
+unaffected.
+
+**What step 1 does not do: close the #19145 race.** Both the prewarm and the
+republish write from a snapshot taken before a concurrent `sync_session`
+delete can land. Step 1 narrows the S-forward window to the republish's own
+collect-to-publish span; it does not close it. #19145 tracks the fences
+that do.
+
 ## The reverse-prewarm index is add-only while live, un-filed at removal (#7209)
 
 `reverse_prewarm_sessions` is the one owner-RG index whose buckets are not all

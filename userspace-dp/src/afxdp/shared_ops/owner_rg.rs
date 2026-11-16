@@ -149,6 +149,19 @@ pub(in crate::afxdp) struct PrewarmTimings {
 /// different. Both cases need their forward entries restored to worker
 /// SessionTables and, when applicable, their reverse companions synthesized
 /// again on activation.
+///
+/// #18641 step 1: this function does NOT publish the forward steering row of
+/// a key in the `sessions` owner-RG index (S). Its only production caller,
+/// `handle_activated_rgs`, runs `republish_bpf_session_entries_for_owner_rgs`
+/// right after it, in the same request and under the same `fd >= 0`
+/// condition. That republish rewrites the row of every key in S, re-reading
+/// the index and the shared map at that moment and applying the same
+/// stale-replay fence. Publishing those rows here as well wrote each one twice
+/// per activation: the same syscalls as the republish, whose own cost was
+/// measured at ~13-18 ms per RG (#18654). Forwards that are only in the
+/// reverse-prewarm index keep their
+/// publish: the split-RG case (#287/#524), where the forward's own owner RG is
+/// not the activated one, so the republish does not reach it.
 pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
     shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
@@ -175,12 +188,21 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     // #4069: dedup the forward and reverse-prewarm key sets in O(N+M) via a
     // hash set (see merge_owner_rg_candidate_keys) instead of the former
     // O(N·M) `Vec::contains` scan on this failover-critical prewarm path.
+    let owner_index_keys = owner_rg_session_keys_serialized(
+        shared_sessions,
+        &shared_owner_rg_indexes.sessions,
+        owner_rgs,
+    );
+    // #18641 step 1: the keys whose forward steering row the caller's
+    // republish rewrites (see the function doc). Empty when nothing is
+    // published, so the forward loop below never consults it.
+    let republished_by_caller: FastSet<SessionKey> = if publish_session_map {
+        owner_index_keys.iter().cloned().collect()
+    } else {
+        FastSet::default()
+    };
     let candidate_keys = merge_owner_rg_candidate_keys(
-        owner_rg_session_keys_serialized(
-            shared_sessions,
-            &shared_owner_rg_indexes.sessions,
-            owner_rgs,
-        ),
+        owner_index_keys,
         owner_rg_session_keys_serialized(
             shared_sessions,
             &shared_owner_rg_indexes.reverse_prewarm_sessions,
@@ -264,8 +286,11 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
     let mut fwd_publish_errors = 0u32;
     for forward in &forward_entries {
         let steering_started = std::time::Instant::now();
-        timings.forward_steering_writes += usize::from(publish_session_map);
-        if publish_session_map
+        // #18641 step 1: a key in S is left to the caller's republish.
+        let publish_forward =
+            publish_session_map && !republished_by_caller.contains(&forward.key);
+        timings.forward_steering_writes += usize::from(publish_forward);
+        if publish_forward
             && publish_session_map_entry_for_session(
                 session_map,
                 &forward.key,
@@ -311,7 +336,7 @@ pub(in crate::afxdp) fn prewarm_reverse_synced_sessions_for_owner_rgs(
         eprintln!(
             "xpf-ha: prewarm forward BPF publish: {} errors out of {} entries",
             fwd_publish_errors,
-            forward_entries.len()
+            timings.forward_steering_writes
         );
     }
     for reverse in reverse_entries {

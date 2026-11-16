@@ -13598,3 +13598,8 @@ fn owner_rg_export_abandon_by_client_window_when_page1_was_lost_18752() {
         .kick_owner_rg_export_unpaged(&[1], 3)
         .expect("fresh kick after the abandon must proceed");
 }
+
+// #18641 step 1: one steering write per forward per activation. A child
+// module, so it shares this file's private fixtures.
+#[path = "ha_activation_steering_18641_tests.rs"]
+mod activation_steering_18641;
