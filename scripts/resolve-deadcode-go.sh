@@ -33,7 +33,17 @@
 #   $DEADCODE_GO, then $GO, then PATH `go`, then the conventional
 #   install locations /usr/lib/go-1.26/bin/go, /usr/lib/go-1.26.*/bin/go,
 #   /usr/local/go/bin/go and $HOME/sdk/go1.26*/bin/go.
+#
+# THE PIN (#19152)
+#
+#   DEADCODE_GO_VERSION is the one go1.26.* release that is INSTALLED for
+#   this analyser: CI's golang.org/dl side toolchain and the test runners
+#   (scripts/provision-testrunner.sh puts it at /usr/lib/go-<version>,
+#   which the glob above finds) read it from here. The resolver still
+#   accepts any go1.26.*. scripts/go-deadcode-gate-selftest.sh fails if
+#   the pin leaves that series or CI installs a different release.
 set -u
+DEADCODE_GO_VERSION=1.26.9
 
 if [ "${DEADCODE_GO_CANDIDATES+x}" = x ]; then
 	GO_CANDIDATES=$DEADCODE_GO_CANDIDATES
@@ -51,8 +61,8 @@ for cand in $GO_CANDIDATES; do
 done
 
 if [ "${XPF_DEADCODE_REQUIRE:-}" = "1" ]; then
-	echo "resolve-deadcode-go: FAIL: no go1.26.* toolchain found (XPF_DEADCODE_REQUIRE=1); deadcode v0.38.0 panics under go1.27 — install go1.26 or set DEADCODE_GO" >&2
+	echo "resolve-deadcode-go: FAIL: no go1.26.* toolchain found (XPF_DEADCODE_REQUIRE=1); deadcode v0.38.0 panics under go1.27 — install go$DEADCODE_GO_VERSION or set DEADCODE_GO" >&2
 	exit 1
 fi
-echo "resolve-deadcode-go: NOT-EXAMINED: no go1.26.* toolchain found (deadcode v0.38.0's SSA builder panics under go1.27); set DEADCODE_GO or install go1.26" >&2
+echo "resolve-deadcode-go: NOT-EXAMINED: no go1.26.* toolchain found (deadcode v0.38.0's SSA builder panics under go1.27); set DEADCODE_GO or install go$DEADCODE_GO_VERSION" >&2
 exit 77

@@ -10,6 +10,10 @@
 # function, a stale row, malformed rows), because a gate that reddened on
 # everything would satisfy every failure cell while being useless.
 #
+# Section 0b (#19152) checks that the INSTALLED deadcode toolchain is derived
+# from one pin: the resolver accepts it (and refuses go1.27), CI installs
+# it, and scripts/provision-testrunner.sh derives it, with go.mod's build Go.
+#
 # The ACCEPTANCE mutation of #17154 — re-adding one of bd3dee05c0's
 # deleted wrappers without a caller — is cell 2: the wrapper's deadcode
 # row appears with no allowlist row and the gate reds naming it.
@@ -89,7 +93,9 @@ DEADCODE_GO_CANDIDATES="$FAKE_GO" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/
 	ok "resolver prints only the first usable Go 1.26 binary" ||
 	bad "resolver did not print the fixture Go binary (rc=$rc): $(cat "$WORK/resolver.err")"
 
-DEADCODE_GO_CANDIDATES="$WORK/missing-go" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
+# Provisioned runners export XPF_DEADCODE_REQUIRE=1 (#19152), so a cell that
+# expects the NOT-EXAMINED exit states the environment it tests.
+XPF_DEADCODE_REQUIRE='' DEADCODE_GO_CANDIDATES="$WORK/missing-go" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
 [ "$rc" = "77" ] && [ ! -s "$WORK/resolver.out" ] && grep -q "NOT-EXAMINED" "$WORK/resolver.err" &&
 	ok "missing Go 1.26 toolchain is NOT-EXAMINED (exit 77)" ||
 	bad "missing toolchain was not exit 77 / NOT-EXAMINED (rc=$rc): $(cat "$WORK/resolver.err")"
@@ -98,7 +104,7 @@ XPF_DEADCODE_REQUIRE=1 DEADCODE_GO_CANDIDATES="$WORK/missing-go" sh "$RESOLVER" 
 [ "$rc" = "1" ] && [ ! -s "$WORK/resolver.out" ] && grep -q "FAIL: no go1.26" "$WORK/resolver.err" &&
 	ok "XPF_DEADCODE_REQUIRE=1 makes missing toolchain a hard failure (exit 1)" ||
 	bad "REQUIRE did not hard-fail a missing toolchain (rc=$rc): $(cat "$WORK/resolver.err")"
-out=$(DEADCODE_GO_CANDIDATES="$WORK/missing-go" make -s -C "$ROOT" check-nft-deadcode GO="$WORK/missing-go" 2>&1); rc=$?
+out=$(XPF_DEADCODE_REQUIRE='' DEADCODE_GO_CANDIDATES="$WORK/missing-go" make -s -C "$ROOT" check-nft-deadcode GO="$WORK/missing-go" 2>&1); rc=$?
 [ "$rc" = "2" ] && echo "$out" | grep -q "NOT-EXAMINED" && echo "$out" | grep -q "Error 77" &&
 	ok "scoped target propagates no-toolchain NOT-EXAMINED (recipe exit 77)" ||
 	bad "scoped target did not propagate exit 77 (rc=$rc): $out"
@@ -131,6 +137,52 @@ out=$(DEADCODE_GO_CANDIDATES="$FAKE_GO" FAKE_DEADCODE_MODE=clean FAKE_DEADCODE_A
 	ok "scoped target invokes the gate's pinned analyser version ($PINGO)" ||
 	bad "scoped target did not invoke pinned analyser $PINGO (rc=$rc): $out / $(cat "$WORK/run.args" 2>/dev/null)"
 
+
+# ── 0b. The installed deadcode toolchain is derived, not copied (#19152) ─
+# CI and the test runners install exactly DEADCODE_GO_VERSION from the
+# resolver. Each cell has a twin it must reject, so it cannot pass vacuously.
+PROVISION="$ROOT/scripts/provision-testrunner.sh"
+PIN=$(sed -n 's/^DEADCODE_GO_VERSION=//p' "$RESOLVER")
+[ "$(grep -c '^DEADCODE_GO_VERSION=' "$RESOLVER")" = "1" ] && [ -n "$PIN" ] &&
+	ok "resolver declares the installed deadcode Go once ($PIN)" ||
+	bad "resolver must declare DEADCODE_GO_VERSION exactly once (got '$PIN')"
+fake_go_version() { # fake_go_version <path> <go version>
+	printf '#!/bin/sh\necho "go version go%s linux/amd64"\n' "$2" >"$1"
+	chmod +x "$1"
+}
+fake_go_version "$WORK/pin-go" "$PIN"
+fake_go_version "$WORK/next-go" 1.27.2
+XPF_DEADCODE_REQUIRE='' DEADCODE_GO_CANDIDATES="$WORK/pin-go" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
+[ "$rc" = "0" ] && [ "$(cat "$WORK/resolver.out")" = "$WORK/pin-go" ] &&
+	ok "the resolver accepts the pinned release go$PIN" ||
+	bad "the pin go$PIN is outside the series the resolver accepts (rc=$rc): $(cat "$WORK/resolver.err")"
+XPF_DEADCODE_REQUIRE='' DEADCODE_GO_CANDIDATES="$WORK/next-go" sh "$RESOLVER" >"$WORK/resolver.out" 2>"$WORK/resolver.err"; rc=$?
+[ "$rc" = "77" ] &&
+	ok "twin: the resolver refuses go1.27.2 (so the cell above can fail)" ||
+	bad "the resolver accepted go1.27.2 (rc=$rc)"
+ci_versions=$(grep -o 'go[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*' "$ROOT/.github/workflows/test.yml" | sort -u)
+[ "$ci_versions" = "go$PIN" ] &&
+	ok "CI's deadcode side toolchain is the pin (go$PIN)" ||
+	bad "CI's Go release literals ($(printf '%s ' $ci_versions)) must be exactly go$PIN; bump .github/workflows/test.yml with the pin"
+want_go=$(sed -n 's/^toolchain go//p' "$ROOT/go.mod")
+[ -n "$want_go" ] || want_go=$(sed -n 's/^go //p' "$ROOT/go.mod")
+out=$(bash "$PROVISION" --print-versions 2>&1); rc=$?
+[ "$rc" = "0" ] && [ "$out" = "$(printf 'go %s\ndeadcode-go %s' "$want_go" "$PIN")" ] &&
+	ok "runner provisioning derives go $want_go from go.mod and deadcode go $PIN from the resolver" ||
+	bad "provision-testrunner.sh --print-versions disagrees with go.mod/the pin (rc=$rc): $out"
+mkdir -p "$WORK/prov/scripts"
+cp "$PROVISION" "$WORK/prov/scripts/"
+printf 'DEADCODE_GO_VERSION=1.26.4\n' >"$WORK/prov/scripts/resolve-deadcode-go.sh"
+printf 'module x\n\ngo 1.24.9\n\ntoolchain go1.25.3\n' >"$WORK/prov/go.mod"
+out=$(bash "$WORK/prov/scripts/provision-testrunner.sh" --print-versions 2>&1); rc=$?
+[ "$rc" = "0" ] && [ "$out" = "$(printf 'go 1.25.3\ndeadcode-go 1.26.4')" ] &&
+	ok "fixture: a go.mod toolchain line wins over its go line" ||
+	bad "fixture toolchain line not honoured (rc=$rc): $out"
+printf 'module x\n\ngo 1.24\n' >"$WORK/prov/go.mod"
+out=$(bash "$WORK/prov/scripts/provision-testrunner.sh" --print-versions 2>&1); rc=$?
+[ "$rc" = "2" ] && echo "$out" | grep -q "cannot derive a full Go release" &&
+	ok "fixture: a go line without a patch release is refused (exit 2), not downloaded as go1.24" ||
+	bad "a partial Go version was not refused (rc=$rc): $out"
 
 # ── 1. Exact match is green, and the census states its reach ────────
 out=$(run_gate "$BASE_OUT" "$BASE_ALLOW"); rc=$?
