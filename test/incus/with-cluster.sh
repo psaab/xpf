@@ -65,6 +65,28 @@ if xpf_cluster_lock_held; then
 	exec env -- "$@"
 fi
 
+# #19165: the lock tuple and the cluster env must name the same cluster.
+# The lock comes from XPF_CLUSTER_LOCK, but FW0/FW1, which the VM-target
+# guard below touches (shims, systemctl daemon-reload), come from
+# cluster-env.sh, which defaults to loss. A tcp/udp lock tuple without
+# BPFRX_CLUSTER_ENV therefore ran that guard on the LOSS firewalls without
+# the loss lock, inside another agent's loss measurement (2026-11-16).
+# Checked before the lock is taken, so a mismatched cell never holds one. A
+# private lock path (the selftests) names no cluster, and an env with no
+# INCUS_REMOTE (the legacy local cluster) has none to compare.
+case "$(basename -- "$XPF_CLUSTER_LOCK")" in
+xpf-cluster.lock) LOCK_CLUSTER=loss ;;
+xpf-cluster-tcp.lock) LOCK_CLUSTER=tcp ;;
+xpf-cluster-udp.lock) LOCK_CLUSTER=udp ;;
+*) LOCK_CLUSTER= ;;
+esac
+# shellcheck source=cluster-env.sh
+source "${SCRIPT_DIR}/cluster-env.sh"
+if [[ -n "$LOCK_CLUSTER" && -n "${INCUS_REMOTE:-}" && "$INCUS_REMOTE" != "$LOCK_CLUSTER" ]]; then
+	echo "[with-cluster] REFUSED: the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK}) but the cluster env resolves ${INCUS_REMOTE} (FW0=${FW0}); the cell would touch ${INCUS_REMOTE}'s firewalls without its lock. Export BPFRX_CLUSTER_ENV for ${LOCK_CLUSTER} (test/incus/${LOCK_CLUSTER}-userspace-cluster.env) with its lock tuple (#19165)" >&2
+	exit 2
+fi
+
 WAITED=0
 # Timeout: digits only, forced base-10 (a leading zero like "08" must
 # not become an octal arithmetic error that silently disables the
@@ -203,8 +225,7 @@ trap 'rm -f "$XPF_CLUSTER_OWNER" "$XPF_CLUSTER_BUILD_BASELINE" 2>/dev/null || tr
 echo "[with-cluster $(date +%H:%M:%S)] lock acquired (pid $$, purpose: ${PURPOSE})" >&2
 # A cluster cell is a V-class harness. Resolve its firewall targets and
 # prove both are VMs before the cell can run apt/systemctl or deploy code.
-# shellcheck source=cluster-env.sh
-source "${SCRIPT_DIR}/cluster-env.sh"
+# (cluster-env.sh was sourced before the lock, for the #19165 check.)
 # shellcheck source=vm-target-guard.sh
 source "${SCRIPT_DIR}/vm-target-guard.sh"
 xpf_assert_vm_target "$FW0"

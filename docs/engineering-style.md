@@ -2075,6 +2075,15 @@ they repeatedly bite:
   tcp/udp MUST export its matching `XPF_CLUSTER_LOCK`,
   `XPF_CLUSTER_OWNER`, and `XPF_CLUSTER_EPOCH` before calling any
   self-locking command; otherwise it silently uses the loss defaults.
+  It MUST also export `BPFRX_CLUSTER_ENV` for the same cluster
+  (`test/incus/tcp-userspace-cluster.env` / `udp-userspace-cluster.env`).
+  `with-cluster.sh` takes its firewall targets from `cluster-env.sh`, which
+  defaults to loss, and its VM-target guard (shims, `systemctl
+  daemon-reload`) runs on them. A udp tuple without the udp env ran that
+  guard on the LOSS firewalls without the loss lock, inside another agent's
+  loss measurement (2026-11-16). Since #19165, `with-cluster.sh` refuses
+  (exit 2, before taking the lock) a canonical lock tuple whose cluster
+  differs from the env's `INCUS_REMOTE`.
   Never give a gate and ordinary command for one physical cluster different
   tuples. See the campaign skill and CLAUDE.md for the full path table.
   | Actor | Protocol |
