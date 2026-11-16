@@ -6163,15 +6163,24 @@ it.
       - A held-back retry keeps its obligation armed: `forceResync`
         re-armed, `bulkAckRetryOwed` left set, the fence still armed.
       - `nextSweepDelay` arms the sweep timer EXACTLY at the deadline for a
-        held-back forced or aged retry. The barrier re-prime is polled by
-        the 0.5 s barrier refusals and needs no timer.
+        held-back forced or aged retry. A deadline that passes while the
+        sweep runs (an OVERDUE retry) is re-checked at
+        `coldPrimeRetryPollDelay` (1 s), not after another profile interval,
+        but only while the sweep could run it: a primary predicate set, no
+        incremental pause, connected, a session store, and no capability
+        fence (`bulkRetryRunnableNow`). Otherwise the profile interval
+        stands, and a reconnect or the fence's lifting reaches it. The
+        barrier re-prime is polled by the 0.5 s barrier refusals and needs
+        no timer.
       - NOT held back: a forced resync consumed at connect, the connect-time
         cold prime, a peer's bulk request, and the daemon prime (its own
         schedule).
-      - The price, accepted as #19115's was: a forced resync can wait up to
-        30 s after the export recovers, so a takeover inside that window can
-        find standby sessions up to 30 s stale. Any success resets the
-        episode. See `docs/ha-failover-status.md`.
+      - The price, accepted as #19115's was: up to 30 s of ADDITIONAL
+        backoff before the next attempt, measured from the last failure's
+        completion, plus scheduling, lock and processing delay. The
+        standby's staleness also includes the whole failing episode before
+        it. Any success resets the episode, and the next retry becomes
+        eligible immediately. See `docs/ha-failover-status.md`.
   - **The owed debt governs.** While a debt is owed, the sweep's retry is the
     owed re-drive or nothing. It may start only when no young ack covers the
     debt, the bulk is not fenced (`bulkFenceNow`: exactly the window's

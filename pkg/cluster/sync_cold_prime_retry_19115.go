@@ -247,12 +247,35 @@ func (s *SessionSync) nextSweepDelay(interval time.Duration) time.Duration {
 	// backoff fires EXACTLY at its deadline, not at the next profile tick
 	// (Codex finding 18 on #19115 v4: gating without scheduling costs a
 	// profile interval).
+	//
+	// An OVERDUE one (its deadline passed while this sweep ran: the gate
+	// skipped it just before the deadline, then the enumeration crossed it)
+	// is re-checked at coldPrimeRetryPollDelay, not after another profile
+	// interval (#19135 review, Codex P2-1). Only while the sweep could run it
+	// (bulkRetryRunnableNow): disconnected, paused or fenced, it keeps the
+	// profile interval instead of polling. The floor is a poll, never 0: an
+	// aged re-drive skipped because another re-drive holds
+	// bulkRedriveInFlight must not spin the loop.
 	if s.forceResync.Load() || s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue() {
 		if notBefore, now := s.bulkRetryNotBeforeNs(), s.nowMono(); notBefore > now {
 			d = min(d, time.Duration(notBefore-now))
+		} else if s.bulkRetryRunnableNow() {
+			d = min(d, coldPrimeRetryPollDelay)
 		}
 	}
 	return d
+}
+
+// bulkRetryRunnableNow reports whether the sweep could run a held-back forced
+// or aged retry now: syncSweep's own preconditions (a primary predicate, no
+// incremental pause, connected, a session store) and no capability fence
+// (#19135). nextSweepDelay polls an overdue retry only while this holds.
+func (s *SessionSync) bulkRetryRunnableNow() bool {
+	return (s.IsPrimaryFn != nil || s.IsPrimaryForRGFn != nil) &&
+		s.incrementalPauseDepth.Load() == 0 &&
+		s.stats.Connected.Load() &&
+		s.sessions != nil &&
+		s.bulkFenceNow() == nil
 }
 
 // doBulkSyncAdmitted runs one authoritative bulk under bulkSendMu, held across

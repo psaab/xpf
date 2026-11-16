@@ -1268,20 +1268,26 @@ schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
   (install-table identity, IPsec discriminator), not at all, until the peer's
   capability frame lifts the fence.
 
-**A failing export can leave standby sessions stale for up to 30 s (#19135).**
+**A failing export adds up to 30 s of backoff to the standby's correction (#19135).**
 A forced resync is how the primary corrects the standby's session table after
 a delete-journal overflow: the standby may still hold sessions the primary has
 closed. While the export keeps failing, that resync is held to the shared
 backoff.
 - **The consequence:** once the export recovers, the held-back resync can
-  still wait up to 30 s (plus scheduling and lock delay) from the end of the
-  last failed attempt. A crash takeover inside that window can find standby
-  sessions up to 30 s stale: closed flows not yet removed.
+  still wait up to 30 s of ADDITIONAL backoff, measured from the completion
+  of the last failed attempt, plus scheduling, lock and processing delay.
+- **That is not a bound on how stale the standby is.** The standby misses
+  the primary's deletions for the WHOLE failing episode and then the
+  remaining backoff: an overflow followed by ten minutes of export failures
+  can leave ten-minute-old closed sessions on the standby. The export,
+  delivery and receiver reconciliation take further time. A crash takeover
+  in that time can find those closed flows still installed.
 - **This is the same trade the user accepted for #19115's drain refusals.**
   The alternative is a full export attempt every sweep tick (as fast as 1 s)
   while the export is failing.
 - **Any successful authoritative bulk resets the episode,** so the next
-  retry, or a new forced resync, goes at once.
+  retry, or a new forced resync, becomes eligible immediately (it still runs
+  on its own schedule: the next sweep tick, or a connect or peer request).
 - **What is never held back:** a forced resync consumed when the connection
   is set up, the connect-time cold prime, and a peer's bulk request.
 
