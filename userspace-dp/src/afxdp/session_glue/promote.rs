@@ -333,7 +333,7 @@ enum ForwardPartner {
     /// this worker's to promote with R but cannot be promoted now, and R alone
     /// would leave F peer-synced with nothing to retry it (Codex cycle-1 P1):
     /// - `NotCurrent(Unproven)`: shared F carries the zero session id, which
-    ///   is never promoted (fold 3); TERMINAL, the seed stays allowed;
+    ///   is never promoted (fold 3); TERMINAL, the seed is suppressed (fold 4);
     /// - `PartnerRefused`: F's materialize was refused by the install itself
     ///   (r24 P3-1); TRANSIENT, the seed is suppressed;
     /// - `StaleReplayFenced`: the #10612 fence refused F's current content;
@@ -574,13 +574,18 @@ impl SyncedPromotion {
     ///   upsert makes this row non-promotable; the incarnation is the same.
     /// - `StaleReplayFenced` does not: the fence is permanent until a purge
     ///   removes the row, so suppression would be unbounded.
-    /// - `NotCurrent(Unproven)` does not (#18552 fold 3): a zero-id row, or a
-    ///   reverse hit's zero-id forward partner, is never promoted, so no later
-    ///   resolved hit has anything to retry. Suppression would put every
-    ///   packet of the flow on the slow path for its life (a resolve, a permit
-    ///   claim and a shared lookup each) and buy nothing. A seeded entry serves
-    ///   the worker row's own decision, exactly as a non-promotable synced hit
-    ///   does, and as master did when it promoted such a row.
+    /// - `NotCurrent(Unproven)` suppresses (#18552 fold 4, codex-c P2), for a
+    ///   zero-id hit row and for a reverse hit's zero-id forward partner. The
+    ///   row is never promoted, so nothing is retried; the reason is cache
+    ///   coherence. A zero id cannot tell this incarnation from a legacy
+    ///   peer's same-NAT replacement whose `UpsertSynced` is still queued, and
+    ///   that upsert replaces the row in place without evicting the key's
+    ///   cache entries (only a delete does, #6457). A cache hit checks only that
+    ///   the backing row is live, so an entry seeded from the old row would
+    ///   keep forwarding on its decision (its installing table, its egress)
+    ///   after the repair. The cost: a zero-id flow (a peer that sends no
+    ///   session id; the mixed-version ISSU window) takes the slow path for
+    ///   every packet. Performance only; it forwards.
     /// - `PartnerRefused` suppresses (fold 3, r24 P3-1): the pair must be
     ///   retried by a resolved reply. Bounded like `Superseded`: F's queued
     ///   `UpsertSynced` lands at this worker's next command drain, after which
@@ -591,6 +596,7 @@ impl SyncedPromotion {
             self,
             Self::Deferred
                 | Self::NotCurrent(SyncedRowIncarnation::Superseded)
+                | Self::NotCurrent(SyncedRowIncarnation::Unproven)
                 | Self::PartnerRefused
         )
     }
@@ -640,7 +646,7 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 /// | shared vs the worker row | action |
 /// |---|---|
 /// | proven current: same NAT, shared id non-zero and equal | promote the worker row (its last-seen, TCP state and counters are kept) |
-/// | `Unproven`: same NAT, shared id 0 (fold 3) | never promote; TERMINAL, the seed is allowed; worker and shared rows unchanged |
+/// | `Unproven`: same NAT, shared id 0 (fold 3) | never promote; TERMINAL; the seed is suppressed (fold 4: a cached decision would outlive a queued same-NAT replacement); worker and shared rows unchanged |
 /// | `Superseded` (NAT, or the non-zero id, differs) | skip; the seed is suppressed |
 /// | absent, `SharedLocal`, stale-replay fenced | skip |
 ///
