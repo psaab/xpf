@@ -17378,3 +17378,160 @@ fn probe_unowned_peer_owned_redirect_19164() {
         dbg.disposition_other,
     );
 }
+
+/// #19164 probe (not for landing): the REPLY pipeline on the production-faithful
+/// unowned shape (RG3 the peer's, its prefix withheld), for both stored shapes
+/// and both arrivals.
+#[test]
+fn probe_unowned_peer_owned_reply_path_19164() {
+    let now_secs = 123;
+    let active = || HAGroupRuntime {
+        active: true,
+        watchdog_timestamp: now_secs,
+        lease: HAGroupRuntime::active_lease_until(now_secs, now_secs),
+    };
+    let ha_state = BTreeMap::from([(1, active()), (2, active())]);
+    let mut snapshot = nat_snapshot_with_fabric();
+    snapshot.policies.clear();
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth3.0".to_string(),
+        zone: "lan".to_string(),
+        linux_name: "ge-0-0-3".to_string(),
+        ifindex: 26,
+        redundancy_group: 3,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:03:00:01".to_string(),
+        addresses: vec![InterfaceAddressSnapshot {
+            family: "inet".to_string(),
+            address: "10.0.62.1/24".to_string(),
+            scope: 0,
+            ..Default::default()
+        }],
+        ..Default::default()
+    });
+    let mut forwarding = build_forwarding_state(&snapshot);
+    let client = Ipv4Addr::new(10, 0, 62, 102);
+    let server = Ipv4Addr::new(1, 1, 1, 1);
+    forwarding.neighbors.insert(
+        (26, IpAddr::V4(client)),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let forward_key = SessionKey {
+        addr_family: libc::AF_INET as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V4(client),
+        dst_ip: IpAddr::V4(server),
+        src_port: 12345,
+        dst_port: 80,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    };
+    let snat = NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(40000),
+        ..NatDecision::default()
+    };
+    let reverse_key = crate::session::reverse_session_key(&forward_key, snat);
+    let reverse_nat = snat.reverse(IpAddr::V4(client), IpAddr::V4(server), 12345, 80);
+    let local_fc = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 26,
+        tx_ifindex: 26,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(IpAddr::V4(client)),
+        neighbor_mac: Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+        src_mac: Some([0x02, 0xbf, 0x72, 0x03, 0x00, 0x01]),
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    let redirect = crate::afxdp::forwarding::resolve_fabric_redirect(&forwarding)
+        .expect("PROBE: the fabric redirect resolves");
+    let metadata = SessionMetadata {
+        forward_wire_alias_origin: false,
+        ingress_zone: TEST_WAN_ZONE_ID,
+        egress_zone: TEST_LAN_ZONE_ID,
+        ingress_zone_check: 0,
+        egress_zone_check: 0,
+        ingress_ifindex: 0,
+        ingress_vlan_id: 0,
+        forward_ingress_vlan_id: None,
+        owner_rg_id: 0,
+        fabric_ingress: false,
+        is_reverse: true,
+        nat64_reverse: None,
+        log_session_init: false,
+        log_session_close: false,
+        policy_id: 0,
+        inactivity_timeout_ns: None,
+        policy_counter_idx: 0,
+        policy_counter: None,
+        nat_scope_ifindex: None,
+    };
+    let flow = SessionFlow {
+        src_ip: reverse_key.src_ip,
+        dst_ip: reverse_key.dst_ip,
+        forward_key: reverse_key.clone(),
+    };
+    for (shape, stored) in [("local-fc-26", local_fc), ("fabric-redirect", redirect)] {
+        let decision = SessionDecision {
+            resolution: stored,
+            nat: reverse_nat,
+            install_table_domain: 0,
+            install_table_check: 0,
+        };
+        let target = crate::afxdp::session_glue::resolution_target_for_session(&flow, decision);
+        for (variant, looked) in [
+            (
+                "stale",
+                crate::afxdp::session_glue::lookup_forwarding_resolution_for_session_without_cache(
+                    &forwarding, &neighbors, &flow, decision,
+                )
+                .resolution,
+            ),
+            (
+                "current",
+                crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
+                    &forwarding, &neighbors, &flow, decision,
+                )
+                .resolution,
+            ),
+        ] {
+            for (arrival, ingress, fabric_link) in [("wan-12", 12, false), ("fabric-21", 21, true)] {
+                let reply = crate::afxdp::session_glue::reresolve_stored_session(
+                    &forwarding,
+                    &ha_state,
+                    &neighbors,
+                    now_secs,
+                    &decision,
+                    &metadata,
+                    &reverse_key,
+                    target,
+                    looked,
+                    crate::afxdp::session_glue::FabricArrival::Packet {
+                        fabric_ingress: fabric_link,
+                        fabric_link_ingress: fabric_link,
+                        ingress_ifindex: ingress,
+                        ha_startup_grace_until_secs: 0,
+                        fabric_adopted: false,
+                        adopted_recovery: None,
+                    },
+                );
+                eprintln!(
+                    "PROBE_REPLY shape={shape} stamp={variant} arrival={arrival} target={target} \
+                     lookup=({:?}, egress {}) reply=({:?}, egress {}, mac {:?})",
+                    looked.disposition,
+                    looked.egress_ifindex,
+                    reply.disposition,
+                    reply.egress_ifindex,
+                    reply.neighbor_mac
+                );
+            }
+        }
+    }
+}
