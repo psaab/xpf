@@ -108,12 +108,6 @@ func (m *Manager) PeerNeverSeenSyncFreshForTesting() bool {
 	return m.peerSyncFreshLocked()
 }
 
-// SetPeerSyncSourceForTesting publishes a real SessionSync as the peer
-// sync source without a wire round trip, mirroring SetConnectedForTesting.
-func (m *Manager) SetPeerSyncSourceForTesting(ss *SessionSync) {
-	m.SetPeerSyncSource(ss)
-}
-
 // SetFakePeerSyncSourceForTesting injects a fake sync source with explicit
 // connected / receive-age / silence-window state (#17056 cells).
 func (m *Manager) SetFakePeerSyncSourceForTesting(connected bool, age time.Duration, received, silenceFresh bool) {
