@@ -2629,11 +2629,24 @@ P2-1, R23 NEW-1):
     XDP shim attached (kind)", blocker `xdp_missing_data_member`. The scope is
     F4's: peer alive blocks; a lone owner gets an ERROR log and the
     peer-alive-form metric instead;
-  - **not required, never a blocker:** a member whose config disables it, and
-    a member with known non-Ethernet framing (`ShimAttachRefused`), the
-    refresh path's structural attach exclusions. NO shim program loaded is a
-    distinct state (the check is skipped; other reasons block); a loaded
+  - **"attachment required?" is separate from attachment freshness.** Not
+    required, never a blocker: a member whose base row is administratively
+    disabled (`baseRowAdminDisabled`: its own `disable`, or a disabled
+    untagged unit 0 on the same netdev; pure config, so it holds under any
+    verdict), and a member with known non-Ethernet framing
+    (`ShimAttachRefused`), classified from every lookup whether or not the
+    program could be identified, and kept across verdict staleness while the
+    verdict was made against the current config. Every tick re-observes it, so
+    a replacement device is reclassified on the next tick; a stalled tick loop
+    can leave it standing, because readiness must not do that I/O. These are
+    the refresh path's structural attach exclusions. NO shim program loaded is
+    a distinct state (the check is skipped; other reasons block); a loaded
     program that cannot be identified is not that state;
+  - **identity without side effects:** readiness reads the loaded program
+    through `EntryProgramIdentity` (`peekEntryProgramLocked`, allowlisted in
+    the #2114 registry canary), which has no lookup hook, no obsolete-access
+    count, no log and no syscall. `lookupProgramLocked` would count and WARN
+    on a Teardown-retained registry while the caller holds its mutex;
   - cost: per tick, one netlink lookup per configured member plus one info
     query when the loaded program changed, all off the mutex. Logs are on
     change, keyed on a stable kind.

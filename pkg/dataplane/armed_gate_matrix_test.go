@@ -105,9 +105,12 @@ var managerMethodClasses = map[string]string{
 	"ClearAllCounters":     "class3",
 
 	// --- class 4: escaping getters of Start-populated state ---
-	"Map":            "class4",
-	"Program":        "class4",
-	"NewEventSource": "class4", // error signature: fresh -> the typed error
+	"Map":     "class4",
+	"Program": "class4",
+	// #19110: the side-effect-free identity read of the loaded entry program
+	// (peekEntryProgramLocked): an escaping getter, nil outcome when absent.
+	"EntryProgramIdentity": "class4",
+	"NewEventSource":       "class4", // error signature: fresh -> the typed error
 
 	// --- category L: lifecycle (arming/teardown path itself; ungated by
 	// construction) + the retired-path no-op stubs ---
@@ -253,8 +256,8 @@ func TestManager_PreArmMethodMatrix(t *testing.T) {
 			}
 		}
 	}
-	if len(inventory) != 143 {
-		t.Fatalf("exported *Manager method inventory = %d, want 143", len(inventory))
+	if len(inventory) != 144 {
+		t.Fatalf("exported *Manager method inventory = %d, want 144", len(inventory))
 	}
 	for name := range inventory {
 		if _, ok := managerMethodClasses[name]; !ok {
@@ -368,6 +371,10 @@ var registryAccessAllowlist = map[string]bool{
 	// lives only in a small reviewable set of functions", and naming the
 	// caller would have widened that set instead of preserving it.
 	"takeRegistryHandles": true,
+	// #19110: the identity read for the userspace takeover readiness, which
+	// holds its own mutex and must not reach lookupProgramLocked's
+	// obsolete-registry WARN. Index read only, under m.mu.
+	"peekEntryProgramLocked": true,
 }
 
 // unwrapOwnerIdent strips any parenthesization and pointer-dereference

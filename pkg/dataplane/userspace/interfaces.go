@@ -563,7 +563,7 @@ func buildInterfaceSnapshotsFrom(cfg *config.Config, liveXfrm map[string]bool) [
 			ParentLinuxName: "",
 			NativeVLANID:    iface.NativeVlanID,
 			Ifindex:         ifindex,
-			AdminDisabled:   iface.Disable || (unit0Disabled && snapshotLinuxName(cfg, name, iface, iface.Units[0]) == linuxName),
+			AdminDisabled:   baseRowAdminDisabled(cfg, name, iface, linuxName),
 			ParentIfindex:   0,
 			RXQueues:        userspaceRXQueueCountFn(linuxName),
 			VLANID:          0,
@@ -1165,6 +1165,23 @@ func snapshotLinuxName(cfg *config.Config, ifName string, iface *config.Interfac
 		return config.LinuxIfName(cfg.ResolveReth(ifName))
 	}
 	return config.LinuxIfName(ifName)
+}
+
+// baseRowAdminDisabled is a base row's AdminDisabled: the interface's own
+// `disable`, or a disabled unit 0 that collapses onto the same netdev (#14575;
+// a VLAN-tagged unit 0 has its own netdev and does not). Structural attach
+// admission refuses such an owner (refreshStructuralAttachAdmission). The
+// #19110 missing-data-member readiness uses this same rule, so a member the
+// attach paths refuse is never a readiness blocker.
+func baseRowAdminDisabled(cfg *config.Config, name string, iface *config.InterfaceConfig, linuxName string) bool {
+	if iface == nil {
+		return false
+	}
+	if iface.Disable {
+		return true
+	}
+	u0, ok := iface.Units[0]
+	return ok && u0 != nil && u0.Disable && snapshotLinuxName(cfg, name, iface, u0) == linuxName
 }
 
 // egressRowIdentity is the egress-zone identity of one emitted snapshot row,

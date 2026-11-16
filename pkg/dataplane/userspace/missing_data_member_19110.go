@@ -52,10 +52,21 @@ import (
 //     failed lookup is the reason "<name> has no XDP shim attached (<kind>)",
 //     blocker xdp_missing_data_member. Its scope is F4's: with the peer alive
 //     it blocks; a lone owner gets the ERROR log and the peer-alive-form metric.
-//   - Not required, and so never a blocker: a member whose config disables it
-//     (the snapshot's AdminDisabled for its base row), and a member with known
-//     non-Ethernet framing (dataplane.ShimAttachRefused). These are the
-//     refresh path's structural attach exclusions (manager_link_refresh.go).
+//   - "Attachment REQUIRED?" is classified separately from attachment
+//     freshness. Not required, and so never a blocker:
+//       - a member whose base row is administratively disabled
+//         (baseRowAdminDisabled: its own `disable`, or a disabled unit 0 on the
+//         same netdev). This is pure config, so it holds under any verdict;
+//       - a member with known non-Ethernet framing (dataplane.ShimAttachRefused),
+//         classified from every lookup, whether or not the program could be
+//         identified. Framing is a property of the device, not of attachment,
+//         so the exclusion is kept across verdict staleness while the verdict
+//         was made against the CURRENT config. Every tick re-observes it, so a
+//         replacement device is reclassified on the next tick. A stalled tick
+//         loop can leave it standing; readiness must not do the I/O to
+//         re-check it.
+//     These are the refresh path's structural attach exclusions
+//     (refreshStructuralAttachAdmission).
 //   - NO shim program loaded is its own state: the check is skipped, because
 //     other reasons already block. A loaded program that cannot be identified
 //     is NOT that state: its members are "unverified".
@@ -131,7 +142,7 @@ var programIDFn = func(p *ebpf.Program) (uint32, error) {
 // dataMember is one configured local RETH data member.
 type dataMember struct {
 	cfgName, linuxName string
-	disabled           bool // `disable` on the member: the snapshot's AdminDisabled for its base row
+	disabled           bool // baseRowAdminDisabled: the snapshot's AdminDisabled for its base row
 }
 
 // localDataMembers is the config's local RETH data members, sorted by Linux name.
@@ -142,8 +153,8 @@ func localDataMembers(cfg *config.Config) []dataMember {
 	seen := map[string]dataMember{}
 	for _, phys := range cfg.RethToPhysical() {
 		mem := dataMember{cfgName: phys, linuxName: config.LinuxIfName(phys)}
-		if ifc := cfg.Interfaces.Interfaces[phys]; ifc != nil && ifc.Disable {
-			mem.disabled = true
+		if ifc := cfg.Interfaces.Interfaces[phys]; ifc != nil {
+			mem.disabled = baseRowAdminDisabled(cfg, phys, ifc, snapshotLinuxName(cfg, phys, ifc, nil))
 		}
 		seen[mem.linuxName] = mem
 	}
@@ -169,8 +180,9 @@ func localDataMemberNames(cfg *config.Config) []string {
 }
 
 // entryProgramLocked is the shim's loaded entry program, nil when none is
-// loaded. Registry lookups under the shim manager's own mutex, no syscall.
-// Caller holds m.mu (lock order: the userspace m.mu, then the shim's).
+// loaded. It goes through EntryProgramIdentity, which has no side effect: no
+// syscall, no obsolete-registry log or count. Caller holds m.mu (lock order:
+// the userspace m.mu, then the shim's).
 func (m *Manager) entryProgramLocked() *ebpf.Program {
 	if m.entryProgramHook != nil {
 		return m.entryProgramHook()
@@ -178,7 +190,7 @@ func (m *Manager) entryProgramLocked() *ebpf.Program {
 	if m.bpfShim == nil {
 		return nil
 	}
-	return m.bpfShim.Program(m.bpfShim.XDPEntryProgram())
+	return m.bpfShim.EntryProgramIdentity()
 }
 
 // shimProgIDCache is the tick's identification of one loaded program.
@@ -207,15 +219,19 @@ type memberXDPVerdict struct {
 // memberNow is the observation and readiness clock. A seam for the cells.
 var memberNow = time.Now
 
-// classifyMember turns one lookup into a kind ("" = positive evidence).
-func classifyMember(st memberXDPState, err error, progID uint32) (kind, detail string) {
+// classifyMember turns one lookup into a kind ("" = positive evidence). The
+// framing exclusion is decided from the lookup alone; only the attachment
+// check needs the program's identity (progErr non-empty: it failed).
+func classifyMember(st memberXDPState, err error, progID uint32, progErr string) (kind, detail string) {
 	switch {
 	case errors.Is(err, errMemberAbsent):
 		return "absent", "absent"
 	case err != nil:
 		return "unverified", "unverified: lookup failed: " + err.Error()
 	case st.NotAttachable:
-		return "excluded:non-ethernet", "excluded: non-Ethernet framing"
+		return "excluded:non-ethernet", fmt.Sprintf("excluded: non-Ethernet framing, ifindex %d", st.Ifindex)
+	case progErr != "":
+		return "unverified", "unverified: the loaded shim program could not be identified: " + progErr
 	case !st.Attached:
 		kind = "not-attached"
 	case st.ProgID != progID:
@@ -250,15 +266,11 @@ func (m *Manager) observeDataMembers() {
 		for _, mem := range members {
 			at := memberNow() // before the lookup: the evidence is at least this old
 			o := memberObservation{at: at}
-			switch {
-			case mem.disabled:
+			if mem.disabled {
 				o.kind, o.detail = "excluded:admin-disabled", "excluded: administratively disabled"
-			case cache.err != nil:
-				o.kind = "unverified"
-				o.detail = "unverified: the loaded shim program could not be identified: " + cache.err.Error()
-			default:
+			} else {
 				st, err := memberXDPStateFn(mem.linuxName)
-				o.kind, o.detail = classifyMember(st, err, cache.id)
+				o.kind, o.detail = classifyMember(st, err, cache.id, v.progErr)
 			}
 			v.obs[mem.linuxName] = o
 			if v.oldest.IsZero() || at.Before(v.oldest) {
@@ -368,13 +380,16 @@ func (m *Manager) missingDataMemberReasonsLocked(peerAlive bool) []string {
 	var reasons []string
 	for _, mem := range members {
 		if mem.disabled {
-			continue
+			continue // not required: pure config, under any verdict
+		}
+		o, observed := v.obs[mem.linuxName]
+		if observed && v.cfg == cfg && o.kind == "excluded:non-ethernet" {
+			continue // not required: framing, kept across staleness for this config
 		}
 		detail := stale
 		if detail == "" {
-			o, ok := v.obs[mem.linuxName]
 			switch {
-			case !ok:
+			case !observed:
 				detail = "unverified: not observed yet"
 			case o.kind == "" || strings.HasPrefix(o.kind, "excluded"):
 				continue
