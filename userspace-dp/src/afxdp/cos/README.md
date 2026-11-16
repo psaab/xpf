@@ -297,12 +297,16 @@ mod.rs for further file-level breakdown.
   to the residual, and residual one binding cannot use stays available to the
   others. The bucket is first-come.
   It is read before transmit and debited after it, with a saturating debit.
-  - Each collision of k spenders, each with one batch outstanding, can
-    overspend it by up to (k − 1) × one batch, and that excess is forgiven,
-    not carried.
-  - The allowance is per collision. It is not per 1 ms epoch, and it is not a
-    cumulative conservation bound: repeated collisions forgive repeatedly.
-  - With k spenders in lockstep, ordinary surplus can therefore run near
+  - **The bound holds for one group.** For ONE group of overlapping batch
+    attempts, each spender contributing at most one batch, the overspend is
+    at most (spenders − 1) × B, with B the largest batch. That excess is
+    forgiven, not carried.
+  - **It does not hold for an arbitrary spender's read-to-debit interval.**
+    A stalled reader can straddle later races. W1 reads B and stalls; W2 and
+    W3 race twice more after refills; W1 then sends. That is 7B sent against
+    3B credited, an excess of 4B.
+  - **Excess accumulates.** Every race's excess is forgiven, so repeated
+    races add up. With k spenders in lockstep, ordinary surplus can run near
     k × R in the long run, capped only by the root lease and the shaping
     rate.
   - This predates the #19100 stack (fb33f3ae9a). Reserve-before-submit is

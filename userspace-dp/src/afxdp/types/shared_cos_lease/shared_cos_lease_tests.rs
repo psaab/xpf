@@ -3051,7 +3051,8 @@ fn newly_active_worker_is_excluded_not_class_wide_fail_open_9117() {
 // they were checked against is the pool's own and stays.
 // ===========================================================================
 
-/// The 1 ms window the per-window grant bound is checked over.
+/// The 1 ms window this serialized test checks its per-window grant bound
+/// over. It is the test's own checking window, not an overspend window.
 const EPOCH_19025: u64 = 1_000_000;
 
 /// Conservation as a SERIALIZED property: when each spender's read and debit
@@ -3064,9 +3065,15 @@ const EPOCH_19025: u64 = 1_000_000;
 /// - Checked at every step (cumulative) and per 1 ms window.
 ///
 /// It does NOT cover overlapping readers. The pool is read before transmit
-/// and debited after, with a saturating debit, so concurrent spenders can
-/// overspend it by up to (spenders − 1) × one batch per window. That race
-/// predates the #19100 stack; reserve-before-submit is #19144.
+/// and debited after, with a saturating debit.
+/// - One group of overlapping batch attempts, each spender contributing at
+///   most one batch, can overspend it by up to (spenders − 1) × the largest
+///   batch.
+/// - A stalled reader can straddle later races, so no such bound holds over
+///   an arbitrary read-to-debit interval.
+/// - Every race's excess is forgiven, so repeated races accumulate: with k
+///   spenders in lockstep, near k × R in the long run.
+/// That race predates the #19100 stack; reserve-before-submit is #19144.
 #[test]
 fn residual_pool_grants_never_exceed_the_residual_when_read_and_debit_serialize_19025() {
     for slots in [2usize, 4, 8] {

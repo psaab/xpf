@@ -540,14 +540,18 @@ and nothing is owed.
   - Ordinary surplus is held to R by the shared pool only up to the pool's
     read-then-debit race. The pool is read before transmit and debited after
     it, with a saturating debit.
-    - Each collision of k spenders, each with one batch outstanding, can
-      overspend it by up to (k − 1) × one batch, and that excess is forgiven,
-      not carried.
-    - That allowance is per collision. It is not per 1 ms epoch, and it is
-      not a cumulative conservation bound: repeated collisions forgive
-      repeatedly.
-    - So with k spenders in lockstep, ordinary surplus can run near k × R in
-      the long run, capped only by the root lease and the shaping rate.
+    - **The bound holds for one group.** For ONE group of overlapping batch
+      attempts, each spender contributing at most one batch, the overspend
+      is at most (spenders − 1) × B, with B the largest batch. That excess is
+      forgiven, not carried.
+    - **It does not hold for an arbitrary spender's read-to-debit
+      interval.** A stalled reader can straddle later races. W1 reads B and
+      stalls; W2 and W3 race twice more after refills; W1 then sends. That is
+      7B sent against 3B credited, an excess of 4B, more than 2B.
+    - **Excess accumulates.** Every race's excess is forgiven, so repeated
+      races add up. With k spenders in lockstep, ordinary surplus can run
+      near k × R in the long run, capped only by the root lease and the
+      shaping rate.
   - That race predates this stack: it is on master since fb33f3ae9a.
     Reserve-before-submit is tracked as #19144.
 - **Not addressed here.** A small exact class on a slow worker beside a large
