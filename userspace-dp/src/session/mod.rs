@@ -8467,6 +8467,9 @@ impl SessionTable {
     }
 }
 
+// Test fixtures only (#19155): #18687 moved synced-import admission to
+// REPLICATED_NODE_SESSION_CEILING, its last production caller.
+#[cfg(test)]
 pub(crate) const fn default_max_sessions() -> usize {
     DEFAULT_MAX_SESSIONS
 }

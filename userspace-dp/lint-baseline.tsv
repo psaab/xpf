@@ -65,7 +65,7 @@ release	dead_code	src/afxdp/session_glue/resolve.rs	1
 release	dead_code	src/afxdp/session_glue/tx_cancel.rs	2
 release	dead_code	src/afxdp/session_glue/worker_commands.rs	2
 release	dead_code	src/afxdp/sharded_neighbor.rs	11
-release	dead_code	src/afxdp/shared_ops/lookup.rs	4
+release	dead_code	src/afxdp/shared_ops/lookup.rs	3
 release	dead_code	src/afxdp/shared_ops/reverse_synth.rs	1
 release	dead_code	src/afxdp/tx/cos_classify.rs	6
 release	dead_code	src/afxdp/tx/cos_classify_ba.rs	1
@@ -146,7 +146,7 @@ tests	dead_code	src/afxdp/../../../userspace-xdp/src/gre_classify.rs	14
 tests	dead_code	src/afxdp/../../../userspace-xdp/src/ipv6_ext_walk.rs	23
 tests	dead_code	src/afxdp/../../../userspace-xdp/src/tunnel_frag.rs	1
 tests	dead_code	src/afxdp/bpf_map/metrics.rs	1
-tests	dead_code	src/afxdp/bpf_map/mod.rs	2
+tests	dead_code	src/afxdp/bpf_map/mod.rs	1
 tests	dead_code	src/afxdp/bpf_map/publish_conntrack.rs	1
 tests	dead_code	src/afxdp/bpf_map/tuple_gate.rs	4
 tests	dead_code	src/afxdp/coordinator/idle_lease_sync_8121.rs	1
@@ -159,7 +159,6 @@ tests	dead_code	src/afxdp/coordinator/wg_control/mtu.rs	1
 tests	dead_code	src/afxdp/coordinator/wg_control/wg_control_tests.rs	2
 tests	dead_code	src/afxdp/cos/admission.rs	2
 tests	dead_code	src/afxdp/flood_counters.rs	1
-tests	dead_code	src/afxdp/flow_cache.rs	3
 tests	dead_code	src/afxdp/forwarding/fib.rs	2
 tests	dead_code	src/afxdp/frame/../../../../userspace-xdp/src/degraded_ndp.rs	1
 tests	dead_code	src/afxdp/frame/../../../../userspace-xdp/src/gre_classify.rs	14
@@ -186,8 +185,6 @@ tests	dead_code	src/afxdp/session_glue/tests.rs	1
 tests	dead_code	src/afxdp/session_glue/tx_cancel.rs	2
 tests	dead_code	src/afxdp/sharded_neighbor.rs	2
 tests	dead_code	src/afxdp/shared_ops/counters.rs	1
-tests	dead_code	src/afxdp/shared_ops/lookup.rs	1
-tests	dead_code	src/afxdp/tests_decap_dnat_table.rs	1
 tests	dead_code	src/afxdp/tests_host_bound_post_dnat_9529.rs	1
 tests	dead_code	src/afxdp/tests_policy_revocation_8356.rs	1
 tests	dead_code	src/afxdp/tx/cos_classify_ba.rs	1
@@ -226,7 +223,6 @@ tests	dead_code	src/session/mod.rs	8
 tests	dead_code	src/session/pmech_directory.rs	5
 tests	dead_code	src/session/pptp.rs	2
 tests	dead_code	src/session/pptp_control.rs	1
-tests	dead_code	src/session/split_handshake_16223_tests.rs	1
 tests	dead_code	src/slowpath.rs	2
 tests	dead_code	src/slowpath_reinject_9506.rs	8
 tests	dead_code	src/xsk_ffi.rs	2
