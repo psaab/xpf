@@ -286,8 +286,8 @@ helper-reported `HAGroups` are only compared, never adopted.
   slot list; that line is the lab witness. A failed clear (a frozen map, an
   EPERM) WARNs once per distinct error and is retried by the next refresh. It
   changes nothing any helper is told, because the slot is already masked.
-- **EFFECTIVE inventory** (what a helper receives) is BASE ∨ a live #18559
-  pre-activation (below). The pre-activation is this process's in-memory,
+- **EFFECTIVE inventory** (what a helper receives) is BASE ∨ a live,
+  routes-ready #18559 pre-activation (below, #19167). The pre-activation is this process's in-memory,
   deadline-bounded overlay. It is never persisted or imported, so the
   barrier does not touch it.
 
@@ -337,14 +337,34 @@ deadline (`transferPreActivateTTL`, 5 s) while this node requests an RG
 transfer. The mark is an overlay on what the HELPER is told. It never changes
 `haGroups` or the `rg_active` BPF map, which keep the cluster truth.
 
+An entry has two stages (#19167):
+- **Routes-pending**, from `BeginTransferPreActivation`. The route builder
+  already reports the RG as locally primary, so the caller's republish
+  carries its connected prefixes. But the helper is NOT told the RG is
+  active yet.
+- **Routes-ready**, from `PublishTransferPreActivation(rgIDs)`. The daemon
+  calls it only after its connected-route republish succeeded, and it marks
+  exactly the named RGs: a concurrent transfer's routes-pending entry stays
+  pending. From here on the RG is active in the helper-facing view.
+  Re-beginning a live, routes-ready RG only extends its deadline.
+
+Before #19167, Begin made the RG helper-facing active at once. The periodic
+status poll runs outside the daemon's `applySem` and publishes the effective
+inventory (`syncHAWatchdogOnlyLocked`). It could therefore tell the helper the
+RG was active between Begin and the route republish. The helper then ran its
+activation refresh (RefreshOwnerRGs) against the pre-activation FIB during a
+planned failover, and the daemon's later explicit publish brought no second
+refresh, because the RG was already active.
+
 - Every `update_ha_state` sender builds from `effectiveHAGroupsLocked`: the
   main publish (`syncHAStateLocked`), the `UpdateRGActive` publish, and the
   watchdog inventory the session-socket and degraded refreshes use
-  (`haWatchdogGroupsLocked`). A pre-active RG is therefore sent active by
-  every path, and a refresh never reads it as a demotion. The status poll's
-  helper/manager signature comparison uses the same effective view.
+  (`haWatchdogGroupsLocked`). A routes-ready pre-active RG is therefore sent
+  active by every path, a routes-pending one by none, and a refresh never
+  reads it as a demotion. The status poll's helper/manager signature
+  comparison uses the same effective view, so Begin alone moves no signature.
 - The route builders take the provider from `rgPrimaryNowLocked`, which
-  reports a pre-active RG as locally primary. Its connected prefixes then
+  reports a pre-active RG (at either stage) as locally primary. Its connected prefixes then
   enter the helper FIB before its forwarding opens, the #16270 order the
   promotion path keeps. Proxy-NDP responders keep the raw provider: a
   pre-active node must not answer for addresses its peer still owns.

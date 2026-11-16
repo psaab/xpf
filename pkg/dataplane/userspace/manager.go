@@ -418,10 +418,11 @@ type Manager struct {
 	haGroups    map[int]HAGroupStatus
 	// transferPreActive (#18559) holds the data RGs whose helper forwarding
 	// is opened ahead of the cluster promotion while this node requests a
-	// transfer, each with its backstop deadline. It is an overlay on the
+	// transfer, each with its backstop deadline and whether its connected
+	// routes are published yet (#19167). It is an overlay on the
 	// helper-facing view only: haGroups and the rg_active BPF map keep the
 	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
-	transferPreActive map[int]time.Time
+	transferPreActive map[int]transferPreActivation
 	// rgActiveWritten (#19093) records, per rg_active slot, whether THIS
 	// process has landed a write to that slot through UpdateRGActive. The
 	// rg_active map is pinned under /sys/fs/bpf/xpf and outlives an unclean

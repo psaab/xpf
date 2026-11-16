@@ -77,7 +77,7 @@ func newPreActivateManager18559(t *testing.T) (*Manager, *haSendRecorder18559) {
 func TestPreActivationOpensHelperForwarding18559(t *testing.T) {
 	m, rec := newPreActivateManager18559(t)
 	m.BeginTransferPreActivation([]int{0, 1}, time.Now().Add(time.Minute))
-	_ = m.PublishTransferPreActivation() // post-send status apply may fail unshimmed
+	_ = m.PublishTransferPreActivation([]int{0, 1}) // post-send status apply may fail unshimmed
 	got := rec.last(t)
 	if !got[1] {
 		t.Fatalf("helper inventory %v: the pre-active RG1 was not sent active", got)
@@ -114,7 +114,7 @@ func TestPreActivationPublishesFullInventoryAndAbort18569(t *testing.T) {
 				m.mu.Unlock()
 			}
 			m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
-			if err := m.PublishTransferPreActivation(); err != nil && err.Error() != "userspace_ctrl map not loaded" {
+			if err := m.PublishTransferPreActivation([]int{1}); err != nil && err.Error() != "userspace_ctrl map not loaded" {
 				t.Fatalf("PublishTransferPreActivation: %v", err)
 			}
 			wantDuring := []HAGroupStatus{
@@ -155,10 +155,13 @@ func equalHAGroupInventories18569(got, want []HAGroupStatus) bool {
 }
 
 // The daemon's reconcile keeps writing rg_active=false for an RG that is
-// still cluster-secondary. That must not close the window.
+// still cluster-secondary. That must not close the window. (#19167: the window
+// is open once the daemon published it after its route republish, so the
+// fixture opens it the way the daemon does: Begin, then Publish.)
 func TestPreActivationSurvivesSecondaryRGActiveWrite18559(t *testing.T) {
 	m, rec := newPreActivateManager18559(t)
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
+	_ = m.PublishTransferPreActivation([]int{1})
 	_ = m.UpdateRGActive(1, false)
 	if got := rec.last(t); !got[1] {
 		t.Fatalf("helper inventory %v: a still-secondary rg_active=false write closed the pre-activation", got)
@@ -202,7 +205,7 @@ func TestRealDemotionSupersedesPreActivation18559(t *testing.T) {
 func TestEndPreActivationRevertsUnpromotedRG18559(t *testing.T) {
 	m, rec := newPreActivateManager18559(t)
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
-	_ = m.PublishTransferPreActivation()
+	_ = m.PublishTransferPreActivation([]int{1})
 	reverted, _ := m.EndTransferPreActivation([]int{1})
 	if !reverted {
 		t.Fatal("EndTransferPreActivation did not report the revert; the caller would not withdraw the connected prefixes")
@@ -232,7 +235,7 @@ func TestEndPreActivationAfterPromotionIsFree18559(t *testing.T) {
 func TestExpiredPreActivationDoesNotCount18559(t *testing.T) {
 	m, rec := newPreActivateManager18559(t)
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(-time.Millisecond))
-	_ = m.PublishTransferPreActivation()
+	_ = m.PublishTransferPreActivation([]int{1})
 	if got := rec.last(t); got[1] {
 		t.Fatalf("helper inventory %v: an expired pre-activation was sent active", got)
 	}
@@ -267,7 +270,7 @@ func TestPreActivationRouteProviderOnly18559(t *testing.T) {
 func TestPreActivationKeptByWatchdogInventory18559(t *testing.T) {
 	m, _ := newPreActivateManager18559(t)
 	m.BeginTransferPreActivation([]int{1}, time.Now().Add(time.Minute))
-	_ = m.PublishTransferPreActivation()
+	_ = m.PublishTransferPreActivation([]int{1})
 	m.mu.Lock()
 	groups := m.haWatchdogGroupsLocked()
 	m.mu.Unlock()

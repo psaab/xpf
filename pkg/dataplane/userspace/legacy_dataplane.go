@@ -531,13 +531,14 @@ func (a *LegacyDataPlaneAdapter) BeginTransferPreActivation(rgIDs []int, until t
 	}
 }
 
-// PublishTransferPreActivation forwards the #18559 helper publish.
-func (a *LegacyDataPlaneAdapter) PublishTransferPreActivation() error {
+// PublishTransferPreActivation forwards the #18559 helper publish, which also
+// marks rgIDs routes-ready (#19167).
+func (a *LegacyDataPlaneAdapter) PublishTransferPreActivation(rgIDs []int) error {
 	m, err := a.managerOrErr()
 	if err != nil {
 		return err
 	}
-	return m.PublishTransferPreActivation()
+	return m.PublishTransferPreActivation(rgIDs)
 }
 
 // EndTransferPreActivation forwards the #18559 release.

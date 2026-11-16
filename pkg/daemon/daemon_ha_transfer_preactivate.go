@@ -23,7 +23,7 @@ const transferPreActivateTTL = 5 * time.Second
 // transferPreActivator is the userspace dataplane surface the hook drives.
 type transferPreActivator interface {
 	BeginTransferPreActivation(rgIDs []int, until time.Time)
-	PublishTransferPreActivation() error
+	PublishTransferPreActivation(rgIDs []int) error
 	EndTransferPreActivation(rgIDs []int) (bool, error)
 }
 
@@ -105,7 +105,9 @@ func (d *Daemon) beginTransferPreActivation(rgIDs []int) error {
 	}(); err != nil {
 		return err
 	}
-	if err := pre.PublishTransferPreActivation(); err != nil {
+	// #19167: this call is what lets the helper see the RGs active, so it
+	// must stay after the successful republish above.
+	if err := pre.PublishTransferPreActivation(ids); err != nil {
 		return err
 	}
 	slog.Info("cluster: transfer pre-activation opened local forwarding", "rgs", ids)
