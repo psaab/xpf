@@ -68,12 +68,17 @@ The script also prepares the runner environment:
   build (another worktree, an older commit) once re-ran the old binary in
   "Finished ... in 0.0s". The sync therefore does not keep the workstation's
   mtimes. A per-lane ledger, `/work/<lane>/.xpf-src-ledger.json`, maps each
-  path to its content hash and the time the lane first saw that content:
-  - an unchanged file gets its ledger time back, so the incremental build
+  path to its content hash and the exact mtime (ns) the sync applied:
+  - an unchanged file gets that mtime back, so the incremental build
     survives;
-  - a new or changed file, or one the previous run modified on the runner,
-    gets the sync time;
-  - a lane with no ledger restamps every file once.
+  - a new or changed file gets the sync time;
+  - so does every file the previous run TOUCHED on the runner: its content or
+    its mtime no longer matches what the sync applied, or it was deleted.
+    Content alone cannot see a run that edits, builds, and writes the
+    original bytes back (`scripts/mutate-9546.py` restores its mutants this
+    way): the bytes match the ledger, but the binary is the edit's;
+  - a lane with no ledger, or a ledger in the earlier format, restamps every
+    file once.
   The tree is extracted to `src.new` and swapped in after the restamp.
   Hashing costs about 2 s per sync of a full worktree.
   `make test-vm-test-run-sync-lib` drives this with real cargo under a mock

@@ -19,12 +19,19 @@
 #     lane recompiles and prints value=2 (the issue's case).
 #   - runner-side edit: a run edits the source on the runner and builds it;
 #     the next sync of the unchanged tree recompiles back to the tree.
+#   - restored after build: a run edits, builds, then writes the ORIGINAL
+#     bytes back (scripts/mutate-9546.py restores its mutants this way); the
+#     next sync must recompile, though every byte matches the ledger.
+#   - deleted after build: a run deletes a file a build script probes, and
+#     builds; the next sync restores the file and must re-run the script.
 #   - unbuilt middle sync: A built, then B synced but not built, then C (B's
 #     content, older still) recompiles and prints C's value.
 #   - no ledger: a lane whose ledger is gone but whose target dir is not
 #     recompiles.
-#   - mutation: the restamp without its dirty-file check fails the
-#     runner-side-edit cell.
+#   - mutations, each KILLED only when the STALE value actually runs: no
+#     dirty check at all (runner-side edit runs value=9); a content-only
+#     dirty check, the pre-#19134-review shape (restored after build runs
+#     value=9); no deleted-file check (deleted after build runs flag=0).
 # Needs cargo; exits 77 (SKIP) without it.
 set -euo pipefail
 
@@ -94,9 +101,41 @@ TOML
 	(cd "$1" && cargo generate-lockfile --offline >/dev/null 2>&1)
 	touch -d "$3" "$1/Cargo.toml" "$1/Cargo.lock" "$1/src/main.rs"
 }
+# make_probe_tree <dir> <mtime>: a crate whose build script bakes in whether
+# flag.txt exists (flag=1/0), with cargo told to re-run it when flag.txt
+# changes.
+make_probe_tree() {
+	mkdir -p "$1/src"
+	git init -q "$1"
+	cat >"$1/Cargo.toml" <<'TOML'
+[package]
+name = "stalefix19134probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+build = "build.rs"
+
+[workspace]
+TOML
+	cat >"$1/build.rs" <<'RS'
+fn main() {
+    println!("cargo:rerun-if-changed=flag.txt");
+    let flag = if std::path::Path::new("flag.txt").exists() { 1 } else { 0 };
+    println!("cargo:rustc-env=PROBE_FLAG={flag}");
+}
+RS
+	printf 'fn main() {
+    println!("flag={}", env!("PROBE_FLAG"));
+}
+' >"$1/src/main.rs"
+	echo on >"$1/flag.txt"
+	(cd "$1" && cargo generate-lockfile --offline >/dev/null 2>&1)
+	touch -d "$2" "$1/Cargo.toml" "$1/Cargo.lock" "$1/build.rs" "$1/src/main.rs" "$1/flag.txt"
+}
 make_tree "$tmp/A" 1 "2020-06-01 00:00:00"
 make_tree "$tmp/B" 2 "2001-01-01 00:00:00"
 make_tree "$tmp/C" 2 "1999-01-01 00:00:00"
+make_probe_tree "$tmp/D" "2010-01-01 00:00:00"
 
 # lane <script> <tree> <name> <out> <command>: run the command on the mock
 # runner from <tree>, syncing it into lane <name>.
@@ -107,6 +146,7 @@ lane() {
 run_cmd='cargo run --offline 2>&1'
 compiled() { grep -q 'Compiling stalefix19134' "$1"; }
 printed() { grep -qx "value=$2" "$1"; }
+flagged() { grep -qx "flag=$2" "$1"; }
 
 # control: the trap itself, without vm-test-run.sh.
 cp -a "$tmp/A" "$tmp/ctl"
@@ -152,6 +192,38 @@ else
 	bad "runner-side edit: edit=$(tr '\n' '|' <"$tmp/e.out.edit") next=$(tr '\n' '|' <"$tmp/e.out")"
 fi
 
+# restored after build: edit, build, write the original bytes back, re-sync.
+# runner_restore <script> <lane> <out>
+runner_restore() {
+	lane "$1" "$tmp/B" "$2" "$3.prep" "$run_cmd"
+	# The tree's bytes by checksum, not path: the mock rewrites /work/ paths.
+	local sum
+	sum=$(sha256sum <"$tmp/B/src/main.rs" | cut -c1-64)
+	lane "$1" "$tmp/B" "$2" "$3.edit" "sed -i 's/= 2;/= 9;/' src/main.rs && $run_cmd && sed -i 's/= 9;/= 2;/' src/main.rs && [ \"\$(sha256sum <src/main.rs | cut -c1-64)\" = $sum ] && echo restored-bytes"
+	lane "$1" "$tmp/B" "$2" "$3" "$run_cmd"
+}
+runner_restore "$script" restore "$tmp/r.out"
+if printed "$tmp/r.out.edit" 9 && grep -qx restored-bytes "$tmp/r.out.edit" && compiled "$tmp/r.out" && printed "$tmp/r.out" 2; then
+	ok "restored after build: a run that built value=9 and wrote the original bytes back is followed by a recompile (value=2)"
+else
+	bad "restored after build: edit=$(tr '\n' '|' <"$tmp/r.out.edit") next=$(tr '\n' '|' <"$tmp/r.out")"
+fi
+
+# deleted after build: the run deletes flag.txt and builds (flag=0); the next
+# sync restores flag.txt and must re-run the build script (flag=1).
+# runner_delete <script> <lane> <out>
+runner_delete() {
+	lane "$1" "$tmp/D" "$2" "$3.prep" "$run_cmd"
+	lane "$1" "$tmp/D" "$2" "$3.del" "rm flag.txt && $run_cmd"
+	lane "$1" "$tmp/D" "$2" "$3" "$run_cmd"
+}
+runner_delete "$script" delete "$tmp/d.out"
+if flagged "$tmp/d.out.prep" 1 && flagged "$tmp/d.out.del" 0 && flagged "$tmp/d.out" 1; then
+	ok "deleted after build: after a run built without flag.txt, the next sync re-runs the build script (flag=1)"
+else
+	bad "deleted after build: prep=$(tr '\n' '|' <"$tmp/d.out.prep") del=$(tr '\n' '|' <"$tmp/d.out.del") next=$(tr '\n' '|' <"$tmp/d.out")"
+fi
+
 # unbuilt middle sync: A built, B synced without a build, then C (B's content).
 lane "$script" "$tmp/A" mid "$tmp/m1.out" "$run_cmd"
 lane "$script" "$tmp/B" mid "$tmp/m2.out" "true"
@@ -172,18 +244,27 @@ else
 	bad "no ledger: $(tr '\n' '|' <"$tmp/n2.out")"
 fi
 
-# mutation: drop the dirty-file check; the runner-side-edit cell must fail.
-sed 's/        if entry is None or entry\[0\] != digest(path):/        if False:/' "$script" >"$tmp/no-dirty.sh"
-if cmp -s "$script" "$tmp/no-dirty.sh"; then
-	bad "mutation no-dirty: the anchor was not found"
-else
-	runner_edit "$tmp/no-dirty.sh" edit-mutant "$tmp/em.out"
-	if printed "$tmp/em.out" 2 && compiled "$tmp/em.out"; then
-		bad "mutation no-dirty: the runner-side-edit cell still passed; it cannot see the defect"
-	else
-		ok "mutation no-dirty: without the dirty-file check the edited binary is re-tested (cell fails)"
+# mutate <name> <sed expr> <cell function> <lane> <stale-value check>: the
+# mutant is KILLED only when its cell actually runs the STALE binary; any
+# other outcome (a build error, a missing anchor) is not a kill.
+mutate() {
+	sed "$2" "$script" >"$tmp/$1.sh"
+	if cmp -s "$script" "$tmp/$1.sh"; then
+		bad "mutation $1: the anchor was not found"
+		return
 	fi
-fi
+	"$3" "$tmp/$1.sh" "$4" "$tmp/$1.out"
+	if $5 "$tmp/$1.out"; then
+		ok "mutation $1: the cell ran the stale binary ($(grep -E '^(value|flag)=' "$tmp/$1.out" | tr '\n' ' '))"
+	else
+		bad "mutation $1: the stale binary did not run ($(tr '\n' '|' <"$tmp/$1.out")); the cell cannot show the defect"
+	fi
+}
+stale_edit() { printed "$1" 9; }
+stale_flag() { flagged "$1" 0; }
+mutate no-dirty 's/^        if touched_on_runner(rel, path):$/        if False:/' runner_edit edit-m1 stale_edit
+mutate content-only 's/^    return os\.stat(path)\.st_mtime_ns != entry\[1\].*/    return False/' runner_restore restore-m2 stale_edit
+mutate no-deleted 's/^dirty |= set(known) - seen$/pass/' runner_delete delete-m3 stale_flag
 
 echo "vm-test-run sync selftest: ${pass} passed, ${fail} failed"
 [[ "$fail" -eq 0 ]]

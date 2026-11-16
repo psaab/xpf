@@ -53,11 +53,16 @@
 # an older commit) therefore re-tested the previous binary. So the sync does
 # not keep the workstation's mtimes. A per-lane ledger
 # (/work/<name>/.xpf-src-ledger.json) records each path's content hash and the
-# time the lane first saw that content. A file whose content the ledger knows
-# gets that time back, so an unchanged tree keeps its incremental build. A new
-# or changed file, or one the previous run modified on the runner, gets the
-# sync time, which is newer than every artefact. A lane with a build but no
-# ledger restamps everything once.
+# exact mtime (ns) the sync applied to it. A file whose content the ledger
+# knows gets that mtime back, so an unchanged tree keeps its incremental
+# build. A new or changed file gets the sync time, which is newer than every
+# artefact. So does every file the previous run TOUCHED on the runner: one
+# whose content or mtime no longer matches what the sync applied, or that it
+# deleted. Content alone is not enough: a run that edits a file, builds, and
+# writes the original bytes back (scripts/mutate-9546.py restores its
+# mutants this way) leaves content the ledger knows over a binary built from
+# the edit. A lane with a build but no (current-format) ledger restamps
+# everything once.
 #
 # The command runs via `bash -lc` in /work/<name>/src with
 # CARGO_TARGET_DIR=/work/<name>/target, TMPDIR=/work/<name>/tmp and
@@ -157,39 +162,53 @@ def digest(path):
     return h.hexdigest()
 
 
+# Ledger format 2: {"v": 2, "files": {path: [content hash, applied mtime ns]}}.
+# Anything else (format 1 kept float first-seen times) counts as no ledger.
 try:
     with open(ledger_path, encoding="utf-8") as handle:
         ledger = json.load(handle)
-    if not isinstance(ledger, dict):
-        ledger = None
-except (OSError, ValueError):
-    ledger = None
-if ledger is None:
+    known = ledger["files"] if isinstance(ledger, dict) and ledger.get("v") == 2 else None
+    if not isinstance(known, dict):
+        known = None
+except (OSError, ValueError, KeyError):
+    known = None
+if known is None:
     # No record of what the target dir was built from: trust nothing in it.
-    ledger = {}
-# A file the previous run changed on the runner (a mutant, a regenerated
-# file) may be what the target was built from: its synced content gets a new
-# stamp even when it matches the ledger.
-dirty = set()
+    known = {}
+
+
+def touched_on_runner(rel, path):
+    entry = known.get(rel)
+    if entry is None or entry[0] != digest(path):
+        return True  # new or different content
+    return os.stat(path).st_mtime_ns != entry[1]  # rewritten, even with the same bytes
+
+
+# A file the previous run touched on the runner (a mutant, a restored mutant,
+# a regenerated file) may be what the target was built from: its synced
+# content gets a new stamp even when it matches the ledger. So does a file
+# that run deleted.
+dirty, seen = set(), set()
 if os.path.isdir(src):
     for rel, path in files(src):
-        entry = ledger.get(rel)
-        if entry is None or entry[0] != digest(path):
+        seen.add(rel)
+        if touched_on_runner(rel, path):
             dirty.add(rel)
-now = time.time()
+dirty |= set(known) - seen
+now = time.time_ns()
 fresh, stamped = {}, 0
 for rel, path in files(new):
     h = digest(path)
-    entry = ledger.get(rel)
+    entry = known.get(rel)
     if entry is not None and entry[0] == h and rel not in dirty:
         stamp = entry[1]
     else:
         stamp, stamped = now, stamped + 1
-    os.utime(path, (stamp, stamp))
+    os.utime(path, ns=(stamp, stamp))
     fresh[rel] = [h, stamp]
 tmp = ledger_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as handle:
-    json.dump(fresh, handle)
+    json.dump({"v": 2, "files": fresh}, handle)
 os.replace(tmp, ledger_path)
 if os.path.lexists(src):
     shutil.rmtree(src)
