@@ -41,12 +41,21 @@
 # A gate cell PAUSES the runners of the host it measures (`incus pause`), and
 # a run inside a paused runner freezes with it. Nothing in the run's output
 # said so, and a timeout from such a run reads as a hang, a flake or a
-# regression. Two clocks catch a pause either way the guest clock behaves
-# across it: a 1 Hz heartbeat on the runner sums gaps of more than 2 s on its
-# CLOCK_MONOTONIC (a guest clock that jumps across the pause), and the
+# regression. Two clocks are read, one for each way the guest clock can behave
+# across a pause: a 1 Hz heartbeat on the runner sums gaps of more than 2 s on
+# its CLOCK_MONOTONIC (a guest clock that jumps across the pause), and the
 # workstation's elapsed time is compared with the runner's monotonic elapsed
-# time, minus 2 s of exec overhead (a guest clock that stops). A nonzero
-# paused-for adds a second line saying that a timeout or timing-sensitive
+# time, minus 2 s of exec overhead (a guest clock that stops). It is a
+# conservative stall heuristic, not proof either way:
+#   - paused-for=0 means BELOW THE DETECTION THRESHOLD, not pause-free: a
+#     stopped-clock pause under about 2 s, or heartbeat gaps that each stay
+#     under 2 s, read as 0;
+#   - a positive value means a POSSIBLE stall, including exec and start-up
+#     overhead (a slow start before the heartbeat runs counts too), not a
+#     stall attributed to incus;
+#   - no test has paused a real VM mid-run yet, so which branch a real
+#     `incus pause` trips is not established.
+# A positive paused-for adds a line saying that a timeout or timing-sensitive
 # result from the run is VOID unless re-run clean; paused-for=unknown means the
 # runner's clock record could not be read.
 # A --root leg also prints vm-proof=present|absent. The proof is
@@ -84,21 +93,33 @@
 # path, the hash, mtime and mode the sync wrote. The next sync deletes the
 # lane's target dir when ANY of these holds:
 #   - the synced tree's identity differs from the ledger's;
-#   - a file in the previous tree differs from what the sync wrote (content,
-#     mtime or mode), or was deleted, or was created on the runner (outside
-#     __pycache__/ directories, which no build reads);
+#   - a path of the previous tree differs from what the sync wrote (a file's
+#     content, mtime or mode; a directory's existence or mode), or was deleted,
+#     or was created on the runner. The one exemption: an entry the RUNNER
+#     created inside a __pycache__ directory (Python's bytecode cache). A
+#     SYNCED __pycache__ path is in the tree's identity like any other;
 #   - the ledger is missing, unreadable, or in an older format;
 #   - scanning either tree hit an error.
 # Clocks never enter the decision. The cost is a full rebuild of the lane
 # after any change to the tree; an unchanged re-sync keeps the incremental
 # build. Residual: a runner-side change that restores both a file's bytes AND
 # its exact mtime is indistinguishable from no change.
-# The deletion is confined to the lane: before anything touches it, the lane
-# is opened from /work without following a symlink, and must be a directory
-# on /work's filesystem with no mount point at or under it
-# (/proc/self/mountinfo). The target dir is deleted through directory fds,
-# never following a symlink and refusing a directory on another filesystem.
-# On any doubt about the path, the sync refuses (exit 2) instead.
+# Threat model for the deletion: a runner is single-tenant and every writer on
+# it is one of our own lanes. What is defended against is ACCIDENTAL aliasing
+# that exists when the sync starts: a lane that is a symlink to another lane
+# (/work/alias -> /work/other), a bind mount under a lane, a stale lane. A
+# concurrent adversary renaming lanes or adding bind mounts while a sync runs
+# is out of scope; in particular a same-filesystem bind mount added under the
+# target after the check is not seen. Within that model: ONE process, run as
+# root, does every destructive step (removing and creating src.new, handing
+# files to runner, the extraction, the clean, the swap) while holding the
+# lane's directory fd. It opens /work/<name> from /work without following a
+# symlink and requires a directory on /work's filesystem with no mount point
+# at or under it (/proc/self/mountinfo). Every deletion and chown goes through
+# directory fds, never follows a symlink, checks each directory's identity and
+# filesystem (the target dir's root included), and repairs an unreadable
+# directory through an O_PATH handle on that same object. On any doubt about
+# the path the sync refuses (exit 2) instead.
 #
 # The command runs via `bash -lc` in /work/<name>/src with
 # CARGO_TARGET_DIR=/work/<name>/target, TMPDIR=/work/<name>/tmp and
@@ -180,17 +201,19 @@ if [[ "$(incus exec "$runner" -- systemd-detect-virt --vm 2>/dev/null || true)" 
 	exit 2
 fi
 
-# #19134: the lane check, the keep-or-clean decision and the swap of the
-# synced tree into place (see "The lane's target dir" above). Runs on the
-# runner as `runner`: python3 -I - {check|sync} /work/ <name>. Exit 3 is a
-# refusal it explains on stderr.
+# #19134: one process prepares the lane, extracts the synced tree, decides
+# whether to keep the build, cleans it if not, and swaps the tree into place
+# (see "The lane's target dir" above). It runs on the runner as root, holding
+# the lane's directory fd from the first check to the last write:
+#   python3 -I -c "$lane_py" sync /work/ <name>   (the tar stream on stdin)
+# Exit 3 is a refusal it explains on stderr.
 lane_py=$(
 	cat <<'PY'
-import hashlib, json, os, re, stat, sys
+import hashlib, json, os, pwd, re, stat, subprocess, sys
 
 mode, parent_arg, name = sys.argv[1], sys.argv[2], sys.argv[3]
-LEDGER, FORMAT = ".xpf-src-ledger.json", 3
-SKIP_DIRS = {"__pycache__"}
+LEDGER, FORMAT = ".xpf-src-ledger.json", 4
+CACHE_DIR = "__pycache__"
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
 
 
@@ -216,17 +239,29 @@ def open_lane(pfd):
     return os.open(name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=pfd)
 
 
+def real_root():
+    """Root in the initial user namespace: only then are files handed to runner."""
+    if os.geteuid() != 0:
+        return False
+    try:
+        with open("/proc/self/uid_map", encoding="ascii") as handle:
+            return handle.read().split() == ["0", "0", "4294967295"]
+    except OSError:
+        return False
+
+
 def lane():
-    """(parent fd, lane fd), or (parent fd, None) when the lane does not exist yet.
-    Refuses unless the lane is a plain directory on /work's filesystem with no
-    mount point at or under it."""
+    """The lane's fd. Creates the lane if it does not exist; refuses unless it
+    is a plain directory on the parent's filesystem with no mount point at or
+    under it."""
     parent = os.path.realpath(parent_arg)
     pfd = os.open(parent, DIR_FLAGS)
     path = os.path.join(parent, name)
     try:
         lfd = open_lane(pfd)
     except FileNotFoundError:
-        return pfd, None
+        os.mkdir(name, 0o755, dir_fd=pfd)
+        lfd = open_lane(pfd)
     except OSError as exc:
         raise Refuse(f"{path} is not a plain directory ({exc.strerror})") from exc
     if os.fstat(lfd).st_dev != os.fstat(pfd).st_dev:
@@ -234,22 +269,45 @@ def lane():
     mounts = mounts_under(path)
     if mounts:
         raise Refuse(f"mount point(s) under the lane: {', '.join(mounts[:3])}")
-    return pfd, lfd
+    os.close(pfd)
+    return lfd
 
 
 def open_dir(dfd, entry_name, st):
-    """Open a directory entry already lstat'ed as a directory, without following
-    a symlink; a directory the owner cannot read is made readable first."""
+    """Open a directory entry already lstat'ed as st, never following a
+    symlink. A directory the caller cannot read is made readable through an
+    O_PATH handle on that same object, never by name."""
     try:
         fd = os.open(entry_name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=dfd)
     except PermissionError:
-        os.chmod(entry_name, 0o700, dir_fd=dfd)
-        fd = os.open(entry_name, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=dfd)
+        handle = os.open(entry_name, os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=dfd)
+        try:
+            got = os.fstat(handle)
+            if not stat.S_ISDIR(got.st_mode) or (got.st_dev, got.st_ino) != (st.st_dev, st.st_ino):
+                raise Refuse(f"{entry_name} changed while it was being opened")
+            os.chmod(f"/proc/self/fd/{handle}", 0o700)
+            fd = os.open(f"/proc/self/fd/{handle}", DIR_FLAGS)
+        finally:
+            os.close(handle)
     got = os.fstat(fd)
     if (got.st_dev, got.st_ino) != (st.st_dev, st.st_ino):
         os.close(fd)
         raise Refuse(f"{entry_name} changed while it was being opened")
     return fd
+
+
+def child_dir(dfd, entry_name, dev):
+    """(fd, stat) of a directory entry that must be a real directory on dev,
+    or (None, None) when it does not exist."""
+    try:
+        st = os.lstat(entry_name, dir_fd=dfd)
+    except FileNotFoundError:
+        return None, None
+    if not stat.S_ISDIR(st.st_mode):
+        raise Refuse(f"{entry_name} in the lane is not a directory")
+    if st.st_dev != dev:
+        raise Refuse(f"{entry_name} in the lane is on another filesystem")
+    return open_dir(dfd, entry_name, st), st
 
 
 def digest_fd(fd):
@@ -262,13 +320,14 @@ def digest_fd(fd):
 
 
 def scan(dfd, prefix, out):
-    """Every non-directory entry under dfd: {path: [digest, mtime_ns, mode]}."""
+    """Every entry under dfd: {path: [digest, mtime_ns, mode]}. A directory is
+    recorded by existence and mode ("D", no mtime: its mtime moves with every
+    entry made in it)."""
     for entry in list(os.scandir(dfd)):
         st = os.lstat(entry.name, dir_fd=dfd)
         rel = prefix + entry.name
-        if stat.S_ISDIR(st.st_mode):
-            if entry.name in SKIP_DIRS:
-                continue
+        if stat.S_ISDIR(st.st_mode):  # a directory: existence and mode
+            out[rel] = ["D", None, stat.S_IMODE(st.st_mode)]
             cfd = open_dir(dfd, entry.name, st)
             try:
                 scan(cfd, rel + "/", out)
@@ -289,8 +348,10 @@ def scan(dfd, prefix, out):
     return out
 
 
-def scan_tree(lfd, top):
-    fd = os.open(top, DIR_FLAGS | os.O_NOFOLLOW, dir_fd=lfd)
+def scan_tree(lfd, top, dev):
+    fd, _ = child_dir(lfd, top, dev)
+    if fd is None:
+        raise FileNotFoundError(top)
     try:
         return scan(fd, "", {})
     finally:
@@ -302,6 +363,14 @@ def identity(files):
     for rel in sorted(files):
         h.update(f"{rel}\0{files[rel][0]}\0{files[rel][2]:o}\n".encode("utf-8", "surrogateescape"))
     return h.hexdigest()
+
+
+def runner_cache(rel):
+    """A __pycache__ directory, or an entry inside one. Only a RUNNER-CREATED
+    one is exempt from the runner-change check: a synced one is in the tree's
+    identity like any other path."""
+    parts = rel.split("/")
+    return CACHE_DIR in parts
 
 
 def purge(dfd, dev):
@@ -323,18 +392,31 @@ def purge(dfd, dev):
 
 
 def remove_dir(lfd, entry_name, dev):
-    try:
-        st = os.lstat(entry_name, dir_fd=lfd)
-    except FileNotFoundError:
+    fd, _ = child_dir(lfd, entry_name, dev)
+    if fd is None:
         return
-    if not stat.S_ISDIR(st.st_mode):
-        raise Refuse(f"{entry_name} in the lane is not a directory")
-    fd = open_dir(lfd, entry_name, st)
     try:
         purge(fd, dev)
     finally:
         os.close(fd)
     os.rmdir(entry_name, dir_fd=lfd)
+
+
+def chown_tree(dfd, dev, uid, gid):
+    """Hand every entry under dfd to uid:gid, fd-relatively, never following a
+    symlink (root legs leave root-owned files behind)."""
+    for entry in list(os.scandir(dfd)):
+        st = os.lstat(entry.name, dir_fd=dfd)
+        if (st.st_uid, st.st_gid) != (uid, gid):
+            os.chown(entry.name, uid, gid, dir_fd=dfd, follow_symlinks=False)
+        if stat.S_ISDIR(st.st_mode):
+            if st.st_dev != dev:
+                raise Refuse(f"{entry.name} is on another filesystem")
+            cfd = open_dir(dfd, entry.name, st)
+            try:
+                chown_tree(cfd, dev, uid, gid)
+            finally:
+                os.close(cfd)
 
 
 def read_ledger(lfd):
@@ -355,17 +437,50 @@ def read_ledger(lfd):
     return ledger, None
 
 
+def extract(lfd, dev, owner):
+    """tar -x of stdin inside src.new, as runner when we are root."""
+    fd, _ = child_dir(lfd, "src.new", dev)
+    def enter():
+        os.fchdir(fd)
+        if owner:
+            os.setgroups([])
+            os.setgid(owner[1])
+            os.setuid(owner[0])
+    try:
+        done = subprocess.run(["tar", "-xf", "-"], preexec_fn=enter, pass_fds=(fd,), check=False)
+    finally:
+        os.close(fd)
+    if done.returncode != 0:
+        raise SystemExit(f"vm-test-run: tar -x into the lane failed (rc {done.returncode})")
+
+
 def sync():
-    pfd, lfd = lane()
-    if lfd is None:
-        raise Refuse("the lane does not exist after the sync created it")
+    lfd = lane()
     dev = os.fstat(lfd).st_dev
+    owner = None
+    if real_root():
+        user = pwd.getpwnam("runner")
+        owner = (user.pw_uid, user.pw_gid)
+    # Prepare: a fresh src.new, the lane's target and tmp dirs, all runner's.
+    remove_dir(lfd, "src.new", dev)
+    os.mkdir("src.new", 0o755, dir_fd=lfd)
+    for keep in ("target", "tmp"):
+        fd, _ = child_dir(lfd, keep, dev)
+        if fd is None:
+            os.mkdir(keep, 0o755, dir_fd=lfd)
+        else:
+            os.close(fd)
+    if owner:
+        os.chown(lfd, *owner)
+        chown_tree(lfd, dev, *owner)
+    extract(lfd, dev, owner)
+    # Decide.
     reasons = []
     ledger, why = read_ledger(lfd)
     if why:
         reasons.append(why)
     try:
-        new = scan_tree(lfd, "src.new")
+        new = scan_tree(lfd, "src.new", dev)
     except OSError as exc:
         new = None
         reasons.append(f"could not scan the synced tree ({exc})")
@@ -374,28 +489,26 @@ def sync():
         if ledger_tree != identity(new):
             reasons.append("the synced tree changed")
         try:
-            old = scan_tree(lfd, "src")
+            old = scan_tree(lfd, "src", dev)
         except FileNotFoundError:
             old = {}
         except OSError as exc:
             old = None
             reasons.append(f"could not scan the previous tree ({exc})")
         if old is not None:
-            changed = sorted(rel for rel, rec in old.items() if ledger_files.get(rel) != rec)
+            changed = sorted(rel for rel, rec in old.items()
+                             if ledger_files.get(rel) != rec and not (rel not in ledger_files and runner_cache(rel)))
             gone = sorted(rel for rel in ledger_files if rel not in old)
             if changed or gone:
-                reasons.append(f"the last run changed {len(changed)} and removed {len(gone)} file(s) on the runner"
+                reasons.append(f"the last run changed {len(changed)} and removed {len(gone)} path(s) on the runner"
                                f" (e.g. {', '.join((changed + gone)[:3])})")
+    # Clean, swap, record.
     if reasons:
-        try:
-            st = os.lstat("target", dir_fd=lfd)
-        except FileNotFoundError:
-            st = None
-        if st is not None:
-            if not stat.S_ISDIR(st.st_mode):
-                raise Refuse("the lane's target is not a directory")
-            tfd = open_dir(lfd, "target", st)
+        tfd, _ = child_dir(lfd, "target", dev)
+        if tfd is not None:
             try:
+                if os.fstat(tfd).st_dev != dev:
+                    raise Refuse("the lane's target is on another filesystem")
                 purge(tfd, dev)
             finally:
                 os.close(tfd)
@@ -412,15 +525,15 @@ def sync():
         return
     tmp = LEDGER + ".tmp"
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_CLOEXEC, 0o644, dir_fd=lfd)
+    if owner:
+        os.fchown(fd, *owner)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         json.dump({"v": FORMAT, "tree": identity(new), "files": new}, handle)
     os.replace(tmp, LEDGER, src_dir_fd=lfd, dst_dir_fd=lfd)
 
 
 try:
-    if mode == "check":
-        lane()
-    elif mode == "sync":
+    if mode == "sync":
         sync()
     else:
         raise SystemExit(f"lane_py: unknown mode {mode!r}")
@@ -430,15 +543,9 @@ except Refuse as exc:
 PY
 )
 if [[ "$sync" -eq 1 ]]; then
-	if ! printf '%s\n' "$lane_py" | incus exec "$runner" -- su runner -c "python3 -I - check /work/ '${name}'"; then
-		echo "vm-test-run: ${base} is not a plain lane directory on ${runner}; refusing (#19134)" >&2
-		exit 2
-	fi
-	incus exec "$runner" -- bash -c "rm -rf '${base}/src.new' && mkdir -p '${base}/src.new' '${base}/target' '${base}/tmp' && chown -R runner:runner '${base}'"
-	(cd "$top" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) |
-		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src.new'"
-	if ! printf '%s\n' "$lane_py" | incus exec "$runner" -- su runner -c "python3 -I - sync /work/ '${name}'"; then
-		echo "vm-test-run: could not decide whether to keep the lane's build, or clean it safely, on ${runner}; refusing rather than risk testing a stale build (#19134)" >&2
+	if ! (cd "$top" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) |
+		incus exec "$runner" -- python3 -I -c "$lane_py" sync /work/ "${name}"; then
+		echo "vm-test-run: could not prepare, decide on, or safely clean ${base} on ${runner}; refusing rather than risk testing a stale build (#19134)" >&2
 		exit 2
 	fi
 	# testguard-run.sh runs Go tests in a private network namespace with no
