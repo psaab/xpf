@@ -28,10 +28,18 @@
 #     content, older still) recompiles and prints C's value.
 #   - no ledger: a lane whose ledger is gone but whose target dir is not
 #     recompiles.
-#   - mutations, each KILLED only when the STALE value actually runs: no
-#     dirty check at all (runner-side edit runs value=9); a content-only
-#     dirty check, the pre-#19134-review shape (restored after build runs
-#     value=9); no deleted-file check (deleted after build runs flag=0).
+#   - artefacts ahead of the clock: the lane's build carries mtimes a day in
+#     the future (a clock that stepped back after the build); a changed tree
+#     must still recompile, so its stamp must clear the newest artefact.
+#   - clock behind the previous sync: the ledger says the last sync was a
+#     day from now; the sync must say so, clean the target dir and rebuild.
+#   - mutations, each KILLED only when its cell observably runs the stale
+#     build (or, for the backstop, keeps the build it must discard): no dirty
+#     check at all (runner-side edit runs value=9); a
+#     content-only dirty check, the pre-#19134-review shape (restored after
+#     build runs value=9); no deleted-file check (deleted after build runs
+#     flag=0); stamping with the plain clock (artefacts ahead runs value=1);
+#     no clock backstop (the old build is reused, nothing recompiles).
 # Needs cargo; exits 77 (SKIP) without it.
 set -euo pipefail
 
@@ -244,6 +252,39 @@ else
 	bad "no ledger: $(tr '\n' '|' <"$tmp/n2.out")"
 fi
 
+# artefacts ahead of the clock: A built, every file of the lane's target dir
+# moved a day into the future, then B (a changed tree) synced into the lane.
+# runner_ahead <script> <lane> <out>
+runner_ahead() {
+	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
+	find "$tmp/work/$2/target" -exec touch -h -d "@$(($(date +%s) + 86400))" {} +
+	lane "$1" "$tmp/B" "$2" "$3" "$run_cmd"
+}
+runner_ahead "$script" ahead "$tmp/ah.out"
+if printed "$tmp/ah.out.prep" 1 && compiled "$tmp/ah.out" && printed "$tmp/ah.out" 2; then
+	ok "artefacts ahead of the clock: a changed tree still recompiles (value=2)"
+else
+	bad "artefacts ahead of the clock: prep=$(tr '\n' '|' <"$tmp/ah.out.prep") next=$(tr '\n' '|' <"$tmp/ah.out")"
+fi
+
+# clock behind the previous sync: the ledger's last sync is a day from now.
+# runner_clock_back <script> <lane> <out>
+runner_clock_back() {
+	lane "$1" "$tmp/A" "$2" "$3.prep" "$run_cmd"
+	python3 -I -c 'import json, sys, time
+p = sys.argv[1]
+d = json.load(open(p))
+d["last_sync_ns"] = time.time_ns() + 86400 * 10**9
+json.dump(d, open(p, "w"))' "$tmp/work/$2/.xpf-src-ledger.json"
+	lane "$1" "$tmp/A" "$2" "$3" "$run_cmd"
+}
+runner_clock_back "$script" back "$tmp/bk.out"
+if grep -q 'behind the previous sync; cleaning' "$tmp/bk.out" && compiled "$tmp/bk.out" && printed "$tmp/bk.out" 1; then
+	ok "clock behind the previous sync: the sync says so, cleans the target dir, and the run rebuilds (value=1)"
+else
+	bad "clock behind the previous sync: $(tr '\n' '|' <"$tmp/bk.out")"
+fi
+
 # mutate <name> <sed expr> <cell function> <lane> <stale-value check>: the
 # mutant is KILLED only when its cell actually runs the STALE binary; any
 # other outcome (a build error, a missing anchor) is not a kill.
@@ -255,16 +296,20 @@ mutate() {
 	fi
 	"$3" "$tmp/$1.sh" "$4" "$tmp/$1.out"
 	if $5 "$tmp/$1.out"; then
-		ok "mutation $1: the cell ran the stale binary ($(grep -E '^(value|flag)=' "$tmp/$1.out" | tr '\n' ' '))"
+		ok "mutation $1: its cell kept the stale build ($(grep -E '^(value|flag)=' "$tmp/$1.out" | tr '\n' ' '))"
 	else
 		bad "mutation $1: the stale binary did not run ($(tr '\n' '|' <"$tmp/$1.out")); the cell cannot show the defect"
 	fi
 }
 stale_edit() { printed "$1" 9; }
 stale_flag() { flagged "$1" 0; }
+stale_ahead() { printed "$1" 1; }
+reused_build() { printed "$1" 1 && ! compiled "$1"; }
 mutate no-dirty 's/^        if touched_on_runner(rel, path):$/        if False:/' runner_edit edit-m1 stale_edit
 mutate content-only 's/^    return os\.stat(path)\.st_mtime_ns != entry\[1\].*/    return False/' runner_restore restore-m2 stale_edit
 mutate no-deleted 's/^dirty |= set(known) - seen$/pass/' runner_delete delete-m3 stale_flag
+mutate now-stamping 's/^stamp_new = now if floor is None else max(now, floor + SECOND)$/stamp_new = now/' runner_ahead ahead-m4 stale_ahead
+mutate no-backstop 's/^if isinstance(last_sync, int) and now < last_sync:$/if False:/' runner_clock_back back-m5 reused_build
 
 echo "vm-test-run sync selftest: ${pass} passed, ${fail} failed"
 [[ "$fail" -eq 0 ]]

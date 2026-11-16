@@ -55,14 +55,17 @@
 # (/work/<name>/.xpf-src-ledger.json) records each path's content hash and the
 # exact mtime (ns) the sync applied to it. A file whose content the ledger
 # knows gets that mtime back, so an unchanged tree keeps its incremental
-# build. A new or changed file gets the sync time, which is newer than every
-# artefact. So does every file the previous run TOUCHED on the runner: one
-# whose content or mtime no longer matches what the sync applied, or that it
-# deleted. Content alone is not enough: a run that edits a file, builds, and
-# writes the original bytes back (scripts/mutate-9546.py restores its
-# mutants this way) leaves content the ledger knows over a binary built from
-# the edit. A lane with a build but no (current-format) ledger restamps
-# everything once.
+# build. Every other file gets a fresh stamp: a new or changed file, and one
+# the previous run TOUCHED on the runner (its content or mtime no longer
+# matches what the sync applied, or the run deleted it). Content alone is not
+# enough: a run that edits a file, builds, and writes the original bytes back
+# (scripts/mutate-9546.py restores its mutants this way) leaves content the
+# ledger knows over a binary built from the edit. A fresh stamp is the sync
+# time or, if later, the newest artefact in target/*/deps plus one second, so
+# neither a clock behind the build nor a coarse filesystem can leave the
+# source older than the artefact. If the clock is behind the previous sync,
+# the target dir is deleted outright. A lane with a build but no
+# (current-format) ledger restamps everything once.
 #
 # The command runs via `bash -lc` in /work/<name>/src with
 # CARGO_TARGET_DIR=/work/<name>/target, TMPDIR=/work/<name>/tmp and
@@ -138,7 +141,7 @@ fi
 # `runner`: python3 -I - <base>.
 restamp_py=$(
 	cat <<'PY'
-import hashlib, json, os, shutil, sys, time
+import glob, hashlib, json, os, shutil, sys, time
 
 base = sys.argv[1]
 src, new = os.path.join(base, "src"), os.path.join(base, "src.new")
@@ -162,18 +165,57 @@ def digest(path):
     return h.hexdigest()
 
 
-# Ledger format 2: {"v": 2, "files": {path: [content hash, applied mtime ns]}}.
-# Anything else (format 1 kept float first-seen times) counts as no ledger.
+SECOND = 1_000_000_000
+
+
+def newest_artifact_ns(target):
+    """The newest mtime among the lane's compiled artefacts: one readdir of
+    each <target>/<profile>/deps and <target>/<triple>/<profile>/deps, not a
+    walk of the whole target dir."""
+    newest = None
+    for pattern in ("*/deps", "*/*/deps"):
+        for deps in glob.glob(os.path.join(glob.escape(target), pattern)):
+            try:
+                entries = list(os.scandir(deps))
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    mtime = entry.stat(follow_symlinks=False).st_mtime_ns
+                except OSError:
+                    continue
+                if newest is None or mtime > newest:
+                    newest = mtime
+    return newest
+
+
+# Ledger format 2: {"v": 2, "files": {path: [content hash, applied mtime ns]},
+# "last_sync_ns": the clock at the previous sync}. Anything else (format 1
+# kept float first-seen times) counts as no ledger.
+last_sync = None
 try:
     with open(ledger_path, encoding="utf-8") as handle:
         ledger = json.load(handle)
     known = ledger["files"] if isinstance(ledger, dict) and ledger.get("v") == 2 else None
     if not isinstance(known, dict):
         known = None
+    else:
+        last_sync = ledger.get("last_sync_ns")
 except (OSError, ValueError, KeyError):
     known = None
 if known is None:
     # No record of what the target dir was built from: trust nothing in it.
+    known = {}
+now = time.time_ns()
+# Fail-closed backstop: the clock is behind the previous sync, so an artefact
+# anywhere in the target dir may be newer than any stamp this sync can apply.
+# Throw the builds away rather than reason about which are safe.
+if isinstance(last_sync, int) and now < last_sync:
+    print(f"vm-test-run: the runner clock is {(last_sync - now) / SECOND:.1f}s behind the previous sync;"
+          f" cleaning {target} so no earlier build can be reused (#19134)", file=sys.stderr)
+    if os.path.lexists(target):
+        shutil.rmtree(target)
+    os.makedirs(target)
     known = {}
 
 
@@ -195,7 +237,13 @@ if os.path.isdir(src):
         if touched_on_runner(rel, path):
             dirty.add(rel)
 dirty |= set(known) - seen
-now = time.time_ns()
+# A new or touched file must be NEWER than every artefact it could be confused
+# with. The clock alone does not guarantee that: it can be behind an artefact's
+# mtime (a step backward between the build and this sync), and a coarse
+# filesystem can round the source and the artefact into the same tick. So the
+# stamp is at least the newest artefact plus a second.
+floor = newest_artifact_ns(target)
+stamp_new = now if floor is None else max(now, floor + SECOND)
 fresh, stamped = {}, 0
 for rel, path in files(new):
     h = digest(path)
@@ -203,19 +251,20 @@ for rel, path in files(new):
     if entry is not None and entry[0] == h and rel not in dirty:
         stamp = entry[1]
     else:
-        stamp, stamped = now, stamped + 1
+        stamp, stamped = stamp_new, stamped + 1
     os.utime(path, ns=(stamp, stamp))
     fresh[rel] = [h, stamp]
 tmp = ledger_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as handle:
-    json.dump({"v": 2, "files": fresh}, handle)
+    json.dump({"v": 2, "files": fresh, "last_sync_ns": now}, handle)
 os.replace(tmp, ledger_path)
 if os.path.lexists(src):
     shutil.rmtree(src)
 os.rename(new, src)
 built = os.path.isdir(target) and any(os.scandir(target))
+ahead = f", {(stamp_new - now) / SECOND:.1f}s ahead of the clock to clear the newest artefact" if stamp_new > now else ""
 print(f"vm-test-run: {stamped} of {len(fresh)} synced files new or changed for this lane"
-      f"{' (target dir present)' if built else ''}; stamped with the sync time", file=sys.stderr)
+      f"{' (target dir present)' if built else ''}; stamped with the sync time{ahead}", file=sys.stderr)
 PY
 )
 if [[ "$sync" -eq 1 ]]; then
