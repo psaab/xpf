@@ -2480,8 +2480,9 @@ so an operator can see why every failback fails:
 
 The other re-drive failures (`tombstone dropped` under churn, a generation
 change) no longer hold a window open. Each one costs a re-drive on the owed-debt
-schedule: 1 s after the failure ends, then 2 s, then 4 s after each later
-failure, independent of the sweep profile (#19115, `pkg/cluster/README.md`).
+schedule: 1 s after the failure ends, then 2 s and 4 s, and if it keeps
+failing 8 s, 16 s, then every 30 s, independent of the sweep profile (#19115,
+`pkg/cluster/README.md`).
 
 ## Incremental Sweep and Delete Journal
 
