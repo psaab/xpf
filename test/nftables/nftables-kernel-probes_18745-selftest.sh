@@ -1,7 +1,7 @@
 #!/bin/sh
 # Hermetic regression tests for the #18745 nftables kernel leg's Go selection.
 # Fake unshare supplies only the capability probe. The Go wrapper runs the
-# REAL Go test command against a generated 216-test fixture package, without
+# REAL Go test command against a generated fixture package, without
 # package code or network-namespace privileges.
 set -u
 
@@ -42,8 +42,9 @@ go 1.20
 MODULE
 
 # Generate the same kernel-test names the runner pins, plus a known non-kernel
-# test for the inherited one-test -run regression and enough fillers to pin
-# the expected total at 216.
+# test for the inherited one-test -run regression and fillers. The total is
+# deliberately NOT the 216 the leg used to pin (#19141): the leg must read
+# which tests to expect from the tree it runs.
 kernel_names=$(sed -n "/^expected_kernel_cells='/,/^'$/p" \
 	"$SCRIPT_DIR/selftest-nftables-kernel_18745.sh" | sed '1d;$d')
 kernel_count=$(printf '%s\n' "$kernel_names" | grep -cE '^Test[^[:space:]]+$' || true)
@@ -51,6 +52,8 @@ if [ "$kernel_count" -ne 36 ]; then
 	echo "FAIL: runner declares $kernel_count kernel cells, want 36"
 	exit 1
 fi
+fillers=190
+fixture_total=$((kernel_count + 1 + fillers))
 {
 	printf 'package nftables\n\nimport "testing"\n\n'
 	while IFS= read -r name; do
@@ -61,7 +64,7 @@ $kernel_names
 NAMES
 	printf 'func TestAdjudicatedTransitMarkMatchesRust(t *testing.T) {}\n'
 	i=1
-	while [ "$i" -le 179 ]; do
+	while [ "$i" -le "$fillers" ]; do
 		printf 'func TestProbeNonKernel%03d(t *testing.T) {}\n' "$i"
 		i=$((i + 1))
 	done
@@ -96,6 +99,11 @@ if [[ "${1:-}" != test ]]; then
 	exit 97
 fi
 shift
+# PROBE_EXTRA_SKIP narrows the run AFTER the leg's own -skip '' (the last
+# -skip wins), the way a caller-side filter would.
+if [[ -n "${PROBE_EXTRA_SKIP:-}" ]]; then
+	exec "$GO_REAL" test "$@" -skip="$PROBE_EXTRA_SKIP"
+fi
 exec "$GO_REAL" test "$@"
 GO
 chmod +x "$WORK/bin/unshare" "$WORK/bin/go" || {
@@ -108,7 +116,7 @@ check_full_leg() {
 	go_flags=$2
 	if out=$(cd "$FIXTURE_ROOT" && PATH="$WORK/bin:$PATH" GO="$WORK/bin/go" GO_REAL="$GO_REAL" GOFLAGS="$go_flags" sh "$LEG" 2>&1); then
 		case "$out" in
-		*"PASS: all 216 pkg/nftables tests ran; all 36 pinned kernel cells passed"*)
+		*"PASS: all $fixture_total pkg/nftables tests ran; all 36 pinned kernel cells passed"*)
 			echo "PASS: $label — inherited GOFLAGS did not narrow the leg" ;;
 		*)
 			echo "FAIL: $label — the leg returned success without proving the complete pinned run"
@@ -122,11 +130,48 @@ check_full_leg() {
 	fi
 }
 
+# check_leg_fails <label> <text the failure must contain> [VAR=value ...]:
+# the leg must exit nonzero and name what it caught.
+check_leg_fails() {
+	label=$1
+	want=$2
+	shift 2
+	if out=$(cd "$FIXTURE_ROOT" && env PATH="$WORK/bin:$PATH" GO="$WORK/bin/go" GO_REAL="$GO_REAL" GOFLAGS= "$@" sh "$LEG" 2>&1); then
+		echo "FAIL: $label — the leg passed"
+		printf '%s\n' "$out" | sed 's/^/      /'
+		return 1
+	fi
+	case "$out" in
+	*"$want"*)
+		echo "PASS: $label — the leg failed and named it" ;;
+	*)
+		echo "FAIL: $label — the leg failed without naming \"$want\""
+		printf '%s\n' "$out" | sed 's/^/      /'
+		return 1 ;;
+	esac
+}
+
 failures=0
 check_full_leg 'GOFLAGS -run subset' '-run=TestAdjudicatedTransitMarkMatchesRust' || failures=$((failures + 1))
 check_full_leg 'GOFLAGS -skip all tests' '-skip=^Test' || failures=$((failures + 1))
+# A declared test that did not run is a narrowed package.
+check_leg_fails 'narrowed run' 'TestProbeNonKernel007' PROBE_EXTRA_SKIP='^TestProbeNonKernel007$' || failures=$((failures + 1))
+# A test the compiler runs but the source scan cannot see (a signature split
+# over lines) means the scan cannot vouch for the run.
+cat >"$FIXTURE_ROOT/pkg/nftables/unscanned_probe_test.go" <<'UNSCANNED'
+package nftables
+
+import "testing"
+
+func TestProbeUnscanned(
+	t *testing.T,
+) {
+}
+UNSCANNED
+check_leg_fails 'unscanned test' 'TestProbeUnscanned' || failures=$((failures + 1))
+rm -f "$FIXTURE_ROOT/pkg/nftables/unscanned_probe_test.go"
 if [ "$failures" -ne 0 ]; then
 	echo "nftables-kernel-probes: FAIL ($failures case(s))"
 	exit 1
 fi
-echo "nftables-kernel-probes: PASS (2 GOFLAGS cases)"
+echo "nftables-kernel-probes: PASS (4 cases)"
