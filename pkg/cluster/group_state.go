@@ -65,13 +65,13 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 			}
 			m.mastershipGen++
 			existing = &RedundancyGroupState{
-				GroupID:               rg.ID,
-				LocalPriority:         pri,
-				Weight:                initialWeight,
-				State:                 StateSecondary,
-				mastershipGen:         m.mastershipGen,
-				Preempt:               rg.Preempt,
-				MonitorFails:          initialMonitorFails,
+				GroupID:       rg.ID,
+				LocalPriority: pri,
+				Weight:        initialWeight,
+				State:         StateSecondary,
+				mastershipGen: m.mastershipGen,
+				Preempt:       rg.Preempt,
+				MonitorFails:  initialMonitorFails,
 			}
 			m.groups[rg.ID] = existing
 			if cfg.ControlInterface != "" {

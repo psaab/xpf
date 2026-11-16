@@ -316,11 +316,11 @@ func TestPricedEqualsRenderedPathSet15995(t *testing.T) {
 // proves both wrappers selected exactly the same terminal nodes.
 func TestNavigateWalkerParity17267(t *testing.T) {
 	tests := []struct {
-		name       string
-		text       string
-		path       []string
-		wantWidth  int
-		wantPaths  [][]string
+		name      string
+		text      string
+		path      []string
+		wantWidth int
+		wantPaths [][]string
 	}{
 		{
 			name:      "empty-path",
@@ -409,9 +409,9 @@ func TestNavigateWalkerParity17267(t *testing.T) {
 			wantWidth: 1,
 		},
 		{
-			name: "failed-multi-key-continuation",
-			text: `root { pair v extra x; pair v other y; }`,
-			path: []string{"root", "pair", "v", "extra", "y"},
+			name:      "failed-multi-key-continuation",
+			text:      `root { pair v extra x; pair v other y; }`,
+			path:      []string{"root", "pair", "v", "extra", "y"},
 			wantWidth: 0,
 			wantPaths: nil,
 		},

@@ -19,12 +19,12 @@ import (
 // emitters also makes the cluster/node distinction assertions fail.
 func TestRethPlaceholderScopedByCluster_18628(t *testing.T) {
 	for _, tc := range []struct {
-		name               string
-		clusterID          int
-		nodeID             int
-		noRethVRRP         bool
-		privateRGElection  bool
-		want               string
+		name              string
+		clusterID         int
+		nodeID            int
+		noRethVRRP        bool
+		privateRGElection bool
+		want              string
 	}{
 		{name: "cluster 22 node 0", clusterID: 22, nodeID: 0, want: "169.254.22.3/32"},
 		{name: "cluster 23 node 0", clusterID: 23, nodeID: 0, want: "169.254.23.3/32"},

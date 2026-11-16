@@ -411,7 +411,7 @@ func TestRedactionSiteConsumersPinned17270(t *testing.T) {
 			}
 			tests = append(tests, siteCase{
 				name: "embedded " + name, tree: tree,
-				path: []string{"event-options", "policy", "p1"},
+				path:   []string{"event-options", "policy", "p1"},
 				canary: canary, marker: marker, wantErr: wantErr,
 			})
 		}

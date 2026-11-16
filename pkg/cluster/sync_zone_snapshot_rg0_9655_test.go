@@ -298,7 +298,9 @@ func TestMastershipChangeDuringBulkVoidsReconcile18548(t *testing.T) {
 		dp := &mockSweepDP{v4sessions: map[dataplane.SessionKey]dataplane.SessionValue{
 			local: establishedIn(zone),
 		}}
-		dp.beforeBatchV4 = func() { t.Fatal("#18548: flip-back reached stale-row enumeration instead of failing the BulkEnd generation check") }
+		dp.beforeBatchV4 = func() {
+			t.Fatal("#18548: flip-back reached stale-row enumeration instead of failing the BulkEnd generation check")
+		}
 		rx := mastershipReceiver18548(t, dp, state)
 		rx.handleMessage(nil, syncMsgBulkStart, bulkStartPayload(1, nil))
 

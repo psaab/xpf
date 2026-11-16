@@ -847,7 +847,6 @@ func rustIdentStart19013(c byte) bool {
 	return c == '_' || ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c >= 0x80
 }
 
-
 func rustLineOffset19013(src string, line int) int {
 	offset := 0
 	for line > 0 && offset < len(src) {
@@ -1385,8 +1384,6 @@ func rustClosureParamEnd19013(src string, start, limit int) int {
 	return -1
 }
 
-
-
 func rustForBindingShadows19013(src, name string, start, end int) bool {
 	for i := start; i < end; {
 		if next, skip := skipRustNonCodeFnItem19013(src, i); skip {
@@ -1461,7 +1458,6 @@ func rustPatternBinds19013(pattern, name string) bool {
 	}
 	return false
 }
-
 
 func rustMatchArmShadows19013(src, name string, start, end int) bool {
 	for i := start; i < end; {
