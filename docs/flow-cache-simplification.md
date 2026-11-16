@@ -42,6 +42,12 @@ The current cache is still:
   - config generation
   - FIB generation
   - owner RG epoch
+  - (later additions) the live RG lease, the next hop's neighbor shard
+    epoch, the live HA/fabric verdict on the cached decision, and a live
+    backing session that is the same incarnation the entry was seeded
+    from (#19173: `backing_install_epoch` against the row's write-once
+    `install_epoch`). The full current list is in
+    `userspace-dp/src/afxdp/README.md`, "What a flow-cache hit validates".
 
 Relevant code:
 

@@ -61,6 +61,11 @@ pub(super) fn stage_flow_cache_seed(
     // the `EnforceChanged` arm. Ordinary resolves pass false.
     fabric_established: bool,
     neighbor_epoch_snapshot: &ShardEpochSnapshot,
+    // #19173: the worker's session table, read (never written) to bind the
+    // entry to the incarnation of its backing record, and the packet's
+    // `now_ns` for the forward-wire candidate's liveness.
+    sessions: &SessionTable,
+    now_ns: u64,
     worker_ctx: &WorkerContext,
 ) {
     // ── Flow cache population ────────────────────
@@ -277,6 +282,15 @@ pub(super) fn stage_flow_cache_seed(
         // #16217: carry the adoption mark onto the cached entry (see
         // `FlowCacheEntry::fabric_established`).
         entry.fabric_established = fabric_established;
+        // #19173: bind the entry to the incarnation of the record the hit
+        // probe will resolve for this key. Read here, after this packet's
+        // slow path has installed, replaced or promoted it, so the stamp
+        // names the row the seeded decision came from. A later same-key
+        // replacement stamps a new epoch and the probe refuses the hit.
+        // Cold path: one extra key lookup per seed, never per hit.
+        entry.backing_install_epoch = sessions
+            .backing_install_epoch_for_cache_hit(&flow.forward_key, now_ns)
+            .unwrap_or(crate::session::PROBE_NO_BACKING_ROW);
         flow_cache.insert(entry);
     }
     }

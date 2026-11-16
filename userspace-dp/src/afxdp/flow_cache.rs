@@ -399,6 +399,18 @@ pub(super) struct FlowCacheEntry {
     /// the forwarding snapshot and target it was computed for. See
     /// [`FlowCacheEntry::destination_owner_rg`].
     pub(super) dest_owner_memo: DestOwnerMemo,
+    /// #19173: the `install_epoch` of the session record this entry was
+    /// seeded from, read by `stage_flow_cache_seed` through
+    /// `SessionTable::backing_install_epoch_for_cache_hit` after the slow
+    /// path's own installs, replacements and promotions for the packet. The
+    /// fused cache-hit probe refuses a record with another epoch
+    /// (`ProbeHitVerdict::Replaced`, eviction arm
+    /// `post_hit_session_replaced`). Every same-key replacement stamps a new
+    /// epoch; in-place updates never move it (#9856), so a steady flow keeps
+    /// hitting. `PROBE_NO_BACKING_ROW` when the seed's key resolved no
+    /// record; `PROBE_ANY_INCARNATION` (no check) only on an entry built
+    /// without the seed (deny entries never reach the probe; tests).
+    pub(super) backing_install_epoch: u64,
 }
 
 /// #18534: `(ForwardingState::publish_epoch, target, owner RG)` for the
@@ -887,6 +899,9 @@ impl FlowCacheEntry {
             neighbor_shard,
             fabric_established: false,
             dest_owner_memo: DestOwnerMemo::default(),
+            // #19173: bound by `stage_flow_cache_seed`, which owns the
+            // session table; unbound until then.
+            backing_install_epoch: crate::session::PROBE_ANY_INCARNATION,
         })
     }
     #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
@@ -1022,6 +1037,9 @@ impl FlowCacheEntry {
             neighbor_shard: NEIGHBOR_SHARD_NONE,
             fabric_established: false,
             dest_owner_memo: DestOwnerMemo::default(),
+            // #19173: a deny entry carries no backing-session dependency
+            // and never reaches the fused probe.
+            backing_install_epoch: crate::session::PROBE_ANY_INCARNATION,
         })
     }
 }
@@ -1085,9 +1103,16 @@ pub(super) enum FlowCacheEvictionArm {
     /// liveness-only probe, which does not attribute.
     PostHitSessionDeadNoRecord = 20,
     PostHitSessionDeadIdleCrossed = 21,
+    /// #19173: the fused probe resolved a record for the key, but a
+    /// different incarnation than the one the entry was seeded from
+    /// (`ProbeHitVerdict::Replaced`): a same-key replacement such as
+    /// `UpsertSynced`/`UpsertLocal` or a local reinstall. Its own arm so a
+    /// seed/probe resolution disagreement (a re-seed that never sticks)
+    /// shows up here instead of hiding under the no-record arm.
+    PostHitSessionReplaced = 22,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 22;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 23;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -1113,6 +1138,7 @@ impl FlowCacheEvictionArm {
         Self::PostHitFabricRedirectDestinationNowLocal,
         Self::PostHitSessionDeadNoRecord,
         Self::PostHitSessionDeadIdleCrossed,
+        Self::PostHitSessionReplaced,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -1147,6 +1173,7 @@ impl FlowCacheEvictionArm {
             }
             Self::PostHitSessionDeadNoRecord => "post_hit_session_dead_no_record",
             Self::PostHitSessionDeadIdleCrossed => "post_hit_session_dead_idle_crossed",
+            Self::PostHitSessionReplaced => "post_hit_session_replaced",
         }
     }
 }

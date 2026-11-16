@@ -11277,6 +11277,8 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 // hit revalidation keeps serving them.
                                 session_hit_fabric_adopted,
                                 &neighbor_epoch_snapshot,
+                                sessions,
+                                now_ns,
                                 worker_ctx,
                             );
                         }

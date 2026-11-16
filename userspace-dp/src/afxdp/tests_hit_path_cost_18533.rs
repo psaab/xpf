@@ -245,6 +245,7 @@ fn flow_cache_entry_layout_18534() {
     field!(neighbor_shard, u16);
     field!(fabric_established, bool);
     field!(dest_owner_memo, crate::afxdp::flow_cache::DestOwnerMemo);
+    field!(backing_install_epoch, u64);
     fields.sort();
     let slot = std::mem::size_of::<Option<FlowCacheEntry>>();
     let slots = crate::afxdp::flow_cache::FlowCache::new().entries.len();

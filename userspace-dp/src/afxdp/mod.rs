@@ -715,6 +715,17 @@ mod tests_neighbor_learn_fresh_18533;
 #[cfg(test)]
 #[path = "tests_hit_path_cost_18533.rs"]
 mod tests_hit_path_cost_18533;
+// #19173: a same-key replacement must not leave the flow cache serving the
+// decision seeded from the old row.
+#[cfg(test)]
+#[path = "tests_flow_cache_incarnation_19173.rs"]
+mod tests_flow_cache_incarnation_19173;
+#[cfg(test)]
+#[path = "tests_flow_cache_incarnation_19173_arm.rs"]
+mod tests_flow_cache_incarnation_19173_arm;
+#[cfg(test)]
+#[path = "tests_flow_cache_hit_bench_19173.rs"]
+mod tests_flow_cache_hit_bench_19173;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;

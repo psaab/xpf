@@ -2365,6 +2365,35 @@ learn; removal, a new source MAC, a new snapshot, interval expiry and an
 unpublished snapshot all take it); and the ignored full-poll `MEASUREMENT`
 `tests_hit_path_cost_18533.rs` (numbers in `docs/log/18534.md`).
 
+## What a flow-cache hit validates (#19173)
+
+A forwarding entry has no TTL (`deny_expires_at_secs = 0`), so it is served
+only while every one of these holds:
+
+- **Lookup** (`FlowCache::lookup_counted_with_scheduler_expiry`): key,
+  physical and logical ingress (#5139); config and FIB generation; the
+  owner-RG epoch of the seed-time stamp owner (#2466); the live runtime
+  lease (#14943); the scheduler phase.
+- **Neighbor** (`flow_cache_hit.rs`): the shard epoch of the cached next
+  hop (#3048/#5147).
+- **Decision**: the live HA/fabric verdict on the cached resolution
+  (`cached_flow_decision_invalid_reason_for_cached_flow`, #16220 arms).
+- **Backing row** (the fused probe, `session/mod.rs` `probe_hit_inner`):
+  the key resolves a record that is live (#9991/#14945, #16223, #18656)
+  AND is the incarnation the entry was seeded from (#19173). The seed
+  (`stage_flow_cache_seed`) stamps `FlowCacheEntry::backing_install_epoch`
+  from the record's write-once `install_epoch`; a same-key replacement
+  (`UpsertSynced`, `UpsertLocal`, a local re-install) mints a new epoch,
+  and the probe refuses the stale incarnation before any accounting
+  (`ProbeHitVerdict::Replaced`, eviction arm `post_hit_session_replaced`,
+  ordinal 22). In-place row updates never move the epoch, so a steady
+  flow keeps hitting. Design, the in-place-writer analysis and numbers:
+  `session/README.md` "Flow-cache hits bind to the row's incarnation" and
+  `docs/log/19173.md`.
+
+The entry grows by one `u64` for the token; its layout and the
+per-hit cost are recorded in `docs/log/19173.md`.
+
 ## Matched-view grace for lagging shim stamps (#18560)
 
 The shim stamps every packet with the config/FIB generations in

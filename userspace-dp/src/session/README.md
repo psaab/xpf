@@ -1567,6 +1567,78 @@ push is removed) and `afxdp/worker/loop_body/mod.rs`'s
 `delete_synced_invalidation_walks_every_binding` — RED if the
 invalidate loop is removed).
 
+## Flow-cache hits bind to the row's incarnation (#19173)
+
+The deletes above (#3776, #6457, #18656's wire-tuple slot) all evict a slot
+because its session went away. A same-key REPLACEMENT never went away: it
+removes the row with `RemovalKind::Replace` and installs a new incarnation
+under the same key, with no Close and no deleted key. `UpsertSynced` (HA
+import, sibling replication), `UpsertLocal` (local-tunnel replicas) and a
+local re-install all do this. The replacement can change a decision input
+the cache-hit path does not re-derive, chiefly the installing-table stamp,
+while the generations, RG epochs, leases and neighbor epochs stay put, so
+before #19173 the slot kept serving the decision seeded from the OLD row
+with no TTL.
+
+- **Token.** `SessionEntry::install_epoch`, the per-table counter
+  `next_epoch` stamps at every install and every `upsert_synced_with_origin`
+  (both constructors of a row). It moves on every replacement, a same-id
+  re-import included, and is write-once per incarnation (#9856): no
+  in-place writer (`refresh_in_place`, `demote_owner_rg`, the revalidation
+  persists, the probe, `lookup_with_origin`) touches it. 0 is never
+  minted, so it is `PROBE_ANY_INCARNATION`; `u64::MAX` is
+  `PROBE_NO_BACKING_ROW`.
+- **Seed.** `stage_flow_cache_seed` stamps
+  `FlowCacheEntry::backing_install_epoch` from
+  `backing_install_epoch_for_cache_hit(key, now)`, after the packet's own
+  slow-path installs, replacements and promotions. That accessor resolves
+  exactly what the probe resolves: the direct or reverse-alias record, else
+  the single live forward-wire candidate (#18656). A key that resolves no
+  record binds `PROBE_NO_BACKING_ROW`, which no row matches.
+- **Hit.** `probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy`
+  takes the entry's epoch and, under the record borrow it already holds,
+  refuses a record with another epoch as `ProbeHitVerdict::Replaced`
+  before any keepalive, accounting or undo. The hit path evicts the slot
+  like a dead row (`post_hit_session_replaced`) and the slow path judges
+  the live row. One field read and one compare per hit. The TTL arm's
+  liveness-only probe does not check: it never forwards on the cached
+  decision.
+- **What the slow path then does.** A replacing row arrives with an
+  unvalidated filter stamp, so on a direct (non-foreign) arrival its first
+  hit runs the #7212/#10467 route revalidation, which re-derives the
+  installing table from this node's own ingress filter. If B's table is not
+  this node's choice, the pair is revoked. Before #19173 the cache hid that
+  verdict and kept forwarding the replaced flow on the old decision. If it
+  is, A was accepted under the same rule, so the two tables are equal and
+  the re-seed resolves A's egress. Foreign (fabric-zone) arrivals, which
+  skip the route revalidation, never seed the cache.
+- **Cost of a replacement.** One slow-path packet per cached flow per
+  replacement, a no-op re-import included. Periodic replacements: primary
+  liveness re-imports on the peer-synced side (adaptive, at most one scan
+  per second), TUN-origin `UpsertLocal` refreshes (every 1 s for UDP, 5 s
+  for TCP), sibling replication at flow setup and on promotion.
+
+In-place rewriters do not move the token; each relies on another fence:
+
+| Writer | Fence |
+|---|---|
+| `refresh_for_ha_transition` (RefreshOwnerRGS) | Keeps the installing table (`..decision`); re-resolves only from FIB + HA. RG-epoch bump for activated RGs and `rg_epochs[0]`, plus the per-hit live HA verdict. |
+| `demote_owner_rg` + refresh (DemoteOwnerRGS) | Same, for demoted RGs. The origin flip lets a later import replace the row, which moves the token. |
+| `promote_synced_with_origin` | Runs on the packet's own slow path before its seed, so the seed carries the promoted decision and the row's (unchanged) epoch. |
+| `revalidate_forwarding_resolution_with_egress_zone` | Runs only when the row's forwarding generation is stale, i.e. after a config/FIB generation change that already fenced older entries. |
+| `update_reverse_route_on_filter_hit` | The reverse row's own slow path, which re-seeds; the cache entry is keyed by logical ingress. |
+| `rebind_policy_pair`, `rebind_zones_pair`, `rebind_forward_egress_zone` | Commit-time (`adopt_rotated_forwarding`, #8356 revalidation): config generation fence. |
+
+Cells: `session/cache_incarnation_19173_tests.rs` (refusal before any
+write; every replacement moves the epoch; in-place updates do not; the
+accessor resolves like the probe for direct, reverse and wire keys; the
+no-row sentinel), `afxdp/tests_flow_cache_incarnation_19173.rs` (the
+issue's repro on the poll path for `UpsertSynced` and `UpsertLocal`; the
+identical re-import control; ten in-place-updating hits stay hits), and
+`afxdp/tests_flow_cache_incarnation_19173_arm.rs` (the seed binds the
+served row; the eviction arm; the re-seed binds the replacing row).
+Numbers and the writer analysis: `docs/log/19173.md`.
+
 ## Static input-filter revalidation stamp (#7212)
 
 Junos firewall filters are stateless and evaluated on every packet, so a filter

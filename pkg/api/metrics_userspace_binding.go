@@ -168,6 +168,7 @@ var flowCacheEvictionArmLabels = []string{
 	"post_hit_fabric_redirect_destination_now_local",
 	"post_hit_session_dead_no_record",
 	"post_hit_session_dead_idle_crossed",
+	"post_hit_session_replaced",
 }
 
 // #16220: emit per-arm flow-cache evictions so a cache-retention failure

@@ -593,7 +593,30 @@ pub enum ProbeHitVerdict {
     NoRecord,
     /// The record was idle-crossed and no companion proved progress.
     IdleCrossed,
+    /// #19173: the key resolved a record, but not the incarnation the cache
+    /// entry was seeded from: its `install_epoch` differs from the entry's
+    /// `backing_install_epoch`. A same-key replacement (`UpsertSynced`,
+    /// `UpsertLocal`, a local reinstall, delete then reinstall) stamps a new
+    /// epoch, and the replacement may carry a decision input the hit path
+    /// does not re-derive (the installing-table stamp). Refused before any
+    /// keepalive, accounting or undo work.
+    Replaced,
 }
+
+/// #19173: the `expected_install_epoch` that skips the incarnation check in
+/// the fused cache-hit probe. `next_epoch` pre-increments a counter that
+/// starts at 0, so no record ever carries epoch 0. A cache entry that was
+/// never bound to a backing row (an entry built directly in a test, or a
+/// deny entry, which never reaches the probe) carries this value.
+pub(crate) const PROBE_ANY_INCARNATION: u64 = 0;
+
+/// #19173: the `backing_install_epoch` a forwarding seed records when the
+/// seed's key resolved no record (`backing_install_epoch_for_cache_hit`
+/// returned `None`). It matches no record, so a row installed after such a
+/// seed is refused as `Replaced` rather than served the decision the seed
+/// computed without it. `epoch_counter` is a per-table `u64` incremented once
+/// per install, so it never reaches this value.
+pub(crate) const PROBE_NO_BACKING_ROW: u64 = u64::MAX;
 
 impl ProbeHitVerdict {
     #[inline]

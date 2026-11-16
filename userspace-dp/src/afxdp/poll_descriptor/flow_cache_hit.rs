@@ -697,7 +697,11 @@ pub(super) fn stage_flow_cache_hit(
         }
         // #18656: the probe's verdict names which refusal fired, so a dead
         // backing session is counted under its own eviction arm below.
-        // The TTL liveness-only probe does not attribute. When the probe
+        // The TTL liveness-only probe does not attribute, and it does not
+        // check the backing incarnation (#19173): a would-expire packet is
+        // answered with a locally built Time Exceeded, never forwarded on
+        // the cached decision, and the next forwarded packet takes the
+        // fused probe below. When the probe
         // served a post-NAT forward tuple through the forward-wire scope it
         // names the canonical key it recorded its undo/deferred work under;
         // the admit/rollback/transition calls below must use that key.
@@ -715,6 +719,10 @@ pub(super) fn stage_flow_cache_hit(
             // or progress arm needs it; established hits never walk L3/L4.
             sessions.probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy(
                 &flow.forward_key,
+                // #19173: the incarnation this entry was seeded from. A
+                // same-key replacement since the seed is refused as
+                // `Replaced` and evicted below like a dead row.
+                cached.backing_install_epoch,
                 now_ns,
                 meta.pkt_len as u64,
                 meta.tcp_flags,
@@ -735,6 +743,9 @@ pub(super) fn stage_flow_cache_hit(
                 (true, _) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDead,
                 (false, crate::session::ProbeHitVerdict::IdleCrossed) => {
                     crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadIdleCrossed
+                }
+                (false, crate::session::ProbeHitVerdict::Replaced) => {
+                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionReplaced
                 }
                 (false, _) => {
                     crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadNoRecord

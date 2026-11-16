@@ -132,6 +132,7 @@ fn make_entry(
         neighbor_shard: NEIGHBOR_SHARD_NONE,
         fabric_established: false,
         dest_owner_memo: Default::default(),
+        backing_install_epoch: crate::session::PROBE_ANY_INCARNATION,
     }
 }
 

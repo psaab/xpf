@@ -391,6 +391,7 @@ fn cached_entry() -> FlowCacheEntry {
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
         dest_owner_memo: Default::default(),
+        backing_install_epoch: crate::session::PROBE_ANY_INCARNATION,
     }
 }
 
@@ -1531,6 +1532,10 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         false,
         false,
         &neighbor_epoch_snapshot,
+        // #19173: no backing row in this table; the entry binds
+        // `PROBE_NO_BACKING_ROW`. These cells inspect the seed only.
+        &crate::session::SessionTable::new(),
+        0,
         &worker_ctx,
     );
 
@@ -1570,6 +1575,10 @@ fn refused_resolve_install_blocks_flow_cache_seed_10582_r4() {
         false,
         false,
         &neighbor_epoch_snapshot,
+        // #19173: no backing row in this table; the entry binds
+        // `PROBE_NO_BACKING_ROW`. These cells inspect the seed only.
+        &crate::session::SessionTable::new(),
+        0,
         &worker_ctx,
     );
     assert!(
@@ -1691,6 +1700,10 @@ fn flow_cache_seed_promotes_ambiguous_zone_only_when_owner_active_17031() {
             false,
             false,
             &neighbor_epoch_snapshot,
+            // #19173: no backing row in this table; the entry binds
+            // `PROBE_NO_BACKING_ROW`. These cells inspect the seed only.
+            &crate::session::SessionTable::new(),
+            0,
             &worker_ctx,
         );
         let entry = flow_cache
@@ -1846,9 +1859,11 @@ fn stage9_descriptor_forwards_ambiguous_zone_to_flow_cache_seed_17031() {
         call_args.len()
     );
     let args = &call_args[0];
+    // #19173 appended `sessions, now_ns` before `worker_ctx`; the
+    // ambiguous_zone position (14) is unchanged.
     assert_eq!(
         args.len(),
-        21,
+        23,
         "#17031: stage_flow_cache_seed call arity drifted; re-pin the \
          ambiguous_zone position before trusting the index assertions: {args:?}"
     );
@@ -4813,6 +4828,10 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_11315() {
                 false,
                 false,
                 neighbor_epoch_snapshot,
+                // #19173: no backing row in this table; the entry binds
+                // `PROBE_NO_BACKING_ROW`. These cells inspect the seed only.
+                &crate::session::SessionTable::new(),
+                0,
                 &worker_ctx,
             );
         };
@@ -4977,6 +4996,10 @@ fn flow_cache_seed_refuses_stale_neighbor_mac_v6_11315() {
                 false,
                 false,
                 neighbor_epoch_snapshot,
+                // #19173: no backing row in this table; the entry binds
+                // `PROBE_NO_BACKING_ROW`. These cells inspect the seed only.
+                &crate::session::SessionTable::new(),
+                0,
                 &worker_ctx,
             );
         };

@@ -7531,6 +7531,7 @@ fn epoch_based_flow_cache_invalidation_for_demoted_owner_rg() {
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
         dest_owner_memo: Default::default(),
+        backing_install_epoch: crate::session::PROBE_ANY_INCARNATION,
     });
 
     // Before epoch bump, lookup should hit.
@@ -7628,6 +7629,7 @@ fn epoch_based_flow_cache_unrelated_rg_not_invalidated() {
         neighbor_shard: crate::afxdp::flow_cache::NEIGHBOR_SHARD_NONE,
         fabric_established: false,
         dest_owner_memo: Default::default(),
+        backing_install_epoch: crate::session::PROBE_ANY_INCARNATION,
     });
 
     // Bump epoch for RG 2 (unrelated).

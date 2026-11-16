@@ -4455,6 +4455,27 @@ impl SessionTable {
     pub(crate) fn session_id_for(&self, key: &SessionKey) -> u64 {
         self.entry_by_key(key).map(|e| e.session_id).unwrap_or(0)
     }
+
+    /// #19173: the `install_epoch` of the record the fused cache-hit probe
+    /// (`probe_hit_inner`) resolves for `key` at `now_ns`, or `None` when it
+    /// resolves none. The flow-cache seed stamps this onto the entry and the
+    /// probe refuses any other incarnation, so the resolution here must be
+    /// the probe's: the direct or reverse-alias record (whatever its
+    /// liveness; the probe does not fall through past a found record), else
+    /// the single live forward-wire candidate (#18656). Quiet: a seed-time
+    /// speculative read is not a packet-path lookup miss (#7919).
+    pub(crate) fn backing_install_epoch_for_cache_hit(
+        &self,
+        key: &SessionKey,
+        now_ns: u64,
+    ) -> Option<u64> {
+        if let Some(record) = self.record_by_key_quiet(key) {
+            return Some(record.entry.install_epoch);
+        }
+        self.forward_wire_candidate_handle(key, Some(now_ns))
+            .and_then(|handle| self.entries.get(handle as usize))
+            .map(|record| record.entry.install_epoch)
+    }
     /// #19026: the session id, origin and disposition of the row under
     /// exactly `key` (the superseded-Close gate, `afxdp/session_delta.rs`).
     pub(crate) fn exact_row_announcement(
@@ -4721,6 +4742,7 @@ impl SessionTable {
         let mut wire_canonical = None;
         self.probe_hit_inner(
             key,
+            PROBE_ANY_INCARNATION,
             now_ns,
             len,
             tcp_flags,
@@ -4752,6 +4774,7 @@ impl SessionTable {
         let mut wire_canonical = None;
         self.probe_hit_inner(
             key,
+            PROBE_ANY_INCARNATION,
             now_ns,
             len,
             tcp_flags,
@@ -4789,6 +4812,7 @@ impl SessionTable {
         let mut wire_canonical = None;
         self.probe_hit_inner(
             key,
+            PROBE_ANY_INCARNATION,
             now_ns,
             len,
             tcp_flags,
@@ -4887,6 +4911,7 @@ impl SessionTable {
     ) -> ProbeHitVerdict {
         self.probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy(
             key,
+            PROBE_ANY_INCARNATION,
             now_ns,
             len,
             tcp_flags,
@@ -4900,10 +4925,17 @@ impl SessionTable {
     /// #17268: production cache-hit probe with a lazy parsed TCP ACK. The
     /// closure is invoked only by the handshake-candidate/progress arms that
     /// validate it, and its result is memoized across those arms for this hit.
+    ///
+    /// #19173: `expected_install_epoch` is the cache entry's
+    /// `backing_install_epoch`, the incarnation of the record this key
+    /// resolved when the entry was seeded. A record with another
+    /// `install_epoch` is refused as [`ProbeHitVerdict::Replaced`] before any
+    /// write; [`PROBE_ANY_INCARNATION`] skips the check.
     #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
     pub fn probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy<F>(
         &mut self,
         key: &SessionKey,
+        expected_install_epoch: u64,
         now_ns: u64,
         len: u64,
         tcp_flags: u8,
@@ -4919,6 +4951,7 @@ impl SessionTable {
         let mut ack_cache = None;
         self.probe_hit_inner(
             key,
+            expected_install_epoch,
             now_ns,
             len,
             tcp_flags,
@@ -5159,6 +5192,7 @@ impl SessionTable {
     fn probe_hit_inner<F>(
         &mut self,
         key: &SessionKey,
+        expected_install_epoch: u64,
         now_ns: u64,
         len: u64,
         tcp_flags: u8,
@@ -5209,6 +5243,19 @@ impl SessionTable {
         let ((probed_is_reverse, probed_nat), ack_validation_candidate) =
             match self.record_by_key_mut(key) {
             Some(record) => {
+                // #19173: the cache entry was seeded from ONE incarnation of
+                // this key's record. A same-key replacement (UpsertSynced,
+                // UpsertLocal, a local reinstall) stamps a new install epoch
+                // and may change a decision input the hit path does not
+                // re-derive, such as the installing-table stamp. Refuse it
+                // before any write, so the slow path re-derives from the
+                // live row. One compare; in-place updates never move the
+                // epoch (#9856 write-once).
+                if expected_install_epoch != PROBE_ANY_INCARNATION
+                    && record.entry.install_epoch != expected_install_epoch
+                {
+                    return ProbeHitVerdict::Replaced;
+                }
                 let entry = &mut record.entry;
                 let probed = (entry.metadata.is_reverse, entry.decision.nat);
                 let ack_validation_candidate = !entry.closing
@@ -5338,6 +5385,7 @@ impl SessionTable {
                 *wire_canonical = Some(canonical.clone());
                 return self.probe_hit_inner(
                     &canonical,
+                    expected_install_epoch,
                     now_ns,
                     len,
                     tcp_flags,
@@ -8886,6 +8934,11 @@ mod translated_twin_matrix_17088_tests;
 #[cfg(test)]
 #[path = "moved_session_probe_18656_tests.rs"]
 mod moved_session_probe_18656_tests;
+
+// #19173: the cache-hit probe binds a hit to one incarnation of its row.
+#[cfg(test)]
+#[path = "cache_incarnation_19173_tests.rs"]
+mod cache_incarnation_19173_tests;
 
 // #18780: bounded per-call expiry work (reap/pop budget + backlog
 // continuation) and lazy node-served evidence on the expire pass.

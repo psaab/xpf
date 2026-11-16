@@ -204,6 +204,8 @@ fn enqueue_tx_owned_below_cap_does_not_touch_overflow_counter() {
 // #18566/#18656's per-arm eviction slots and #18560's matched-view counters
 // (trail at binding_state/mod.rs) leave size 3136 and offsets 2944/3073,
 // compiler-reported under rustc 1.98.1; the issue's 3072 predates #18560.
+// #19173 adds the `PostHitSessionReplaced` eviction slot: offsets
+// 2944/3073 -> 2952/3081, size unchanged.
 fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304() {
     assert_eq!(std::mem::size_of::<BindingLiveState>(), 3136,);
     assert_eq!(
@@ -213,12 +215,12 @@ fn admission_attempt_instrument_leaves_four_pinned_layout_values_unchanged_6304(
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, pending_tx_admitted),
-        2944,
+        2952,
         "#18807: compiler-measured admission-counter offset"
     );
     assert_eq!(
         std::mem::offset_of!(BindingLiveState, delta_loss_pending),
-        3073,
+        3081,
         "#18807: compiler-measured final-field offset"
     );
 }

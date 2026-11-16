@@ -1099,9 +1099,12 @@ const _: [(); 64] = [(); std::mem::align_of::<BindingLiveState>()];
 // 48 bytes over the pre-#18656 values). The size grows by one 64-byte
 // alignment unit, 3072 -> 3136: the 48 bytes no longer fit the tail slack
 // (compiler-reported).
+// #19173 adds one per-arm flow-cache eviction slot
+// (`PostHitSessionReplaced`, arm count 22 -> 23) before both sentinels;
+// offsets advance by 8 bytes, size unchanged (compiler-reported).
 const _: [(); 3136] = [(); std::mem::size_of::<BindingLiveState>()];
-const _: [(); 2944] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
-const _: [(); 3073] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
+const _: [(); 2952] = [(); std::mem::offset_of!(BindingLiveState, pending_tx_admitted)];
+const _: [(); 3081] = [(); std::mem::offset_of!(BindingLiveState, delta_loss_pending)];
 
 impl BindingLiveState {
     pub(super) fn new() -> Self {
