@@ -94,28 +94,14 @@ func (o ListenerOwner) Privileged(selfUID uint32) bool {
 	return o.Found && (o.UID == 0 || o.UID == selfUID)
 }
 
-// lookupListenerOwnerFn is the production listener-owner lookup, a
-// variable so the grpcapi supervisor's tests can drive the attributed /
-// unattributed / non-privileged branches without depending on who
-// happens to hold a port on the machine running the suite. Production
-// never changes it.
-var lookupListenerOwnerFn = LookupListenerOwner
-
-// SetLookupListenerOwnerForTest replaces the listener-owner lookup the
-// grpcapi supervisor consults and restores the previous value through
-// the returned function. Test-only.
-func SetLookupListenerOwnerForTest(fn func(addr string) (ListenerOwner, error)) (restore func()) {
-	prev := lookupListenerOwnerFn
-	lookupListenerOwnerFn = fn
-	return func() { lookupListenerOwnerFn = prev }
-}
-
 // LookupListenerOwnerForSupervisor is the entry point the grpcapi
-// primary-listener supervisor calls at the #8233 fatal decision. It
-// goes through the replaceable seam above so the supervisor's policy
-// (fatal only for a privileged holder) is testable as a property.
+// primary-listener supervisor calls at the #8233 fatal decision. The
+// supervisor's policy (fatal only for a privileged holder) is tested
+// through its own seam, `primarySupervisorConfig.holderCheck` in
+// pkg/grpcapi, so this package carries no replaceable lookup (#17342
+// removed an unused one).
 func LookupListenerOwnerForSupervisor(addr string) (ListenerOwner, error) {
-	return lookupListenerOwnerFn(addr)
+	return LookupListenerOwner(addr)
 }
 
 // listenTableKey identifies one wanted local-address key in one table file.
