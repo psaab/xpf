@@ -141,13 +141,14 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         // no-op.
         let original_dst = fwd.key.dst_ip;
         let original_dst_port = fwd.key.dst_port;
-        let resolution = embedded_icmp_return_resolution(
+        let icmp_return = embedded_icmp_return_resolution(
             ctx,
             &fwd.key,
             fwd.decision,
             original_src,
             now_ns,
         );
+        let resolution = icmp_return.resolution;
         // #9901 (F-077): per-session error budget, keyed on the FORWARD
         // session's own key (the ORIGINAL pre-NAT tuple — the stable
         // identity across every error about this flow). Over budget the
@@ -163,6 +164,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         let (_, fwd_egress_zone) =
             crate::afxdp::poll_descriptor::related_forward_zones(&fwd.metadata);
         return EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
+            stored_redirect_return: icmp_return.stored_redirect,
             nat,
             original_src,
             original_src_port,
@@ -343,8 +345,9 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     } else {
         false
     };
-    let resolution = if outbound_snat {
-        match &forward_companion {
+    // #19164: only the return-to-client arm can carry a stored-redirect retain.
+    let (resolution, stored_redirect_return) = if outbound_snat {
+        let resolution = match &forward_companion {
             Some((_, companion)) => companion.decision.resolution,
             None => embedded_icmp_quoted_reply_resolution(
                 ctx,
@@ -352,13 +355,19 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
                 emb_src,
                 now_ns,
             ),
-        }
+        };
+        (resolution, None)
     } else if sl.metadata.is_reverse && !via_reply_key {
-        embedded_icmp_quoted_reply_resolution(ctx, &reverse_key, emb_src, now_ns)
+        (
+            embedded_icmp_quoted_reply_resolution(ctx, &reverse_key, emb_src, now_ns),
+            None,
+        )
     } else if sl.metadata.is_reverse {
-        sl.decision.resolution
+        (sl.decision.resolution, None)
     } else {
-        embedded_icmp_return_resolution(ctx, &embedded_key, sl.decision, emb_src, now_ns)
+        let icmp_return =
+            embedded_icmp_return_resolution(ctx, &embedded_key, sl.decision, emb_src, now_ns);
+        (icmp_return.resolution, icmp_return.stored_redirect)
     };
     // #14628: hand the FORWARD decision to the outbound builders; every
     // other arm keeps the matched entry's own decision bit-for-bit.
@@ -392,6 +401,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         fwd_egress_zone
     };
     EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
+        stored_redirect_return,
         nat: match_nat,
         original_src: emb_src,
         original_src_port: hdr.src_port,

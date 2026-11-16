@@ -12,14 +12,26 @@
 //! match arms.
 //!
 //! **Return path (#19164).** An ICMP error that quotes a client's FORWARD
-//! packet goes back to the client by the matched REVERSE session's route,
-//! looked up FRESH with the same lookup variant a reply on that reverse uses
-//! (`return_resolution.rs` `fresh_reverse_resolution`). The poll arm then
-//! finalizes it as it always has (`finalize_embedded_icmp_resolution_parts`:
-//! the HA snapshot, the fabric redirect, the #16053 owner-RG promotion).
+//! packet goes back to the client by the route a REPLY on the matched reverse
+//! session would take, built from the reply pipeline's own stages:
+//! 1. **the lookup** (`return_resolution.rs` `fresh_reverse_resolution`): the
+//!    reply's lookup variant, with its #11315 revalidated cached fallback and
+//!    nothing more;
+//! 2. **the HA snapshot and fabric redirect**
+//!    (`finalize_embedded_icmp_resolution_parts`), applied once;
+//! 3. **for a stored FabricRedirect, the reply's retain verdict**
+//!    (`retain_stored_fabric_redirect`, the reply's own
+//!    `rehome_or_retain_fabric_redirect`). On a split node the FIB answers a
+//!    peer-owned LAN client with the WAN default route (#15742), and only this
+//!    verdict keeps the error on the fabric to the owner.
+//!
+//! Then the #16053 owner-RG promotion reads the result.
 //! - Before #19164 the stored resolution was used verbatim. After an RG
 //!   activation an import-time FabricRedirect sent the error over the fabric
 //!   to the demoted peer; after a FIB change it left by the old route.
+//! - The return never falls back to a stored value the reply would refuse: a
+//!   stale stamp, a #11315 MAC/egress mismatch, a #1873 re-owned tunnel or a
+//!   vanished installing table gives the same answer a reply would get.
 //!
 //! Wrapper functions in this file delegate directly to children via
 //! qualified-path calls (NOT `pub(super) use ...`) — that pattern
@@ -35,6 +47,7 @@ mod nat_match_v4;
 mod nat_match_v6;
 mod parse;
 mod return_resolution;
+pub(in crate::afxdp) use self::return_resolution::StoredRedirectReturn;
 mod session_match;
 // #9901 (F-077): the quoted-L4 floor counter lives in the private `parse`
 // submodule; the status vertical (`afxdp/coordinator/status.rs`) reads it
@@ -92,6 +105,11 @@ pub(super) struct EmbeddedIcmpMatch {
     /// error, including its already-re-NAT'd fabric hand-off at the peer,
     /// #13772) keeps #10666's PMTUD-only scope.
     pub(super) quoted_is_reply: bool,
+    /// #19164 (review, seat r23 P1-1): set when the return resolution came
+    /// from a matched reverse whose STORED resolution is a FabricRedirect.
+    /// The arm's finalization then applies the reply's retain verdict
+    /// (`retain_stored_fabric_redirect`). `None` on every other match.
+    pub(super) stored_redirect_return: Option<StoredRedirectReturn>,
     /// #10667: the F-077 gating key this match was charged against. The
     /// poll arms refund it via
     /// `SessionTable::refund_icmp_error_not_delivered` on every post-match
@@ -1268,7 +1286,8 @@ mod return_resolution_15771 {
             plain_decision(),
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .resolution;
         assert_tenant(&resolution, "return v4");
     }
 
@@ -1283,7 +1302,8 @@ mod return_resolution_15771 {
             plain_decision(),
             IpAddr::V6(v6_target()),
             1_000,
-        );
+        )
+        .resolution;
         assert_tenant(&resolution, "return v6");
     }
 
@@ -1331,7 +1351,8 @@ mod return_resolution_15771 {
             decision,
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .resolution;
         assert_tenant(&resolution, "stamped return v4");
     }
 
@@ -1351,7 +1372,8 @@ mod return_resolution_15771 {
             decision,
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .resolution;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::TableUnavailable,
@@ -1391,7 +1413,8 @@ mod return_resolution_15771 {
             plain_decision(),
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .resolution;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::ForwardCandidate
@@ -1404,9 +1427,8 @@ mod return_resolution_15771 {
     }
 }
 
-// Repro: the embedded-ICMP return path uses a STORED reverse resolution
-// verbatim, where the reply path re-resolves it (#19145 design round,
-// the R-read).
+// #19164: the embedded-ICMP return path takes the route a reply on the
+// matched reverse would take (found by the #19145 design round's R-read).
 #[cfg(test)]
 #[path = "stale_reverse_return_tests.rs"]
 mod stale_reverse_return_tests;

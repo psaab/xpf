@@ -333,6 +333,7 @@ fn icmp_te_nat_reversal_v4_rewrites_outer_dst_and_embedded_src() {
     };
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_src_port: Some(snat_port),
@@ -497,6 +498,7 @@ fn icmp_te_nat_reversal_v4_with_port_snat() {
     };
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_src_port: Some(snat_port),
@@ -631,6 +633,7 @@ fn icmp_dest_unreach_nat_reversal_v4() {
     };
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_src_port: Some(40000),
@@ -728,6 +731,7 @@ fn icmp_dnat_reversal_v4_rewrites_embedded_dst_and_outer_src() {
     );
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_dst: Some(IpAddr::V4(private_s)),
             rewrite_dst_port: Some(private_port),
@@ -823,6 +827,7 @@ fn icmp_static_nat_reversal_v4_rewrites_embedded_dst() {
     );
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             // static 1:1 reverses dst only (IP), no port DNAT.
             rewrite_dst: Some(IpAddr::V4(private_s)),
@@ -882,6 +887,7 @@ fn icmp_snat_only_reversal_v4_leaves_destination_untouched() {
     let frame = build_icmp_te_frame_v4(router, snat_ip, server_ip, snat_port, 80, PROTO_TCP);
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_src_port: Some(snat_port),
@@ -962,6 +968,7 @@ fn icmpv6_te_nat_reversal_v6_rewrites_outer_dst_and_embedded_src() {
     };
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V6(snat_ip)),
             rewrite_src_port: Some(snat_port),
@@ -1132,6 +1139,7 @@ fn icmpv6_dnat66_reversal_v6_rewrites_embedded_dst_and_outer_src() {
     };
 
     let icmp_match = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_dst: Some(IpAddr::V6(internal_s)),
             rewrite_dst_port: Some(internal_port),
@@ -1762,6 +1770,15 @@ fn icmpv6_te_prefers_reverse_session_resolution_for_client_return_path() {
         internal_prefix: "fd35:1940:0027::/48".to_string(),
         external_prefix: "2602:fd41:0070::/48".to_string(),
     }]);
+    // #19164: the client's live neighbor. The ICMP return now takes the
+    // reply's route, and a reply serves the reverse's stored MAC only while
+    // that MAC is still the live neighbor (#11315, `cached_session_resolution`).
+    forwarding.neighbors.insert(
+        (24, IpAddr::V6(internal_client)),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0x00, 0x11, 0x22, 0x33, 0x44, 0x55],
+        },
+    );
 
     let forward_key = SessionKey {
         addr_family: libc::AF_INET6 as u8,
@@ -1933,6 +1950,7 @@ fn icmp_embed_builder_nonbearing_quoted_icmp_keeps_word_13650() {
     frame[emb_l4] = 3;
     frame[emb_l4 + 4..emb_l4 + 6].copy_from_slice(&0x1234u16.to_be_bytes());
     let m4 = EmbeddedIcmpMatch {
+        stored_redirect_return: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(snat_ip)),
             rewrite_src_port: Some(snat_port),

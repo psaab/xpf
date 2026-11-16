@@ -1,24 +1,29 @@
 //! #19164: an ICMP error (PTB, unreachable) quoting a client's FORWARD packet
-//! is returned to the client by the matched reverse session's route. Before
-//! #19164 that route was the reverse's STORED resolution, verbatim
-//! (`embedded_icmp_return_resolution`), while a reply on the same reverse is
-//! looked up again on every packet (`resolve.rs` into `reresolve_stored_session`).
-//! When the stored value was stale, the error left by a different path than the
-//! flow's replies.
+//! is returned to the client by the route a REPLY on the matched reverse
+//! session would take. Before #19164 it used the reverse's STORED resolution
+//! verbatim (`embedded_icmp_return_resolution`), while a reply on the same
+//! reverse is looked up again on every packet (`resolve.rs` into
+//! `reresolve_stored_session`).
 //!
 //! Each cell drives the poll arm's real sequence: the return resolution, then
-//! `finalize_embedded_icmp_resolution_parts` (the HA snapshot and the fabric
-//! redirect). It asserts the CORRECT property: the result matches the reply's.
-//! - **(a) HA:** the shared reverse is the import-time FabricRedirect,
-//!   synthesized while the client-side RG was the peer's; now that RG is
-//!   active here.
-//! - **(b) non-HA:** a local reverse resolved under one FIB; the route to the
-//!   client moves, and the forwarding generation advances with it.
-//! - **(c) the negative control for (a):** the peer still owns the client-side
-//!   RG, so the error must follow the reply over the fabric. No
-//!   over-correction.
+//! `finalize_embedded_icmp_return_parts` (the HA snapshot, the fabric redirect
+//! and, for a stored FabricRedirect, the reply's retain verdict). It compares
+//! the result with the reply pipeline's.
+//! - **(a) HA activation:** the shared reverse is the import-time
+//!   FabricRedirect; the client-side RG is now active here.
+//! - **(b) a FIB change:** a local reverse; the route moves and the forwarding
+//!   generation advances.
+//! - **(c) the split node, v4 and v6** (#19164 review, seat r23 P1-1): the peer
+//!   owns the client-side RG, and its LAN prefix is withheld from the FIB
+//!   (#15742), so the FIB answers the client with the WAN default route. The
+//!   reply keeps its fabric redirect, and so must the error.
+//! - **No fallback the reply would refuse** (r23 P2-1): (d) a stale stamp
+//!   whose new route has no neighbor yet, (e) a #11315 MAC mismatch, (f) a
+//!   #1873 re-owned tunnel, (h) a vanished installing table.
+//! - **(g) the lookup variant, v4 and v6** (r23 P3-1): synced for a
+//!   peer-synced reverse, cached for a local one.
 //!
-//! (a) and (b) were RED at b725d9542e, before the fix.
+//! (a) and (b) were RED at b725d9542e, before the fix; (c)-(f) at e5ecb4e764.
 
 use super::return_resolution::embedded_icmp_return_resolution;
 use super::*;
@@ -28,7 +33,8 @@ use crate::afxdp::forwarding::{
 use crate::afxdp::forwarding_build::build_forwarding_state;
 use crate::afxdp::session_glue::{FabricArrival, reresolve_stored_session};
 use crate::afxdp::test_fixtures::nat_snapshot_with_fabric;
-use crate::prefix::PrefixV4;
+use crate::prefix::{PrefixV4, PrefixV6};
+use std::net::Ipv6Addr;
 
 const NOW_SECS: u64 = 1_000_000;
 const NOW_NS: u64 = NOW_SECS * 1_000_000_000;
@@ -206,12 +212,19 @@ impl Maps {
 
 /// The loss-cluster topology (`nat_snapshot_with_fabric`): `reth0.80` (RG1,
 /// ifindex 12) is the WAN, `reth1.0` (RG2, ifindex 24) the LAN, `fab0` the
-/// fabric. A LAN client's TCP flow to a WAN server; its shared reverse (server
-/// -> client) is the import-time FabricRedirect, synthesized while RG2 was the
-/// peer's. The client's neighbor is known on the LAN egress.
+/// fabric; v4 and v6 default routes leave by the WAN gateway. A LAN client's
+/// TCP flow to a WAN server; its shared reverse (server -> client) is the
+/// import-time FabricRedirect, synthesized while RG2 was the peer's. The
+/// client's neighbor is known on the LAN egress.
+///
+/// `split`: the production FIB of the node whose peer owns RG2. The peer-owned
+/// LAN connected prefix is withheld from the transit FIB (#15742,
+/// `connected_rg_peer_owned`), so the FIB answers the client with the WAN
+/// default route.
 struct HaShape {
     state: ForwardingState,
     neighbors: Arc<ShardedNeighborMap>,
+    client: IpAddr,
     forward: SessionKey,
     reverse: SessionKey,
     stored: SessionDecision,
@@ -219,27 +232,41 @@ struct HaShape {
     maps: Maps,
 }
 
-fn ha_shape(src_port: u16) -> HaShape {
-    let client = IpAddr::V4(CLIENT_V4);
+fn flow(client: IpAddr, server: IpAddr, src_port: u16) -> (SessionKey, SessionKey) {
     let forward = SessionKey {
-        addr_family: libc::AF_INET as u8,
+        addr_family: match client {
+            IpAddr::V4(_) => libc::AF_INET as u8,
+            IpAddr::V6(_) => libc::AF_INET6 as u8,
+        },
         protocol: crate::ip_proto::PROTO_TCP,
         src_ip: client,
-        dst_ip: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        dst_ip: server,
         src_port,
         dst_port: 5211,
         discriminator: Default::default(),
         routing_domain: 0,
     };
     let reverse = crate::session::reverse_session_key(&forward, crate::nat::NatDecision::default());
-    let state = build_forwarding_state(&nat_snapshot_with_fabric());
+    (forward, reverse)
+}
+
+fn learn(neighbors: &ShardedNeighborMap, ifindex: i32, ip: IpAddr, mac: [u8; 6]) {
+    neighbors.insert((ifindex, ip), crate::afxdp::types::NeighborEntry { mac });
+}
+
+fn ha_shape(src_port: u16, client: IpAddr, server: IpAddr, split: bool) -> HaShape {
+    let (forward, reverse) = flow(client, server, src_port);
+    let mut snapshot = nat_snapshot_with_fabric();
+    if split {
+        for iface in &mut snapshot.interfaces {
+            if iface.name == "reth1.0" {
+                iface.connected_rg_peer_owned = true;
+            }
+        }
+    }
+    let state = build_forwarding_state(&snapshot);
     let neighbors = Arc::new(ShardedNeighborMap::new());
-    neighbors.insert(
-        (24, client),
-        crate::afxdp::types::NeighborEntry {
-            mac: [0x02, 0, 0, 0, 0, 24],
-        },
-    );
+    learn(&neighbors, 24, client, [0x02, 0, 0, 0, 0, 24]);
     let stored =
         decision(resolve_fabric_redirect(&state).expect("FIXTURE: the fabric redirect resolves"));
     let metadata = reverse_metadata(state.egress_zone_id(12), state.egress_zone_id(24), 12, 2);
@@ -248,6 +275,7 @@ fn ha_shape(src_port: u16) -> HaShape {
     HaShape {
         state,
         neighbors,
+        client,
         forward,
         reverse,
         stored,
@@ -256,50 +284,101 @@ fn ha_shape(src_port: u16) -> HaShape {
     }
 }
 
-/// The ICMP error as the poll arm resolves it: the return resolution, then its
-/// finalization for an arrival on the WAN (ifindex 12, the WAN zone).
+/// The ICMP error as the poll arm resolves it: the return resolution, then
+/// `finalize_embedded_icmp_return_parts`, for an arrival on `ingress_ifindex`
+/// in `ingress_zone`.
+#[expect(clippy::too_many_arguments, reason = "#19164 test driver")]
+fn icmp_return(
+    maps: &mut Maps,
+    state: &ForwardingState,
+    neighbors: &Arc<ShardedNeighborMap>,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    forward: &SessionKey,
+    forward_decision: SessionDecision,
+    ingress_ifindex: i32,
+    ingress_zone: u32,
+) -> ForwardingResolution {
+    let raw = embedded_icmp_return_resolution(
+        &mut maps.ctx(state, neighbors),
+        forward,
+        forward_decision,
+        forward.src_ip,
+        NOW_NS,
+    );
+    super::builders::finalize_embedded_icmp_return_parts(
+        state,
+        ha,
+        NOW_SECS,
+        ingress_ifindex,
+        raw.resolution,
+        ingress_zone,
+        raw.stored_redirect.as_ref(),
+    )
+}
+
+/// The reply on `reverse`, for an arrival on `ingress_ifindex`.
+#[expect(clippy::too_many_arguments, reason = "#19164 test driver")]
+fn reply(
+    state: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    neighbors: &Arc<ShardedNeighborMap>,
+    reverse: &SessionKey,
+    stored: SessionDecision,
+    metadata: &SessionMetadata,
+    stale: bool,
+    peer_synced: bool,
+    ingress_ifindex: i32,
+) -> ForwardingResolution {
+    let looked_up = reply_lookup(state, neighbors, reverse, stored, stale, peer_synced);
+    reresolve_stored_session(
+        state,
+        ha,
+        neighbors,
+        NOW_SECS,
+        &stored,
+        metadata,
+        reverse,
+        crate::afxdp::session_glue::resolution_target_for_session(
+            &SessionFlow {
+                src_ip: reverse.src_ip,
+                dst_ip: reverse.dst_ip,
+                forward_key: reverse.clone(),
+            },
+            stored,
+        ),
+        looked_up,
+        packet_arrival(ingress_ifindex),
+    )
+}
+
 fn icmp_as_finalized(
     shape: &mut HaShape,
     ha: &BTreeMap<i32, HAGroupRuntime>,
 ) -> ForwardingResolution {
-    let raw = embedded_icmp_return_resolution(
-        &mut shape.maps.ctx(&shape.state, &shape.neighbors),
+    let zone = shape.state.egress_zone_id(12);
+    icmp_return(
+        &mut shape.maps,
+        &shape.state,
+        &shape.neighbors,
+        ha,
         &shape.forward,
         shape.stored,
-        IpAddr::V4(CLIENT_V4),
-        NOW_NS,
-    );
-    finalize_embedded_icmp_resolution_parts(
-        &shape.state,
-        ha,
-        NOW_SECS,
         12,
-        raw,
-        shape.state.egress_zone_id(12),
+        zone,
     )
 }
 
-/// The reply on the same reverse, for the same arrival.
 fn reply_of(shape: &HaShape, ha: &BTreeMap<i32, HAGroupRuntime>) -> ForwardingResolution {
-    let looked_up = reply_lookup(
-        &shape.state,
-        &shape.neighbors,
-        &shape.reverse,
-        shape.stored,
-        false,
-        true,
-    );
-    reresolve_stored_session(
+    reply(
         &shape.state,
         ha,
         &shape.neighbors,
-        NOW_SECS,
-        &shape.stored,
-        &shape.metadata,
         &shape.reverse,
-        IpAddr::V4(CLIENT_V4),
-        looked_up,
-        packet_arrival(12),
+        shape.stored,
+        &shape.metadata,
+        false,
+        true,
+        12,
     )
 }
 
@@ -307,7 +386,12 @@ fn reply_of(shape: &HaShape, ha: &BTreeMap<i32, HAGroupRuntime>) -> ForwardingRe
 /// ICMP error. Before the fix it took the stale FabricRedirect over the fabric.
 #[test]
 fn an_icmp_error_follows_the_reply_path_after_activation_not_a_stale_fabric_redirect() {
-    let mut shape = ha_shape(35_790);
+    let mut shape = ha_shape(
+        35_790,
+        IpAddr::V4(CLIENT_V4),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        false,
+    );
     let ha = BTreeMap::from([(1, active()), (2, active())]);
     let reply = reply_of(&shape, &ha);
     assert_eq!(
@@ -324,26 +408,163 @@ fn an_icmp_error_follows_the_reply_path_after_activation_not_a_stale_fabric_redi
     );
 }
 
-/// (c) The negative control: the PEER still owns RG2 here (RG1 active, RG2
-/// not). The reply keeps the fabric redirect, and so must the ICMP error.
-#[test]
-fn an_icmp_error_keeps_the_fabric_redirect_while_the_peer_owns_the_client_rg() {
-    let mut shape = ha_shape(35_791);
+/// (c) The split node: RG1 (WAN) active here, RG2 (LAN) on the peer, with the
+/// production split FIB. The fresh lookup answers the LAN client with the WAN
+/// default route, an active local ForwardCandidate. The reply keeps its stored
+/// FabricRedirect over it (the retain verdict), and so must the ICMP error;
+/// e5ecb4e764 sent it out the WAN to the client's private address.
+fn split_node_keeps_the_fabric_redirect(client: IpAddr, server: IpAddr, src_port: u16) {
+    let mut shape = ha_shape(src_port, client, server, true);
     let ha = BTreeMap::from([(1, active()), (2, inactive())]);
+    let fresh = reply_lookup(
+        &shape.state,
+        &shape.neighbors,
+        &shape.reverse,
+        shape.stored,
+        false,
+        true,
+    );
+    assert_eq!(
+        (fresh.disposition, fresh.egress_ifindex),
+        (ForwardingDisposition::ForwardCandidate, 12),
+        "FIXTURE: on the split node the FIB answers the peer-owned LAN client {client} with the WAN \
+         default route (#15742) ({fresh:?})"
+    );
     let reply = reply_of(&shape, &ha);
     assert_eq!(
         reply.disposition,
         ForwardingDisposition::FabricRedirect,
-        "FIXTURE: while the peer owns the client-side RG, the reply keeps the fabric redirect ({reply:?})"
+        "FIXTURE: the reply keeps its fabric redirect over the WAN answer ({reply:?})"
     );
     let icmp = icmp_as_finalized(&mut shape, &ha);
     assert_eq!(
-        (icmp.disposition, icmp.egress_ifindex),
-        (reply.disposition, reply.egress_ifindex),
-        "while the peer owns the client-side RG the ICMP error must follow the reply over the fabric \
-         (icmp={icmp:?}, reply={reply:?})"
+        (icmp.disposition, icmp.egress_ifindex, icmp.neighbor_mac),
+        (reply.disposition, reply.egress_ifindex, reply.neighbor_mac),
+        "an ICMP error to the peer-owned client {client} must follow the reply over the fabric, not \
+         out the WAN (icmp={icmp:?}, reply={reply:?})"
+    );
+    assert_eq!(shape.client, client);
+}
+
+#[test]
+fn an_icmp_error_keeps_the_fabric_redirect_on_the_split_node_v4() {
+    split_node_keeps_the_fabric_redirect(
+        IpAddr::V4(CLIENT_V4),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        35_791,
     );
 }
+
+#[test]
+fn an_icmp_error_keeps_the_fabric_redirect_on_the_split_node_v6() {
+    split_node_keeps_the_fabric_redirect(
+        IpAddr::V6("2001:559:8585:ef00::102".parse().expect("v6 client")),
+        IpAddr::V6("2001:559:8585:80::200".parse().expect("v6 server")),
+        35_793,
+    );
+}
+
+/// A local FIB: egress rows 11 and 99, and, when `route_egress` is set, a
+/// route for `prefix` out that egress with `client` as the next hop.
+fn local_fib(client: IpAddr, prefix: &str, route_egress: Option<i32>) -> ForwardingState {
+    let row = |src_mac: [u8; 6]| EgressInterface {
+        bind_ifindex: 0,
+        vlan_id: 0,
+        mtu: 1500,
+        src_mac,
+        zone_id: 0,
+        redundancy_group: 0,
+        primary_v4: None,
+        primary_v6: None,
+    };
+    let mut state = ForwardingState::default();
+    state.egress.insert(11, row([0x02, 0xaa, 0, 0, 0, 11]));
+    state.egress.insert(99, row([0x02, 0xaa, 0, 0, 0, 99]));
+    let Some(egress) = route_egress else {
+        return state;
+    };
+    match client {
+        IpAddr::V4(client) => {
+            state.routes_v4.insert(
+                "inet.0".to_string(),
+                vec![RouteEntryV4::single(
+                    PrefixV4::from_net(prefix.parse().expect("v4 prefix")),
+                    egress,
+                    0,
+                    Some(client),
+                    false,
+                    String::new(),
+                    0,
+                )],
+            );
+        }
+        IpAddr::V6(client) => {
+            state.routes_v6.insert(
+                "inet6.0".to_string(),
+                vec![RouteEntryV6::single(
+                    PrefixV6::from_net(prefix.parse().expect("v6 prefix")),
+                    egress,
+                    0,
+                    Some(client),
+                    false,
+                    String::new(),
+                    0,
+                )],
+            );
+        }
+    }
+    state
+}
+
+/// A local reverse for `client`, resolved under `before` and installed in the
+/// worker's table.
+fn install_local_reverse(
+    maps: &mut Maps,
+    before: &ForwardingState,
+    neighbors: &Arc<ShardedNeighborMap>,
+    reverse: &SessionKey,
+    client: IpAddr,
+    egress: i32,
+) -> SessionDecision {
+    let resolved =
+        lookup_forwarding_resolution_with_dynamic_for_flow(before, neighbors, client, reverse)
+            .resolution;
+    assert_eq!(
+        (resolved.disposition, resolved.egress_ifindex),
+        (ForwardingDisposition::ForwardCandidate, egress),
+        "FIXTURE: the reverse resolves out egress {egress} when it is installed ({resolved:?})"
+    );
+    let stored = decision(resolved);
+    assert!(
+        maps.sessions.install_with_protocol(
+            reverse.clone(),
+            stored,
+            reverse_metadata(0, 0, 0, 0),
+            NOW_NS,
+            crate::ip_proto::PROTO_TCP,
+            0x10
+        ),
+        "FIXTURE: the local reverse must install"
+    );
+    stored
+}
+
+fn stamp_is_stale(maps: &Maps, reverse: &SessionKey) -> bool {
+    let stamp = crate::afxdp::shared_ops::probe_session_across_scopes_with_wire_indexes(
+        &maps.sessions,
+        &maps.shared_sessions,
+        &maps.shared_forward_wire_sessions,
+        Some(&maps.owner_indexes),
+        reverse,
+        NOW_NS,
+    )
+    .expect("FIXTURE: the reverse is found")
+    .lookup
+    .forwarding_generation;
+    maps.sessions.forwarding_resolution_is_stale(stamp)
+}
+
+const SERVER_V4: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 7);
 
 /// (b) No HA: a local reverse resolved while the route to the client went out
 /// egress 99. The route moves to egress 11, and the worker's forwarding
@@ -351,135 +572,434 @@ fn an_icmp_error_keeps_the_fabric_redirect_while_the_peer_owns_the_client_rg() {
 /// re-resolves cache-free and leaves by egress 11, and so must the ICMP error.
 #[test]
 fn an_icmp_error_follows_the_reply_path_after_a_fib_change() {
-    let client = Ipv4Addr::new(10, 99, 1, 50);
-    let fib = |egress: i32| {
-        let row = |src_mac: [u8; 6]| EgressInterface {
-            bind_ifindex: 0,
-            vlan_id: 0,
-            mtu: 1500,
-            src_mac,
-            zone_id: 0,
-            redundancy_group: 0,
-            primary_v4: None,
-            primary_v6: None,
-        };
-        let mut state = ForwardingState::default();
-        state.egress.insert(11, row([0x02, 0xaa, 0, 0, 0, 11]));
-        state.egress.insert(99, row([0x02, 0xaa, 0, 0, 0, 99]));
-        state.routes_v4.insert(
-            "inet.0".to_string(),
-            vec![RouteEntryV4::single(
-                PrefixV4::from_net("10.99.1.0/24".parse().expect("prefix")),
-                egress,
-                0,
-                Some(client),
-                false,
-                String::new(),
-                0,
-            )],
-        );
-        state
-    };
+    let client = IpAddr::V4(Ipv4Addr::new(10, 99, 1, 50));
+    let (forward, reverse) = flow(client, IpAddr::V4(SERVER_V4), 40_000);
     let neighbors = Arc::new(ShardedNeighborMap::new());
-    for ifindex in [11, 99] {
-        neighbors.insert(
-            (ifindex, IpAddr::V4(client)),
-            crate::afxdp::types::NeighborEntry {
-                mac: [0x02, 0, 0, 0, 0, ifindex as u8],
-            },
-        );
-    }
-    let forward = SessionKey {
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: IpAddr::V4(client),
-        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
-        src_port: 40_000,
-        dst_port: 443,
-        discriminator: Default::default(),
-        routing_domain: 0,
-    };
-    let reverse = crate::session::reverse_session_key(&forward, crate::nat::NatDecision::default());
-    let before = fib(99);
+    learn(&neighbors, 11, client, [0x02, 0, 0, 0, 0, 11]);
+    learn(&neighbors, 99, client, [0x02, 0, 0, 0, 0, 99]);
     let mut maps = Maps::new();
     maps.sessions.set_forwarding_revalidation_gen(1, 1);
-    let stored_resolution = lookup_forwarding_resolution_with_dynamic_for_flow(
-        &before,
-        &neighbors,
-        IpAddr::V4(client),
-        &reverse,
-    )
-    .resolution;
-    assert_eq!(
-        (
-            stored_resolution.disposition,
-            stored_resolution.egress_ifindex
-        ),
-        (ForwardingDisposition::ForwardCandidate, 99),
-        "FIXTURE: the reverse resolves out egress 99 before the change ({stored_resolution:?})"
+    let before = local_fib(client, "10.99.1.0/24", Some(99));
+    let stored = install_local_reverse(&mut maps, &before, &neighbors, &reverse, client, 99);
+    let after = local_fib(client, "10.99.1.0/24", Some(11));
+    maps.sessions.set_forwarding_revalidation_gen(1, 2);
+    assert!(
+        stamp_is_stale(&maps, &reverse),
+        "FIXTURE: the stored resolution must be stale after the generation advanced"
     );
-    let stored = decision(stored_resolution);
-    let metadata = reverse_metadata(0, 0, 0, 0);
+    let unclustered = BTreeMap::new();
+    let reply = reply(
+        &after,
+        &unclustered,
+        &neighbors,
+        &reverse,
+        stored,
+        &reverse_metadata(0, 0, 0, 0),
+        true,
+        false,
+        0,
+    );
+    assert_eq!(
+        reply.egress_ifindex, 11,
+        "FIXTURE: after the route moves, the reply re-resolves out egress 11 ({reply:?})"
+    );
+    let icmp = icmp_return(
+        &mut maps,
+        &after,
+        &neighbors,
+        &unclustered,
+        &forward,
+        stored,
+        0,
+        0,
+    );
+    assert_eq!(
+        (icmp.disposition, icmp.egress_ifindex),
+        (reply.disposition, reply.egress_ifindex),
+        "an ICMP error to the client must take the reply's path after a FIB change; the return path \
+         used the reverse's STORED resolution (icmp={icmp:?}, reply={reply:?})"
+    );
+}
+
+/// (d) A stale stamp, and the new route has no neighbor yet. The reply refuses
+/// the stored value there (cache-free lookup: MissingNeighbor on egress 11),
+/// and so must the error. e5ecb4e764 fell back to the stored route and sent the
+/// error out egress 99, which the FIB had replaced.
+#[test]
+fn an_icmp_error_never_takes_a_replaced_route_when_the_new_route_has_no_neighbor() {
+    let client = IpAddr::V4(Ipv4Addr::new(10, 99, 1, 51));
+    let (forward, reverse) = flow(client, IpAddr::V4(SERVER_V4), 40_001);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    learn(&neighbors, 99, client, [0x02, 0, 0, 0, 0, 99]);
+    let mut maps = Maps::new();
+    maps.sessions.set_forwarding_revalidation_gen(1, 1);
+    let before = local_fib(client, "10.99.1.0/24", Some(99));
+    let stored = install_local_reverse(&mut maps, &before, &neighbors, &reverse, client, 99);
+    let after = local_fib(client, "10.99.1.0/24", Some(11));
+    maps.sessions.set_forwarding_revalidation_gen(1, 2);
+    let unclustered = BTreeMap::new();
+    let reply = reply(
+        &after,
+        &unclustered,
+        &neighbors,
+        &reverse,
+        stored,
+        &reverse_metadata(0, 0, 0, 0),
+        true,
+        false,
+        0,
+    );
+    assert_eq!(
+        (reply.disposition, reply.egress_ifindex),
+        (ForwardingDisposition::MissingNeighbor, 11),
+        "FIXTURE: no neighbor is known on the new egress yet ({reply:?})"
+    );
+    let icmp = icmp_return(
+        &mut maps,
+        &after,
+        &neighbors,
+        &unclustered,
+        &forward,
+        stored,
+        0,
+        0,
+    );
+    assert_eq!(
+        (icmp.disposition, icmp.egress_ifindex),
+        (reply.disposition, reply.egress_ifindex),
+        "the error must get the reply's answer, never the stale stored route out egress 99 \
+         (icmp={icmp:?}, reply={reply:?})"
+    );
+}
+
+/// (e) A current stamp, but the stored MAC is no longer the live neighbor
+/// (#11315: a gateway failover replaced it), and the route is gone. The reply's
+/// cached variant rejects the stored value (`cached_session_resolution`) and
+/// answers NoRoute; the error must not be sent to the stale MAC.
+#[test]
+fn an_icmp_error_never_takes_a_stored_mac_the_live_neighbor_contradicts() {
+    let client = IpAddr::V4(Ipv4Addr::new(10, 99, 2, 60));
+    let (forward, reverse) = flow(client, IpAddr::V4(SERVER_V4), 40_002);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let stale_mac = [0x02, 0, 0, 0, 0xa0, 99];
+    learn(&neighbors, 99, client, stale_mac);
+    let mut maps = Maps::new();
+    let before = local_fib(client, "10.99.2.0/24", Some(99));
+    let stored = install_local_reverse(&mut maps, &before, &neighbors, &reverse, client, 99);
+    assert_eq!(
+        stored.resolution.neighbor_mac,
+        Some(stale_mac),
+        "FIXTURE: the stored MAC"
+    );
+    learn(&neighbors, 99, client, [0x02, 0, 0, 0, 0xb0, 99]);
+    let after = local_fib(client, "10.99.2.0/24", None);
+    assert!(
+        !stamp_is_stale(&maps, &reverse),
+        "FIXTURE: the stamp stays current"
+    );
+    let unclustered = BTreeMap::new();
+    let reply = reply(
+        &after,
+        &unclustered,
+        &neighbors,
+        &reverse,
+        stored,
+        &reverse_metadata(0, 0, 0, 0),
+        false,
+        false,
+        0,
+    );
+    assert_eq!(
+        reply.disposition,
+        ForwardingDisposition::NoRoute,
+        "FIXTURE: the reply rejects the contradicted stored MAC and has no route ({reply:?})"
+    );
+    let icmp = icmp_return(
+        &mut maps,
+        &after,
+        &neighbors,
+        &unclustered,
+        &forward,
+        stored,
+        0,
+        0,
+    );
+    assert_eq!(
+        (icmp.disposition, icmp.egress_ifindex, icmp.neighbor_mac),
+        (reply.disposition, reply.egress_ifindex, reply.neighbor_mac),
+        "the error must get the reply's answer, never the stale stored MAC (icmp={icmp:?}, reply={reply:?})"
+    );
+}
+
+/// (f) #1873: the stored resolution names tunnel endpoint 7 on ifindex 50, and
+/// the id has since been re-owned by ifindex 51. The reply's lookup returns a
+/// gated NoRoute so the session never adopts the new owner's encap; the error
+/// must not fall back to the stored tunnel resolution.
+#[test]
+fn an_icmp_error_never_takes_a_re_owned_tunnel() {
+    let client = IpAddr::V4(Ipv4Addr::new(10, 99, 3, 70));
+    let (forward, reverse) = flow(client, IpAddr::V4(SERVER_V4), 40_003);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    let mut state = ForwardingState::default();
+    state.tunnel_endpoints.insert(
+        7,
+        TunnelEndpoint {
+            id: 7,
+            logical_ifindex: 51,
+            mtu: 0,
+            interface_label: "gr1".into(),
+            interface: "gr-0/0/0.1".into(),
+            redundancy_group: 0,
+            mode: "gre".into(),
+            kind: crate::afxdp::tunnel_mode_kind("gre"),
+            outer_family: libc::AF_INET,
+            source: IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8)),
+            destination: IpAddr::V4(Ipv4Addr::new(203, 0, 113, 1)),
+            key: 0,
+            ttl: 64,
+            clear_dont_fragment_bit: false,
+            transport_table: String::new(),
+            wg_listen_port: 0,
+            wg_local_privkey: zeroize::Zeroizing::new([0u8; 32]),
+            wg_peers: Vec::new(),
+        },
+    );
+    let stored = decision(ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: 50,
+        tx_ifindex: 50,
+        tunnel_endpoint_id: 7,
+        next_hop: None,
+        neighbor_mac: Some([0x02, 0, 0, 0, 0, 50]),
+        src_mac: Some([0x02, 0xaa, 0, 0, 0, 50]),
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    });
+    let mut maps = Maps::new();
     assert!(
         maps.sessions.install_with_protocol(
             reverse.clone(),
             stored,
-            metadata.clone(),
+            reverse_metadata(0, 0, 0, 0),
             NOW_NS,
             crate::ip_proto::PROTO_TCP,
             0x10
         ),
         "FIXTURE: the local reverse must install"
     );
-    // The FIB changes, and the worker's forwarding generation advances.
-    let after = fib(11);
-    maps.sessions.set_forwarding_revalidation_gen(1, 2);
-    let stamp = crate::afxdp::shared_ops::probe_session_across_scopes_with_wire_indexes(
-        &maps.sessions,
-        &maps.shared_sessions,
-        &maps.shared_forward_wire_sessions,
-        Some(&maps.owner_indexes),
-        &reverse,
-        NOW_NS,
-    )
-    .expect("FIXTURE: the reverse is found")
-    .lookup
-    .forwarding_generation;
-    assert!(
-        maps.sessions.forwarding_resolution_is_stale(stamp),
-        "FIXTURE: the stored resolution must be stale after the generation advanced"
-    );
-    let looked_up = reply_lookup(&after, &neighbors, &reverse, stored, true, false);
     let unclustered = BTreeMap::new();
-    let reply = reresolve_stored_session(
-        &after,
+    let reply = reply(
+        &state,
         &unclustered,
         &neighbors,
-        NOW_SECS,
-        &stored,
-        &metadata,
         &reverse,
-        IpAddr::V4(client),
-        looked_up,
-        packet_arrival(0),
+        stored,
+        &reverse_metadata(0, 0, 0, 0),
+        false,
+        false,
+        0,
+    );
+    let fresh = reply_lookup(&state, &neighbors, &reverse, stored, false, false);
+    assert_eq!(
+        (
+            fresh.disposition,
+            fresh.tunnel_endpoint_id,
+            fresh.egress_ifindex
+        ),
+        (ForwardingDisposition::NoRoute, 7, 50),
+        "FIXTURE: the reply's lookup gates the re-owned tunnel to NoRoute (#1873) ({fresh:?})"
     );
     assert_eq!(
-        reply.egress_ifindex, 11,
-        "FIXTURE: after the route moves, the reply re-resolves out egress 11 ({reply:?})"
+        reply.disposition,
+        ForwardingDisposition::NoRoute,
+        "FIXTURE: the reply drops it ({reply:?})"
     );
-    let raw = embedded_icmp_return_resolution(
-        &mut maps.ctx(&after, &neighbors),
+    let icmp = icmp_return(
+        &mut maps,
+        &state,
+        &neighbors,
+        &unclustered,
         &forward,
         stored,
-        IpAddr::V4(client),
-        NOW_NS,
+        0,
+        0,
     );
-    let icmp = finalize_embedded_icmp_resolution_parts(&after, &unclustered, NOW_SECS, 0, raw, 0);
     assert_eq!(
-        (icmp.disposition, icmp.egress_ifindex),
-        (reply.disposition, reply.egress_ifindex),
-        "an ICMP error to the client must take the reply's path after a FIB change; the return path \
-         used the reverse's STORED resolution (icmp={icmp:?}, reply={reply:?})"
+        icmp.disposition, reply.disposition,
+        "the error must get the gated NoRoute, never the stored tunnel resolution (icmp={icmp:?})"
+    );
+}
+
+/// (h) The reverse's installing table is gone (a deleted routing instance).
+/// The reply's lookup answers TableUnavailable and does not use the stored
+/// egress; neither may the error.
+#[test]
+fn an_icmp_error_never_takes_the_stored_egress_of_a_vanished_table() {
+    let client = IpAddr::V4(Ipv4Addr::new(10, 99, 4, 80));
+    let (forward, reverse) = flow(client, IpAddr::V4(SERVER_V4), 40_004);
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    learn(&neighbors, 99, client, [0x02, 0, 0, 0, 0, 99]);
+    let state = local_fib(client, "10.99.4.0/24", Some(99));
+    let resolved =
+        lookup_forwarding_resolution_with_dynamic_for_flow(&state, &neighbors, client, &reverse)
+            .resolution;
+    let stored = SessionDecision {
+        install_table_domain: 0x5eed_0001,
+        install_table_check: 1,
+        ..decision(resolved)
+    };
+    let mut maps = Maps::new();
+    assert!(
+        maps.sessions.install_with_protocol(
+            reverse.clone(),
+            stored,
+            reverse_metadata(0, 0, 0, 0),
+            NOW_NS,
+            crate::ip_proto::PROTO_TCP,
+            0x10
+        ),
+        "FIXTURE: the local reverse must install"
+    );
+    let unclustered = BTreeMap::new();
+    let reply = reply(
+        &state,
+        &unclustered,
+        &neighbors,
+        &reverse,
+        stored,
+        &reverse_metadata(0, 0, 0, 0),
+        false,
+        false,
+        0,
+    );
+    assert_eq!(
+        reply.disposition,
+        ForwardingDisposition::TableUnavailable,
+        "FIXTURE: the reply's lookup refuses the vanished installing table ({reply:?})"
+    );
+    let icmp = icmp_return(
+        &mut maps,
+        &state,
+        &neighbors,
+        &unclustered,
+        &forward,
+        stored,
+        0,
+        0,
+    );
+    assert_eq!(
+        icmp.disposition, reply.disposition,
+        "the error must not use the stored egress of a vanished table (icmp={icmp:?})"
+    );
+}
+
+/// (g) The lookup variant. Both reverses were resolved out egress 99 and the
+/// route has since moved to egress 11, with NO generation change, so both
+/// stamps are current and the stored values still revalidate (#11315).
+/// - A LOCAL reverse takes the cached variant: its fast path serves the stored
+///   egress 99.
+/// - A PEER-SYNCED reverse takes the synced variant, which skips the fast path:
+///   the FIB answers egress 11.
+///
+/// The error must take each reply's variant.
+fn the_return_uses_the_replys_lookup_variant(client: IpAddr, server: IpAddr, prefix: &str) {
+    let neighbors = Arc::new(ShardedNeighborMap::new());
+    learn(&neighbors, 11, client, [0x02, 0, 0, 0, 0, 11]);
+    learn(&neighbors, 99, client, [0x02, 0, 0, 0, 0, 99]);
+    let before = local_fib(client, prefix, Some(99));
+    let after = local_fib(client, prefix, Some(11));
+    let mut maps = Maps::new();
+    let (forward_local, reverse_local) = flow(client, server, 41_000);
+    let stored_local =
+        install_local_reverse(&mut maps, &before, &neighbors, &reverse_local, client, 99);
+    let (forward_synced, reverse_synced) = flow(client, server, 41_001);
+    let stored_synced = decision(
+        lookup_forwarding_resolution_with_dynamic_for_flow(
+            &before,
+            &neighbors,
+            client,
+            &reverse_synced,
+        )
+        .resolution,
+    );
+    let metadata = reverse_metadata(0, 0, 0, 0);
+    maps.publish_shared_reverse(&reverse_synced, stored_synced, &metadata);
+    let unclustered = BTreeMap::new();
+    for (label, forward, reverse, stored, peer_synced, want) in [
+        (
+            "local",
+            &forward_local,
+            &reverse_local,
+            stored_local,
+            false,
+            99,
+        ),
+        (
+            "peer-synced",
+            &forward_synced,
+            &reverse_synced,
+            stored_synced,
+            true,
+            11,
+        ),
+    ] {
+        assert!(
+            !stamp_is_stale(&maps, reverse),
+            "FIXTURE: the {label} stamp stays current"
+        );
+        let reply = reply(
+            &after,
+            &unclustered,
+            &neighbors,
+            reverse,
+            stored,
+            &metadata,
+            false,
+            peer_synced,
+            0,
+        );
+        assert_eq!(
+            (reply.disposition, reply.egress_ifindex),
+            (ForwardingDisposition::ForwardCandidate, want),
+            "FIXTURE: the {label} reply's lookup variant answers egress {want} ({reply:?})"
+        );
+        let icmp = icmp_return(
+            &mut maps,
+            &after,
+            &neighbors,
+            &unclustered,
+            forward,
+            stored,
+            0,
+            0,
+        );
+        assert_eq!(
+            (icmp.disposition, icmp.egress_ifindex, icmp.neighbor_mac),
+            (reply.disposition, reply.egress_ifindex, reply.neighbor_mac),
+            "the error to {client} on a {label} reverse must use the reply's lookup variant \
+             (icmp={icmp:?}, reply={reply:?})"
+        );
+    }
+}
+
+#[test]
+fn the_return_uses_the_replys_lookup_variant_v4() {
+    the_return_uses_the_replys_lookup_variant(
+        IpAddr::V4(Ipv4Addr::new(10, 99, 5, 90)),
+        IpAddr::V4(SERVER_V4),
+        "10.99.5.0/24",
+    );
+}
+
+#[test]
+fn the_return_uses_the_replys_lookup_variant_v6() {
+    the_return_uses_the_replys_lookup_variant(
+        IpAddr::V6("2001:db8:99::90".parse::<Ipv6Addr>().expect("v6 client")),
+        IpAddr::V6("2001:db8:7::7".parse::<Ipv6Addr>().expect("v6 server")),
+        "2001:db8:99::/64",
     );
 }
 
@@ -494,7 +1014,12 @@ fn an_icmp_error_follows_the_reply_path_after_a_fib_change() {
 #[ignore = "#19164 cost bench: cargo test --release --bins icmp_return_reresolve_cost_bench -- --ignored --nocapture"]
 fn icmp_return_reresolve_cost_bench() {
     const N: u32 = 200_000;
-    let mut shape = ha_shape(35_792);
+    let mut shape = ha_shape(
+        35_792,
+        IpAddr::V4(CLIENT_V4),
+        IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
+        false,
+    );
     for round in 0..3 {
         let started = std::time::Instant::now();
         for _ in 0..N {
@@ -527,113 +1052,4 @@ fn icmp_return_reresolve_cost_bench() {
             new_ns - old_ns
         );
     }
-}
-
-/// (d) The fallback: the route moves to egress 11, but no neighbor is known
-/// there yet, so the fresh lookup cannot forward (MissingNeighbor). The
-/// return keeps the STORED route (egress 99) and its MAC, the pre-#19164
-/// behaviour, rather than dropping the ICMP error.
-#[test]
-fn an_icmp_error_keeps_the_stored_route_when_the_fresh_lookup_cannot_forward() {
-    let client = Ipv4Addr::new(10, 99, 1, 51);
-    let fib = |egress: i32| {
-        let row = |src_mac: [u8; 6]| EgressInterface {
-            bind_ifindex: 0,
-            vlan_id: 0,
-            mtu: 1500,
-            src_mac,
-            zone_id: 0,
-            redundancy_group: 0,
-            primary_v4: None,
-            primary_v6: None,
-        };
-        let mut state = ForwardingState::default();
-        state.egress.insert(11, row([0x02, 0xaa, 0, 0, 0, 11]));
-        state.egress.insert(99, row([0x02, 0xaa, 0, 0, 0, 99]));
-        state.routes_v4.insert(
-            "inet.0".to_string(),
-            vec![RouteEntryV4::single(
-                PrefixV4::from_net("10.99.1.0/24".parse().expect("prefix")),
-                egress,
-                0,
-                Some(client),
-                false,
-                String::new(),
-                0,
-            )],
-        );
-        state
-    };
-    let neighbors = Arc::new(ShardedNeighborMap::new());
-    neighbors.insert(
-        (99, IpAddr::V4(client)),
-        crate::afxdp::types::NeighborEntry {
-            mac: [0x02, 0, 0, 0, 0, 99],
-        },
-    );
-    let forward = SessionKey {
-        addr_family: libc::AF_INET as u8,
-        protocol: crate::ip_proto::PROTO_TCP,
-        src_ip: IpAddr::V4(client),
-        dst_ip: IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)),
-        src_port: 40_001,
-        dst_port: 443,
-        discriminator: Default::default(),
-        routing_domain: 0,
-    };
-    let reverse = crate::session::reverse_session_key(&forward, crate::nat::NatDecision::default());
-    let before = fib(99);
-    let mut maps = Maps::new();
-    maps.sessions.set_forwarding_revalidation_gen(1, 1);
-    let stored_resolution = lookup_forwarding_resolution_with_dynamic_for_flow(
-        &before,
-        &neighbors,
-        IpAddr::V4(client),
-        &reverse,
-    )
-    .resolution;
-    assert_eq!(
-        (
-            stored_resolution.disposition,
-            stored_resolution.egress_ifindex
-        ),
-        (ForwardingDisposition::ForwardCandidate, 99),
-        "FIXTURE: the reverse resolves out egress 99 before the change ({stored_resolution:?})"
-    );
-    let stored = decision(stored_resolution);
-    assert!(
-        maps.sessions.install_with_protocol(
-            reverse.clone(),
-            stored,
-            reverse_metadata(0, 0, 0, 0),
-            NOW_NS,
-            crate::ip_proto::PROTO_TCP,
-            0x10
-        ),
-        "FIXTURE: the local reverse must install"
-    );
-    let after = fib(11);
-    maps.sessions.set_forwarding_revalidation_gen(1, 2);
-    let fresh = reply_lookup(&after, &neighbors, &reverse, stored, true, false);
-    assert_eq!(
-        fresh.disposition,
-        ForwardingDisposition::MissingNeighbor,
-        "FIXTURE: no neighbor is known on the new egress yet ({fresh:?})"
-    );
-    let icmp = embedded_icmp_return_resolution(
-        &mut maps.ctx(&after, &neighbors),
-        &forward,
-        stored,
-        IpAddr::V4(client),
-        NOW_NS,
-    );
-    assert_eq!(
-        (icmp.disposition, icmp.egress_ifindex, icmp.neighbor_mac),
-        (
-            stored_resolution.disposition,
-            stored_resolution.egress_ifindex,
-            stored_resolution.neighbor_mac
-        ),
-        "when the fresh lookup cannot forward, the ICMP error keeps the stored route and MAC (icmp={icmp:?})"
-    );
 }

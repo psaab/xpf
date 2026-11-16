@@ -2414,7 +2414,16 @@ fn poll_descriptor_co_moved_pmtud_admitted_as_related_16053() {
     ]);
     let mut snapshot = nat_snapshot_with_fabric();
     snapshot.policies.clear();
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    // #19164: the client's live neighbor. The ICMP return now takes the
+    // reply's route, and a reply serves the reverse's stored MAC only while
+    // that MAC is still the live neighbor (#11315, `cached_session_resolution`).
+    forwarding.neighbors.insert(
+        (24, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 102))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
     let client_ip = Ipv4Addr::new(10, 0, 61, 102);
@@ -2682,10 +2691,23 @@ fn poll_descriptor_unowned_claimed_zone_pmtud_denied_16053() {
         }],
         ..Default::default()
     });
-    let forwarding = build_forwarding_state(&snapshot);
+    let mut forwarding = build_forwarding_state(&snapshot);
+    // #19164: the client's live neighbor. The ICMP return now takes the
+    // reply's route, and a reply serves the reverse's stored MAC only while
+    // that MAC is still the live neighbor (#11315, `cached_session_resolution`).
+    forwarding.neighbors.insert(
+        (26, IpAddr::V4(Ipv4Addr::new(10, 0, 62, 102))),
+        crate::afxdp::types::NeighborEntry {
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+        },
+    );
     let router_ip = Ipv4Addr::new(10, 0, 0, 1);
     let snat_ip = Ipv4Addr::new(172, 16, 80, 8);
-    let client_ip = Ipv4Addr::new(10, 0, 61, 102);
+    // #19164: the client lives on `reth3.0`'s subnet (10.0.62.0/24), so the
+    // FIB, like the stored delivery, reaches it out the RG3 interface. The
+    // ICMP return now takes the reply's route; a client the FIB places on the
+    // LAN would be delivered out the LAN, and RG3 would never be judged.
+    let client_ip = Ipv4Addr::new(10, 0, 62, 102);
     let server_ip = Ipv4Addr::new(1, 1, 1, 1);
     let snat_port: u16 = 40000;
     let client_port: u16 = 12345;

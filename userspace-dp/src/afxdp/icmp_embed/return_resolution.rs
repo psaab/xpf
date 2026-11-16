@@ -74,6 +74,27 @@ fn domain_scoped_fallback_resolution(
         .resolution
 }
 
+/// #19164 (review, seat r23 P1-1): what the reply pipeline's retain verdict
+/// needs, for a matched reverse whose STORED resolution is a FabricRedirect.
+/// Carried on the match to the arm's finalization, which has the HA state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::afxdp) struct StoredRedirectReturn {
+    /// The reverse's stored decision (its resolution is the FabricRedirect).
+    pub(in crate::afxdp) decision: SessionDecision,
+    /// The reverse's egress zone: the client's zone.
+    pub(in crate::afxdp) egress_zone: u32,
+    /// The reverse's resolution target: the client.
+    pub(in crate::afxdp) target: IpAddr,
+}
+
+/// The return resolution and, for a stored FabricRedirect reverse, the
+/// context of the retain verdict the arm applies after finalizing it.
+#[derive(Clone, Copy, Debug)]
+pub(in crate::afxdp::icmp_embed) struct IcmpReturn {
+    pub(in crate::afxdp::icmp_embed) resolution: ForwardingResolution,
+    pub(in crate::afxdp::icmp_embed) stored_redirect: Option<StoredRedirectReturn>,
+}
+
 /// Resolve the forwarding back to the original (pre-NAT) client for
 /// an embedded ICMP error. Tries the reverse-key session lookup first
 /// and looks the matched reverse up FRESH, the way the reply path does
@@ -92,7 +113,7 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
     forward_decision: SessionDecision,
     original_src: IpAddr,
     now_ns: u64,
-) -> ForwardingResolution {
+) -> IcmpReturn {
     let reverse_key = reverse_session_key(forward_key, forward_decision.nat);
     if let Some(reverse) = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
@@ -104,7 +125,15 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
     ) {
         return fresh_reverse_resolution(ctx, &reverse_key, &reverse);
     }
-    domain_scoped_fallback_resolution(ctx, forward_key, Some(forward_decision), original_src)
+    IcmpReturn {
+        resolution: domain_scoped_fallback_resolution(
+            ctx,
+            forward_key,
+            Some(forward_decision),
+            original_src,
+        ),
+        stored_redirect: None,
+    }
 }
 
 /// #19164: the matched reverse's resolution, looked up FRESH the way a reply
@@ -121,9 +150,18 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
 /// **It uses the SAME lookup variant the reply uses:**
 /// - cache-free when the stored resolution's forwarding generation is stale;
 /// - the synced-session variant for a peer-synced reverse;
-/// - the cached variant otherwise. The cached variants fall back to the
-///   stored resolution (revalidated against live egress and neighbors) only
-///   when the FIB answers NoRoute or MissingNeighbor, as the reply does.
+/// - the cached variant otherwise.
+///
+/// **The stored value is served only where the reply would serve it.** The
+/// cached and synced variants serve it through `cached_session_resolution`
+/// (#11315: a ForwardCandidate with a live egress and the stored MAC still
+/// live), as their fast path or when the FIB cannot forward. Nothing else
+/// falls back to it (#19164 review, seat r23 P2-1). The return gets the
+/// reply's answer, not the stored value:
+/// - with a stale stamp;
+/// - on a #11315 mismatch;
+/// - on a #1873 re-owned tunnel (the gated NoRoute);
+/// - when the installing table is gone (TableUnavailable).
 ///
 /// **What this does NOT do: HA enforcement or fabric composition.** The poll
 /// arm finalizes every matched resolution itself
@@ -134,47 +172,42 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
 /// accounting. So this supplies the un-enforced, fresh lookup the finalization
 /// expects.
 ///
-/// **When the fresh lookup cannot forward** (NoRoute, MissingNeighbor), the
-/// STORED resolution is kept. That is the pre-#19164 behaviour, and the
-/// reply path's own cached-fallback idea extended to a stale stamp. A reply
-/// in that state would wait for the neighbor or drop; a PTB is better sent
-/// with the last-known route and MAC than lost.
+/// **For a stored FabricRedirect** it also returns the context of the reply's
+/// retain verdict, which the arm applies after finalizing
+/// (`retain_stored_fabric_redirect`).
 ///
-/// **Residuals:**
-/// - The #9951 leak-incarnation revocation arm is not mirrored. A revoked leak
-///   gets the ordinary lookup here.
-/// - A stored FabricRedirect whose fresh lookup finds no neighbor yet (just
-///   after a takeover, before the client's MAC is relearned) keeps the stored
-///   redirect, as before #19164, until the neighbor is learned.
+/// **Residual:** the #9951 leak-incarnation revocation arm is not mirrored. A
+/// revoked leak gets the ordinary lookup here.
 fn fresh_reverse_resolution(
     ctx: &NatMatchCtx<'_>,
     reverse_key: &SessionKey,
     reverse: &crate::afxdp::shared_ops::ResolvedSessionLookup,
-) -> ForwardingResolution {
+) -> IcmpReturn {
     let stored = reverse.lookup.decision;
-    let fresh = fresh_reverse_lookup(ctx, reverse_key, reverse, stored);
-    // Fresh when it is a definite answer; the stored resolution when the fresh
-    // lookup cannot forward (no route, no neighbor yet). An ICMP error is then
-    // never worse off than before #19164: the PTB still leaves with the
-    // last-known route and MAC instead of being dropped.
-    match fresh.disposition {
-        ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor => stored.resolution,
-        _ => fresh,
+    let flow = SessionFlow {
+        src_ip: reverse_key.src_ip,
+        dst_ip: reverse_key.dst_ip,
+        forward_key: reverse_key.clone(),
+    };
+    let stored_redirect = (stored.resolution.disposition == ForwardingDisposition::FabricRedirect)
+        .then(|| StoredRedirectReturn {
+            decision: stored,
+            egress_zone: reverse.lookup.metadata.egress_zone,
+            target: crate::afxdp::session_glue::resolution_target_for_session(&flow, stored),
+        });
+    IcmpReturn {
+        resolution: fresh_reverse_lookup(ctx, &flow, reverse, stored),
+        stored_redirect,
     }
 }
 
 /// The reply path's lookup variant for `reverse` (see `fresh_reverse_resolution`).
 fn fresh_reverse_lookup(
     ctx: &NatMatchCtx<'_>,
-    reverse_key: &SessionKey,
+    flow: &SessionFlow,
     reverse: &crate::afxdp::shared_ops::ResolvedSessionLookup,
     stored: SessionDecision,
 ) -> ForwardingResolution {
-    let flow = SessionFlow {
-        src_ip: reverse_key.src_ip,
-        dst_ip: reverse_key.dst_ip,
-        forward_key: reverse_key.clone(),
-    };
     if ctx
         .sessions
         .forwarding_resolution_is_stale(reverse.lookup.forwarding_generation)
@@ -182,25 +215,85 @@ fn fresh_reverse_lookup(
         crate::afxdp::session_glue::lookup_forwarding_resolution_for_session_without_cache(
             ctx.forwarding,
             ctx.dynamic_neighbors,
-            &flow,
+            flow,
             stored,
         )
     } else if reverse.origin.is_peer_synced() {
         crate::afxdp::session_glue::lookup_forwarding_resolution_for_synced_session(
             ctx.forwarding,
             ctx.dynamic_neighbors,
-            &flow,
+            flow,
             stored,
         )
     } else {
         crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
             ctx.forwarding,
             ctx.dynamic_neighbors,
-            &flow,
+            flow,
             stored,
         )
     }
     .resolution
+}
+
+/// #19164 (review, seat r23 P1-1): the reply pipeline's retain verdict for a
+/// matched reverse whose STORED resolution is a FabricRedirect, applied to the
+/// return resolution AFTER the arm's finalization, so HA is enforced once.
+///
+/// **Why.** On a split node (the WAN RG active here, the LAN RG on the peer)
+/// the peer-owned LAN connected prefix is withheld from the transit FIB
+/// (#15742). A LAN client then matches the WAN default route: a local
+/// ForwardCandidate whose RG is active, which the finalization leaves alone.
+/// The reply keeps its stored FabricRedirect over that WAN answer
+/// (`reresolve_stored_session`, through `rehome_or_retain_fabric_redirect`);
+/// without this, the ICMP error went out the WAN to the client's private
+/// address.
+///
+/// **What it reuses.** The reply's own function and inputs:
+/// - the owner is the client's connected owner RG in the installing table,
+///   judged against `ha_state` (`DestinationOwner`, #15958b/#16524);
+/// - the destination zone is the reverse's egress zone.
+///
+/// **Skipped for an arrival on the fabric link**, as the reply skips it
+/// (`FabricArrival::rehome_skipped`): an error the peer handed over is never
+/// sent back over the fabric.
+pub(in crate::afxdp::icmp_embed) fn retain_stored_fabric_redirect(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    ingress_ifindex: i32,
+    finalized: ForwardingResolution,
+    stored_redirect: Option<&StoredRedirectReturn>,
+) -> ForwardingResolution {
+    let Some(stored) = stored_redirect else {
+        return finalized;
+    };
+    if ingress_is_fabric(forwarding, ingress_ifindex) {
+        return finalized;
+    }
+    let install_table = crate::afxdp::session_glue::install_table_name_for_session(
+        forwarding,
+        stored.decision,
+        stored.target,
+    );
+    let owner = crate::afxdp::session_glue::DestinationOwner::from_dest_rg(
+        crate::afxdp::session_glue::connected_owner_rg_for_target_in_table(
+            forwarding,
+            stored.target,
+            install_table,
+        ),
+        ha_state,
+        now_secs,
+    );
+    crate::afxdp::session_glue::rehome_or_retain_fabric_redirect(
+        forwarding,
+        stored.decision.resolution,
+        finalized,
+        stored.egress_zone,
+        owner,
+        Some(stored.target),
+        install_table,
+    )
 }
 
 /// #10672: resolve the forwarding for an ICMP error quoting a REPLY packet —
