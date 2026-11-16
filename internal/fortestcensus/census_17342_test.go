@@ -7,34 +7,36 @@ import (
 	"testing"
 )
 
-// The real module: every *ForTest* hook is called, or baselined with its
-// defining file and a reason.
-func TestForTestHooksAreLiveInThisModule17342(t *testing.T) {
+const allowFile = "scripts/go-fortest-seams.allow"
+
+// The real module: every exported *ForTest* func and method has a row with a
+// reason, and every row names one that exists.
+func TestExportedForTestSeamsHaveARow17342(t *testing.T) {
 	root := filepath.Join("..", "..")
-	allow, malformed, err := readAllow(filepath.Join(root, "scripts", "go-fortest-liveness.allow"))
+	rows, malformed, err := readAllow(filepath.Join(root, filepath.FromSlash(allowFile)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := runCensus(root, allow)
+	seams, err := scanSeams(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Logf("%d *ForTest* hooks, %d with no caller, %d baseline row(s)", len(res.hooks), len(res.dead), len(allow))
-	// Anti-vacuity: the tree has ~160 hooks; a walk that found a handful
-	// missed the tree, and would vouch for everything it did not see.
-	if len(res.hooks) < 100 {
-		t.Errorf("only %d hooks found under %s; the walk did not see the tree", len(res.hooks), root)
+	t.Logf("%d exported *ForTest* seams, %d rows", len(seams), len(rows))
+	// Anti-vacuity: the tree has ~150 of them; a walk that found a handful
+	// missed the tree, and the rows it could not match would read as the
+	// list's fault rather than the walk's.
+	if len(seams) < 100 {
+		t.Errorf("only %d exported seams found under %s; the walk did not see the tree", len(seams), root)
 	}
-	for _, p := range append(malformed, res.problems...) {
+	for _, p := range append(malformed, check(seams, rows, allowFile)...) {
 		t.Error(p)
 	}
 }
 
-// fixture writes a module example.com/fx with the given files.
+// fixture writes the given files under a temporary root.
 func fixture(t *testing.T, files map[string]string) string {
 	t.Helper()
 	root := t.TempDir()
-	files["go.mod"] = "module example.com/fx\n\ngo 1.24\n"
 	for name, body := range files {
 		p := filepath.Join(root, filepath.FromSlash(name))
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -47,105 +49,110 @@ func fixture(t *testing.T, files map[string]string) string {
 	return root
 }
 
-const liveHook = "package a\n\n// FooForTest is called by a_test.go.\nfunc FooForTest() int { return 1 }\n"
-const liveCaller = "package a\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) { _ = FooForTest() }\n"
-const deadHook = "package a\n\n// BarForTest replaces the clock.\nfunc BarForTest() {}\n"
+const mgr = "package a\n\ntype Mgr struct{}\n\ntype Other struct{}\n\n"
 
-// expectProblems runs the census and checks the problem list: each want is a
-// substring of exactly one problem, and there are no others.
-func expectProblems(t *testing.T, root string, allow []allowRow, want ...string) {
-	t.Helper()
-	res, err := runCensus(root, allow)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(res.problems) != len(want) {
-		t.Fatalf("got %d problem(s), want %d:\n  %s", len(res.problems), len(want), strings.Join(res.problems, "\n  "))
-	}
-	for _, w := range want {
-		n := 0
-		for _, p := range res.problems {
-			if strings.Contains(p, w) {
-				n++
-			}
-		}
-		if n != 1 {
-			t.Errorf("want exactly one problem containing %q; got:\n  %s", w, strings.Join(res.problems, "\n  "))
-		}
-	}
-}
-
-func TestForTestCensusCells17342(t *testing.T) {
+func TestForTestSeamRuleCells17342(t *testing.T) {
 	cells := []struct {
 		name  string
 		files map[string]string
-		allow []allowRow
-		want  []string
+		rows  map[string]string
+		want  []string // each a substring of exactly one problem; no others
 	}{
-		{name: "live: a hook called from its package's test", files: map[string]string{"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller}},
-		{name: "live: a hook called package-qualified from another package", files: map[string]string{
-			"pkg/a/a.go":      liveHook,
-			"pkg/b/b_test.go": "package b\n\nimport (\n\t\"testing\"\n\n\t\"example.com/fx/pkg/a\"\n)\n\nfunc TestB(t *testing.T) { _ = a.FooForTest() }\n",
-		}},
-		{name: "line comment only is not a caller", files: map[string]string{
-			"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller, "pkg/a/b.go": deadHook,
-			"pkg/a/c.go": "package a\n\n// Tests call BarForTest to freeze time.\nvar _ = 0\n",
-		}, want: []string{"pkg/a.BarForTest has no caller"}},
-		{name: "block comment only is not a caller", files: map[string]string{
-			"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller, "pkg/a/b.go": deadHook,
-			"pkg/a/c.go": "package a\n\n/* BarForTest replaces the clock. */\nvar _ = 0\n",
-		}, want: []string{"pkg/a.BarForTest has no caller"}},
-		{name: "a string literal is not a caller", files: map[string]string{
-			"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller, "pkg/a/b.go": deadHook,
-			"pkg/a/c.go": "package a\n\nvar diag = \"call BarForTest first\"\n",
-		}, want: []string{"pkg/a.BarForTest has no caller"}},
-		{name: "an uncalled method hook", files: map[string]string{
-			"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller,
-			"pkg/a/m.go": "package a\n\ntype T struct{ v int }\n\nfunc (x *T) SetVForTesting(v int) { x.v = v }\n",
-		}, want: []string{"pkg/a.(T).SetVForTesting has no caller"}},
-		{name: "same-named hooks in two packages are counted separately", files: map[string]string{
-			"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller,
-			"pkg/one/one.go":      "package one\n\ntype Monitor struct{}\n\nfunc (m *Monitor) SetTickForTest() {}\n",
-			"pkg/two/two.go":      "package two\n\ntype Monitor struct{}\n\nfunc (m *Monitor) SetTickForTest() {}\n",
-			"pkg/one/one_test.go": "package one_test\n\nimport (\n\t\"testing\"\n\n\t\"example.com/fx/pkg/one\"\n)\n\nfunc TestOne(t *testing.T) { m := &one.Monitor{}; m.SetTickForTest() }\n",
-		}, want: []string{"pkg/two.(Monitor).SetTickForTest has no caller"}},
-		{name: "a reference no scope can attribute fails, it does not pick one", files: map[string]string{
-			"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller,
-			"pkg/one/one.go": "package one\n\ntype Monitor struct{}\n\nfunc (m *Monitor) SetTickForTest() {}\n",
-			"pkg/two/two.go": "package two\n\ntype Monitor struct{}\n\nfunc (m *Monitor) SetTickForTest() {}\n",
-			"pkg/c/c_test.go": "package c\n\nimport (\n\t\"testing\"\n\n\t\"example.com/fx/pkg/one\"\n\t\"example.com/fx/pkg/two\"\n)\n\n" +
-				"type ticker interface{ SetTickForTest() }\n\nfunc TestC(t *testing.T) {\n\tfor _, m := range []ticker{&one.Monitor{}, &two.Monitor{}} {\n\t\tm.SetTickForTest()\n\t}\n}\n",
-		}, want: []string{"is ambiguous between pkg/one.(Monitor).SetTickForTest, pkg/two.(Monitor).SetTickForTest", "pkg/one.(Monitor).SetTickForTest has no caller", "pkg/two.(Monitor).SetTickForTest has no caller"}},
-		{name: "a baselined dead hook passes", files: map[string]string{"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller, "pkg/a/b.go": deadHook},
-			allow: []allowRow{{id: "pkg/a.BarForTest", file: "pkg/a/b.go", reason: "kept for a pending test"}}},
-		{name: "a baseline row whose hook moved fails", files: map[string]string{"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller, "pkg/a/b.go": deadHook},
-			allow: []allowRow{{id: "pkg/a.BarForTest", file: "pkg/a/old.go", reason: "kept for a pending test"}},
-			want:  []string{"names pkg/a/old.go, but the hook is defined in pkg/a/b.go"}},
-		{name: "a baseline row whose hook gained a caller fails", files: map[string]string{"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller},
-			allow: []allowRow{{id: "pkg/a.FooForTest", file: "pkg/a/a.go", reason: "x"}},
-			want:  []string{"is stale: the hook now has a caller"}},
-		{name: "a baseline row whose hook is gone fails", files: map[string]string{"pkg/a/a.go": liveHook, "pkg/a/a_test.go": liveCaller},
-			allow: []allowRow{{id: "pkg/a.GoneForTest", file: "pkg/a/gone.go", reason: "x"}},
-			want:  []string{"is stale: the hook is gone"}},
+		{name: "an exported func with a row passes",
+			files: map[string]string{"pkg/a/a.go": "package a\n\nfunc FooForTest() {}\n"},
+			rows:  map[string]string{"pkg/a.FooForTest": "r"}},
+		{name: "a new exported func without a row fails, named",
+			files: map[string]string{"pkg/a/a.go": "package a\n\nfunc FooForTest() {}\n"},
+			want:  []string{"exported seam pkg/a.FooForTest has no row"}},
+		{name: "a new exported method without a row fails, named with its receiver",
+			files: map[string]string{"pkg/a/a.go": mgr + "func (m *Mgr) ResetForTesting() {}\n"},
+			want:  []string{"exported seam pkg/a.(Mgr).ResetForTesting has no row"}},
+		{name: "an exported method on an unexported type still needs a row",
+			files: map[string]string{"pkg/a/a.go": "package a\n\ntype srv struct{}\n\nfunc (s srv) DrainForTest() {}\n"},
+			want:  []string{"exported seam pkg/a.(srv).DrainForTest has no row"}},
+		{name: "a generic receiver is keyed by its type name",
+			files: map[string]string{"pkg/a/a.go": "package a\n\ntype Cache[K comparable, V any] struct{}\n\nfunc (c *Cache[K, V]) DropForTest() {}\n"},
+			rows:  map[string]string{"pkg/a.(Cache).DropForTest": "r"}},
+		{name: "a stale row fails",
+			files: map[string]string{"pkg/a/a.go": "package a\n\nfunc FooForTest() {}\n"},
+			rows:  map[string]string{"pkg/a.FooForTest": "r", "pkg/a.GoneForTest": "r"},
+			want:  []string{"stale row pkg/a.GoneForTest"}},
+		{name: "a row for another receiver does not cover the seam, and is stale",
+			files: map[string]string{"pkg/a/a.go": mgr + "func (m *Mgr) ResetForTest() {}\n"},
+			rows:  map[string]string{"pkg/a.(Other).ResetForTest": "r"},
+			want:  []string{"exported seam pkg/a.(Mgr).ResetForTest has no row", "stale row pkg/a.(Other).ResetForTest"}},
+		{name: "same-named seams in two packages each need a row",
+			files: map[string]string{"pkg/a/a.go": "package a\n\nfunc FooForTest() {}\n", "pkg/b/b.go": "package b\n\nfunc FooForTest() {}\n"},
+			rows:  map[string]string{"pkg/a.FooForTest": "r"},
+			want:  []string{"exported seam pkg/b.FooForTest has no row"}},
+		{name: "unexported seams are the deadcode gate's, not this rule's",
+			files: map[string]string{"pkg/a/a.go": mgr + "func setClockForTest() {}\n\nfunc (m *Mgr) resetForTest() {}\n"}},
+		{name: "a seam declared in a _test.go file is not product code",
+			files: map[string]string{"pkg/a/a.go": "package a\n", "pkg/a/a_test.go": "package a\n\nfunc HelperForTest() {}\n"}},
+		{name: "a comment or string naming a seam is not a seam",
+			files: map[string]string{"pkg/a/a.go": "package a\n\n// FooForTest is gone.\nvar s = \"func BarForTest() {}\"\n"}},
+		{name: "a row for a seam that is now unexported is stale",
+			files: map[string]string{"pkg/a/a.go": "package a\n\nfunc fooForTest() {}\n"},
+			rows:  map[string]string{"pkg/a.FooForTest": "r"},
+			want:  []string{"stale row pkg/a.FooForTest"}},
+		{name: "vendor and testdata are not scanned",
+			files: map[string]string{"vendor/x/x.go": "package x\n\nfunc FooForTest() {}\n", "pkg/a/testdata/t.go": "package t\n\nfunc FooForTest() {}\n"}},
+		{name: "a nested package is keyed by its full directory",
+			files: map[string]string{"pkg/a/b/c.go": "package b\n\nfunc FooForTest() {}\n"},
+			want:  []string{"exported seam pkg/a/b.FooForTest has no row"}},
 	}
 	for _, c := range cells {
 		t.Run(c.name, func(t *testing.T) {
-			expectProblems(t, fixture(t, c.files), c.allow, c.want...)
+			seams, err := scanSeams(fixture(t, c.files))
+			if err != nil {
+				t.Fatal(err)
+			}
+			rows := c.rows
+			if rows == nil {
+				rows = map[string]string{}
+			}
+			got := check(seams, rows, "allow")
+			if len(got) != len(c.want) {
+				t.Fatalf("got %d problem(s), want %d:\n  %s", len(got), len(c.want), strings.Join(got, "\n  "))
+			}
+			for _, w := range c.want {
+				n := 0
+				for _, p := range got {
+					if strings.Contains(p, w) {
+						n++
+					}
+				}
+				if n != 1 {
+					t.Errorf("want exactly one problem containing %q; got:\n  %s", w, strings.Join(got, "\n  "))
+				}
+			}
 		})
 	}
 }
 
-func TestForTestCensusRefusesAnEmptyTreeAndMalformedRows17342(t *testing.T) {
-	root := fixture(t, map[string]string{"pkg/a/a.go": "package a\n\nfunc F() {}\n"})
-	if _, err := runCensus(root, nil); err == nil || !strings.Contains(err.Error(), "nothing to vouch for") {
-		t.Errorf("a tree with no hooks: err=%v, want a refusal (it vouches for nothing)", err)
-	}
+func TestForTestSeamRuleAllowFile17342(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "allow")
-	if err := os.WriteFile(p, []byte("# comment\nJustAName\n"), 0o644); err != nil {
+	body := "# comment\n\npkg/a.FooForTest\tkept for pkg/b tests\n" +
+		"pkg/a.BarForTest\n" + // no reason
+		"pkg/a.BazForTest\t \n" + // blank reason
+		"pkg/a.FooForTest\tagain\n" // duplicate
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	_, problems, err := readAllow(p)
-	if err != nil || len(problems) != 1 || !strings.Contains(problems[0], "want <hook id>") {
-		t.Errorf("a malformed baseline row: problems=%v err=%v, want one refusal", problems, err)
+	rows, problems, err := readAllow(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows["pkg/a.FooForTest"] != "kept for pkg/b tests" {
+		t.Errorf("rows = %v, want only pkg/a.FooForTest with its first reason", rows)
+	}
+	want := []string{":4: want <seam id>", ":5: want <seam id>", ":6: duplicate row for pkg/a.FooForTest"}
+	if len(problems) != len(want) {
+		t.Fatalf("got %d problem(s), want %d:\n  %s", len(problems), len(want), strings.Join(problems, "\n  "))
+	}
+	for i, w := range want {
+		if !strings.Contains(problems[i], w) {
+			t.Errorf("problem %d = %q, want it to contain %q", i, problems[i], w)
+		}
 	}
 }
