@@ -329,19 +329,24 @@ switch (`Restart=on-failure` loops the exit) while it impersonated the
 management server. The client half of the same fix is in `pkg/authz`'s
 `client.go`: the remote `cli` and `pkg/upgrade` verify at dial time that
 a loopback server is owned by uid 0 (#14982) before writing any RPC, so
-a squatter is never handed `set`/`load` payloads.
-
-The server half of a connection the client has just dialed can still be
-in `TCP_SYN_RECV`. `connect()` returns before the server's kernel has
-processed the final ACK, and on a loaded box a gate saw the CLI refuse
-the real xpfd ("peer socket is in TCP state 3", #19125). So for that one
-state only, the client re-reads the table on a bounded backoff (about
-1 s, within the dial's context), then applies the unchanged checks
-(ESTABLISHED, uid 0). A SYN_RECV row is never attributed. Every other
-non-established state, TIME_WAIT's uid-0 mini-socket included, is still
-refused at once, and the server-side #5278 attribution never waits. Separately, both sshd
+a squatter is never handed `set`/`load` payloads. Separately, both sshd
 drop-ins (image factory and daemon-managed) set `DisableForwarding yes`,
 closing the `ssh -R` squat path for login accounts.
+
+The server half of a connection the client has just dialed can still be
+in `TCP_SYN_RECV`: `connect()` may return before the server's kernel has
+processed the final ACK, and on a loaded box a gate saw the CLI refuse
+the real xpfd ("peer socket is in TCP state 3", #19125).
+- For that one state only, the client re-reads the table on a bounded
+  backoff, then applies the unchanged checks (ESTABLISHED, uid 0).
+- The whole verification, every table lookup and every sleep, runs under
+  one deadline: the earlier of the dial's deadline and now + 1 s. Each
+  lookup is abandoned at that deadline, and a result that arrives after
+  it is never used.
+- A SYN_RECV row is never attributed. Every other non-established state,
+  TIME_WAIT's uid-0 mini-socket included, is still refused at once.
+- The server-side #5278 attribution never waits, and the shared
+  socket-table batcher is unchanged.
 
 **What this does NOT close.** The mixed-version window. A supervisor that
 ignores the exit code can still start a second daemon, and nothing here helps a
