@@ -777,6 +777,9 @@ make build-userspace-dp
 # Run unit tests — Go suite AND Rust userspace-dp cargo suite (#4006).
 # A Rust dataplane regression fails `make test`. `make test-go` /
 # `make test-rust` run one leg; the Rust leg needs cargo (~minutes).
+# test-rust's release leg runs with --no-fail-fast (#19133), so every
+# userspace-dp test target reports, not just the first red one
+# (`make test-rust-leg1-lib` pins it).
 make test
 
 # Deploy to Incus VM
