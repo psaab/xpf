@@ -43,10 +43,21 @@
 # relative order is NOT preserved.
 #
 # The sync copies tracked plus untracked-but-not-ignored files of the current
-# worktree (uncommitted edits included), preserving mtimes so cargo and go
-# keep their incremental state. Files deleted locally are deleted on the
-# runner too: the source tree is replaced on every sync, the target dir is
+# worktree (uncommitted edits included). Files deleted locally are deleted on
+# the runner too: the source tree is replaced on every sync, the target dir is
 # not. No .git is copied; GOFLAGS gets -buildvcs=false.
+#
+# Source mtimes (#19134): cargo decides a crate is fresh by comparing source
+# mtimes with its artefacts, and the target dir outlives every sync. A tree
+# whose files carry OLDER mtimes than the lane's last build (another worktree,
+# an older commit) therefore re-tested the previous binary. So the sync does
+# not keep the workstation's mtimes. A per-lane ledger
+# (/work/<name>/.xpf-src-ledger.json) records each path's content hash and the
+# time the lane first saw that content. A file whose content the ledger knows
+# gets that time back, so an unchanged tree keeps its incremental build. A new
+# or changed file, or one the previous run modified on the runner, gets the
+# sync time, which is newer than every artefact. A lane with a build but no
+# ledger restamps everything once.
 #
 # The command runs via `bash -lc` in /work/<name>/src with
 # CARGO_TARGET_DIR=/work/<name>/target, TMPDIR=/work/<name>/tmp and
@@ -117,10 +128,85 @@ if [[ "$(incus exec "$runner" -- systemd-detect-virt --vm 2>/dev/null || true)" 
 	exit 2
 fi
 
+# #19134: restamp the synced tree from the lane's content ledger (see "Source
+# mtimes" above), then swap it in for the previous tree. Runs on the runner as
+# `runner`: python3 -I - <base>.
+restamp_py=$(
+	cat <<'PY'
+import hashlib, json, os, shutil, sys, time
+
+base = sys.argv[1]
+src, new = os.path.join(base, "src"), os.path.join(base, "src.new")
+ledger_path = os.path.join(base, ".xpf-src-ledger.json")
+target = os.path.join(base, "target")
+
+
+def files(root):
+    for top, _dirs, names in os.walk(root):
+        for name in names:
+            path = os.path.join(top, name)
+            if os.path.isfile(path) and not os.path.islink(path):
+                yield os.path.relpath(path, root), path
+
+
+def digest(path):
+    h = hashlib.blake2b(digest_size=16)
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+try:
+    with open(ledger_path, encoding="utf-8") as handle:
+        ledger = json.load(handle)
+    if not isinstance(ledger, dict):
+        ledger = None
+except (OSError, ValueError):
+    ledger = None
+if ledger is None:
+    # No record of what the target dir was built from: trust nothing in it.
+    ledger = {}
+# A file the previous run changed on the runner (a mutant, a regenerated
+# file) may be what the target was built from: its synced content gets a new
+# stamp even when it matches the ledger.
+dirty = set()
+if os.path.isdir(src):
+    for rel, path in files(src):
+        entry = ledger.get(rel)
+        if entry is None or entry[0] != digest(path):
+            dirty.add(rel)
+now = time.time()
+fresh, stamped = {}, 0
+for rel, path in files(new):
+    h = digest(path)
+    entry = ledger.get(rel)
+    if entry is not None and entry[0] == h and rel not in dirty:
+        stamp = entry[1]
+    else:
+        stamp, stamped = now, stamped + 1
+    os.utime(path, (stamp, stamp))
+    fresh[rel] = [h, stamp]
+tmp = ledger_path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as handle:
+    json.dump(fresh, handle)
+os.replace(tmp, ledger_path)
+if os.path.lexists(src):
+    shutil.rmtree(src)
+os.rename(new, src)
+built = os.path.isdir(target) and any(os.scandir(target))
+print(f"vm-test-run: {stamped} of {len(fresh)} synced files new or changed for this lane"
+      f"{' (target dir present)' if built else ''}; stamped with the sync time", file=sys.stderr)
+PY
+)
 if [[ "$sync" -eq 1 ]]; then
-	incus exec "$runner" -- bash -c "rm -rf '${base}/src' && mkdir -p '${base}/src' '${base}/target' '${base}/tmp' && chown -R runner:runner '${base}'"
+	incus exec "$runner" -- bash -c "rm -rf '${base}/src.new' && mkdir -p '${base}/src.new' '${base}/target' '${base}/tmp' && chown -R runner:runner '${base}'"
 	(cd "$top" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) |
-		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src'"
+		incus exec "$runner" -- su runner -c "tar -xf - -C '${base}/src.new'"
+	if ! printf '%s\n' "$restamp_py" | incus exec "$runner" -- su runner -c "python3 -I - '${base}'"; then
+		echo "vm-test-run: could not restamp the synced tree on ${runner} (#19134); refusing rather than risk testing a stale build" >&2
+		exit 2
+	fi
 	# testguard-run.sh runs Go tests in a private network namespace with no
 	# network, so a cold module cache fails there as "setup failed". Fetch the
 	# modules first, outside the guard. With a warm cache this is quick and

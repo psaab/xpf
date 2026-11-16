@@ -605,6 +605,12 @@ run_bash scripts/next-deb-version-selftest.sh
 # command exits; a control proves it reorders, a mutation cell proves the order
 # cell can fail. Needs bash and git.
 run_bash scripts/vm-test-run-selftest.sh
+# #19134: a reused vm-test-run.sh lane must not re-test the previous cargo
+# binary. Real cargo on a one-file crate under a mock incus: an older-mtime
+# tree, a runner-side edit, an unbuilt middle sync and a lost ledger all
+# recompile, an unchanged re-sync does not; a control proves the cargo trap is
+# real and a mutation drops the dirty-file check. SKIPs without cargo.
+run_bash scripts/vm-test-run-sync-selftest.sh
 # #8302: the harness result ledger. Hermetic -- fixtures only, no cluster.
 #
 # harness-result-selftest.sh drives the whole adapter table, whose reason for

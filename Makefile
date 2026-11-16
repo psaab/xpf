@@ -1132,6 +1132,12 @@ test-clean-shared-cargo-lib:
 test-vm-test-run-lib:
 	bash ./scripts/vm-test-run-selftest.sh
 
+# #19134: a reused vm-test-run.sh lane never re-tests the previous cargo
+# binary (content-ledger restamp; real cargo, mock incus). Needs cargo.
+.PHONY: test-vm-test-run-sync-lib
+test-vm-test-run-sync-lib:
+	bash ./scripts/vm-test-run-sync-selftest.sh
+
 # Legacy standalone test environment management (single Incus VM/container).
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
