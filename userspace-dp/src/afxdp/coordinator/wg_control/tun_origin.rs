@@ -12,7 +12,8 @@
 //!
 //! - shared-only publish: no `worker_commands` UpsertLocal prewarm. WG threads
 //!   spawn ungated (unlike GRE's), so the queue set is empty at spawn; the
-//!   first reply installs via reactive `materialize_shared_session_hit`.
+//!   first reply installs via the reactive shared-hit materialize
+//!   (`session_glue::apply_deferred_shared_materialization`).
 //! - publish AFTER encap, gated on `EncapOutcome::Sent`: a session for a packet
 //!   that never left (MTU drop, NoSession handshake request, encap/send
 //!   failure) would admit replies with no causally-prior outbound packet.

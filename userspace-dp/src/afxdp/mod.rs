@@ -852,6 +852,11 @@ mod tests_late_synced_publish_18550;
 #[cfg(test)]
 #[path = "tests_promote_permit_18552.rs"]
 mod tests_promote_permit_18552;
+// #19153 fold 3: a translated fabric packet resolved through a lagging shared
+// wire alias is captured as the current canonical row and never dropped.
+#[cfg(test)]
+#[path = "tests_wire_alias_lag_19153.rs"]
+mod tests_wire_alias_lag_19153;
 
 // #18722: the opening-replica GC retention reads the shared row's
 // ct-slice-restamped counts as its recency proof.

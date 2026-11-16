@@ -9023,8 +9023,9 @@ fn untracked_allocation_still_frees_on_first_release_6211_f2() {
 // owning worker is still forwarding through — mid-flow pool-port reuse.
 //
 // The second reaching path needs no reserve at all:
-// `session_glue::materialize_shared_session_hit` installs a `WorkerLocalImport`
-// replica on a worker off the SHARED map WITHOUT reserving, and
+// the shared-hit materialize (`session_glue::materialize_current_shared_under_permit`)
+// installs a `WorkerLocalImport` replica on a worker off the SHARED map WITHOUT
+// reserving, and
 // `reap_expired_sessions` then releases for it unconditionally — a worker that
 // never held the allocation freeing it outright.
 //
@@ -9174,7 +9175,7 @@ fn local_allocation_frees_when_the_owning_worker_reaps_6522() {
     );
 }
 
-// #6522 the tight property, and the `materialize_shared_session_hit` path: a
+// #6522 the tight property, and the shared-hit materialize path: a
 // worker that NEVER reserved must not free another worker's allocation. That
 // path installs a `WorkerLocalImport` replica off the shared map without
 // reserving, and `reap_expired_sessions` releases for every expired entry with

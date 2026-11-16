@@ -11214,7 +11214,8 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
 
 // #6313 RED-on-revert: a reverse-direction packet whose 5-tuple hits a
 // peer-synced entry in the SHARED session map is materialized into this
-// worker's local table by `materialize_shared_session_hit`, and that
+// worker's local table by the shared-hit materialize
+// (`apply_deferred_shared_materialization`), and that
 // materialize must ADOPT the shared replica's stable session id rather than
 // mint a fresh node-local one (#5212). The reverse companion of a synced
 // session carries the SAME RT_FLOW correlation id as its forward half, so a
@@ -11224,8 +11225,9 @@ fn synced_session_hit_recomputes_local_resolution_after_failover() {
 //
 // The wire-level adoption in `upsert_synced_with_origin` is covered by
 // `synced_import_adopts_peer_session_id_5212` (session/tests.rs); this test
-// covers the session_glue CALLER — reverting the `session_id: replica.session_id`
-// argument in `materialize_shared_session_hit` back to `session_id: 0` makes
+// covers the session_glue CALLER — reverting the replica's session id in the
+// install `materialize_current_shared_under_permit` builds
+// (`into_session_install`) back to `session_id: 0` makes
 // the install fall through to `alloc_session_id()` and reddens the first
 // assertion below. The local table is pinned to worker 4 and the peer id is
 // minted in worker 9's namespace so a fresh local alloc can never coincide
@@ -11334,7 +11336,7 @@ fn reverse_materialized_shared_hit_adopts_replica_session_id_6313() {
     }
 
     // THE PROPERTY (#6313): the reverse-materialized entry carries the
-    // replica's id verbatim. Reverting `materialize_shared_session_hit` to
+    // replica's id verbatim. Reverting the materialize core's install to
     // `session_id: 0` reds here with a worker-4 local alloc.
     assert_eq!(
         sessions.session_id_for(&reverse),
@@ -12418,8 +12420,10 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
 /// installed an entry and every packet re-took the slow path.
 /// The non-adopted control keeps the #10582 refusal.
 ///
-/// FAIL-ON-REVERT: pass `false` in place of `fabric_adopted` to
-/// `materialize_shared_session_hit_adopted` and the adopted leg
+/// FAIL-ON-REVERT: pass `false` in place of `fabric_adopted` where
+/// `materialize_current_shared_under_permit` derives
+/// `allow_replace_local` (this cell reaches it through the test-only
+/// `materialize_shared_session_hit_adopted`) and the adopted leg
 /// returns `install_failed=true` with the incumbent intact.
 #[test]
 fn adopted_materialize_replaces_local_incumbent_16217() {

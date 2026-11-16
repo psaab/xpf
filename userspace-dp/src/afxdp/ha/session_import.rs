@@ -1569,9 +1569,11 @@ impl crate::afxdp::ha::SessionDomain {
         // #6600: RESERVE THE TRANSLATED NAT PORT BEFORE PUBLISHING.
         //
         // The publish below makes the entry visible on every packet-path lookup
-        // surface at once (`synced`, `nat`, `forward_wire`), and
-        // `materialize_shared_session_hit` forwards on `replica.decision`
-        // — including `decision.nat` — without reserving anything. The
+        // surface at once (`synced`, `nat`, `forward_wire`), and the
+        // shared-hit materialize (`apply_deferred_shared_materialization`,
+        // its core `materialize_current_shared_under_permit`) forwards on the
+        // shared row's decision — including `decision.nat` — without
+        // reserving anything. The
         // reservation used to happen ONLY inside the worker-local upsert, which
         // is driven by a command enqueued AFTER this publish; a worker that
         // sampled an empty queue just before that push proceeds straight into
@@ -1753,7 +1755,8 @@ impl crate::afxdp::ha::SessionDomain {
         // demotion an old-peer's resend would otherwise overwrite shared
         // authority with zeros and materialization would forward on the
         // default table. The worker-local preserve repairs only worker
-        // tables; this is the copy `materialize_shared_session_hit`
+        // tables; this is the copy the shared-hit materialize
+        // (`materialize_current_shared_under_permit`) installs and
         // forwards on. Same incarnation rule as the worker twin (0 =
         // unknown, never a real id — local publishes carry 0).
         if entry.decision.install_table_domain == 0 && entry.decision.install_table_check == 0 {
