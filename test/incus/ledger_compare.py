@@ -105,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import date, datetime, timezone
+import hashlib
 import json
 import re
 
@@ -148,6 +149,24 @@ REQUIRED_KEYS = (
     "build_git_sha",
     "exe_check",
 )
+
+#: #19126: rows committed WITHOUT ``exe_check``, although REQUIRED_KEYS has
+#: required it, and run-selftests.sh has linted for it, since b3f5b06807
+#: (2026-09-02). These three are hand-written parent-judged FAIL rows from
+#: 2026-11-04 (deb_version null): the binary they judged was never checked, so
+#: no exe_check value can be recorded for them without fabricating one. Each is
+#: exempt from THAT ONE key, and only while its content is exactly the content
+#: committed then: the value is the sha256 of the row's canonical JSON
+#: (``_canonical``). A new row, an edited row, or another row reusing one of
+#: these run_ids still fails. Never add to this list to make a new row pass.
+EXE_CHECK_GRANDFATHERED: Dict[str, str] = {
+    # ae181ba784 test: record #18949 final cluster gate ledger rows (#18881)
+    "18949parentjudged1": "942c2fd13895fb04ddeeeedf85236e4d482e7a972a94e32918bf7cbd6b17640d",
+    # dd5576e664 test: record #18967 final loss gate ledger rows (#17244)
+    "18967parentjudged1": "34418dd53a222dbea87e31e7f6deb3fcad3b4818a09c138fc517e0c130eef854",
+    # 9c5ac2b5de test: record #18970 loss cluster gate ledger rows (#18964)
+    "18970parentjudged1": "bac5b59bd42a2ab66dfe7c8ffdf257be61d28766ff12efaa2ce2580bff69459f",
+}
 
 # Outcomes.
 REGRESSION = "REGRESSION"
@@ -299,15 +318,16 @@ def lint_row(row: object, lineno: int) -> List[str]:
     errs: List[str] = []
     if not isinstance(row, dict):
         return [f"line {lineno}: not a JSON object"]
+    grandfathered = _exe_check_grandfathered(row)
     for k in REQUIRED_KEYS:
-        if k not in row:
+        if k not in row and not (k == "exe_check" and grandfathered):
             errs.append(f"line {lineno}: missing required key {k!r}")
     if errs:
         return errs
     verdict = row["verdict"]
     if verdict not in VERDICTS:
         errs.append(f"line {lineno}: verdict {verdict!r} is not one of {VERDICTS}")
-    if row["exe_check"] not in EXE_CHECKS:
+    if not grandfathered and row["exe_check"] not in EXE_CHECKS:
         errs.append(f"line {lineno}: exe_check {row['exe_check']!r} is not one of {EXE_CHECKS}")
     measurement_scope = row.get("measurement_scope")
     if measurement_scope is not None and measurement_scope not in MEASUREMENT_SCOPES:
@@ -320,7 +340,7 @@ def lint_row(row: object, lineno: int) -> List[str]:
         errs.append(f"line {lineno}: VOID row with an empty void_reason")
     if verdict in ("PASS", "FAIL") and reason:
         errs.append(f"line {lineno}: {verdict} row carries a void_reason {reason!r}")
-    if verdict in ("PASS", "FAIL") and row["exe_check"] in ("MISMATCH", "UNAVAILABLE"):
+    if verdict in ("PASS", "FAIL") and row.get("exe_check") in ("MISMATCH", "UNAVAILABLE"):
         errs.append(
             f"line {lineno}: {verdict} row with exe_check={row['exe_check']} — a "
             "measurement of a binary that cannot be named is a VOID (#2176)"
@@ -351,6 +371,15 @@ def lint_row(row: object, lineno: int) -> List[str]:
 
 def _canonical(row: Dict) -> str:
     return json.dumps(row, sort_keys=True, separators=(",", ":"))
+
+
+def _exe_check_grandfathered(row: Dict) -> bool:
+    """#19126: the row lacks ``exe_check`` and is, byte for byte, one of the
+    rows EXE_CHECK_GRANDFATHERED names."""
+    if "exe_check" in row:
+        return False
+    want = EXE_CHECK_GRANDFATHERED.get(row.get("run_id"))
+    return want is not None and hashlib.sha256(_canonical(row).encode()).hexdigest() == want
 
 
 def lint_ledger(text: str) -> List[str]:

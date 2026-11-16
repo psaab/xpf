@@ -284,6 +284,19 @@ non-numeric metric value; an empty gate or env.
 A gate that cannot say which of the three it is writes nothing, and an absent
 row is visibly absent to the comparator — whereas a defaulted row is not.
 
+**Three grandfathered rows (#19126).** `ledger-lint` applies the same contract
+at read time. Three hand-written parent-judged FAIL rows were committed on
+2026-11-04 without `exe_check`: `18949parentjudged1`, `18967parentjudged1`,
+`18970parentjudged1`. The key has been required since b3f5b06807
+(2026-09-02), not since #18977 as #19126 first said. The binary those rows
+judged was never checked, so no value can be recorded for them without
+fabricating one. `EXE_CHECK_GRANDFATHERED` in `ledger_compare.py` exempts each
+from THAT ONE key, and only while the row is byte-for-byte the committed row
+(sha256 of its canonical JSON). A new row, an edited row, or another row
+reusing one of these `run_id`s still fails. Never add to the list to make a
+new row pass. `ledger_compare_test.ExeCheckGrandfather19126` pins this, with
+mutants for a blanket exemption and for no exemption.
+
 ## Reading a comparison
 
 ```
