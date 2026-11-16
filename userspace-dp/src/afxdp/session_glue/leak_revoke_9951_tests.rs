@@ -649,7 +649,9 @@ fn peer_shared_materialize_promote_rechecks_removed_leak_9951() {
     protocol: PROTO_TCP,
     tcp_flags: 0x10,
     generation: 0,
-    session_id: 0,
+    // #18552 fold 3: a current-version peer's non-zero id. A zero-id row is
+    // never promoted, and this cell's subject is what promotion carries.
+    session_id: 0x1855_2101,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
             persistent_lease_hold: None,
     source_nat_static: None, };
@@ -1465,7 +1467,9 @@ fn shared_materialize_recomputes_ri_reverse_leak_stamp_10312() {
     protocol: PROTO_TCP,
     tcp_flags: 0x10,
     generation: 0,
-    session_id: 0,
+    // #18552 fold 3: a current-version peer's non-zero id. A zero-id row is
+    // never promoted, and this cell's subject is what promotion carries.
+    session_id: 0x1855_2101,
     tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
             persistent_lease_hold: None,
     source_nat_static: None, };
