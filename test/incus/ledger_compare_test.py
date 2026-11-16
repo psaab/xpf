@@ -1364,5 +1364,101 @@ class CoverageCensus(unittest.TestCase):
         self.assertEqual(rc3, 2)
 
 
+# #19126: three tracked rows lack exe_check. They are exempt from that one key,
+# and only while their content is exactly what was committed; anything else
+# missing the key still fails, and a mutated exemption must be caught.
+_LEDGER_D = pathlib.Path(__file__).resolve().parent.parent / "results" / LEDGER_DIR_NAME
+_SOURCE = pathlib.Path(__file__).resolve().parent / "ledger_compare.py"
+_MISSING = "line 1: missing required key 'exe_check'"
+
+
+# The three rows exactly as committed (one line each), so this class also runs
+# where the tracked ledger is not reachable (harness-ledger-mutation-selftest.sh
+# copies only the module and this file into a sandbox).
+_GRANDFATHERED_TEXT = {
+    '18949parentjudged1': (
+        '{"schema":2,"run_id":"18949parentjudged1","ts":"2026-11-04T11:20:00.000Z","gate":"pr18949-loss-throughput","env":"loss-userspace-cluster","verdict":"FAIL","void_reason":"","headline_metric":"single_v6_reverse_pr_retransmits","headline_direction":"lower-better","metrics":{"single_v6_reverse_baseline_retransmits":201,"single_v6_reverse_pr_retransmits":222,"single_v6_reverse_control_retransmits":93,"multi_v4_baseline_receiver_median_bps":19307558827,"multi_v4_pr_receiver_median_bps":19059605725,"multi_v4_pr_percent_of_baseline":98.72,"multi_v4_pr_retransmits":12093,"multi_v4_control_retransmits":12107,"multi_v6_baseline_receiver_median_bps":17916905410,"multi_v6_pr_receiver_median_bps":19963450620,"multi_v6_pr_percent_of_baseline":111.42,"multi_v6_pr_retransmits":12012,"multi_v6_control_retransmits":14554},"build_git_sha":"763d231ad8c99521c9665a231ac5d29266cc756d","parent_note":"compare-gate.sh computed verdict=FAIL then aborted on ids[0] unbound at line 140 before writing its row; parent recorded the identical metrics here so the FAIL is in the tracked ledger (never deleted, 6.8)."}'
+    ),
+    '18967parentjudged1': (
+        '{"schema":2,"run_id":"18967parentjudged1","ts":"2026-11-04T19:05:00.000Z","gate":"pr18967-loss-throughput","env":"loss-userspace-cluster","verdict":"FAIL","void_reason":"","headline_metric":"multi_v4_pr_retransmits","headline_direction":"lower-better","metrics":{"multi_v4_baseline_receiver_median_bps":19206953853,"multi_v4_pr_receiver_median_bps":19618385185,"multi_v4_pr_percent_of_baseline":102.14,"multi_v4_pr_retransmits":10702,"multi_v4_control_retransmits":9913,"multi_v6_baseline_receiver_median_bps":20375822416,"multi_v6_pr_receiver_median_bps":18706434820,"multi_v6_pr_percent_of_baseline":91.81,"multi_v6_pr_retransmits":17689,"multi_v6_control_retransmits":17019},"build_git_sha":"8b9748517696489fdebcf9aed40c4c0ef520ddb5","parent_note":"compare-gate.sh computed verdict=FAIL then aborted on ids[0] unbound at line 140 (#18977) before writing its row; parent recorded the identical metrics here (never deleted, 6.8)."}'
+    ),
+    '18970parentjudged1': (
+        '{"schema":2,"run_id":"18970parentjudged1","ts":"2026-11-04T20:10:00.000Z","gate":"pr18970-loss-throughput","env":"loss-userspace-cluster","verdict":"FAIL","void_reason":"","headline_metric":"multi_v6_pr_receiver_median_bps","headline_direction":"higher-better","metrics":{"multi_v4_baseline_receiver_median_bps":19276058127,"multi_v4_pr_receiver_median_bps":20112544055,"multi_v4_pr_percent_of_baseline":104.34,"multi_v4_pr_retransmits":9701,"multi_v4_control_retransmits":9265,"multi_v6_baseline_receiver_median_bps":20285108718,"multi_v6_pr_receiver_median_bps":17564970484,"multi_v6_pr_percent_of_baseline":86.59,"multi_v6_pr_retransmits":24806,"multi_v6_control_retransmits":11902},"build_git_sha":"709016eca4e5e5fba545460e92b46c193faedb98","parent_note":"compare-gate.sh computed verdict=FAIL then aborted on ids[0] (#18977); parent recorded identical metrics (never deleted, 6.8)."}'
+    ),
+}
+
+
+def _grandfathered_row(run_id):
+    return json.loads(_GRANDFATHERED_TEXT[run_id])
+
+
+def _mutant_lint_row(anchor, replacement):
+    """lint_row from the module source with ONE exact replacement."""
+    source = _SOURCE.read_text(encoding="utf-8")
+    if source.count(anchor) != 1:
+        raise AssertionError(f"mutant anchor occurs {source.count(anchor)} times: {anchor!r}")
+    namespace = {"__name__": "ledger_compare_mutant_19126"}
+    exec(compile(source.replace(anchor, replacement), str(_SOURCE), "exec"), namespace)
+    return namespace["lint_row"]
+
+
+class ExeCheckGrandfather19126(unittest.TestCase):
+    NAMES = ("18949parentjudged1", "18967parentjudged1", "18970parentjudged1")
+
+    def test_the_named_rows_lint_clean_without_an_exe_check(self):
+        for name in self.NAMES:
+            with self.subTest(row=name):
+                row = _grandfathered_row(name)
+                self.assertNotIn("exe_check", row, "never fabricate one for these rows")
+                self.assertEqual(lint_row(row, 1), [])
+
+    def test_the_fixtures_are_the_tracked_rows(self):
+        if not _LEDGER_D.is_dir():
+            self.skipTest("the tracked ledger is not reachable from here (a sandboxed copy)")
+        for name in self.NAMES:
+            with self.subTest(row=name):
+                tracked = (_LEDGER_D / f"{name}.json").read_text(encoding="utf-8")
+                self.assertEqual(tracked, _GRANDFATHERED_TEXT[name] + "\n")
+
+    def test_parse_ledger_accepts_them(self):
+        text = "\n".join(json.dumps(_grandfathered_row(name)) for name in self.NAMES) + "\n"
+        self.assertEqual([r["run_id"] for r in parse_ledger(text)], list(self.NAMES))
+
+    def new_row(self):
+        row = _grandfathered_row("18949parentjudged1")
+        row["run_id"] = "19126newrowwithoutexecheck"
+        return row
+
+    def test_a_new_row_missing_exe_check_still_fails(self):
+        self.assertIn(_MISSING, lint_row(self.new_row(), 1))
+
+    def test_an_edited_grandfathered_row_loses_its_exemption(self):
+        row = _grandfathered_row("18967parentjudged1")
+        row["ts"] = "2026-11-16T00:00:00.000Z"
+        self.assertIn(_MISSING, lint_row(row, 1))
+
+    def test_another_row_reusing_a_grandfathered_run_id_fails(self):
+        row = _grandfathered_row("18970parentjudged1")
+        row["run_id"] = "18949parentjudged1"
+        self.assertIn(_MISSING, lint_row(row, 1))
+
+    def test_mutant_exempting_every_row_without_exe_check_passes_a_new_row(self):
+        mutant = _mutant_lint_row(
+            "    want = EXE_CHECK_GRANDFATHERED.get(row.get(\"run_id\"))\n"
+            "    return want is not None and hashlib.sha256(_canonical(row).encode()).hexdigest() == want\n",
+            "    return True\n",
+        )
+        self.assertEqual(mutant(self.new_row(), 1), [], "the mutant must flip the new-row cell")
+
+    def test_mutant_without_the_exemption_fails_the_named_rows(self):
+        mutant = _mutant_lint_row(
+            "    grandfathered = _exe_check_grandfathered(row)\n",
+            "    grandfathered = False\n",
+        )
+        for name in self.NAMES:
+            with self.subTest(row=name):
+                self.assertIn(_MISSING, mutant(_grandfathered_row(name), 1))
+
+
 if __name__ == "__main__":
     unittest.main()
