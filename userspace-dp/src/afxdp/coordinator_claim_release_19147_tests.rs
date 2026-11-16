@@ -640,9 +640,13 @@ fn pct_19147(sorted: &[u64], p: f64) -> u64 {
 /// threads time their own shared-lock acquisitions, standing in for the new-flow
 /// publishes that contend on that lock.
 /// - **CLAIMED:** every entry carries a coordinator claim (the standby's HA
-///   import, or the new primary's activation). The release BPF-deletes its
-///   rows inside the lock.
+///   import, or the new primary's activation). The release does its
+///   bookkeeping inside the lock and BPF-deletes its rows after it.
 /// - **UNCLAIMED:** no claim, so the release is a holdings lookup.
+///
+/// `lock_hold_ns` is the remover's own hold of the shared-session lock, from
+/// acquisition to the unlock (`REMOVAL_LOCK_HOLD_NS_19147`). It separates what
+/// the lock costs from the contending threads' scheduling and wake-up.
 #[test]
 #[ignore = "#19147 P3-2 bench (root, real BPF map): cargo test --release --bins coordinator_release_lock_hold_bench -- --ignored --nocapture"]
 fn coordinator_release_lock_hold_bench_19147() {
@@ -730,6 +734,8 @@ fn coordinator_release_lock_hold_bench_19147() {
             })
             .collect();
         let mut holds = Vec::with_capacity(entries.len());
+        crate::afxdp::shared_ops::REMOVAL_LOCK_HOLD_NS_19147
+            .with(|h| *h.borrow_mut() = Some(Vec::with_capacity(entries.len())));
         let burst = std::time::Instant::now();
         for entry in &entries {
             let started = std::time::Instant::now();
@@ -743,6 +749,10 @@ fn coordinator_release_lock_hold_bench_19147() {
             holds.push(started.elapsed().as_nanos() as u64);
         }
         let burst_us = burst.elapsed().as_micros();
+        let mut lock_holds = crate::afxdp::shared_ops::REMOVAL_LOCK_HOLD_NS_19147
+            .with(|h| h.borrow_mut().take())
+            .expect("BENCH: the hold instrument was armed");
+        lock_holds.sort_unstable();
         stop.store(true, AtOrd::Relaxed);
         let mut waits: Vec<u64> = workers
             .into_iter()
@@ -761,6 +771,14 @@ fn coordinator_release_lock_hold_bench_19147() {
             pct_19147(&waits, 0.99),
             pct_19147(&waits, 0.999),
             waits.last().copied().unwrap_or(0),
+        );
+        eprintln!(
+            "BENCH19147HOLD round={round} arm={arm} lock_hold_ns n={} p50={} p99={} p999={} max={}",
+            lock_holds.len(),
+            pct_19147(&lock_holds, 0.5),
+            pct_19147(&lock_holds, 0.99),
+            pct_19147(&lock_holds, 0.999),
+            lock_holds.last().copied().unwrap_or(0),
         );
     }
 }

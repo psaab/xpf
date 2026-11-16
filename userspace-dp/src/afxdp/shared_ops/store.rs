@@ -739,6 +739,10 @@ std::thread_local! {
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
     /// #19147 (review, seat r23 P3-2): test-only seam AFTER the shared lock
     /// is released and BEFORE the deferred BPF ops are committed.
+    /// #19147 bench instrument: when `Some`, each removal on this thread that
+    /// reaches the unlock records how long it HELD the shared-session lock.
+    pub(in crate::afxdp) static REMOVAL_LOCK_HOLD_NS_19147:
+        std::cell::RefCell<Option<Vec<u64>>> = const { std::cell::RefCell::new(None) };
     pub(in crate::afxdp) static BETWEEN_UNLOCK_AND_COMMIT_19147:
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
@@ -831,6 +835,8 @@ pub(in crate::afxdp) fn remove_shared_session_if(
     // skipped (leaving a stale entry that would mis-route after failover)
     // because a worker panicked under the shared-session lock.
     let mut sessions = lock_shared_recover(shared_sessions);
+    #[cfg(test)]
+    let hold_started_19147 = std::time::Instant::now();
     if let Some(candidate) = sessions.get(key)
         && !accept(candidate)
     {
@@ -1107,6 +1113,12 @@ pub(in crate::afxdp) fn remove_shared_session_if(
     } else {
         None
     };
+    #[cfg(test)]
+    REMOVAL_LOCK_HOLD_NS_19147.with(|holds| {
+        if let Some(holds) = holds.borrow_mut().as_mut() {
+            holds.push(hold_started_19147.elapsed().as_nanos() as u64);
+        }
+    });
     drop(sessions);
     if let Some(deferred) = deferred {
         #[cfg(test)]
