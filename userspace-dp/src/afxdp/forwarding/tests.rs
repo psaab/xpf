@@ -394,9 +394,19 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
     // 0 hits). A direct hit's cached redirect is the serving decision;
     // only fabric-ingress hits (packet already crossed to this node)
     // still re-resolve locally. See the companion reason-level test.
+    //
+    // #19128: the split-RG shape #16220 measured. The redirect is stamped
+    // with the LAN/ingress RG 2, active here, while the WAN egress for
+    // 8.8.8.8 (reth0.80) is RG 1, owned by the peer. With RG 1 also active
+    // here, the fresh HA-enforced resolution is a local active egress and
+    // #18588 (31417f9774) supersedes the redirect by design; the reason-level
+    // test pins that shape as well.
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let ha_state = BTreeMap::from([
+        (1, inactive_ha_runtime(now_secs)),
+        (2, active_ha_runtime(now_secs)),
+    ]);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
 
@@ -405,7 +415,7 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
         &ha_state,
         &dynamic_neighbors,
         now_secs,
-        1,
+        2,
         false,
         IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8)),
         None,
@@ -457,11 +467,21 @@ fn cached_flow_decision_keeps_fabric_redirect_on_non_fabric_ingress_when_local_o
 
 /// #16220: reason-level pin for the owner-active arm split: direct
 /// ingress -> None (valid), fabric ingress -> OwnerActiveRedirect.
+///
+/// #19128: judged in the split-RG shape #16220 measured: the stamp owner is
+/// the LAN/ingress RG 2, active here, and the WAN egress RG 1 for 8.8.8.8 is
+/// the peer's. The last leg pins what #18588 (31417f9774) intends for the
+/// single-RG shape this cell used to build: with the egress RG also active
+/// here, a direct-ingress redirect to a routed destination yields to the
+/// local egress.
 #[test]
 fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let now_secs = monotonic_nanos() / 1_000_000_000;
-    let ha_state = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    let ha_state = BTreeMap::from([
+        (1, inactive_ha_runtime(now_secs)),
+        (2, active_ha_runtime(now_secs)),
+    ]);
     let dynamic_neighbors = Arc::new(ShardedNeighborMap::new());
     let resolution = resolve_fabric_redirect(&state).expect("fabric redirect");
     let target = IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8));
@@ -471,7 +491,7 @@ fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
             &ha_state,
             &dynamic_neighbors,
             now_secs,
-            1,
+            2,
             false,
             target,
             None,
@@ -486,7 +506,7 @@ fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
             &ha_state,
             &dynamic_neighbors,
             now_secs,
-            1,
+            2,
             true,
             target,
             None,
@@ -494,6 +514,23 @@ fn fabric_redirect_owner_active_reason_splits_on_ingress_16220() {
         ),
         Some(CachedDecisionInvalid::OwnerActiveRedirect),
         "fabric-ingress redirect whose owner is now local must re-resolve"
+    );
+    let egress_active_here = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
+    assert_eq!(
+        cached_flow_decision_invalid_reason(
+            &state,
+            &egress_active_here,
+            &dynamic_neighbors,
+            now_secs,
+            1,
+            false,
+            target,
+            None,
+            resolution,
+        ),
+        Some(CachedDecisionInvalid::FabricRedirectDestinationNowLocal),
+        "#18588: a direct-ingress redirect to a routed destination whose fresh \
+         HA-enforced egress is local and active yields to it"
     );
 }
 /// #16222: split-RG fabric-ingress revalidation must judge the cached
