@@ -436,7 +436,8 @@ What is NOT covered (residuals, `docs/log/18552.md` has the detail):
 **Materialize-on-miss vs the commit-time policy-delete batch (#19153).** A
 worker that misses its own table and finds the flow in the shared map
 materializes the shared row into its table
-(`session_glue::materialize_shared_session_hit_adopted`). That is how a node
+(`session_glue::apply_deferred_shared_materialization`, after the Owner
+verdict). That is how a node
 serves a taken-over flow whose replica this worker lacks. An import fans
 `UpsertSynced` replicas out to every worker, so most first packets after a
 takeover are worker synced hits, which #18552 promotes. Materialize is the
@@ -477,26 +478,49 @@ Now the materialize joins the worker install protocol:
   gate keeps it out of the flow cache (`poll_descriptor/mod.rs`,
   `flow_cache_install_failed`), and the next packet resolves and retries. The
   persistent-hold acquire runs after every check, so a refusal changes nothing.
-- **The packet after a change (fold 1, Codex P1).** The packet's resolve,
-  Owner verdict, deferred promotion and deferred forwarding revalidation were
-  all derived from the capture, while the materialize installs current
-  content. The rule: a promotion may publish only content equal to what the
-  worker row holds after the materialize
-  (`apply_deferred_shared_materialization`, `materialize_divergence`). Equal
-  decision and metadata: everything stands. Otherwise the promotion and the
+- **The packet after a change: classify before apply (folds 1-2, Codex P1
+  and P2).** The packet's resolve, Owner verdict, deferred promotion and
+  deferred forwarding revalidation were all derived from the capture, while
+  the materialize installs current content. So under the permit, after the
+  re-read and BEFORE anything is installed, the core compares the current
+  row with the capture (`materialize_current_shared_under_permit` with the
+  capture as `classify_against`, `materialize_divergence`). Compared:
+  - the whole decision (resolution, NAT, routing table);
+  - every metadata field: zones and their vintage, ingress identity, NAT
+    scope, NAT64 reverse, owner RG, fabric ingress, direction, alias
+    provenance, the admitting policy id, session logging, the idle timeout
+    and the policy counter. None is exempt: `policy_counter_idx` feeds the
+    TUN-origin exemption and `policy_counter.is_some()` bypasses the #10612
+    replay fence;
+  - `source_nat_static` (SNAT provenance);
+  - for TCP, the close class and handshake stage, decoded as the install
+    decodes them (a legacy 0 stage is Established);
+  - the leak incarnation (#9951), as the incarnation each row resolves under.
+    A zero stamp carries no provenance and resolves on current forwarding,
+    which is the live incarnation, so the core's own zero-to-live derivation
+    for a peer-synced row, or a sibling's live stamp, equals an unstamped
+    capture; a stamp from a removed leak does not.
+
+  The session id is the identity rule's (`same_synced_incarnation`), checked
+  first. Origin, the HA generation, the publisher's last flags, packet
+  counters and clocks, PPTP call ids and the publisher's lease hold are not
+  compared: nothing in this packet's handling reads them, and normal refreshes
+  rewrite them. Equal: the row is installed with this packet's TCP flags
+  (close state, timeout) and fabric adoption, and every capture-derived
+  effect stands. Different, or the captured incarnation absent or superseded:
+  the current row is installed clean (its own carried flags, no adoption), so
+  a dropped RST or FIN cannot have reset or closed it; the promotion and the
   revalidation are dropped (each would write the capture's content over the
-  installed row), the seed is suppressed, and the next packet resolves the
-  installed row as a worker hit and promotes it. Whether THIS packet is
-  forwarded depends on what differs:
-  - only `log_session_init`, `log_session_close`, `inactivity_timeout_ns`,
-    `policy_counter_idx` or `policy_counter` (logging, idle timeout and
-    hit-counter attribution): it forwards once on the capture's decision;
-  - anything in the decision (resolution, NAT, routing table) or any other
-    metadata field (zones and their vintage, ingress identity, NAT scope,
-    NAT64 reverse, owner RG, fabric ingress, direction, alias provenance,
-    the admitting policy id), or the captured incarnation is absent or
-    superseded in shared: it is dropped (its frame recycled, as the
-    post-verdict input-filter drop does).
+  installed row); and the packet is dropped (its frame recycled, as the
+  post-verdict input-filter drop does). The next packet resolves the
+  installed row as a worker hit and promotes it.
+- **The drop counter.** Every such drop counts in
+  `MATERIALIZE_DIVERGENCE_DROPS`, exported as
+  `ProcessStatus.materialize_divergence_drops` and the Prometheus counter
+  `xpf_userspace_materialize_divergence_drops_total`. A drop needs a shared
+  write inside one packet's capture-to-claim window (microseconds) that
+  changes a compared field, so a normal takeover should leave it at 0; a gate
+  can now check that instead of assuming it.
 - **Cost.** One materialize attempt per flow per worker, unless it is refused,
   in which case the flow's next packet tries again for as long as the cause
   lasts. A held pair costs the non-allocating claim pre-check (lock
@@ -527,17 +551,30 @@ Pinned by:
 - `afxdp/session_glue/materialize_core_19153_tests.rs`: the core's six
   outcomes and the table each leaves; a worker-local #10582 refusal allocates
   nothing (no claim); the identity predicate's table and its #18552 consumer on
-  a NAT-only change.
+  a NAT-only change; and fold 2, v4 and v6: a differing row installs without
+  the packet's RST or FIN (close state and timeout an import's), an equal row
+  takes the FIN, a differing row never takes fabric adoption, and the field
+  table (every authority field drops, every refresh field does not).
+- `afxdp/session_glue/leak_revoke_9951_tests.rs` (L1-L3): on a removed and
+  re-added leak, a current row stamped with the revoked incarnation drops the
+  packet and is not promoted; one stamped with the live incarnation, and the
+  core's zero-to-live derivation with no race at all, are equal.
 - `afxdp/session_glue/shared_replica_hold_17683_tests.rs`: a refused
   materialize takes no persistent hold.
 - `afxdp/tests_promote_permit_18552.rs`: on the real poll pipeline, a refused
   materialize forwards but does not seed the flow cache, and the next packet
   after the lease drops materializes; with no promotion armed, the
   materialize's `install_failed` alone keeps the packet out of the cache; and
-  the capture-replacement matrix (fold 1, zero and non-zero ids): a
-  metadata-only replacement forwards once, an owner-RG or NAT replacement is
-  not forwarded, neither seeds the cache or publishes `SharedPromote`, and the
-  next packet promotes the current row.
+  the capture-replacement matrix (zero and non-zero ids): a logging-only,
+  counter-only, owner-RG, NAT, valid-zone or revoked-leak replacement is not
+  forwarded, publishes no `SharedPromote`, does not seed the cache and counts
+  one drop; an RST or FIN replaced by a valid-zone row leaves that row's close
+  state and idle window exactly as an ACK's clean install does; the next
+  packet promotes the current row; and the control, a FIN on an unchanged
+  row, is forwarded with its close state applied.
+- `protocol/tests.rs` (`process_status_materialize_divergence_drops_roundtrip_19153`),
+  `pkg/dataplane/userspace` (`TestMaterializeDivergenceStatusWire19153`) and
+  `pkg/api` (the #13280 emit cells): the counter's wire key and metric.
 
 Not covered: how often the race fires on a live cluster. Measuring it needs a
 policy commit that invalidates active failed-over flows under load.

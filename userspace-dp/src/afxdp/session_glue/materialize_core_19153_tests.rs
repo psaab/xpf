@@ -17,7 +17,14 @@
 //!   nothing (fold 1, D2);
 //! - the predicate `promote::same_synced_incarnation`, as a table;
 //! - its #18552 consumer (`synced_row_incarnation`) on a NAT-only change
-//!   under the zero-id sentinel.
+//!   under the zero-id sentinel;
+//! - fold 2, classify before apply (v4 and v6): a current row that differs
+//!   from the capture is installed with none of this packet's state (an RST
+//!   or FIN leaves its close state and timeout as an import would set them;
+//!   fabric adoption does not let it replace a local incumbent) and reports
+//!   `Drop`; an equal row takes the packet's FIN as before; and the
+//!   classification table: every authority field drops, every refresh field
+//!   (generation, counters, packet clocks, origin, flags) does not.
 
 use super::materialize_permit_19153_tests::{
     ID_A, ID_B, NOW_NS, Shared, flow_key, peer_row, snat,
@@ -37,19 +44,26 @@ fn core_outcome(
     let permits = global_tuple_gate()
         .try_acquire_installs([captured.key.clone(), companion])
         .expect("premise: the pair is unleased");
-    materialize_current_shared_under_permit(
+    let (outcome, divergence) = materialize_current_shared_under_permit(
         sessions,
         &shared.sessions,
         forwarding,
         &captured.key,
         Some(CapturedIncarnation::of(captured)),
+        None,
         MaterializeInstall {
             now_ns: NOW_NS,
             tcp_flags: crate::tcp_flags::TCP_ACK,
             fabric_adopted: false,
         },
         &permits,
-    )
+    );
+    assert_eq!(
+        divergence,
+        MaterializeDivergence::None,
+        "an identity-only caller classifies nothing"
+    );
+    outcome
 }
 
 fn outcome_name(outcome: &MaterializeOutcome) -> &'static str {
@@ -263,5 +277,332 @@ fn a_local_incumbent_refusal_claims_nothing_19153() {
         allocations, 0,
         "a worker-local #10582 refusal must be judged before the claim, not pay the permit set \
          and the shared re-read on every packet"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #19153 fold 2 (Codex P2-1, the lead's rule): classify BEFORE apply.
+// ---------------------------------------------------------------------------
+
+/// A family twin of the fixture's tuple: v4 is `flow_key`, v6 a documentation
+/// prefix tuple of the cell's own.
+fn family_key(v6: bool, src_port: u16) -> SessionKey {
+    if !v6 {
+        return flow_key(src_port);
+    }
+    SessionKey {
+        addr_family: libc::AF_INET6 as u8,
+        protocol: PROTO_TCP,
+        src_ip: IpAddr::V6("2001:db8:192:2::153".parse().unwrap()),
+        dst_ip: IpAddr::V6("2001:db8:198:51::153".parse().unwrap()),
+        src_port,
+        dst_port: 443,
+        discriminator: Default::default(),
+        routing_domain: 0,
+    }
+}
+
+fn family_snat(v6: bool, port: u16) -> NatDecision {
+    if !v6 {
+        return snat(port);
+    }
+    NatDecision {
+        rewrite_src: Some(IpAddr::V6("2001:db8:203:113::153".parse().unwrap())),
+        rewrite_src_port: Some(port),
+        ..NatDecision::default()
+    }
+}
+
+/// The capture-classifying core, as the poll path's `materialize_capture`
+/// runs it: under permits on the capture's pair, with this packet's flags and
+/// adoption.
+fn core_classified(
+    sessions: &mut SessionTable,
+    shared: &Shared,
+    forwarding: &ForwardingState,
+    captured: &SyncedSessionEntry,
+    tcp_flags: u8,
+    fabric_adopted: bool,
+) -> (MaterializeOutcome, MaterializeDivergence) {
+    let companion = reverse_session_key(&captured.key, captured.decision.nat);
+    let permits = global_tuple_gate()
+        .try_acquire_installs([captured.key.clone(), companion])
+        .expect("premise: the pair is unleased");
+    materialize_current_shared_under_permit(
+        sessions,
+        &shared.sessions,
+        forwarding,
+        &captured.key,
+        Some(CapturedIncarnation::of(captured)),
+        Some(captured),
+        MaterializeInstall {
+            now_ns: NOW_NS,
+            tcp_flags,
+            fabric_adopted,
+        },
+        &permits,
+    )
+}
+
+/// The close state and timeout an HA import (`UpsertSynced`) gives `row`:
+/// its own carried flags, no packet. What a clean install must equal.
+fn imported_close_state(row: &SyncedSessionEntry) -> (bool, bool, bool, bool, u64) {
+    let mut reference = SessionTable::new();
+    let mut install = synced_replica_entry(row).into_session_install(NOW_NS);
+    install.origin = SessionOrigin::SharedMaterialize;
+    assert!(
+        reference.upsert_synced_with_origin(install, false),
+        "premise: the reference import installs"
+    );
+    reference
+        .close_state_for_test(&row.key)
+        .expect("premise: the reference row is live")
+}
+
+/// Codex P2-1. An RST (or FIN) resolved against capture A; before the claim,
+/// shared became B: the same incarnation and translation, open and
+/// established, with a different but valid ingress zone. The core must judge
+/// B against A before installing, then install B with B's own carried flags:
+/// B's close state and timeout are exactly an import's, not reset or closing
+/// by a packet the caller is about to drop. v4 and v6, RST and FIN.
+#[test]
+fn a_differing_row_installs_without_the_packets_rst_or_fin_19153() {
+    let forwarding = zone_validated_forwarding();
+    for v6 in [false, true] {
+        for (name, flags) in [
+            ("RST", crate::tcp_flags::TCP_RST),
+            ("FIN", crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK),
+        ] {
+            let cell = format!("v6={v6} {name}");
+            let shared = Shared::new();
+            let key = family_key(v6, 42_101);
+            let a = peer_row(key.clone(), ID_A, family_snat(v6, 40_101));
+            shared.publish(&a);
+            let captured = shared.capture(&key);
+            let mut b = a.clone();
+            b.metadata.ingress_zone = 2;
+            assert!(
+                forwarding.zone_id_to_name.contains_key(&b.metadata.ingress_zone),
+                "premise ({cell}): B's ingress zone is valid, so the #10612 fence does not fire"
+            );
+            shared.publish(&b);
+            let mut sessions = SessionTable::new();
+
+            let (outcome, divergence) =
+                core_classified(&mut sessions, &shared, &forwarding, &captured, flags, false);
+
+            let installed_zone = match &outcome {
+                MaterializeOutcome::Installed(lookup) => Some(lookup.metadata.ingress_zone),
+                _ => None,
+            };
+            assert_eq!(
+                (outcome_name(&outcome), installed_zone, divergence),
+                ("Installed", Some(2), MaterializeDivergence::Drop),
+                "{cell}: B must be installed (current content) and the packet classified Drop"
+            );
+            let close = sessions.close_state_for_test(&key).expect("B is installed");
+            assert_eq!(
+                (close.0, close.1, close.2),
+                (false, false, false),
+                "{cell}: the dropped packet closed or reset B (closing, reset, fin_own)"
+            );
+            assert_eq!(
+                close,
+                imported_close_state(&b),
+                "{cell}: B's close state and timeout must be exactly what an import of B sets"
+            );
+        }
+    }
+}
+
+/// The equal-path control: the current row is the capture, so the install
+/// takes the packet's FIN exactly as before fold 2 (closing, fin_own, the
+/// close window), and the classification is `None`. v4 and v6.
+#[test]
+fn an_equal_row_installs_with_the_packets_fin_19153() {
+    let forwarding = zone_validated_forwarding();
+    for v6 in [false, true] {
+        let shared = Shared::new();
+        let key = family_key(v6, 42_102);
+        let a = peer_row(key.clone(), ID_A, family_snat(v6, 40_102));
+        shared.publish(&a);
+        let captured = shared.capture(&key);
+        let mut sessions = SessionTable::new();
+
+        let (outcome, divergence) = core_classified(
+            &mut sessions,
+            &shared,
+            &forwarding,
+            &captured,
+            crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK,
+            false,
+        );
+
+        assert_eq!(
+            (outcome_name(&outcome), divergence),
+            ("Installed", MaterializeDivergence::None),
+            "v6={v6}: an unchanged row installs and the packet stands"
+        );
+        let close = sessions.close_state_for_test(&key).expect("A is installed");
+        assert_eq!(
+            (close.0, close.1, close.2),
+            (true, false, true),
+            "v6={v6}: the FIN on an unchanged row must set closing and fin_own, as today"
+        );
+        assert_ne!(
+            close.4,
+            imported_close_state(&a).4,
+            "v6={v6}: the FIN must select the close window, not the established one"
+        );
+    }
+}
+
+/// The other packet-derived install input: #16217 fabric adoption lets the
+/// install replace a local incumbent. The adoption gate judged this packet
+/// against the shared state it read, so a row that differs from the capture
+/// must not get it: the incumbent survives and the packet drops. Control: an
+/// equal row is adopted and replaces it. v4 and v6.
+#[test]
+fn a_differing_row_never_takes_the_packets_fabric_adoption_19153() {
+    let forwarding = zone_validated_forwarding();
+    for v6 in [false, true] {
+        for differs in [true, false] {
+            let cell = format!("v6={v6} differs={differs}");
+            let shared = Shared::new();
+            let key = family_key(v6, 42_103);
+            let a = peer_row(key.clone(), ID_A, family_snat(v6, 40_103));
+            shared.publish(&a);
+            let captured = shared.capture(&key);
+            if differs {
+                let mut b = a.clone();
+                b.metadata.owner_rg_id = 2;
+                shared.publish(&b);
+            }
+            let mut sessions = SessionTable::new();
+            assert!(
+                sessions.install_with_protocol(
+                    key.clone(),
+                    a.decision,
+                    a.metadata.clone(),
+                    NOW_NS,
+                    PROTO_TCP,
+                    crate::tcp_flags::TCP_ACK,
+                ),
+                "premise ({cell}): the local incumbent installs"
+            );
+
+            let (outcome, divergence) = core_classified(
+                &mut sessions,
+                &shared,
+                &forwarding,
+                &captured,
+                crate::tcp_flags::TCP_ACK,
+                true,
+            );
+            let row = sessions.entry_with_origin(&key).map(|(_, _, origin)| origin);
+            if differs {
+                assert_eq!(
+                    (outcome_name(&outcome), divergence, row),
+                    ("InstallRefused", MaterializeDivergence::Drop, Some(SessionOrigin::ForwardFlow)),
+                    "{cell}: the differing row replaced the local incumbent on this packet's adoption"
+                );
+            } else {
+                assert_eq!(
+                    (outcome_name(&outcome), divergence, row),
+                    ("Installed", MaterializeDivergence::None, Some(SessionOrigin::SharedMaterialize)),
+                    "{cell}: control: an equal adopted row must replace the incumbent"
+                );
+            }
+        }
+    }
+}
+
+/// The classification, field by field, on a forwarding view with no route
+/// leak (the live incarnation is 0). Every authority field of the row drops;
+/// every field a normal refresh rewrites (and nothing in this packet's
+/// handling reads) does not. The leak cells with a live leak, including the
+/// zero-to-live derivation, are in `leak_revoke_9951_tests.rs`.
+#[test]
+fn the_classification_compares_authority_not_refresh_state_19153() {
+    let forwarding = zone_validated_forwarding();
+    let key = flow_key(42_104);
+    let mut base = peer_row(key, ID_A, snat(40_104));
+    base.tcp_handshake_state = crate::session::TcpHandshakeState::Established.to_wire();
+    let counter = || Some(Arc::new(crate::policy::PolicyRuleCounter::with_rule_id("19153/rule")));
+    let reverse_info = crate::nat64::Nat64ReverseInfo {
+        orig_src_v6: "2001:db8::1".parse().unwrap(),
+        orig_dst_v6: "64:ff9b::c633:6499".parse().unwrap(),
+    };
+    type Change = Box<dyn Fn(&mut SyncedSessionEntry)>;
+    let drops: Vec<(&str, Change)> = vec![
+        ("nat", Box::new(|row| row.decision.nat.rewrite_src_port = Some(40_204))),
+        ("egress", Box::new(|row| row.decision.resolution.egress_ifindex = 13)),
+        ("next hop", Box::new(|row| row.decision.resolution.next_hop = None)),
+        ("install table", Box::new(|row| row.decision.install_table_domain = 9)),
+        ("ingress zone", Box::new(|row| row.metadata.ingress_zone = 2)),
+        ("egress zone", Box::new(|row| row.metadata.egress_zone = 1)),
+        ("ingress vintage", Box::new(|row| row.metadata.ingress_zone_check = 7)),
+        ("egress vintage", Box::new(|row| row.metadata.egress_zone_check = 7)),
+        ("ingress ifindex", Box::new(|row| row.metadata.ingress_ifindex = 9)),
+        ("ingress vlan", Box::new(|row| row.metadata.ingress_vlan_id = 80)),
+        ("forward ingress vlan", Box::new(|row| row.metadata.forward_ingress_vlan_id = Some(80))),
+        ("nat scope", Box::new(|row| row.metadata.nat_scope_ifindex = Some(12))),
+        ("owner rg", Box::new(|row| row.metadata.owner_rg_id = 2)),
+        ("fabric ingress", Box::new(|row| row.metadata.fabric_ingress = true)),
+        ("direction", Box::new(|row| row.metadata.is_reverse = true)),
+        ("alias provenance", Box::new(|row| row.metadata.forward_wire_alias_origin = true)),
+        ("nat64 reverse", Box::new(move |row| row.metadata.nat64_reverse = Some(reverse_info))),
+        ("log init", Box::new(|row| row.metadata.log_session_init = true)),
+        ("log close", Box::new(|row| row.metadata.log_session_close = true)),
+        ("policy id", Box::new(|row| row.metadata.policy_id = 9)),
+        ("idle timeout", Box::new(|row| row.metadata.inactivity_timeout_ns = Some(1_000))),
+        ("policy counter index", Box::new(|row| row.metadata.policy_counter_idx = 3)),
+        ("policy counter", Box::new(move |row| row.metadata.policy_counter = counter())),
+        ("snat provenance", Box::new(|row| row.source_nat_static = Some(true))),
+        ("close class", Box::new(|row| row.tcp_close_class = crate::session::TcpCloseClass::Reset.to_wire())),
+        (
+            "handshake stage",
+            Box::new(|row| row.tcp_handshake_state = crate::session::TcpHandshakeState::Opening.to_wire()),
+        ),
+        ("revoked leak stamp", Box::new(|row| row.leak_incarnation = 0x1915_3bad)),
+    ];
+    let refreshes: Vec<(&str, Change)> = vec![
+        ("generation", Box::new(|row| row.generation += 5)),
+        ("publisher flags", Box::new(|row| row.tcp_flags = crate::tcp_flags::TCP_FIN)),
+        ("origin", Box::new(|row| row.origin = SessionOrigin::SharedPromote)),
+        ("forward packets", Box::new(|row| row.fwd_packets = 40)),
+        ("reverse packets", Box::new(|row| row.rev_packets = 41)),
+        ("sibling clock", Box::new(|row| row.sibling_last_seen_ns = 42)),
+        ("served clock", Box::new(|row| row.last_served_ns = 43)),
+        ("pptp call ids", Box::new(|row| row.pptp_call_ids = 44)),
+        ("session id (the identity rule's)", Box::new(|row| row.session_id = 0)),
+        ("legacy handshake byte", Box::new(|row| row.tcp_handshake_state = 0)),
+        ("unknown close byte", Box::new(|row| row.tcp_close_class = 0xee)),
+    ];
+    for (expected, rows) in [
+        (MaterializeDivergence::Drop, &drops),
+        (MaterializeDivergence::None, &refreshes),
+    ] {
+        for (field, change) in rows.iter() {
+            let mut current = base.clone();
+            change(&mut current);
+            assert_eq!(
+                materialize_divergence(&forwarding, &base, &current, &mut None),
+                expected,
+                "{field}: classification"
+            );
+        }
+    }
+    // Close and handshake bytes are TCP state: a UDP row installs neither, so
+    // a difference in them is not a difference in what is installed.
+    let mut udp = base.clone();
+    udp.key.protocol = PROTO_UDP;
+    udp.protocol = PROTO_UDP;
+    let mut udp_current = udp.clone();
+    udp_current.tcp_close_class = crate::session::TcpCloseClass::Reset.to_wire();
+    assert_eq!(
+        materialize_divergence(&forwarding, &udp, &udp_current, &mut None),
+        MaterializeDivergence::None,
+        "UDP close byte: classification"
     );
 }

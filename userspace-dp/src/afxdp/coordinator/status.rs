@@ -57,6 +57,16 @@ impl super::Coordinator {
         crate::afxdp::bpf_map::tuple_gate_poison_recoveries()
     }
 
+    /// #19153 fold 2 (r24 P3): packets dropped because their shared-hit
+    /// materialize found a current row that differs from the resolve's
+    /// capture, or the captured incarnation gone. Process-global atomic, read
+    /// directly like the TupleGate twin above. Surfaced as
+    /// `xpf_userspace_materialize_divergence_drops_total`; a normal takeover
+    /// is expected to leave it at 0.
+    pub fn materialize_divergence_drops(&self) -> u64 {
+        crate::afxdp::session_glue::materialize_divergence_drops()
+    }
+
     pub fn dynamic_neighbor_status(&self) -> (usize, u64) {
         let entries = self.neighbors.dynamic.len();
         let generation = self.neighbors.generation.load(Ordering::Relaxed);

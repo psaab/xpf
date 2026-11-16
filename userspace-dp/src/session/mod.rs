@@ -6796,6 +6796,17 @@ impl SessionTable {
         self.entry_by_key(key).map(|e| e.last_seen_ns)
     }
 
+    /// #19153 fold 2: read the close state an install derives from its TCP
+    /// flags (`closing`, `reset`, `fin_own`, `fin_peer`) and the idle window
+    /// it selected (`expires_after_ns`), or `None` if no live entry exists.
+    /// Same idiom as `observed_close_fields`: a cell that pins whether an
+    /// install took a packet's RST or FIN has to read exactly these.
+    #[cfg(test)]
+    pub(crate) fn close_state_for_test(&self, key: &SessionKey) -> Option<(bool, bool, bool, bool, u64)> {
+        self.entry_by_key(key)
+            .map(|e| (e.closing, e.reset, e.fin_own, e.fin_peer, e.expires_after_ns))
+    }
+
     /// Unified session update function replacing promote_synced,
     /// refresh_local, and refresh_for_ha_activation.
     ///

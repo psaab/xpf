@@ -923,6 +923,12 @@ type ProcessStatus struct {
 	// #17201: TupleGate mutex poison recoveries. Surfaced as
 	// xpf_tuple_gate_poison_recoveries_total.
 	TupleGatePoisonRecoveries uint64 `json:"tuple_gate_poison_recoveries,omitempty"`
+	// #19153: packets the helper dropped because a shared-hit materialize
+	// found a current shared row that differs from the resolve's capture
+	// (judged before the install), or the captured incarnation gone. A
+	// normal takeover is expected to leave it at 0. Surfaced as
+	// xpf_userspace_materialize_divergence_drops_total.
+	MaterializeDivergenceDrops uint64 `json:"materialize_divergence_drops,omitempty"`
 	// #10695 (#9506 counter slice): D13/D11 logical-frame build failures
 	// (including ECN-combine refusals), and D13 RFC 6040 §4.2 illegal
 	// inner-ECN refusals. Surfaced as

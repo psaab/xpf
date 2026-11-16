@@ -30,10 +30,11 @@ func TestUserspaceHASplitBrainCountersEmit13291(t *testing.T) {
 	// Then 3 split-brain counters + 3 HATransitionDropped labels + 2
 	// HATransitionStaleSkipped labels + 7 WG-uncovered outcomes + 1 WG
 	// queue-poison counter + #18281 (668ab4cdc4) TupleGate poison (+1)
-	// = 32. The 30 -> 32 delta is one series each from #17144 and #18281;
-	// #17144's series is already included in the 15-single subtotal.
-	if len(got) != 32 {
-		t.Fatalf("emitted %d metrics, want 32 (including WG uncovered, three HA split-brain counters, and #16561, #17144, and #18281 status series)", len(got))
+	// + #19153 materialize divergence drops (+1) = 33. The 30 -> 32 delta
+	// is one series each from #17144 and #18281; #17144's series is already
+	// included in the 15-single subtotal.
+	if len(got) != 33 {
+		t.Fatalf("emitted %d metrics, want 33 (including WG uncovered, three HA split-brain counters, and #16561, #17144, #18281, and #19153 status series)", len(got))
 	}
 	for _, tc := range []struct {
 		desc  *prometheus.Desc

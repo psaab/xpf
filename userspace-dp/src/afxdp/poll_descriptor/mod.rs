@@ -3143,16 +3143,18 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                             resolved.deferred_synced_promotion = None;
                             resolved.deferred_synced_purge = None;
                         }
-                        // #19153 fold 1 (Codex P1): this packet's shared-hit
-                        // materialize found the captured incarnation gone or
-                        // replaced, or installed content that differs from
-                        // the capture in its translation, egress or admission.
-                        // Its decision is the capture's, which shared no longer
-                        // names, so it is not forwarded: the frame is recycled
-                        // as the input-filter drop below recycles a denied
-                        // Owner packet. The materialize already dropped the
-                        // capture-derived promotion and revalidation; the next
-                        // packet resolves current state.
+                        // #19153 folds 1-2 (Codex P1, P2): this packet's
+                        // shared-hit materialize found the captured
+                        // incarnation gone or replaced, or a current row that
+                        // differs from the capture in a compared field (judged
+                        // before the install, which then took none of this
+                        // packet's flags). Its decision is the capture's,
+                        // which shared no longer names, so it is not
+                        // forwarded: the frame is recycled as the input-filter
+                        // drop below recycles a denied Owner packet. The
+                        // materialize already dropped the capture-derived
+                        // promotion and revalidation; the next packet resolves
+                        // current state.
                         if resolved.materialize_divergence
                             == crate::afxdp::session_glue::MaterializeDivergence::Drop
                         {
@@ -3353,12 +3355,11 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // promotion was deferred. Cache hits never promote and
                         // forwarding entries never expire, so a seeded deferral
                         // would leave the owned flow peer-synced for its life.
-                        // #19153 fold 1: nor from a packet whose materialize
-                        // installed content that differs from its capture:
-                        // the next packet resolves the installed row.
+                        // #19153 fold 2: a packet whose materialize found a
+                        // current row that differs from its capture never
+                        // gets here (it is recycled above).
                         flow_cache_install_failed = resolved.install_failed
                             || resolved.promotion_deferred
-                            || resolved.materialize_divergence.suppresses_flow_cache_seed()
                             || foreign_arrival_zone.is_some();
                         if resolved.created {
                             telemetry.counters.session_creates += 1;

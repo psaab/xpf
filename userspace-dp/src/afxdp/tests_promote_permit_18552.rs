@@ -1366,15 +1366,21 @@ impl PollFixture {
 
     /// One mid-stream LAN -> WAN ACK through the production poll body.
     fn lan_ack(&mut self) -> PollStep {
+        self.lan_packet(rg::TCP_ACK)
+    }
+
+    /// One mid-stream LAN -> WAN TCP packet with `tcp_flags` (#19153 fold 2:
+    /// an RST or FIN as well as an ACK) through the production poll body.
+    fn lan_packet(&mut self, tcp_flags: u8) -> PollStep {
         let frame = build_txn_tcp_syn_frame_v4(
             rg::LAN_HOST,
             rg::WAN_HOST,
             rg::SPORT,
             rg::DPORT,
-            rg::TCP_ACK,
+            tcp_flags,
             [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
         );
-        let mut meta = txn_meta_v4(rg::LAN_IFINDEX as u32, rg::TCP_ACK, frame.len() as u16);
+        let mut meta = txn_meta_v4(rg::LAN_IFINDEX as u32, tcp_flags, frame.len() as u16);
         meta.flow_src_addr[..4].copy_from_slice(&rg::LAN_HOST.octets());
         meta.flow_dst_addr[..4].copy_from_slice(&rg::WAN_HOST.octets());
         meta.flow_src_port = rg::SPORT;
@@ -1667,24 +1673,49 @@ fn refused_materialize_alone_suppresses_the_seed_19153() {
     );
 }
 
-/// #19153 fold 1 (Codex P1): what the shared row becomes between the resolve's
-/// capture of A and the materialize's claim, in the poll cells below.
+/// #19153 folds 1-2 (Codex P1, P2): what the shared row becomes between the
+/// resolve's capture of A and the materialize's claim, in the poll cells below.
+/// Every one of them is a divergence, and since fold 2 (classify before apply,
+/// no exempt field) every one drops the packet.
 #[derive(Clone, Copy, Debug)]
 enum Replacement {
-    /// B differs from A only in a metadata-only field (session logging).
+    /// B differs from A only in session logging (fold 1 forwarded this once).
     MetadataOnly,
-    /// B differs in the owner RG, a forwarding-relevant field.
+    /// B differs from A only in the policy counter index (fold 1 forwarded
+    /// this once; `policy_counter_idx` feeds the TUN-origin exemption).
+    CounterOnly,
+    /// B differs in the owner RG.
     OwnerRg,
     /// B names another translation (a different SNAT port): superseded.
     Nat,
+    /// B is admitted from another, still valid zone (wan), so the #10612
+    /// fence does not fire: Codex's RST/FIN replacement.
+    IngressZone,
+    /// B carries a nonzero leak stamp for a leak this view no longer has
+    /// (revoked, #9951), where A is unstamped: Codex P2-2.
+    LeakStamp,
 }
 
+/// The packet's TCP flags in a capture-replacement cell.
+const PACKET_RST: u8 = crate::tcp_flags::TCP_RST;
+const PACKET_FIN: u8 = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
+
+/// A revoked leak incarnation: the poll view rides no leak, so any nonzero
+/// stamp is one whose leak was removed.
+const REVOKED_LEAK_19153: u64 = 0x1915_3bad;
+
 /// One cell of the capture-replacement matrix, through the real poll pipeline:
-/// this worker holds no row, so the first LAN ACK captures shared A; the hook
-/// publishes B in the capture..claim window; the materialize then installs B
-/// (or finds A superseded). `zero_id` runs it with the legacy session id 0 on
-/// both A and B, else with A's non-zero id.
-fn assert_capture_replacement(replacement: Replacement, zero_id: bool) {
+/// this worker holds no row, so the first packet (`tcp_flags`) captures shared
+/// A; the hook publishes B in the capture..claim window; the materialize then
+/// classifies B against A BEFORE it installs, installs B clean (or finds A
+/// superseded) and the packet is dropped. `zero_id` runs it with the legacy
+/// session id 0 on both A and B, else with A's non-zero id. Returns the worker
+/// row's close state and idle window after the first packet.
+fn assert_capture_replacement(
+    replacement: Replacement,
+    zero_id: bool,
+    tcp_flags: u8,
+) -> Option<(bool, bool, bool, bool, u64)> {
     let mut fx = PollFixture::imported();
     let key = fx.forward.key.clone();
     fx.sessions.delete(&key);
@@ -1699,10 +1730,14 @@ fn assert_capture_replacement(replacement: Replacement, zero_id: bool) {
     let mut b = fx.forward.clone();
     match replacement {
         Replacement::MetadataOnly => b.metadata.log_session_close = !b.metadata.log_session_close,
+        Replacement::CounterOnly => b.metadata.policy_counter_idx += 1,
         Replacement::OwnerRg => b.metadata.owner_rg_id = 2,
         Replacement::Nat => b.decision.nat.rewrite_src_port = Some(40_001),
+        Replacement::IngressZone => b.metadata.ingress_zone = fx.forwarding.zone_name_to_id["wan"],
+        Replacement::LeakStamp => b.leak_incarnation = REVOKED_LEAK_19153,
     }
     assert_ne!(b.metadata.owner_rg_id, 0, "premise: B keeps an owner");
+    assert_eq!(fx.forward.leak_incarnation, 0, "premise: A is unstamped, as an import publishes it");
     let (shared, nat, wire, indexes) = (
         Arc::clone(&fx.shared),
         Arc::clone(&fx.shared_nat),
@@ -1714,53 +1749,70 @@ fn assert_capture_replacement(replacement: Replacement, zero_id: bool) {
         crate::afxdp::shared_ops::publish_shared_session(&shared, &nat, &wire, &indexes, &published);
     });
 
-    let first = fx.lan_ack();
+    // Process-global and only ever incremented, so a parallel cell can raise
+    // it but never hide this cell's drop.
+    let drops_before = crate::afxdp::session_glue::MATERIALIZE_DIVERGENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let first = fx.lan_packet(tcp_flags);
+    let drops_after = crate::afxdp::session_glue::MATERIALIZE_DIVERGENCE_DROPS
+        .load(std::sync::atomic::Ordering::Relaxed);
     let worker_after_first = fx
         .sessions
         .entry_with_origin(&key)
         .map(|(decision, metadata, origin)| {
-            (decision.nat, metadata.owner_rg_id, metadata.log_session_close, origin)
+            (
+                decision.nat,
+                metadata.owner_rg_id,
+                metadata.log_session_close,
+                metadata.policy_counter_idx,
+                metadata.ingress_zone,
+                origin,
+            )
         });
+    let close_after_first = fx.sessions.close_state_for_test(&key);
+    let leak_after_first = fx.sessions.leak_incarnation(&key);
     let shared_after_first = fx.shared_origin();
     let cached_after_first = fx.cached();
-    let second = fx.lan_ack();
-    // The second packet is an ordinary worker hit whose forwarding
-    // revalidation may re-derive the owner RG from the live egress, so only
-    // B's translation, its logging flag and the origin are compared there.
-    let worker_after_second = fx
-        .sessions
-        .entry_with_origin(&key)
-        .map(|(decision, metadata, origin)| (decision.nat, metadata.log_session_close, origin));
 
-    let installed_b = |origin: SessionOrigin| {
-        Some((b.decision.nat, b.metadata.owner_rg_id, b.metadata.log_session_close, origin))
-    };
-    let promoted_b =
-        Some((b.decision.nat, b.metadata.log_session_close, SessionOrigin::SharedPromote));
-    let forwarded_once = matches!(replacement, Replacement::MetadataOnly);
+    let installed_b = Some((
+        b.decision.nat,
+        b.metadata.owner_rg_id,
+        b.metadata.log_session_close,
+        b.metadata.policy_counter_idx,
+        b.metadata.ingress_zone,
+        SessionOrigin::SharedMaterialize,
+    ));
     let first_worker_ok = match replacement {
         // Superseded: nothing installed.
         Replacement::Nat => worker_after_first.is_none(),
-        _ => worker_after_first == installed_b(SessionOrigin::SharedMaterialize),
+        _ => worker_after_first == installed_b,
+    };
+    // B installed clean: its close state is what its own carried flags (an
+    // ACK, as the import published it) give, whatever the packet carried.
+    let clean_close = match replacement {
+        Replacement::Nat => close_after_first.is_none(),
+        _ => close_after_first.is_some_and(|(closing, reset, fin_own, fin_peer, _)| {
+            !closing && !reset && !fin_own && !fin_peer
+        }),
+    };
+    let leak_ok = match replacement {
+        Replacement::LeakStamp => leak_after_first == Some(REVOKED_LEAK_19153),
+        _ => true,
     };
     assert_legs(
         &format!(
-            "capture replacement {replacement:?} (zero_id={zero_id}; first packet {first:?}, \
-             worker {worker_after_first:?}, shared {shared_after_first:?}, cached \
-             {cached_after_first}; second packet {second:?}, worker {worker_after_second:?}, \
-             shared {:?})",
-            fx.shared_origin()
+            "capture replacement {replacement:?} (zero_id={zero_id}, flags={tcp_flags:#04x}; \
+             first packet {first:?}, worker {worker_after_first:?}, close {close_after_first:?}, \
+             leak {leak_after_first:?}, shared {shared_after_first:?}, cached \
+             {cached_after_first}, drops +{})",
+            drops_after - drops_before
         ),
         &[
             (first.session_hit == 1, "premise: the first packet must hit the shared row"),
             (
-                (first.tx_wan == 1) == forwarded_once,
-                if forwarded_once {
-                    "first: a metadata-only replacement must forward the packet once"
-                } else {
-                    "first: the packet was forwarded on the capture's decision although the \
-                     shared row changed its translation or egress"
-                },
+                first.tx_wan == 0,
+                "first: the packet was forwarded on the capture's decision although the current \
+                 shared row differs from the capture",
             ),
             (
                 first_worker_ok,
@@ -1768,48 +1820,171 @@ fn assert_capture_replacement(replacement: Replacement, zero_id: bool) {
                  not empty)",
             ),
             (
+                clean_close,
+                "first: the dropped packet's flags closed or reset B (B must be installed clean)",
+            ),
+            (leak_ok, "first: B was not installed with its own leak provenance"),
+            (
                 shared_after_first == Some(SessionOrigin::SyncImport),
                 "first: the capture-derived promotion ran and published SharedPromote",
             ),
-            (!cached_after_first, "first: the diverged packet seeded the flow cache"),
+            (!cached_after_first, "first: the dropped packet seeded the flow cache"),
             (
-                second.tx_wan == 1
-                    && worker_after_second == promoted_b
-                    && fx.shared_origin() == Some(SessionOrigin::SharedPromote),
-                "second: the next packet did not forward and promote B",
+                drops_after > drops_before,
+                "first: the drop was not counted in MATERIALIZE_DIVERGENCE_DROPS",
             ),
         ],
+    );
+    // The next packet is an ordinary worker hit on B (or, superseded, a
+    // materialize of B), forwarded and promoted. Not for B admitted from the
+    // wan zone (a LAN packet is foreign to it, judged by its own zone and
+    // never promoting), nor for the revoked-leak row (#9951's own handling,
+    // which this cell does not restate).
+    if !matches!(replacement, Replacement::IngressZone | Replacement::LeakStamp) {
+        let second = fx.lan_ack();
+        // The second packet's forwarding revalidation may re-derive the owner
+        // RG from the live egress, so only B's translation, its logging flag
+        // and the origin are compared there.
+        let worker_after_second = fx
+            .sessions
+            .entry_with_origin(&key)
+            .map(|(decision, metadata, origin)| (decision.nat, metadata.log_session_close, origin));
+        assert_legs(
+            &format!(
+                "capture replacement {replacement:?} (zero_id={zero_id}): second packet \
+                 {second:?}, worker {worker_after_second:?}, shared {:?}",
+                fx.shared_origin()
+            ),
+            &[(
+                second.tx_wan == 1
+                    && worker_after_second
+                        == Some((b.decision.nat, b.metadata.log_session_close, SessionOrigin::SharedPromote))
+                    && fx.shared_origin() == Some(SessionOrigin::SharedPromote),
+                "second: the next packet did not forward and promote B",
+            )],
+        );
+    }
+    close_after_first
+}
+
+/// Codex P2-1: the RST (or FIN) packet replaced by B is dropped, and B's close
+/// state AND idle window are exactly what the same replacement under an ACK
+/// installs (B clean, from its own carried flags), not the reset or close
+/// window the packet would select.
+fn assert_close_untouched(zero_id: bool, tcp_flags: u8) {
+    let reference = assert_capture_replacement(Replacement::IngressZone, zero_id, rg::TCP_ACK);
+    let got = assert_capture_replacement(Replacement::IngressZone, zero_id, tcp_flags);
+    assert!(reference.is_some(), "premise: the ACK twin installed B");
+    assert_eq!(
+        got, reference,
+        "flags={tcp_flags:#04x} zero_id={zero_id}: B's (closing, reset, fin_own, fin_peer, \
+         idle window) differ from a clean install of B"
     );
 }
 
 #[test]
-fn capture_replacement_metadata_only_forwards_once_19153() {
-    assert_capture_replacement(Replacement::MetadataOnly, false);
+fn capture_replacement_metadata_only_is_not_forwarded_19153() {
+    assert_capture_replacement(Replacement::MetadataOnly, false, rg::TCP_ACK);
 }
 
 #[test]
-fn capture_replacement_metadata_only_forwards_once_zero_id_19153() {
-    assert_capture_replacement(Replacement::MetadataOnly, true);
+fn capture_replacement_metadata_only_is_not_forwarded_zero_id_19153() {
+    assert_capture_replacement(Replacement::MetadataOnly, true, rg::TCP_ACK);
+}
+
+#[test]
+fn capture_replacement_counter_only_is_not_forwarded_19153() {
+    assert_capture_replacement(Replacement::CounterOnly, false, rg::TCP_ACK);
+}
+
+#[test]
+fn capture_replacement_counter_only_is_not_forwarded_zero_id_19153() {
+    assert_capture_replacement(Replacement::CounterOnly, true, rg::TCP_ACK);
 }
 
 #[test]
 fn capture_replacement_owner_rg_is_not_forwarded_19153() {
-    assert_capture_replacement(Replacement::OwnerRg, false);
+    assert_capture_replacement(Replacement::OwnerRg, false, rg::TCP_ACK);
 }
 
 #[test]
 fn capture_replacement_owner_rg_is_not_forwarded_zero_id_19153() {
-    assert_capture_replacement(Replacement::OwnerRg, true);
+    assert_capture_replacement(Replacement::OwnerRg, true, rg::TCP_ACK);
 }
 
 #[test]
 fn capture_replacement_nat_is_not_forwarded_19153() {
-    assert_capture_replacement(Replacement::Nat, false);
+    assert_capture_replacement(Replacement::Nat, false, rg::TCP_ACK);
 }
 
 #[test]
 fn capture_replacement_nat_is_not_forwarded_zero_id_19153() {
-    assert_capture_replacement(Replacement::Nat, true);
+    assert_capture_replacement(Replacement::Nat, true, rg::TCP_ACK);
+}
+
+/// Codex P2-1: an RST resolved against A; B (valid zone) replaced it before
+/// the claim. The RST is dropped AND B is installed clean: not reset, not
+/// closing, its timeout an open row's.
+#[test]
+fn capture_replacement_rst_leaves_the_current_row_open_19153() {
+    assert_close_untouched(false, PACKET_RST);
+}
+
+#[test]
+fn capture_replacement_rst_leaves_the_current_row_open_zero_id_19153() {
+    assert_close_untouched(true, PACKET_RST);
+}
+
+/// Codex P2-1, the FIN twin.
+#[test]
+fn capture_replacement_fin_leaves_the_current_row_open_19153() {
+    assert_close_untouched(false, PACKET_FIN);
+}
+
+#[test]
+fn capture_replacement_fin_leaves_the_current_row_open_zero_id_19153() {
+    assert_close_untouched(true, PACKET_FIN);
+}
+
+/// Codex P2-2: B carries a revoked leak incarnation that A did not. B is
+/// installed with it, the packet is dropped, nothing is promoted or seeded.
+#[test]
+fn capture_replacement_revoked_leak_stamp_is_not_forwarded_19153() {
+    assert_capture_replacement(Replacement::LeakStamp, false, rg::TCP_ACK);
+}
+
+#[test]
+fn capture_replacement_revoked_leak_stamp_is_not_forwarded_zero_id_19153() {
+    assert_capture_replacement(Replacement::LeakStamp, true, rg::TCP_ACK);
+}
+
+/// The equal-path control (fold 2): nothing replaces A, so the materialize
+/// installs A with this packet's FIN (closing, fin_own) and the packet is
+/// handled as before. The same packet through a replacement is the FIN cell
+/// above.
+#[test]
+fn unchanged_row_takes_the_packets_fin_19153() {
+    let mut fx = PollFixture::imported();
+    let key = fx.forward.key.clone();
+    fx.sessions.delete(&key);
+    fx.sessions.delete(&fx.reverse.key.clone());
+
+    let first = fx.lan_packet(PACKET_FIN);
+    let close = fx.sessions.close_state_for_test(&key);
+    let worker = fx.worker_origin();
+
+    assert_legs(
+        &format!("unchanged row, FIN (packet {first:?}; worker {worker:?}, close {close:?})"),
+        &[
+            (first.session_hit == 1, "premise: the packet must hit the shared row"),
+            (first.tx_wan == 1, "control: an unchanged row's FIN must be forwarded"),
+            (worker.is_some(), "control: the unchanged row must be installed"),
+            (
+                close.is_some_and(|(closing, reset, fin_own, _, _)| closing && fin_own && !reset),
+                "control: the FIN on an unchanged row must set closing and fin_own, as today",
+            ),
+        ],
+    );
 }
 
 // ---------------------------------------------------------------------------

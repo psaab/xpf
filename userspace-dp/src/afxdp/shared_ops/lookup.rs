@@ -883,11 +883,11 @@ pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     /// promote. Distinct from `install_failed`, which also gates the session-hit
     /// fragment association: a deferred promotion leaves a live session behind.
     pub(in crate::afxdp) promotion_deferred: bool,
-    /// #19153 (fold 1, Codex P1): set after the Owner verdict when this
-    /// packet's shared-hit materialize installed content that differs from the
-    /// resolve's capture, or found the captured incarnation gone. The poll site
-    /// keeps a `ForwardOnce` packet out of the flow cache and recycles a
-    /// `Drop` packet (`MaterializeDivergence`).
+    /// #19153 (folds 1-2, Codex P1/P2): set after the Owner verdict when this
+    /// packet's shared-hit materialize found a current row that differs from
+    /// the resolve's capture (judged before the install), or the captured
+    /// incarnation gone. The poll site recycles a `Drop` packet
+    /// (`MaterializeDivergence`).
     pub(in crate::afxdp) materialize_divergence:
         crate::afxdp::session_glue::MaterializeDivergence,
     /// #12644: shared-map materialization held until an Owner verdict.

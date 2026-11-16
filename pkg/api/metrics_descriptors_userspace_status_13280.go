@@ -128,4 +128,9 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"TupleGate lock poison recoveries (#17201).",
 		nil, nil,
 	)
+	c.userspaceMaterializeDivergenceDrops = prometheus.NewDesc(
+		"xpf_userspace_materialize_divergence_drops_total",
+		"Packets dropped because a shared-hit materialize found a current shared row that differs from the resolve's capture, or the captured incarnation gone (#19153).",
+		nil, nil,
+	)
 }
