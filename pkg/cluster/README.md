@@ -6133,10 +6133,20 @@ it.
   2026-11-15):
   - **The backoff holds back only the owed re-drive.** `bulkRetryNotBefore`
     gates the owed cold-prime re-drive this issue adds, and nothing else.
-    - It advances when ANY authoritative bulk ends in a non-fence error, to
-      1 s, then 2 s, then 4 s after that failure COMPLETED
+    - It advances when ANY authoritative bulk ends in a non-fence error,
+      along `coldPrimeRetrySchedule`, measured from that failure's END
       (`noteBulkResult`). A failed attempt's own duration therefore adds to
       the gap between two attempts' starts.
+      - **1 s, 2 s, 4 s** for the first three consecutive failures: the
+        admission phase, in which every gap stays at most 4 s, so a drain
+        window opened early in an episode holds an attempt.
+      - **8 s, 16 s, then 30 s,** the cap, while the export keeps failing.
+        This is the long tail chosen by the user on 2026-11-15, after the
+        #19115 lab measured the cost of a 4 s cadence under a persistent
+        failure: +3.7 % of a core at 10k sessions and +7.3 % at about
+        24.6k. A drain requested during the tail can be refused although
+        the export has just recovered, until the next attempt (at most 30 s
+        away) succeeds.
     - It resets on a successful send (BulkEnd written), a discharge, the
       runtime being wired, and a new debt generation.
     - It never touches the #18752 owed age or last failure.
@@ -6187,7 +6197,9 @@ it.
     COMPLETED failure, the next attempt reaches a qualifying pending bulk
     inside a 5 s admission window when three things add up to less than
     5 s:
-    - the remaining backoff, at most 4 s;
+    - the remaining backoff: at most 4 s in an episode's first three
+      failures, and up to 30 s in its long tail, when a drain is refused
+      anyway unless that next attempt succeeds;
     - the scheduling and lock delay before the attempt starts (the timer is
       armed exactly at the deadline, but the attempt waits for `bulkSendMu`
       if another bulk holds it);

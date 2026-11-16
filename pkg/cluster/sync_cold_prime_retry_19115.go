@@ -23,7 +23,8 @@ import (
 //
 //   - THE BACKOFF, bulkRetryNotBefore, holds back ONLY the owed cold-prime
 //     re-drive. It is advanced by ANY authoritative bulk that ends in a
-//     non-fence error, to 1 s, 2 s, then 4 s after that failure COMPLETED (a
+//     non-fence error, along coldPrimeRetrySchedule (1 s, 2 s, 4 s, then a
+//     long tail of 8 s, 16 s and 30 s) after that failure COMPLETED (a
 //     failed attempt's own duration adds to the start-to-start gap). It is
 //     reset by a SUCCESSFUL send (the window wrote BulkEnd; publishing
 //     pending state alone is not success), by a discharge, by the runtime
@@ -59,18 +60,38 @@ import (
 //     barrier-fence re-prime that the fence still needs it. A peer's bulk
 //     request and a forced resync always export.
 
+// coldPrimeRetrySchedule is the owed re-drive's backoff after the Nth
+// consecutive failed authoritative bulk of an owed episode, measured from that
+// failure's END (the user's decision of 2026-11-15: a long tail):
+//
+//   - 1 s, 2 s, 4 s: the admission phase. From the first failure, attempts
+//     start about 1 s, 3 s and 7 s later (plus each failed attempt's own
+//     duration), so every gap stays at most 4 s while the episode is young.
+//     Measured from an observed completed failure, the next attempt reaches
+//     a qualifying pending bulk inside a 5 s admission window when the
+//     remaining backoff, the scheduling and lock delay and that attempt's
+//     own successful time-to-pending add up to less than 5 s. This is what
+//     admits a drain after a transient (the #19115 lab, D-B).
+//   - 8 s, 16 s, then 30 s, the cap: sustained failure. After three
+//     consecutive failures the export has been failing for 7 s or more, and
+//     a drain opened now would be refused for the debt anyway unless the
+//     very next attempt succeeds. Growing the backoff cuts the cost of a
+//     persistently failing export, a full owner-RG export attempt each time
+//     (the lab measured +3.7 % of a core at 10k sessions and +7.3 % at about
+//     24.6k at the 4 s cadence), to one attempt per 30 s at the cap. The
+//     price: a drain whose window opens during the tail can be refused even
+//     if the export has just recovered, until the next attempt (at most 30 s
+//     away) succeeds; the operator retries the drain.
+//
+// A success (BulkEnd written), a discharge, the runtime being wired and a new
+// debt generation reset it to the first step; it never touches the #18752
+// owed age or last failure.
+var coldPrimeRetrySchedule = [...]time.Duration{
+	1 * time.Second, 2 * time.Second, 4 * time.Second,
+	8 * time.Second, 16 * time.Second, 30 * time.Second,
+}
+
 const (
-	// coldPrimeRetryBase is the owed re-drive's first backoff after a failed
-	// authoritative bulk; it doubles to coldPrimeRetryBase <<
-	// coldPrimeRetryMaxShift.
-	coldPrimeRetryBase = time.Second
-	// coldPrimeRetryMaxShift caps the backoff at 4 s. Measured from an
-	// observed completed failure, the next attempt reaches a qualifying
-	// pending bulk inside a 5 s admission window when the remaining backoff
-	// (at most 4 s), the scheduling and lock delay and that attempt's own
-	// successful time-to-pending add up to less than 5 s. A window that opens
-	// during a failing attempt also waits for that attempt to end.
-	coldPrimeRetryMaxShift = 2
 	// coldPrimeFirstRetryDelay schedules a NEW debt generation's first sweep
 	// re-drive (the debt itself is eligible at once): a debt armed with no
 	// attempt in flight (the peer-reboot edge, a capable discovery) is
@@ -134,9 +155,11 @@ func (s *SessionSync) noteBulkRetryResult(err error) {
 	case errors.Is(err, errBulkFencedForPeer) || errors.Is(err, errBulkFencedForIpsecPeer):
 	default:
 		s.bulkRetryMu.Lock()
-		shift := min(s.bulkRetryFailures, coldPrimeRetryMaxShift)
-		s.bulkRetryFailures++
-		s.bulkRetryNotBefore = s.nowMono() + int64(coldPrimeRetryBase<<shift)
+		step := coldPrimeRetrySchedule[min(int(s.bulkRetryFailures), len(coldPrimeRetrySchedule)-1)]
+		if s.bulkRetryFailures < uint32(len(coldPrimeRetrySchedule)) {
+			s.bulkRetryFailures++
+		}
+		s.bulkRetryNotBefore = s.nowMono() + int64(step)
 		s.bulkRetryMu.Unlock()
 	}
 }

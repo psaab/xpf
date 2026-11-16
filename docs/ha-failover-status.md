@@ -1232,8 +1232,9 @@ pay it is in flight:
 
 - `show chassis cluster information`, Cold synchronization block:
   `Cold prime owed to peer (no bulk pending): owed for <age>; it clears when a
-  bulk re-drive (1 s after a failure, then 2 s, then 4 s after each later
-  failure) is acked by the peer; last bulk error: <error> (<age> ago)`, followed by `Blocks: demotion of this node's primary
+  bulk re-drive (1 s after a failure, then 2 s and 4 s; if it keeps failing,
+  8 s, 16 s, then every 30 s) is acked by the peer; last bulk error: <error>
+  (<age> ago)`, followed by `Blocks: demotion of this node's primary
   RGs (manual failover/failback and ISSU drain)`. The error reads `none recorded`
   before the first failed re-drive in this cold-prime episode.
 - The refused failover's error ends with the same detail.
@@ -1244,13 +1245,18 @@ pay it is in flight:
 **How it clears.** Only on its own. The sync sweep re-drives the bulk on a
 schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
 - 100 ms after a new debt is armed;
-- 1 s after a failed attempt ENDS, then 2 s, then 4 s after each later
-  failure. The wait runs from the end of the failed attempt, so a slow
-  failing export adds its own duration to the gap. A drain admitted within
-  5 s therefore needs the remaining wait (at most 4 s), any wait for another
-  bulk in progress, and the next attempt's own export up to its pending
-  publish to add up to less than 5 s. A drain that starts during a failing
-  attempt also waits for that attempt to end. This backoff applies only to
+- 1 s after a failed attempt ENDS, then 2 s, then 4 s. The wait runs from the
+  end of the failed attempt, so a slow failing export adds its own duration
+  to the gap. Early in an episode a drain admitted within 5 s therefore needs
+  the remaining wait (at most 4 s), any wait for another bulk in progress,
+  and the next attempt's own export up to its pending publish to add up to
+  less than 5 s. A drain that starts during a failing attempt also waits for
+  that attempt to end;
+- if it keeps failing, 8 s, then 16 s, then every 30 s (#19115's long tail).
+  A persistently failing export then costs one full export every 30 s
+  instead of every 4 s. The price: a drain requested during the tail can be
+  refused even though the export has just recovered, until the next attempt
+  (at most 30 s away) succeeds. Retry the drain then. This backoff applies only to
   the cold-prime re-drive; other retries of a failing bulk (a forced resync,
   an aged unacknowledged bulk, the barrier re-prime) keep their own earlier
   cadence (#19135);

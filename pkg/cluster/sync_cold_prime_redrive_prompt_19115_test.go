@@ -500,7 +500,7 @@ func TestOwedRetryBacksOffUnderAFastSweep19115(t *testing.T) {
 // and 20 on design v4): the backoff runs from the END of a failed attempt, so
 // the failed attempt's own duration adds to the start-to-start gap, and under
 // the production 15 s / 60 s profile the sweep timer is armed exactly at each
-// deadline, the 4 s cap included. Every failed export takes 400 ms. A backoff
+// deadline, the 4 s step included. Every failed export takes 400 ms. A backoff
 // measured from the attempt's START comes 400 ms early; a timer that rounds a
 // deadline up (or waits for the profile) comes late.
 func TestOwedRetryBackoffRunsFromTheFailedAttemptsEnd19115(t *testing.T) {
@@ -550,8 +550,69 @@ func TestOwedRetryBackoffRunsFromTheFailedAttemptsEnd19115(t *testing.T) {
 			i+1, fromEnd.Round(time.Millisecond), starts[i+1].Sub(starts[i]).Round(time.Millisecond))
 	}
 	if gap := starts[3].Sub(starts[2]); gap < 4*time.Second+exportTakes-30*time.Millisecond {
-		t.Errorf("#19115 (Codex finding 7): at the 4 s cap the start-to-start gap is %v, want at least 4 s plus the failed export's %v",
+		t.Errorf("#19115 (Codex finding 7): at the 4 s step the start-to-start gap is %v, want at least 4 s plus the failed export's %v",
 			gap.Round(time.Millisecond), exportTakes)
+	}
+}
+
+// TestOwedRetryBackoffHasALongTail19115 (the user's decision of
+// 2026-11-15): the first three consecutive failures of an owed episode back
+// off 1 s, 2 s and 4 s, the admission phase that wins a 5 s drain window; a
+// failure after those grows the backoff to 8 s, 16 s and then a 30 s cap,
+// so a persistently failing export costs one attempt per 30 s, not per 4 s.
+// A successful send and a new debt generation restart the schedule, and the
+// sweep timer is armed at the full tail deadline. Driven with a fake
+// monotonic clock, so the exact deadlines are read, not waited for.
+func TestOwedRetryBackoffHasALongTail19115(t *testing.T) {
+	ss := bareSync19115((&flakySnapshot19115{}).read)
+	now := int64(1_000_000_000_000)
+	ss.nowMonoFn = func() int64 { return now }
+	fail := func(n int) []time.Duration {
+		var got []time.Duration
+		for range n {
+			ss.noteBulkRetryResult(errExportGenChanged19115)
+			got = append(got, time.Duration(ss.bulkRetryNotBeforeNs()-now))
+			now += int64(time.Minute) // the next failure ends well after this deadline
+		}
+		return got
+	}
+	want := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second,
+		8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second, 30 * time.Second}
+	got := fail(len(want))
+	for i := range want {
+		switch {
+		case i < 3 && got[i] != want[i]:
+			t.Errorf("#19115 admission phase: failure %d backed off %v, want %v; growing before the third failure loses the retries that win a 5 s drain window",
+				i+1, got[i], want[i])
+		case got[i] != want[i]:
+			t.Errorf("#19115 long tail: failure %d backed off %v, want %v (8 s, 16 s, then a 30 s cap)", i+1, got[i], want[i])
+		}
+	}
+
+	// In the tail, an owed debt's sweep timer is armed at the full deadline,
+	// not at a profile interval.
+	ss.mu.Lock()
+	ss.armColdPrimeLocked()
+	ss.mu.Unlock()
+	fail(len(coldPrimeRetrySchedule))
+	now -= int64(time.Minute) // back to the moment the last failure ended
+	if d := ss.nextSweepDelay(time.Minute); d != 30*time.Second {
+		t.Errorf("#19115: with the backoff at its 30 s cap the sweep timer is %v, want exactly 30 s", d)
+	}
+	now += int64(time.Minute)
+
+	// A successful send restarts the schedule.
+	ss.noteBulkRetryResult(nil)
+	if got := fail(1)[0]; got != time.Second {
+		t.Errorf("#19115: after a successful send the next failure backed off %v, want 1 s", got)
+	}
+	// So does a new debt generation, from deep in the tail.
+	fail(len(coldPrimeRetrySchedule))
+	ss.mu.Lock()
+	ss.armColdPrimeLocked()
+	ss.mu.Unlock()
+	if got := fail(1)[0]; got != time.Second {
+		t.Errorf("#19115: after a new debt generation the next failure backed off %v, want 1 s", got)
 	}
 }
 
