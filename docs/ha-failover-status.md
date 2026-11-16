@@ -812,6 +812,15 @@ the worker took at the start of its pass, which can predate the
 connected-route republish that precedes every activation (#16270). It now
 re-resolves against the FIB loaded with the HA view, after the drain.
 
+That guarantee holds only if the helper learns of an activation after the
+activation's route republish. One path does not yet keep that order: a
+planned transfer's pre-activation (#19167). `BeginTransferPreActivation`
+makes the RG effectively Active at once, and the periodic status poll can
+publish it to the helper before the daemon's route republish runs. The
+refresh then re-resolves against the still-split FIB and stamps the table
+as refreshed, so a reply in that gap can still be revoked. #18705 lands
+after #19167; the Go-side fix is tracked there.
+
 Cells: `activation_before_refresh_keeps_the_flow_18691` (no longer
 ignored; v4/v6), `tests_refresh_pending_18705.rs` and
 `tests_refresh_pending_pipeline_18705.rs`. Analysis:

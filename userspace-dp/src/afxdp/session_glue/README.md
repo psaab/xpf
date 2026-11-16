@@ -144,6 +144,13 @@ FIB that view was activated against. The pass's own forwarding was loaded
 before the drain and can still be the split FIB. Every other command keeps
 the pass's forwarding.
 
+The FIB argument assumes that every helper-facing activation follows its
+route republish. The transfer pre-activation path does not yet guarantee
+that (#19167). `BeginTransferPreActivation` makes the RG effectively Active,
+and the status poll's `syncHAStateLocked` can publish it before the daemon's
+`republishConnectedRG`. In that order the refresh runs against the split FIB
+and still stamps. The fix is on the Go side, and #18705 lands after it.
+
 A refresh, queued or replayed, stamps the published epoch on the table
 (`handle_refresh_owner_rgs_then_stamp` ->
 `SessionTable::note_owner_rgs_refreshed`), but ONLY when it ran its full

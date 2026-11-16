@@ -2681,7 +2681,11 @@ before the store, differs from the table's refresh stamp. A
 `RefreshOwnerRGS` (queued or #9720 debt) stamps the PUBLISHED epoch of the
 view it ran under, and only if it ran its full re-resolution scan; an
 RG0-only refresh stamps nothing. It re-resolves against the forwarding
-loaded with that view, after the drain (`session_glue/README.md`).
+loaded with that view, after the drain (`session_glue/README.md`). That
+forwarding is only as new as the activation's FIB if the helper learns of
+the activation after its route republish. A transfer pre-activation can
+currently reach the helper first, through the status poll (#19167, a Go-side
+dependency of #18705).
 
 The keep is PROVISIONAL. The judgment returns
 `SourceNatHitJudgment::KeepUnjudged`, and the poll path then withholds the
