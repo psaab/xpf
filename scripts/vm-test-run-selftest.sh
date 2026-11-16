@@ -60,6 +60,13 @@
 # status survives. Mutations: the refusal dropped (the command runs), the
 # after-run report dropped, and the before/after comparison inverted (names
 # the old entry, not the new one).
+# Fold (Codex on b7e): a FAILED probe is not a clean directory (a --root run
+# is refused, --allow-xpf-state discloses it, and a failed after-probe is
+# disclosed with the status kept); two overlapping --root lanes are
+# serialized by the per-runner lock (B waits, then is refused over A's
+# write, and A's report names only A's entry); a TERM after a write exits 143
+# and still names it. Mutations: the lock dropped (A's report also claims
+# B's write), the interrupt report dropped.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -89,12 +96,28 @@ exec) shift 2; [[ "${1:-}" == -- ]] && shift ;;
 esac
 case "${1:-}" in
 test | find) exit 0 ;;
+flock)
+	# #19162: the per-runner root lock holder, with /run/ in the sandbox.
+	[[ "${3:-}" == sh && "${4:-}" == -c ]] || exit 94
+	mkdir -p "$MOCK_ROOT/run"
+	exec flock "${2//\/run\//$MOCK_ROOT/run/}" sh -c "${5//\/run\//$MOCK_ROOT/run/}" ;;
+cat) exec cat "${2//\/run\//$MOCK_ROOT/run/}" ;;
 systemd-detect-virt) echo kvm; exit 0 ;;
 su) [[ "${2:-}" == - && "${3:-}" == runner && "${4:-}" == -c ]] || exit 91; body=$5 ;;
 bash)
 	if [[ "${2:-}" == -c ]]; then
 		# #19142: the VM-proof probe answers MOCK_VM_PROOF (default present);
 		# any other one-shot command (the clock read) runs as it is.
+		# #19162: MOCK_XPF_PROBE_FAIL=<n> fails the n-th state probe as an
+		# exec error would (a later exec still works).
+		if [[ "${3:-}" == *"xpf-state (#19162)"* && -n "${MOCK_XPF_PROBE_FAIL:-}" ]]; then
+			n=$(($(cat "$MOCK_ROOT/probe-count" 2>/dev/null || echo 0) + 1))
+			echo "$n" >"$MOCK_ROOT/probe-count"
+			if [[ "$n" == "$MOCK_XPF_PROBE_FAIL" ]]; then
+				echo "Error: mock probe failure" >&2
+				exit 1
+			fi
+		fi
 		if [[ "${3:-}" == *"vm-proof (#19142)"* ]]; then
 			echo "${MOCK_VM_PROOF:-present}"
 			exit 0
@@ -126,7 +149,13 @@ if [[ -n "${MOCK_STALL_S:-}" ]]; then
 	kill -CONT -- "-$pid" 2>/dev/null || true
 	wait "$pid" || rc=$?
 else
-	bash -c "$body" >"$held" || rc=$?
+	# A TERM to this client ends the command at once, as closing a real
+	# `incus exec` client ends the remote process (#19162).
+	bash -c "$body" >"$held" &
+	child=$!
+	trap 'kill "$child" 2>/dev/null; wait "$child" 2>/dev/null; cat "$held"; rm -f "$held"; exit 143' TERM
+	wait "$child" || rc=$?
+	trap - TERM
 fi
 cat "$held"
 rm -f "$held"
@@ -416,6 +445,81 @@ else
 fi
 reset_state
 
+# Fold (7): a failed probe is not a clean directory.
+rm -f "$marker" "$tmp/probe-count"
+pe_rc=$(pause_run "$script" st-perr 'touch /work/lane/tmp/ran-19142' --root -- MOCK_XPF_PROBE_FAIL=1)
+if [[ "$pe_rc" == 2 && ! -e "$marker" ]] && grep -q '^vm-test-run: refusing a --root run: .*could not be inspected' "$tmp/st-perr.err"; then
+	ok "xpf-state probe failed: the --root run is refused (status 2), not read as clean, and the command never runs"
+else
+	bad "xpf-state probe failed: rc=$pe_rc $(tr '\n' '|' <"$tmp/st-perr.err")"
+fi
+rm -f "$marker" "$tmp/probe-count"
+pa_rc=$(pause_run "$script" st-pallow 'touch /work/lane/tmp/ran-19142' --root --allow-xpf-state -- MOCK_XPF_PROBE_FAIL=1)
+if [[ "$pa_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: warning: .*could not be inspected' "$tmp/st-pallow.err"; then
+	ok "xpf-state probe failed + --allow-xpf-state: the command runs, the unknown state disclosed"
+else
+	bad "xpf-state probe failed + allow: rc=$pa_rc $(tr '\n' '|' <"$tmp/st-pallow.err")"
+fi
+reset_state
+rm -f "$tmp/probe-count"
+pf_rc=$(pause_run "$script" st-pafter 'touch /var/lib/xpf/after-wrote; exit 3' --root -- MOCK_XPF_PROBE_FAIL=2)
+if [[ "$pf_rc" == 3 ]] && grep -q '^vm-test-run: could not inspect .*/var/lib/xpf after the --root command' "$tmp/st-pafter.err" &&
+	! grep -q '^vm-test-run: this --root command wrote production state' "$tmp/st-pafter.err"; then
+	ok "xpf-state after-probe failed: disclosed, and the command's status (3) survives"
+else
+	bad "xpf-state after-probe failed: rc=$pf_rc $(tr '\n' '|' <"$tmp/st-pafter.err")"
+fi
+rm -f "$tmp/probe-count"
+
+# Fold (8): two overlapping --root lanes. A sleeps, then writes; B starts
+# while A holds the lock, writes too, and marks that it ran.
+# two_lanes <script> <tag>: true when B waited, was refused over A's entry
+# without running, and A's report names exactly A's entry.
+two_lanes() {
+	local a_rc b_rc
+	reset_state
+	rm -f "$tmp/work/lane/tmp/b-ran"
+	(pause_run "$1" "$2-a" 'sleep 4; touch /var/lib/xpf/a-wrote' --root >/dev/null) &
+	local a_pid=$!
+	sleep 1
+	b_rc=$(pause_run "$1" "$2-b" 'touch /var/lib/xpf/b-wrote; touch /work/lane/tmp/b-ran' --root)
+	wait "$a_pid" || true
+	a_rc=$(cat "$tmp/$2-a.rc")
+	[[ "$a_rc" == 0 && "$b_rc" == 2 && ! -e "$tmp/work/lane/tmp/b-ran" ]] &&
+		grep -q '^vm-test-run: waiting for another --root run on mock:runner' "$tmp/$2-b.err" &&
+		grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: a-wrote (#19162)' "$tmp/$2-a.err"
+}
+if two_lanes "$script" st-two; then
+	ok "two overlapping --root lanes: B waits for A's lock, is refused over A's write without running, and A's report names only a-wrote"
+else
+	bad "two overlapping --root lanes: A rc=$(cat "$tmp/st-two-a.rc") A=[$(tr '\n' '|' <"$tmp/st-two-a.err")] B=[$(tr '\n' '|' <"$tmp/st-two-b.err")]"
+fi
+reset_state
+
+# Fold (9): a TERM after the command wrote state still reports it, with 143.
+# term_reports <script> <tag>
+term_reports() {
+	local pid rc=0
+	reset_state
+	# exec: $pid must be vm-test-run itself, not a subshell around it.
+	(cd "$tmp/repo" && exec env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" \
+		bash "$1" --runner mock:runner --name lane --no-sync --root -- 'touch /var/lib/xpf/sig-wrote; sleep 20') \
+		>"$tmp/$2.out" 2>"$tmp/$2.err" &
+	pid=$!
+	for _ in $(seq 50); do [[ -e "$state/sig-wrote" ]] && break; sleep 0.1; done
+	sleep 0.5
+	kill -TERM "$pid"
+	wait "$pid" || rc=$?
+	echo "$rc" >"$tmp/$2.rc"
+	[[ "$rc" == 143 ]] && grep -qx 'vm-test-run: this --root command wrote production state to mock:runner:/var/lib/xpf: sig-wrote (#19162)' "$tmp/$2.err"
+}
+if term_reports "$script" st-term; then
+	ok "TERM after a write: exit 143, and the write is still named"
+else
+	bad "TERM after a write: rc=$(cat "$tmp/st-term.rc") $(tr '\n' '|' <"$tmp/st-term.err")"
+fi
+reset_state
+
 # The proof predicate itself, against test files (the probe text is taken from
 # the script; only its path is replaced).
 probe() { sed -n '/^# vm-proof (#19142)$/,/^fi$/p' "$1" | sed "s|^p=/run/xpf-testguard-vm-boot-id\$|p=$tmp/proof/id|"; }
@@ -558,11 +662,27 @@ if mutant no-state-refusal 's/if \[\[ "$as_root" -eq 1 \&\& "$allow_xpf_state" -
 	reset_state
 fi
 # shellcheck disable=SC2016 # a sed program: the $ is literal
-if mutant no-writer-report 's/if \[\[ -n "$xpf_state_new" \]\]; then/if false; then/'; then
+if mutant no-writer-report 's/if \[\[ -n "$new" \]\]; then/if false; then/'; then
 	if ! writer_named "$tmp/no-writer-report.sh" m9 && [[ "$(cat "$tmp/m9.rc")" == 3 ]]; then
 		ok "mutation no-writer-report: the writer cell fails, with the status still 3"
 	else
 		bad "mutation no-writer-report: the writer cell still passes"
+	fi
+fi
+# Each run takes its OWN lock file: everything works, nothing is serialized.
+# shellcheck disable=SC2016 # a sed program: the $ is literal
+if mutant no-root-lock 's|flock /run/xpf-vm-test-run-root.lock|flock /run/xpf-vm-test-run-root.$$.lock|'; then
+	if ! two_lanes "$tmp/no-root-lock.sh" m11; then
+		ok "mutation no-root-lock: the two-lane cell fails (unserialized lanes)"
+	else
+		bad "mutation no-root-lock: the two-lane cell still passes"
+	fi
+fi
+if mutant no-interrupt-report 's/if wait_unfrozen soft; then xpf_state_report || true; fi/:/'; then
+	if ! term_reports "$tmp/no-interrupt-report.sh" m12 && [[ "$(cat "$tmp/m12.rc")" == 143 ]]; then
+		ok "mutation no-interrupt-report: the TERM cell fails, with the status still 143"
+	else
+		bad "mutation no-interrupt-report: the TERM cell still passes (rc $(cat "$tmp/m12.rc"))"
 	fi
 fi
 if mutant inverted-compare 's/comm -13 /comm -12 /'; then

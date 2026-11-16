@@ -84,6 +84,13 @@
 # read the world-readable files, prints the list as a warning. After a --root
 # command, every entry that was not there before is named on stderr: that
 # command wrote production state. The command's status is unchanged.
+# A probe that FAILS is not a clean directory: a --root run is refused (or,
+# with --allow-xpf-state, runs with the unknown state disclosed), and a failed
+# after-probe is disclosed. A --root leg holds a per-runner lock on the runner
+# (/run/xpf-vm-test-run-root.lock) from its observation to its report, so
+# overlapping root lanes wait for each other instead of both observing an
+# empty directory and claiming each other's writes. An INT/TERM still
+# reports what the command wrote and exits 130/143.
 #
 # Stream order (#19139): `incus exec` carries the command's stdout and stderr
 # as two separate streams, and the workstation merges them (`>log 2>&1`) in
@@ -643,20 +650,120 @@ if [[ "$as_root" -eq 1 ]]; then
 	fi
 fi
 
-# #19162: the runner's /var/lib/xpf (see "Runner state" above). The probe
-# prints one entry per line, or nothing for an empty or absent directory.
+# #19162: the runner's /var/lib/xpf (see "Runner state" above).
+#
+# The probe answers with ONE status line: XPF_STATE=absent, XPF_STATE=empty,
+# XPF_STATE=nonempty (followed by one entry per line), or XPF_STATE=error
+# <why>. Anything else, including a failed `incus exec`, is an error. Only an
+# OBSERVED absent or empty directory admits a --root run without
+# --allow-xpf-state: a probe that failed is not a clean directory.
 xpf_state_sh='# xpf-state (#19162)
-ls -A1 /var/lib/xpf 2>/dev/null || true'
-xpf_state() { incus exec "$runner" -- bash -c "$xpf_state_sh" 2>/dev/null; }
-xpf_state_before=$(xpf_state) || xpf_state_before=
-if [[ -n "$xpf_state_before" ]]; then
-	listed=$(tr '\n' ' ' <<<"$xpf_state_before")
+d=/var/lib/xpf
+if [ ! -e "$d" ] && [ ! -L "$d" ]; then echo XPF_STATE=absent; exit 0; fi
+if [ ! -d "$d" ]; then echo "XPF_STATE=error $d is not a directory"; exit 0; fi
+if ! l=$(ls -A1 "$d" 2>&1); then echo "XPF_STATE=error $l"; exit 0; fi
+if [ -z "$l" ]; then echo XPF_STATE=empty; else echo XPF_STATE=nonempty; printf "%s\n" "$l"; fi'
+# xpf_state_probe <var>: sets <var>_status (absent|empty|nonempty|error) and
+# <var>_entries (one per line; for error, the reason).
+before_status='' before_entries='' after_status='' after_entries=''
+xpf_state_probe() {
+	local out first
+	out=$(incus exec "$runner" -- bash -c "$xpf_state_sh" 2>&1) || out="XPF_STATE=error incus exec failed: ${out//$'\n'/ }"
+	first=${out%%$'\n'*}
+	case "$first" in
+	XPF_STATE=absent | XPF_STATE=empty) printf -v "$1_status" '%s' "${first#XPF_STATE=}"; printf -v "$1_entries" '' ;;
+	XPF_STATE=nonempty)
+		printf -v "$1_status" nonempty
+		printf -v "$1_entries" '%s' "${out#*$'\n'}"
+		;;
+	XPF_STATE=error*) printf -v "$1_status" error; printf -v "$1_entries" '%s' "${first#XPF_STATE=error }" ;;
+	*) printf -v "$1_status" error; printf -v "$1_entries" 'unrecognised probe output: %s' "${first:0:120}" ;;
+	esac
+}
+
+# #19162: a --root leg holds a per-runner lock from its observation through
+# its report, so two root lanes on one runner can neither both observe an
+# empty directory nor claim each other's writes. The lock lives ON the
+# runner (any workstation's lanes share it): `flock` held by a remote process
+# whose stdin is a FIFO this script keeps open. It is released when this
+# script closes the FIFO, and also when this script dies, because closing the
+# `incus exec` client ends the remote process (both measured on
+# tcp:xpf-testrunner, 2026-11-16).
+root_lock_pid=
+root_lock_dir=
+root_lock_release() {
+	[[ -n "$root_lock_pid" ]] || return 0
+	# No redirection here: `exec` with no command applies its redirections to
+	# this shell, so `2>/dev/null` would silence every later line on stderr.
+	exec {root_lock_fd}>&-
+	kill "$root_lock_pid" 2>/dev/null || true
+	wait "$root_lock_pid" 2>/dev/null || true
+	rm -rf "$root_lock_dir"
+	root_lock_pid=
+}
+if [[ "$as_root" -eq 1 ]]; then
+	root_lock_dir=$(mktemp -d "${TMPDIR:-/tmp}/vmtr-rootlock.XXXXXX")
+	mkfifo "$root_lock_dir/f"
+	owner="lane=${name} pid=$$ host=$(hostname -s 2>/dev/null || echo unknown) since=$(date -u +%FT%TZ)"
+	incus exec "$runner" -- flock /run/xpf-vm-test-run-root.lock sh -c "printf '%s\n' '${owner}' >/run/xpf-vm-test-run-root.owner; echo VMTR_ROOT_LOCK_HELD; cat >/dev/null" \
+		<"$root_lock_dir/f" >"$root_lock_dir/out" 2>&1 &
+	root_lock_pid=$!
+	exec {root_lock_fd}>"$root_lock_dir/f"
+	lock_waited=0
+	until grep -q '^VMTR_ROOT_LOCK_HELD$' "$root_lock_dir/out" 2>/dev/null; do
+		if ! kill -0 "$root_lock_pid" 2>/dev/null; then
+			echo "vm-test-run: could not take the per-runner root lock on ${runner}: $(tr '\n' ' ' <"$root_lock_dir/out") (#19162)" >&2
+			root_lock_release
+			exit 2
+		fi
+		if [[ "$lock_waited" -eq 20 ]]; then
+			holder=$(incus exec "$runner" -- cat /run/xpf-vm-test-run-root.owner 2>/dev/null) || holder=unknown
+			echo "vm-test-run: waiting for another --root run on ${runner} to finish (holder: ${holder}) (#19162)" >&2
+		fi
+		if [[ "$lock_waited" -ge $((${XPF_TEST_RUNNER_WAIT_S:-7200} * 10)) ]]; then
+			echo "vm-test-run: still waiting for the per-runner root lock on ${runner}; giving up (#19162)" >&2
+			root_lock_release
+			exit 75
+		fi
+		sleep 0.1
+		lock_waited=$((lock_waited + 1))
+	done
+fi
+
+xpf_state_probe before
+if [[ "$before_status" == nonempty || "$before_status" == error ]]; then
+	if [[ "$before_status" == nonempty ]]; then
+		listed=$(tr '\n' ' ' <<<"$before_entries")
+		seen="holds state an earlier root leg left (${listed% })"
+	else
+		seen="could not be inspected (${before_entries}), so it is not known to be clean"
+	fi
 	if [[ "$as_root" -eq 1 && "$allow_xpf_state" -ne 1 ]]; then
-		echo "vm-test-run: refusing a --root run: ${runner}:/var/lib/xpf holds state an earlier root leg left (${listed% }), and tests read that production path. Move it aside when no root lane is running there, e.g. as root on the runner: d=/var/lib/xpf-residue/\$(date -u +%Y%m%dT%H%M%SZ); mkdir -p \$d && find /var/lib/xpf -mindepth 1 -maxdepth 1 -exec mv -t \$d {} + ; or pass --allow-xpf-state to run with it listed (#19162)" >&2
+		echo "vm-test-run: refusing a --root run: ${runner}:/var/lib/xpf ${seen}, and tests read that production path. Move it aside when no root lane is running there, e.g. as root on the runner: d=/var/lib/xpf-residue/\$(date -u +%Y%m%dT%H%M%SZ); mkdir -p \$d && find /var/lib/xpf -mindepth 1 -maxdepth 1 -exec mv -t \$d {} + ; or pass --allow-xpf-state to run with it disclosed (#19162)" >&2
+		root_lock_release
 		exit 2
 	fi
-	echo "vm-test-run: warning: ${runner}:/var/lib/xpf holds state from an earlier root leg (${listed% }); a test that reads it depends on that leg (#19162)" >&2
+	echo "vm-test-run: warning: ${runner}:/var/lib/xpf ${seen}; a test that reads it depends on that (#19162)" >&2
 fi
+# xpf_state_report: after a --root command (or its interruption), name what
+# it added to /var/lib/xpf. Best effort: a failed probe is disclosed, never
+# allowed to change the command's status.
+xpf_state_report() {
+	xpf_state_probe after
+	if [[ "$after_status" == error ]]; then
+		echo "vm-test-run: could not inspect ${runner}:/var/lib/xpf after the --root command (${after_entries}); whether it wrote production state is unknown (#19162)" >&2
+		return 0
+	fi
+	if [[ "$before_status" == error ]]; then
+		[[ -n "$after_entries" ]] && echo "vm-test-run: ${runner}:/var/lib/xpf holds $(tr '\n' ' ' <<<"$after_entries"| sed 's/ $//') after the --root command; the before-probe failed, so what it added is unknown (#19162)" >&2
+		return 0
+	fi
+	local new
+	new=$(comm -13 <(sort <<<"$before_entries") <(sort <<<"$after_entries") | grep -v '^$' | tr '\n' ' ') || true
+	if [[ -n "$new" ]]; then
+		echo "vm-test-run: this --root command wrote production state to ${runner}:/var/lib/xpf: ${new% } (#19162)" >&2
+	fi
+}
 
 # #19142: the runner-side heartbeat (see "Disclosure" above). It writes
 # "<start> <last> <gaps> <samples>" (CLOCK_MONOTONIC ns) to its file once a
@@ -724,22 +831,44 @@ root_handback() {
 		-xdev ! -user runner -exec chown -h runner:runner {} + >/dev/null 2>&1 || true
 	trap - INT TERM
 }
+# root_interrupted <status>: the INT/TERM path of a --root leg. End the
+# command, report what it left (#19162), hand files back, release the lock,
+# and exit with the signal's conventional status.
+root_interrupted() {
+	trap '' INT TERM
+	# `|| true`: under set -e a failing last command of an && list (wait
+	# returns the killed command's 143) would exit before the report.
+	if [[ -n "${root_cmd_pid:-}" ]]; then
+		kill "$root_cmd_pid" 2>/dev/null || true
+		wait "$root_cmd_pid" 2>/dev/null || true
+	fi
+	if wait_unfrozen soft; then xpf_state_report || true; fi
+	root_handback
+	root_lock_release
+	exit "$1"
+}
 if [[ "$as_root" -eq 1 ]]; then
-	trap 'root_handback; exit 130' INT
-	trap 'root_handback; exit 143' TERM
+	trap 'root_interrupted 130' INT
+	trap 'root_interrupted 143' TERM
 	ws_t0=$(ws_now)
-	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${wrapped}" || rc=$?
+	# In the background, so a TERM to this script runs root_interrupted now
+	# rather than after the command ends (bash defers traps for a foreground
+	# child). A non-interactive shell gives it /dev/null as stdin.
+	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${wrapped}" &
+	root_cmd_pid=$!
+	wait "$root_cmd_pid" || rc=$?
+	root_cmd_pid=
 	ws_t1=$(ws_now)
 	trap - INT TERM
 	root_handback
-	# #19162: name what this command left in /var/lib/xpf.
+	# #19162: name what this command left in /var/lib/xpf, then let the next
+	# root lane in.
 	if wait_unfrozen soft; then
-		xpf_state_after=$(xpf_state) || xpf_state_after=
-		xpf_state_new=$(comm -13 <(sort <<<"$xpf_state_before") <(sort <<<"$xpf_state_after") | grep -v '^$' | tr '\n' ' ') || true
-		if [[ -n "$xpf_state_new" ]]; then
-			echo "vm-test-run: this --root command wrote production state to ${runner}:/var/lib/xpf: ${xpf_state_new% } (#19162)" >&2
-		fi
+		xpf_state_report
+	else
+		echo "vm-test-run: ${runner} stayed FROZEN after the --root command; /var/lib/xpf was not inspected (#19162)" >&2
 	fi
+	root_lock_release
 else
 	ws_t0=$(ws_now)
 	incus exec "$runner" -- su - runner -c "${stream_prefix}${env_prefix}; ${wrapped}" || rc=$?
