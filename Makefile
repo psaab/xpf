@@ -635,22 +635,35 @@ test-race-dp:
 # is what gates these cells, and a second release-feature build
 # would double the cold cost for no additional oracle.
 DEBUG_LOG_CELLS_16439 := afxdp::worker::loop_body::debug_report::policy_revoked_sessions_fold_tests::accumulate_carries_policy_revoked_sessions_10021 afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_tuple_mismatch_recycles_frame_exactly_once afxdp::tx::dispatch::tests::enqueue_failure::direct_tx_pat_translation_is_not_a_tuple_mismatch_9782 afxdp::tx::dispatch::tests::segmentation::segmentation_pat_translation_survives_expected_ports_9782
+# #19133: one file per `make` run (each recipe line is its own `sh -c` whose
+# parent is make, so $PPID names the run) where each failed leg records itself.
+TEST_RUST_LEGS_FAILED = "$${TMPDIR:-/tmp}/xpf-test-rust-failed-legs.$$PPID"
 test-rust: lint-rust-baseline check-userspace-dt-needed
 
+	# #19133: EVERY leg runs. A failed leg records itself instead of stopping
+	# make, so a red leg can no longer hide the legs after it, and the last
+	# line exits nonzero naming every failed leg.
+	# scripts/test-rust-leg1-selftest.sh pins this (make test-rust-leg1-lib).
+	@rm -f $(TEST_RUST_LEGS_FAILED)
 	# Leg 0: compile bench invariants only; benches are never executed.
-	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned check --manifest-path userspace-dp/Cargo.toml --benches \
+		|| echo "Leg 0: cargo check --benches" >>$(TEST_RUST_LEGS_FAILED)
 	# Leg 1: full release suite; overflow checks remain off by design.
 	# --no-fail-fast (#19133): without it cargo stops at the first red test
 	# binary, so a red unit cell hid every userspace-dp/tests/* target.
-	# scripts/test-rust-leg1-selftest.sh pins it (make test-rust-leg1-lib).
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml --release \
-		--bins --tests --no-fail-fast -- --test-threads=1
+		--bins --tests --no-fail-fast -- --test-threads=1 \
+		|| echo "Leg 1: release suite (--bins --tests)" >>$(TEST_RUST_LEGS_FAILED)
 	# Leg 2: validate the exact target-qualified oracle, then run one debug argv.
-	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp python3 scripts/debug-leg-census.py --manifest userspace-dp/Cargo.toml --cargo "$(CARGO)" --toolchain "$$pinned"
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp python3 scripts/debug-leg-census.py --manifest userspace-dp/Cargo.toml --cargo "$(CARGO)" --toolchain "$$pinned" \
+		|| echo "Leg 2: debug-leg census" >>$(TEST_RUST_LEGS_FAILED)
 	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned test --manifest-path userspace-dp/Cargo.toml \
-		--bins --tests -- --test-threads=1 --exact $$(cut -f2 userspace-dp/debug-leg.tests | tr '\n' ' ')
+		--bins --tests -- --test-threads=1 --exact $$(cut -f2 userspace-dp/debug-leg.tests | tr '\n' ' ') \
+		|| echo "Leg 2: debug argv" >>$(TEST_RUST_LEGS_FAILED)
 	# Leg 3 (#16439): debug-log-only cells, exact-named and listed first.
-	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned"
+	pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)") && stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh) && XPF_LINKED_LIBS_STAMP=$$stamp sh -c 'set -eu; listed="$$("$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --list)"; for cell in $(DEBUG_LOG_CELLS_16439); do count=$$(printf "%s\n" "$$listed" | grep -c -F -x "$$cell: test" || true); if [ "$$count" != "1" ]; then echo "test-rust Leg 3 (#16439): expected exactly one listed debug-log cell $$cell, found $$count" >&2; exit 1; fi; done; "$$0" +"$$1" test --manifest-path userspace-dp/Cargo.toml --features debug-log --bin xpf-userspace-dp -- --test-threads=1 --exact $(DEBUG_LOG_CELLS_16439)' "$(CARGO)" "$$pinned" \
+		|| echo "Leg 3: debug-log cells" >>$(TEST_RUST_LEGS_FAILED)
+	@if [ -s $(TEST_RUST_LEGS_FAILED) ]; then echo "test-rust: FAILED legs:" >&2; sed 's/^/  /' $(TEST_RUST_LEGS_FAILED) >&2; rm -f $(TEST_RUST_LEGS_FAILED); exit 1; fi; rm -f $(TEST_RUST_LEGS_FAILED); echo "test-rust: every leg passed"
 
 
 # #17200: clippy gate for the userspace dataplane. Clippy could not
@@ -1129,9 +1142,11 @@ endif
 test-clean-shared-cargo-lib:
 	sh ./scripts/clean-shared-cargo-selftest.sh
 
-# #19133: test-rust leg 1 reports every target. Extracts leg 1 from
-# `make -n test-rust` and runs it on a fixture crate with a red unit cell and a
-# red tests/ target; both must report. Needs cargo and the pinned toolchain.
+# #19133: test-rust reports every failure: every target inside leg 1
+# (--no-fail-fast) and every leg (a red leg no longer stops the ones after it).
+# Runs the real recipe from `make -n test-rust` on a fixture crate whose leg 1
+# and leg 2 are both red; both must be named. Needs cargo and the pinned
+# toolchain.
 .PHONY: test-rust-leg1-lib
 test-rust-leg1-lib:
 	bash ./scripts/test-rust-leg1-selftest.sh

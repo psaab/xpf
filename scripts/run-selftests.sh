@@ -471,10 +471,12 @@ run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh --selftest
 # #18839: `make clean` must never delete the box-wide shared cargo target dir.
 # Dry runs (`make -n clean`) only, with a positive control on the old recipe.
 run_shell scripts/clean-shared-cargo-selftest.sh
-# #19133: `make test-rust` leg 1 reports every target: its real command (from
-# `make -n test-rust`) on a fixture crate with a red unit cell and a red tests/
-# target must report both, and a mutation without --no-fail-fast must hide the
-# second. Builds a two-file crate; SKIPs without cargo or the pinned toolchain.
+# #19133: `make test-rust` reports every failure. Its real recipe (from
+# `make -n test-rust`), run line by line as make runs it on a fixture crate
+# whose leg 1 and leg 2 are red, must report both fixture failures in leg 1 and
+# name leg 1 AND leg 2 as failed. Two mutations (no --no-fail-fast; leg 1 not
+# recording its failure) must each hide something. Builds a two-file crate;
+# SKIPs without cargo or the pinned toolchain.
 run_bash scripts/test-rust-leg1-selftest.sh
 # #18738: the shim-ext-parity acceptance harness's signal handling and ROWS
 # filter, against a stub cargo in a throwaway checkout. Seconds; no Rust build.
