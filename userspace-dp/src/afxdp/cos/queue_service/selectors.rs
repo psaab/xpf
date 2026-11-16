@@ -8,6 +8,21 @@
 
 use super::*;
 
+/// #19098: the head a non-exact batch build will actually take. The builder
+/// (`build_cos_batch_from_queue`) pops through the cap-aware
+/// `cos_queue_peek_min_bucket` at `compute_drain_target_bps`, which skips
+/// buckets above their per-flow target. A selector that budgeted the
+/// uncapped `cos_queue_front` head instead could cover a head the builder
+/// does not take; when the capped head was larger, the build returned
+/// nothing, nothing was sent, the over-target bucket's observed rate never
+/// decayed, and the queue stopped for good. The selectors that feed that
+/// builder budget this head. Unshaped or non-flow-fair queues get
+/// `u64::MAX` as the target, so their head is unchanged.
+#[inline]
+fn nonexact_builder_head(queue: &CoSQueueRuntime) -> Option<&CoSPendingTxItem> {
+    cos_queue_peek_min_bucket(queue, compute_drain_target_bps(queue)).map(|(_, head)| head)
+}
+
 #[cfg(test)]
 #[inline]
 pub(in crate::afxdp) fn select_cos_guarantee_batch(
@@ -405,7 +420,7 @@ pub(in crate::afxdp) fn select_nonexact_cos_guarantee_batch_into(
                 .and_then(|queue_fast| queue_fast.shared_queue_lease.as_ref()),
             now_ns,
         );
-        let Some(head) = cos_queue_front(queue) else {
+        let Some(head) = nonexact_builder_head(queue) else {
             continue;
         };
         let head_len = cos_item_len(head);
@@ -538,7 +553,7 @@ pub(super) fn select_cos_surplus_batch_filtered(
             if queue.config.exact && !queue.config.surplus_sharing {
                 continue;
             }
-            let Some(head) = cos_queue_front(queue) else {
+            let Some(head) = nonexact_builder_head(queue) else {
                 continue;
             };
             let head_len = cos_item_len(head);
