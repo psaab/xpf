@@ -175,39 +175,71 @@ func TestTransitElectionDebtRunsNoReadinessCallback19169(t *testing.T) {
 	}
 }
 
+// readinessTrap19169 is a transfer-readiness callback that FAILS the test when
+// invoked while armed. Only the entry point under test runs armed: the cell's
+// own observation reads (some fixtures read weight through GroupStates) do not.
+type readinessTrap19169 struct {
+	armed atomic.Bool
+	calls atomic.Int32
+}
+
+// trapReadiness19169 installs the trap on cm, ARMED.
+func trapReadiness19169(t *testing.T, cm *cluster.Manager) *readinessTrap19169 {
+	t.Helper()
+	trap := &readinessTrap19169{}
+	trap.armed.Store(true)
+	cm.SetTransferReadinessFunc(func(rg int) (bool, []string) {
+		if trap.armed.Load() {
+			trap.calls.Add(1)
+			t.Errorf("a failover-path entry point ran the transfer-readiness callback for RG%d:\n%s", rg, debug.Stack())
+		}
+		return true, nil
+	})
+	return trap
+}
+
+// observe runs fn with the trap disarmed.
+func (trap *readinessTrap19169) observe(fn func()) {
+	trap.armed.Store(false)
+	defer trap.armed.Store(true)
+	fn()
+}
+
+func (trap *readinessTrap19169) Load() int32 { return trap.calls.Load() }
+
 // TestNoFailoverPathRunsTheReadinessCallback19169 is the census as a test, not
 // a judgment: the cluster's transfer-readiness callback FAILS the test if any
-// failover-path entry point invokes it. It drives:
-//   - a helper-down demotion (the event handler's VIP release and its
-//     ownership reads);
-//   - the reconcile pass (RG0 config ownership, the RG set, the helper-down
-//     release, the demotion write);
-//   - a direct-VIP reconcile on its own;
-//   - the transit gate's election-debt tick.
+// failover-path entry point invokes it. Each entry point runs in its own
+// subtest from a FRESH fixture, through its OUTER entry, and must produce its
+// own effect there (codex-e P2-2: one shared actuation assertion was satisfied
+// by the first handler alone):
+//   - a helper-down demotion: the event handler releases RG1's VIPs;
+//   - the reconcile pass, with the demotion event dropped: the pass itself
+//     releases RG1's VIPs;
+//   - a direct-VIP reconcile of a group this node no longer owns;
+//   - the helper-down release of a group this node no longer owns;
+//   - the REAL transit-gate tick (reassertTransitGate) across every debt
+//     transition: healthy, intentional stop (keepArm), unexpected exit,
+//     crash loop and recovery, each with its own weight and debt verdict;
+//   - an ownerless transfer-out accept and its confirmation (#18715).
 //
 // The first validation run of #19169 found reconcileRG0ConfigOwnership's
 // GroupState(0) this way, a caller the hand census had marked off-path.
 func TestNoFailoverPathRunsTheReadinessCallback19169(t *testing.T) {
-	d, log := readinessDaemon19169(t, 0)
-	var calls atomic.Int32
-	d.cluster.SetTransferReadinessFunc(func(rg int) (bool, []string) {
-		calls.Add(1)
-		t.Errorf("a failover-path entry point ran the transfer-readiness callback for RG%d:\n%s", rg, debug.Stack())
-		return true, nil
-	})
-	step := func(name string, fn func()) {
+	released := func(t *testing.T, log *order18701, before int, want string) {
 		t.Helper()
-		before := calls.Load()
-		fn()
-		if n := calls.Load() - before; n != 0 {
-			t.Errorf("%s ran the transfer-readiness callback %d times", name, n)
+		if !slices.Contains(log.snapshot()[before:], want) {
+			t.Fatalf("events %v: this entry point did not produce %q itself", log.snapshot()[before:], want)
 		}
 	}
-	step("the helper-down demotion of RG1", func() {
+	t.Run("helper-down demotion", func(t *testing.T) {
+		d, log := readinessDaemon19169(t, 0)
+		calls := trapReadiness19169(t, d.cluster)
 		if _, err := d.cluster.ManualFailover(1); err != nil {
 			t.Fatalf("ManualFailover(1): %v", err)
 		}
-		for {
+		before := len(log.snapshot())
+		for handled := false; !handled; {
 			select {
 			case ev := <-d.cluster.Events():
 				if ev.GroupID != 1 || ev.OldState != cluster.StatePrimary {
@@ -216,18 +248,117 @@ func TestNoFailoverPathRunsTheReadinessCallback19169(t *testing.T) {
 				if timer := d.handleClusterEvent(context.Background(), ev, nil); timer != nil {
 					timer.Stop()
 				}
-				return
+				handled = true
 			case <-time.After(2 * time.Second):
 				t.Fatal("no RG1 demotion event")
-				return
+			}
+		}
+		released(t, log, before, "vips-removed:1")
+		if calls.Load() != 0 {
+			t.Fatalf("readiness ran %d times", calls.Load())
+		}
+	})
+	t.Run("reconcile pass with the demotion event dropped", func(t *testing.T) {
+		d, log := readinessDaemon19169(t, 0)
+		calls := trapReadiness19169(t, d.cluster)
+		if _, err := d.cluster.ManualFailover(1); err != nil {
+			t.Fatalf("ManualFailover(1): %v", err)
+		}
+		for drained := false; !drained; {
+			select {
+			case <-d.cluster.Events():
+			default:
+				drained = true
+			}
+		}
+		before := len(log.snapshot())
+		d.reconcileRGState()
+		released(t, log, before, "vips-removed:1")
+		if calls.Load() != 0 {
+			t.Fatalf("readiness ran %d times", calls.Load())
+		}
+	})
+	t.Run("direct-VIP reconcile of a group no longer owned", func(t *testing.T) {
+		d, log := readinessDaemon19169(t, 0)
+		calls := trapReadiness19169(t, d.cluster)
+		d.cluster.SetGroupStateForTesting(2, cluster.StateSecondary)
+		before := len(log.snapshot())
+		d.reconcileDirectVIPOwnership(2, "test")
+		released(t, log, before, "vips-removed:2")
+		if calls.Load() != 0 {
+			t.Fatalf("readiness ran %d times", calls.Load())
+		}
+	})
+	t.Run("helper-down release of a group no longer owned", func(t *testing.T) {
+		d, log := readinessDaemon19169(t, 0)
+		calls := trapReadiness19169(t, d.cluster)
+		d.cluster.SetGroupStateForTesting(1, cluster.StateSecondary)
+		before := len(log.snapshot())
+		d.releaseDirectVIPsHelperDown("test")
+		released(t, log, before, "vips-removed:1")
+		if calls.Load() != 0 {
+			t.Fatalf("readiness ran %d times", calls.Load())
+		}
+	})
+	t.Run("transit-gate tick across every debt transition", func(t *testing.T) {
+		withBarrierRecorder(t)
+		d, weight, rt := newReadinessDaemon18697(t)
+		calls := trapReadiness19169(t, d.cluster)
+		debts := func() (arm, crash bool) {
+			for _, rg := range d.cluster.MonitorFailuresByGroup() {
+				if rg.GroupID != 1 {
+					continue
+				}
+				arm = slices.Contains(rg.MonitorFails, cluster.DataplaneArmMonitorIface)
+				crash = slices.Contains(rg.MonitorFails, cluster.HelperCrashLoopMonitorIface)
+			}
+			return arm, crash
+		}
+		for _, step := range []struct {
+			name                       string
+			running, notReady, looping bool
+			wantArm, wantCrash         bool
+			wantWeight                 int
+		}{
+			{name: "healthy", running: true, wantWeight: 255},
+			{name: "intentional stop (keepArm)", wantWeight: 255},
+			{name: "unexpected exit", notReady: true, wantArm: true, wantWeight: 1},
+			{name: "crash loop", looping: true, notReady: true, wantArm: true, wantCrash: true},
+			{name: "recovery", running: true, wantWeight: 255},
+		} {
+			rt.running.Store(step.running)
+			rt.notReady.Store(step.notReady)
+			rt.crashLoop.Store(step.looping)
+			before := calls.Load()
+			d.reassertTransitGate(step.name)
+			if n := calls.Load() - before; n != 0 {
+				t.Fatalf("%s: the transit-gate tick ran the readiness callback %d times", step.name, n)
+			}
+			arm, crash := debts()
+			if arm != step.wantArm || crash != step.wantCrash {
+				t.Fatalf("%s: RG1 arm debt %v crash-loop debt %v, want %v %v", step.name, arm, crash, step.wantArm, step.wantCrash)
+			}
+			var w int
+			calls.observe(func() { w = weight() }) // the fixture reads weight via GroupStates
+			if step.wantWeight != 0 && w != step.wantWeight {
+				t.Fatalf("%s: RG1 weight %d, want %d", step.name, w, step.wantWeight)
 			}
 		}
 	})
-	step("the reconcile pass", d.reconcileRGState)
-	step("a direct-VIP reconcile", func() { d.reconcileDirectVIPOwnership(2, "test") })
-	step("the helper-down release", func() { d.releaseDirectVIPsHelperDown("test") })
-	step("the election-debt tick", func() { d.applyTransitElectionDebt(false, false) })
-	if !slices.Contains(log.snapshot(), "vips-removed:1") {
-		t.Fatalf("events %v: the drive never reached the VIP release, so this census proved nothing", log.snapshot())
-	}
+	t.Run("ownerless transfer-out accept and confirmation", func(t *testing.T) {
+		d, log, confirms := newOwnerless18715(t, 0, nil)
+		calls := trapReadiness19169(t, d.cluster)
+		if err := d.acceptOwnerlessTransferOut(1, actuationReqID); err != nil {
+			t.Fatalf("an ownerless request was not accepted: %v", err)
+		}
+		if err := d.waitFailoverActuated(1, actuationReqID); err != nil {
+			t.Fatalf("the confirmed ownerless fence was not acked: %v", err)
+		}
+		if !slices.Contains(log.snapshot(), "rg_active=false sent") || *confirms != 1 {
+			t.Fatalf("events %v confirms=%d: the accept must write and confirm", log.snapshot(), *confirms)
+		}
+		if calls.Load() != 0 {
+			t.Fatalf("readiness ran %d times", calls.Load())
+		}
+	})
 }

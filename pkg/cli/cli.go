@@ -880,12 +880,14 @@ func (c *CLI) clusterPrefix() string {
 	if c.cluster == nil {
 		return ""
 	}
-	rg0 := c.cluster.GroupState(0)
-	if rg0 == nil {
+	// #19169: the prompt needs only RG0's state; GroupState would run the
+	// transfer-readiness callback on every prompt.
+	rg0, known := c.cluster.LocalGroupState(0)
+	if !known {
 		return ""
 	}
 	role := "secondary"
-	if rg0.State == cluster.StatePrimary {
+	if rg0 == cluster.StatePrimary {
 		role = "primary"
 	}
 	return fmt.Sprintf("{%s:node%d}", role, c.cluster.NodeID())
