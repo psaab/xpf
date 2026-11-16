@@ -7,7 +7,18 @@ set -u
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 LEG=${1:-$SCRIPT_DIR/selftest-nftables-kernel_18745.sh}
-GO_REAL=${GO_REAL:-$(command -v go || true)}
+# #19136: GO_REAL must be the Go toolchain, never test/support/host-bin-shims/go.
+# scripts/run-selftests.sh puts that shim first in PATH, and testguard-run.sh
+# puts it first again inside the leg. The shim resolves "the real go" as the
+# next `go` on PATH, which there is this fixture's own wrapper below. So a
+# GO_REAL taken from run-selftests.sh's PATH sent wrapper -> shim -> wrapper
+# through a new testguard-run.sh on every turn, an unbounded recursion that
+# hung `make selftest` for 60 min and masked every later leg. Resolve it with
+# the shim directory removed. An explicit GO_REAL is still honoured.
+# shellcheck disable=SC1007 # `CDPATH= cd` clears CDPATH for this command only
+SHIM_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../support/host-bin-shims" 2>/dev/null && pwd || true)
+PATH_WITHOUT_SHIMS=$(printf '%s\n' "$PATH" | tr ':' '\n' | grep -vxF -- "${SHIM_DIR:-/nonexistent}" | paste -sd: -)
+GO_REAL=${GO_REAL:-$(PATH=$PATH_WITHOUT_SHIMS command -v go || true)}
 if [ -z "$GO_REAL" ] || ! command -v "$GO_REAL" >/dev/null 2>&1; then
 	echo "SKIP: go not installed — cannot exercise #18745 GOFLAGS handling"
 	exit 77
