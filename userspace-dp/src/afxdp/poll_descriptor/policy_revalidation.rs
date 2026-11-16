@@ -2681,6 +2681,18 @@ pub(in crate::afxdp) fn resolve_current_forward_companion(
         fwd_decision,
     )
     .resolution;
+    // #19171: this producer has neither the retain verdict nor #16217, so the
+    // connected-owner derivation always applies (a packet's answer on the
+    // stored egress costs one comparison).
+    let looked_up = crate::afxdp::session_glue::connected_owner_derivation(
+        forwarding,
+        dynamic_neighbors,
+        resolution_target,
+        install_table_name_for_session(forwarding, fwd_decision, resolution_target),
+        looked_up,
+        Some(fwd_decision.resolution.egress_ifindex),
+    )
+    .unwrap_or(looked_up);
     let looked_up = prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
         ha_state,
