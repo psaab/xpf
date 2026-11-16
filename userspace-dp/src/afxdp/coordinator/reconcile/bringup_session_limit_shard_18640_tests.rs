@@ -48,3 +48,21 @@ fn bring_up_charges_each_key_on_exactly_one_worker_18640() {
         assert_eq!(charged, 1, "key {port} must be charged on exactly one worker, got {charged}");
     }
 }
+
+// #19131 (#6311): the launch plan bring-up builds keeps the node id it is given.
+// The source guard (tests/session_id_node_namespace_6311_guard.rs) anchors the
+// CALLS; this covers what no anchor can see, the constructor's stored field
+// (`WorkerLaunchPlan::new`, worker/launch.rs). Node 1, not 0, so a field
+// hardcoded to 0 fails here.
+#[test]
+fn worker_launch_plan_keeps_the_node_id_19131() {
+    let shards = session_limit_shards([3u32].into_iter());
+    let plan = worker_launch_plan(3, 1, Vec::new(), crate::PollMode::BusyPoll, &shards);
+    assert_eq!(plan.worker_id, 3);
+    assert_eq!(
+        plan.node_id, 1,
+        "the launch plan dropped the node id: node 1 would mint session ids in node 0's namespace (#6311)"
+    );
+    let direct = WorkerLaunchPlan::new(3, 1, Vec::new(), crate::PollMode::BusyPoll);
+    assert_eq!(direct.node_id, 1, "WorkerLaunchPlan::new must store the node id it is given (#6311)");
+}
