@@ -605,6 +605,16 @@ else
 	bad "nested --root run: rc=$nest_rc $(tr '\n' '|' <"$tmp/st-nested.err")"
 fi
 
+# --help prints the whole header: through its last comment line, and nothing
+# of the code after it.
+help_last=$(awk 'NR == 1 { next } /^#/ { last = $0; next } { print last; exit }' "$script")
+help_out=$(bash "$script" --help)
+if [[ "$(tail -n 1 <<<"$help_out")" == "$help_last" && "$(head -n 1 <<<"$help_out")" == "$(sed -n 2p "$script")" ]]; then
+	ok "--help: the whole header, first line to last"
+else
+	bad "--help: ends with [$(tail -n 1 <<<"$help_out")], want [$help_last]"
+fi
+
 # The proof predicate itself, against test files (the probe text is taken from
 # the script; only its path is replaced).
 probe() { sed -n '/^# vm-proof (#19142)$/,/^fi$/p' "$1" | sed "s|^p=/run/xpf-testguard-vm-boot-id\$|p=$tmp/proof/id|"; }

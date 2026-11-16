@@ -174,7 +174,9 @@ while [[ $# -gt 0 ]]; do
 	--allow-unproven-root) allow_unproven_root=1; shift ;;
 	--allow-xpf-state) allow_xpf_state=1; shift ;;
 	--) shift; break ;;
-	-h|--help) sed -n '2,46p' "$0"; exit 0 ;;
+	# The whole leading comment block, however long it grows (a fixed line
+	# range went stale twice as the header grew).
+	-h|--help) awk 'NR == 1 { next } /^#/ { print; next } { exit }' "$0"; exit 0 ;;
 	*) echo "vm-test-run: unknown argument: $1 (use -- before the command)" >&2; exit 2 ;;
 	esac
 done
