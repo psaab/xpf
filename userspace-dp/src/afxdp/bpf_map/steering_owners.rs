@@ -40,6 +40,41 @@
 //!   thread works on a clone that shares it.
 //! - **Why:** before #19147, eight removal paths (the census in #19147)
 //!   released nothing, and the claim outlived the session.
+//! - **The wholesale retire is fenced against coordinator claims**
+//!   (`coordinator_publication`): a coordinator claim takes it shared before
+//!   its holdings shard, and `retire_coordinator` takes it exclusively across
+//!   both sweeps, so a claim lands wholly before or after the retire. It never
+//!   splits into a row half with no holdings half (#19147 review, Codex P2).
+//! - **Not immediate kernel reclamation.** The wholesale retire deletes no
+//!   BPF row; rows left without an owner linger, as `retire_workers` leaves
+//!   them, and the daemon's post-enable orphan-row re-adjudication
+//!   (`pkg/dataplane/userspace/process.go`) decides them.
+//! - **Cost:** a removal of an entry the coordinator never claimed is a
+//!   holdings-shard lookup, with no BPF syscall. One that WAS claimed does
+//!   only the bookkeeping under the global shared-session lock. Its BPF delete,
+//!   or its rewrite of a surviving owner's action (#14650), is DEFERRED until
+//!   after that lock (#19147 review, seat r23 P3-2: in the lock, a ~1 ms tail
+//!   delete raised contending lockers' p999 ~10x).
+//! - **The deferred op is re-checked under the row-shard lock**
+//!   (`commit_deferred_row`): a row that is still ownerless is deleted; one a
+//!   replacement claimed (and wrote) in between is left alone; a restore
+//!   writes the CURRENT survivors' action.
+//! - **Residuals, which predate #19147:**
+//!   - **A late publisher.** A coordinator publisher that claims AFTER its
+//!     key's removal recreates a claim with no shared authority behind it.
+//!     The HA import publishes shared, then claims after the lock drops,
+//!     against the removers that take no tuple permit.
+//!   - **The LocalDelivery replacement** (`forwarding/local_delivery.rs`) now
+//!     has a few-µs window with no steering row: the leaked coordinator claim
+//!     used to bridge it. That is the pre-existing no-coordinator-claim case.
+//!     Publishing the replacement first would rely on its publish to move the
+//!     holdings, which a failed install or a failed write does not.
+//!   - **Removed in the review fold:** the explicit post-lock coordinator
+//!     releases in `session_glue/revalidation.rs` and
+//!     `session_glue/install_table_purge.rs`. They ran with no tuple permit, so
+//!     they could drop a concurrent import's claim on a new incarnation. The
+//!     ones in `session_delta.rs` and the admission shed run under a permit or
+//!     lease and stay.
 //!
 //! **Actions are recorded (#14650).** Each owner records the action byte it
 //! published. A physical row shared by owners with different actions is
@@ -136,8 +171,13 @@ impl SteeringHolder {
 /// still using — the original #9560 defect, surviving inside the handoff window
 /// between the coordinator's synchronous write and the first worker claim, and
 /// surviving permanently when every queued upsert was dropped. A claim closes the
-/// window; what keeps it from outliving its session is that every authoritative
-/// removal of the shared entry releases it.
+/// window. Since #19147 every removal of the shared entry releases it, in the
+/// removal primitive and under the shared lock. A claim made AFTER the removal
+/// still outlives the session (a residual that predates #19147): coordinator
+/// claimers publish shared first and claim after the lock drops (the HA import:
+/// `publish_shared_session`, then `publish_synced_entry_or_note_unpublished`,
+/// in `ha/session_import.rs`), so a removal in that window leaves the later
+/// claim with no session behind it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Claim {
     workers: u128,
@@ -206,6 +246,26 @@ pub(crate) enum OwnerRemoval {
 pub(crate) struct SteeringRowOwners {
     rows: ShardedMap<SteeringRow, Mutex<FastMap<SteeringRow, Owners>>, NUM_SHARDS>,
     holdings: ShardedMap<SessionKey, Mutex<FastMap<SessionKey, Held>>, NUM_SHARDS>,
+    /// #19147 (review, Codex P2): serializes `retire_coordinator` against
+    /// every COORDINATOR claim. A coordinator publish takes it shared, before
+    /// its holdings shard; the retire takes it exclusively across BOTH of its
+    /// sweeps (rows, then holdings). Without it a coordinator claim landing
+    /// between the two sweeps kept its row half and lost its holdings half: a
+    /// ghost row owner that no held-only release can find, so an aliased
+    /// owner's teardown preserved the kernel row forever. Worker claims need
+    /// no such fence: `retire_workers` runs only after every worker is joined.
+    /// Releases do not take it, since they remove both halves under the
+    /// holdings guard and cannot split a claim.
+    coordinator_publication: std::sync::RwLock<()>,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    /// #19147: test-only seam BETWEEN `retire_coordinator`'s row sweep and its
+    /// holdings sweep, so a cell can race a coordinator claim into exactly
+    /// that window.
+    pub(crate) static RETIRE_COORDINATOR_BETWEEN_SWEEPS_19147:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
 }
 
 impl Default for SteeringRowOwners {
@@ -213,6 +273,7 @@ impl Default for SteeringRowOwners {
         Self {
             rows: ShardedMap::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
             holdings: ShardedMap::with_seed_and(*SHARD_SEED, || Mutex::new(FastMap::default())),
+            coordinator_publication: std::sync::RwLock::new(()),
         }
     }
 }
@@ -299,6 +360,22 @@ fn held_rows(
 }
 
 impl SteeringRowOwners {
+    /// #19147: the shared side of `coordinator_publication`, for a COORDINATOR
+    /// claim only; a worker claim takes nothing. Taken BEFORE the holdings
+    /// shard, so the order is publication lock, holdings, rows, matching
+    /// `retire_coordinator` (publication lock, then rows and holdings one
+    /// shard at a time).
+    fn coordinator_publication_shared(
+        &self,
+        holder: SteeringHolder,
+    ) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+        matches!(holder, SteeringHolder::Coordinator).then(|| {
+            self.coordinator_publication
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        })
+    }
+
     fn row_shard(&self, row: &SteeringRow) -> MutexGuard<'_, FastMap<SteeringRow, Owners>> {
         lock(self.rows.shard_at(row_shard_idx(row)))
     }
@@ -327,6 +404,7 @@ impl SteeringRowOwners {
         write: impl FnOnce(u8) -> io::Result<()>,
     ) -> io::Result<()> {
         let claim = holder.claim();
+        let _publication = self.coordinator_publication_shared(holder);
         let mut holdings = self.holdings_shard(owner);
         self.write_and_claim(&mut holdings, row, owner, claim, action, write)
     }
@@ -367,6 +445,7 @@ impl SteeringRowOwners {
         mut restore: impl FnMut(&SteeringRow, u8),
     ) -> io::Result<()> {
         let claim = holder.claim();
+        let _publication = self.coordinator_publication_shared(holder);
         let mut holdings = self.holdings_shard(owner);
         for (row, payload) in rows {
             let action = action_of(payload);
@@ -473,6 +552,12 @@ impl SteeringRowOwners {
     /// left with no holder linger unowned, as `retire_workers` leaves worker
     /// rows; a later release that names the row deletes it.
     pub(crate) fn retire_coordinator(&self) {
+        // #19147 (review, Codex P2): exclusive across BOTH sweeps, so no
+        // coordinator claim lands between them.
+        let _publication = self
+            .coordinator_publication
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for shard in self.rows.shards().iter() {
             let mut rows = lock(shard);
             rows.retain(|_, owners| {
@@ -483,6 +568,13 @@ impl SteeringRowOwners {
                 !owners.is_empty()
             });
         }
+        #[cfg(test)]
+        RETIRE_COORDINATOR_BETWEEN_SWEEPS_19147.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
         for shard in self.holdings.shards().iter() {
             let mut holdings = lock(shard);
             holdings.retain(|_, held| {
@@ -605,6 +697,36 @@ impl SteeringRowOwners {
             }
         }
         outcome
+    }
+
+    /// #19147 (review, seat r23 P3-2): phase 2 of a DEFERRED release. Phase 1
+    /// (`release_entry` with collecting callbacks, under the shared-session
+    /// lock) did the bookkeeping and decided that `row` needed a BPF delete (or,
+    /// when `restore`, a survivor-action rewrite). This performs it after that
+    /// lock is gone, re-checking under the row's shard lock, with the I/O inside
+    /// that lock as every registry operation does:
+    /// - **no owner now:** the row is deleted;
+    /// - **an owner claimed it since, for a delete:** skipped. A replacement
+    ///   that claimed the row also wrote it, and deleting it would strand that
+    ///   replacement with no row;
+    /// - **for a restore:** the CURRENT survivors' fail-safe action is written.
+    pub(crate) fn commit_deferred_row(
+        &self,
+        row: &SteeringRow,
+        restore: bool,
+        delete: impl FnOnce(&SteeringRow),
+        write: impl FnOnce(&SteeringRow, u8),
+    ) {
+        let rows = self.row_shard(row);
+        match rows.get(row) {
+            None => delete(row),
+            Some(owners) if restore => {
+                if let Some(action) = surviving_action(owners) {
+                    write(row, action);
+                }
+            }
+            Some(_) => {}
+        }
     }
 
     /// Whether `row`'s shard is locked at this instant.

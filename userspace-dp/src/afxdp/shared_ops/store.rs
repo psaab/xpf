@@ -729,6 +729,20 @@ fn remove_shared_alias_owned_by(
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    /// #19147 (review, seat r23 P3-3): test-only seam in
+    /// `remove_shared_session_if`, just BEFORE the coordinator release, still
+    /// under the shared-session lock. A cell races a replacement's publish and
+    /// claim against the release through it.
+    pub(in crate::afxdp) static BEFORE_COORDINATOR_RELEASE_19147:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+    /// #19147 (review, seat r23 P3-2): test-only seam AFTER the shared lock
+    /// is released and BEFORE the deferred BPF ops are committed.
+    pub(in crate::afxdp) static BETWEEN_UNLOCK_AND_COMMIT_19147:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = std::cell::RefCell::new(None);
+}
+
 /// The outcome of a conditional shared-session removal (#9714 review round 2,
 /// finding 3).
 pub(in crate::afxdp) enum SharedRemoval {
@@ -1071,12 +1085,38 @@ pub(in crate::afxdp) fn remove_shared_session_if(
     }
     // #19147: a coordinator steering claim stands for this shared entry
     // (#9560 round 3), so its removal releases that claim HERE, for every
-    // removal path, as the #7209 un-file above does. Still under the shared
-    // lock, for the same reason as the un-file: a publisher of a replacement
-    // under this key publishes under that lock and claims after, so this
-    // release cannot drop the replacement's claim.
-    if removed_entry.is_some() {
-        shared_owner_rg_indexes.release_coordinator_claims(key);
+    // removal path, as the #7209 un-file above does.
+    // - The BOOKKEEPING happens still under the shared lock, for the same
+    //   reason as the un-file: a publisher of a replacement under this key
+    //   publishes under that lock and claims after, so this release cannot
+    //   drop the replacement's claim.
+    // - The BPF syscalls it decided on are DEFERRED until after the lock
+    //   (#19147 review, seat r23 P3-2). A delete held in this global mutex
+    //   measured ~1 ms in its tail and raised contending lockers' p999 ~10x.
+    //   Each is re-checked under its row-shard lock when performed, so a
+    //   replacement that claimed and wrote the row in between keeps it.
+    let deferred = if removed_entry.is_some() {
+        #[cfg(test)]
+        BEFORE_COORDINATOR_RELEASE_19147.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        shared_owner_rg_indexes.release_coordinator_claims_deferred(key)
+    } else {
+        None
+    };
+    drop(sessions);
+    if let Some(deferred) = deferred {
+        #[cfg(test)]
+        BETWEEN_UNLOCK_AND_COMMIT_19147.with(|hook| {
+            let hook = hook.borrow_mut().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        });
+        shared_owner_rg_indexes.commit_coordinator_release(deferred);
     }
     match removed_entry {
         Some(entry) => SharedRemoval::Removed(Box::new(entry)),

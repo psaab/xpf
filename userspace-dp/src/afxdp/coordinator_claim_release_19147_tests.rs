@@ -419,3 +419,424 @@ fn the_stale_replay_purge_releases_the_coordinator_claim_19147() {
         "the stale-replay purge's removal must release the coordinator claim"
     );
 }
+
+/// #19147 (review, Codex P2): a coordinator claim racing the wholesale retire
+/// must land WHOLE, before or after it, never split between its two sweeps.
+///
+/// The seam runs between the retire's row sweep and its holdings sweep. In it,
+/// another thread publishes a coordinator claim for K (an HA import that
+/// published its shared entry before the clear and claims after). Before the
+/// fix the claim landed in that window: its row half survived the
+/// already-finished row sweep, and the holdings sweep then erased its holdings
+/// half. That left a ghost row owner no held-only release can find. With the
+/// fix the claim blocks on the publication lock until the retire completes.
+///
+/// The cell checks BOTH registry halves, then that a subsequent held-only
+/// release (what the removal primitive runs) finds the claim and leaves the
+/// row ownerless.
+#[test]
+fn a_coordinator_claim_racing_the_wholesale_retire_lands_whole_19147() {
+    let coordinator = recorded_coordinator();
+    let entry = synced_entry_port(31_911, 0);
+    let owners = Arc::clone(&coordinator.steering_owners);
+    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let claimer: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    let landed_in_window = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let (owners, claimed, claimer, landed_in_window) = (
+            Arc::clone(&owners),
+            Arc::clone(&claimed),
+            Arc::clone(&claimer),
+            Arc::clone(&landed_in_window),
+        );
+        let entry = entry.clone();
+        crate::afxdp::bpf_map::RETIRE_COORDINATOR_BETWEEN_SWEEPS_19147.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let thread_claimed = Arc::clone(&claimed);
+                let handle = std::thread::spawn(move || {
+                    crate::afxdp::bpf_map::publish_session_map_entry_for_session(
+                        crate::afxdp::bpf_map::SteeringMap {
+                            fd: RECORDER_ONLY_MAP_FD,
+                            owners: &owners,
+                            holder: SteeringHolder::Coordinator,
+                        },
+                        &entry.key,
+                        entry.decision,
+                        &entry.metadata,
+                        false,
+                        false,
+                    )
+                    .expect("the racing coordinator claim must publish");
+                    thread_claimed.store(true, std::sync::atomic::Ordering::Release);
+                });
+                // Give the claim every chance to land INSIDE the window.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                while std::time::Instant::now() < deadline {
+                    if claimed.load(std::sync::atomic::Ordering::Acquire) {
+                        landed_in_window.store(true, std::sync::atomic::Ordering::Release);
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                *claimer.lock().expect("claimer") = Some(handle);
+            }));
+        });
+    }
+
+    coordinator.steering_owners.retire_coordinator();
+    let handle = claimer
+        .lock()
+        .expect("claimer")
+        .take()
+        .expect("FIXTURE: the seam must have run");
+    handle.join().expect("the racing claim thread");
+
+    assert!(
+        !landed_in_window.load(std::sync::atomic::Ordering::Acquire),
+        "a coordinator claim landed BETWEEN the retire's two sweeps; it must wait for the whole retire"
+    );
+    let row = crate::afxdp::bpf_map::session_map_row(&entry.key);
+    let held = coordinator_held(&coordinator, &entry.key);
+    let row_owners = coordinator.steering_owners.owner_count(&row);
+    assert!(
+        held > 0 && row_owners == 1,
+        "the racing claim must be WHOLE: holdings {held}, row owners {row_owners} (a row owner with no \
+         holdings is a ghost no held-only release can find)"
+    );
+    // The removal primitive's release sequence (`remove_shared_session_if`):
+    // the bookkeeping under the shared-session lock, then the deferred BPF ops
+    // after it.
+    let indexes = &coordinator.sessions.owner_rg_indexes;
+    let deferred = {
+        let _shared = crate::afxdp::shared_ops::lock_shared_recover(&coordinator.sessions.synced);
+        indexes
+            .release_coordinator_claims_deferred(&entry.key)
+            .expect("FIXTURE: the index set must carry the coordinator's steering registry")
+    };
+    indexes.commit_coordinator_release(deferred);
+    assert_eq!(
+        coordinator.steering_owners.owner_count(&row),
+        0,
+        "a subsequent held-only release must find the claim and leave the row ownerless (no ghost owner)"
+    );
+}
+
+/// #19147 (review, seat r23 P3-3): the release runs UNDER the shared-session
+/// lock, so a replacement that publishes the same key under that lock and
+/// claims after it cannot lose its claim to the release.
+///
+/// In the seam just before the release, another thread publishes a
+/// replacement K' of the removed key K into the shared store and claims its
+/// rows as the coordinator, the HA import's order. With the release under the
+/// lock, the replacement's publish waits until the removal (release included)
+/// has finished, and its claim survives. A release moved after the lock drops
+/// lets the replacement publish and claim first; the identity-blind release
+/// of key K then drops K''s claim.
+#[test]
+fn a_replacement_claimed_during_the_removal_keeps_its_claim_19147() {
+    let coordinator = recorded_coordinator();
+    let entry = synced_entry_port(31_912, 0);
+    publish_and_claim(&coordinator, &entry, SteeringHolder::Coordinator);
+    let mut replacement = entry.clone();
+    replacement.session_id = 0x19147;
+    let sessions = Arc::clone(&coordinator.sessions);
+    let owners = Arc::clone(&coordinator.steering_owners);
+    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let publisher: Arc<Mutex<Option<std::thread::JoinHandle<()>>>> = Arc::new(Mutex::new(None));
+    {
+        let (claimed, publisher) = (Arc::clone(&claimed), Arc::clone(&publisher));
+        crate::afxdp::shared_ops::BEFORE_COORDINATOR_RELEASE_19147.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                let thread_claimed = Arc::clone(&claimed);
+                let handle = std::thread::spawn(move || {
+                    publish_shared_session(
+                        &sessions.synced,
+                        &sessions.nat,
+                        &sessions.forward_wire,
+                        &sessions.owner_rg_indexes,
+                        &replacement,
+                    );
+                    crate::afxdp::bpf_map::publish_session_map_entry_for_session(
+                        crate::afxdp::bpf_map::SteeringMap {
+                            fd: RECORDER_ONLY_MAP_FD,
+                            owners: &owners,
+                            holder: SteeringHolder::Coordinator,
+                        },
+                        &replacement.key,
+                        replacement.decision,
+                        &replacement.metadata,
+                        false,
+                        false,
+                    )
+                    .expect("the replacement's claim must publish");
+                    thread_claimed.store(true, std::sync::atomic::Ordering::Release);
+                });
+                // Give the replacement every chance to claim BEFORE the release.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+                while std::time::Instant::now() < deadline
+                    && !claimed.load(std::sync::atomic::Ordering::Acquire)
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                *publisher.lock().expect("publisher") = Some(handle);
+            }));
+        });
+    }
+
+    crate::afxdp::shared_ops::remove_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry.key,
+    );
+    publisher
+        .lock()
+        .expect("publisher")
+        .take()
+        .expect("FIXTURE: the seam must have run")
+        .join()
+        .expect("the replacement publisher");
+
+    assert!(
+        coordinator
+            .sessions
+            .synced
+            .lock()
+            .expect("shared")
+            .get(&entry.key)
+            .is_some_and(|live| live.session_id == 0x19147),
+        "FIXTURE: the replacement must be the live shared entry"
+    );
+    assert!(
+        coordinator_held(&coordinator, &entry.key) > 0,
+        "the replacement's coordinator claim must survive the removal of the entry it replaced; a \
+         release outside the shared lock drops it"
+    );
+    assert_eq!(
+        coordinator
+            .steering_owners
+            .owner_count(&crate::afxdp::bpf_map::session_map_row(&entry.key)),
+        1,
+        "the replacement's row must keep its coordinator owner"
+    );
+}
+
+fn pct_19147(sorted: &[u64], p: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted[((sorted.len() as f64 - 1.0) * p).round() as usize]
+}
+
+/// #19147 (review, seat r23 P3-2): what the in-lock release costs, against a
+/// REAL BPF hash map (it needs CAP_BPF; without it, it prints SKIP).
+/// Ignored; run it as root in release:
+/// `cargo test --release --bins coordinator_release_lock_hold_bench -- --ignored --nocapture`.
+///
+/// Each arm seeds N shared entries, then removes them one by one, timing each
+/// `remove_shared_session` call (the removal holds the shared-session lock for
+/// almost its whole body, so this is about its hold time). Meanwhile WORKERS
+/// threads time their own shared-lock acquisitions, standing in for the new-flow
+/// publishes that contend on that lock.
+/// - **CLAIMED:** every entry carries a coordinator claim (the standby's HA
+///   import, or the new primary's activation). The release BPF-deletes its
+///   rows inside the lock.
+/// - **UNCLAIMED:** no claim, so the release is a holdings lookup.
+#[test]
+#[ignore = "#19147 P3-2 bench (root, real BPF map): cargo test --release --bins coordinator_release_lock_hold_bench -- --ignored --nocapture"]
+fn coordinator_release_lock_hold_bench_19147() {
+    use std::sync::atomic::{AtomicBool, Ordering as AtOrd};
+    const N: u16 = 4_000;
+    const WORKERS: usize = 4;
+    let name = c"x19147bench";
+    // SAFETY: a plain map create with a NUL-terminated name and no opts.
+    let fd = unsafe {
+        libbpf_sys::bpf_map_create(
+            libbpf_sys::BPF_MAP_TYPE_HASH,
+            name.as_ptr(),
+            40,
+            1,
+            131_072,
+            std::ptr::null(),
+        )
+    };
+    if fd < 0 {
+        eprintln!(
+            "BENCH19147 SKIP: bpf_map_create: {} (needs CAP_BPF)",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+    let coordinator = Coordinator::new();
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd { fd }),
+            ..Default::default()
+        }));
+    let mut base: u16 = 10_000;
+    for (round, (arm, claim)) in [
+        ("UNCLAIMED", false),
+        ("CLAIMED", true),
+        ("UNCLAIMED", false),
+        ("CLAIMED", true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let entries: Vec<SyncedSessionEntry> =
+            (0..N).map(|i| synced_entry_port(base + i, 0)).collect();
+        base += N;
+        for entry in &entries {
+            publish_shared_session(
+                &coordinator.sessions.synced,
+                &coordinator.sessions.nat,
+                &coordinator.sessions.forward_wire,
+                &coordinator.sessions.owner_rg_indexes,
+                entry,
+            );
+            if claim {
+                crate::afxdp::bpf_map::publish_session_map_entry_for_session(
+                    crate::afxdp::bpf_map::SteeringMap {
+                        fd,
+                        owners: &coordinator.steering_owners,
+                        holder: SteeringHolder::Coordinator,
+                    },
+                    &entry.key,
+                    entry.decision,
+                    &entry.metadata,
+                    false,
+                    false,
+                )
+                .expect("BENCH: the coordinator claim must write the real map");
+            }
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let (shared, stop) = (Arc::clone(&coordinator.sessions.synced), Arc::clone(&stop));
+                std::thread::spawn(move || {
+                    let mut waits = Vec::with_capacity(1 << 18);
+                    while !stop.load(AtOrd::Relaxed) {
+                        let started = std::time::Instant::now();
+                        let guard = crate::afxdp::shared_ops::lock_shared_recover(&shared);
+                        waits.push(started.elapsed().as_nanos() as u64);
+                        drop(guard);
+                        std::hint::spin_loop();
+                    }
+                    waits
+                })
+            })
+            .collect();
+        let mut holds = Vec::with_capacity(entries.len());
+        let burst = std::time::Instant::now();
+        for entry in &entries {
+            let started = std::time::Instant::now();
+            crate::afxdp::shared_ops::remove_shared_session(
+                &coordinator.sessions.synced,
+                &coordinator.sessions.nat,
+                &coordinator.sessions.forward_wire,
+                &coordinator.sessions.owner_rg_indexes,
+                &entry.key,
+            );
+            holds.push(started.elapsed().as_nanos() as u64);
+        }
+        let burst_us = burst.elapsed().as_micros();
+        stop.store(true, AtOrd::Relaxed);
+        let mut waits: Vec<u64> = workers
+            .into_iter()
+            .flat_map(|w| w.join().expect("worker"))
+            .collect();
+        holds.sort_unstable();
+        waits.sort_unstable();
+        eprintln!(
+            "BENCH19147 round={round} arm={arm} n={} burst_us={burst_us} removal_ns p50={} p99={} max={} | worker_lock_wait_ns n={} p50={} p99={} p999={} max={}",
+            holds.len(),
+            pct_19147(&holds, 0.5),
+            pct_19147(&holds, 0.99),
+            holds.last().copied().unwrap_or(0),
+            waits.len(),
+            pct_19147(&waits, 0.5),
+            pct_19147(&waits, 0.99),
+            pct_19147(&waits, 0.999),
+            waits.last().copied().unwrap_or(0),
+        );
+    }
+}
+
+/// #19147 (review, seat r23 P3-2): the release's BPF delete is DEFERRED past
+/// the shared-session lock, so it must re-check the row under its shard lock.
+///
+/// The removed entry's coordinator claim was its row's only owner, so phase 1
+/// decides on a delete. In the seam between the unlock and that deferred
+/// delete, a replacement publishes the same key and claims it as the
+/// coordinator, which writes the row. The deferred delete must see the new
+/// owner and skip: the replacement keeps its claim AND its BPF row (its write
+/// is the row's last record).
+#[test]
+fn a_replacement_written_before_the_deferred_delete_keeps_its_row_19147() {
+    let coordinator = recorded_coordinator();
+    let entry = synced_entry_port(31_913, 0);
+    publish_and_claim(&coordinator, &entry, SteeringHolder::Coordinator);
+    let mut replacement = entry.clone();
+    replacement.session_id = 0x19148;
+    clear_session_map_writes();
+    {
+        let sessions = Arc::clone(&coordinator.sessions);
+        let owners = Arc::clone(&coordinator.steering_owners);
+        crate::afxdp::shared_ops::BETWEEN_UNLOCK_AND_COMMIT_19147.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move || {
+                publish_shared_session(
+                    &sessions.synced,
+                    &sessions.nat,
+                    &sessions.forward_wire,
+                    &sessions.owner_rg_indexes,
+                    &replacement,
+                );
+                crate::afxdp::bpf_map::publish_session_map_entry_for_session(
+                    crate::afxdp::bpf_map::SteeringMap {
+                        fd: RECORDER_ONLY_MAP_FD,
+                        owners: &owners,
+                        holder: SteeringHolder::Coordinator,
+                    },
+                    &replacement.key,
+                    replacement.decision,
+                    &replacement.metadata,
+                    false,
+                    false,
+                )
+                .expect("the replacement's claim must publish");
+            }));
+        });
+    }
+
+    crate::afxdp::shared_ops::remove_shared_session(
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+        &entry.key,
+    );
+
+    assert!(
+        crate::afxdp::shared_ops::BETWEEN_UNLOCK_AND_COMMIT_19147
+            .with(|hook| hook.borrow().is_none()),
+        "FIXTURE: the seam between the unlock and the deferred commit must have run"
+    );
+    assert!(
+        coordinator_held(&coordinator, &entry.key) > 0,
+        "the replacement's coordinator claim must survive"
+    );
+    let last = session_map_writes()
+        .iter()
+        .rev()
+        .find(|record| record.key == entry.key)
+        .map(|record| record.value);
+    assert!(
+        matches!(last, Some(Some(_))),
+        "the replacement's BPF row must survive: the deferred delete must re-check the row's owners \
+         and skip it ({:?})",
+        session_map_writes()
+    );
+}

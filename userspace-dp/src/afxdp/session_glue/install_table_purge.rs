@@ -398,7 +398,12 @@ fn teardown_purge_forward(
             session_id: closed_id,
         });
     }
-    release_coordinator_session_rows(session_map, key);
+    // #19147 (review, seat r23 P3-1): no explicit coordinator release here.
+    // The removal primitive released the coordinator's held rows for this
+    // key under the shared lock. A second, identity-blind release here, after
+    // that lock dropped and with no tuple permit, could drop a concurrent HA
+    // import's claim on a new incarnation of the key (and BPF-delete its row
+    // before any worker installs it).
     sessions.emit_close_delta_with_snapshot(
         key.clone(),
         *decision,
@@ -493,7 +498,12 @@ fn teardown_purge_companion(
             session_id: closed_companion_id,
         });
     }
-    release_coordinator_session_rows(session_map, companion_key);
+    // #19147 (review, seat r23 P3-1): no explicit coordinator release here.
+    // The removal primitive released the coordinator's held rows for this
+    // key under the shared lock. A second, identity-blind release here, after
+    // that lock dropped and with no tuple permit, could drop a concurrent HA
+    // import's claim on a new incarnation of the key (and BPF-delete its row
+    // before any worker installs it).
     sessions.emit_close_delta_with_snapshot(
         companion_key.clone(),
         *companion_decision,
