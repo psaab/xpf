@@ -201,12 +201,17 @@ func (d *Daemon) helperDownFenceSilentAck(rgID int, silentAtEntry bool) error {
 // services only of RGs this node no longer owns, and leaves an owned RG's
 // VIPs in place. Used when the local helper is not answering, so that no RG's
 // VIP release waits behind another RG's helper round trips (#18701).
+//
+// #19169: the RGs are enumerated with DataGroupIDs, not GroupStates.
+// GroupStates runs the transfer-readiness callback for every group before it
+// returns (routing discovery and FRR queries, up to 2 s each), so the first VIP
+// removal used to wait behind N of them. RG0 owns no RETH VIPs.
 func (d *Daemon) releaseDirectVIPsHelperDown(reason string) {
 	if d.cluster == nil {
 		return
 	}
-	for _, rg := range d.cluster.GroupStates() {
-		d.reconcileDirectVIPOwnership(rg.GroupID, reason)
+	for _, rgID := range d.cluster.DataGroupIDs() {
+		d.reconcileDirectVIPOwnership(rgID, reason)
 	}
 }
 

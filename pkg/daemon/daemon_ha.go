@@ -1193,16 +1193,23 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 	if d.cluster == nil || d.store == nil {
 		return
 	}
-	rg0 := d.cluster.GroupState(0)
-	if rg0 == nil {
+	// #19169: LocalGroupState, not GroupState. This runs at the top of the
+	// reconcile pass, ahead of its helper-down VIP release, and GroupState
+	// runs the transfer-readiness callback (routing and FRR queries, up to
+	// 2 s) for a field this reconcile does not read.
+	rg0State, known := d.cluster.LocalGroupState(0)
+	if !known {
 		// No RG0 in this config — nothing owns the gate, so nothing to
 		// reconcile. Not the same as "RG0 exists and is secondary".
 		d.rg0WasPrimary.Store(false)
 		return
 	}
+	if d.rg0OwnershipSnapshotHook != nil {
+		d.rg0OwnershipSnapshotHook() // the #12171 race cells' injection point
+	}
 
 	var wantReadOnly bool
-	switch rg0.State {
+	switch rg0State {
 	case cluster.StatePrimary:
 		wantReadOnly = false
 	case cluster.StateSecondary, cluster.StateSecondaryHold:
@@ -1210,19 +1217,19 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 	default:
 		return
 	}
-	if rg0.State == cluster.StatePrimary {
+	if rg0State == cluster.StatePrimary {
 		d.rg0WasPrimary.Store(true)
 	}
-	// #12171: GroupState snapshots RG0 before running its transfer-readiness
-	// callback outside the manager lock. Recheck ownership after that callback
-	// so a stale snapshot from a concurrent event makes this reconcile bail in
-	// BOTH directions: a stale Secondary snapshot must not consume a promotion
+	// #12171: the state above is a snapshot (taken with no transfer-readiness
+	// callback since #19169, but still released before the gate). Recheck
+	// ownership so a stale snapshot from a concurrent event makes this
+	// reconcile bail in BOTH directions: a stale Secondary snapshot must not consume a promotion
 	// latch from a self-election that already opened the gate, and a stale
 	// Primary snapshot must not re-open config writes on a node that is now
 	// RG0 secondary. The recheck only narrows the race to the final
 	// accessor-to-gate span; full serialization of event and reconcile handling
 	// is a follow-up.
-	if primary, known := d.cluster.LocalGroupPrimary(0); !known || primary != (rg0.State == cluster.StatePrimary) {
+	if primary, known := d.cluster.LocalGroupPrimary(0); !known || primary != (rg0State == cluster.StatePrimary) {
 		return
 	}
 
@@ -1232,7 +1239,7 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 			// pass false so apply re-derives the takeover itself: that sets
 			// peerTakeoverObserved and logs the peer-takeover reasons rather
 			// than the generic demotion lines.
-			d.applyRG0OwnershipTransition(rg0.State, false)
+			d.applyRG0OwnershipTransition(rg0State, false)
 		}
 		return
 	}
@@ -1241,9 +1248,9 @@ func (d *Daemon) reconcileRG0ConfigOwnership() {
 		"An RG0 transition event was almost certainly dropped (see the "+
 		"\"event channel full\" warning); the node would otherwise have stayed in "+
 		"this split state until the next transition.",
-		"rg0_state", rg0.State.String(), "store_read_only_was", !wantReadOnly,
+		"rg0_state", rg0State.String(), "store_read_only_was", !wantReadOnly,
 		"issue", "#6889")
-	d.applyRG0OwnershipTransition(rg0.State, false)
+	d.applyRG0OwnershipTransition(rg0State, false)
 }
 
 // applyRG0OwnershipTransition reacts to an RG0 ownership change: it toggles
@@ -1749,8 +1756,10 @@ func (d *Daemon) reconcileRGState() {
 		seen[rgID] = true
 	}
 	d.rgStatesMu.RUnlock()
-	for _, gs := range d.cluster.GroupStates() {
-		seen[gs.GroupID] = true
+	// #19169: IDs only, so no transfer-readiness callbacks. This runs
+	// before the helper-down VIP release below.
+	for _, rgID := range d.cluster.GroupIDs() {
+		seen[rgID] = true
 	}
 	for rgID := range rgVRRP {
 		seen[rgID] = true

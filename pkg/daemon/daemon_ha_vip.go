@@ -95,19 +95,16 @@ func (d *Daemon) isNoRethVRRP() bool {
 	return cc != nil && !cc.UsesRethVRRP()
 }
 
-func directVIPOwnershipDesired(localState cluster.NodeState) bool {
-	return localState == cluster.StatePrimary
-}
-
+// shouldOwnDirectVIPs reads ownership with LocalGroupPrimary, not GroupState
+// (#19169): GroupState runs the transfer-readiness callback (routing and FRR
+// queries, up to 2 s), and this runs under directVIPMu in every direct VIP
+// reconcile, including the helper-down release. An unknown group owns nothing.
 func (d *Daemon) shouldOwnDirectVIPs(rgID int) bool {
 	if d.cluster == nil {
 		return false
 	}
-	local := d.cluster.GroupState(rgID)
-	if local == nil {
-		return false
-	}
-	return directVIPOwnershipDesired(local.State)
+	primary, known := d.cluster.LocalGroupPrimary(rgID)
+	return known && primary
 }
 
 func (d *Daemon) directVIPOwnershipApplied(rgID int) bool {

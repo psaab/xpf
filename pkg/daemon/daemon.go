@@ -2010,6 +2010,13 @@ type Daemon struct {
 	stableLL              stableLLTenure
 	addStableRethLLFn     func(int)
 	stableLLReleaseHoldFn func(int)
+	// rg0OwnershipSnapshotHook is a unit-test seam: it runs right after
+	// reconcileRG0ConfigOwnership samples RG0's state and before its #12171
+	// recheck, so a cell can land a concurrent ownership event in exactly
+	// that window. Before #19169 the cells used the transfer-readiness
+	// callback, which GroupState ran at that point; the sample no longer runs
+	// it. Production leaves it nil.
+	rg0OwnershipSnapshotHook func()
 
 	// linkDelFn removes a network interface. Defaults to netlink.LinkDel;
 	// overridden in tests so the #8372 fabric-overlay reaper can be driven

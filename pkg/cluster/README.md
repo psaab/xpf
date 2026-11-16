@@ -187,10 +187,17 @@ picked up by the same #7164 divergence check, so a deletion restarts a
 running heartbeat onto the defaults just as a changed value does.
 
 - Group-state accessors (`UpdateConfig`, `GroupStates`,
-  `DataGroupIDs`, `GroupState`, `IsLocalPrimary`, `IsPeerPrimary`,
+  `DataGroupIDs`, `GroupIDs`, `MonitorFailuresByGroup`, `GroupState`,
+  `IsLocalPrimary`, `LocalGroupPrimary`, `LocalGroupState`, `IsPeerPrimary`,
   `PeerPrimaryRGs` (#15081: peer-primary data RGs + liveness for
   forwarded-failover outcome reconciliation),
   `IsLocalPrimaryAny`, `LocalPriorities`) — `group_state.go`.
+  **`GroupStates` and `GroupState` run the transfer-readiness callback**
+  for every group they return. In production that is routing discovery
+  plus FRR queries, up to 2 s per group. HA hot paths that need only IDs,
+  ownership, state or monitor failures use `GroupIDs` / `DataGroupIDs`,
+  `LocalGroupPrimary` / `IsLocalPrimary`, `LocalGroupState` and
+  `MonitorFailuresByGroup`, none of which invoke the callback (#19169).
 - Peer-state accessors (`PeerAlive`, `PeerNodeID`,
   `PeerGroupStates`, `PeerGroupPrimary`, software/HA-protocol version,
   `PeerMonitorStatuses`) — `peer_state.go`.
