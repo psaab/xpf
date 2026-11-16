@@ -530,20 +530,35 @@ in git history; `git log -- bpf/xdp/ bpf/tc/` walks the deleted source.
   The heartbeat staleness threshold is interval × threshold — 100ms × 5 = 500ms
   at runtime defaults or 200ms × 5 ≈ 1s in the deployed lab config
   (`DefaultHeartbeatInterval`/`DefaultHeartbeatThreshold` and `heartbeatReceiver.checkTimeout` in `pkg/cluster/heartbeat.go`;
-  `docs/ha-cluster-userspace.conf:71-72`). This is not necessarily the
-  peer-loss declaration time: while session sync stays connected and inbound
-  peer traffic is no more than 2s old, `syncSuppressesPeerTimeoutLocked` (pkg/cluster, #17056)
-  defers the heartbeat timeout; its continuous-suppression cap is 5s
-  (`pkg/cluster/heartbeat_suppress.go`). With an ESTABLISHED sync stream,
-  the guard can defer declaration until peer traffic is 2s old. Detection is
-  max(threshold, remaining sync-recency window) plus up to one heartbeat tick:
-  roughly 0.5–2.1s from peer death at defaults, or 1.0–2.2s with the lab
-  heartbeat interval. Process crash (FIN disconnects sync) or sync already idle
-  for >2s lets the heartbeat staleness check declare peer loss at its
-  500ms/1s threshold (subject to startup/restart grace). These are detection
-  times, not end-to-end traffic-restoration latency
-  (`pkg/cluster/heartbeat_manager.go:790-832`;
-  `pkg/cluster/sync_conn_read.go:47-82,124-126`).
+  `docs/ha-cluster-userspace.conf:71-72`). The receiver checks staleness four
+  times per interval (`timeoutChecksPerInterval`, `pkg/cluster/heartbeat.go:1464-1501`,
+  #18639), so a dead peer is declared at threshold + at most ¼ interval:
+  0.5–0.525s at defaults, 1.0–1.05s in the lab config (subject to
+  startup/restart grace). Recent session-sync traffic can still defer the
+  timeout (`syncSuppressesPeerTimeoutLocked`, `pkg/cluster/heartbeat_suppress.go:318-342`,
+  #17056): only while sync is connected and inbound peer traffic is ≤2s old,
+  capped at 5s of continuous suppression. But recency alone no longer proves
+  the peer alive (#18570/#18561): at the first missed heartbeat (>1.5
+  intervals old) the receiver sends ONE sync-level liveness probe
+  (`prearmPeerLivenessProbe`, `heartbeat_suppress.go:235-249`, armed from
+  `heartbeat.go:1567-1573`). At the timeout tick, a peer that answers
+  sync-level heartbeats (`PeerHeartbeatAckSupported`, `pkg/cluster/sync.go:2724`)
+  keeps the suppression only if a sync frame NEWER than the probe has
+  arrived (`peerAnsweredLivenessProbeLocked`, `heartbeat_suppress.go:268-294`).
+  So a hard-killed peer, whose half-open sync socket still reads "connected",
+  is declared at the heartbeat threshold rather than up to 2s later; a peer
+  that answers (heartbeat path broken, sync alive) keeps the recency rule and
+  the 5s cap. Two exceptions remain. A peer that never proved ack support
+  (an older build mid-upgrade) keeps the recency-only rule, up to ~2s past
+  the threshold. A probe that could not be pre-armed (the late tick fell
+  inside a restart/boot grace) is sent on the timeout tick and given
+  (2×threshold−3)/2 intervals to answer: 350ms at defaults, 700ms in the lab
+  (`livenessProbeAnswerWindowLocked`, `heartbeat_suppress.go:206-213`).
+  Process crash (FIN disconnects sync) or sync idle >2s skips the suppression
+  entirely. These are detection times, not end-to-end traffic-restoration
+  latency (`handlePeerTimeout`, `pkg/cluster/heartbeat_manager.go:947-1001`,
+  suppression decision at `:968`); master's loss ledger puts the per-stream
+  crash resume median at ~1.7s.
   Separately, interface/IP monitors poll each second and require 3 consecutive
   failed polls, followed by a 5s hold-down before another transition; IP sweeps
   use at most 16 concurrent 800ms probes, so more than 16 targets add probe
