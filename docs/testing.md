@@ -217,6 +217,7 @@ no leg passes `-v`. So:
 | `make vm-test-root` | the XDP shim's behavioural cells in the disposable VM leg. They SKIP without the required privilege, and the #1864 verifier gate does **not** substitute — two distinct WRONG fixes of the #7494 fragment bug both pass it. `make test` now prints a line saying it did not examine them. |
 | `make host-mutation-census` | mutation class, namespace boundary, and isolation proof for every kernel-mutating Go test in the guarded packages (#18038) |
 | `make go-skip-census` | every Go `t.Skip` in the tree, counted per bucket and ratcheted |
+| `make go-fortest-liveness-census` | every `*ForTest*` hook in non-test Go code has a caller (comment lines do not count) or a reasoned row in `scripts/go-fortest-liveness.allow`, and no row is stale (#17342). deadcode cannot see an uncalled exported method of a live type |
 | `make ignored-cell-census` | every Rust `#[ignore]`, including the third crate outside both workspaces |
 | `make test-cold-path-flooder` | 44 `#[test]`s in `test/incus/cold-path-flooder`, which was reached by nothing |
 | `make harness-census` | every runnable shell harness under `test/incus/` |

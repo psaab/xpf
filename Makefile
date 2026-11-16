@@ -1711,6 +1711,16 @@ go-deadcode-gate:
 test-go-deadcode-gate-lib:
 	bash ./scripts/go-deadcode-gate-selftest.sh
 
+# #17342: every *ForTest* hook in non-test Go code has a caller, or a
+# baseline row with a reason (scripts/go-fortest-liveness.allow). Hermetic
+# source scan; the self-test runs fixture trees plus two mutants.
+.PHONY: go-fortest-liveness-census test-go-fortest-liveness-census-lib
+go-fortest-liveness-census:
+	sh scripts/go-fortest-liveness-census.sh
+
+test-go-fortest-liveness-census-lib:
+	bash ./scripts/go-fortest-liveness-census-selftest.sh
+
 test-ignored-cell-census-lib:
 	bash ./test/incus/ignored-cell-census-selftest.sh
 
