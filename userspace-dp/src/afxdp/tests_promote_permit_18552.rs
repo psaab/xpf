@@ -1557,6 +1557,63 @@ fn superseded_promotion_does_not_seed_flow_cache_18552() {
     );
 }
 
+/// #19153: the same poll pipeline, for a MATERIALIZE. This worker holds no row
+/// for the flow (its first packet here after a takeover), so the packet misses
+/// the worker table, hits the shared row and materializes it. A held lease on
+/// the pair (an HA import or delete, or the commit-time policy-delete batch)
+/// refuses the materialize. The packet still forwards on the shared hit, but
+/// nothing installs and it must not seed the flow cache: a seeded entry would
+/// serve the flow with no session behind it and no packet would retry. Once
+/// the lease drops, the next packet materializes.
+#[test]
+fn refused_materialize_does_not_seed_flow_cache_and_retries_19153() {
+    let mut fx = PollFixture::imported();
+    let (forward_key, reverse_key) = (fx.forward.key.clone(), fx.reverse.key.clone());
+    fx.sessions.delete(&forward_key);
+    fx.sessions.delete(&reverse_key);
+    let before = (fx.worker_origin(), fx.shared_origin());
+    let lease = global_tuple_gate()
+        .acquire_lease([forward_key, reverse_key])
+        .expect("premise: the idle pair leases");
+
+    let refused = fx.lan_ack();
+    let after_refusal = (fx.worker_origin(), fx.cached());
+    drop(lease);
+    let retried = fx.lan_ack();
+    let after_retry = fx.worker_origin();
+
+    assert_legs(
+        &format!(
+            "refused materialize (worker/shared before {before:?}; first packet {refused:?}; \
+             after it worker/cached {after_refusal:?}; retry {retried:?}, worker after it \
+             {after_retry:?})"
+        ),
+        &[
+            (
+                before == (None, Some(SessionOrigin::SyncImport)),
+                "premise: the worker must hold no row while shared holds the imported row",
+            ),
+            (
+                refused.session_hit == 1 && refused.tx_wan == 1,
+                "premise: the refused packet must hit the shared session and forward out the WAN",
+            ),
+            (
+                after_refusal.0.is_none(),
+                "refusal: the materialize installed under the held lease",
+            ),
+            (
+                !after_refusal.1,
+                "seed: the refused packet seeded the flow cache, so no later packet resolves \
+                 and the materialize is never retried",
+            ),
+            (
+                retried.session_hit == 1 && after_retry.is_some(),
+                "retry: the next packet after the lease dropped did not materialize the row",
+            ),
+        ],
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fold 2, B1 (Codex P1-4 = r24 P2-1(a), the lead's Option B): a REPLY-first
 // promotion. The #9678 import gate and the #9714 peer-delete guard read only

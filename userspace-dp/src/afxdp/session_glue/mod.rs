@@ -106,6 +106,13 @@ mod tests;
 #[cfg(test)]
 #[path = "policy_batch_materialize_race_tests.rs"]
 mod policy_batch_materialize_race_tests;
+// #19153: materialize-on-miss under the install permit, one property a cell.
+#[cfg(test)]
+#[path = "materialize_permit_19153_tests.rs"]
+mod materialize_permit_19153_tests;
+#[cfg(test)]
+#[path = "materialize_core_19153_tests.rs"]
+mod materialize_core_19153_tests;
 
 #[cfg(test)]
 #[path = "deleted_first_policy_purge_9526_tests.rs"]

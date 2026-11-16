@@ -12326,6 +12326,23 @@ fn scheduler_generation_bump_revalidates_at_cap_shared_hit_10582_t2() {
     );
 }
 
+/// #19153: a shared map that still names the entry `resolved` captured, the
+/// state the resolve found it in. A materialize installs only the incarnation
+/// shared authority names at install time, re-read under its install permit,
+/// so a cell that materializes a hand-built shared hit must also publish it.
+fn shared_naming_captured_19153(
+    resolved: &ResolvedSessionLookup,
+) -> Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>> {
+    let shared = Arc::new(Mutex::new(FastMap::default()));
+    if let Some(entry) = resolved.shared_entry.as_ref() {
+        shared
+            .lock()
+            .expect("shared map")
+            .insert(entry.key.clone(), entry.clone());
+    }
+    shared
+}
+
 /// A local row at the replica key must not be clobbered by a shared hit.
 /// `install_failed` is the cache-seed safety bit for this refused repair.
 #[test]
@@ -12372,8 +12389,10 @@ fn shared_hit_local_clobber_sets_install_failed_10582() {
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
+    let shared = shared_naming_captured_19153(&resolved);
     let (_, install_failed) = super::materialize_shared_session_hit(
         &mut sessions,
+        &shared,
         &mut resolved,
         &forwarding,
         2_000_000,
@@ -12442,8 +12461,10 @@ fn adopted_materialize_replaces_local_incumbent_16217() {
         TCP_FLAG_ACK,
     ));
     let mut hit = build_hit();
+    let shared = shared_naming_captured_19153(&hit);
     let (_, install_failed) = super::materialize_shared_session_hit_adopted(
         &mut sessions,
+        &shared,
         &mut hit,
         &forwarding,
         2_000_000,
@@ -12475,8 +12496,10 @@ fn adopted_materialize_replaces_local_incumbent_16217() {
         TCP_FLAG_ACK,
     ));
     let mut hit = build_hit();
+    let shared = shared_naming_captured_19153(&hit);
     let (_, install_failed) = super::materialize_shared_session_hit_adopted(
         &mut control,
+        &shared,
         &mut hit,
         &forwarding,
         2_000_000,
@@ -13053,8 +13076,10 @@ fn shared_hit_materialization_marks_stale_before_policy_revalidation_10582_t5() 
         origin: SessionOrigin::SyncImport,
         authority_deferred: false,
     };
+    let shared = shared_naming_captured_19153(&resolved);
     let (_, install_failed) = super::materialize_shared_session_hit(
         &mut sessions,
+        &shared,
         &mut resolved,
         &forwarding,
         2_000_000,
@@ -22886,8 +22911,10 @@ fn materialize_stale_zone_shared_hit_returns_miss_10612() {
     };
     let drops_before = crate::afxdp::session_glue::STALE_REPLAY_FENCE_DROPS
         .load(std::sync::atomic::Ordering::Relaxed);
+    let shared = shared_naming_captured_19153(&resolved);
     let (lookup, install_failed) = super::materialize_shared_session_hit(
         &mut sessions,
+        &shared,
         &mut resolved,
         &forwarding,
         2_000_000,
