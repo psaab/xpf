@@ -321,6 +321,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
         deferred_forwarding_revalidation: None,
         deferred_synced_promotion: None,
         promotion_deferred: false,
+        materialize_divergence: crate::afxdp::session_glue::MaterializeDivergence::None,
         deferred_shared_materialization: None,
         deferred_synced_purge: Some(DeferredSyncedPurge {
             key: wire_key.clone(),
@@ -570,6 +571,7 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
         authority_deferred: false,
         deferred_forwarding_revalidation: None,
         promotion_deferred: false,
+        materialize_divergence: crate::afxdp::session_glue::MaterializeDivergence::None,
         deferred_synced_promotion: Some(DeferredSyncedPromotion {
             key: key.clone(),
             decision,

@@ -437,8 +437,12 @@ What is NOT covered (residuals, `docs/log/18552.md` has the detail):
 worker that misses its own table and finds the flow in the shared map
 materializes the shared row into its table
 (`session_glue::materialize_shared_session_hit_adopted`). That is how a node
-serves every flow it took over in a failover. Until #19153 the materialize took
-no tuple-gate permit. The commit-time policy-delete batch
+serves a taken-over flow whose replica this worker lacks. An import fans
+`UpsertSynced` replicas out to every worker, so most first packets after a
+takeover are worker synced hits, which #18552 promotes. Materialize is the
+fallback: a prewarm or upsert dropped under queue pressure, a respawned
+helper's empty tables (where every flow materializes), and alias and
+companion gaps. Until #19153 the materialize took no tuple-gate permit. The commit-time policy-delete batch
 (`ha/session_domain.rs::delete_policy_batch`, #10512, the session
 invalidation of #6948) does this:
 
@@ -468,17 +472,44 @@ Now the materialize joins the worker install protocol:
   CURRENT shared content, never the capture. So a zero-id (legacy) shared row
   that matches on the NAT decision alone installs its current state, not the
   capture's.
-- **A refusal.** A refused permit, an absent or superseded shared row, or a
-  refused install returns `install_failed`. The packet forwards on its resolved
-  decision, the poll seed gate keeps it out of the flow cache
-  (`poll_descriptor/mod.rs`, `flow_cache_install_failed`), and the next packet
-  resolves and retries. The persistent-hold acquire runs after every check, so
-  a refusal changes nothing.
+- **A refusal.** A refused permit or a refused install returns
+  `install_failed`. The packet forwards on its resolved decision, the poll seed
+  gate keeps it out of the flow cache (`poll_descriptor/mod.rs`,
+  `flow_cache_install_failed`), and the next packet resolves and retries. The
+  persistent-hold acquire runs after every check, so a refusal changes nothing.
+- **The packet after a change (fold 1, Codex P1).** The packet's resolve,
+  Owner verdict, deferred promotion and deferred forwarding revalidation were
+  all derived from the capture, while the materialize installs current
+  content. The rule: a promotion may publish only content equal to what the
+  worker row holds after the materialize
+  (`apply_deferred_shared_materialization`, `materialize_divergence`). Equal
+  decision and metadata: everything stands. Otherwise the promotion and the
+  revalidation are dropped (each would write the capture's content over the
+  installed row), the seed is suppressed, and the next packet resolves the
+  installed row as a worker hit and promotes it. Whether THIS packet is
+  forwarded depends on what differs:
+  - only `log_session_init`, `log_session_close`, `inactivity_timeout_ns`,
+    `policy_counter_idx` or `policy_counter` (logging, idle timeout and
+    hit-counter attribution): it forwards once on the capture's decision;
+  - anything in the decision (resolution, NAT, routing table) or any other
+    metadata field (zones and their vintage, ingress identity, NAT scope,
+    NAT64 reverse, owner RG, fabric ingress, direction, alias provenance,
+    the admitting policy id), or the captured incarnation is absent or
+    superseded in shared: it is dropped (its frame recycled, as the
+    post-verdict input-filter drop does).
+- **Cost.** One materialize attempt per flow per worker, unless it is refused,
+  in which case the flow's next packet tries again for as long as the cause
+  lasts. A held pair costs the non-allocating claim pre-check (lock
+  operations). A live local incumbent that refuses a non-adopted install
+  (#10582) is judged on the worker's own table before any claim
+  (`SessionTable::holds_local_row`), so it costs one probe. Only a refusal
+  inside the core (a persistent hold that cannot be joined, a directory
+  conflict, a companion the claim does not cover) pays the claim, the shared
+  re-read and the release on each attempt.
 
 The lock order is the permit, then the shared lock. That is the order of
 promotion and the HA import (a lease, then the shared lock), and the permit is
-never waited for. The cost is once per materialize (per flow per worker),
-never per packet.
+never waited for.
 
 Pinned by:
 
@@ -487,19 +518,26 @@ Pinned by:
   materializes the next packet before it acks. The batch must not leave the
   revoked incarnation on the worker.
 - `afxdp/session_glue/materialize_permit_19153_tests.rs`, one property per
-  cell:
+  cell, through the materialize wrapper:
   - a completed removal between the capture and the materialize;
   - a held lease on the pair or on the reply tuple alone, then a retry;
-  - a superseded capture (new id, or new translation), reported `Superseded`;
-  - the control, including a locally owned shared row (`SharedLocal`);
-  - zero-id: the current content is installed;
-  - the identity predicate's table, and its #18552 consumer on a NAT-only
-    change.
+  - a superseded capture (new id, or new translation);
+  - the control, including a locally owned shared row;
+  - zero-id: the current content is installed.
+- `afxdp/session_glue/materialize_core_19153_tests.rs`: the core's six
+  outcomes and the table each leaves; a worker-local #10582 refusal allocates
+  nothing (no claim); the identity predicate's table and its #18552 consumer on
+  a NAT-only change.
 - `afxdp/session_glue/shared_replica_hold_17683_tests.rs`: a refused
   materialize takes no persistent hold.
 - `afxdp/tests_promote_permit_18552.rs`: on the real poll pipeline, a refused
   materialize forwards but does not seed the flow cache, and the next packet
-  after the lease drops materializes.
+  after the lease drops materializes; with no promotion armed, the
+  materialize's `install_failed` alone keeps the packet out of the cache; and
+  the capture-replacement matrix (fold 1, zero and non-zero ids): a
+  metadata-only replacement forwards once, an owner-RG or NAT replacement is
+  not forwarded, neither seeds the cache or publishes `SharedPromote`, and the
+  next packet promotes the current row.
 
 Not covered: how often the race fires on a live cluster. Measuring it needs a
 policy commit that invalidates active failed-over flows under load.

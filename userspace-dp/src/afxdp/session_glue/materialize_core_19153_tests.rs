@@ -11,6 +11,10 @@
 //!   part of the identity, not only of the companion-witness check);
 //! - an unleased current row is `Installed`, and a locally owned one
 //!   `SharedLocal`;
+//! - a current row whose zone vanished is `StaleReplayFenced`, and a live
+//!   local incumbent makes the install `InstallRefused` (fold 1);
+//! - the #10582 clobber refusal is judged before any claim: it allocates
+//!   nothing (fold 1, D2);
 //! - the predicate `promote::same_synced_incarnation`, as a table;
 //! - its #18552 consumer (`synced_row_incarnation`) on a NAT-only change
 //!   under the zero-id sentinel.
@@ -26,6 +30,7 @@ use crate::afxdp::bpf_map::global_tuple_gate;
 fn core_outcome(
     sessions: &mut SessionTable,
     shared: &Shared,
+    forwarding: &ForwardingState,
     captured: &SyncedSessionEntry,
 ) -> MaterializeOutcome {
     let companion = reverse_session_key(&captured.key, captured.decision.nat);
@@ -35,7 +40,7 @@ fn core_outcome(
     materialize_current_shared_under_permit(
         sessions,
         &shared.sessions,
-        &ForwardingState::default(),
+        forwarding,
         &captured.key,
         Some(CapturedIncarnation::of(captured)),
         MaterializeInstall {
@@ -58,11 +63,24 @@ fn outcome_name(outcome: &MaterializeOutcome) -> &'static str {
     }
 }
 
-/// Each outcome the core owes a caller, and that only `Installed` and
-/// `SharedLocal` change the table.
+/// A zone-validated forwarding view naming the fixture's zones (1 lan, 2 wan),
+/// so the #10612 fence is live: a row naming any other zone is stale.
+fn zone_validated_forwarding() -> ForwardingState {
+    let mut forwarding = ForwardingState::default();
+    forwarding.zone_id_to_name.insert(1, "lan".to_string());
+    forwarding.zone_id_to_name.insert(2, "wan".to_string());
+    forwarding.zone_set_validated = true;
+    forwarding
+}
+
+/// All six outcomes the core owes a caller (#19153 fold 1, Codex gap: the
+/// fence and the refused install too), and the table each leaves: only
+/// `Installed` and `SharedLocal` install; `InstallRefused` leaves the local
+/// incumbent exactly as it was.
 #[test]
 fn the_materialize_core_reports_each_outcome_19153() {
     let shared = Shared::new();
+    let forwarding = zone_validated_forwarding();
 
     // Removed: the capture's row is gone.
     let removed_key = flow_key(42_001);
@@ -93,18 +111,52 @@ fn the_materialize_core_reports_each_outcome_19153() {
     shared.publish(&local);
     let local_capture = shared.capture(&local_key);
 
-    let cases: [(&str, &SyncedSessionEntry, &str, usize); 5] = [
-        ("removed", &removed_capture, "SharedAbsent", 0),
-        ("new session id", &new_id_capture, "Superseded", 0),
-        ("new translation", &new_nat_capture, "Superseded", 0),
-        ("current", &current_capture, "Installed", 1),
-        ("locally owned", &local_capture, "SharedLocal", 1),
+    // StaleReplayFenced: the capture was live, the current row (same
+    // incarnation) names a zone this node no longer has.
+    let stale_key = flow_key(42_008);
+    shared.publish(&peer_row(stale_key.clone(), ID_A, snat(40_208)));
+    let stale_capture = shared.capture(&stale_key);
+    let mut stale = peer_row(stale_key.clone(), ID_A, snat(40_208));
+    stale.metadata.egress_zone = 9;
+    shared.publish(&stale);
+
+    // InstallRefused: a live LOCAL incumbent under the key (#10582).
+    let incumbent_key = flow_key(42_009);
+    shared.publish(&peer_row(incumbent_key.clone(), ID_A, snat(40_209)));
+    let incumbent_capture = shared.capture(&incumbent_key);
+
+    let cases: [(&str, &SyncedSessionEntry, bool, &str, Option<SessionOrigin>); 7] = [
+        ("removed", &removed_capture, false, "SharedAbsent", None),
+        ("new session id", &new_id_capture, false, "Superseded", None),
+        ("new translation", &new_nat_capture, false, "Superseded", None),
+        ("current", &current_capture, false, "Installed", Some(SessionOrigin::SharedMaterialize)),
+        ("locally owned", &local_capture, false, "SharedLocal", Some(SessionOrigin::WorkerLocalImport)),
+        ("stale current row", &stale_capture, false, "StaleReplayFenced", None),
+        ("local incumbent", &incumbent_capture, true, "InstallRefused", Some(SessionOrigin::ForwardFlow)),
     ];
-    for (case, capture, expected, rows) in cases {
+    for (case, capture, local_incumbent, expected, row) in cases {
         let mut sessions = SessionTable::new();
-        let outcome = core_outcome(&mut sessions, &shared, capture);
+        if local_incumbent {
+            assert!(
+                sessions.install_with_protocol(
+                    capture.key.clone(),
+                    capture.decision,
+                    capture.metadata.clone(),
+                    NOW_NS,
+                    PROTO_TCP,
+                    crate::tcp_flags::TCP_ACK,
+                ),
+                "premise ({case}): the local incumbent installs"
+            );
+        }
+        let outcome = core_outcome(&mut sessions, &shared, &forwarding, capture);
         assert_eq!(outcome_name(&outcome), expected, "{case}: outcome");
-        assert_eq!(sessions.len(), rows, "{case}: rows installed");
+        assert_eq!(
+            sessions.entry_with_origin(&capture.key).map(|(_, _, origin)| origin),
+            row,
+            "{case}: the row the table holds afterwards"
+        );
+        assert_eq!(sessions.len(), usize::from(row.is_some()), "{case}: rows");
     }
 }
 
@@ -161,5 +213,55 @@ fn promotion_identity_supersedes_a_zero_id_translation_change_18552_19153() {
         same,
         super::promote::SyncedRowIncarnation::Current,
         "a zero-id shared row under the same translation is Current"
+    );
+}
+
+/// #19153 fold 1 (D2, r24 P3-1): a non-adopted materialize over a live LOCAL
+/// incumbent (#10582) is refused on this worker's own table before any claim.
+/// That refusal lasts as long as the incumbent, so every packet of the flow
+/// meets it: it must not build a permit set (two Vecs, an admission `Arc`, gate
+/// entries) or re-read shared. Zero heap allocations is the observable.
+#[test]
+fn a_local_incumbent_refusal_claims_nothing_19153() {
+    let shared = Shared::new();
+    let key = flow_key(42_010);
+    shared.publish(&peer_row(key.clone(), ID_A, snat(40_210)));
+    let captured = shared.capture(&key);
+    let mut sessions = SessionTable::new();
+    assert!(
+        sessions.install_with_protocol(
+            key.clone(),
+            captured.decision,
+            captured.metadata.clone(),
+            NOW_NS,
+            PROTO_TCP,
+            crate::tcp_flags::TCP_ACK,
+        ),
+        "premise: the local incumbent installs"
+    );
+    // This thread's gate exists before counting (#18834 per-thread gates).
+    let _ = global_tuple_gate();
+    let forwarding = ForwardingState::default();
+    let mut resolved = ResolvedSessionLookup::shared(captured.clone());
+    let ((_, install_failed), allocations) = crate::test_alloc::count_allocs(|| {
+        materialize_shared_session_hit(
+            &mut sessions,
+            &shared.sessions,
+            &mut resolved,
+            &forwarding,
+            NOW_NS + 1,
+            crate::tcp_flags::TCP_ACK,
+        )
+    });
+    assert!(install_failed, "the local incumbent must refuse the materialize");
+    assert_eq!(
+        sessions.entry_with_origin(&key).map(|(_, _, origin)| origin),
+        Some(SessionOrigin::ForwardFlow),
+        "the local incumbent must survive"
+    );
+    assert_eq!(
+        allocations, 0,
+        "a worker-local #10582 refusal must be judged before the claim, not pay the permit set \
+         and the shared re-read on every packet"
     );
 }

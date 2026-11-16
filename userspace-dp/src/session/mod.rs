@@ -4425,6 +4425,17 @@ impl SessionTable {
         self.record_by_key(key).map(|r| &r.entry)
     }
 
+    /// #10582 / #19153 fold 1: whether a live LOCAL row (one whose origin does
+    /// not yield to the peer) holds `key`. This is the clobber guard of
+    /// `upsert_synced_with_origin`, which refuses a non-adopted peer install
+    /// over such a row, and the materialize pre-check that judges the same
+    /// refusal before claiming the tuple gate. One probe, no clone.
+    #[inline]
+    pub(crate) fn holds_local_row(&self, key: &SessionKey) -> bool {
+        self.entry_by_key(key)
+            .is_some_and(|existing| !existing.origin.yields_to_peer())
+    }
+
     #[inline]
     fn entry_by_key_mut(&mut self, key: &SessionKey) -> Option<&mut SessionEntry> {
         self.record_by_key_mut(key).map(|r| &mut r.entry)

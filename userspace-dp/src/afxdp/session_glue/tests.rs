@@ -15960,6 +15960,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         deferred_forwarding_revalidation: None,
         deferred_synced_promotion: None,
         promotion_deferred: false,
+        materialize_divergence: crate::afxdp::session_glue::MaterializeDivergence::None,
         deferred_shared_materialization: None,
         deferred_synced_purge: Some(DeferredSyncedPurge {
             key: wire_key.clone(),
