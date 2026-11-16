@@ -213,7 +213,7 @@ fn materialize_against(
 ) -> bool {
     let mut resolved = crate::afxdp::session_glue::ResolvedSessionLookup::shared(entry);
     let (_, install_failed) =
-        super::resolve::materialize_shared_session_hit_adopted(
+        super::materialize::materialize_shared_session_hit_adopted(
             sessions,
             shared,
             &mut resolved,
@@ -345,7 +345,7 @@ fn materialized_shared_wire_alias_releases_replaced_incumbent_hold_17683() {
 
     let mut resolved = crate::afxdp::session_glue::ResolvedSessionLookup::shared(alias_hit);
     let (_, install_failed) =
-        super::resolve::materialize_shared_session_hit_adopted(
+        super::materialize::materialize_shared_session_hit_adopted(
             &mut sessions,
             &shared_sessions,
             &mut resolved,

@@ -76,6 +76,9 @@ pub(in crate::afxdp) mod revalidation;
 
 mod tx_cancel;
 mod resolve;
+// #19153: shared-hit materialize-on-miss, called from `resolve.rs`'s deferred
+// Owner-verdict effects.
+mod materialize;
 #[cfg(test)]
 mod modularity_13082_tests;
 pub(super) use forward_commit::{
@@ -87,6 +90,7 @@ pub(super) use worker_commands::*;
 pub(super) use revalidation::*;
 pub(super) use tx_cancel::*;
 pub(super) use resolve::*;
+pub(super) use materialize::*;
 pub(crate) use resolution::policy_id_for_list_request;
 pub(crate) use revalidation::publish_worker_session_map_entry;
 #[cfg(test)]

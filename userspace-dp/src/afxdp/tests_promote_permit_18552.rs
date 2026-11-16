@@ -286,6 +286,7 @@ impl Fixture {
             authority_deferred: false,
             deferred_forwarding_revalidation: None,
             promotion_deferred: false,
+            materialize_divergence: crate::afxdp::session_glue::MaterializeDivergence::None,
             deferred_synced_promotion: Some(DeferredSyncedPromotion {
                 key,
                 decision,
@@ -1612,6 +1613,203 @@ fn refused_materialize_does_not_seed_flow_cache_and_retries_19153() {
             ),
         ],
     );
+}
+
+/// #19153 fold 1 (Codex gap): a refused materialize keeps the packet out of
+/// the flow cache BY ITSELF. The shared pair is published as locally owned
+/// (`SharedPromote`, a sibling worker's promotion), so the resolve arms no
+/// promotion and nothing else can suppress the seed: only the materialize's
+/// `install_failed` stands between the refused packet and the cache.
+#[test]
+fn refused_materialize_alone_suppresses_the_seed_19153() {
+    let mut fx = PollFixture::imported();
+    let (forward_key, reverse_key) = (fx.forward.key.clone(), fx.reverse.key.clone());
+    fx.sessions.delete(&forward_key);
+    fx.sessions.delete(&reverse_key);
+    for entry in [fx.forward.clone(), fx.reverse.clone()] {
+        let mut local = entry;
+        local.origin = SessionOrigin::SharedPromote;
+        fx.publish(&local);
+    }
+    let lease = global_tuple_gate()
+        .acquire_lease([forward_key, reverse_key])
+        .expect("premise: the idle pair leases");
+    let refused = fx.lan_ack();
+    let after = (fx.worker_origin(), fx.cached());
+    drop(lease);
+    let retried = fx.lan_ack();
+    assert_legs(
+        &format!(
+            "refused materialize, no promotion (packet {refused:?}; worker/cached after it \
+             {after:?}; retry {retried:?}, worker {:?})",
+            fx.worker_origin()
+        ),
+        &[
+            (
+                fx.shared_origin() == Some(SessionOrigin::SharedPromote),
+                "premise: shared names the pair as locally owned (no promotion is armed)",
+            ),
+            (
+                refused.session_hit == 1 && refused.tx_wan == 1,
+                "premise: the refused packet must hit the shared session and forward",
+            ),
+            (after.0.is_none(), "refusal: the materialize installed under the held lease"),
+            (
+                !after.1,
+                "seed: the refused materialize's install_failed did not keep the packet out \
+                 of the flow cache",
+            ),
+            (
+                retried.tx_wan == 1 && fx.worker_origin() == Some(SessionOrigin::WorkerLocalImport),
+                "retry: the next packet did not materialize the locally owned row",
+            ),
+        ],
+    );
+}
+
+/// #19153 fold 1 (Codex P1): what the shared row becomes between the resolve's
+/// capture of A and the materialize's claim, in the poll cells below.
+#[derive(Clone, Copy, Debug)]
+enum Replacement {
+    /// B differs from A only in a metadata-only field (session logging).
+    MetadataOnly,
+    /// B differs in the owner RG, a forwarding-relevant field.
+    OwnerRg,
+    /// B names another translation (a different SNAT port): superseded.
+    Nat,
+}
+
+/// One cell of the capture-replacement matrix, through the real poll pipeline:
+/// this worker holds no row, so the first LAN ACK captures shared A; the hook
+/// publishes B in the capture..claim window; the materialize then installs B
+/// (or finds A superseded). `zero_id` runs it with the legacy session id 0 on
+/// both A and B, else with A's non-zero id.
+fn assert_capture_replacement(replacement: Replacement, zero_id: bool) {
+    let mut fx = PollFixture::imported();
+    let key = fx.forward.key.clone();
+    fx.sessions.delete(&key);
+    fx.sessions.delete(&fx.reverse.key.clone());
+    if zero_id {
+        fx.forward.session_id = 0;
+        fx.reverse.session_id = 0;
+        let (forward, reverse) = (fx.forward.clone(), fx.reverse.clone());
+        fx.publish(&forward);
+        fx.publish(&reverse);
+    }
+    let mut b = fx.forward.clone();
+    match replacement {
+        Replacement::MetadataOnly => b.metadata.log_session_close = !b.metadata.log_session_close,
+        Replacement::OwnerRg => b.metadata.owner_rg_id = 2,
+        Replacement::Nat => b.decision.nat.rewrite_src_port = Some(40_001),
+    }
+    assert_ne!(b.metadata.owner_rg_id, 0, "premise: B keeps an owner");
+    let (shared, nat, wire, indexes) = (
+        Arc::clone(&fx.shared),
+        Arc::clone(&fx.shared_nat),
+        Arc::clone(&fx.shared_wire),
+        fx.shared_indexes.clone(),
+    );
+    let published = b.clone();
+    crate::afxdp::session_glue::set_materialize_before_claim_hook_for_test(move || {
+        crate::afxdp::shared_ops::publish_shared_session(&shared, &nat, &wire, &indexes, &published);
+    });
+
+    let first = fx.lan_ack();
+    let worker_after_first = fx
+        .sessions
+        .entry_with_origin(&key)
+        .map(|(decision, metadata, origin)| {
+            (decision.nat, metadata.owner_rg_id, metadata.log_session_close, origin)
+        });
+    let shared_after_first = fx.shared_origin();
+    let cached_after_first = fx.cached();
+    let second = fx.lan_ack();
+    // The second packet is an ordinary worker hit whose forwarding
+    // revalidation may re-derive the owner RG from the live egress, so only
+    // B's translation, its logging flag and the origin are compared there.
+    let worker_after_second = fx
+        .sessions
+        .entry_with_origin(&key)
+        .map(|(decision, metadata, origin)| (decision.nat, metadata.log_session_close, origin));
+
+    let installed_b = |origin: SessionOrigin| {
+        Some((b.decision.nat, b.metadata.owner_rg_id, b.metadata.log_session_close, origin))
+    };
+    let promoted_b =
+        Some((b.decision.nat, b.metadata.log_session_close, SessionOrigin::SharedPromote));
+    let forwarded_once = matches!(replacement, Replacement::MetadataOnly);
+    let first_worker_ok = match replacement {
+        // Superseded: nothing installed.
+        Replacement::Nat => worker_after_first.is_none(),
+        _ => worker_after_first == installed_b(SessionOrigin::SharedMaterialize),
+    };
+    assert_legs(
+        &format!(
+            "capture replacement {replacement:?} (zero_id={zero_id}; first packet {first:?}, \
+             worker {worker_after_first:?}, shared {shared_after_first:?}, cached \
+             {cached_after_first}; second packet {second:?}, worker {worker_after_second:?}, \
+             shared {:?})",
+            fx.shared_origin()
+        ),
+        &[
+            (first.session_hit == 1, "premise: the first packet must hit the shared row"),
+            (
+                (first.tx_wan == 1) == forwarded_once,
+                if forwarded_once {
+                    "first: a metadata-only replacement must forward the packet once"
+                } else {
+                    "first: the packet was forwarded on the capture's decision although the \
+                     shared row changed its translation or egress"
+                },
+            ),
+            (
+                first_worker_ok,
+                "first: the worker row is not the installed current content B (or, superseded, \
+                 not empty)",
+            ),
+            (
+                shared_after_first == Some(SessionOrigin::SyncImport),
+                "first: the capture-derived promotion ran and published SharedPromote",
+            ),
+            (!cached_after_first, "first: the diverged packet seeded the flow cache"),
+            (
+                second.tx_wan == 1
+                    && worker_after_second == promoted_b
+                    && fx.shared_origin() == Some(SessionOrigin::SharedPromote),
+                "second: the next packet did not forward and promote B",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn capture_replacement_metadata_only_forwards_once_19153() {
+    assert_capture_replacement(Replacement::MetadataOnly, false);
+}
+
+#[test]
+fn capture_replacement_metadata_only_forwards_once_zero_id_19153() {
+    assert_capture_replacement(Replacement::MetadataOnly, true);
+}
+
+#[test]
+fn capture_replacement_owner_rg_is_not_forwarded_19153() {
+    assert_capture_replacement(Replacement::OwnerRg, false);
+}
+
+#[test]
+fn capture_replacement_owner_rg_is_not_forwarded_zero_id_19153() {
+    assert_capture_replacement(Replacement::OwnerRg, true);
+}
+
+#[test]
+fn capture_replacement_nat_is_not_forwarded_19153() {
+    assert_capture_replacement(Replacement::Nat, false);
+}
+
+#[test]
+fn capture_replacement_nat_is_not_forwarded_zero_id_19153() {
+    assert_capture_replacement(Replacement::Nat, true);
 }
 
 // ---------------------------------------------------------------------------

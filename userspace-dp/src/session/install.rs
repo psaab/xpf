@@ -1031,9 +1031,7 @@ impl SessionTable {
         // Reject peer data that would clobber a locally-owned session
         // unless explicitly allowed (e.g. during HA activation). #18620: a
         // punt seed is not locally owned (`yields_to_peer`).
-        if matches!(self.entry_by_key(&key), Some(existing) if !existing.origin.yields_to_peer())
-            && !allow_replace_local
-        {
+        if self.holds_local_row(&key) && !allow_replace_local {
             return false;
         }
         if PMechSessionDirectory::global().conflicts_with_install(
