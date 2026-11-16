@@ -791,6 +791,16 @@ fn maybe_promote_synced_session_sets_fabric_ingress_on_fabric_hit() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let forwarding = test_forwarding_state_with_fabric();
     // #1346: wrap the four shared-map refs in `SharedSessionRefs`
@@ -873,6 +883,16 @@ fn promote_republishes_the_live_close_class_9412() {
         let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
         let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+        // #18552 (F2): the HA import publishes this row's shared twin before the
+        // worker holds it, and the promotion promotes only the incarnation shared names.
+        crate::afxdp::testfx::publish_shared_twin_for_test(
+            &sessions,
+            &key,
+            &shared_sessions,
+            &shared_nat_sessions,
+            &shared_forward_wire_sessions,
+            &shared_owner_rg_indexes,
+        );
         let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
         let forwarding = test_forwarding_state_with_fabric();
         let shared = super::SharedSessionRefs {
@@ -961,6 +981,16 @@ fn promote_republishes_the_session_id_for_replicas_to_adopt_9582() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> =
         vec![Arc::new(Mutex::new(VecDeque::new()))];
     let forwarding = test_forwarding_state_with_fabric();
@@ -7433,6 +7463,17 @@ fn demoted_local_session_promotes_as_synced_on_failback_lookup() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the new-flow install published this row to shared and the
+    // coordinator's demote rewrote it to `SyncImport`; the promotion promotes
+    // only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let active_state = BTreeMap::from([(1, active_ha_runtime(1))]);
 
@@ -12828,6 +12869,14 @@ fn resolve_shared_hit_no_incumbent_fixture_10613()
             persistent_lease_hold: None,
             source_nat_static: None, },
         );
+    // #18552 (F2): a real `publish_shared_session` writes the canonical row
+    // as well as the forward-wire alias, and the promotion that follows the
+    // materialization promotes only the incarnation the canonical row names.
+    let canonical = lock_shared_recover(&shared_forward_wire_sessions)
+        .get(&wire_key)
+        .cloned()
+        .expect("fixture: the forward-wire alias row");
+    lock_shared_recover(&shared_sessions).insert(key.clone(), canonical);
     // #14383: record this fixture's wire ownership (the publish path's
     // observe step) so the fail-closed wire lookup can prove it unique.
     lock_shared_recover(&shared_owner_rg_indexes.wire_ambiguities)
@@ -12929,6 +12978,16 @@ fn sync_import_legitimate_promotion_remains_enabled_10613() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let promoted = maybe_promote_synced_session(
         &mut sessions,
         SteeringMap::unshared_for_test(-1),
@@ -15873,6 +15932,7 @@ fn purge_translated_synced_hit_full_teardown_13674() {
         authority_deferred: false,
         deferred_forwarding_revalidation: None,
         deferred_synced_promotion: None,
+        promotion_deferred: false,
         deferred_shared_materialization: None,
         deferred_synced_purge: Some(DeferredSyncedPurge {
             key: wire_key.clone(),
@@ -22635,8 +22695,14 @@ fn prewarm_skips_stale_zone_entries_10612() {
 }
 
 /// #10612 (M4): failover promote must skip authoritative republish for
-/// stale-zone rows (no shared publish, no peer replicate) while the local
-/// flip still stands. Also pins the R2 drop counter wiring.
+/// stale-zone rows (no shared publish, no peer replicate). Also pins the R2
+/// drop counter wiring.
+///
+/// #18552 (review r24 P2-1(b)): the fence now runs BEFORE the worker-row flip.
+/// It used to run after it and return with the worker row `SharedPromote` and
+/// the shared row still peer-synced, the exact state the #9678 gate cannot see,
+/// left in place until a purge removed the row. So the row is no longer
+/// flipped either.
 #[test]
 fn promote_skips_republish_for_stale_zone_rows_10612() {
     let mut forwarding = ForwardingState::default();
@@ -22713,8 +22779,8 @@ fn promote_skips_republish_for_stale_zone_rows_10612() {
         .expect("local row must exist");
     assert_eq!(
         origin,
-        SessionOrigin::SharedPromote,
-        "the local flip stands; only the authoritative republish is fenced"
+        SessionOrigin::SyncImport,
+        "#18552: a fenced promotion must not flip the worker row either"
     );
     let _ = promoted;
 }
@@ -24411,6 +24477,16 @@ fn worker_list_excludes_promoted_unbound_row_from_positional_matching_12072() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let shared = super::SharedSessionRefs {
         sessions: &shared_sessions,
@@ -24925,6 +25001,16 @@ fn wrapper_drives_fabric_ingress_without_fabric_link_17063() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &translated_key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
     let mut ha_state = BTreeMap::new();
     ha_state.insert(1, active_ha_runtime(1));
@@ -25015,6 +25101,16 @@ fn wrapper_drives_fabric_ingress_without_fabric_link_17063() {
         PROTO_TCP,
         0x18,
     ));
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &control_sessions,
+        &translated_key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let control = drive(&mut control_sessions, true)
         .expect("#17063: the (true,true) control shape must resolve through production");
     let (control_decision, control_metadata, _) = control_sessions

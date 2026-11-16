@@ -2018,15 +2018,21 @@ pub(super) fn update_session_cluster_synced_origin(
 /// Publishing, so that variant declines silently and the promoted session's
 /// conntrack row stays marked peer-synced. The permit is the admission here,
 /// as for `publish_bpf_conntrack_entry_under_gate_with_source_nat`: it already
-/// excludes every lease and clear fence for the whole transaction. `_permits`
-/// is a witness that the caller holds one; it is not consulted.
+/// excludes every lease and clear fence for the whole transaction. `permits`
+/// is the caller's witness: debug builds assert that one of them fences the
+/// canonical `key` (review P3-1), so a caller holding a permit for a different
+/// tuple, or none, cannot run this RMW ungated unnoticed.
 pub(super) fn update_session_cluster_synced_origin_under_permit(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     key: &SessionKey,
     peer_synced: bool,
-    _permits: &[InstallPermit],
+    permits: &[InstallPermit],
 ) {
+    debug_assert!(
+        permits.iter().any(|permit| permit.covers(key)),
+        "#18552: origin RMW under a permit that does not fence {key:?}"
+    );
     update_session_cluster_synced_origin_raw(conntrack_v4_fd, conntrack_v6_fd, key, peer_synced)
 }
 

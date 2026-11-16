@@ -12526,6 +12526,16 @@ fn late_reconciler_maps_shared_promote_for_worker_reserve_9718() {
         },
         false,
     ));
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &local_sessions,
+        &key,
+        &coordinator.sessions.synced,
+        &coordinator.sessions.nat,
+        &coordinator.sessions.forward_wire,
+        &coordinator.sessions.owner_rg_indexes,
+    );
     let shared = crate::afxdp::session_glue::SharedSessionRefs {
         sessions: &coordinator.sessions.synced,
         nat_sessions: &coordinator.sessions.nat,

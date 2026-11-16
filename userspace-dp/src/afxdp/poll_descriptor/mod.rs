@@ -3329,8 +3329,13 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // The cache keys on logical ingress (#5139), so a descriptor
                         // seeded here would serve that zone's later packets with no
                         // authority check at all.
-                        flow_cache_install_failed =
-                            resolved.install_failed || foreign_arrival_zone.is_some();
+                        // #18552 (review F1): nor from a packet whose synced
+                        // promotion was deferred. Cache hits never promote and
+                        // forwarding entries never expire, so a seeded deferral
+                        // would leave the owned flow peer-synced for its life.
+                        flow_cache_install_failed = resolved.install_failed
+                            || resolved.promotion_deferred
+                            || foreign_arrival_zone.is_some();
                         if resolved.created {
                             telemetry.counters.session_creates += 1;
                             telemetry.dbg.session_create += 1;

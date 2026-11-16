@@ -36,6 +36,7 @@ use crate::afxdp::bpf_map::{
 use crate::afxdp::session_glue::{
     ConntrackFds, SessionHitVerdict, SharedSessionRefs, Tick,
     maybe_promote_synced_session_with_conntrack, set_promote_after_flip_hook_for_test,
+    set_promote_before_fanout_hook_for_test,
 };
 use crate::afxdp::testfx::{test_forwarding_state, test_metadata, test_resolution};
 use std::cell::RefCell;
@@ -179,6 +180,10 @@ struct Fixture {
     v6: bool,
     coordinator: Coordinator,
     commands: Arc<Mutex<VecDeque<WorkerCommand>>>,
+    /// A sibling worker's command queue, handed to the promotion as its
+    /// fan-out target (review F4b): `replicate_session_upsert` pushes the
+    /// promoted row here, so a cell can observe whether and when it did.
+    sibling: Arc<Mutex<VecDeque<WorkerCommand>>>,
     worker_sessions: crate::session::SessionTable,
     ha_state: BTreeMap<i32, HAGroupRuntime>,
     /// The incarnation this node holds (T1 = LOCAL_PORT).
@@ -255,13 +260,21 @@ impl Fixture {
     /// promotion `resolve.rs` arms on every non-transient synced hit, applied
     /// through the production entry point with the conntrack test map wired.
     fn promote_on_hit(&mut self) {
+        let row = self.original.clone();
+        let forwarding = self.coordinator.forwarding.clone();
+        self.promote_row_on_hit(&row, &forwarding);
+    }
+
+    /// As `promote_on_hit`, for the worker's row of `row`'s incarnation, under
+    /// `forwarding`. The promotion fans out to the sibling queue.
+    fn promote_row_on_hit(&mut self, row: &SyncedSessionEntry, forwarding: &ForwardingState) {
         let now_ns = monotonic_nanos();
-        let key = self.key();
-        let decision = self.original.decision;
-        let metadata = self.original.metadata.clone();
+        let key = row.key.clone();
+        let decision = row.decision;
+        let metadata = row.metadata.clone();
         let mut resolved = ResolvedFlowSessionDecision {
             key: key.clone(),
-            session_id: SEED_SESSION_ID,
+            session_id: row.session_id,
             timeout_secs: 300,
             decision,
             source_nat_static: None,
@@ -272,6 +285,7 @@ impl Fixture {
             install_failed: false,
             authority_deferred: false,
             deferred_forwarding_revalidation: None,
+            promotion_deferred: false,
             deferred_synced_promotion: Some(DeferredSyncedPromotion {
                 key,
                 decision,
@@ -287,7 +301,7 @@ impl Fixture {
             deferred_synced_purge: None,
             fabric_adopted: false,
         };
-        let no_peers: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
+        let siblings = vec![Arc::clone(&self.sibling)];
         maybe_promote_synced_session_with_conntrack(
             &mut self.worker_sessions,
             SteeringMap::unshared_for_test(RECORDER_ONLY_MAP_FD),
@@ -296,7 +310,7 @@ impl Fixture {
                 nat_sessions: &self.coordinator.sessions.nat,
                 forward_wire_sessions: &self.coordinator.sessions.forward_wire,
                 owner_rg_indexes: &self.coordinator.sessions.owner_rg_indexes,
-                peer_worker_commands: &no_peers,
+                peer_worker_commands: &siblings,
                 worker_commands_by_id: empty_worker_commands_by_id(),
                 conntrack: ConntrackFds {
                     v4: CONNTRACK_TEST_MAP_FD,
@@ -304,7 +318,7 @@ impl Fixture {
                 },
                 tick: Tick::from_ns(now_ns),
             },
-            &self.coordinator.forwarding,
+            forwarding,
             0x10,
             0,
             SessionHitVerdict::Owner,
@@ -312,6 +326,26 @@ impl Fixture {
             &mut Vec::new(),
         );
     }
+
+    /// The (session id, NAT, origin) the shared row for `key` names.
+    fn shared_identity(&self, key: &SessionKey) -> Option<(u64, NatDecision, SessionOrigin)> {
+        self.shared(key)
+            .map(|entry| (entry.session_id, entry.decision.nat, entry.origin))
+    }
+
+    fn sibling_commands(&self) -> usize {
+        self.sibling.lock().expect("sibling queue").len()
+    }
+}
+
+/// Report every broken leg together, so a red run names each one.
+fn assert_legs(cell: &str, legs: &[(bool, &str)]) {
+    let failed: Vec<&str> = legs
+        .iter()
+        .filter(|(held, _)| !held)
+        .map(|(_, leg)| *leg)
+        .collect();
+    assert!(failed.is_empty(), "{cell}: broken legs: {failed:#?}");
 }
 
 /// One worker, RG 1 forwarding-active on the coordinator and in the worker's
@@ -359,6 +393,7 @@ fn seeded_fixture(v6: bool) -> Fixture {
         v6,
         coordinator,
         commands,
+        sibling: Arc::new(Mutex::new(VecDeque::new())),
         worker_sessions: crate::session::SessionTable::new(),
         ha_state,
         original,
@@ -463,6 +498,13 @@ fn assert_promoted_flow_intact(fx: &Fixture, cell: &str) {
             "8: the promotion left the conntrack row marked peer-synced (an origin RMW through \
              `with_publish` declines under the promotion's own permit)",
         ),
+        // Review F4a: shared authority itself names the promoted incarnation.
+        (
+            fx.shared_identity(&key)
+                == Some((SEED_SESSION_ID, snat(v6, LOCAL_PORT), SessionOrigin::SharedPromote)),
+            "9: the shared forward row is not the promoted session (origin SharedPromote, \
+             translation T1, the original RT_FLOW session id)",
+        ),
     ];
     let failed: Vec<&str> = legs
         .iter()
@@ -478,6 +520,13 @@ fn assert_promoted_flow_intact(fx: &Fixture, cell: &str) {
 /// drain the promotion's install permit and it is refused (`RejectedGateBusy`)
 /// within its acquire budget; the peer's retry then meets the published
 /// `SharedPromote` row and the #9678 gate.
+///
+/// Review r23 P3-4: the fix-side outcome here is a same-thread artefact. The
+/// import runs on the thread that holds the permit, so it can never drain it
+/// and always spends its whole 100 ms budget before `RejectedGateBusy`. No
+/// production import runs on a promoting worker. Cell (b) is the real
+/// cross-thread interleaving; this cell stays because it is the deterministic
+/// master-red form of the window.
 fn assert_late_import_inside_window_keeps_t1(v6: bool) {
     let mut fx = seeded_fixture(v6);
     let domain = fx.coordinator.session_domain().clone();
@@ -655,4 +704,812 @@ fn promotion_defers_to_import_lease_and_retries_v4_18552() {
 #[test]
 fn promotion_defers_to_import_lease_and_retries_v6_18552() {
     assert_promotion_defers_to_import_lease(true);
+}
+
+// ---------------------------------------------------------------------------
+// Review cycle 1 (Codex P1-1..P1-3, r23 P3-1..P3-4, r24 P2-1(b)/P3-1/P3-4).
+// ---------------------------------------------------------------------------
+
+/// The state a skipped promotion owes: nothing it would have written changed.
+/// The worker row keeps `worker`, the shared forward keeps `shared`, the
+/// conntrack origin bit is not cleared, the forward tuple is not re-steered,
+/// and nothing is fanned out to the sibling.
+fn skipped_promotion_legs(
+    fx: &Fixture,
+    worker: Option<(NatDecision, SessionOrigin)>,
+    shared: Option<(u64, NatDecision, SessionOrigin)>,
+) -> Vec<(bool, &'static str)> {
+    let key = fx.key();
+    vec![
+        (
+            fx.worker_origin(&key) == worker,
+            "worker: the promotion flipped (or replaced) the worker row",
+        ),
+        (
+            fx.shared_identity(&key) == shared,
+            "shared: the promotion rewrote the shared forward row",
+        ),
+        (
+            fx.conntrack_peer_synced() != Some(false),
+            "conntrack: the promotion cleared the conntrack peer-synced origin bit",
+        ),
+        (
+            !session_map_writes().iter().any(|write| write.key == key),
+            "steering: the promotion re-published the forward tuple's steering row",
+        ),
+        (
+            fx.sibling_commands() == 0,
+            "fan-out: the promotion replicated a row to the sibling worker",
+        ),
+    ]
+}
+
+/// F2 (Codex P1-2), import shape. A late import of a new incarnation (T1 ->
+/// T2: generation 7 -> 9, a different session id and translation) COMPLETES
+/// before the worker takes its permit: shared names T2, the import retired T1
+/// and reserved T2, and the worker's `UpsertSynced(T2)` is still queued. The
+/// worker then promotes its stale T1 row. Without the incarnation check it
+/// overwrites shared with T1 and the queued T2 upsert is later refused as a
+/// local-ownership clobber, so the node forwards on a T1 nothing reserves.
+fn assert_completed_import_supersedes_stale_promotion(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    assert_eq!(
+        fx.coordinator.upsert_synced_session(fx.late.clone()),
+        SyncedImportOutcome::Applied,
+        "premise (v6={v6}): the late import completes before the promotion"
+    );
+    let t2 = Some((LATE_SESSION_ID, snat(v6, LATE_PORT), SessionOrigin::SyncImport));
+    assert_eq!(fx.shared_identity(&key), t2, "premise (v6={v6}): shared names T2");
+    let stale_worker = Some((snat(v6, LOCAL_PORT), SessionOrigin::SyncImport));
+    assert_eq!(
+        fx.worker_origin(&key),
+        stale_worker,
+        "premise (v6={v6}): the worker has not drained the queued T2 upsert"
+    );
+    clear_session_map_writes();
+
+    fx.promote_on_hit();
+
+    let mut legs = skipped_promotion_legs(&fx, stale_worker, t2);
+    legs.push((
+        fx.port_is_free(204, LOCAL_PORT),
+        "allocator: the stale promotion re-reserved T1",
+    ));
+    assert_legs(&format!("completed import (v6={v6})"), &legs);
+
+    // The queued repair lands, and the next hit promotes the CURRENT incarnation.
+    fx.drain_worker();
+    assert_eq!(
+        fx.worker_origin(&key),
+        Some((snat(v6, LATE_PORT), SessionOrigin::SyncImport)),
+        "v6={v6}: the queued T2 upsert must replace the unpromoted T1 row"
+    );
+    let late = fx.late.clone();
+    let forwarding = fx.coordinator.forwarding.clone();
+    fx.promote_row_on_hit(&late, &forwarding);
+    assert_eq!(
+        (fx.worker_origin(&key), fx.shared_identity(&key)),
+        (
+            Some((snat(v6, LATE_PORT), SessionOrigin::SharedPromote)),
+            Some((LATE_SESSION_ID, snat(v6, LATE_PORT), SessionOrigin::SharedPromote)),
+        ),
+        "v6={v6}: a hit after the repair must promote T2 (a resend with a bumped \
+         generation is the same incarnation)"
+    );
+    assert!(
+        !fx.port_is_free(205, LATE_PORT),
+        "v6={v6}: T2 stays reserved for the promoted session"
+    );
+}
+
+#[test]
+fn completed_import_supersedes_stale_promotion_v4_18552() {
+    assert_completed_import_supersedes_stale_promotion(false);
+}
+
+#[test]
+fn completed_import_supersedes_stale_promotion_v6_18552() {
+    assert_completed_import_supersedes_stale_promotion(true);
+}
+
+/// F2 (Codex P1-2), delete shape. A peer delete COMPLETES before the worker
+/// takes its permit: the shared forward and its companion are gone and the
+/// worker's `DeleteSynced` is queued. Promoting the worker's row then would
+/// resurrect the deleted shared forward without its companion.
+fn assert_completed_peer_delete_blocks_stale_promotion(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let local_reply = fx.local_reply();
+    let outcome = fx
+        .coordinator
+        .session_domain()
+        .delete_synced(key.clone(), SyncedDeleteMode::PEER, false);
+    assert_eq!(
+        outcome,
+        SyncedDeleteOutcome::Applied,
+        "premise (v6={v6}): a peer delete of a peer-synced row applies"
+    );
+    assert!(
+        fx.shared(&key).is_none() && fx.shared(&local_reply).is_none(),
+        "premise (v6={v6}): the delete removed the shared forward and its companion"
+    );
+    let stale_worker = Some((snat(v6, LOCAL_PORT), SessionOrigin::SyncImport));
+    assert_eq!(
+        fx.worker_origin(&key),
+        stale_worker,
+        "premise (v6={v6}): the worker has not drained the queued delete"
+    );
+    clear_session_map_writes();
+
+    fx.promote_on_hit();
+
+    let mut legs = skipped_promotion_legs(&fx, stale_worker, None);
+    legs.push((
+        fx.shared(&local_reply).is_none(),
+        "companion: the promotion resurrected the deleted reply companion",
+    ));
+    assert_legs(&format!("completed peer delete (v6={v6})"), &legs);
+    fx.drain_worker();
+    assert_eq!(
+        fx.worker_origin(&key),
+        None,
+        "v6={v6}: the queued delete must remove the unpromoted row"
+    );
+}
+
+#[test]
+fn completed_peer_delete_blocks_stale_promotion_v4_18552() {
+    assert_completed_peer_delete_blocks_stale_promotion(false);
+}
+
+#[test]
+fn completed_peer_delete_blocks_stale_promotion_v6_18552() {
+    assert_completed_peer_delete_blocks_stale_promotion(true);
+}
+
+/// R1 (r24 P2-1(b)): the #10612 stale-replay fence used to return AFTER the
+/// worker-row flip, leaving the worker `SharedPromote` and the shared row
+/// peer-synced: the window the #9678 gate cannot see, held open until a purge.
+/// Now it flips nothing. (The other post-flip return, `synced_entry_for`
+/// finding no row, cannot follow a flip that applied: the flip refreshes the
+/// row in place and nothing between them removes it. No cell can reach it.)
+fn assert_stale_replay_fence_flips_nothing(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let mut zones_vanished = fx.coordinator.forwarding.clone();
+    // A validated zone set that still names the row's ingress zone but no
+    // longer its egress zone (a commit removed it).
+    zones_vanished.zone_set_validated = true;
+    zones_vanished.zone_id_to_name.clear();
+    zones_vanished
+        .zone_id_to_name
+        .insert(fx.original.metadata.ingress_zone, "lan".to_string());
+    let mut promoted_metadata = fx.original.metadata.clone();
+    promoted_metadata.owner_rg_id = RG;
+    assert!(
+        crate::afxdp::session_glue::synced_entry_is_stale_replay(
+            SessionOrigin::SharedPromote,
+            &promoted_metadata,
+            &zones_vanished,
+        ),
+        "premise: the row's egress zone vanished, so the #10612 fence applies"
+    );
+    let shared_before = fx.shared_identity(&key);
+    clear_session_map_writes();
+
+    let row = fx.original.clone();
+    fx.promote_row_on_hit(&row, &zones_vanished);
+
+    let legs = skipped_promotion_legs(
+        &fx,
+        Some((snat(v6, LOCAL_PORT), SessionOrigin::SyncImport)),
+        shared_before,
+    );
+    assert_legs(&format!("stale-replay fence (v6={v6})"), &legs);
+}
+
+#[test]
+fn stale_replay_fence_flips_nothing_v4_18552() {
+    assert_stale_replay_fence_flips_nothing(false);
+}
+
+#[test]
+fn stale_replay_fence_flips_nothing_v6_18552() {
+    assert_stale_replay_fence_flips_nothing(true);
+}
+
+/// F3 (Codex P1-3). The importer loads its HA view (RG inactive), the RG then
+/// activates, and an owner packet promotes T1 while the import waits on the
+/// promotion's permit. The import's lease then re-reads a `SharedPromote` row,
+/// whose generation is 0, so the #2170 check cannot stop it. Judged with the
+/// pre-lease view, the #9678 gate reads the row as replaceable and the import
+/// frees T1. Every ownership decision after the lease must use a view loaded
+/// after it.
+///
+/// Both rendezvous are on observed states, not timings: the importer's own
+/// after-snapshot hook hands control back once its view is loaded, and the
+/// promotion's after-flip hook returns once the importer is parked on the
+/// permit (`draining` with an install claim held).
+fn assert_import_rereads_ha_after_lease(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let inactive = HAGroupRuntime {
+        active: false,
+        watchdog_timestamp: now_secs,
+        lease: HAForwardingLease::Inactive,
+    };
+    let inactive_view = BTreeMap::from([(RG, inactive)]);
+    assert!(
+        crate::afxdp::session_glue::synced_entry_allows_local_replace(&inactive_view, RG, now_secs),
+        "premise: with the RG inactive, the #9678 gate lets a peer row replace a local one"
+    );
+    fx.coordinator.ha.rg_runtime.store(Arc::new(inactive_view));
+
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel::<()>();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let gate = global_tuple_gate();
+    let import_gate = Arc::clone(&gate);
+    let domain = fx.coordinator.session_domain().clone();
+    let late = fx.late.clone();
+    let importer = std::thread::spawn(move || {
+        adopt_tuple_gate_for_test(import_gate);
+        domain.set_synced_upsert_after_snapshot_hook_for_test(move |_domain, _key| {
+            snapshot_tx.send(()).expect("snapshot rendezvous");
+            go_rx
+                .recv_timeout(RENDEZVOUS_BOUND)
+                .expect("the promotion never released the importer");
+        });
+        domain.upsert_synced_session(late)
+    });
+    snapshot_rx
+        .recv_timeout(RENDEZVOUS_BOUND)
+        .expect("premise: the importer never loaded its HA view");
+    // The RG activates; the worker's hit resolves against the active view.
+    fx.coordinator.ha.rg_runtime.store(Arc::new(fx.ha_state.clone()));
+
+    let parked = Rc::new(std::cell::Cell::new(false));
+    let parked_slot = Rc::clone(&parked);
+    let probe_key = key.clone();
+    set_promote_after_flip_hook_for_test(move || {
+        go_tx.send(()).expect("release the importer");
+        let deadline = Instant::now() + RENDEZVOUS_BOUND;
+        loop {
+            let probe = gate.probe(&probe_key);
+            if probe.state == "draining" && probe.installs > 0 {
+                parked_slot.set(true);
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
+            std::thread::yield_now();
+        }
+    });
+
+    fx.promote_on_hit();
+
+    let outcome = importer.join().expect("importer thread");
+    assert!(
+        parked.get(),
+        "premise (v6={v6}): the import never parked on the promotion's permit \
+         (outcome {outcome:?})"
+    );
+    fx.drain_worker();
+    assert_promoted_flow_intact(&fx, &format!("activation before the lease (outcome {outcome:?})"));
+}
+
+#[test]
+fn import_rereads_ha_view_after_lease_v4_18552() {
+    assert_import_rereads_ha_after_lease(false);
+}
+
+#[test]
+fn import_rereads_ha_view_after_lease_v6_18552() {
+    assert_import_rereads_ha_after_lease(true);
+}
+
+/// F4b: the permit spans the sibling fan-out, not only the shared publish.
+/// The promotion's before-fan-out hook probes the gate: both permit keys must
+/// still carry the install claim while `replicate_session_upsert` is queued,
+/// and the claim must be gone after. (A schedule that turns a release here
+/// into damage needs an import or delete that #9678/#9714 would not already
+/// stop on the published row, so the cell pins the lifetime directly.)
+fn assert_permit_spans_sibling_fanout(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let reply = fx.local_reply();
+    let gate = global_tuple_gate();
+    let seen: Rc<RefCell<Option<(usize, usize, usize)>>> = Rc::new(RefCell::new(None));
+    let seen_slot = Rc::clone(&seen);
+    let sibling = Arc::clone(&fx.sibling);
+    let (probe_key, probe_reply, probe_gate) = (key.clone(), reply.clone(), Arc::clone(&gate));
+    set_promote_before_fanout_hook_for_test(move || {
+        *seen_slot.borrow_mut() = Some((
+            probe_gate.probe(&probe_key).installs,
+            probe_gate.probe(&probe_reply).installs,
+            sibling.lock().expect("sibling queue").len(),
+        ));
+    });
+
+    fx.promote_on_hit();
+
+    let seen = seen.borrow_mut().take();
+    assert_eq!(
+        seen,
+        Some((1, 1, 0)),
+        "v6={v6}: at the fan-out the install claim must still hold the forward and \
+         the reply tuple (installs per key, then sibling queue depth)"
+    );
+    // `replicate_session_upsert` queues the sibling's replica origin of the
+    // promoted row (`SharedPromote` replicates as `WorkerLocalImport`).
+    let replica_origin = SessionOrigin::SharedPromote.worker_replica_origin();
+    let queued = fx.sibling.lock().expect("sibling queue").clone();
+    assert!(
+        queued.len() == 1
+            && queued.iter().all(|command| matches!(
+                command,
+                WorkerCommand::UpsertSynced(entry) | WorkerCommand::UpsertLocal(entry)
+                    if entry.key == key && entry.origin == replica_origin
+            )),
+        "v6={v6}: the fan-out must queue the promoted row's replica for the sibling, \
+         got {queued:?}"
+    );
+    assert_eq!(
+        (gate.probe(&key).state, gate.probe(&reply).state),
+        ("absent", "absent"),
+        "v6={v6}: the permit is released once the fan-out is queued"
+    );
+}
+
+#[test]
+fn permit_spans_sibling_fanout_v4_18552() {
+    assert_permit_spans_sibling_fanout(false);
+}
+
+#[test]
+fn permit_spans_sibling_fanout_v6_18552() {
+    assert_permit_spans_sibling_fanout(true);
+}
+
+/// F4c (r23 P3-2): a racing lease that covers only the REPLY tuple (a peer
+/// import or delete keyed on the reverse row) must also refuse the promotion,
+/// so the permit has to claim the reply tuple, not only `key`.
+fn assert_reply_only_lease_refuses_promotion(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let shared_before = fx.shared_identity(&key);
+    let lease = global_tuple_gate()
+        .acquire_lease([fx.local_reply()])
+        .expect("premise: the idle reply tuple leases");
+    clear_session_map_writes();
+
+    fx.promote_on_hit();
+
+    let legs = skipped_promotion_legs(
+        &fx,
+        Some((snat(v6, LOCAL_PORT), SessionOrigin::SyncImport)),
+        shared_before,
+    );
+    assert_legs(&format!("reply-only lease (v6={v6})"), &legs);
+    drop(lease);
+    fx.promote_on_hit();
+    assert_eq!(
+        fx.worker_origin(&key),
+        Some((snat(v6, LOCAL_PORT), SessionOrigin::SharedPromote)),
+        "v6={v6}: the next hit after the reply lease dropped must promote"
+    );
+}
+
+#[test]
+fn reply_only_lease_refuses_promotion_v4_18552() {
+    assert_reply_only_lease_refuses_promotion(false);
+}
+
+#[test]
+fn reply_only_lease_refuses_promotion_v6_18552() {
+    assert_reply_only_lease_refuses_promotion(true);
+}
+
+/// R4 (r24 P3-4): a PEER delete that arrives inside the promotion's window
+/// waits for the permit, re-reads a `SharedPromote` row under its removal lock
+/// and is refused by #9714. Its candidate snapshot predates the lease and was
+/// still peer-synced, so the early #9714 check passes and the refusal comes
+/// from the under-lock re-check: `RefusedConcurrentLocalOwned`, not the early
+/// arm's `RefusedLocalOwned` (session_import.rs, the `remove_shared_session_if`
+/// predicate). Before #18552 the delete applied in the window and the
+/// promotion's publish then resurrected the shared row.
+fn assert_in_window_peer_delete_is_refused(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    let local_reply = fx.local_reply();
+    let domain = fx.coordinator.session_domain().clone();
+    let deleter: Rc<RefCell<Option<std::thread::JoinHandle<SyncedDeleteOutcome>>>> =
+        Rc::new(RefCell::new(None));
+    let parked = Rc::new(std::cell::Cell::new(false));
+    let deleter_slot = Rc::clone(&deleter);
+    let parked_slot = Rc::clone(&parked);
+    let probe_key = key.clone();
+    set_promote_after_flip_hook_for_test(move || {
+        let gate = global_tuple_gate();
+        let delete_gate = Arc::clone(&gate);
+        let delete_key = probe_key.clone();
+        let handle = std::thread::spawn(move || {
+            adopt_tuple_gate_for_test(delete_gate);
+            domain.delete_synced(delete_key, SyncedDeleteMode::PEER, false)
+        });
+        let deadline = Instant::now() + RENDEZVOUS_BOUND;
+        loop {
+            if handle.is_finished() {
+                break;
+            }
+            let probe = gate.probe(&probe_key);
+            if probe.state == "draining" && probe.installs > 0 {
+                parked_slot.set(true);
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the peer delete neither finished nor parked on the promotion's permit: {probe:?}"
+            );
+            std::thread::yield_now();
+        }
+        *deleter_slot.borrow_mut() = Some(handle);
+    });
+
+    fx.promote_on_hit();
+
+    let outcome = deleter
+        .borrow_mut()
+        .take()
+        .expect("premise: the promotion never reached its window")
+        .join()
+        .expect("delete thread");
+    fx.drain_worker();
+    assert_legs(
+        &format!("in-window peer delete (v6={v6}, outcome {outcome:?}, parked {})", parked.get()),
+        &[
+            (parked.get(), "witness: the delete never parked on the promotion's permit"),
+            (
+                outcome == SyncedDeleteOutcome::RefusedConcurrentLocalOwned,
+                "outcome: the delete was not refused as locally owned under its removal \
+                 lock (#9714)",
+            ),
+            (
+                fx.worker_origin(&key)
+                    == Some((snat(v6, LOCAL_PORT), SessionOrigin::SharedPromote)),
+                "worker: the promoted forward row did not survive",
+            ),
+            (
+                fx.shared_identity(&key)
+                    == Some((SEED_SESSION_ID, snat(v6, LOCAL_PORT), SessionOrigin::SharedPromote)),
+                "shared: the promoted shared forward did not survive",
+            ),
+            (
+                fx.shared(&local_reply).is_some() && fx.worker_origin(&local_reply).is_some(),
+                "companion: the reply companion was deleted",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn in_window_peer_delete_is_refused_v4_18552() {
+    assert_in_window_peer_delete_is_refused(false);
+}
+
+#[test]
+fn in_window_peer_delete_is_refused_v6_18552() {
+    assert_in_window_peer_delete_is_refused(true);
+}
+
+// ---------------------------------------------------------------------------
+// F1 (Codex P1-1 = r23 P2-1): the REAL poll pipeline and flow cache.
+//
+// A promotion that is skipped for this packet must keep the packet out of the
+// flow cache. Cache hits (`flow_cache_hit.rs`) never promote and forwarding
+// entries never TTL-expire, so a seeded packet would leave the owned flow
+// peer-synced, and open to the #18552 race, for its whole life. The harness is
+// the #18531 one (captured loss fw1 snapshot, fw1 owning both RGs, the
+// production poll body), with two differences: the bindings, and so the flow
+// cache, persist across packets, and the shared maps hold the imported pair,
+// as the HA import publishes it.
+// ---------------------------------------------------------------------------
+
+use super::tests_split_rg_failback_18531 as rg;
+use super::tests_support::{
+    build_txn_tcp_syn_frame_v4, txn_meta_v4, txn_run_multi_binding_with_shared_maps,
+};
+
+struct PollFixture {
+    forwarding: ForwardingState,
+    ha: BTreeMap<i32, HAGroupRuntime>,
+    sessions: crate::session::SessionTable,
+    bindings: Vec<BindingWorker>,
+    shared: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_wire: Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_indexes: SharedSessionOwnerRgIndexes,
+    forward: SyncedSessionEntry,
+    reverse: SyncedSessionEntry,
+}
+
+/// What one LAN -> WAN ACK did on the LAN binding.
+#[derive(Debug)]
+struct PollStep {
+    /// Slow-path session hits (0 when the flow cache served the packet).
+    session_hit: u64,
+    /// Flow-cache hits on the LAN binding during this packet.
+    cache_hits: u64,
+    /// Packets sent out the WAN binding during this packet.
+    tx_wan: u64,
+}
+
+impl PollFixture {
+    /// fw1 after the crash takeover: it owns both RGs, and its worker and
+    /// shared maps hold the fw0-originated pair as the HA import left it
+    /// (`SyncImport`, reverse from production reverse synthesis).
+    fn imported() -> Self {
+        let forwarding = rg::fw1_owner_forwarding();
+        let now_ns = monotonic_nanos();
+        let now_secs = now_ns / 1_000_000_000;
+        let ha = rg::owner_ha(now_secs);
+        let forward =
+            rg::imported_pair_entry(&forwarding, rg::forward_key(), IpAddr::V4(rg::SNAT_IP));
+        let reverse = crate::afxdp::shared_ops::synthesized_synced_reverse_entry(
+            &forwarding,
+            &ha,
+            &Arc::new(ShardedNeighborMap::default()),
+            &forward,
+            now_secs,
+        )
+        .expect("production reverse synthesis must produce the companion");
+        let mut sessions = crate::session::SessionTable::new();
+        for entry in [&forward, &reverse] {
+            assert!(
+                sessions.upsert_synced_with_origin(
+                    crate::session::SessionInstall {
+                        key: entry.key.clone(),
+                        decision: entry.decision,
+                        metadata: entry.metadata.clone(),
+                        source_nat_static: entry.source_nat_static,
+                        origin: SessionOrigin::SyncImport,
+                        now_ns,
+                        protocol: PROTO_TCP,
+                        tcp_flags: rg::TCP_ACK,
+                        session_id: entry.session_id,
+                        tcp_close_class: 0,
+                        tcp_handshake_state: entry.tcp_handshake_state,
+                        persistent_lease_hold: None,
+                        fwd_packets: entry.fwd_packets,
+                        rev_packets: entry.rev_packets,
+                    },
+                    false,
+                ),
+                "fixture: the HA import must install {:?}",
+                entry.key
+            );
+        }
+        sessions.set_forwarding_revalidation_gen(7, 9);
+        let fx = Self {
+            forwarding,
+            ha,
+            sessions,
+            bindings: rg::bindings(),
+            shared: Arc::new(Mutex::new(FastMap::default())),
+            shared_nat: Arc::new(Mutex::new(FastMap::default())),
+            shared_wire: Arc::new(Mutex::new(FastMap::default())),
+            shared_indexes: SharedSessionOwnerRgIndexes::default(),
+            forward,
+            reverse,
+        };
+        for entry in [&fx.forward, &fx.reverse] {
+            fx.publish(entry);
+        }
+        fx
+    }
+
+    fn publish(&self, entry: &SyncedSessionEntry) {
+        crate::afxdp::shared_ops::publish_shared_session(
+            &self.shared,
+            &self.shared_nat,
+            &self.shared_wire,
+            &self.shared_indexes,
+            entry,
+        );
+    }
+
+    /// One mid-stream LAN -> WAN ACK through the production poll body.
+    fn lan_ack(&mut self) -> PollStep {
+        let frame = build_txn_tcp_syn_frame_v4(
+            rg::LAN_HOST,
+            rg::WAN_HOST,
+            rg::SPORT,
+            rg::DPORT,
+            rg::TCP_ACK,
+            [0x02, 0xbf, 0x72, 0x16, 0x02, 0x03],
+        );
+        let mut meta = txn_meta_v4(rg::LAN_IFINDEX as u32, rg::TCP_ACK, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&rg::LAN_HOST.octets());
+        meta.flow_dst_addr[..4].copy_from_slice(&rg::WAN_HOST.octets());
+        meta.flow_src_port = rg::SPORT;
+        meta.flow_dst_port = rg::DPORT;
+        meta.config_generation = 7;
+        let tx_before = self.bindings[rg::WAN]
+            .live
+            .tx_packets
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let hits_before = self.bindings[rg::LAN].flow.flow_cache.hits;
+        let (_batch, dbg, _egress) = txn_run_multi_binding_with_shared_maps(
+            &mut self.bindings,
+            rg::LAN,
+            &mut self.sessions,
+            &self.forwarding,
+            &self.ha,
+            &frame,
+            meta,
+            &self.shared,
+            &self.shared_nat,
+            &self.shared_wire,
+            &self.shared_indexes,
+            7,
+            0,
+        );
+        assert_eq!(dbg.rx, 1, "anti-vacuity: the descriptor must reach the poll body");
+        PollStep {
+            session_hit: dbg.session_hit,
+            cache_hits: self.bindings[rg::LAN].flow.flow_cache.hits - hits_before,
+            tx_wan: self.bindings[rg::WAN]
+                .live
+                .tx_packets
+                .load(std::sync::atomic::Ordering::Relaxed)
+                - tx_before,
+        }
+    }
+
+    fn cached(&self) -> bool {
+        let key = rg::forward_key();
+        self.bindings[rg::LAN]
+            .flow
+            .flow_cache
+            .entries
+            .iter()
+            .flatten()
+            .any(|entry| entry.key == key)
+    }
+
+    fn worker_origin(&self) -> Option<SessionOrigin> {
+        self.sessions
+            .entry_with_origin(&rg::forward_key())
+            .map(|(_, _, origin)| origin)
+    }
+
+    fn shared_origin(&self) -> Option<SessionOrigin> {
+        crate::afxdp::shared_ops::lock_shared_recover(&self.shared)
+            .get(&rg::forward_key())
+            .map(|entry| entry.origin)
+    }
+
+    /// Owner packets until one promotes, bounded. Returns the packet count.
+    fn ack_until_promoted(&mut self, bound: usize) -> Option<usize> {
+        (1..=bound).find(|_| {
+            let _ = self.lan_ack();
+            self.worker_origin() == Some(SessionOrigin::SharedPromote)
+        })
+    }
+}
+
+/// F1: the first owner packet after the takeover meets a held tuple lease (an
+/// HA import or delete of the flow), so its promotion is refused. The packet
+/// still forwards, but it must not seed the flow cache; once the lease drops,
+/// a later owner packet takes the slow path again and promotes.
+#[test]
+fn refused_promotion_does_not_seed_flow_cache_and_retries_18552() {
+    let mut fx = PollFixture::imported();
+    let lease = global_tuple_gate()
+        .acquire_lease([fx.forward.key.clone(), fx.reverse.key.clone()])
+        .expect("premise: the idle pair leases");
+
+    let refused = fx.lan_ack();
+    let after_refusal = (fx.worker_origin(), fx.shared_origin(), fx.cached());
+    drop(lease);
+    let promoted_after = fx.ack_until_promoted(4);
+    let follow_up = fx.lan_ack();
+
+    assert_legs(
+        &format!(
+            "refused promotion (first packet {refused:?}; after it worker/shared/cached \
+             {after_refusal:?}; promoted after {promoted_after:?} more packets; then {follow_up:?})"
+        ),
+        &[
+            (
+                refused.session_hit == 1 && refused.tx_wan == 1,
+                "premise: the refused packet must hit the session and forward out the WAN",
+            ),
+            (
+                after_refusal.0 == Some(SessionOrigin::SyncImport)
+                    && after_refusal.1 == Some(SessionOrigin::SyncImport),
+                "refusal: the promotion was not refused under the held lease",
+            ),
+            (
+                !after_refusal.2,
+                "seed: the refused packet seeded the flow cache, so no later packet resolves \
+                 and the promotion is never retried",
+            ),
+            (
+                promoted_after.is_some(),
+                "retry: no later owner packet promoted the row after the lease dropped",
+            ),
+            (
+                fx.shared_origin() == Some(SessionOrigin::SharedPromote),
+                "retry: shared authority was not republished as SharedPromote",
+            ),
+            (
+                follow_up.cache_hits == 1 && follow_up.session_hit == 0,
+                "cache: once promoted, the flow must ride the flow cache again",
+            ),
+        ],
+    );
+}
+
+/// F1 x F2: the shared row was superseded (a completed import of a new
+/// incarnation of the reused 5-tuple: a different RT_FLOW session id; interface
+/// SNAT keeps the translation) while this worker still holds the old row and
+/// its `UpsertSynced` is queued. The promotion must skip AND keep the packet
+/// out of the flow cache, so that once the queued upsert lands, the next packet
+/// resolves the current row and promotes it.
+#[test]
+fn superseded_promotion_does_not_seed_flow_cache_18552() {
+    let mut fx = PollFixture::imported();
+    let mut successor = fx.forward.clone();
+    successor.session_id = fx.forward.session_id + 1;
+    successor.generation = fx.forward.generation + 2;
+    fx.publish(&successor);
+
+    let skipped = fx.lan_ack();
+    let after_skip = (fx.worker_origin(), fx.shared_origin(), fx.cached());
+    let shared_id_after_skip = crate::afxdp::shared_ops::lock_shared_recover(&fx.shared)
+        .get(&rg::forward_key())
+        .map(|entry| entry.session_id);
+    // The queued repair lands at the worker's next command drain.
+    rg::apply_commands(
+        &mut fx.sessions,
+        &fx.forwarding,
+        &fx.ha,
+        vec![WorkerCommand::UpsertSynced(successor.clone())],
+    );
+    let promoted_after = fx.ack_until_promoted(4);
+    let promoted_id = fx.sessions.session_id_for(&rg::forward_key());
+
+    assert_legs(
+        &format!(
+            "superseded promotion (first packet {skipped:?}; after it worker/shared/cached \
+             {after_skip:?}, shared id {shared_id_after_skip:?}; promoted after \
+             {promoted_after:?} more packets, id {promoted_id:#x})"
+        ),
+        &[
+            (
+                skipped.session_hit == 1 && skipped.tx_wan == 1,
+                "premise: the packet must hit the session and forward out the WAN",
+            ),
+            (
+                after_skip.0 == Some(SessionOrigin::SyncImport),
+                "worker: the superseded row was promoted",
+            ),
+            (
+                after_skip.1 == Some(SessionOrigin::SyncImport)
+                    && shared_id_after_skip == Some(successor.session_id),
+                "shared: the superseded row overwrote the successor in shared authority",
+            ),
+            (
+                !after_skip.2,
+                "seed: the skipped packet seeded the flow cache from the superseded row",
+            ),
+            (
+                promoted_after.is_some() && promoted_id == successor.session_id,
+                "retry: the successor was not promoted once its upsert landed",
+            ),
+        ],
+    );
 }

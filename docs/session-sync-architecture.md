@@ -313,14 +313,59 @@ the shared publish and the sibling fan-out. It takes the permit with
 `try_acquire_installs`, which never blocks, as the new-flow install does.
 
 - **Import holds the lease first.** The promotion is refused. It is skipped for
-  that packet, which forwards on the synced hit. The row stays promotable, and
-  the next hit retries.
+  that packet, which forwards on the synced hit but does not seed the flow
+  cache. The row stays promotable, and the next resolved hit retries.
 - **Promotion holds the permit first.** The import's lease waits for it (up to
   its 100 ms acquire budget, or it reports `RejectedGateBusy`). The import then
   re-reads a `SharedPromote` row, which the #9678 gate stops.
 - **Origin bit.** The conntrack origin-bit clear uses
   `update_session_cluster_synced_origin_under_permit`. The gated variant needs
   an Idle tuple and would decline silently under the promotion's own permit.
+  Debug builds assert that one of the passed permits fences the key.
+- **Only the current incarnation is promoted.** An import or a delete that
+  COMPLETED before the permit was taken has already rewritten shared authority
+  and queued this worker's repair, so the worker row may name a superseded or
+  deleted incarnation. Under the permit, before the flip, the promotion
+  re-reads the shared row (`synced_row_incarnation`, one shared lookup per
+  attempt) and promotes only if it is present, still peer-synced, and names the
+  worker row's incarnation: the same NAT decision and, when the shared row
+  carries one, the same RT_FLOW session id (0 is the legacy sentinel; the
+  worker mints its own id for such a row). Generation is not compared: the
+  worker row does not store it, and a same-incarnation resend bumps it.
+  Otherwise nothing changes: the queued `UpsertSynced` or `DeleteSynced`
+  repairs the row, and a later hit promotes the current incarnation. Without this, the stale row overwrote shared
+  authority (or resurrected a deleted forward without its companion), and the
+  queued repair was then refused as a local-ownership clobber.
+- **Every check runs before the flip.** The #10612 stale-replay fence used to
+  return after the flip, leaving the worker row `SharedPromote` and the shared
+  row peer-synced. It now runs first and flips nothing, so no outcome other
+  than a full promotion changes the worker row, shared authority, the origin
+  bit, steering or the sibling queues.
+- **A deferred packet is not cached.** Flow-cache hits never promote and
+  forwarding entries never expire, so a packet whose promotion was deferred
+  and then seeded the cache would leave the owned flow peer-synced for its
+  life. `ResolvedFlowSessionDecision::promotion_deferred` keeps it out of the
+  cache when the deferral needs a resolved hit to clear: a refused permit
+  (transient) and a superseded shared row (bounded by the worker's next command
+  drain; a cache entry seeded from the old row would outlive the repair,
+  because a cache hit checks only that its backing row is live). A shared row
+  that is absent (the queued delete evicts the cache itself), already locally
+  owned (a sibling promoted it; shared authority already protects the flow) or
+  a stale-replay fence (permanent until a purge) does not suppress the seed.
+- **Refusal costs no allocation.** While a holder lasts (a lease's drain, up to
+  100 ms, or a whole clear), every resolved hit retries. A non-allocating pre-check
+  (`TupleGate::install_claim_would_refuse`) refuses then without the keys and
+  permits Vecs, the admission Arc and a gate-entry insert and rollback.
+  `try_acquire_installs` stays the authority.
+- **The importer judges ownership after its lease.** It loaded its HA view
+  before the lease, to prepare the lease keys. An import that waited on the
+  promotion's permit could therefore judge the published `SharedPromote` row
+  with a view from before the RG activated, read it as replaceable and free T1
+  (the row's generation is 0, so the #2170 check never fires). The #9678 gate
+  and the two steering publishes now use a view loaded after the lease, as the
+  delete path already did. The worker's load of the activated view happens
+  before its permit release, which happens before the lease, so the reload
+  sees the activation or a later state.
 - **When it happens.** A different translation from a non-stale later send
   takes a new incarnation of a reused 5-tuple on the old owner, while this node
   still holds the predecessor. The generation check refuses only strictly older
@@ -335,7 +380,17 @@ Pinned by:
   - a concurrent late import on another thread, parked on the promotion's
     permit;
   - the converse: a held import lease defers the promotion, and the next hit
-    promotes.
+    promotes;
+  - an import and a peer delete that completed before the permit: no
+    promotion, and the next hit after the repair promotes the current
+    incarnation;
+  - the stale-replay fence flips nothing;
+  - an import that loaded its HA view before the RG activated and waited on
+    the promotion's permit is still stopped by #9678;
+  - the permit spans the sibling fan-out, a lease on only the reply tuple
+    refuses the promotion, and an in-window peer delete is refused by #9714;
+  - on the real poll pipeline and flow cache: a refused promotion and a
+    superseded one do not seed the cache, and a later owner packet promotes.
 
 - `afxdp/tests_late_synced_publish_18550.rs`: v4 and v6; the late-publish,
   shared-local and worker-local shapes;

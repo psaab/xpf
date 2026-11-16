@@ -383,3 +383,32 @@ mod equivalence_16137_tests {
         assert!(local.zone_name_to_id.is_empty());
     }
 }
+
+/// #18552 (review F2): publish the shared row of the worker row under `key`,
+/// exactly as the HA import does before it fans the row out to the workers.
+///
+/// A synced promotion promotes only the incarnation the shared row still
+/// names (`session_glue::promote::synced_row_incarnation`); an absent shared
+/// row means a completed delete whose `DeleteSynced` is still queued, and the
+/// promotion skips. A fixture that seeds a promotable worker row directly, with
+/// no import, must therefore also publish its shared twin, or it models a
+/// worker row whose shared authority was deleted.
+pub(in crate::afxdp) fn publish_shared_twin_for_test(
+    sessions: &crate::session::SessionTable,
+    key: &SessionKey,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+) {
+    let entry = sessions
+        .synced_entry_for(key)
+        .unwrap_or_else(|| panic!("fixture: no worker row under {key:?} to publish"));
+    crate::afxdp::shared_ops::publish_shared_session(
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        &entry,
+    );
+}
