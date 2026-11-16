@@ -2407,20 +2407,44 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
     tun_test
         .write_all(&tun_origin_inner_10038(5001))
         .expect("write inner packet");
-    // The handshake request proves the packet REACHED encap and took the
-    // NoSession arm — so empty maps below mean "gated on Sent", not "never
-    // arrived". A publish (if the gate were missing) lands synchronously in
-    // the same burst iteration, so the extra settle sleep closes the race.
-    let mut requested = false;
-    for _ in 0..100 {
-        if engine.take_handshake_request(&pk) {
-            requested = true;
+    // A second inner packet, read and encapsulated AFTER the first by the same
+    // single-threaded burst. Once it has reached encap, the first packet's
+    // iteration is over, including the publish a missing gate would make right
+    // after `encap_and_send` returns. So the empty maps below are checked after
+    // that publish point, not after a settle sleep.
+    tun_test
+        .write_all(&tun_origin_inner_10038(5002))
+        .expect("write second inner packet");
+    // #19138: witness through COUNTERS, which the control loop never consumes.
+    // The NoSession handshake request is a consume-once EDGE, and the control
+    // loop takes it too: its attempt machine drains it when a handshake attempt
+    // gives up (attempt.rs), and with no attempt active it takes it to start
+    // one. In this cell the BringUp attempt normally outlives the test (90 s),
+    // but a VM pause longer than that jumps the guest's monotonic clock past it
+    // (#19142), and a cell that polls the edge can then lose it. A counter
+    // cannot be taken away.
+    // The bound counts ITERATIONS, not elapsed time: a pause spans one sleep,
+    // so it cannot use up the budget. It is only a hang guard, for a burst that
+    // never reaches encap.
+    let counters = engine.counters();
+    let mut drops = 0;
+    for _ in 0..12_000 {
+        drops = counters.encap_drops_no_session.load(Ordering::Relaxed);
+        if drops >= 2 {
             break;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(5));
     }
-    assert!(requested, "the NoSession encap must request a handshake");
-    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        drops >= 2,
+        "the burst did not take the NoSession arm for both packets in 12000 polls (no-session drops {drops})"
+    );
+    // The first packet's NoSession arm requested the handshake before the
+    // second packet was read; the request is rate-limited, so it is one edge.
+    assert!(
+        counters.hs_requests_armed.load(Ordering::Relaxed) >= 1,
+        "the NoSession encap must request a handshake"
+    );
     assert!(
         test_shared.lock().expect("shared map").is_empty()
             && test_nat.lock().expect("nat map").is_empty()
