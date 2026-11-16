@@ -525,20 +525,21 @@ func (a *LegacyDataPlaneAdapter) SetFeedSnapshots(overlay map[string][]string) {
 }
 
 // BeginTransferPreActivation forwards the #18559 make-before-break mark.
-func (a *LegacyDataPlaneAdapter) BeginTransferPreActivation(rgIDs []int, until time.Time) {
+func (a *LegacyDataPlaneAdapter) BeginTransferPreActivation(rgIDs []int, until time.Time) uint64 {
 	if m, err := a.managerOrErr(); err == nil {
-		m.BeginTransferPreActivation(rgIDs, until)
+		return m.BeginTransferPreActivation(rgIDs, until)
 	}
+	return 0
 }
 
 // PublishTransferPreActivation forwards the #18559 helper publish, which also
 // marks rgIDs routes-ready (#19167).
-func (a *LegacyDataPlaneAdapter) PublishTransferPreActivation(rgIDs []int) error {
+func (a *LegacyDataPlaneAdapter) PublishTransferPreActivation(rgIDs []int, epoch uint64) error {
 	m, err := a.managerOrErr()
 	if err != nil {
 		return err
 	}
-	return m.PublishTransferPreActivation(rgIDs)
+	return m.PublishTransferPreActivation(rgIDs, epoch)
 }
 
 // EndTransferPreActivation forwards the #18559 release.

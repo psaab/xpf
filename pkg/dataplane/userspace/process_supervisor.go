@@ -281,6 +281,7 @@ func (m *Manager) scheduleRestartTimer(d time.Duration, fn func()) {
 // Called with m.mu held, immediately after a successful cmd.Start().
 func (m *Manager) startHelperSupervisorLocked(cmd *exec.Cmd) {
 	m.procGen++
+	m.helperEpoch++ // #19167 fold 1: a new helper has none of the old one's routes
 	m.bindOwedInventoryDebtLocked()
 	// Keep the helper-session epoch ahead of any sender while this new process
 	// is still being published. The subsequent snapshot publication records

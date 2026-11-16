@@ -278,35 +278,63 @@ func (d *Daemon) actuateLearnedRouteRefresh(ctx context.Context) bool {
 // for a benign absent/resetting daemon shape. Returns false only when
 // a publish or FIB bump failed. The caller owns applySem.
 func (d *Daemon) republishConnectedRG(reason string) bool {
+	return d.republishConnectedRGOutcome(reason) != connectedRGRepublishFailed
+}
+
+// connectedRGRepublishOutcome is what a connected-RG republish did (#19167
+// review). Most callers only need "not failed"; the transfer pre-activation
+// must also know whether the helper actually HAS the routes before it opens
+// forwarding.
+type connectedRGRepublishOutcome int
+
+const (
+	// connectedRGRepublished: a snapshot was published and its FIB
+	// generation bump confirmed.
+	connectedRGRepublished connectedRGRepublishOutcome = iota
+	// connectedRGRepublishUnchanged: the rebuilt snapshot equals the last one
+	// the helper acknowledged (a duplicate skip with no FIB bump owed), so the
+	// helper already holds these routes. The duplicate gate is against the
+	// CURRENT helper's publication: a helper reset clears it.
+	connectedRGRepublishUnchanged
+	// connectedRGRepublishSkipped: nothing was published at all: the daemon
+	// is resetting, there is no store or active config, or the dataplane is
+	// not an overlay publisher.
+	connectedRGRepublishSkipped
+	// connectedRGRepublishFailed: the publish or its FIB bump failed.
+	connectedRGRepublishFailed
+)
+
+// republishConnectedRGOutcome is republishConnectedRG with the outcome kept.
+func (d *Daemon) republishConnectedRGOutcome(reason string) connectedRGRepublishOutcome {
 	if d == nil || d.store == nil || d.isResetting() {
-		return true
+		return connectedRGRepublishSkipped
 	}
 	cfg := d.store.ActiveConfig()
 	if cfg == nil {
-		return true
+		return connectedRGRepublishSkipped
 	}
 	pub, ok := d.dataplane().(routeOverlayPublisher)
 	if !ok {
-		return true
+		return connectedRGRepublishSkipped
 	}
 	schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
 	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
 	if err != nil {
 		slog.Warn("HA connected-route republish failed; next ownership edge or commit retries",
 			"reason", reason, "err", err)
-		return false
+		return connectedRGRepublishFailed
 	}
 	if !published && !d.pendingFIBBump {
-		return true
+		return connectedRGRepublishUnchanged
 	}
 	if _, err := pub.BumpFIBGeneration(); err != nil {
 		d.pendingFIBBump = true
 		slog.Warn("HA connected-route FIB bump unconfirmed; route listener retry remains armed",
 			"reason", reason, "err", err)
-		return false
+		return connectedRGRepublishFailed
 	}
 	d.pendingFIBBump = false
-	return true
+	return connectedRGRepublished
 }
 
 // scheduleConnectedRGRepublish refreshes helper routes after an RG
