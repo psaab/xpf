@@ -80,6 +80,10 @@ func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
 	// (Codex delta P2-2).
 	m.genericDataMemberCfg = cfg
 	reasons, changed := m.setGenericDataMembersLocked(members)
+	// A successful compile attach pass just ran: the next status tick re-runs
+	// the refresh reconcile, which drops any attach debt the compile repaid
+	// (codex-d NEW P2-1).
+	m.makeRefreshAttachDebtDueLocked()
 	m.mu.Unlock()
 	if changed {
 		logGenericDataMembers(reasons)

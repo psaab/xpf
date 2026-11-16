@@ -140,7 +140,9 @@ func xdpNativeUnsupportedByDriver(err error) bool {
 //
 // So each interface gets ONE attempt per mode. A refusal returns ErrXDPOccupied
 // with no generic attempt and no occupant probe. The interface stays
-// fail-closed until the next apply or the next refresh that re-resolves it.
+// fail-closed, and the userspace Manager records the failure as attach debt:
+// a readiness reason for a RETH data member, retried on a later status tick
+// (pkg/dataplane/userspace refresh_attach_debt_19110.go, codex-d NEW P2-1).
 // They are vars so the batch cells can give the pass a non-zero budget.
 var (
 	xdpRefreshOccupancyBudget time.Duration

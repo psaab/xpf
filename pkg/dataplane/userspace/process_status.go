@@ -770,6 +770,10 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 						}
 					}
 				}
+				// #19110 (codex-d NEW P2-1): a refresh attach that failed is
+				// owed a retry. It runs on a LATER tick, with backoff, never as
+				// a sleep under m.mu (the refresh attach budgets are zero).
+				m.retryRefreshAttachDebtLocked(time.Now())
 				// virtual-MAC change with no link cycle publishes a workerless
 				// DeferWorkers=true snapshot; the daemon's mandatory re-apply
 				// arms the workers. If that re-apply failed, the daemon recorded

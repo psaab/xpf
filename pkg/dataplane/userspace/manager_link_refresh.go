@@ -268,15 +268,17 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 // row) or a VLAN child (ParentIfindex > 0) goes generic, and everything else
 // goes through the shim manager's AttachShimXDPInterfaces (one pass, one
 // budget, for the whole reconciliation), which applies the compile pass's
-// #19110 rules. Those rules are: reclaim a stale pin first;
-// retry a refusal (EBUSY/EEXIST) and NEVER fall back to generic on one; fall
-// back to generic only on an unsupported native attach, and record that
-// fallback for the F4 takeover guard, which is recomputed after the loop. An
-// attach failure is logged
-// and left for the next refresh/full apply to retry — it must not fail
-// this publish, because the helper's snapshot update is still correct and
-// the unshimmed interface is fail-closed (no program, fence-dropped
-// transit), never fail-open.
+// #19110 rules. Those rules are: reclaim a stale pin first; give up at once on
+// a refusal (EBUSY/EEXIST; the refresh budgets are zero, so this caller never
+// waits under m.mu) and NEVER fall back to generic on one; fall back to generic
+// only on an unsupported native attach, and record that fallback for the F4
+// takeover guard, which is recomputed after the loop. An attach failure must
+// not fail this publish, because the helper's snapshot update is still correct
+// and the unshimmed interface is fail-closed (no program, fence-dropped
+// transit), never fail-open. It is recorded as attach DEBT instead: a RETH
+// data member in it is a takeover-readiness reason while the peer is alive,
+// and the status loop retries it on a later tick (codex-d NEW P2-1,
+// refresh_attach_debt_19110.go).
 //
 // Detach half is intentionally NOT done here: detaching an obsolete ifindex
 // before the helper accepts next would repeat the #5485 bypass if the
@@ -299,6 +301,10 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 		tracked = m.bpfShim.XDPLinks()
 	}
 	var batch []dataplane.ShimXDPAttachRequest
+	// #19110 (codex-d NEW P2-1): what this pass tried and what it left with no
+	// attachment, for the readiness debt and its retry
+	// (refresh_attach_debt_19110.go).
+	attempted, failed := map[int]bool{}, map[int]error{}
 	for _, ifindex := range buildUserspaceIngressIfindexes(next) {
 		if ifindex == 0 {
 			continue
@@ -323,6 +329,7 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 			// sequence is spelled out here. Production goes through
 			// AttachShimXDPInterfaces below.
 			attach := m.attachInterfaceXDPHook
+			attempted[int(ifindex)] = true
 			if err := attach(int(ifindex), forceGeneric); err != nil {
 				if attachErrIsAlreadyAttached(err) {
 					continue
@@ -334,8 +341,7 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 						err = gerr
 					}
 				}
-				slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; interface remains fail-closed until the next apply",
-					"ifindex", ifindex, "err", err, "issue", "#14133")
+				failed[int(ifindex)] = err
 			}
 			continue
 		}
@@ -346,9 +352,9 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 	// not N, while this caller holds m.mu.
 	if len(batch) > 0 {
 		for ifindex, err := range m.bpfShim.AttachShimXDPInterfaces(batch) {
+			attempted[ifindex] = true
 			if err != nil && !attachErrIsAlreadyAttached(err) {
-				slog.Warn("userspace: failed to attach XDP shim during interface-link refresh; interface remains fail-closed until the next apply",
-					"ifindex", ifindex, "err", err, "issue", "#14133")
+				failed[ifindex] = err
 			}
 		}
 	}
@@ -365,6 +371,10 @@ func (m *Manager) reconcileInterfaceAttachmentsForRefreshLocked(next *ConfigSnap
 			logGenericDataMembers(reasons)
 		}
 	}
+	// After the member re-resolve, so a failed member is logged by name. A
+	// failure is readiness debt and is retried on a later status tick; it no
+	// longer waits for an unrelated apply (codex-d NEW P2-1).
+	m.noteRefreshAttachOutcomeLocked(attempted, failed, time.Now())
 }
 
 // refreshRxVlanAttachAdmissionLocked adds the RX-VLAN activation precondition
