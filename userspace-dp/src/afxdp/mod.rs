@@ -896,6 +896,9 @@ mod tests_ipsec_selector_fence_10683;
 #[path = "tests_missing_neighbor_probe_gate_14661.rs"]
 mod tests_missing_neighbor_probe_gate_14661;
 #[cfg(test)]
+#[path = "tests_snat_failure_terminates_19132.rs"]
+mod tests_snat_failure_terminates_19132;
+#[cfg(test)]
 #[path = "tests_policy_inbound_nat.rs"]
 mod tests_policy_inbound_nat;
 #[cfg(test)]
