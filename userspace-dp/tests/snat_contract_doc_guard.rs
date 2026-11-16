@@ -15,9 +15,14 @@
 //!   - a crate-wide census of runtime `source_nat_decision_for_flow(` calls:
 //!     exactly the composer and the flowless-fragment retry (frag_assoc.rs);
 //!   - the composer propagates a failure as `NatFailure::SourceNat`;
-//!   - the flowless-fragment retry drops on any failure;
-//!   - exactly two composer callers, both in poll_descriptor/mod.rs, each
-//!     recording a `NatFailure::SourceNat` with `record_source_nat_failure`;
+//!   - the flowless-fragment retry's match has exactly two arms, an `Ok(..)`
+//!     translate arm and `_ => RetryFlowlessFragmentNat::Drop`, so every error
+//!     reaches the drop (an inserted `Err(_) => Unchanged` arm fails);
+//!   - exactly two composer callers, both in poll_descriptor/mod.rs. Each one's
+//!     `NatFailure::SourceNat` arm records the failure and THEN terminates:
+//!     the recorder only counts, it does not drop. The normal caller recycles
+//!     and `continue`s; the missing-neighbor seed `break 'missing_neighbor`s
+//!     with `StageOutcome::RecycleAndContinue`;
 //!   - no legacy Option helper and no `unwrap_or_default` fail-open on the
 //!     decision path;
 //!   - the plan and capability docs describe this layout.
@@ -95,6 +100,49 @@ fn window(source: &str, line: usize, len: usize) -> Vec<&str> {
     source.lines().skip(line - 1).take(len).collect()
 }
 
+/// The lines of the `{ .. }` block that opens at the first `{` on or after
+/// `lines[start]`, through its matching `}` (these blocks hold no braces inside
+/// string or char literals).
+fn block_from<'a>(lines: &[&'a str], start: usize) -> Option<Vec<&'a str>> {
+    let mut depth = 0i32;
+    let mut opened = false;
+    for (offset, line) in lines[start..].iter().enumerate() {
+        for ch in line.chars() {
+            match ch {
+                '{' => {
+                    depth += 1;
+                    opened = true;
+                }
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+        if opened && depth <= 0 {
+            return Some(lines[start..=start + offset].to_vec());
+        }
+    }
+    None
+}
+
+/// The arm heads (lines holding `=>`) at depth 1 of a `match .. { .. }` block.
+fn match_arm_heads<'a>(block: &[&'a str]) -> Vec<&'a str> {
+    let mut depth = 0i32;
+    let mut heads = Vec::new();
+    for line in block {
+        if depth == 1 && line.contains("=>") {
+            heads.push(line.trim());
+        }
+        for ch in line.chars() {
+            match ch {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                _ => {}
+            }
+        }
+    }
+    heads
+}
+
 #[test]
 fn snat_contract_documents_current_fail_closed_runtime() {
     let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -137,13 +185,19 @@ fn snat_contract_documents_current_fail_closed_runtime() {
         }
     }
 
-    // 3. The flowless-fragment retry drops on any failure.
+    // 3. The flowless-fragment retry drops on any failure: its match is exactly
+    //    an `Ok(..)` arm and `_ => Drop`, so no arm can catch an error first.
     let frag = read(&repo_root, FRAG_RETRY);
+    let frag_lines: Vec<&str> = frag.lines().collect();
     for (file, line) in decision_sites.iter().filter(|(f, _)| f == FRAG_RETRY) {
-        let w = window(&frag, *line, 40).join("\n");
-        if !w.contains("_ => RetryFlowlessFragmentNat::Drop") {
+        let heads = block_from(&frag_lines, line - 1).map(|b| match_arm_heads(&b)).unwrap_or_default();
+        let exact = heads.len() == 2
+            && heads[0].starts_with("Ok(")
+            && heads[1] == "_ => RetryFlowlessFragmentNat::Drop,";
+        if !exact {
             problems.push(format!(
-                "{file}:{line}: the flowless-fragment source-NAT retry must drop when the decision fails"
+                "{file}:{line}: the flowless-fragment source-NAT match must be exactly an `Ok(..)` arm and \
+                 `_ => RetryFlowlessFragmentNat::Drop,` so every error drops; found arms {heads:?}"
             ));
         }
     }
@@ -160,13 +214,25 @@ fn snat_contract_documents_current_fail_closed_runtime() {
     }
     for (file, line) in composer_sites.iter().filter(|(f, _)| f == POLL) {
         let w = window(&poll, *line, 60);
-        let records = w
+        let body = w
             .iter()
             .position(|l| l.contains("NatFailure::SourceNat("))
-            .is_some_and(|arm| w[arm..].iter().take(15).any(|l| l.contains("record_source_nat_failure(")));
-        if !records {
+            .and_then(|arm| block_from(&w, arm))
+            .map(|b| b.join("\n"))
+            .unwrap_or_default();
+        let recorded = body.find("record_source_nat_failure(");
+        // The terminator must come after the record: the recorder only counts.
+        let terminated = recorded.is_some_and(|at| {
+            let rest = &body[at..];
+            (rest.contains("scratch_recycle.push(") && rest.contains("continue;"))
+                || (rest.contains("break 'missing_neighbor") && rest.contains("StageOutcome::RecycleAndContinue"))
+        });
+        if recorded.is_none() || !terminated {
             problems.push(format!(
-                "{file}:{line}: the NatFailure::SourceNat arm must call record_source_nat_failure before the frame is recycled"
+                "{file}:{line}: the NatFailure::SourceNat arm must call record_source_nat_failure and then drop the \
+                 packet (recycle + continue, or break 'missing_neighbor StageOutcome::RecycleAndContinue); \
+                 recorded={} dropped={terminated}",
+                recorded.is_some()
             ));
         }
     }
