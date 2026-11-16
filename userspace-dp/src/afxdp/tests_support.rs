@@ -1548,6 +1548,68 @@ pub(super) fn txn_run_descriptor_with_injected(
     injected: (Vec<u8>, UserspaceDpMeta),
     local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
 ) -> (BatchCounters, DebugPollCounters) {
+    txn_run_pass_19132(
+        binding,
+        sessions,
+        forwarding,
+        ha_state,
+        Some(injected),
+        &[],
+        local_tunnel_deliveries,
+    )
+}
+
+/// One descriptor pass: an optional injected packet (served first), then the
+/// given RX descriptors in order. #19132 uses the RX list to put a valid
+/// packet AFTER one whose handling must not end the pass. With RX frames the
+/// caller asserts what was processed; the single-packet anti-vacuity check
+/// applies only to the injected-only shape.
+pub(super) fn txn_run_pass_19132(
+    binding: &mut BindingWorker,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    injected: Option<(Vec<u8>, UserspaceDpMeta)>,
+    rx: &[(&[u8], UserspaceDpMeta)],
+    local_tunnel_deliveries: &Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
+) -> (BatchCounters, DebugPollCounters) {
+    let mut available = 0u32;
+    for &(frame, meta) in rx {
+        // The mirror-test binding marks every UMEM frame free for TX, and an
+        // injected packet takes the FRONT one; each RX descriptor reserves one
+        // from the BACK, so no copy can overwrite another.
+        let rx_frame = binding
+            .tx_pipeline
+            .free_tx_frames
+            .pop_back()
+            .expect("fixture: a free UMEM frame for the RX descriptor");
+        let meta_len = std::mem::size_of::<UserspaceDpMeta>();
+        let frame_offset = rx_frame as usize + 128;
+        let meta_offset = frame_offset - meta_len;
+        let meta_bytes = unsafe {
+            std::slice::from_raw_parts((&meta as *const UserspaceDpMeta).cast::<u8>(), meta_len)
+        };
+        unsafe {
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(meta_offset, meta_len)
+                .expect("meta slice")
+                .copy_from_slice(meta_bytes);
+            binding
+                .umem
+                .area()
+                .slice_mut_unchecked(frame_offset, frame.len())
+                .expect("frame slice")
+                .copy_from_slice(frame);
+        }
+        binding.xsk.rx.push_for_test(XdpDesc {
+            addr: frame_offset as u64,
+            len: frame.len() as u32,
+            options: 0,
+        });
+        available += 1;
+    }
     let expected_live_replays = binding
         .pending_pmech_reverse
         .iter()
@@ -1617,8 +1679,8 @@ pub(super) fn txn_run_descriptor_with_injected(
         &mut [],
         &mut [],
         &area_handle,
-        0,
-        Some(injected),
+        available,
+        injected,
         sessions,
         &mut screen,
         ValidationState {
@@ -1636,7 +1698,9 @@ pub(super) fn txn_run_descriptor_with_injected(
         &worker_ctx,
         &mut telemetry,
     );
-    if expected_live_replays == 0 {
+    if available > 0 {
+        // The caller asserts what this two-packet pass processed.
+    } else if expected_live_replays == 0 {
         assert_packet_validated_10646(&batch);
     } else {
         let expected_packets = expected_live_replays + 1;
