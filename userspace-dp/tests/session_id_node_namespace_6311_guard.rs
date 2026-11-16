@@ -34,6 +34,12 @@
 //! time a full-list anchor went red while the node id still flowed. Every
 //! anchor is checked and every missing one is reported together, so one stale
 //! anchor cannot hide the hops after it.
+//!
+//! What a source anchor cannot see is a constructor that stores a constant in
+//! place of its argument (`WorkerLaunchPlan::new` in worker/launch.rs). That hop
+//! is covered by the unit test `worker_launch_plan_keeps_the_node_id_19131`
+//! (coordinator/reconcile/bringup_session_limit_shard_18640_tests.rs), which
+//! builds a plan for node 1 and checks it keeps 1.
 
 use std::fs;
 use std::path::{Path, PathBuf};
