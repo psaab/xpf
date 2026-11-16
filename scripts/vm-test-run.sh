@@ -30,6 +30,9 @@
 #              run a --root leg even when the runner has no VM proof for its
 #              current boot (see "Disclosure" below); vm-proof=absent is
 #              still printed.
+#   --allow-xpf-state
+#              run a --root leg even when the runner's /var/lib/xpf holds
+#              state (see "Runner state" below); the entries are still listed.
 #
 #   If the runner is FROZEN (a gate cell pauses its same-host runner while it
 #   measures), the script waits for it to resume, up to XPF_TEST_RUNNER_WAIT_S
@@ -68,6 +71,19 @@
 # same test). Without it testguard-run.sh runs even a root leg inside
 # `unshare -Urp`, where every privileged cell SKIPs. So a --root run without
 # the proof is refused (exit 2) unless --allow-unproven-root is given.
+#
+# Runner state (#19162): /var/lib/xpf is the daemon's production state
+# directory. A test that reads it (HA epoch lock, fabric-auth grace, transit
+# gate ownership, ...) while an earlier root leg has left state there gets a
+# verdict that depends on that leg, and nothing named the leg that wrote it.
+# testguard-run.sh covers a root run with a throwaway overlay (#19084); a root
+# command that bypasses it writes the real path. So, before the command, a
+# --root run with a non-empty /var/lib/xpf is refused (exit 2) with the list
+# and a move-aside recipe, unless --allow-xpf-state is given (then it runs and
+# the list is printed); a runner-user run, which cannot write there but can
+# read the world-readable files, prints the list as a warning. After a --root
+# command, every entry that was not there before is named on stderr: that
+# command wrote production state. The command's status is unchanged.
 #
 # Stream order (#19139): `incus exec` carries the command's stdout and stderr
 # as two separate streams, and the workstation merges them (`>log 2>&1`) in
@@ -136,6 +152,7 @@ as_root=0
 sync=1
 merge_stderr=1
 allow_unproven_root=0
+allow_xpf_state=0
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--runner) runner="$2"; shift 2 ;;
@@ -144,8 +161,9 @@ while [[ $# -gt 0 ]]; do
 	--no-sync) sync=0; shift ;;
 	--separate-stderr) merge_stderr=0; shift ;;
 	--allow-unproven-root) allow_unproven_root=1; shift ;;
+	--allow-xpf-state) allow_xpf_state=1; shift ;;
 	--) shift; break ;;
-	-h|--help) sed -n '2,43p' "$0"; exit 0 ;;
+	-h|--help) sed -n '2,46p' "$0"; exit 0 ;;
 	*) echo "vm-test-run: unknown argument: $1 (use -- before the command)" >&2; exit 2 ;;
 	esac
 done
@@ -625,6 +643,21 @@ if [[ "$as_root" -eq 1 ]]; then
 	fi
 fi
 
+# #19162: the runner's /var/lib/xpf (see "Runner state" above). The probe
+# prints one entry per line, or nothing for an empty or absent directory.
+xpf_state_sh='# xpf-state (#19162)
+ls -A1 /var/lib/xpf 2>/dev/null || true'
+xpf_state() { incus exec "$runner" -- bash -c "$xpf_state_sh" 2>/dev/null; }
+xpf_state_before=$(xpf_state) || xpf_state_before=
+if [[ -n "$xpf_state_before" ]]; then
+	listed=$(tr '\n' ' ' <<<"$xpf_state_before")
+	if [[ "$as_root" -eq 1 && "$allow_xpf_state" -ne 1 ]]; then
+		echo "vm-test-run: refusing a --root run: ${runner}:/var/lib/xpf holds state an earlier root leg left (${listed% }), and tests read that production path. Move it aside when no root lane is running there, e.g. as root on the runner: d=/var/lib/xpf-residue/\$(date -u +%Y%m%dT%H%M%SZ); mkdir -p \$d && find /var/lib/xpf -mindepth 1 -maxdepth 1 -exec mv -t \$d {} + ; or pass --allow-xpf-state to run with it listed (#19162)" >&2
+		exit 2
+	fi
+	echo "vm-test-run: warning: ${runner}:/var/lib/xpf holds state from an earlier root leg (${listed% }); a test that reads it depends on that leg (#19162)" >&2
+fi
+
 # #19142: the runner-side heartbeat (see "Disclosure" above). It writes
 # "<start> <last> <gaps> <samples>" (CLOCK_MONOTONIC ns) to its file once a
 # second and on SIGTERM, exits 0 on SIGTERM (so bash prints no job notice into
@@ -699,6 +732,14 @@ if [[ "$as_root" -eq 1 ]]; then
 	ws_t1=$(ws_now)
 	trap - INT TERM
 	root_handback
+	# #19162: name what this command left in /var/lib/xpf.
+	if wait_unfrozen soft; then
+		xpf_state_after=$(xpf_state) || xpf_state_after=
+		xpf_state_new=$(comm -13 <(sort <<<"$xpf_state_before") <(sort <<<"$xpf_state_after") | grep -v '^$' | tr '\n' ' ') || true
+		if [[ -n "$xpf_state_new" ]]; then
+			echo "vm-test-run: this --root command wrote production state to ${runner}:/var/lib/xpf: ${xpf_state_new% } (#19162)" >&2
+		fi
+	fi
 else
 	ws_t0=$(ws_now)
 	incus exec "$runner" -- su - runner -c "${stream_prefix}${env_prefix}; ${wrapped}" || rc=$?
