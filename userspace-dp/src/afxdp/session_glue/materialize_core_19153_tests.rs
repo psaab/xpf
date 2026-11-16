@@ -199,7 +199,9 @@ fn the_synced_incarnation_predicate_table_19153() {
 
 /// #18552's consumer of the same rule. A worker row (non-zero id, as the
 /// worker always stores) against a shared row with the zero-id sentinel: only
-/// the NAT decision is compared, and a translation change is `Superseded`.
+/// the NAT decision is compared, so a translation change is `Superseded`. The
+/// same translation is `Unproven`, never `Current` (#18552 cycle 2, Codex P2):
+/// a zero id cannot prove the worker row is shared's incarnation.
 #[test]
 fn promotion_identity_supersedes_a_zero_id_translation_change_18552_19153() {
     let key = flow_key(42_007);
@@ -225,8 +227,8 @@ fn promotion_identity_supersedes_a_zero_id_translation_change_18552_19153() {
     );
     assert_eq!(
         same,
-        super::promote::SyncedRowIncarnation::Current,
-        "a zero-id shared row under the same translation is Current"
+        super::promote::SyncedRowIncarnation::Unproven,
+        "a zero-id shared row under the same translation is Unproven, never Current"
     );
 }
 

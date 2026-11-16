@@ -268,6 +268,31 @@ impl Fixture {
     /// As `promote_on_hit`, for the worker's row of `row`'s incarnation, under
     /// `forwarding`. The promotion fans out to the sibling queue.
     fn promote_row_on_hit(&mut self, row: &SyncedSessionEntry, forwarding: &ForwardingState) {
+        let _ = self.hit_with(row, None, forwarding);
+    }
+
+    /// One owner-verdict hit, as `resolve.rs` defers it: when `materialize` is
+    /// set (a SHARED hit: this worker held no row), the materialize of that
+    /// shared entry first, then the promotion of `row`, through the production
+    /// entry point.
+    fn hit_with(
+        &mut self,
+        row: &SyncedSessionEntry,
+        materialize: Option<SyncedSessionEntry>,
+        forwarding: &ForwardingState,
+    ) -> crate::afxdp::session_glue::MaterializeDivergence {
+        self.hit_with_flags(row, materialize, forwarding, 0x10)
+    }
+
+    /// As `hit_with`, for a packet carrying `tcp_flags` (an ACK in every other
+    /// cell): the flags the materialize and the deferred promotion see.
+    fn hit_with_flags(
+        &mut self,
+        row: &SyncedSessionEntry,
+        materialize: Option<SyncedSessionEntry>,
+        forwarding: &ForwardingState,
+        tcp_flags: u8,
+    ) -> crate::afxdp::session_glue::MaterializeDivergence {
         let now_ns = monotonic_nanos();
         let key = row.key.clone();
         let decision = row.decision;
@@ -294,11 +319,12 @@ impl Fixture {
                 origin: SessionOrigin::SyncImport,
                 fabric_ingress: false,
                 protocol: PROTO_TCP,
-                tcp_flags: 0x10,
+                tcp_flags,
                 now_ns,
                 ack: None,
             }),
-            deferred_shared_materialization: None,
+            deferred_shared_materialization: materialize
+                .map(|entry| crate::afxdp::shared_ops::DeferredSharedMaterialization { entry }),
             deferred_synced_purge: None,
             fabric_adopted: false,
         };
@@ -321,12 +347,13 @@ impl Fixture {
             },
             forwarding,
             &self.ha_state,
-            0x10,
+            tcp_flags,
             0,
             SessionHitVerdict::Owner,
             &mut resolved,
             &mut Vec::new(),
         );
+        resolved.materialize_divergence
     }
 
     /// One owner-verdict REPLY hit on the promotable reverse companion of the
@@ -404,46 +431,23 @@ fn seeded_fixture_in(
     forwarding: ForwardingState,
     ha_state: BTreeMap<i32, HAGroupRuntime>,
 ) -> Fixture {
-    clear_session_map_writes();
-    clear_conntrack_rows_for_test();
-    let mut coordinator = Coordinator::new();
-    coordinator.set_forwarding_for_test(forwarding);
-    let commands = Arc::new(Mutex::new(VecDeque::new()));
-    coordinator.workers.register(
-        0,
-        crate::afxdp::coordinator::WorkerRuntimeRecord::for_test(WorkerHandle {
-            stop: Arc::new(AtomicBool::new(false)),
-            heartbeat: Arc::new(AtomicU64::new(0)),
-            commands: commands.clone(),
-            session_export_ack: Arc::new(AtomicU64::new(0)),
-            cos_status: Arc::new(ArcSwap::from_pointee(Vec::new())),
-            runtime_atomics: Arc::new(super::worker_runtime::WorkerRuntimeAtomics::new()),
-            cold_path_atomics: Arc::new(super::cold_path_hist::WorkerColdPathAtomics::new()),
-        }),
-        None,
-    );
-    coordinator
-        .bpf_maps
-        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
-            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
-                fd: RECORDER_ONLY_MAP_FD,
-            }),
-            ..Default::default()
-        }));
-    coordinator.ha.rg_runtime.store(Arc::new(ha_state.clone()));
-    let original = peer_row(v6, LOCAL_PORT, SEED_GENERATION, SEED_SESSION_ID);
-    let late = peer_row(v6, LATE_PORT, LATE_GENERATION, LATE_SESSION_ID);
-    let mut fx = Fixture {
+    seeded_fixture_with(
         v6,
-        coordinator,
-        commands,
-        sibling: Arc::new(Mutex::new(VecDeque::new())),
-        worker_sessions: crate::session::SessionTable::new(),
+        forwarding,
         ha_state,
-        original,
-        late,
-    };
+        peer_row(v6, LOCAL_PORT, SEED_GENERATION, SEED_SESSION_ID),
+    )
+}
 
+/// As `seeded_fixture_in`, with `original` as the incarnation this node
+/// imports and drains (cycle 2: a zero-id legacy row).
+fn seeded_fixture_with(
+    v6: bool,
+    forwarding: ForwardingState,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    original: SyncedSessionEntry,
+) -> Fixture {
+    let mut fx = fixture_shell(v6, forwarding, ha_state, original);
     assert_eq!(
         fx.coordinator.upsert_synced_session(fx.original.clone()),
         SyncedImportOutcome::Applied,
@@ -486,6 +490,54 @@ fn seeded_fixture_in(
     });
     clear_session_map_writes();
     fx
+}
+
+/// The coordinator (one registered worker, RG view `ha_state`, a recorder-only
+/// session map) and an empty worker table: nothing imported yet.
+fn fixture_shell(
+    v6: bool,
+    forwarding: ForwardingState,
+    ha_state: BTreeMap<i32, HAGroupRuntime>,
+    original: SyncedSessionEntry,
+) -> Fixture {
+    clear_session_map_writes();
+    clear_conntrack_rows_for_test();
+    let mut coordinator = Coordinator::new();
+    coordinator.set_forwarding_for_test(forwarding);
+    let commands = Arc::new(Mutex::new(VecDeque::new()));
+    coordinator.workers.register(
+        0,
+        crate::afxdp::coordinator::WorkerRuntimeRecord::for_test(WorkerHandle {
+            stop: Arc::new(AtomicBool::new(false)),
+            heartbeat: Arc::new(AtomicU64::new(0)),
+            commands: commands.clone(),
+            session_export_ack: Arc::new(AtomicU64::new(0)),
+            cos_status: Arc::new(ArcSwap::from_pointee(Vec::new())),
+            runtime_atomics: Arc::new(super::worker_runtime::WorkerRuntimeAtomics::new()),
+            cold_path_atomics: Arc::new(super::cold_path_hist::WorkerColdPathAtomics::new()),
+        }),
+        None,
+    );
+    coordinator
+        .bpf_maps
+        .store(Arc::new(crate::afxdp::coordinator::BpfMaps {
+            session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+                fd: RECORDER_ONLY_MAP_FD,
+            }),
+            ..Default::default()
+        }));
+    coordinator.ha.rg_runtime.store(Arc::new(ha_state.clone()));
+    let late = peer_row(v6, LATE_PORT, LATE_GENERATION, LATE_SESSION_ID);
+    Fixture {
+        v6,
+        coordinator,
+        commands,
+        sibling: Arc::new(Mutex::new(VecDeque::new())),
+        worker_sessions: crate::session::SessionTable::new(),
+        ha_state,
+        original,
+        late,
+    }
 }
 
 /// The state every window cell owes once the promotion and the late import
@@ -2249,4 +2301,561 @@ fn reply_first_skips_superseded_forward_v4_18552() {
 #[test]
 fn reply_first_skips_superseded_forward_v6_18552() {
     assert_reply_first_skips_superseded_forward(true);
+}
+
+// ---------------------------------------------------------------------------
+// Cycle 2 (Codex re-check, MAJOR): a CONDITIONAL reconcile from current shared
+// authority, through the #19153 materialize core
+// (`materialize_current_shared_under_permit`), under the promotion's own
+// permit on [hit key, companion].
+//
+// - P1: a reply hit whose F has not reached this worker (its `UpsertSynced`
+//   still queued) used to promote R alone, and R's promotion left nothing to
+//   retry F. F is now materialized from shared and promoted with R.
+// - P2: a zero shared session id proves nothing. A legacy peer's same-NAT
+//   replacement, or delete and recreate, used to promote (and publish) the
+//   worker's stale incarnation. The worker row is now reconciled from the
+//   CURRENT shared content first, and that row is promoted.
+// - Control: a row shared PROVES current (non-zero id, same NAT) is promoted
+//   as before, keeping its worker-local counters and its own view.
+// ---------------------------------------------------------------------------
+
+/// A zero-id (legacy peer) incarnation of the client flow on T1.
+fn legacy_row(v6: bool, generation: u64, policy_id: u32) -> SyncedSessionEntry {
+    let mut row = peer_row(v6, LOCAL_PORT, generation, 0);
+    row.metadata.policy_id = policy_id;
+    row
+}
+
+/// The incarnation-distinguishing content of the forward row: the admitting
+/// policy id the peer stamped (A and B differ only in it, besides generation).
+fn policy_ids(fx: &Fixture) -> (Option<u32>, Option<u32>) {
+    let key = fx.key();
+    (
+        fx.worker_sessions
+            .entry_with_origin(&key)
+            .map(|(_, metadata, _)| metadata.policy_id),
+        fx.shared(&key).map(|entry| entry.metadata.policy_id),
+    )
+}
+
+/// Whether `commands` holds an `UpsertSynced` for `key`.
+fn queued_upsert_for(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>, key: &SessionKey) -> bool {
+    commands
+        .lock()
+        .expect("worker queue")
+        .iter()
+        .any(|command| matches!(command, WorkerCommand::UpsertSynced(entry) if entry.key == *key))
+}
+
+/// P1 (Codex P1). The import has completed (shared F and R published, both
+/// `UpsertSynced` commands QUEUED, the lease released) and this worker has
+/// drained nothing yet. A reply finds shared R and the poll path materializes
+/// it, then promotes it. F is absent here, current and peer-synced in shared,
+/// and its owner RG is active: F is materialized and the pair is promoted.
+/// Then a late different-translation import of F meets #9678 (T1 kept, T2 never
+/// reserved), a peer delete of F is `RefusedLocalOwned` (#9714), and the
+/// queued upserts, drained last, are refused: the pair stays promoted on T1.
+fn assert_reply_first_materializes_queued_forward(v6: bool) {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
+    let mut fx = fixture_shell(
+        v6,
+        forwarding(),
+        ha_state,
+        peer_row(v6, LOCAL_PORT, SEED_GENERATION, SEED_SESSION_ID),
+    );
+    assert_eq!(
+        fx.coordinator.upsert_synced_session(fx.original.clone()),
+        SyncedImportOutcome::Applied,
+        "premise (v6={v6}): the import completes"
+    );
+    let (key, reply) = (fx.key(), fx.local_reply());
+    let premise = (
+        fx.worker_origin(&key).is_none() && fx.worker_origin(&reply).is_none(),
+        fx.shared(&key).map(|entry| entry.origin),
+        fx.shared(&reply).map(|entry| entry.origin),
+        queued_upsert_for(&fx.commands, &key),
+    );
+    assert_eq!(
+        premise,
+        (true, Some(SessionOrigin::SyncImport), Some(SessionOrigin::SyncImport), true),
+        "premise (v6={v6}): worker holds neither row, shared holds the pair, F's upsert is queued"
+    );
+    assert!(!fx.port_is_free(208, LOCAL_PORT), "premise (v6={v6}): the import holds T1");
+
+    // The reply: a shared-R hit, materialized and then promoted.
+    let mut shared_reply = fx.shared(&reply).expect("shared R");
+    let materialize = shared_reply.clone();
+    shared_reply.decision.resolution = ForwardingResolution {
+        egress_ifindex: 6,
+        tx_ifindex: 6,
+        next_hop: Some(fx.original.key.src_ip),
+        ..test_resolution()
+    };
+    let forwarding = fx.coordinator.forwarding.clone();
+    let divergence = fx.hit_with(&shared_reply, Some(materialize), &forwarding);
+    let after_hit = fx.pair_origins();
+
+    clear_session_map_writes();
+    let import = fx.coordinator.upsert_synced_session(fx.late.clone());
+    let after_import = (
+        fx.shared_identity(&key),
+        !fx.port_is_free(209, LOCAL_PORT),
+        fx.port_is_free(210, LATE_PORT),
+        fx.shared(&fx.late_reply()).is_none(),
+    );
+    let delete = fx
+        .coordinator
+        .session_domain()
+        .delete_synced(key.clone(), SyncedDeleteMode::PEER, false);
+    let queued_before_drain = queued_upsert_for(&fx.commands, &key);
+    fx.drain_worker();
+    let after_drain = (fx.pair_origins(), fx.worker_origin(&key));
+
+    assert_legs(
+        &format!(
+            "reply-first, F queued (v6={v6}; after the hit worker F/R, shared F/R = \
+             {after_hit:?}; import {import:?} -> shared F, T1 held, T2 free, no late companion \
+             {after_import:?}; delete {delete:?}; after the drain {after_drain:?})"
+        ),
+        &[
+            (
+                divergence == crate::afxdp::session_glue::MaterializeDivergence::None,
+                "premise: the reply's materialize of R diverged from its capture",
+            ),
+            (
+                after_hit == PAIR_PROMOTED,
+                "pair: the reply hit did not materialize F and promote it with R (worker and \
+                 shared)",
+            ),
+            (
+                import == SyncedImportOutcome::Applied
+                    && after_import
+                        == (
+                            Some((
+                                SEED_SESSION_ID,
+                                snat(v6, LOCAL_PORT),
+                                SessionOrigin::SharedPromote,
+                            )),
+                            true,
+                            true,
+                            true,
+                        ),
+                "import: the late different-translation import of F was not stopped by #9678 \
+                 (shared F replaced, T1 freed, T2 reserved, or the late companion published)",
+            ),
+            (
+                delete == SyncedDeleteOutcome::RefusedLocalOwned,
+                "delete: the peer delete of F was not refused as locally owned (#9714)",
+            ),
+            (
+                queued_before_drain,
+                "premise: F's original upsert was not still queued at the drain",
+            ),
+            (
+                after_drain
+                    == (
+                        PAIR_PROMOTED,
+                        Some((snat(v6, LOCAL_PORT), SessionOrigin::SharedPromote)),
+                    ),
+                "drain: the queued upsert of F (or R) was applied over the promoted pair",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn reply_first_materializes_queued_forward_v4_18552() {
+    assert_reply_first_materializes_queued_forward(false);
+}
+
+#[test]
+fn reply_first_materializes_queued_forward_v6_18552() {
+    assert_reply_first_materializes_queued_forward(true);
+}
+
+/// The F-absent materialize takes nothing from the reply (rebase onto #19153
+/// fold 2: `reverse_hit_forward_partner` calls the core with
+/// `classify_against` `None`, no TCP flags and no fabric adoption). The P1
+/// shape (this worker holds neither row, F's upsert still queued) with a reply
+/// carrying FIN or RST: R is materialized with the packet and promoted, and F
+/// is materialized from shared and promoted with it. F's close state and idle
+/// window must equal a CLEAN install of shared F (its own carried flags, as
+/// its queued `UpsertSynced` installs it). R's handling of its own flags is
+/// unchanged: R's close state equals the TRUE twin's (the same packet with F
+/// already present here, so F is not materialized), and it carries the
+/// packet's close, so the F leg is not vacuous.
+fn assert_absent_forward_takes_none_of_the_replys_flags(tcp_flags: u8) {
+    let v6 = false;
+    let run = |forward_present: bool| {
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
+        let mut fx = fixture_shell(
+            v6,
+            forwarding(),
+            ha_state,
+            peer_row(v6, LOCAL_PORT, SEED_GENERATION, SEED_SESSION_ID),
+        );
+        assert_eq!(
+            fx.coordinator.upsert_synced_session(fx.original.clone()),
+            SyncedImportOutcome::Applied,
+            "premise (F present: {forward_present}): the import completes"
+        );
+        let (key, reply) = (fx.key(), fx.local_reply());
+        assert!(
+            fx.worker_origin(&key).is_none() && fx.worker_origin(&reply).is_none(),
+            "premise (F present: {forward_present}): the worker holds neither row yet"
+        );
+        let shared_forward = fx.shared(&key).expect("shared F");
+        let mut clean = crate::session::SessionTable::new();
+        assert!(
+            clean.upsert_synced_with_origin(
+                shared_forward.clone().into_session_install(monotonic_nanos()),
+                false,
+            ),
+            "reference: a clean install of shared F"
+        );
+        let clean_forward = clean.close_state_for_test(&key);
+        if forward_present {
+            assert!(
+                fx.worker_sessions.upsert_synced_with_origin(
+                    shared_forward.into_session_install(monotonic_nanos()),
+                    false,
+                ),
+                "twin premise: F installed here as its queued upsert installs it"
+            );
+        }
+        let mut shared_reply = fx.shared(&reply).expect("shared R");
+        let materialize = shared_reply.clone();
+        shared_reply.decision.resolution = ForwardingResolution {
+            egress_ifindex: 6,
+            tx_ifindex: 6,
+            next_hop: Some(fx.original.key.src_ip),
+            ..test_resolution()
+        };
+        let forwarding = fx.coordinator.forwarding.clone();
+        let divergence = fx.hit_with_flags(&shared_reply, Some(materialize), &forwarding, tcp_flags);
+        (
+            divergence,
+            fx.pair_origins(),
+            fx.worker_sessions.close_state_for_test(&key),
+            fx.worker_sessions.close_state_for_test(&reply),
+            clean_forward,
+        )
+    };
+    let (divergence, origins, forward, reply, clean_forward) = run(false);
+    let (twin_divergence, twin_origins, _, twin_reply, _) = run(true);
+    let rst = tcp_flags & crate::tcp_flags::TCP_RST != 0;
+    let reply_closed = match reply {
+        Some((closing, reset, fin_own, _, _)) => {
+            closing && if rst { reset } else { fin_own && !reset }
+        }
+        None => false,
+    };
+    assert_legs(
+        &format!(
+            "absent F, reply flags 0x{tcp_flags:02x}: divergence {divergence:?}, worker F/R, \
+             shared F/R {origins:?}; F close {forward:?} vs clean {clean_forward:?}; R close \
+             {reply:?} vs twin {twin_reply:?} (twin: {twin_divergence:?}, {twin_origins:?})"
+        ),
+        &[
+            (
+                divergence == crate::afxdp::session_glue::MaterializeDivergence::None
+                    && twin_divergence == crate::afxdp::session_glue::MaterializeDivergence::None,
+                "premise: the reply's materialize of R diverged from its capture",
+            ),
+            (
+                origins == PAIR_PROMOTED,
+                "pair: F was not materialized and promoted with R",
+            ),
+            (
+                twin_origins == PAIR_PROMOTED,
+                "twin premise: the reply did not promote the pair with F present",
+            ),
+            (
+                clean_forward.is_some() && forward == clean_forward,
+                "F: the materialized F's close state or idle window is not a clean install of \
+                 shared F (the reply's flags reached F)",
+            ),
+            (
+                reply == twin_reply,
+                "R: R's close state differs from the twin's (the F materialize changed R's own \
+                 handling of its flags)",
+            ),
+            (
+                reply_closed,
+                "control: R does not carry the reply's FIN or RST, so the F leg proves nothing",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn absent_forward_materialize_takes_none_of_the_replys_fin_v4_18552() {
+    assert_absent_forward_takes_none_of_the_replys_flags(
+        crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK,
+    );
+}
+
+#[test]
+fn absent_forward_materialize_takes_none_of_the_replys_rst_v4_18552() {
+    assert_absent_forward_takes_none_of_the_replys_flags(crate::tcp_flags::TCP_RST);
+}
+
+/// The zero-id fixture: legacy incarnation A (policy 11) imported and drained,
+/// so this worker holds A under a node-minted id.
+fn legacy_fixture(v6: bool) -> Fixture {
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
+    let fx = seeded_fixture_with(v6, forwarding(), ha_state, legacy_row(v6, SEED_GENERATION, 11));
+    assert_ne!(
+        fx.worker_sessions.session_id_for(&fx.key()),
+        0,
+        "premise: the worker mints a node-local id for a zero-id row"
+    );
+    fx
+}
+
+/// What one zero-id run observed: after the first forward hit, after the
+/// second, and after the queued commands drained.
+#[derive(Debug)]
+struct LegacyRun {
+    first: crate::afxdp::session_glue::MaterializeDivergence,
+    after_first: ((Option<u32>, Option<u32>), Option<SessionOrigin>),
+    second: crate::afxdp::session_glue::MaterializeDivergence,
+    after_second: ((Option<u32>, Option<u32>), Option<SessionOrigin>),
+    after_drain: ((Option<u32>, Option<u32>), Option<SessionOrigin>),
+}
+
+/// Two forward hits, each resolved against the row the worker holds at that
+/// moment (as the poll path's resolve reads it), then a drain of the queued
+/// commands. Rule (b): the first hit reconciles the worker's A to the current
+/// B, which differs, so nothing is promoted (and, the admitting policy having
+/// changed, the packet is not forwarded); the second hit resolves B,
+/// reconciles to identical content, and promotes B.
+fn run_legacy_hits(fx: &mut Fixture) -> LegacyRun {
+    let key = fx.key();
+    let forwarding = fx.coordinator.forwarding.clone();
+    let observe = |fx: &Fixture| {
+        (
+            policy_ids(fx),
+            fx.shared(&key).map(|entry| entry.origin),
+        )
+    };
+    // Each packet resolves against the row the worker holds, with the
+    // forwarding resolution the resolve computes for it (the WAN candidate,
+    // as `promote_on_hit` passes): the stored resolution is this node's own
+    // derivation and the resolve re-derives it.
+    let packet_row = |fx: &Fixture| {
+        let mut row = fx.worker_sessions.synced_entry_for(&key).expect("worker row");
+        row.decision.resolution = fx.original.decision.resolution;
+        row
+    };
+    let row = packet_row(fx);
+    let first = fx.hit_with(&row, None, &forwarding);
+    let after_first = observe(fx);
+    let row = packet_row(fx);
+    let second = fx.hit_with(&row, None, &forwarding);
+    let after_second = observe(fx);
+    fx.drain_worker();
+    let after_drain = (
+        policy_ids(fx),
+        fx.worker_origin(&key).map(|(_, origin)| origin),
+    );
+    LegacyRun {
+        first,
+        after_first,
+        second,
+        after_second,
+        after_drain,
+    }
+}
+
+/// The legs both zero-id cells owe: A's content is never promoted or
+/// published; the first hit reconciles to B and promotes nothing (the packet
+/// is not forwarded: the admitting policy changed); the second promotes B; the
+/// queued commands leave the promoted B.
+fn legacy_legs(run: &LegacyRun) -> Vec<(bool, &'static str)> {
+    use crate::afxdp::session_glue::MaterializeDivergence;
+    vec![
+        (
+            run.after_first == ((Some(22), Some(22)), Some(SessionOrigin::SyncImport)),
+            "first: the hit promoted or published A's stale content, or did not reconcile \
+             the worker row to B",
+        ),
+        (
+            run.first == MaterializeDivergence::Drop,
+            "first: the diverged reconcile did not keep the packet from being forwarded (the \
+             admitting policy changed)",
+        ),
+        (
+            run.second == MaterializeDivergence::None
+                && run.after_second == ((Some(22), Some(22)), Some(SessionOrigin::SharedPromote)),
+            "second: the next hit did not promote B",
+        ),
+        (
+            run.after_drain == ((Some(22), Some(22)), Some(SessionOrigin::SharedPromote)),
+            "drain: the queued commands changed the promoted B",
+        ),
+    ]
+}
+
+/// P2a (Codex P2). A legacy peer (zero session ids) replaces A with B under
+/// the same tuple and translation; B is published and its upsert queued, and
+/// this worker still holds A. A's content (policy 11) is never promoted or
+/// published: the first forward hit reconciles the worker row to B (policy 22)
+/// and promotes nothing (rule (b)), the second promotes B, and the queued B
+/// upsert then meets the promoted row and changes nothing.
+fn assert_zero_id_replacement_promotes_current_content(v6: bool) {
+    let mut fx = legacy_fixture(v6);
+    let key = fx.key();
+    assert_eq!(
+        fx.coordinator
+            .upsert_synced_session(legacy_row(v6, LATE_GENERATION, 22)),
+        SyncedImportOutcome::Applied,
+        "premise (v6={v6}): the legacy peer's replacement B imports"
+    );
+    assert_eq!(
+        policy_ids(&fx),
+        (Some(11), Some(22)),
+        "premise (v6={v6}): the worker holds A, shared names B"
+    );
+    assert!(queued_upsert_for(&fx.commands, &key), "premise: B's upsert is queued");
+
+    let run = run_legacy_hits(&mut fx);
+
+    assert_legs(
+        &format!("zero-id replacement (v6={v6}; {run:?})"),
+        &legacy_legs(&run),
+    );
+}
+
+#[test]
+fn zero_id_replacement_promotes_current_content_v4_18552() {
+    assert_zero_id_replacement_promotes_current_content(false);
+}
+
+#[test]
+fn zero_id_replacement_promotes_current_content_v6_18552() {
+    assert_zero_id_replacement_promotes_current_content(true);
+}
+
+/// P2b (Codex P2). The same ambiguity through a delete and a recreate: a peer
+/// delete of A completes (shared A gone, `DeleteSynced` queued), then the
+/// legacy peer recreates the tuple as B under the same translation (published,
+/// `UpsertSynced` queued). This worker still holds A. As in P2a, the first hit
+/// reconciles to B and promotes nothing, the second promotes B; the queued
+/// delete and upsert, drained after, meet a locally owned row and leave it.
+fn assert_zero_id_recreate_promotes_current_content(v6: bool) {
+    let mut fx = legacy_fixture(v6);
+    let key = fx.key();
+    let delete = fx
+        .coordinator
+        .session_domain()
+        .delete_synced(key.clone(), SyncedDeleteMode::PEER, false);
+    assert_eq!(delete, SyncedDeleteOutcome::Applied, "premise (v6={v6}): A's peer delete applies");
+    assert_eq!(
+        fx.coordinator
+            .upsert_synced_session(legacy_row(v6, LATE_GENERATION, 22)),
+        SyncedImportOutcome::Applied,
+        "premise (v6={v6}): the recreated B imports"
+    );
+    assert_eq!(
+        policy_ids(&fx),
+        (Some(11), Some(22)),
+        "premise (v6={v6}): the worker holds A, shared names the recreated B"
+    );
+
+    let run = run_legacy_hits(&mut fx);
+
+    assert_legs(
+        &format!("zero-id delete+recreate (v6={v6}; {run:?})"),
+        &legacy_legs(&run),
+    );
+}
+
+#[test]
+fn zero_id_recreate_promotes_current_content_v4_18552() {
+    assert_zero_id_recreate_promotes_current_content(false);
+}
+
+#[test]
+fn zero_id_recreate_promotes_current_content_v6_18552() {
+    assert_zero_id_recreate_promotes_current_content(true);
+}
+
+/// Control (a pin; it passes before cycle 2 too). Shared PROVES the worker row
+/// current (non-zero id, same NAT) while its content differs: a same-
+/// incarnation resend (policy 33) whose upsert has not landed. The promotion
+/// promotes the worker row as before: its worker-local packet counters are
+/// kept, not reset to the shared row's, and the published row is the worker's
+/// own view (policy 0), not the resend's.
+fn assert_proven_current_promotion_keeps_worker_fields(v6: bool) {
+    let mut fx = seeded_fixture(v6);
+    let key = fx.key();
+    for _ in 0..5 {
+        fx.worker_sessions
+            .account_packet_at(&key, 1_000, 0x10, 0, monotonic_nanos());
+    }
+    let local_packets = fx
+        .worker_sessions
+        .synced_entry_for(&key)
+        .map(|entry| entry.fwd_packets);
+    let mut resend = fx.original.clone();
+    resend.metadata.policy_id = 33;
+    crate::afxdp::shared_ops::publish_shared_session(
+        &fx.coordinator.sessions.synced,
+        &fx.coordinator.sessions.nat,
+        &fx.coordinator.sessions.forward_wire,
+        &fx.coordinator.sessions.owner_rg_indexes,
+        &resend,
+    );
+    let shared_packets = fx.shared(&key).map(|entry| entry.fwd_packets);
+
+    fx.promote_on_hit();
+    let after_packets = fx
+        .worker_sessions
+        .synced_entry_for(&key)
+        .map(|entry| entry.fwd_packets);
+
+    assert_legs(
+        &format!(
+            "proven current (v6={v6}; worker packets before {local_packets:?}, shared \
+             {shared_packets:?}, after {after_packets:?}; worker/shared policy {:?}; origins \
+             {:?})",
+            policy_ids(&fx),
+            fx.pair_origins()
+        ),
+        &[
+            (
+                local_packets == Some(5) && shared_packets.is_some_and(|packets| packets < 5),
+                "premise: the worker counted 5 packets the shared row does not carry",
+            ),
+            (
+                fx.worker_origin(&key).map(|(_, origin)| origin)
+                    == Some(SessionOrigin::SharedPromote),
+                "promotion: the proven-current row was not promoted",
+            ),
+            (
+                after_packets.is_some_and(|packets| packets >= 5),
+                "counters: the promotion reset the worker-local counters to the shared row's \
+                 (reconciled a proven-current row)",
+            ),
+            (
+                policy_ids(&fx) == (Some(0), Some(0)),
+                "view: the promotion replaced the worker row's own view with the shared resend's",
+            ),
+        ],
+    );
+}
+
+#[test]
+fn proven_current_promotion_keeps_worker_fields_v4_18552() {
+    assert_proven_current_promotion_keeps_worker_fields(false);
+}
+
+#[test]
+fn proven_current_promotion_keeps_worker_fields_v6_18552() {
+    assert_proven_current_promotion_keeps_worker_fields(true);
 }

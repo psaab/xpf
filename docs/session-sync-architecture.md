@@ -415,6 +415,52 @@ Pinned by:
     promoted and F's owner's import applies; with F superseded only R is
     promoted.
 
+**Cycle 2: reconcile from current shared authority (#18552, Codex re-check).**
+Two holes remained, both closed under the promotion's own permit through the
+#19153 materialize core (`materialize_current_shared_under_permit`):
+
+- **A zero session id proves nothing (Codex P2).** The identity rule
+  (`same_synced_incarnation`) compares the NAT decision always and the session
+  id only when shared carries one. A legacy peer (no session ids) can replace,
+  or delete and recreate, a tuple under the same translation while this
+  worker's `UpsertSynced` is still queued, and the old rule promoted and
+  published the worker's stale incarnation. Now a peer-synced shared row with
+  id 0 and the same NAT is `Unproven`, never `Current`: the worker row is first
+  reconciled from the CURRENT shared content, and then rule (b) applies, the
+  same equality test as the #19153 materialize. If what the reconcile
+  installed equals what this packet resolved against (every peer-authored
+  decision and metadata field; the resolution and the owner RG are this node's
+  own derivations), the installed row is promoted. Otherwise nothing is
+  promoted this packet, the seed is suppressed, and the packet is not
+  forwarded (no field is exempt, as in the materialize since #19153 fold 2).
+  The next packet resolves the reconciled row, the reconcile
+  re-installs identical content, and it promotes. **A zero-id row therefore
+  takes the PEER's content on promotion: its counters, timestamps and TCP
+  state are reset to the shared row's. That is a deliberate trade-off for
+  legacy peers that send no session ids, whose identity cannot be proven any
+  other way.** A row shared proves current (a non-zero equal id) is promoted
+  as before and keeps its worker-local last-seen, TCP state and counters.
+- **Reply-first with F not yet on this worker (Codex P1).** A reply hit
+  promoted R alone when this worker held no forward row F, and R's promotion
+  left nothing to retry F, so shared F stayed peer-synced and the #9678 and
+  #9714 gates stayed blind for the flow's life. Now, when shared F is a
+  current, peer-synced forward row whose companion is R and whose owner RG is
+  locally active, F is materialized from shared under the same permit and the
+  pair is promoted; F's queued upsert later meets a local row and is refused.
+  A zero-id F present here is reconciled under rule (b); if it diverges,
+  nothing is promoted this packet (R alone would strand F again). A split RG
+  still promotes R alone.
+
+No row flips until every R and F check has passed. A reconcile or materialize
+followed by a failed check or a declined flip leaves a consistent synced
+replica of current shared content (the row the queued worker command would
+have installed), never a half-promoted one. Pinned by
+`afxdp/tests_promote_permit_18552.rs` (v4 and v6): reply-first with F's
+upsert queued, then a late import (#9678, T1 kept) and a peer delete
+(`RefusedLocalOwned`); zero-id same-NAT replacement, and delete then
+recreate (A's content never published, B promoted on the second packet); and
+the proven-current control (worker counters and view kept).
+
 What is NOT covered (residuals, `docs/log/18552.md` has the detail):
 
 - The coordinator's RG demote (`demote_shared_owner_rgs`) rewrites shared rows
