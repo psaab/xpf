@@ -53,8 +53,12 @@
 #   - a positive value means a POSSIBLE stall, including exec and start-up
 #     overhead (a slow start before the heartbeat runs counts too), not a
 #     stall attributed to incus;
-#   - no test has paused a real VM mid-run yet, so which branch a real
-#     `incus pause` trips is not established.
+#   - one REAL gate pause has been observed (udp:xpf-testrunner3,
+#     2026-11-16 07:20:22Z-07:21:56Z, 94 s): the run reported paused-for=93s,
+#     all from heartbeat gaps (workstation 1500.1 s, runner monotonic
+#     1500.0 s). There the guest's CLOCK_MONOTONIC ran through the pause and
+#     the heartbeat branch caught it. The wall branch stays for a guest whose
+#     clock stops. No selftest pauses a real VM.
 # A positive paused-for adds a line saying that a timeout or timing-sensitive
 # result from the run is VOID unless re-run clean; paused-for=unknown means the
 # runner's clock record could not be read.
