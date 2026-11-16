@@ -191,23 +191,6 @@ func PeekDNSNames(cfg *Config) [][2]string {
 	return out
 }
 
-// ResolveDNSNames resolves the given (fqdn,family) pairs into the
-// answer cache with the bounded pool (network, outside all locks).
-func ResolveDNSNames(pairs [][2]string) {
-	if len(pairs) == 0 {
-		return
-	}
-	entries := make([]dnsEntryRef, 0, len(pairs))
-	holders := make([]*Address, 0, len(pairs))
-	for _, p := range pairs {
-		a := &Address{DNSName: p[0], DNSFamily: p[1]}
-		holders = append(holders, a)
-		entries = append(entries, dnsEntryRef{a, p[0], p[1]})
-	}
-	_ = holders
-	resolveDNSEntriesParallel(entries)
-}
-
 // lookupAddressDNSName resolves fqdn to IP strings. Package var so tests
 // can substitute a deterministic resolver. Only
 // RefreshDNSAddressBooks (outside all locks) may call it via
