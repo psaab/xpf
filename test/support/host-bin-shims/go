@@ -7,6 +7,19 @@ case "$PATH" in
 	*) echo "go-test-shim: host-bin-shims is not the first PATH entry" >&2; exit 125 ;;
 esac
 export PATH
+# #19136: a `go` earlier in PATH than the real toolchain that re-invokes this
+# shim (a test fixture's wrapper handed the shim as its "real" go) made every
+# `go test` here start another testguard-run.sh: an unbounded recursion that
+# hung for an hour. Count the nesting and fail fast instead. Legitimate nesting
+# (a test that runs `go` under the guard) stays far below the limit.
+depth=${XPF_GO_SHIM_DEPTH:-0}
+case "$depth" in '' | *[!0-9]*) depth=0 ;; esac
+if [ "$depth" -ge 8 ]; then
+	echo "go-test-shim: $depth nested shim invocations: a go earlier in PATH re-invokes this shim (#19136)" >&2
+	exit 125
+fi
+XPF_GO_SHIM_DEPTH=$((depth + 1))
+export XPF_GO_SHIM_DEPTH
 go_bin=$(command -v go) || { echo "go-test-shim: real go binary not found" >&2; exit 127; }
 if [ "${1:-}" = test ]; then
 	exec "$root/scripts/testguard-run.sh" "$go_bin" "$@"
