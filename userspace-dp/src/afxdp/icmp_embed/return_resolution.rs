@@ -76,7 +76,9 @@ fn domain_scoped_fallback_resolution(
 
 /// Resolve the forwarding back to the original (pre-NAT) client for
 /// an embedded ICMP error. Tries the reverse-key session lookup first
-/// (matches the live session's egress resolution if still cached),
+/// and looks the matched reverse up FRESH, the way the reply path does
+/// (#19164, `fresh_reverse_resolution`; before #19164 it returned the
+/// stored resolution verbatim),
 /// then falls back to a domain-scoped route + dynamic-neighbor lookup
 /// against the original source (#15771: never the default table for a
 /// VRF flow).
@@ -100,9 +102,105 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
         &reverse_key,
         now_ns,
     ) {
-        return reverse.lookup.decision.resolution;
+        return fresh_reverse_resolution(ctx, &reverse_key, &reverse);
     }
     domain_scoped_fallback_resolution(ctx, forward_key, Some(forward_decision), original_src)
+}
+
+/// #19164: the matched reverse's resolution, looked up FRESH the way a reply
+/// on that reverse looks it up (`resolve.rs`'s hit arm), instead of the stored
+/// value verbatim.
+///
+/// Before #19164 the return path returned the reverse's STORED resolution,
+/// while the reply path looks it up again on every packet. The two disagreed
+/// whenever the stored value was stale:
+/// - after this node took over the client-side RG, an import-time
+///   FabricRedirect sent the error over the fabric to the demoted peer;
+/// - after a FIB change, the error left by the old route.
+///
+/// **It uses the SAME lookup variant the reply uses:**
+/// - cache-free when the stored resolution's forwarding generation is stale;
+/// - the synced-session variant for a peer-synced reverse;
+/// - the cached variant otherwise. The cached variants fall back to the
+///   stored resolution (revalidated against live egress and neighbors) only
+///   when the FIB answers NoRoute or MissingNeighbor, as the reply does.
+///
+/// **What this does NOT do: HA enforcement or fabric composition.** The poll
+/// arm finalizes every matched resolution itself
+/// (`finalize_embedded_icmp_resolution_parts`): the HA snapshot, the fabric
+/// redirect of an HAInactive/NoRoute/DiscardRoute on a non-fabric ingress, and
+/// then the #16053 owner-RG promotion that reads the finalized result. Running
+/// the reply's whole pipeline here would apply HA twice and pre-empt that
+/// accounting. So this supplies the un-enforced, fresh lookup the finalization
+/// expects.
+///
+/// **When the fresh lookup cannot forward** (NoRoute, MissingNeighbor), the
+/// STORED resolution is kept. That is the pre-#19164 behaviour, and the
+/// reply path's own cached-fallback idea extended to a stale stamp. A reply
+/// in that state would wait for the neighbor or drop; a PTB is better sent
+/// with the last-known route and MAC than lost.
+///
+/// **Residuals:**
+/// - The #9951 leak-incarnation revocation arm is not mirrored. A revoked leak
+///   gets the ordinary lookup here.
+/// - A stored FabricRedirect whose fresh lookup finds no neighbor yet (just
+///   after a takeover, before the client's MAC is relearned) keeps the stored
+///   redirect, as before #19164, until the neighbor is learned.
+fn fresh_reverse_resolution(
+    ctx: &NatMatchCtx<'_>,
+    reverse_key: &SessionKey,
+    reverse: &crate::afxdp::shared_ops::ResolvedSessionLookup,
+) -> ForwardingResolution {
+    let stored = reverse.lookup.decision;
+    let fresh = fresh_reverse_lookup(ctx, reverse_key, reverse, stored);
+    // Fresh when it is a definite answer; the stored resolution when the fresh
+    // lookup cannot forward (no route, no neighbor yet). An ICMP error is then
+    // never worse off than before #19164: the PTB still leaves with the
+    // last-known route and MAC instead of being dropped.
+    match fresh.disposition {
+        ForwardingDisposition::NoRoute | ForwardingDisposition::MissingNeighbor => stored.resolution,
+        _ => fresh,
+    }
+}
+
+/// The reply path's lookup variant for `reverse` (see `fresh_reverse_resolution`).
+fn fresh_reverse_lookup(
+    ctx: &NatMatchCtx<'_>,
+    reverse_key: &SessionKey,
+    reverse: &crate::afxdp::shared_ops::ResolvedSessionLookup,
+    stored: SessionDecision,
+) -> ForwardingResolution {
+    let flow = SessionFlow {
+        src_ip: reverse_key.src_ip,
+        dst_ip: reverse_key.dst_ip,
+        forward_key: reverse_key.clone(),
+    };
+    if ctx
+        .sessions
+        .forwarding_resolution_is_stale(reverse.lookup.forwarding_generation)
+    {
+        crate::afxdp::session_glue::lookup_forwarding_resolution_for_session_without_cache(
+            ctx.forwarding,
+            ctx.dynamic_neighbors,
+            &flow,
+            stored,
+        )
+    } else if reverse.origin.is_peer_synced() {
+        crate::afxdp::session_glue::lookup_forwarding_resolution_for_synced_session(
+            ctx.forwarding,
+            ctx.dynamic_neighbors,
+            &flow,
+            stored,
+        )
+    } else {
+        crate::afxdp::session_glue::lookup_forwarding_resolution_for_session(
+            ctx.forwarding,
+            ctx.dynamic_neighbors,
+            &flow,
+            stored,
+        )
+    }
+    .resolution
 }
 
 /// #10672: resolve the forwarding for an ICMP error quoting a REPLY packet —

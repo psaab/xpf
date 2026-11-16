@@ -409,7 +409,7 @@ match resolved.resolution.disposition {
     _ => resolved,
 } }
 
-pub(super) fn lookup_forwarding_resolution_for_synced_session(forwarding: &ForwardingState,
+pub(in crate::afxdp) fn lookup_forwarding_resolution_for_synced_session(forwarding: &ForwardingState,
 dynamic_neighbors: &Arc<ShardedNeighborMap>,
 flow: &SessionFlow,
 decision: SessionDecision,) -> ForwardingLookupResult { lookup_forwarding_resolution_for_session_with_cache(

@@ -11,6 +11,16 @@
 //! a borrow bundle threaded through all four embedded-ICMP NAT
 //! match arms.
 //!
+//! **Return path (#19164).** An ICMP error that quotes a client's FORWARD
+//! packet goes back to the client by the matched REVERSE session's route,
+//! looked up FRESH with the same lookup variant a reply on that reverse uses
+//! (`return_resolution.rs` `fresh_reverse_resolution`). The poll arm then
+//! finalizes it as it always has (`finalize_embedded_icmp_resolution_parts`:
+//! the HA snapshot, the fabric redirect, the #16053 owner-RG promotion).
+//! - Before #19164 the stored resolution was used verbatim. After an RG
+//!   activation an import-time FabricRedirect sent the error over the fabric
+//!   to the demoted peer; after a FIB change it left by the old route.
+//!
 //! Wrapper functions in this file delegate directly to children via
 //! qualified-path calls (NOT `pub(super) use ...`) — that pattern
 //! would trigger E0364 on `pub(super)` child items, as documented
