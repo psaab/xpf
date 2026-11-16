@@ -23,10 +23,24 @@
 #   --root     run the command as root (privileged VM legs such as
 #              `make vm-test-root`); default is the unprivileged `runner` user.
 #   --no-sync  skip the source sync (re-run against what is already there).
+#   --separate-stderr
+#              keep the command's stderr apart from its stdout (see below);
+#              for a caller that parses stdout alone.
 #
 #   If the runner is FROZEN (a gate cell pauses its same-host runner while it
 #   measures), the script waits for it to resume, up to XPF_TEST_RUNNER_WAIT_S
 #   seconds (default 7200), then exits 75.
+#
+# Stream order (#19139): `incus exec` carries the command's stdout and stderr
+# as two separate streams, and the workstation merges them (`>log 2>&1`) in
+# ARRIVAL order, not write order. cargo writes `Running <target>` and `error:
+# test failed` to stderr while libtest writes results to stdout, so a merged
+# log spliced `error: test failed ...` into the middle of `test X ... FAILED`
+# and moved `Running` lines away from their tests. By default the command
+# therefore runs with `exec 2>&1`, so both leave the runner as ONE stream in
+# the order they were written; the workstation then sees nothing on the
+# command's stderr. --separate-stderr keeps the two apart, and then their
+# relative order is NOT preserved.
 #
 # The sync copies tracked plus untracked-but-not-ignored files of the current
 # worktree (uncommitted edits included), preserving mtimes so cargo and go
@@ -43,14 +57,16 @@ runner="${XPF_TEST_RUNNER:-udp:xpf-testrunner}"
 name=""
 as_root=0
 sync=1
+merge_stderr=1
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--runner) runner="$2"; shift 2 ;;
 	--name) name="$2"; shift 2 ;;
 	--root) as_root=1; shift ;;
 	--no-sync) sync=0; shift ;;
+	--separate-stderr) merge_stderr=0; shift ;;
 	--) shift; break ;;
-	-h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+	-h|--help) sed -n '2,43p' "$0"; exit 0 ;;
 	*) echo "vm-test-run: unknown argument: $1 (use -- before the command)" >&2; exit 2 ;;
 	esac
 done
@@ -149,6 +165,9 @@ fi
 gocache=/home/runner/.cache/go-build
 [[ "$as_root" -eq 1 ]] && gocache=/root/.cache/go-build
 env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOCACHE='${gocache}' GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src' || { echo 'vm-test-run: no source tree at ${base}/src (sync it first)' >&2; exit 2; }"
+# #19139: one stream, in write order (see "Stream order" above).
+stream_prefix=""
+[[ "$merge_stderr" -eq 1 ]] && stream_prefix="exec 2>&1; "
 rc=0
 # A root leg keeps HOME=/home/runner (for the toolchains), so whatever it
 # wrote under runner's lane dir, module cache, cargo dir or cache is
@@ -167,10 +186,10 @@ root_handback() {
 if [[ "$as_root" -eq 1 ]]; then
 	trap 'root_handback; exit 130' INT
 	trap 'root_handback; exit 143' TERM
-	incus exec "$runner" -- bash -lc "export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}" || rc=$?
+	incus exec "$runner" -- bash -lc "${stream_prefix}export HOME=/home/runner PATH=/home/runner/.cargo/bin:\$PATH; ${env_prefix}; ${cmd}" || rc=$?
 	trap - INT TERM
 	root_handback
 else
-	incus exec "$runner" -- su - runner -c "${env_prefix}; ${cmd}" || rc=$?
+	incus exec "$runner" -- su - runner -c "${stream_prefix}${env_prefix}; ${cmd}" || rc=$?
 fi
 exit "$rc"
