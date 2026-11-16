@@ -26,6 +26,26 @@
 #   - the root leg merging unconditionally (ignoring --separate-stderr): the
 #     root separation cell fails;
 #   - the user leg merging unconditionally: the user separation cell fails.
+#
+# #19142, disclosure (the script's own `vm-test-run:` lines are set aside
+# before every byte comparison above):
+#   - every run ends with exactly one paused-for line, 0s when nothing paused
+#     it; every root run prints vm-proof=present, and no user run prints one;
+#   - a stall (the mock stops the command's whole process group for 5 s, the
+#     guest clock running on) reports paused-for >= 4 and the VOID line;
+#   - a frozen guest clock (the mock delays the start by 6 s, which the runner
+#     never sees) reports paused-for >= 3 and the VOID line; a quiet run of
+#     the same shape reports 0 and no VOID line;
+#   - --root with vm-proof absent (or unknown) is refused and the command does
+#     not run; --allow-unproven-root runs it with vm-proof=absent disclosed;
+#   - the proof predicate itself, run under `unshare -Ur` so a test file is
+#     root-owned: present only for a mode-444 root file holding the current
+#     boot ID; a stale boot ID, mode 644, a symlink or no file is absent, and
+#     so is a file outside the user namespace (not root-owned). SKIP without
+#     unshare -Ur.
+#   Mutations: the heartbeat term dropped (the stall reads 0), the wall term
+#   dropped (the frozen clock reads 0), the refusal dropped (the command
+#   runs), the boot-ID comparison dropped (a stale proof reads present).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -57,13 +77,40 @@ case "${1:-}" in
 test | find) exit 0 ;;
 systemd-detect-virt) echo kvm; exit 0 ;;
 su) [[ "${2:-}" == - && "${3:-}" == runner && "${4:-}" == -c ]] || exit 91; body=$5 ;;
-bash) [[ "${2:-}" == -lc ]] || exit 92; body=$3 ;;
+bash)
+	if [[ "${2:-}" == -c ]]; then
+		# #19142: the VM-proof probe answers MOCK_VM_PROOF (default present);
+		# any other one-shot command (the clock read) runs as it is.
+		if [[ "${3:-}" == *"vm-proof (#19142)"* ]]; then
+			echo "${MOCK_VM_PROOF:-present}"
+			exit 0
+		fi
+		exec bash -c "${3//\/work\//$MOCK_ROOT/work/}"
+	fi
+	[[ "${2:-}" == -lc ]] || exit 92
+	body=$3 ;;
 *) exit 93 ;;
 esac
 body=${body//\/work\//$MOCK_ROOT/work/}
 rc=0
 held="$MOCK_ROOT/held.$$"
-bash -c "$body" >"$held" || rc=$?
+# #19142: MOCK_PRE_DELAY_S delays the start, time a frozen guest clock never
+# sees; MOCK_STALL_S stops the command's whole process group for that long
+# after 1 s, a pause the guest clock runs through.
+if [[ -n "${MOCK_PRE_DELAY_S:-}" ]]; then
+	sleep "$MOCK_PRE_DELAY_S"
+fi
+if [[ -n "${MOCK_STALL_S:-}" ]]; then
+	setsid bash -c "$body" >"$held" &
+	pid=$!
+	sleep 1
+	kill -STOP -- "-$pid" 2>/dev/null || true
+	sleep "$MOCK_STALL_S"
+	kill -CONT -- "-$pid" 2>/dev/null || true
+	wait "$pid" || rc=$?
+else
+	bash -c "$body" >"$held" || rc=$?
+fi
 cat "$held"
 rm -f "$held"
 exit "$rc"
@@ -106,6 +153,10 @@ leg_opts() {
 	if [[ "$1" == root ]]; then echo --root; fi
 }
 
+# strip_own <file>: <file>.cmd, the file without vm-test-run's own lines
+# (#19142 adds a paused-for line to every run, a vm-proof line to root runs).
+strip_own() { grep -v '^vm-test-run: ' "$1" >"$1.cmd" || true; }
+
 # order_holds <script> <leg> <tag>: default mode; stdout is the write order and
 # stderr is empty. Sets order_rc to the script's status.
 order_holds() {
@@ -113,7 +164,9 @@ order_holds() {
 	opts=$(leg_opts "$2")
 	# shellcheck disable=SC2086 # opts is empty or one word
 	order_rc=$(run "$1" "$tmp/$3.out" "$tmp/$3.err" $opts)
-	cmp -s "$tmp/$3.out" "$tmp/want.merged" && cmp -s "$tmp/$3.err" "$tmp/want.empty"
+	strip_own "$tmp/$3.out"
+	strip_own "$tmp/$3.err"
+	cmp -s "$tmp/$3.out.cmd" "$tmp/want.merged" && cmp -s "$tmp/$3.err.cmd" "$tmp/want.empty"
 }
 
 # separation_holds <script> <leg> <tag>: --separate-stderr; each stream holds
@@ -123,7 +176,9 @@ separation_holds() {
 	opts=$(leg_opts "$2")
 	# shellcheck disable=SC2086 # opts is empty or one word
 	sep_rc=$(run "$1" "$tmp/$3.out" "$tmp/$3.err" $opts --separate-stderr)
-	cmp -s "$tmp/$3.out" "$tmp/want.stdout" && cmp -s "$tmp/$3.err" "$tmp/want.stderr"
+	strip_own "$tmp/$3.out"
+	strip_own "$tmp/$3.err"
+	cmp -s "$tmp/$3.out.cmd" "$tmp/want.stdout" && cmp -s "$tmp/$3.err.cmd" "$tmp/want.stderr"
 }
 
 show() { od -c "$1" | head -4 | tr -s ' ' | tr '\n' '|'; }
@@ -133,8 +188,9 @@ for leg in user root; do
 	# control: the mock reorders when the streams are kept apart.
 	# shellcheck disable=SC2086 # opts is empty or one word
 	run "$script" "$tmp/c-$leg.arrival" - $opts --separate-stderr >/dev/null
-	if ! cmp -s "$tmp/c-$leg.arrival" "$tmp/want.merged" &&
-		[[ "$(head -n 1 "$tmp/c-$leg.arrival")" == "error: test failed, to rerun pass \`--bin x\`" ]]; then
+	strip_own "$tmp/c-$leg.arrival"
+	if ! cmp -s "$tmp/c-$leg.arrival.cmd" "$tmp/want.merged" &&
+		[[ "$(head -n 1 "$tmp/c-$leg.arrival.cmd")" == "error: test failed, to rerun pass \`--bin x\`" ]]; then
 		ok "control ($leg leg): with separate streams the transport delivers stderr ahead of the stdout written before it"
 	else
 		bad "control ($leg leg): the mock transport did not reorder; the order cells prove nothing ($(show "$tmp/c-$leg.arrival"))"
@@ -162,6 +218,143 @@ for leg in user root; do
 		bad "--separate-stderr ($leg leg): exit status $sep_rc, want 3"
 	fi
 done
+
+# #19142: the disclosure lines of the runs above.
+for tag in o-user o-root s-user s-root; do
+	n_pause=$(grep -c '^vm-test-run: paused-for=0s ' "$tmp/$tag.err" || true)
+	n_proof=$(grep -c '^vm-test-run: vm-proof=present ' "$tmp/$tag.err" || true)
+	want_proof=0
+	[[ "$tag" == *-root ]] && want_proof=1
+	if [[ "$n_pause" == 1 && "$n_proof" == "$want_proof" ]]; then
+		ok "disclosure ($tag): one paused-for=0s line; vm-proof=present printed $want_proof time(s)"
+	else
+		bad "disclosure ($tag): $n_pause paused-for=0s line(s), $n_proof vm-proof=present line(s) (want 1 and $want_proof): $(tr '\n' '|' <"$tmp/$tag.err")"
+	fi
+done
+
+# pause_run <script> <tag> <command> [opts...] [-- VAR=value ...]: a run of
+# <command> under the mock; prints its status. The reported seconds are read
+# with paused_of.
+pause_run() {
+	local under=$1 tag=$2 command=$3 rc=0
+	shift 3
+	local opts=() envs=()
+	while [[ $# -gt 0 && "$1" != -- ]]; do opts+=("$1"); shift; done
+	[[ "${1:-}" == -- ]] && shift
+	envs=("$@")
+	(cd "$tmp/repo" && env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" "${envs[@]}" \
+		bash "$under" --runner mock:runner --name lane --no-sync "${opts[@]}" -- "$command") \
+		>"$tmp/$tag.out" 2>"$tmp/$tag.err" || rc=$?
+	echo "$rc"
+}
+paused_of() { sed -n 's/^vm-test-run: paused-for=\([0-9]*\)s .*/\1/p' "$tmp/$1.err"; }
+voided() { grep -q '^vm-test-run: this run was paused or stalled' "$tmp/$1.err"; }
+
+# stall_shows <script> <tag>: a 5 s stall reads as paused-for >= 4, VOID.
+stall_shows() {
+	local rc
+	rc=$(pause_run "$1" "$2" 'sleep 4; echo done' -- MOCK_STALL_S=5)
+	[[ "$rc" == 0 && "$(paused_of "$2")" -ge 4 ]] && voided "$2" && grep -qx 'done' "$tmp/$2.out"
+}
+# frozen_shows <script> <tag>: 6 s the runner never saw reads as >= 3, VOID.
+frozen_shows() {
+	local rc
+	rc=$(pause_run "$1" "$2" 'sleep 1; echo done' -- MOCK_PRE_DELAY_S=6)
+	[[ "$rc" == 0 && "$(paused_of "$2")" -ge 3 ]] && voided "$2" && grep -qx 'done' "$tmp/$2.out"
+}
+if stall_shows "$script" stall; then
+	ok "stall: a 5 s stop of the command (guest clock running) reports paused-for=$(paused_of stall)s and the VOID line"
+else
+	bad "stall: $(tr '\n' '|' <"$tmp/stall.err")"
+fi
+if frozen_shows "$script" frozen; then
+	ok "frozen guest clock: 6 s the runner never saw reports paused-for=$(paused_of frozen)s and the VOID line"
+else
+	bad "frozen guest clock: $(tr '\n' '|' <"$tmp/frozen.err")"
+fi
+quiet_rc=$(pause_run "$script" quiet 'sleep 2; echo done')
+if [[ "$quiet_rc" == 0 && "$(paused_of quiet)" == 0 ]] && ! voided quiet; then
+	ok "quiet: the same shape with no pause reports paused-for=0s and no VOID line"
+else
+	bad "quiet: rc=$quiet_rc $(tr '\n' '|' <"$tmp/quiet.err")"
+fi
+
+# proof_refuses <script> <tag> <MOCK_VM_PROOF>: --root without the proof is
+# refused before the command runs (it would create the marker).
+marker="$tmp/work/lane/tmp/ran-19142"
+proof_refuses() {
+	local rc
+	rm -f "$marker"
+	rc=$(pause_run "$1" "$2" 'touch /work/lane/tmp/ran-19142' --root -- MOCK_VM_PROOF="$3")
+	[[ "$rc" == 2 && ! -e "$marker" ]] && grep -q '^vm-test-run: refusing a --root run without the VM proof' "$tmp/$2.err"
+}
+for answer in absent garbage; do
+	shown=$answer
+	[[ "$answer" == garbage ]] && shown=unknown
+	if proof_refuses "$script" "refuse-$answer" "$answer" && grep -q "^vm-test-run: vm-proof=$shown " "$tmp/refuse-$answer.err"; then
+		ok "vm-proof=$shown: the --root run is refused (status 2) and the command never runs"
+	else
+		bad "vm-proof=$shown: $(tr '\n' '|' <"$tmp/refuse-$answer.err")"
+	fi
+done
+rm -f "$marker"
+allow_rc=$(pause_run "$script" allow 'touch /work/lane/tmp/ran-19142' --root --allow-unproven-root -- MOCK_VM_PROOF=absent)
+if [[ "$allow_rc" == 0 && -e "$marker" ]] && grep -q '^vm-test-run: vm-proof=absent ' "$tmp/allow.err"; then
+	ok "--allow-unproven-root: the command runs, with vm-proof=absent disclosed"
+else
+	bad "--allow-unproven-root: rc=$allow_rc $(tr '\n' '|' <"$tmp/allow.err")"
+fi
+
+# The proof predicate itself, against test files (the probe text is taken from
+# the script; only its path is replaced).
+probe() { sed -n '/^# vm-proof (#19142)$/,/^fi$/p' "$1" | sed "s|^p=/run/xpf-testguard-vm-boot-id\$|p=$tmp/proof/id|"; }
+have_userns=1
+unshare -Ur true 2>/dev/null || have_userns=0
+# proof_case <probe file> <setup> : prints present/absent under unshare -Ur.
+proof_case() {
+	rm -rf "$tmp/proof" && mkdir -p "$tmp/proof"
+	eval "$2"
+	unshare -Ur sh "$1"
+}
+# shellcheck disable=SC2016,SC2034 # eval'd later, reached as ${!setup_var}
+setup_valid='cat /proc/sys/kernel/random/boot_id >"$tmp/proof/id"; chmod 444 "$tmp/proof/id"'
+# shellcheck disable=SC2016,SC2034 # eval'd later, reached as ${!setup_var}
+setup_stale='echo 00000000-0000-0000-0000-000000000000 >"$tmp/proof/id"; chmod 444 "$tmp/proof/id"'
+# shellcheck disable=SC2016,SC2034 # eval'd later, reached as ${!setup_var}
+setup_mode='cat /proc/sys/kernel/random/boot_id >"$tmp/proof/id"; chmod 644 "$tmp/proof/id"'
+# shellcheck disable=SC2016,SC2034 # eval'd later, reached as ${!setup_var}
+setup_link='cat /proc/sys/kernel/random/boot_id >"$tmp/proof/real"; chmod 444 "$tmp/proof/real"; ln -s real "$tmp/proof/id"'
+# shellcheck disable=SC2016,SC2034 # eval'd later, reached as ${!setup_var}
+setup_none=':'
+skip=0
+if [[ "$have_userns" -eq 0 ]]; then
+	skip=1
+	echo "SKIP: the proof predicate cells: unshare -Ur is not available here"
+else
+	probe "$script" >"$tmp/probe.sh"
+	if [[ $(grep -c "p=$tmp/proof/id" "$tmp/probe.sh") -ne 1 ]]; then
+		bad "proof predicate: could not take the probe from the script"
+	else
+		for c in valid:present stale:absent mode:absent link:absent none:absent; do
+			setup_var="setup_${c%%:*}"
+			got=$(proof_case "$tmp/probe.sh" "${!setup_var}")
+			if [[ "$got" == "${c#*:}" ]]; then
+				ok "proof predicate (${c%%:*}): ${got}"
+			else
+				bad "proof predicate (${c%%:*}): got ${got}, want ${c#*:}"
+			fi
+		done
+		if [[ "$(id -u)" -ne 0 ]]; then
+			eval "$setup_valid"
+			got=$(sh "$tmp/probe.sh")
+			if [[ "$got" == absent ]]; then
+				ok "proof predicate (not root-owned): a valid proof owned by uid $(id -u) is absent"
+			else
+				bad "proof predicate (not root-owned): got $got"
+			fi
+		fi
+	fi
+fi
 
 # mutant <name> <sed expression>: a copy of the script with one replacement;
 # refuses (FAIL) when the anchor did not match.
@@ -204,5 +397,40 @@ if mutant user-always-merges 's/su - runner -c "${stream_prefix}${env_prefix}/su
 	fi
 fi
 
-echo "vm-test-run selftest: ${pass} passed, ${fail} failed"
+# #19142 mutations.
+if mutant no-heartbeat-term 's/^	p = (h > x) ? h : x$/	p = x/'; then
+	if ! stall_shows "$tmp/no-heartbeat-term.sh" m4; then
+		ok "mutation no-heartbeat-term: the stall no longer shows (paused-for=$(paused_of m4)s)"
+	else
+		bad "mutation no-heartbeat-term: the stall cell still passes; it cannot see the defect"
+	fi
+fi
+if mutant no-wall-term 's/^	p = (h > x) ? h : x$/	p = h/'; then
+	if ! frozen_shows "$tmp/no-wall-term.sh" m5; then
+		ok "mutation no-wall-term: the frozen guest clock no longer shows (paused-for=$(paused_of m5)s)"
+	else
+		bad "mutation no-wall-term: the frozen-clock cell still passes; it cannot see the defect"
+	fi
+fi
+# shellcheck disable=SC2016 # a sed program: the $ is literal
+if mutant no-proof-refusal 's/if \[\[ "$vm_proof" != present \&\& "$allow_unproven_root" -ne 1 \]\]; then/if false; then/'; then
+	rm -f "$marker"
+	if ! proof_refuses "$tmp/no-proof-refusal.sh" m6 absent && [[ -e "$marker" ]]; then
+		ok "mutation no-proof-refusal: the command runs without the proof (the marker was created)"
+	else
+		bad "mutation no-proof-refusal: the refusal cell still passes"
+	fi
+fi
+# shellcheck disable=SC2016 # a sed program: the $ is literal
+if [[ "$have_userns" -eq 1 ]] &&
+	mutant no-boot-check 's/^	\[ "$(cat "$p" 2>\/dev\/null)" = "$b" \]; then$/	true; then/'; then
+	probe "$tmp/no-boot-check.sh" >"$tmp/probe-m7.sh"
+	if [[ "$(proof_case "$tmp/probe-m7.sh" "$setup_stale")" == present ]]; then
+		ok "mutation no-boot-check: a proof from another boot reads present"
+	else
+		bad "mutation no-boot-check: the stale-proof cell still reads absent"
+	fi
+fi
+
+echo "vm-test-run selftest: ${pass} passed, ${fail} failed, ${skip} skipped"
 [[ "$fail" -eq 0 ]]
