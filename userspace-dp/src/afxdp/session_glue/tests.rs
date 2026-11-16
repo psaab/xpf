@@ -12893,7 +12893,9 @@ fn resolve_shared_hit_no_incumbent_fixture_10613()
             protocol: PROTO_TCP,
             tcp_flags: TCP_FLAG_ACK,
             generation: 0,
-            session_id: 0,
+            // #18552 fold 3: a current-version peer's non-zero id. A zero-id row is
+            // never promoted, and this cell's subject is the promotion.
+            session_id: 0x1855_2102,
             tcp_close_class: 0, tcp_handshake_state: 0, rev_packets: 0u64, fwd_packets: 0, pptp_call_ids: 0,
             persistent_lease_hold: None,
             source_nat_static: None, },

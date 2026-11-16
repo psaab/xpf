@@ -345,9 +345,10 @@ the shared publish and the sibling fan-out. It takes the permit with
   re-reads the shared row (`synced_row_incarnation`, one shared lookup per
   attempt) and promotes only if it is present, still peer-synced, and names the
   worker row's incarnation: the same NAT decision and, when the shared row
-  carries one, the same RT_FLOW session id (0 is the legacy sentinel; the
-  worker mints its own id for such a row). Generation is not compared: the
-  worker row does not store it, and a same-incarnation resend bumps it.
+  carries one, the same RT_FLOW session id. Generation is not compared: the
+  worker row does not store it, and a same-incarnation resend bumps it. A
+  shared id of 0 is the legacy sentinel (the worker mints its own id for such
+  a row) and proves nothing, so such a row is never promoted (fold 3, below).
   Otherwise nothing changes: the queued `UpsertSynced` or `DeleteSynced`
   repairs the row, and a later hit promotes the current incarnation. Without
   this, the stale row overwrote shared authority (or resurrected a deleted
@@ -363,12 +364,15 @@ the shared publish and the sibling fan-out. It takes the permit with
   and then seeded the cache would leave the owned flow peer-synced for its
   life. `ResolvedFlowSessionDecision::promotion_deferred` keeps it out of the
   cache when the deferral needs a resolved hit to clear: a refused permit
-  (transient) and a superseded shared row (bounded by the worker's next command
+  (transient), a superseded shared row (bounded by the worker's next command
   drain; a cache entry seeded from the old row would outlive the repair,
-  because a cache hit checks only that its backing row is live). A shared row
-  that is absent (the queued delete evicts the cache itself), already locally
-  owned (a sibling promoted it; shared authority already protects the flow) or
-  a stale-replay fence (permanent until a purge) does not suppress the seed.
+  because a cache hit checks only that its backing row is live), and a
+  refused materialize of a reply's forward partner (`PartnerRefused`, fold 3).
+  A shared row that is absent (the queued delete evicts the cache itself),
+  already locally owned (a sibling promoted it; shared authority already
+  protects the flow), a stale-replay fence (permanent until a purge) or a
+  zero session id (never promoted, so nothing would retry it) does not
+  suppress the seed.
 - **Refusal costs no allocation.** While a holder lasts (a lease's drain, up to
   100 ms, or a whole clear), every resolved hit retries. A non-allocating
   pre-check (`TupleGate::install_claim_would_refuse`) refuses then without the
@@ -415,51 +419,75 @@ Pinned by:
     promoted and F's owner's import applies; with F superseded only R is
     promoted.
 
-**Cycle 2: reconcile from current shared authority (#18552, Codex re-check).**
-Two holes remained, both closed under the promotion's own permit through the
-#19153 materialize core (`materialize_current_shared_under_permit`):
+**Cycle 2 and fold 3: reply-first with F not yet here, and the zero id
+(#18552).**
 
-- **A zero session id proves nothing (Codex P2).** The identity rule
-  (`same_synced_incarnation`) compares the NAT decision always and the session
-  id only when shared carries one. A legacy peer (no session ids) can replace,
-  or delete and recreate, a tuple under the same translation while this
-  worker's `UpsertSynced` is still queued, and the old rule promoted and
-  published the worker's stale incarnation. Now a peer-synced shared row with
-  id 0 and the same NAT is `Unproven`, never `Current`: the worker row is first
-  reconciled from the CURRENT shared content, and then rule (b) applies, the
-  same equality test as the #19153 materialize. If what the reconcile
-  installed equals what this packet resolved against (every peer-authored
-  decision and metadata field; the resolution and the owner RG are this node's
-  own derivations), the installed row is promoted. Otherwise nothing is
-  promoted this packet, the seed is suppressed, and the packet is not
-  forwarded (no field is exempt, as in the materialize since #19153 fold 2).
-  The next packet resolves the reconciled row, the reconcile
-  re-installs identical content, and it promotes. **A zero-id row therefore
-  takes the PEER's content on promotion: its counters, timestamps and TCP
-  state are reset to the shared row's. That is a deliberate trade-off for
-  legacy peers that send no session ids, whose identity cannot be proven any
-  other way.** A row shared proves current (a non-zero equal id) is promoted
-  as before and keeps its worker-local last-seen, TCP state and counters.
-- **Reply-first with F not yet on this worker (Codex P1).** A reply hit
-  promoted R alone when this worker held no forward row F, and R's promotion
-  left nothing to retry F, so shared F stayed peer-synced and the #9678 and
-  #9714 gates stayed blind for the flow's life. Now, when shared F is a
-  current, peer-synced forward row whose companion is R and whose owner RG is
-  locally active, F is materialized from shared under the same permit and the
-  pair is promoted; F's queued upsert later meets a local row and is refused.
-  A zero-id F present here is reconciled under rule (b); if it diverges,
-  nothing is promoted this packet (R alone would strand F again). A split RG
-  still promotes R alone.
+- **Reply-first with F not yet on this worker (cycle 2, Codex P1).** A reply
+  hit promoted R alone when this worker held no forward row F, and R's
+  promotion left nothing to retry F, so shared F stayed peer-synced and the
+  #9678 and #9714 gates stayed blind for the flow's life. Now, when shared F is
+  a current, peer-synced forward row with a non-zero session id whose companion
+  is R and whose owner RG is locally active, F is materialized from shared
+  under the same permit, through the #19153 core
+  (`materialize_current_shared_under_permit`), and the pair is promoted; F's
+  queued upsert later meets a local row and is refused. F is not the row this
+  packet resolved against, so the core classifies nothing for it
+  (`classify_against` `None`) and F takes none of the reply's TCP flags and
+  no fabric adoption: its close state and idle window are a clean install's,
+  while R handles the reply's FIN or RST as it always has. A split RG still
+  promotes R alone.
+- **A refused materialize of that F promotes nothing (fold 3, r24 P3-1).** If
+  the install itself refuses F (a persistent lease hold that cannot be joined,
+  a directory conflict, a companion the permit does not fence), R is NOT
+  promoted alone: the promotion reports `PartnerRefused`, keeps the packet out
+  of the flow cache, and the next resolved reply retries. Once F's queued
+  upsert lands, the retry finds F present and needs no materialize. R alone
+  stays the outcome only for a split RG, and for an F that is already locally
+  owned, absent or superseded in shared.
+- **A zero session id is never promoted (fold 3, the user's decision).** The
+  identity rule (`same_synced_incarnation`) compares the NAT decision always
+  and the session id only when shared carries one, so a zero shared id proves
+  nothing: a legacy peer can replace, or delete and recreate, a tuple under the
+  same translation while this worker's `UpsertSynced` is still queued (Codex
+  cycle-1 P2). A peer-synced shared row with id 0 and the same NAT is
+  `Unproven`, and a promotable synced row whose shared id is 0 is never
+  promoted: neither as the hit row nor as a reply's forward partner F. A reply
+  hit whose F is zero-id promotes NOTHING, R included, so a zero-id F can never
+  leave R promoted alone. With F absent here, the zero id is judged before
+  shared F's owner RG, which is the value the import carried rather than this
+  worker's own derivation. Both rows stay peer-synced and keep forwarding on
+  the synced path. The skip is TERMINAL and the packet may seed the flow cache:
+  nothing would ever retry it, and suppressing the seed would put every packet
+  of the flow on the slow path for its life. Cycle 2 instead reconciled a
+  zero-id row from shared and promoted it; Codex's re-check found that the
+  reconcile installed shared's owner RG (0 from a legacy peer) over F's
+  locally derived one, the equality test masked it, and the owner check that
+  followed promoted R alone, which is the original harm. The reconcile is
+  removed.
+- **No current-version producer emits a zero shared id.** A current Go
+  receiver hands the helper the wire's `RTFlowSessionID`, else the wire's BPF
+  `SessionID`; a current sender always stamps a non-zero `SessionID` (the
+  adopted stable id, else a fresh mint); and every helper-side shared publish
+  of a promotable row carries a worker-minted id or its forward's. The census
+  is in `docs/log/18552.md` (fold 3).
 
-No row flips until every R and F check has passed. A reconcile or materialize
-followed by a failed check or a declined flip leaves a consistent synced
-replica of current shared content (the row the queued worker command would
-have installed), never a half-promoted one. Pinned by
-`afxdp/tests_promote_permit_18552.rs` (v4 and v6): reply-first with F's
-upsert queued, then a late import (#9678, T1 kept) and a peer delete
-(`RefusedLocalOwned`); zero-id same-NAT replacement, and delete then
-recreate (A's content never published, B promoted on the second packet); and
-the proven-current control (worker counters and view kept).
+No row flips until every R and F check has passed. A materialize followed by a
+failed check or a declined flip leaves a consistent synced replica of current
+shared content (the row the queued worker command would have installed), never
+a half-promoted one. Pinned by `afxdp/tests_promote_permit_18552.rs` (v4 and
+v6): reply-first with F's upsert queued, then a late import (#9678, T1 kept)
+and a peer delete (`RefusedLocalOwned`); the same shape with a FIN or RST
+reply (v4), where the materialized F's close state stays a clean install's
+and R's equals its F-present twin's; a refused F materialize that
+promotes nothing, suppresses the seed, and pair-promotes once the cause
+clears; a zero-id hit row (and a legacy same-NAT replacement) never promoted;
+a zero-id shared hit materialized but not promoted; a zero-id F on a reply
+(with R zero-id, and with R proven current) and a zero-id F absent here, each
+promoting nothing; Codex's exact shape (shared F owner 0, worker F owner
+active), where R is not promoted and the later peer delete takes the pair
+together; on the poll pipeline, a zero-id owner hit that is not promoted and
+seeds the cache; and the proven-current control (worker counters and view
+kept).
 
 What is NOT covered (residuals, `docs/log/18552.md` has the detail):
 
@@ -473,6 +501,20 @@ What is NOT covered (residuals, `docs/log/18552.md` has the detail):
   in this state.
 - No cell covers NAT64 or NPTv6 pairs; the pair keys come from
   `reverse_session_key`, which handles them, but that is a code read.
+- **Mixed-version ISSU (fold 3).** Sessions taken over from an old-version
+  peer whose sync records carry no session id (shared id 0) are not converted
+  to local ownership on the new owner. They keep forwarding as peer-synced
+  rows, so the old peer's later delete, or an import of a different
+  translation, can still drop one: the #9678 and #9714 gates protect only
+  promoted rows. Their shared copies also never carry the #9951/#10312 leak
+  stamp (only a promotion publishes it), so a worker that re-materializes one
+  from shared after its leak route was removed does not revoke it; the worker
+  row it already holds keeps its own materialize-time stamp.
+- **A persistently refused partner materialize (fold 3).** If F's install is
+  refused for as long as F's queued upsert has not landed, every reply takes
+  the slow path and R is not promoted (forwarded, not dropped). The upsert
+  bounds it in the P1 shape; a refusal that also defeats the upsert would not
+  be bounded.
 
 - `afxdp/tests_late_synced_publish_18550.rs`: v4 and v6; the late-publish,
   shared-local and worker-local shapes;
@@ -664,8 +706,9 @@ Pinned by:
   forwarded, publishes no `SharedPromote`, does not seed the cache and counts
   one drop; an RST or FIN replaced by a valid-zone row leaves that row's close
   state and idle window exactly as an ACK's clean install does; the next
-  packet promotes the current row; and the control, a FIN on an unchanged
-  row, is forwarded with its close state applied.
+  packet forwards on the current row and promotes it when its id is non-zero
+  (a zero-id row is never promoted, #18552 fold 3); and the control, a FIN on
+  an unchanged row, is forwarded with its close state applied.
 - `protocol/tests.rs` (`process_status_materialize_divergence_drops_roundtrip_19153`),
   `pkg/dataplane/userspace` (`TestMaterializeDivergenceStatusWire19153`) and
   `pkg/api` (the #13280 emit cells): the counter's wire key and metric.

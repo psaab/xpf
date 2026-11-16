@@ -242,15 +242,15 @@ fn run_promote_before_fanout_hook() {
 /// session id, and a translation change a different NAT decision; either is a
 /// different incarnation.
 ///
-/// A shared session id of 0 is the unknown/legacy sentinel (a peer that
-/// predates the field). Then only the NAT decision is compared, and a pass is
-/// NOT proof of sameness (#18552 cycle 2, Codex P2): a legacy peer can replace
-/// or delete-and-recreate a tuple under the same translation. The worker never
-/// stores 0 (it mints a node-local id, `session/install.rs`), so nothing can
-/// match it. No caller treats a zero-id pass as equality:
-/// `synced_row_incarnation` reports it `Unproven` and promotion reconciles the
-/// worker row from CURRENT shared content first; the #19153 materialize core
-/// always installs current shared content, never its caller's copy.
+/// A shared session id of 0 is the unknown/legacy sentinel (a peer whose sync
+/// records carry no session id). Then only the NAT decision is compared, and a
+/// pass is NOT proof of sameness (#18552 cycle 2, Codex P2): a legacy peer can
+/// replace or delete-and-recreate a tuple under the same translation. The
+/// worker never stores 0 (it mints a node-local id, `session/install.rs`), so
+/// nothing can match it. No caller treats a zero-id pass as equality:
+/// `synced_row_incarnation` reports it `Unproven` and promotion never promotes
+/// such a row (#18552 fold 3); the #19153 materialize core always installs
+/// current shared content, never its caller's copy.
 pub(in crate::afxdp) fn same_synced_incarnation(
     nat: NatDecision,
     session_id: u64,
@@ -290,8 +290,12 @@ pub(in crate::afxdp) enum SyncedRowIncarnation {
     /// NAT decision but carries the zero (unknown) session id, so it cannot
     /// prove the worker row is its incarnation. A legacy peer's same-NAT
     /// replacement, or delete and recreate, whose worker command is still
-    /// queued, looks exactly like this. Promotion reconciles the worker row
-    /// from the CURRENT shared content before it flips anything.
+    /// queued, looks exactly like this. #18552 fold 3 (the user's decision,
+    /// after Codex's cycle-2 P1): such a row is never promoted, as a hit row
+    /// or as a reverse hit's forward partner. It stays peer-synced and keeps
+    /// forwarding on the synced path. No current-version producer emits it
+    /// (`docs/log/18552.md`, the fold-3 census): only a peer whose sync records
+    /// carry no session id does.
     Unproven,
 }
 
@@ -315,153 +319,35 @@ pub(in crate::afxdp) fn synced_row_incarnation(
     }
 }
 
-/// #18552 cycle 2: bring the worker row under `key` to the CURRENT shared
-/// content, under the promotion's own permits, through the #19153 materialize
-/// core (`materialize_current_shared_under_permit`). `expected` is the
-/// identity the caller judged shared against: the worker row's when it holds
-/// one, the shared row's own when it does not. Only `Installed` (a peer-synced
-/// replica of current shared content) lets the promotion go on; every other
-/// outcome is the promotion's skip, and leaves the row as the core left it: a
-/// consistent synced replica of current shared content (`SharedLocal`: a
-/// `WorkerLocalImport` replica, which is "do not promote"), or untouched.
-fn reconcile_from_shared(
-    sessions: &mut SessionTable,
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    forwarding: &ForwardingState,
-    key: &SessionKey,
-    expected: CapturedIncarnation,
-    install_inputs: MaterializeInstall,
-    permits: &[crate::afxdp::bpf_map::InstallPermit],
-) -> Result<(), SyncedPromotion> {
-    // Identity only (`classify_against` `None`, #19153 fold 2): the core then
-    // reports `MaterializeDivergence::None` on every path and installs with
-    // `install_inputs` unchanged, as before fold 2. Rule (b) for a hit row
-    // compares after the install (`reconcile_unproven_row`); an absent F has
-    // nothing of this packet's to compare or to take (its inputs carry no
-    // flags and no adoption).
-    let (outcome, _) = materialize_current_shared_under_permit(
-        sessions,
-        shared_sessions,
-        forwarding,
-        key,
-        Some(expected),
-        None,
-        install_inputs,
-        permits,
-    );
-    match outcome {
-        MaterializeOutcome::Installed(_) => Ok(()),
-        MaterializeOutcome::SharedLocal(_) => {
-            Err(SyncedPromotion::NotCurrent(SyncedRowIncarnation::SharedLocal))
-        }
-        MaterializeOutcome::SharedAbsent => {
-            Err(SyncedPromotion::NotCurrent(SyncedRowIncarnation::SharedAbsent))
-        }
-        MaterializeOutcome::Superseded => {
-            Err(SyncedPromotion::NotCurrent(SyncedRowIncarnation::Superseded))
-        }
-        MaterializeOutcome::StaleReplayFenced => Err(SyncedPromotion::StaleReplayFenced),
-        MaterializeOutcome::InstallRefused => Err(SyncedPromotion::ReconcileRefused),
-    }
-}
-
-/// #18552 cycle 2, rule (b): reconcile an `Unproven` worker row (a zero shared
-/// session id proves nothing) from the CURRENT shared content, then apply the
-/// same equality test as the #19153 materialize (`materialize_divergence`): the
-/// worker row's stored decision and metadata, which this packet was resolved
-/// against and would promote, against what the reconcile installed, on every
-/// peer-authored field (the resolution and the owner RG are this node's own
-/// derivations on both paths, see below).
-///
-/// - Equal: `Ok(())`. The packet's decision and metadata describe the
-///   installed row, so promoting the installed row with them publishes exactly
-///   what the worker holds.
-/// - Different: `ReconcileDiverged`, and nothing is promoted this packet. The
-///   row is now a consistent synced replica of current shared content. The next
-///   packet resolves that row, the reconcile re-installs identical content, the
-///   test passes, and it promotes: two packets, no infinite deferral.
-///
-/// "Zero-id gets the peer's content" and "promote what was installed" are the
-/// same rule here and in the materialize.
-fn reconcile_unproven_row(
-    sessions: &mut SessionTable,
-    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
-    forwarding: &ForwardingState,
-    key: &SessionKey,
-    install_inputs: MaterializeInstall,
-    permits: &[crate::afxdp::bpf_map::InstallPermit],
-) -> Result<(), SyncedPromotion> {
-    let worker_absent = SyncedPromotion::NotCurrent(SyncedRowIncarnation::WorkerAbsent);
-    let Some((stored_decision, stored_metadata, _)) = sessions.entry_with_origin(key) else {
-        return Err(worker_absent);
-    };
-    let Some((session_id, nat)) = sessions.ct_slice_emit_identity_for(key) else {
-        return Err(worker_absent);
-    };
-    reconcile_from_shared(
-        sessions,
-        shared_sessions,
-        forwarding,
-        key,
-        CapturedIncarnation { nat, session_id },
-        install_inputs,
-        permits,
-    )?;
-    // Compare with what the worker row HOLDS after the reconcile, read back:
-    // the install can keep this worker's own stamp over the replica's (the
-    // #9752 install-table preservation of `upsert_synced_with_origin`), and a
-    // compare against the replica would then never pass on any later packet.
-    let Some(installed) = sessions.synced_entry_for(key) else {
-        return Err(worker_absent);
-    };
-    // The worker row's resolution and owner RG are this node's own derivations,
-    // not peer content: `handle_upsert_synced` re-resolves both from the local
-    // FIB at import, and the resolve's forwarding revalidation persists them,
-    // while the reconcile installs shared's copies. The promotion writes this
-    // packet's fresh resolution and the worker's owner RG anyway. Comparing
-    // them would call every unchanged zero-id row diverged, so they are taken
-    // from the installed side and every PEER-authored field is compared.
-    //
-    // #19153 fold 2: `materialize_divergence` classifies whole synced rows and
-    // exempts no field. Rule (b) compares the decision and the metadata, as
-    // before: every other field of the stored side is the installed row's, so
-    // only a decision or metadata field can differ, and any difference is
-    // `Drop` (fold 1's logging/counter-only `ForwardOnce` class is gone).
-    let mut stored = installed.clone();
-    stored.decision = SessionDecision {
-        resolution: installed.decision.resolution,
-        ..stored_decision
-    };
-    stored.metadata = SessionMetadata {
-        owner_rg_id: installed.metadata.owner_rg_id,
-        ..stored_metadata
-    };
-    match materialize_divergence(forwarding, &stored, &installed, &mut None) {
-        MaterializeDivergence::None => Ok(()),
-        divergence => Err(SyncedPromotion::ReconcileDiverged(divergence)),
-    }
-}
-
-/// #18552 cycle 2: what a reverse hit does with its forward row F.
+/// #18552: what a reverse hit does with its forward row F.
 enum ForwardPartner {
-    /// R is promoted alone (forward hit, F not ours, split RG, F not current).
+    /// R is promoted alone: a forward hit; F is not this worker's to promote
+    /// (not a promotable peer row, or not R's partner); shared F is already
+    /// locally owned, absent, or superseded; or a split RG (F's owner RG is
+    /// not active here).
     Alone,
     /// F's decision, metadata and the shared entry to publish, read before any
     /// flip: promote the pair.
     Pair(SessionDecision, SessionMetadata, SyncedSessionEntry),
-    /// F was `Unproven` and its reconcile installed content that differs from
-    /// the F this worker held (rule (b)). Promoting R alone would leave F
-    /// peer-synced with nothing to retry it (Codex P1), so nothing is promoted
-    /// this packet; the next reply promotes the pair.
-    Diverged,
+    /// Promote NOTHING this packet, R included, and report this outcome. F is
+    /// this worker's to promote with R but cannot be promoted now, and R alone
+    /// would leave F peer-synced with nothing to retry it (Codex cycle-1 P1):
+    /// - `NotCurrent(Unproven)`: shared F carries the zero session id, which
+    ///   is never promoted (fold 3); TERMINAL, the seed stays allowed;
+    /// - `PartnerRefused`: F's materialize was refused by the install itself
+    ///   (r24 P3-1); TRANSIENT, the seed is suppressed;
+    /// - `StaleReplayFenced`: the #10612 fence refused F's current content;
+    ///   TERMINAL until a purge, the seed stays allowed.
+    Skip(SyncedPromotion),
 }
 
 /// #18552 (B1: Codex P1-4 = r24 P2-1(a), the lead's Option B; cycle 2: Codex
-/// P1 and P2): the forward row F that a reverse-hit promotion of its companion
-/// R promotes with it, under the same permit (which already claims `[R, F]`).
-/// Returns F's decision and metadata and the shared entry to publish for it,
-/// read BEFORE any flip. `None` means R is promoted alone:
+/// P1; fold 3: the user's zero-id decision and r24 P3-1): the forward row F
+/// that a reverse-hit promotion of its companion R promotes with it, under the
+/// same permit (which already claims `[R, F]`). Returns F's decision and
+/// metadata and the shared entry to publish for it, read BEFORE any flip.
 ///
+/// `Alone` (R is promoted alone):
 /// - `key` is not a reverse companion: forward hits are unchanged, and a
 ///   forward hit never promotes its reverse;
 /// - this worker holds an F that is not a promotable peer row, or whose own
@@ -474,20 +360,28 @@ enum ForwardPartner {
 ///   absent, superseded, or already local): F is being replaced or deleted, and
 ///   its queued worker command repairs it.
 ///
-/// Cycle 2. When this worker holds F but shared F carries the zero (unknown)
-/// session id (`Unproven`), F is first reconciled from the CURRENT shared
-/// content (Codex P2). When this worker holds NO F, but shared F is a
-/// peer-synced forward row whose companion is `key` and whose owner RG is
-/// locally active, F's import has completed and only its `UpsertSynced` is
-/// still queued here (Codex P1). F is materialized from shared now, under the
-/// same permit, and promoted with R; the queued upsert later meets a local row
-/// and is refused, which is correct. Before cycle 2 the missing F promoted R
-/// alone, and R's promotion left nothing to retry F, so shared F stayed
-/// peer-synced and both gates stayed blind for the flow's life.
+/// `Skip` (nothing is promoted this packet):
+/// - shared F carries the zero session id (`Unproven`), whether or not this
+///   worker holds F. A zero-id row is never promoted, so the pair is left
+///   peer-synced as it is. For an F absent here this is judged BEFORE shared
+///   F's owner RG, which is the value the import carried (0 from a legacy
+///   peer), not the worker's own FIB derivation that `handle_upsert_synced`
+///   installs (Codex cycle-2 P1): R alone must never be the outcome of a
+///   zero-id F;
+/// - F is absent here, current and owned, and its materialize was refused
+///   (`PartnerRefused`), or fenced (`StaleReplayFenced`).
 ///
-/// A reconcile or materialize here installs only a consistent synced replica
-/// of current shared content. If R's later flip is declined, F stays exactly
-/// that, as the queued upsert would have left it.
+/// Cycle 2 (Codex P1). When this worker holds NO F, but shared F is a
+/// peer-synced forward row with a non-zero session id whose companion is `key`
+/// and whose owner RG is locally active, F's import has completed and only its
+/// `UpsertSynced` is still queued here. F is materialized from shared now,
+/// through the #19153 core, under the same permit, and promoted with R; the
+/// queued upsert later meets a local row and is refused, which is correct.
+/// Before cycle 2 the missing F promoted R alone, and R's promotion left
+/// nothing to retry F, so shared F stayed peer-synced and both gates stayed
+/// blind for the flow's life. A materialize installs only a consistent synced
+/// replica of current shared content; if R's later flip is declined, F stays
+/// exactly that, as the queued upsert would have left it.
 ///
 /// Why F at all: the #9678 import gate and the #9714 peer-delete guard read
 /// only the FORWARD row. With R promoted alone, F stayed `SyncImport`, so a
@@ -508,12 +402,6 @@ fn reverse_hit_forward_partner(
     if !metadata.is_reverse {
         return ForwardPartner::Alone;
     }
-    // F carries no packet of its own here: the packet belongs to R.
-    let install_inputs = MaterializeInstall {
-        now_ns: tick.ns,
-        tcp_flags: 0,
-        fabric_adopted: false,
-    };
     match sessions.entry_with_origin(forward_key) {
         Some((forward_decision, forward_metadata, forward_origin)) => {
             if !forward_origin.is_promotable_synced()
@@ -525,26 +413,21 @@ fn reverse_hit_forward_partner(
             }
             match synced_row_incarnation(sessions, shared_sessions, forward_key) {
                 SyncedRowIncarnation::Current => {}
-                SyncedRowIncarnation::Unproven => match reconcile_unproven_row(
-                    sessions,
-                    shared_sessions,
-                    forwarding,
-                    forward_key,
-                    install_inputs,
-                    permits,
-                ) {
-                    Ok(()) => {}
-                    Err(SyncedPromotion::ReconcileDiverged(_)) => return ForwardPartner::Diverged,
-                    Err(_) => return ForwardPartner::Alone,
-                },
+                // Fold 3: a zero-id F is never promoted, and R is not
+                // promoted without it.
+                SyncedRowIncarnation::Unproven => {
+                    return ForwardPartner::Skip(SyncedPromotion::NotCurrent(
+                        SyncedRowIncarnation::Unproven,
+                    ));
+                }
                 _ => return ForwardPartner::Alone,
             }
         }
         None => {
             // Codex P1: F absent here. Only a current, peer-synced, locally
-            // owned shared F that pairs with R is materialized. F's flip then
-            // writes the content this materialize installed (read back below),
-            // so there is nothing for rule (b) to compare.
+            // owned shared F with a non-zero session id that pairs with R is
+            // materialized. F's flip then writes the content this materialize
+            // installed (read back below).
             let expected = {
                 let shared = lock_shared_recover(shared_sessions);
                 let Some(shared_forward) = shared.get(forward_key) else {
@@ -553,28 +436,64 @@ fn reverse_hit_forward_partner(
                 if !shared_forward.origin.is_promotable_synced()
                     || shared_forward.metadata.is_reverse
                     || reverse_session_key(forward_key, shared_forward.decision.nat) != *key
-                    || !owner_rg_is_locally_active(
-                        ha_state,
-                        shared_forward.metadata.owner_rg_id,
-                        tick.secs,
-                    )
                 {
+                    return ForwardPartner::Alone;
+                }
+                // Fold 3: before the owner check, which reads the owner RG the
+                // import carried, not this worker's own derivation.
+                if shared_forward.session_id == 0 {
+                    return ForwardPartner::Skip(SyncedPromotion::NotCurrent(
+                        SyncedRowIncarnation::Unproven,
+                    ));
+                }
+                if !owner_rg_is_locally_active(
+                    ha_state,
+                    shared_forward.metadata.owner_rg_id,
+                    tick.secs,
+                ) {
                     return ForwardPartner::Alone;
                 }
                 CapturedIncarnation::of(shared_forward)
             };
-            if reconcile_from_shared(
+            // F carries no packet of its own here: the packet belongs to R.
+            // Nothing of it reaches F's install: no TCP flags (so no close,
+            // reset or close window) and no fabric adoption. F is the
+            // partner row, not the row this packet resolved against, so no
+            // capture is classified (`classify_against` `None`); the core
+            // then reports `MaterializeDivergence::None` on every path and
+            // installs current shared F with exactly these inputs.
+            let install_inputs = MaterializeInstall {
+                now_ns: tick.ns,
+                tcp_flags: 0,
+                fabric_adopted: false,
+            };
+            let (outcome, _) = materialize_current_shared_under_permit(
                 sessions,
                 shared_sessions,
                 forwarding,
                 forward_key,
-                expected,
+                Some(expected),
+                None,
                 install_inputs,
                 permits,
-            )
-            .is_err()
-            {
-                return ForwardPartner::Alone;
+            );
+            match outcome {
+                MaterializeOutcome::Installed(_) => {}
+                // F already locally owned, deleted or replaced in shared:
+                // nothing of F's is this promotion's to retry.
+                MaterializeOutcome::SharedLocal(_)
+                | MaterializeOutcome::SharedAbsent
+                | MaterializeOutcome::Superseded => return ForwardPartner::Alone,
+                MaterializeOutcome::StaleReplayFenced => {
+                    return ForwardPartner::Skip(SyncedPromotion::StaleReplayFenced);
+                }
+                // r24 P3-1: a current, locally owned F whose install was
+                // refused (a persistent lease hold that cannot be joined, a
+                // directory conflict, a companion the permit does not fence).
+                // R alone would strand F again; defer the pair.
+                MaterializeOutcome::InstallRefused => {
+                    return ForwardPartner::Skip(SyncedPromotion::PartnerRefused);
+                }
             }
         }
     }
@@ -610,25 +529,29 @@ pub(in crate::afxdp) enum SyncedPromotion {
     /// TRANSIENT: the install claim on the pair was refused. The row stays
     /// promotable and only a resolved hit retries it.
     Deferred,
-    /// TERMINAL: the #10612 stale-replay fence (the row's zones vanished).
+    /// TERMINAL: the #10612 stale-replay fence (the row's zones vanished). For
+    /// a reverse hit it also reports a forward partner F whose current shared
+    /// content the fence refused (#18552 fold 3): nothing is promoted.
     StaleReplayFenced,
-    /// TERMINAL: shared authority no longer names this row's incarnation.
+    /// TERMINAL: shared authority does not prove this row's incarnation
+    /// current: absent, superseded, already locally owned, or (#18552 fold 3)
+    /// `Unproven`, the zero session id, which is never promoted. For a reverse
+    /// hit, `NotCurrent(Unproven)` also reports a zero-id forward partner F:
+    /// R is not promoted without F.
     NotCurrent(SyncedRowIncarnation),
     /// The worker-row flip did not apply (the pre-#18552 no-op).
     FlipDeclined,
-    /// TRANSIENT (cycle 2): the hit row was `Unproven` (zero shared id) and its
-    /// reconcile from current shared content was refused by the install
-    /// itself (`MaterializeOutcome::InstallRefused`). The worker row is
-    /// unchanged and still unproven.
-    ReconcileRefused,
-    /// TRANSIENT (cycle 2, rule (b)): the hit row (or the reverse hit's F) was
-    /// `Unproven`, and its reconcile installed content that differs from what
-    /// this packet was resolved against (`materialize_divergence`). Nothing was
-    /// promoted; the next packet promotes the reconciled row. A `Drop`
-    /// divergence of the hit row also keeps THIS packet from being forwarded
-    /// (the maybe-promote caller copies it into
-    /// `resolved.materialize_divergence`).
-    ReconcileDiverged(MaterializeDivergence),
+    /// TRANSIENT (#18552 fold 3, r24 P3-1): a reverse hit's forward row F is
+    /// absent here but current, peer-synced and locally owned in shared, and
+    /// its materialize under this promotion's permit was refused by the
+    /// install itself (`MaterializeOutcome::InstallRefused`: a persistent
+    /// lease hold that cannot be joined, a directory conflict, a companion the
+    /// permit does not fence). Nothing is promoted, R included: R alone would
+    /// leave F peer-synced with nothing to retry it. The worker rows are as the
+    /// refused install left them (R as resolved, F absent); the next resolved
+    /// reply retries, and once F's queued `UpsertSynced` lands it finds F
+    /// present and needs no materialize.
+    PartnerRefused,
 }
 
 impl SyncedPromotion {
@@ -651,21 +574,24 @@ impl SyncedPromotion {
     ///   upsert makes this row non-promotable; the incarnation is the same.
     /// - `StaleReplayFenced` does not: the fence is permanent until a purge
     ///   removes the row, so suppression would be unbounded.
-    /// - `ReconcileDiverged` suppresses (cycle 2, rule (b)): the next packet
-    ///   must resolve the reconciled row and promote it; a cache hit never
-    ///   promotes.
-    /// - `ReconcileRefused` suppresses (cycle 2): the row is a zero-id row
-    ///   shared cannot prove current, so a seeded entry could keep serving a
-    ///   stale incarnation's decision after the queued repair, exactly as for
-    ///   `Superseded`.
+    /// - `NotCurrent(Unproven)` does not (#18552 fold 3): a zero-id row, or a
+    ///   reverse hit's zero-id forward partner, is never promoted, so no later
+    ///   resolved hit has anything to retry. Suppression would put every
+    ///   packet of the flow on the slow path for its life (a resolve, a permit
+    ///   claim and a shared lookup each) and buy nothing. A seeded entry serves
+    ///   the worker row's own decision, exactly as a non-promotable synced hit
+    ///   does, and as master did when it promoted such a row.
+    /// - `PartnerRefused` suppresses (fold 3, r24 P3-1): the pair must be
+    ///   retried by a resolved reply. Bounded like `Superseded`: F's queued
+    ///   `UpsertSynced` lands at this worker's next command drain, after which
+    ///   the retry finds F present and needs no materialize.
     /// - The rest change nothing a later hit could retry.
     pub(in crate::afxdp) fn suppresses_flow_cache_seed(self) -> bool {
         matches!(
             self,
             Self::Deferred
                 | Self::NotCurrent(SyncedRowIncarnation::Superseded)
-                | Self::ReconcileRefused
-                | Self::ReconcileDiverged(_)
+                | Self::PartnerRefused
         )
     }
 }
@@ -705,30 +631,30 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 /// - TERMINAL, `StaleReplayFenced` (#10612) or `NotCurrent`: under the permit,
 ///   the shared row no longer names this worker row's incarnation (it was
 ///   replaced or deleted, and the worker command that repairs this row is
-///   still queued), or a sibling already promoted it. A later hit after the
-///   repair promotes the current incarnation.
+///   still queued), or a sibling already promoted it, or it carries the zero
+///   session id (`Unproven`). A later hit after the repair promotes the
+///   current incarnation; an `Unproven` row is never promoted.
 ///
-/// #18552 cycle 2, judged under the permit (`synced_row_incarnation`), for the
-/// hit row:
+/// Judged under the permit (`synced_row_incarnation`), for the hit row:
 ///
 /// | shared vs the worker row | action |
 /// |---|---|
-/// | proven current: same NAT, shared id non-zero and equal | promote the worker row as before (its last-seen, TCP state and counters are kept) |
-/// | `Unproven`: same NAT, shared id 0 | reconcile the row from CURRENT shared content, then rule (b) (`reconcile_unproven_row`): installed content equal to what this packet resolved against promotes the installed row; otherwise nothing this packet (`ReconcileDiverged`, seed suppressed, the packet dropped) and the next packet promotes |
+/// | proven current: same NAT, shared id non-zero and equal | promote the worker row (its last-seen, TCP state and counters are kept) |
+/// | `Unproven`: same NAT, shared id 0 (fold 3) | never promote; TERMINAL, the seed is allowed; worker and shared rows unchanged |
 /// | `Superseded` (NAT, or the non-zero id, differs) | skip; the seed is suppressed |
 /// | absent, `SharedLocal`, stale-replay fenced | skip |
 ///
 /// and for a reverse hit's forward F (`reverse_hit_forward_partner`): F proven
-/// current is promoted with R; F `Unproven` is reconciled under rule (b), then
-/// promoted with R if equal, else nothing is promoted this packet (R alone
-/// would leave nothing to retry F); F ABSENT here while shared F is current,
-/// peer-synced and locally owned
-/// (its `UpsertSynced` still queued, Codex P1) is materialized from shared,
-/// then promoted with R; in a split RG (F's owner RG not active here) only R is
-/// promoted. No row flips until every R and F check has passed. A reconcile or
-/// materialize that is followed by a failed check or a declined flip leaves a
-/// consistent synced replica of current shared content, the row the queued
-/// worker command would have installed, never a half-promoted one.
+/// current is promoted with R; F `Unproven` (shared F id 0, F present here or
+/// not) promotes NOTHING, R included, and leaves the pair as it is; F ABSENT
+/// here while shared F is current (non-zero id), peer-synced and locally owned
+/// (its `UpsertSynced` still queued, Codex cycle-2 P1) is materialized from
+/// shared, then promoted with R, and a refused materialize promotes nothing
+/// (`PartnerRefused`, r24 P3-1); in a split RG (F's owner RG not active here),
+/// or with F absent, superseded or already local in shared, only R is
+/// promoted. No row flips until every R and F check has passed. A materialize
+/// followed by a failed check or a declined flip leaves a consistent synced
+/// replica of current shared content, never a half-promoted one.
 ///
 /// [`SyncedPromotion::suppresses_flow_cache_seed`] says which outcomes keep
 /// the packet out of the flow cache, and why.
@@ -808,40 +734,21 @@ fn promote_synced_session_with_conntrack(
     // make the queued repair be refused as a local-ownership clobber. Promote
     // only the incarnation shared still names.
     //
-    // #18552 cycle 2 (Codex P2): a zero shared id proves nothing, so an
-    // `Unproven` row is first reconciled from the CURRENT shared content under
-    // this permit, and rule (b) applies (`reconcile_unproven_row`): the
-    // installed content must equal what this packet was resolved against, or
-    // nothing is promoted this packet. A row shared proves current (non-zero
-    // id, same NAT) is promoted as before and keeps its worker-local last-seen,
-    // TCP state and counters.
-    match synced_row_incarnation(sessions, shared.sessions, key) {
-        SyncedRowIncarnation::Current => {}
-        SyncedRowIncarnation::Unproven => {
-            if let Err(outcome) = reconcile_unproven_row(
-                sessions,
-                shared.sessions,
-                forwarding,
-                key,
-                MaterializeInstall {
-                    now_ns: shared.tick.ns,
-                    tcp_flags,
-                    fabric_adopted: false,
-                },
-                &install_permits,
-            ) {
-                return (promoted, outcome);
-            }
-        }
-        incarnation => return (promoted, SyncedPromotion::NotCurrent(incarnation)),
+    // #18552 cycle 2 (Codex P2) and fold 3 (the user's decision): a zero
+    // shared id proves nothing, and an `Unproven` row is never promoted. It
+    // stays peer-synced and keeps forwarding on the synced path. A row shared
+    // proves current (non-zero id, same NAT) is promoted and keeps its
+    // worker-local last-seen, TCP state and counters.
+    let incarnation = synced_row_incarnation(sessions, shared.sessions, key);
+    if incarnation != SyncedRowIncarnation::Current {
+        return (promoted, SyncedPromotion::NotCurrent(incarnation));
     }
     // #18552 (B1): a reverse hit promotes its forward F too, when F is ours
     // and current. Decided here, with every R check, before ANY flip; when F
     // does not qualify, R is promoted alone. Cycle 2: F absent here but
-    // current in shared is materialized, and a zero-id F is reconciled under
-    // rule (b), under this same permit (`reverse_hit_forward_partner`). A
-    // diverged F defers the whole promotion: R alone would leave nothing to
-    // retry F.
+    // current in shared is materialized under this same permit. Fold 3: a
+    // zero-id F, or a refused materialize of F, promotes nothing: R alone
+    // would leave nothing to retry F (`reverse_hit_forward_partner`).
     let forward_partner = match reverse_hit_forward_partner(
         sessions,
         shared.sessions,
@@ -857,17 +764,7 @@ fn promote_synced_session_with_conntrack(
         ForwardPartner::Pair(forward_decision, forward_metadata, forward_entry) => {
             Some((forward_decision, forward_metadata, forward_entry))
         }
-        // R itself is current and this packet resolved against it, so the
-        // packet forwards (`None`; fold 1 named this `ForwardOnce`, which
-        // #19153 fold 2 removed); `ReconcileDiverged` drops the promotion and
-        // the revalidation and suppresses the seed, and the next reply
-        // retries the pair.
-        ForwardPartner::Diverged => {
-            return (
-                promoted,
-                SyncedPromotion::ReconcileDiverged(MaterializeDivergence::None),
-            );
-        }
+        ForwardPartner::Skip(outcome) => return (promoted, outcome),
     };
     // #13939/#17092: `promote_synced_with_origin` strips any FIN/RST; the
     // Owner-only `Defer::None` replay (`apply_deferred_owner_hit`) after the
@@ -1115,14 +1012,6 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
     // #18552 (review F1): the poll site keeps this packet out of the flow
     // cache, so a deferred promotion is retried by the next resolved hit.
     resolved.promotion_deferred = outcome.suppresses_flow_cache_seed();
-    // #18552 cycle 2, rule (b): a diverged reconcile replaced the row this
-    // packet resolved against. As for the #19153 materialize, the deferred
-    // forwarding revalidation (derived from the replaced content) is dropped,
-    // and a `Drop` divergence keeps the poll site from forwarding the packet.
-    if let SyncedPromotion::ReconcileDiverged(divergence) = outcome {
-        resolved.deferred_forwarding_revalidation = None;
-        resolved.materialize_divergence = divergence;
-    }
 }
 
 
