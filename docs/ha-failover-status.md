@@ -1181,7 +1181,9 @@ gate cluster.
 **Note for that gate:** the peer now promotes before it has drained the
 stopping node's sync backlog, so more synced imports land after activation.
 Such an import does not replace a local session the new owner already holds
-(#9678, deliberate). It does reach `USERSPACE_SESSIONS` through the worker
+(#9678, deliberate). Since #18552 that also covers a session a worker is
+promoting at that moment: the promotion holds the tuple's install permit until
+its shared publish. It does reach `USERSPACE_SESSIONS` through the worker
 fan-out (verified in #18550/#18551). Post-takeover loss leads are tracked in
 #18550/#18551.
 

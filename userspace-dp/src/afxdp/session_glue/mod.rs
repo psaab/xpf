@@ -18,6 +18,8 @@ pub(in crate::afxdp) use promote::{
 };
 #[cfg(test)]
 pub(in crate::afxdp) use promote::maybe_promote_synced_session;
+#[cfg(test)]
+pub(in crate::afxdp) use promote::set_promote_after_flip_hook_for_test;
 /// #10507 Cell 5a test seam: command-driven Demote/Refresh funnels for
 /// cross-module poll tests (unshared map, no BPF). Production `handle_*`
 /// stay `pub(in session_glue)`; these `#[cfg(test)]` delegates widen

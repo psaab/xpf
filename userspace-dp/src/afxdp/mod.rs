@@ -847,6 +847,11 @@ mod tests_txn_flow_cache;
 #[cfg(test)]
 #[path = "tests_late_synced_publish_18550.rs"]
 mod tests_late_synced_publish_18550;
+// #18552: a worker promotion and a late peer import of the same tuple
+// serialize on the worker install permit.
+#[cfg(test)]
+#[path = "tests_promote_permit_18552.rs"]
+mod tests_promote_permit_18552;
 
 // #18722: the opening-replica GC retention reads the shared row's
 // ct-slice-restamped counts as its recency proof.

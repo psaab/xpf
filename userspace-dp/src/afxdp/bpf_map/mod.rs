@@ -2010,6 +2010,26 @@ pub(super) fn update_session_cluster_synced_origin(
     })
 }
 
+/// #18552: the origin-bit RMW for a caller that already holds the tuple's
+/// worker install permit across its table mutation (the synced promotion).
+///
+/// `update_session_cluster_synced_origin` admits through `with_publish`, which
+/// needs an Idle tuple. Under the caller's OWN install permit the tuple is
+/// Publishing, so that variant declines silently and the promoted session's
+/// conntrack row stays marked peer-synced. The permit is the admission here,
+/// as for `publish_bpf_conntrack_entry_under_gate_with_source_nat`: it already
+/// excludes every lease and clear fence for the whole transaction. `_permits`
+/// is a witness that the caller holds one; it is not consulted.
+pub(super) fn update_session_cluster_synced_origin_under_permit(
+    conntrack_v4_fd: c_int,
+    conntrack_v6_fd: c_int,
+    key: &SessionKey,
+    peer_synced: bool,
+    _permits: &[InstallPermit],
+) {
+    update_session_cluster_synced_origin_raw(conntrack_v4_fd, conntrack_v6_fd, key, peer_synced)
+}
+
 fn update_session_cluster_synced_origin_raw(
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,

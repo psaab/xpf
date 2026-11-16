@@ -350,8 +350,11 @@ fn assert_late_import_keeps_local(v6: bool, shared_local: bool) {
     // row, so the worker installs it. That only arises when the late row names
     // a DIFFERENT translation than the local one (another incarnation of the
     // 5-tuple); a late import for the same flow carries the same translation
-    // and the same reply tuple. Not asserted either way here — recorded as a
-    // residual in the issue, not pinned.
+    // and the same reply tuple. Not asserted either way here: this cell seeds
+    // the window statically. #18552 closed that window: the promotion now holds
+    // its install permit from the flip through the shared publish.
+    // `tests_promote_permit_18552.rs` drives the real promotion and pins the
+    // reverse companion, the shared row and the T1 reservation.
 }
 
 #[test]
