@@ -13,22 +13,17 @@
 User directive, 2026-11-08: the dataplane and its tests must not run on the
 development workstation. Every test command runs in a disposable test-runner
 VM on a lab host. The runners are `tcp:xpf-testrunner`, `tcp:xpf-testrunner2`,
-`udp:xpf-testrunner`, `udp:xpf-testrunner2`, `udp:xpf-testrunner3`,
-`udp:xpf-testrunner4` and `loss:xpf-testrunner`. The second runner on each
-host was added 2026-11-09, when one free runner was saturated. The third udp
-runner was added on 2026-11-10, while long tcp gate cells kept both tcp
-runners paused. The fourth udp runner and the first loss runner were added on
-2026-11-16, while #19100's tcp gate held both tcp runners FROZEN for hours
-and four lanes queued on three udp runners.
-- `loss:xpf-testrunner` has 4 vCPU and 24 GiB, so loss's 16 hardware threads
-  (6 + 6 for the firewall VMs) are not overcommitted.
-- It is the only runner outside the tcp and udp hosts, so a tcp or udp gate
-  never pauses it.
-- A loss gate cell pauses it only if the cell's script sets
-  `RUNNER_REF=loss:xpf-testrunner`; `runner_freeze` returns early when
-  RUNNER_REF is empty.
+`udp:xpf-testrunner`, `udp:xpf-testrunner2`, `udp:xpf-testrunner3` and
+`udp:xpf-testrunner4`. Runners live on the tcp and udp hosts only (the user's
+directive). Loss is the throughput-reference cluster: a loss runner created
+on 2026-11-16 was withdrawn and deleted the same day. The second runner on
+each host was added 2026-11-09, when one free runner was saturated. The third
+udp runner was added on 2026-11-10, while long tcp gate cells kept both tcp
+runners paused. The fourth udp runner was added on 2026-11-16, while #19100's
+tcp gate held both tcp runners FROZEN for hours and four lanes queued on three
+udp runners.
 
-All runners share this shape: Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU (4 on loss) at low CPU priority, 32 GiB RAM (24 on loss),
+All runners share this shape: Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU at low CPU priority, 32 GiB RAM,
 150 GiB disk, Go per `go.mod`, and Rust per `userspace-dp/rust-toolchain.toml`.
 Each Go release is installed once into its own directory
 (`/usr/local/go-<version>`, `/usr/lib/go-<version>`) and never replaced in
