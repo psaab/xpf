@@ -13621,3 +13621,7 @@ fn owner_rg_export_abandon_by_client_window_when_page1_was_lost_18752() {
         .kick_owner_rg_export_unpaged(&[1], 3)
         .expect("fresh kick after the abandon must proceed");
 }
+
+// #19147: coordinator steering claims released on every shared removal.
+#[path = "coordinator_claim_release_19147_tests.rs"]
+mod coordinator_claim_release_19147;

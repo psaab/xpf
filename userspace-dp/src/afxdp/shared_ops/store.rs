@@ -1069,6 +1069,15 @@ pub(in crate::afxdp) fn remove_shared_session_if(
         let mut index = lock_shared_recover(&shared_owner_rg_indexes.reverse_prewarm_sessions);
         remove_owner_rg_index_key_from_every_bucket_locked(&mut index, key);
     }
+    // #19147: a coordinator steering claim stands for this shared entry
+    // (#9560 round 3), so its removal releases that claim HERE, for every
+    // removal path, as the #7209 un-file above does. Still under the shared
+    // lock, for the same reason as the un-file: a publisher of a replacement
+    // under this key publishes under that lock and claims after, so this
+    // release cannot drop the replacement's claim.
+    if removed_entry.is_some() {
+        shared_owner_rg_indexes.release_coordinator_claims(key);
+    }
     match removed_entry {
         Some(entry) => SharedRemoval::Removed(Box::new(entry)),
         None => SharedRemoval::Absent,

@@ -685,6 +685,60 @@ pub(in crate::afxdp) struct SharedSessionOwnerRgIndexes {
     /// mirrors live worker TABLES, not the shared maps, so `clear` below
     /// leaves it alone: each table retires its own rows (remove/refresh/drop).
     pub(in crate::afxdp) punt_seeds: Arc<crate::session::PuntSeedDirectory>,
+    /// #19147: the coordinator's steering registry and BPF maps, so that EVERY
+    /// removal of a shared entry releases the coordinator's claim on its rows.
+    /// The #9560 round 3 contract is "every authoritative removal of the
+    /// shared entry releases that claim". It was kept by six call sites and
+    /// missed by eight others (#19147's census). Like the #7209 prewarm
+    /// un-file, the release now lives in the removal primitive
+    /// (`remove_shared_session_if`) and in `clear` below, so a removal path
+    /// cannot forget it. Attached once by `Coordinator::new`; an index set
+    /// built alone (unit fixtures) has none and releases nothing.
+    pub(in crate::afxdp) coordinator_steering: Arc<std::sync::OnceLock<CoordinatorSteering>>,
+}
+
+/// #19147: what the shared store needs to release coordinator steering claims.
+pub(in crate::afxdp) struct CoordinatorSteering {
+    pub(in crate::afxdp) owners: Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
+    pub(in crate::afxdp) maps: Arc<arc_swap::ArcSwap<crate::afxdp::coordinator::BpfMaps>>,
+}
+
+impl SharedSessionOwnerRgIndexes {
+    /// #19147: attach the coordinator's steering registry and maps. Called
+    /// once, by `Coordinator::new`; a second call is ignored (the registry is
+    /// one per coordinator and never replaced).
+    pub(in crate::afxdp) fn attach_coordinator_steering(
+        &self,
+        owners: Arc<crate::afxdp::bpf_map::SteeringRowOwners>,
+        maps: Arc<arc_swap::ArcSwap<crate::afxdp::coordinator::BpfMaps>>,
+    ) {
+        let _ = self
+            .coordinator_steering
+            .set(CoordinatorSteering { owners, maps });
+    }
+
+    /// #19147: release the rows the coordinator holds for `owner`, whose
+    /// shared entry was just removed. The caller is the removal primitive,
+    /// still holding the shared-session lock, so a concurrent publisher of a
+    /// replacement under the same key cannot have claimed yet (it publishes
+    /// under that lock and claims after), and this release cannot drop its
+    /// claim. Lock order: shared sessions, then the registry's holdings and
+    /// row shards; no registry path takes a shared-session lock.
+    pub(in crate::afxdp) fn release_coordinator_claims(&self, owner: &SessionKey) {
+        let Some(steering) = self.coordinator_steering.get() else {
+            return;
+        };
+        let maps = steering.maps.load();
+        let fd = maps.session_map_fd.as_ref().map_or(-1, |fd| fd.fd);
+        crate::afxdp::bpf_map::release_coordinator_held_rows(
+            crate::afxdp::bpf_map::SteeringMap {
+                fd,
+                owners: &steering.owners,
+                holder: crate::afxdp::bpf_map::SteeringHolder::Coordinator,
+            },
+            owner,
+        );
+    }
 }
 
 impl Default for SharedSessionOwnerRgIndexes {
@@ -700,6 +754,7 @@ impl Default for SharedSessionOwnerRgIndexes {
             served_aliases: Arc::new(Mutex::new(SharedServedAliasIndex::default())),
             stage_counts_forward_wire_sessions: Arc::new(Mutex::new(FastMap::default())),
             punt_seeds: Arc::new(crate::session::PuntSeedDirectory::new()),
+            coordinator_steering: Arc::new(std::sync::OnceLock::new()),
         }
     }
 }
@@ -727,6 +782,13 @@ impl SharedSessionOwnerRgIndexes {
         drop(bare_tuple_sessions);
         served_aliases.clear();
         drop(served_aliases);
+        // #19147: every coordinator claim stood for a shared entry just
+        // cleared. Retire them all (no BPF delete; the rows linger unowned, as
+        // `retire_workers` leaves worker rows), still under the shared lock so
+        // a publisher waiting on it claims only after this.
+        if let Some(steering) = self.coordinator_steering.get() {
+            steering.owners.retire_coordinator();
+        }
         drop(sessions);
         let mut wire_sessions =
             crate::afxdp::shared_ops::lock_shared_recover(shared_forward_wire_sessions);

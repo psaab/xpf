@@ -290,3 +290,55 @@ fn worker_loop_orders_expiry_teardown_before_poll_10419() {
         "session housekeeping (expiry teardown) must run before poll_binding"
     );
 }
+
+/// #19147: the missing-neighbor seed retire removes the seed's shared entry,
+/// and so must release the coordinator's steering claim on its rows (#9560
+/// round 3). The index set carries a coordinator steering handle, as
+/// `Coordinator::new` attaches one, over the recorder-only steering map.
+#[test]
+fn seed_retirement_releases_the_coordinator_steering_claim_19147() {
+    use crate::afxdp::bpf_map::{RECORDER_ONLY_MAP_FD, SteeringHolder, SteeringRowOwners};
+    let maps = SharedMaps::new();
+    let owners = Arc::new(SteeringRowOwners::default());
+    let bpf_maps = Arc::new(arc_swap::ArcSwap::from_pointee(crate::afxdp::coordinator::BpfMaps {
+        session_map_fd: Some(crate::afxdp::bpf_map::OwnedFd {
+            fd: RECORDER_ONLY_MAP_FD,
+        }),
+        ..Default::default()
+    }));
+    maps.owner_rg_indexes
+        .attach_coordinator_steering(Arc::clone(&owners), bpf_maps);
+    let seed = entry(key(5209), SessionOrigin::MissingNeighborSeed, 49);
+    maps.publish(&seed);
+    crate::afxdp::bpf_map::publish_session_map_entry_for_session(
+        crate::afxdp::bpf_map::SteeringMap {
+            fd: RECORDER_ONLY_MAP_FD,
+            owners: &owners,
+            holder: SteeringHolder::Coordinator,
+        },
+        &seed.key,
+        seed.decision,
+        &seed.metadata,
+        false,
+        false,
+    )
+    .expect("FIXTURE: the coordinator claim must publish");
+    assert!(
+        owners.held_row_count_for(&seed.key, SteeringHolder::Coordinator) > 0,
+        "FIXTURE: the coordinator must hold the seed's rows"
+    );
+
+    retire(&maps, &[expired(&seed)]);
+
+    assert!(
+        crate::afxdp::shared_ops::lock_shared_recover(&maps.sessions)
+            .get(&seed.key)
+            .is_none(),
+        "FIXTURE: the expired seed's shared row must be removed"
+    );
+    assert_eq!(
+        owners.held_row_count_for(&seed.key, SteeringHolder::Coordinator),
+        0,
+        "the seed retire's removal must release the coordinator's steering claim"
+    );
+}
