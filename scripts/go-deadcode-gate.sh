@@ -72,7 +72,11 @@
 #   treats 77 as a skip-with-message. XPF_DEADCODE_REQUIRE=1 turns that
 #   into a hard failure; CI provisions go1.26.9 only for the scoped
 #   deadcode step and sets REQUIRE there, while the main toolchain stays
-#   go1.24.9 from go-version-file.
+#   go1.24.9 from go-version-file. The test runners carry the same
+#   release at /usr/lib/go-1.26.9 and export REQUIRE from their profile
+#   (#19152); before that they had no go1.26 and every runner's
+#   `make test-go` skipped this gate. The installed release is pinned
+#   once, as DEADCODE_GO_VERSION in scripts/resolve-deadcode-go.sh.
 #
 # OVERRIDES (hermetic self-test and fixtures)
 #
