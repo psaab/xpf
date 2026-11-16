@@ -6547,7 +6547,8 @@ fn upsert_synced_session_refuses_standalone_reverse_8015() {
 //
 // The final leg re-measures the third fact the refiling rested on and that no
 // later pass re-checked: a forward DELETE takes its synthesized companion with
-// it, leaving zero.
+// it and nothing else, so only the local row the 3N fixture seeds (#18687,
+// #19130) remains.
 //
 // PARENT-RED recipe: delete the `is_reverse` early return in
 // `upsert_synced_session`. The over-ceiling companion then publishes and the
