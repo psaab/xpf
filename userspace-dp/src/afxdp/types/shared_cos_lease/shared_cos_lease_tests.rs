@@ -3054,13 +3054,21 @@ fn newly_active_worker_is_excluded_not_class_wide_fail_open_9117() {
 /// The 1 ms window the per-window grant bound is checked over.
 const EPOCH_19025: u64 = 1_000_000;
 
-/// Conservation as a property: what the bindings are granted and spend never
-/// exceeds what the single-clock pool accrued. Varied over binding count,
-/// residual rate and burst; the set of asking bindings changes every 1 ms and
-/// bindings join and leave in between; spends are whole, partial or nothing.
-/// Checked at every step (cumulative) and per 1 ms window.
+/// Conservation as a SERIALIZED property: when each spender's read and debit
+/// run back to back, what the bindings are granted and spend never exceeds
+/// what the single-clock pool accrued.
+/// - Varied over binding count, residual rate and burst.
+/// - The set of asking bindings changes every 1 ms, and bindings join and
+///   leave in between.
+/// - Spends are whole, partial or nothing.
+/// - Checked at every step (cumulative) and per 1 ms window.
+///
+/// It does NOT cover overlapping readers. The pool is read before transmit
+/// and debited after, with a saturating debit, so concurrent spenders can
+/// overspend it by up to (spenders − 1) × one batch per window. That race
+/// predates the #19100 stack; reserve-before-submit is #19144.
 #[test]
-fn residual_pool_grants_never_exceed_the_residual_as_spenders_change_19025() {
+fn residual_pool_grants_never_exceed_the_residual_when_read_and_debit_serialize_19025() {
     for slots in [2usize, 4, 8] {
         for rate in [125_000_000u64, 625_000_000] {
             for burst in [rate / 100, 16_000] {

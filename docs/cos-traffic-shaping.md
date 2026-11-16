@@ -537,6 +537,12 @@ and nothing is owed.
   from the pool (CoV 0.49 against 0.333).
 - **The class bound.** Class 11 may exceed the residual R by the colocated
   share (lab: 1.34 against 1.0).
+  - Ordinary surplus is held to R by the shared pool only up to the pool's
+    read-then-debit race. Bindings whose read-to-debit windows overlap can
+    overspend it by up to (concurrent spenders − 1) × one batch per window,
+    and the excess is forgiven.
+  - That race predates this stack: it is on master since fb33f3ae9a.
+    Reserve-before-submit is tracked as #19144.
 - **Not addressed here.** A small exact class on a slow worker beside a large
   residual (8g of 25g on a 6g worker) loses about 20% of its rate through the
   ordinary shared-pool path. That loss exists unchanged on master and is

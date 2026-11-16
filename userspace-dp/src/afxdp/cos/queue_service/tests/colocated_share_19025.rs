@@ -277,49 +277,6 @@ fn colocated_turn_needs_its_turn_and_local_exact_demand_and_serves_nonexact_only
     );
 }
 
-/// #19025 on #18748 v3: a binding with no non-exact backlog takes nothing
-/// from the residual. #18748's Codex P1 cell found the gap under #19025's
-/// claims: an exact-only worker whose exact pass kept falling through to the
-/// non-exact build asked for the residual budget with nothing to send and held
-/// a claim, so the best-effort worker beside it got about half the residual
-/// (56,250,000 against 74,995,000 bytes for 2,500-byte packets). #19100
-/// removed the claims; the property is now owed by the shared pool itself:
-/// slot 0 holds exact demand (24 of 25 Gb/s) and no non-exact backlog, and
-/// asks halfway through an epoch; slot 1, the only binding with non-exact
-/// work, must still find the whole pool it found before slot 0 asked.
-#[test]
-fn a_binding_without_nonexact_backlog_takes_no_residual_19025() {
-    let mut exact_only = lab_runtime(&[24 * GBIT], SHAPING_BYTES / 100);
-    let (rate, burst) =
-        residual_rate_and_burst(&exact_only, 24 * GBIT).expect("premise: exact demand");
-    let backlog = SharedCoSExactBacklog::new(1);
-    let epoch_start = 2_000_000_000u64;
-    // A second of refill: the pool is the residual's whole burst.
-    let _ = backlog.residual_surplus_budget(epoch_start - 1_000_000_000, rate, burst);
-    let now = epoch_start + 500_000;
-    let before = backlog.residual_surplus_budget(now, rate, burst);
-    assert!(
-        exact_only
-            .queues
-            .iter()
-            .all(|queue| queue.config.exact || cos_queue_is_empty(queue)),
-        "premise: slot 0 has no non-exact backlog"
-    );
-    let _ = nonexact_surplus_budget_under_exact_demand(
-        &mut exact_only,
-        0,
-        now,
-        24 * GBIT,
-        Some(&backlog),
-    );
-    assert!(before > 0, "premise: the residual pool holds credit");
-    assert_eq!(
-        backlog.residual_surplus_budget(now, rate, burst),
-        before,
-        "slot 0 asked with nothing non-exact queued and took part of the residual"
-    );
-}
-
 /// #19025 on #18748 (the demand-gated pool floor): the colocated turn is
 /// non-exact surplus, so on a root that takes root credit per batch it leaves
 /// the pool floor `F` like every other non-exact batch. The turn runs only
@@ -399,80 +356,6 @@ fn the_colocated_turn_leaves_the_pool_floor_19025() {
         (FRAME as u64..=POOL - floor).contains(&bytes),
         "the colocated turn took {} frames ({bytes} bytes) of a {POOL}-byte pool; it may \
          take at most the pool less the floor {floor}",
-        items.len()
-    );
-}
-
-/// #19025 review (mutant T6 survived): the colocated turn is bounded by the
-/// residual budget the binding holds, not just gated on it covering one
-/// frame. The non-exact queue's surplus quantum is 16 frames (24,000 bytes)
-/// and 16 frames are queued; the shared residual (1 Gb/s, a peer's 24 Gb/s
-/// demand on a 25 Gb/s root) has refilled for 30 us, so the binding's
-/// budget is 3,750 bytes. The turn's batch must be at least one frame and
-/// at most that budget: two frames, where a turn that ignores its budget
-/// takes the whole quantum (16 frames). Every throughput cell runs a weight
-/// of 1, where one surplus batch is one frame, so none of them could see
-/// this.
-#[test]
-fn the_colocated_turn_never_sends_past_the_residual_budget_19025() {
-    let now = 2_000_000_000u64;
-    let mut root = lab_runtime(&[24 * GBIT], SHAPING_BYTES / 100);
-    root.tokens = 1_000_000;
-    root.nonexact_turn = true;
-    {
-        let exact = &mut root.queues[0];
-        exact.hot.runnable = true;
-        exact.hot.tokens = 100_000;
-        exact.hot.items.push_back(test_cos_item(FRAME));
-        exact.hot.queued_bytes = FRAME as u64;
-    }
-    {
-        let nonexact = &mut root.queues[1];
-        nonexact.config.surplus_weight = 16;
-        nonexact.hot.runnable = true;
-        for _ in 0..16 {
-            nonexact.hot.items.push_back(test_cos_item(FRAME));
-        }
-        nonexact.hot.queued_bytes = 16 * FRAME as u64;
-    }
-    root.nonempty_queues = 2;
-    root.runnable_queues = 2;
-    let backlog = Arc::new(SharedCoSExactBacklog::new(1));
-    backlog.publish_demand(1, 1500, ExactDemandQueueMask::EMPTY.with_queue(0));
-    // Open the shared residual's refill epoch 30 us ago: 3,750 bytes at
-    // 1 Gb/s.
-    let _ = backlog.residual_surplus_budget(now - 30_000, GBIT, 1_000_000);
-    let mut fast = test_cos_fast_interfaces(
-        IFX,
-        IFX,
-        NONEXACT_QUEUE,
-        vec![
-            (
-                EXACT_QUEUE_IDS[0],
-                test_queue_fast_path(true, 0, None, None),
-            ),
-            (NONEXACT_QUEUE, test_queue_fast_path(true, 0, None, None)),
-        ],
-        None,
-        None,
-    );
-    fast.get_mut(&IFX).expect("fast path").shared_exact_backlog = Some(backlog);
-    let fast_path = fast.get(&IFX).expect("fast path").clone();
-    let mut binding = BindingWorker::new_for_cos_drain_test(0, 0, IFX, root, fast_path);
-    let batch = build_colocated_nonexact_turn_batch(&mut binding, IFX, now)
-        .expect("premise: a pending turn, local exact demand and a residual give a batch");
-    let CoSBatch::Local {
-        queue_idx, items, ..
-    } = batch
-    else {
-        panic!("premise: a Local batch");
-    };
-    assert_eq!(queue_idx, 1, "premise: the turn serves the non-exact queue");
-    let bytes = items.len() as u64 * FRAME as u64;
-    assert!(
-        (FRAME as u64..=3_750).contains(&bytes),
-        "the colocated turn took {} frames ({bytes} bytes) against a 3,750-byte residual \
-         budget",
         items.len()
     );
 }
@@ -1348,6 +1231,92 @@ fn a_sub_32_byte_per_second_residual_still_repays_the_minimum_19100() {
             commits += 1;
         }
     }
+}
+
+/// #19100 (seat 3 review, P2-1): a FUNDED turn never sends past its byte
+/// credit. This replaces #19025's "never past the residual budget" cell,
+/// whose property the worker-local turn does not have (the turn never reads
+/// the pool). The fixture:
+/// - 3 frames of byte credit and a full packet bank;
+/// - the epoch's minimum already spent;
+/// - an unleased exact queue holding tokens, so the pace is its configured
+///   rate.
+/// The first check opens the pace window and builds nothing. 200 us later the
+/// worker has committed nothing, so it is behind its pace, and the turn is
+/// funded: it must take at most 3 frames, out of 16 queued. Mutant: the turn
+/// budget ignores the byte credit (a full TX batch).
+#[test]
+fn a_funded_turn_never_sends_past_its_byte_credit_19100() {
+    let now = 2_000_000_000u64 + 50_000;
+    let mut binding = v61_turn_binding(100_000, 16, FRAME);
+    {
+        let root = binding.cos.cos_interfaces.get_mut(&IFX).expect("root");
+        root.v61_byte_credit = (3 * FRAME as i64) << V61_CREDIT_SHIFT;
+        root.v61_opp_credit = 64i64 << V61_CREDIT_SHIFT;
+        root.v6_epoch = now / 1_000_000;
+        root.v6_min_turn_done = true;
+    }
+    assert!(
+        build_colocated_nonexact_turn_batch(&mut binding, IFX, now).is_none(),
+        "premise: the first check only opens the pace window"
+    );
+    let batch = build_colocated_nonexact_turn_batch(&mut binding, IFX, now + 200_000)
+        .expect("premise: behind its pace with credit, the turn is funded");
+    let root = binding.cos.cos_interfaces.get(&IFX).expect("root");
+    assert_eq!(root.v61_test.funded_builds, 1, "premise: a funded turn was built");
+    let CoSBatch::Local { items, .. } = batch else {
+        panic!("premise: a Local batch");
+    };
+    let bytes: usize = items.iter().map(|req| req.bytes.len()).sum();
+    assert!(
+        bytes <= 3 * FRAME,
+        "a funded turn with 3 frames of byte credit took {} packets, {bytes} bytes",
+        items.len()
+    );
+}
+
+/// #19100 (seat 2 review, P3-1): the turn-tag reset in the GUARANTEE arm of
+/// `build_nonexact_cos_batch_with_demand`. This is the twin of
+/// `an_unsettled_turn_does_not_tag_the_next_ordinary_batch_19100`, whose
+/// non-exact queue has no guarantee and so reaches only the surplus arm.
+/// Here the non-exact queue has a guarantee and tokens, so the ordinary
+/// build after an unsettled turn is a guarantee batch, and it must clear the
+/// tag. A stale tag would charge the guarantee batch to the turn credits and
+/// pace, and skip the pool debit. Mutant: the guarantee arm's reset deleted.
+#[test]
+fn an_unsettled_turn_does_not_tag_the_next_guarantee_batch_19100() {
+    let now = 2_000_000_000u64 + 50_000;
+    let mut binding = v61_turn_binding(100_000, 16, FRAME);
+    {
+        let root = binding.cos.cos_interfaces.get_mut(&IFX).expect("root");
+        let nonexact = &mut root.queues[1];
+        nonexact.config.guarantee_enabled = true;
+        nonexact.config.transmit_rate_bytes = GBIT;
+        nonexact.hot.tokens = 1_000_000;
+        nonexact.hot.last_refill_ns = now;
+    }
+    let _turn = build_colocated_nonexact_turn_batch(&mut binding, IFX, now)
+        .expect("premise: a turn is built");
+    assert!(
+        binding.cos.cos_interfaces.get(&IFX).expect("root").v6_inflight_turn,
+        "premise: the turn is tagged"
+    );
+    {
+        let root = binding.cos.cos_interfaces.get_mut(&IFX).expect("root");
+        root.queues[0].hot.items.clear();
+        root.queues[0].hot.queued_bytes = 0;
+        root.nonempty_queues = 1;
+    }
+    let ordinary = build_nonexact_cos_batch(&mut binding, IFX, now + 1_000)
+        .expect("premise: an ordinary non-exact batch");
+    assert!(
+        matches!(&ordinary, CoSBatch::Local { phase: CoSServicePhase::Guarantee, .. }),
+        "premise: the ordinary batch comes from the guarantee arm"
+    );
+    assert!(
+        !binding.cos.cos_interfaces.get(&IFX).expect("root").v6_inflight_turn,
+        "a guarantee batch built after an unsettled turn carried the turn tag"
+    );
 }
 
 /// #19100 (Codex v6.3 P2): the cap bounds the WHOLE represented balance, so

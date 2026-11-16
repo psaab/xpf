@@ -2264,39 +2264,45 @@ Each carries a RED-on-revert unit test.
   first-come residual bucket was drained by peers that polled it on every
   pass while the busy exact worker polled it only when its exact class had
   nothing to send.
-  Contract now: after each exact service that made progress on a binding
-  (`nonexact_turn`), while that binding has exact demand of its own and
-  non-exact backlog, ONE non-exact surplus batch goes before the next exact
-  service (`build_colocated_nonexact_turn_batch`). **Semantics change:** this
-  relaxes strict guarantee-before-surplus on the worker, but the turn draws
-  on the same interface-wide residual bucket as every other non-exact batch,
-  so non-exact traffic stays within the residual (the exact reservation is
-  unchanged interface-wide), and a turn is one surplus quantum, so the exact
-  class keeps at least every other service on its own worker. **Local loss
-  bound:** on a worker whose TX capacity holds the exact class, the turns
-  take at most one surplus quantum (`surplus_weight` frames) per exact
-  service there, and the non-exact class as a whole never more than the
-  residual; the exact class loses at most the smaller of the residual and
-  that per-service share of the worker (pinned by
-  `tx_capped_exact_class_loses_at_most_the_residual_19025` at weights 1 and
-  8, and by `exact_keeps_its_rate_when_the_residual_exceeds_its_worker_19025`,
-  where the residual is larger than the worker and the exact class still
-  gets its rate). A turn that sends nothing falls through to exact service
-  in the same drain. On #18748 the turn is ordinary non-exact surplus for
-  root credit: on a root with an exact class it acquires per batch leaving
-  the pool floor `F` (always on for a turn, which needs local exact
-  demand) and holds nothing after the drain. It is bounded by both the
-  binding's residual budget and that floor
-  (`the_colocated_turn_never_sends_past_the_residual_budget_19025`,
-  `the_colocated_turn_leaves_the_pool_floor_19025`). The pool
-  alone is first-come, and peers that poll it on every pass drained it before
-  a busy exact worker's turn came (simulation R1: 0.41 Gb/s). #19025
-  therefore gave each binding that asked in a 1 ms epoch an accruing claim
-  on that epoch's residual. #19100 removed the claims: the colocated turn is
-  now worker-local, paid from credit that the worker's own committed exact
-  work earns, and never draws on the pool. So the pool is first-come again,
-  for ordinary non-exact surplus only (docs/cos-traffic-shaping.md,
-  "Colocated Non-Exact Service Beside an Exact Class").
+  Contract now (#19100; the shipped contract is docs/cos-traffic-shaping.md,
+  "Colocated Non-Exact Service Beside an Exact Class"):
+  - **When a turn runs.** After an exact service that made progress on a
+    binding (`nonexact_turn`), while the binding has exact backlog and
+    non-exact backlog, one non-exact batch may go before the next exact
+    service (`build_colocated_nonexact_turn_batch`). This relaxes strict
+    guarantee-before-surplus on the worker.
+  - **The turn is worker-local.** It never draws on the interface-wide
+    residual pool, and its settlement skips the pool debit
+    (`a_turn_leaves_the_shared_residual_pool_alone_19100`). It is paid from
+    local byte and packet credits that the worker's own committed exact work
+    earns at phi/(1-phi), with phi = min(R_local / shaping, 1/32).
+  - **Funded turns.** A funded turn sends at most its byte credit
+    (`a_funded_turn_never_sends_past_its_byte_credit_19100`) and at most the
+    whole packets its credit holds
+    (`a_colocated_turn_takes_at_most_its_packet_limit_of_mixed_sizes_19100`,
+    `short_exact_batches_buy_no_extra_turn_packets_19100`).
+  - **The minimum turn** is one packet per 1 ms epoch, out of debt only
+    (`a_minimum_turn_needs_no_cached_exact_tokens_19100`,
+    `a_minimum_turn_waits_out_its_debt_19100`).
+  - **Class 11 may exceed R** by the colocated share, and the exact class
+    pays at most that share of its worker. Both are accepted trades in the
+    shipped contract.
+  - **The #19025 cells that still hold** are now weaker checks of that bound:
+    - `tx_capped_exact_class_loses_at_most_the_residual_19025`: the exact
+      class loses at most the residual;
+    - `exact_keeps_its_rate_when_the_residual_exceeds_its_worker_19025`.
+  - **Falling through.** A turn that sends nothing falls through to exact
+    service in the same drain.
+  - **Root credit.** On #18748 the turn is non-exact for root credit: on a
+    root with an exact class it acquires per batch, leaving the pool floor
+    `F` (`the_colocated_turn_leaves_the_pool_floor_19025`). It reads that
+    floor without stamping its hold, and holds no root after the drain.
+  - **History.** The pool alone is first-come, and peers that poll it on
+    every pass drained it before a busy exact worker's turn came (simulation
+    R1: 0.41 Gb/s). #19025 therefore gave each binding that asked in a 1 ms
+    epoch an accruing claim on that epoch's residual. #19100 removed the
+    claims, so the pool is first-come again, for ordinary non-exact surplus
+    only.
   A first version (f15d2f08bd) metered each binding with a private
   `residual / n` part instead (n = bindings publishing non-exact backlog).
   Review (Codex, #19025) found it was not a sound replacement for the shared
