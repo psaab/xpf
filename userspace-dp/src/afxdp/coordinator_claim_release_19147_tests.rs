@@ -640,8 +640,8 @@ fn pct_19147(sorted: &[u64], p: f64) -> u64 {
 /// threads time their own shared-lock acquisitions, standing in for the new-flow
 /// publishes that contend on that lock.
 /// - **CLAIMED:** every entry carries a coordinator claim (the standby's HA
-///   import, or the new primary's activation). The release BPF-deletes its
-///   rows inside the lock.
+///   import, or the new primary's activation). The release does its
+///   bookkeeping inside the lock and BPF-deletes its rows after it (fold 2).
 /// - **UNCLAIMED:** no claim, so the release is a holdings lookup.
 #[test]
 #[ignore = "#19147 P3-2 bench (root, real BPF map): cargo test --release --bins coordinator_release_lock_hold_bench -- --ignored --nocapture"]
