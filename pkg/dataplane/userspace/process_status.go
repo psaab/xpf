@@ -796,36 +796,10 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 						slog.Warn("userspace dataplane HA inventory replay failed; will retry next tick", "err", err)
 					}
 				}
-				helperActiveSig := activeHAGroupSignatureSlice(status.HAGroups)
 				if m.clusterHA && !haReplayAttemptedThisTick {
 					_ = m.refreshHAStateFromMapsLocked()
 				}
-				newActiveSig := activeHAGroupSignature(m.effectiveHAGroupMapLocked())
-				if m.clusterHA && !haReplayAttemptedThisTick && newActiveSig != "" && time.Since(m.lastRGActivateTime) >= 2*time.Second {
-					// Only sync watchdog updates to the helper from the poll.
-					// Do NOT sync active/inactive transitions here — that's
-					// handled by UpdateRGActive which must be the sole source
-					// of demotion/activation deltas. If the poll syncs first,
-					// the helper sees no delta and skips FlushFlowCaches.
-					// Skip entirely for 2s after UpdateRGActive to avoid
-					// control socket contention during post-transition work.
-					if helperActiveSig != newActiveSig || newActiveSig != prevActiveSig {
-						// Sync watchdog timestamps only (HA state update
-						// without active/inactive change detection).
-						// Throttle to every 5s to avoid control socket
-						// contention with session installs during bulk sync.
-						if time.Since(m.lastHASyncTime) >= 5*time.Second {
-							if err := m.syncHAWatchdogOnlyLocked(); err != nil {
-								slog.Warn("userspace dataplane HA watchdog sync failed", "err", err)
-							}
-							m.lastHASyncTime = time.Now()
-						}
-					}
-					// Do not bootstrap NAPI queues or kick neighbor repair on
-					// HA ownership changes. By the time UpdateRGActive runs, the
-					// standby must already be forwarding-ready; otherwise
-					// TakeoverReady() should have blocked the handoff earlier.
-				}
+				m.pollHABackstopLocked(status.HAGroups, prevActiveSig, haReplayAttemptedThisTick)
 				if m.pendingHAStateReplay {
 					slog.Debug("userspace dataplane forwarding sync deferred; HA inventory replay pending")
 				} else if err := m.syncDesiredForwardingStateLocked(); err != nil {
@@ -872,4 +846,70 @@ func (m *Manager) shouldStandbyNeighborPrewarmLocked(now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// pollHABackstopLocked is the status poll's HA backstop, extracted from
+// statusLoop (#19103) so a cell can drive one tick. helperGroups is the
+// helper's own HA inventory from this tick's status; prevActiveSig is the
+// cluster-truth active signature at the start of the tick. Caller holds m.mu.
+//
+// #19103: it publishes on ANY signature difference, including a change to an
+// empty signature. Before, it required a non-empty effective signature, so a
+// transfer pre-activation that was the only effective-active RG and ended by
+// its deadline was never published inactive. An expiry the helper has not yet
+// seen (preActivationExpiryOwedLocked) is also exempt from the 5 s sync
+// throttle, so the helper hears it on the next tick, not up to 5 s later.
+func (m *Manager) pollHABackstopLocked(helperGroups []HAGroupStatus, prevActiveSig string, haReplayAttemptedThisTick bool) {
+	helperActiveSig := activeHAGroupSignatureSlice(helperGroups)
+	newActiveSig := activeHAGroupSignature(m.effectiveHAGroupMapLocked())
+	if m.clusterHA && !haReplayAttemptedThisTick && time.Since(m.lastRGActivateTime) >= 2*time.Second {
+		// Only sync watchdog updates to the helper from the poll.
+		// Do NOT sync active/inactive transitions here — that's
+		// handled by UpdateRGActive which must be the sole source
+		// of demotion/activation deltas. If the poll syncs first,
+		// the helper sees no delta and skips FlushFlowCaches.
+		// Skip entirely for 2s after UpdateRGActive to avoid
+		// control socket contention during post-transition work.
+		if helperActiveSig != newActiveSig || newActiveSig != prevActiveSig {
+			// Sync watchdog timestamps only (HA state update
+			// without active/inactive change detection).
+			// Throttle to every 5s to avoid control socket
+			// contention with session installs during bulk sync.
+			if time.Since(m.lastHASyncTime) >= 5*time.Second || m.preActivationExpiryOwedLocked(helperGroups, time.Now()) {
+				if err := m.syncHAWatchdogOnlyLocked(); err != nil {
+					slog.Warn("userspace dataplane HA watchdog sync failed", "err", err)
+				}
+				m.lastHASyncTime = time.Now()
+			}
+		}
+		// Do not bootstrap NAPI queues or kick neighbor repair on
+		// HA ownership changes. By the time UpdateRGActive runs, the
+		// standby must already be forwarding-ready; otherwise
+		// TakeoverReady() should have blocked the handoff earlier.
+	}
+}
+
+// preActivationExpiryOwedLocked reports whether the helper still reports
+// active an RG that only a transfer pre-activation authorized, and that
+// pre-activation no longer authorizes the helper: its deadline passed, or
+// (#19167 fold 2) it was made ready under a helper since replaced. The cluster
+// truth has the RG inactive and nothing else authorizes it (#19103). Caller
+// holds m.mu.
+func (m *Manager) preActivationExpiryOwedLocked(helperGroups []HAGroupStatus, now time.Time) bool {
+	if len(m.transferPreActive) == 0 {
+		return false
+	}
+	for _, g := range helperGroups {
+		if !g.Active {
+			continue
+		}
+		if _, ok := m.transferPreActive[g.RGID]; !ok {
+			continue
+		}
+		if m.haGroups[g.RGID].Active || m.transferPreActiveForHelperLocked(g.RGID, now) {
+			continue
+		}
+		return true
+	}
+	return false
 }

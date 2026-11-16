@@ -300,12 +300,9 @@ process wrote it before the first publish, for example after a cluster event
 between `Start` and the first apply.
 
 That is a statement about **provenance**, not about pre-activation expiry.
-Whether every sender honours a pre-activation's deadline is #19103, and it is
-outside this barrier. Two paths predate #19093: the degraded watchdog's
-snapshot carries no deadline, and the status poll skips the all-inactive
-publish while the helper renews its still-active lease. #19093's lapsed
-pre-activation cell (M8c) covers the refresh+sync publish only; it does not
-cover the degraded watchdog or the status poll.
+Whether every sender honours a pre-activation's deadline is #19103, outside
+this barrier; see "Pre-activation expiry" below. #19093's lapsed
+pre-activation cell (M8c) covers the refresh+sync publish only.
 
 The daemon is unchanged: a fresh `rgStateMachine`'s `applied=false` is now
 true by construction. No extra `rg_active` writes or demotion preps run on
@@ -386,8 +383,46 @@ An entry has two stages (#19167):
     helper. That closes codex-d's second fold-1 finding: an "unchanged"
     dedup against the old helper's hash, for a replacement helper that never
     received that snapshot.
-- **Not covered here:** the pre-activation deadline's expiry holes, tracked by
-  #19103.
+- **Expiry** is #19103's, below.
+
+### Pre-activation expiry (#19103)
+
+A pre-activation that ends ONLY by its backstop deadline (no promotion, no
+`EndTransferPreActivation`: a lost or skipped release) must stop counting on
+every helper publisher. Two did not:
+- **The degraded watchdog.** It sends the snapshot published while the
+  pre-activation was live, for as long as `m.mu` stays held (a long
+  `apply_snapshot`). That snapshot said `Active=true` with no deadline, and a
+  matching active refresh even resurrects a lapsed helper lease (#14943).
+  The snapshot now carries `preActiveUntil` for every group whose `Active`
+  comes only from a pre-activation, and the degraded merge sends it inactive
+  once that deadline has passed.
+- **The status poll** (`pollHABackstopLocked`, extracted from `statusLoop`).
+  It published only on a NON-EMPTY effective signature, so an expiry that
+  emptied it was never published. It now publishes on any difference,
+  including to empty. An expiry the helper has not yet seen
+  (`preActivationExpiryOwedLocked`: the helper reports the RG active, its
+  pre-activation is past the deadline, and the cluster truth is inactive) is
+  also exempt from the 5 s sync throttle. Without that exemption the next
+  sync could land up to about 5 s plus one tick after the deadline. The
+  poll's `prevActiveSig` is the cluster truth, so during a pre-activation the
+  poll re-syncs on the 5 s throttle anyway.
+- **Bound, once `m.mu` is free:** the deadline, plus at most one poll tick
+  (1 s), plus the poll's existing 2 s skip after an `UpdateRGActive`.
+
+**The helper's half (acceptance 3), kept as it is.** An inactive refresh
+against a stored-active RG renews the stored lease only while that lease is
+still valid (`mismatch_renews_valid_stored_active_lease_9629`). It never
+resurrects an expired one (`expired_stored_active_incoming_inactive_needs_lock_9629`).
+This is #9629 MAJOR-4: without the renewal, every demotion blocked on `m.mu`
+becomes an unowned drop, and the helper cannot tell a lapsed pre-activation
+from that.
+
+**Residual:** while `m.mu` stays held past the deadline, degraded receipts can
+keep a still-valid helper lease alive, one lease (at most about 11 s) per
+receipt. The stale window is therefore bounded by the `m.mu` hold plus one
+lease, not by the deadline. The poll publishes the authoritative inactive state
+on its first tick after `m.mu` is released.
 
 Before #19167, Begin made the RG helper-facing active at once. The periodic
 status poll runs outside the daemon's `applySem` and publishes the effective

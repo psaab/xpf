@@ -35,8 +35,10 @@ package userspace
 //     (UpdateRGActive true->false): the cluster truth supersedes the overlay;
 //   - the requester releases it (EndTransferPreActivation) on a failed or
 //     abandoned transfer, which republishes the effective inventory;
-//   - its backstop deadline passes, after which it no longer counts and the
-//     status poll's signature comparison republishes the effective view.
+//   - its backstop deadline passes, after which it no longer counts on any
+//     helper publisher (#19103): the status poll publishes the change, an
+//     owed expiry exempt from its 5 s sync throttle, and the degraded
+//     watchdog's snapshot carries the deadline (preActiveUntil).
 
 import (
 	"errors"

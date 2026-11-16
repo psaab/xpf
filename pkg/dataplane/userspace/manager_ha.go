@@ -1687,7 +1687,12 @@ type haWatchdogIPCSyncState struct {
 // m.mu across a long helper RPC; the watchdog must still be able to reach the
 // session socket during that interval (#9629, GPT-1/Spark MAJOR-1).
 type haWatchdogSnapshot struct {
-	groups            []HAGroupStatus
+	groups []HAGroupStatus
+	// preActiveUntil holds, per group whose Active comes ONLY from a live
+	// transfer pre-activation, that pre-activation's deadline (#19103). The
+	// degraded path sends such a group inactive once the deadline passes,
+	// however long m.mu stays held after this snapshot was published.
+	preActiveUntil    map[int]time.Time
 	sessionFastPath   bool
 	processLive       bool
 	processGen        uint64
@@ -1756,8 +1761,20 @@ func (m *Manager) publishHAWatchdogSnapshotLocked() {
 		len(groups) != 0
 	processGen := m.haWatchdogProcessGen.Load()
 	intentGen := m.haWatchdogIntentGen.Load()
+	var preActiveUntil map[int]time.Time
+	now := time.Now()
+	for _, group := range groups {
+		if !group.Active || m.haGroups[group.RGID].Active || !m.transferPreActiveForHelperLocked(group.RGID, now) {
+			continue
+		}
+		if preActiveUntil == nil {
+			preActiveUntil = make(map[int]time.Time)
+		}
+		preActiveUntil[group.RGID] = m.transferPreActive[group.RGID].until
+	}
 	m.haWatchdogSnapshot.Store(&haWatchdogSnapshot{
 		groups:            groups,
+		preActiveUntil:    preActiveUntil,
 		sessionFastPath:   sessionFastPath,
 		processLive:       processLive,
 		processGen:        processGen,
@@ -1823,19 +1840,27 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 		m.haDegradedCurrent = make(map[int]haWatchdogIPCSyncState, len(snapshot.groups))
 	}
 	seen := make(map[int]struct{}, len(snapshot.groups))
+	now := time.Now()
 	for _, group := range snapshot.groups {
 		seen[group.RGID] = struct{}{}
+		// #19103: an Active that only a transfer pre-activation authorized
+		// lapses at its deadline, even though m.mu (and so a fresh
+		// snapshot) is still unavailable.
+		snapActive := group.Active
+		if until, ok := snapshot.preActiveUntil[group.RGID]; ok && !now.Before(until) {
+			snapActive = false
+		}
 		current, ok := m.haDegradedCurrent[group.RGID]
 		if !ok {
 			current = haWatchdogIPCSyncState{
 				timestamp: group.WatchdogTimestamp,
-				active:    group.Active,
+				active:    snapActive,
 			}
 		} else {
 			// Active is authoritative from the latest m.mu-published
 			// snapshot; timestamps are monotonic because this path may
 			// observe several RG calls while m.mu remains held.
-			current.active = group.Active
+			current.active = snapActive
 			if group.WatchdogTimestamp > current.timestamp {
 				current.timestamp = group.WatchdogTimestamp
 			}
