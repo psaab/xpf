@@ -461,6 +461,12 @@ run_shell test/nftables/selftest-nftables-kernel_18745.sh
 # #18745: GOFLAGS=-run and -skip filters must not turn the whole-package
 # Real Go test against the generated fixture package; fake unshare only.
 run_shell test/nftables/nftables-kernel-probes_18745-selftest.sh
+# #19136: that leg once took host-bin-shims/go (first in THIS runner's PATH) as
+# its real go, and its fixture wrapper and the shim then recursed through
+# testguard-run.sh without bound, hanging every later leg. The leg under this
+# PATH must pass inside a time bound; with GO_REAL forced to the shim it must
+# fail fast on the shim's nesting limit. SKIPs without go.
+run_bash scripts/nftables-probes-shim-path-selftest.sh
 # The daemon probes pin missing-tool behavior and the -json=false argv contract.
 # Fifteen hermetic fixture cells: no Go build or netns.
 run_shell test/daemon/selftest-daemon-probes_15241.sh
