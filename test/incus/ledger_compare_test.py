@@ -45,6 +45,7 @@ from ledger_compare import (
     REGRESSION,
     VOID,
     WITHIN_BAND,
+    _canonical,
     _sorted_rows,
     all_exit_status,
     band,
@@ -1412,13 +1413,45 @@ class ExeCheckGrandfather19126(unittest.TestCase):
                 self.assertNotIn("exe_check", row, "never fabricate one for these rows")
                 self.assertEqual(lint_row(row, 1), [])
 
+    @staticmethod
+    def same_row(text, name):
+        """The row in ``text`` is the grandfathered fixture ``name``, as the
+        exemption's hash sees it: canonical JSON, so whitespace, key order and
+        a trailing newline do not matter and any changed value does."""
+        return _canonical(json.loads(text)) == _canonical(json.loads(_GRANDFATHERED_TEXT[name]))
+
     def test_the_fixtures_are_the_tracked_rows(self):
         if not _LEDGER_D.is_dir():
             self.skipTest("the tracked ledger is not reachable from here (a sandboxed copy)")
         for name in self.NAMES:
             with self.subTest(row=name):
                 tracked = (_LEDGER_D / f"{name}.json").read_text(encoding="utf-8")
-                self.assertEqual(tracked, _GRANDFATHERED_TEXT[name] + "\n")
+                self.assertTrue(self.same_row(tracked, name))
+
+    def test_a_reformatted_shard_keeps_its_exemption(self):
+        # Pretty-printed, keys reversed, no trailing newline: the same row.
+        # load_ledger_text re-compacts a shard, so lint over a directory holding
+        # it must stay clean, and the fixture comparison must accept it.
+        for name in self.NAMES:
+            with self.subTest(row=name):
+                row = _grandfathered_row(name)
+                text = json.dumps(dict(reversed(list(row.items()))), indent=2)
+                self.assertNotEqual(text, _GRANDFATHERED_TEXT[name])
+                self.assertTrue(self.same_row(text, name))
+                with tempfile.TemporaryDirectory() as tmp:
+                    (pathlib.Path(tmp) / f"{name}.json").write_text(text, encoding="utf-8")
+                    self.assertEqual(lint_ledger(load_ledger_text(tmp)), [])
+
+    def test_a_substantive_edit_is_not_the_same_row(self):
+        for name in self.NAMES:
+            with self.subTest(row=name):
+                row = _grandfathered_row(name)
+                row["ts"] = "2026-11-16T00:00:00.000Z"
+                text = json.dumps(row, indent=2)
+                self.assertFalse(self.same_row(text, name))
+                with tempfile.TemporaryDirectory() as tmp:
+                    (pathlib.Path(tmp) / f"{name}.json").write_text(text, encoding="utf-8")
+                    self.assertIn(_MISSING.split(": ", 1)[-1], "\n".join(lint_ledger(load_ledger_text(tmp))))
 
     def test_parse_ledger_accepts_them(self):
         text = "\n".join(json.dumps(_grandfathered_row(name)) for name in self.NAMES) + "\n"
