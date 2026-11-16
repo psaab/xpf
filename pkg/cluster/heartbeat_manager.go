@@ -799,7 +799,6 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	m.peerFrameCount++ // #19140: orders this frame against a member-shim charge
 
 	wasAlive := m.peerAlive
 	// The peer incarnation the previous admitted frame came from, read
@@ -916,7 +915,6 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 			peerWasPrimaryThisSession: wasPrimary || NodeState(g.State) == StatePrimary,
 			takeoverReady:             int(g.Weight) > maxRedundancyGroupWeight-DataplaneArmMonitorCost,
 			takeoverNotReady:          localID != 0 && notReady[g.GroupID],
-			frame:                     m.peerFrameCount,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace

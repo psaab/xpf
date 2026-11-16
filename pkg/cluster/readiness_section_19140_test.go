@@ -186,11 +186,12 @@ func TestReadinessBitIsPerFrameAndDataRGOnly19140(t *testing.T) {
 	owner.handlePeerHeartbeat(frame)
 	owner.mu.RLock()
 	pg1, pg0 := owner.peerGroups[1], owner.peerGroups[0]
+	_, hasRG0 := owner.peerGroups[0]
 	owner.mu.RUnlock()
 	if !pg1.takeoverNotReady {
 		t.Fatal("the peer's RG1 not-ready bit was not recorded")
 	}
-	if pg0.frame == 0 {
+	if !hasRG0 {
 		t.Fatal("setup: the frame carried no RG0 group, so the RG0 check below would be vacuous")
 	}
 	if pg0.takeoverNotReady {
@@ -283,4 +284,84 @@ func TestMemberShimYieldRespectsPeerReadiness19140(t *testing.T) {
 			})
 		}
 	}
+}
+
+// codex-d P2-NEW-1: a frame the peer BUILT before its not-ready edge can
+// ARRIVE after the owner's charge. A later receipt proves nothing about when
+// the peer sampled its readiness; the yield needs a frame that echoes a
+// heartbeat the owner sent after the charge. F is built while the peer is
+// ready, the peer then goes not-ready, the owner is charged, and only then F
+// is delivered: the owner keeps the RG, in both preempt modes, and through
+// the flagged frames that follow.
+func TestInFlightFrameFromBeforeTheEdgeCannotTakeTheRG19140(t *testing.T) {
+	for _, preempt := range []bool{true, false} {
+		t.Run(fmt.Sprintf("preempt=%v", preempt), func(t *testing.T) {
+			owner, peer := memberShimPair19140(t, preempt, 200, 100)
+			exchangeElection12164(owner, peer)
+			inFlight := peer.buildHeartbeat() // unflagged: the peer is still ready
+			if len(inFlight.TakeoverNotReady) != 0 {
+				t.Fatalf("setup: the in-flight frame already flags %v", inFlight.TakeoverNotReady)
+			}
+			peer.SetRGReady(1, false, []string{"userspace helper not running"})
+			chargeMemberShim19140(owner, true)
+			owner.handlePeerHeartbeat(inFlight)
+			peer.handlePeerHeartbeat(owner.buildHeartbeat())
+			if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+				t.Fatal("the owner yielded on a frame the peer built before its not-ready edge")
+			}
+			for range 5 {
+				owner.handlePeerHeartbeat(peer.buildHeartbeat())
+				peer.handlePeerHeartbeat(owner.buildHeartbeat())
+			}
+			if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+				t.Fatal("the owner gave the RG to a peer that flags it not ready")
+			}
+		})
+	}
+}
+
+// r23 P2-1: member-shim debt plus a partial interface-monitor debt must stay
+// at the floor (weight 1), never reach 0. A lone owner keeps the RG; with a
+// peer that flags the RG not ready, the owner keeps it too (a weight-0 resign
+// would bypass the XPFR-qualified yield). An additive debt that reaches 255 on
+// its own still resigns.
+func TestMemberShimPlusPartialMonitorDebtStaysAtTheFloor19140(t *testing.T) {
+	t.Run("lone owner", func(t *testing.T) {
+		owner, _ := memberShimPair19140(t, false, 200, 100)
+		owner.SetGroupStateForTesting(1, StatePrimary)
+		chargeMemberShim19140(owner, true)
+		owner.SetMonitorWeight(1, "ge-0-0-1", true, 50)
+		if w := ownerWeight19140(owner, 1); w != 1 {
+			t.Fatalf("member-shim + a 50 partial monitor: weight %d, want 1 (the floor)", w)
+		}
+		owner.SetMonitorWeight(1, "ge-0-0-2", true, 255)
+		if w := ownerWeight19140(owner, 1); w != 0 {
+			t.Fatalf("an additive debt of 255 on its own: weight %d, want 0 (it still resigns)", w)
+		}
+	})
+	t.Run("flagged peer", func(t *testing.T) {
+		owner, peer := memberShimPair19140(t, false, 200, 100)
+		exchangeElection12164(owner, peer)
+		peer.SetRGReady(1, false, []string{"userspace forwarding not armed"})
+		owner.handlePeerHeartbeat(peer.buildHeartbeat())
+		chargeMemberShim19140(owner, true)
+		owner.SetMonitorWeight(1, "ge-0-0-1", true, 50)
+		for range 6 {
+			owner.handlePeerHeartbeat(peer.buildHeartbeat())
+			peer.handlePeerHeartbeat(owner.buildHeartbeat())
+		}
+		if w := ownerWeight19140(owner, 1); w != 1 {
+			t.Fatalf("owner weight %d, want 1", w)
+		}
+		if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+			t.Fatal("member-shim + partial monitor debt moved the RG to a peer that flags it not ready")
+		}
+	})
+}
+
+// ownerWeight19140 is m's local weight for rgID.
+func ownerWeight19140(m *Manager, rgID int) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.groups[rgID].Weight
 }

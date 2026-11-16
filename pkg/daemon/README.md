@@ -5308,6 +5308,12 @@ The yield goes only to a peer whose heartbeat does not flag the RG not-ready
 flag and keeps the #12164 behaviour (a degraded handoff rather than an
 ownerless RG); the class table there is that mixed-version residual.
 
+**Level-triggered** (r23 P3-2): every tick re-installs a charge the producer
+still holds when the cluster no longer carries it (`HasMonitorDebt`, which runs
+no readiness callback). Removing and re-adding an RG in one commit purges its
+monitor weights (the #8338 class); an edge-triggered producer never charged it
+again. The re-install logs a WARN.
+
 **What it does not do:** re-attach the shim (recovery is still a commit or a
 link event), demote RG0, or act on unverified evidence.
 
@@ -5332,6 +5338,8 @@ Cells, in `member_shim_debt_19140_test.go`:
 - **D4:** config removal;
 - **D5:** not-required members;
 - **D6:** unverified holds the episode;
+- **D7:** a cluster-side purge, after which the charge is re-installed
+  (`TestMemberShimDebtSurvivesAClusterSidePurge19140`);
 - **the tick wiring.**
 
 ## A demotion with an unresponsive helper releases the VIPs first (#18701)

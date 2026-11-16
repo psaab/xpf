@@ -275,3 +275,29 @@ func TestTransitGateTickRunsTheMemberShimProducer19140(t *testing.T) {
 		t.Fatal("reassertTransitGate does not run applyMemberShimDebt: the producer never ticks")
 	}
 }
+
+// r23 P3-2: the producer is level-triggered. An RG removed and re-added in one
+// cluster config change loses its monitor weights; a charge the producer
+// still holds is re-installed on the next tick, with the member still missing.
+func TestMemberShimDebtSurvivesAClusterSidePurge19140(t *testing.T) {
+	f := newShimFixture19140(t)
+	missing := map[string]dpuserspace.DataMemberShimStatus{"ge-0-0-0": missing19140}
+	f.run(memberShimDebtGrace+2*time.Second, missing)
+	if !f.charged(t, 1) {
+		t.Fatal("setup: RG1 charged")
+	}
+	all := []*config.RedundancyGroup{
+		{ID: 0, NodePriorities: map[int]int{0: 200}},
+		{ID: 1, NodePriorities: map[int]int{0: 200}},
+		{ID: 2, NodePriorities: map[int]int{0: 200}},
+	}
+	f.d.cluster.UpdateConfig(&config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{all[0], all[2]}})
+	f.d.cluster.UpdateConfig(&config.ClusterConfig{RedundancyGroups: all})
+	if f.charged(t, 1) {
+		t.Fatal("setup: the cluster kept RG1's debt across the remove and re-add, so this cell observes nothing")
+	}
+	f.run(time.Second, missing)
+	if !f.charged(t, 1) {
+		t.Fatal("the producer still holds RG1's charge but did not re-install it after the cluster-side purge")
+	}
+}

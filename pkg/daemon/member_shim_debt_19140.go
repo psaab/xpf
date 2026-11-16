@@ -180,6 +180,17 @@ func (d *Daemon) applyMemberShimDebt() {
 			d.setMemberShimDebt(rg, false, "the RG has no configured RETH data member any more", nil, now)
 		}
 	}
+	// Level-triggered (r23 P3-2): a charge this producer still holds is
+	// re-installed when the cluster no longer carries it. Removing and
+	// re-adding an RG in one commit purges its monitor weights (the #8338
+	// class), and an edge-triggered producer would never charge it again.
+	for rg := range t.debt {
+		if _, ok := rgMembers[rg]; ok && !d.cluster.HasMonitorDebt(rg, cluster.RethMemberShimMonitorIface) {
+			d.cluster.SetMonitorWeight(rg, cluster.RethMemberShimMonitorIface, true, cluster.RethMemberShimMonitorCost)
+			slog.Warn("cluster: RETH member-shim election debt re-installed after the cluster dropped it",
+				"rg", rg, "issue", "#19140")
+		}
+	}
 	if !fresh {
 		return // unverified for every member: install nothing, clear nothing
 	}

@@ -117,7 +117,7 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 				}
 			}
 			// #19140: the member-shim charge point goes with the debt above.
-			delete(m.memberShimChargedAtFrame, id)
+			delete(m.memberShimChargedAtSeq, id)
 			// Purge the per-RG GARP count so a same-id re-add that omits an
 			// explicit gratuitous-arp-count does not inherit this incarnation's
 			// stale count (#6027). garpCounts is only WRITTEN when the config

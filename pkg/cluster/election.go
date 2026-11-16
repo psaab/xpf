@@ -1194,10 +1194,10 @@ func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int
 		if !found {
 			if iface == RethMemberShimMonitorIface {
 				// #19140: a fresh charge; see floorYieldDebtLocked.
-				if m.memberShimChargedAtFrame == nil {
-					m.memberShimChargedAtFrame = make(map[int]uint64)
+				if m.memberShimChargedAtSeq == nil {
+					m.memberShimChargedAtSeq = make(map[int]uint64)
 				}
-				m.memberShimChargedAtFrame[rgID] = m.peerFrameCount
+				m.memberShimChargedAtSeq[rgID] = m.hbCounter.Load()
 			}
 			rg.MonitorFails = append(rg.MonitorFails, iface)
 			sort.Strings(rg.MonitorFails)
@@ -1208,7 +1208,7 @@ func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int
 		// Remove from failures and delete stored weight.
 		delete(m.monitorWeights, key)
 		if iface == RethMemberShimMonitorIface {
-			delete(m.memberShimChargedAtFrame, rgID)
+			delete(m.memberShimChargedAtSeq, rgID)
 		}
 		for i, f := range rg.MonitorFails {
 			if f == iface {
@@ -1221,6 +1221,19 @@ func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int
 	}
 
 	m.recalcWeight(rg)
+}
+
+// HasMonitorDebt reports whether rgID currently carries a positive debt on
+// iface. It reads only the monitor weights, never the transfer-readiness
+// callback. The #19140 member-shim producer uses it to re-assert a charge a
+// cluster-side purge dropped (an RG removed and re-added in one commit).
+func (m *Manager) HasMonitorDebt(rgID int, iface string) bool {
+	if m == nil {
+		return false
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.monitorWeights[monitorKey{rgID: rgID, iface: iface}] > 0
 }
 
 // dataplaneArmDebtLocked returns the authoritative arm-monitor debt. Marker
@@ -1249,16 +1262,21 @@ func (m *Manager) floorYieldDebtLocked(rgID int, peer *PeerGroupState) bool {
 	if m.dataplaneArmDebtLocked(rgID) > 0 {
 		return true
 	}
-	// The peer's readiness must come from a frame admitted AFTER the charge.
-	// The charge runs an election at once, against the peer's last frame,
-	// which may predate a not-ready edge the peer has not advertised yet; a
-	// yield on it hands the RG to a not-ready peer that then takes it
-	// DEGRADED, and nothing hands it back. The next frame carries the
-	// peer's current readiness, so this delays a yield by at most one
-	// heartbeat interval.
+	// The peer's readiness must be CAUSALLY after the charge. A yield on
+	// readiness the peer sampled before it hands the RG to a peer that may
+	// already be not-ready; that peer then takes it DEGRADED and nothing hands
+	// it back. A later RECEIPT proves nothing (a frame built before the charge
+	// can arrive after it, codex-d's #19140 review). The frame must ECHO a
+	// heartbeat sequence this node sent after the charge: the peer built it,
+	// and sampled its readiness, after receiving that heartbeat. That costs
+	// about one heartbeat round trip on a producer that already waits 10 s.
+	// Residual: the peer's bit is its LAST EVALUATED readiness (rg.Ready,
+	// refreshed by its daemon's reconcile pass), not a fresh evaluation per
+	// frame.
 	return m.monitorWeights[monitorKey{rgID: rgID, iface: RethMemberShimMonitorIface}] > 0 &&
 		peer != nil && !peer.takeoverNotReady &&
-		peer.frame > m.memberShimChargedAtFrame[rgID]
+		peer.heartbeatEchoSession == m.LocalProcessToken() &&
+		peer.heartbeatEchoSequence > m.memberShimChargedAtSeq[rgID]
 }
 
 // SetStartupSyncHold installs or clears the #16741 startup-sync-hold
@@ -1419,7 +1437,7 @@ func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
 // while an explicit full debt (255) on either reserved key still resigns the
 // RG. Every other monitor debt remains additive. Caller must hold m.mu.
 func (m *Manager) monitorDebtTotalLocked(rg *RedundancyGroupState) int {
-	totalLost, holdLost := 0, 0
+	totalLost, holdLost, nonShimHold := 0, 0, 0
 	for _, iface := range rg.MonitorFails {
 		weight := m.monitorWeights[monitorKey{rgID: rg.GroupID, iface: iface}]
 		switch iface {
@@ -1427,11 +1445,25 @@ func (m *Manager) monitorDebtTotalLocked(rg *RedundancyGroupState) int {
 			if weight > holdLost {
 				holdLost = weight
 			}
+			if iface != RethMemberShimMonitorIface && weight > nonShimHold {
+				nonShimHold = weight
+			}
 		default:
 			totalLost += weight
 		}
 	}
-	return totalLost + holdLost
+	total := totalLost + holdLost
+	// #19140 (r23 P2-1): member-shim debt is a FLOOR (weight 1), never a
+	// resignation. Added to ANY partial monitor or ip-monitor debt it reached
+	// weight 0, so a lone owner resigned (black-holing every RETH, not just
+	// the shim-less one) and, with a peer, the weight-0 resign bypassed the
+	// XPFR-qualified yield. When member-shim is the only floor debt and the
+	// additive debt alone is below 255, the total stops at the floor. An
+	// additive debt that reaches 255 on its own still resigns, as before.
+	if nonShimHold == 0 && holdLost > 0 && totalLost < 255 && total > RethMemberShimMonitorCost {
+		total = RethMemberShimMonitorCost
+	}
+	return total
 }
 
 // reconcileMonitorDebtsLocked realigns each RG's installed interface-monitor

@@ -211,14 +211,13 @@ type Manager struct {
 	clusterID       int
 	groups          map[int]*RedundancyGroupState
 	monitorWeights  map[monitorKey]int // per-RG per-interface monitor weights
-	// peerFrameCount counts admitted peer heartbeats; each PeerGroupState
-	// records the count of the frame that built it (#19140). Guarded by mu.
-	peerFrameCount uint64
-	// memberShimChargedAtFrame is, per RG charged with the #19140 RETH
-	// member-shim debt, peerFrameCount when the debt was installed. The
-	// member-shim yield reads the peer's readiness only from a frame
-	// admitted AFTER that point (floorYieldDebtLocked). Guarded by mu.
-	memberShimChargedAtFrame map[int]uint64
+	// memberShimChargedAtSeq is, per RG charged with the #19140 RETH
+	// member-shim debt, this node's heartbeat sequence (hbCounter) when the
+	// debt was installed. The member-shim yield reads the peer's readiness
+	// only from a frame that ECHOES a later local sequence: the peer built it
+	// after receiving a heartbeat this node sent after the charge
+	// (floorYieldDebtLocked). Guarded by mu.
+	memberShimChargedAtSeq map[int]uint64
 	// Advances on local RG creation and every primary-role transition; guarded by mu.
 	mastershipGen   uint64
 	mu              sync.RWMutex

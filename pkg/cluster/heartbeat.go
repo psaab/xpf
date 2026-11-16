@@ -849,10 +849,6 @@ type PeerGroupState struct {
 	// yield deliberately does not (a node with no armed dataplane yields to
 	// a heavier peer whatever that peer's readiness).
 	takeoverNotReady bool
-	// frame is Manager.peerFrameCount for the frame that built this entry
-	// (#19140): the member-shim yield trusts takeoverNotReady only from a
-	// frame admitted after the debt was charged.
-	frame uint64
 }
 
 // heartbeatSender sends periodic heartbeat packets.

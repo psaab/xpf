@@ -4199,16 +4199,41 @@ indefinitely.
   - The receiver records it per frame (`PeerGroupState.takeoverNotReady`): a
     frame without it clears it, and peer loss drops it.
   - A member-shim owner yields only to a peer that does not flag the RG.
-  - **The flag must come from a frame admitted after the charge.** Installing
-    the debt runs an election at once, against the peer's LAST frame, which
-    can predate a not-ready edge the peer has not yet advertised. A yield on
-    that frame hands the RG to a not-ready peer. That peer then promotes
-    DEGRADED through `peerYieldedOwnership`, and nothing hands the RG back.
-    Each admitted frame stamps `PeerGroupState.frame` from
-    `Manager.peerFrameCount`. The charge records the count in
-    `memberShimChargedAtFrame`, and the yield needs `peer.frame` above it.
-    That delays the yield by at most one heartbeat interval, on a producer
-    that already waits a 10 s grace.
+  - **The flag must be CAUSALLY after the charge.** A yield on readiness the
+    peer sampled before the charge hands the RG to a peer that may already be
+    not-ready. That peer then promotes DEGRADED through `peerYieldedOwnership`,
+    and nothing hands the RG back. Two orderings bite:
+    - the charge's own election runs against the peer's last installed
+      frame;
+    - a frame the peer BUILT before its not-ready edge ARRIVES after the
+      charge (codex-d's #19140 review: a later receipt proves nothing, and
+      HMAC and anti-replay admit such a frame).
+
+    So the charge records this node's heartbeat sequence
+    (`memberShimChargedAtSeq`, from `hbCounter`). The yield needs the
+    peer's frame to echo our session and a LATER sequence
+    (`heartbeatEchoSequence`): the peer built it, and sampled its readiness,
+    after receiving a heartbeat this node sent after the charge. That costs
+    about one heartbeat round trip on a producer that already waits a 10 s
+    grace. (Fold 1's receipt counter, `peerFrameCount`, is removed, not kept
+    beside it.)
+  - **Residual: the bit is the peer's LAST EVALUATED readiness.**
+    `buildHeartbeat` copies `rg.Ready`, which the peer's daemon refreshes in
+    its reconcile pass. A frame built after the charge therefore carries
+    readiness no older than that pass, not a fresh evaluation.
+  - **Residual: the member-shim reason is node-global** (r23 P3-1, #19176).
+    One shim-less or UNVERIFIED member on the peer makes `rg.Ready` false
+    for EVERY data RG, so a peer that could serve this RG still withholds
+    the yield. It fails safe: the incumbent keeps the RG. #19176 scopes the
+    reason per RG.
+  - **Member-shim debt stays at the floor** (r23 P2-1).
+    `monitorDebtTotalLocked` adds ordinary monitor debt to the floor MAX, so
+    member-shim (254) plus any partial interface or ip-monitor debt used to
+    reach weight 0. A lone owner then resigned, black-holing every RETH, and
+    with a peer the weight-0 resign bypassed this yield. When member-shim is
+    the only floor debt and the additive debt alone is below 255, the total
+    stops at 254 (weight 1). An additive debt of 255 on its own still
+    resigns. Cell: `TestMemberShimPlusPartialMonitorDebtStaysAtTheFloor19140`.
   - Arm debt ignores the flag and keeps #12164's never-strands contract
     (`TestNonPreemptArmDebtYieldNeverStrandsUnreadyPeer12164`): a node with
     no armed dataplane forwards nothing.
@@ -4231,7 +4256,9 @@ indefinitely.
   the yield toward a flagged peer, an older peer and under arm debt, and after
   the peer becomes ready. They also cover a charge that lands while the owner's
   latest frame predates the peer's not-ready edge
-  (`stale-frame-at-charge-keeps`).
+  (`stale-frame-at-charge-keeps`), and a frame built before that edge but
+  delivered after the charge
+  (`TestInFlightFrameFromBeforeTheEdgeCannotTakeTheRG19140`).
 
 | Peer not-ready reason (readiness-only: no floor debt, peer at weight 255) | Source | Class |
 |---|---|---|
