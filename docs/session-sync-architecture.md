@@ -291,18 +291,51 @@ Measured in the #18550 review with the poll harness:
 | lapsed row, `ping; gre` | | 1 | 1 | 1 (counted, not delivered) |
 | lapsed row, `any-service` | | 1 | 0 | 1 (delivered) |
 
-**Promotion vs late import.** When the worker has promoted the row locally but
-the shared map still shows the older peer row, the #9678 gate cannot see the
-local owner and the import proceeds.
+**Promotion vs late import (#18552, closed).** A worker promotes a peer row in
+two steps. It flips its own table row to `SharedPromote`, then publishes the
+shared row. The #9678 gate reads only the shared row. So an import that ran
+between the two steps saw the older peer row and proceeded. It did the same if
+it re-read the shared row before the flip and published after the promotion.
+In that case:
 
-- The worker's own guard keeps the local forward row and never steers the late
+- The worker's own guard kept the local forward row and never steered the late
   forward translation.
-- The shared map is overwritten with the older peer row.
-- If the late row names a different translation, its synthesized reverse
-  companion is installed and its reply tuple is steered.
+- The shared map was overwritten with the older peer row.
+- If the late row named a different translation, `reserve_flow` retired the
+  flow's live allocation T1 while the worker kept forwarding on it. Its
+  synthesized reverse companion was installed and its reply tuple steered. The
+  stale-companion retirement deleted the promoted session's own reply
+  companion.
 
-This race, including a possible SNAT reservation free, is tracked in #18552.
+The promotion (`promote_synced_session_with_conntrack`) now holds the worker
+install permit for the key and its reply tuple from before the flip until after
+the shared publish and the sibling fan-out. It takes the permit with
+`try_acquire_installs`, which never blocks, as the new-flow install does.
+
+- **Import holds the lease first.** The promotion is refused. It is skipped for
+  that packet, which forwards on the synced hit. The row stays promotable, and
+  the next hit retries.
+- **Promotion holds the permit first.** The import's lease waits for it (up to
+  its 100 ms acquire budget, or it reports `RejectedGateBusy`). The import then
+  re-reads a `SharedPromote` row, which the #9678 gate stops.
+- **Origin bit.** The conntrack origin-bit clear uses
+  `update_session_cluster_synced_origin_under_permit`. The gated variant needs
+  an Idle tuple and would decline silently under the promotion's own permit.
+- **When it happens.** A different translation from a non-stale later send
+  takes a new incarnation of a reused 5-tuple on the old owner, while this node
+  still holds the predecessor. The generation check refuses only strictly older
+  sends, so it does not stop such a row. `docs/log/18552.md` has the full
+  conditions.
+
 Pinned by:
+
+- `afxdp/tests_promote_permit_18552.rs`: v4 and v6, with T1 seeded through the
+  import and the worker drain:
+  - a late import inside the flip..publish window, on the promoting thread;
+  - a concurrent late import on another thread, parked on the promotion's
+    permit;
+  - the converse: a held import lease defers the promotion, and the next hit
+    promotes.
 
 - `afxdp/tests_late_synced_publish_18550.rs`: v4 and v6; the late-publish,
   shared-local and worker-local shapes;

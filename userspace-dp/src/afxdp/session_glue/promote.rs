@@ -174,6 +174,29 @@ pub(in crate::afxdp::session_glue) fn should_keep_synced_hit_transient(
         && is_translated_forward_session_key(key, decision, metadata)
 }
 
+// #18552 test seam: runs once, on the promoting thread, after the worker row
+// flipped to `SharedPromote` and before the shared publish. That is the window
+// the coordinator's #9678 gate cannot see (it reads only the shared row), so a
+// cell can drive a peer import into it deterministically.
+#[cfg(test)]
+std::thread_local! {
+    static PROMOTE_AFTER_FLIP_HOOK_18552: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn set_promote_after_flip_hook_for_test(hook: impl FnOnce() + 'static) {
+    PROMOTE_AFTER_FLIP_HOOK_18552.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_promote_after_flip_hook() {
+    let hook = PROMOTE_AFTER_FLIP_HOOK_18552.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::afxdp) enum SessionHitVerdict {
     Owner,
@@ -188,6 +211,16 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 /// On successful promotion, the session is re-published to the
 /// kernel session map, mirrored into the shared maps under
 /// `SharedPromote` origin, and replicated to peer worker commands.
+///
+/// #18552: the worker-row flip and the shared publish run under the worker
+/// install permit for the session key and its reply tuple, taken without
+/// blocking. Without it a peer import could run between them, see the older
+/// peer row in the shared map, pass the coordinator's #9678 ownership gate
+/// and retire the flow's live NAT allocation. A refused permit (an HA import or
+/// delete holds the tuple lease, a sibling worker holds an install permit, or a
+/// map clear is fenced) skips the promotion for this packet only: the packet
+/// forwards on the synced hit and the row stays promotable, so the next hit
+/// retries (`resolve.rs` arms a deferred promotion on every such hit).
 ///
 /// The compatibility wrapper keeps the pre-#1346 13-argument shape for tests;
 /// the production variant adds the two conntrack fds to invalidate only origin.
@@ -218,6 +251,16 @@ fn promote_synced_session_with_conntrack(
     if fabric_ingress {
         promoted.fabric_ingress = true;
     }
+    // #18552: hold the install permit from before the flip until the shared
+    // publish and the sibling fan-out are done. An import's tuple lease then
+    // either refuses this promotion or waits for it and re-reads a shared row
+    // that is already `SharedPromote`, which its #9678 gate stops. Never
+    // blocks: a refusal is the same no-op as a flip that did not apply.
+    let Ok(install_permits) = crate::afxdp::bpf_map::global_tuple_gate()
+        .try_acquire_installs([key.clone(), reverse_session_key(key, decision.nat)])
+    else {
+        return promoted;
+    };
     // #13939/#17092: `promote_synced_with_origin` strips any FIN/RST; the
     // Owner-only `Defer::None` replay (`apply_deferred_owner_hit`) after the
     // authority verdict re-applies the close and propagates it.
@@ -231,6 +274,8 @@ fn promote_synced_session_with_conntrack(
         tcp_flags,
         ack,
     }) {
+        #[cfg(test)]
+        run_promote_after_flip_hook();
         // #10612 (M4): fence stale replays at promote-publish ingress. A row
         // that lingered through an unvalidated purge (purge no-op) must not be
         // published to shared/BPF/peer after its zones vanished. The local
@@ -247,11 +292,14 @@ fn promote_synced_session_with_conntrack(
         // The helper's promotion flips a peer-synced row to local ownership.
         // Clear only the origin bit in the conntrack mirror; counters,
         // timestamps, NAT state, and creation time remain untouched.
-        crate::afxdp::bpf_map::update_session_cluster_synced_origin(
+        // #18552: the `_under_permit` RMW, because the gated variant needs an
+        // Idle tuple and would decline under this promotion's own permit.
+        crate::afxdp::bpf_map::update_session_cluster_synced_origin_under_permit(
             shared.conntrack.v4,
             shared.conntrack.v6,
             key,
             false,
+            &install_permits,
         );
         // #1789: count a failed shared-promote publish (shim would miss the
         // key -> NO_SESSION degraded path for the promoted flow).
@@ -293,6 +341,8 @@ fn promote_synced_session_with_conntrack(
         );
         replicate_session_upsert(shared.peer_worker_commands, shared.worker_commands_by_id, &promoted_entry);
     }
+    // #18552: released only after the shared publish and the fan-out.
+    drop(install_permits);
     promoted
 }
 

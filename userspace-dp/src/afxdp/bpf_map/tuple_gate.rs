@@ -592,14 +592,26 @@ pub(crate) fn global_tuple_gate() -> Arc<TupleGate> {
 // `Arc<TupleGate>` into the worker and call the gate API through that handle
 // rather than reacquire this accessor. Permits and fences retain the Arc, so
 // explicit cross-thread gate operations keep using the same gate.
+// #18552: when the code under test reacquires this accessor internally (an HA
+// import on a spawned thread racing a worker promotion), the spawned thread
+// calls `adopt_tuple_gate_for_test` with the racing thread's handle first.
 #[cfg(test)]
 thread_local! {
-    static TEST_TUPLE_GATE: Arc<TupleGate> = Arc::new(TupleGate::new());
+    static TEST_TUPLE_GATE: std::cell::RefCell<Arc<TupleGate>> =
+        std::cell::RefCell::new(Arc::new(TupleGate::new()));
 }
 
 #[cfg(test)]
 pub(crate) fn global_tuple_gate() -> Arc<TupleGate> {
-    TEST_TUPLE_GATE.with(Arc::clone)
+    TEST_TUPLE_GATE.with(|gate| Arc::clone(&gate.borrow()))
+}
+
+/// #18552 test seam: make THIS thread's `global_tuple_gate()` resolve to
+/// `gate`, so production code that reacquires the accessor on a spawned test
+/// thread contends on the same gate as the thread that spawned it.
+#[cfg(test)]
+pub(crate) fn adopt_tuple_gate_for_test(gate: Arc<TupleGate>) {
+    TEST_TUPLE_GATE.with(|slot| *slot.borrow_mut() = gate);
 }
 
 /// #17201: read the process-global TupleGate poison-recovery counter.
