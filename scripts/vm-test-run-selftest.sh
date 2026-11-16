@@ -33,9 +33,11 @@
 #     it; every root run prints vm-proof=present, and no user run prints one;
 #   - a stall (the mock stops the command's whole process group for 5 s, the
 #     guest clock running on) reports paused-for >= 4 and the VOID line;
-#   - a frozen guest clock (the mock delays the start by 6 s, which the runner
-#     never sees) reports paused-for >= 3 and the VOID line; a quiet run of
-#     the same shape reports 0 and no VOID line;
+#   - unseen time (the mock delays the start by 6 s, which the runner never
+#     sees: it stands in for a guest clock that stops, and is equally the
+#     pre-command-delay false positive docs/testing.md names) reports
+#     paused-for >= 3 and the VOID line; a quiet run of the same shape reports
+#     0 and no VOID line;
 #   - --root with vm-proof absent (or unknown) is refused and the command does
 #     not run; --allow-unproven-root runs it with vm-proof=absent disclosed;
 #   - the proof predicate itself, run under `unshare -Ur` so a test file is
@@ -43,9 +45,11 @@
 #     boot ID; a stale boot ID, mode 644, a symlink or no file is absent, and
 #     so is a file outside the user namespace (not root-owned). SKIP without
 #     unshare -Ur.
-#   Mutations: the heartbeat term dropped (the stall reads 0), the wall term
-#   dropped (the frozen clock reads 0), the refusal dropped (the command
-#   runs), the boot-ID comparison dropped (a stale proof reads present).
+#   Mutations: the heartbeat term dropped, the wall term dropped (each KILLED
+#   only when the run completes normally and its report is well formed, shows
+#   the signal measured, and still reads below the threshold), the refusal
+#   dropped (the command runs), the boot-ID comparison dropped (a stale proof
+#   reads present). None of this pauses a real VM.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -245,9 +249,30 @@ pause_run() {
 	(cd "$tmp/repo" && env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" "${envs[@]}" \
 		bash "$under" --runner mock:runner --name lane --no-sync "${opts[@]}" -- "$command") \
 		>"$tmp/$tag.out" 2>"$tmp/$tag.err" || rc=$?
+	echo "$rc" >"$tmp/$tag.rc"
 	echo "$rc"
 }
 paused_of() { sed -n 's/^vm-test-run: paused-for=\([0-9]*\)s .*/\1/p' "$tmp/$1.err"; }
+# report_of <tag>: "<paused> <workstation> <runner monotonic> <heartbeat gaps>"
+# from a well-formed report line, or nothing.
+report_of() {
+	sed -n 's/^vm-test-run: paused-for=\([0-9]*\)s (workstation \([0-9.]*\)s, runner monotonic \([0-9.]*\)s, heartbeat gaps \([0-9.]*\)s) (#19142)$/\1 \2 \3 \4/p' "$tmp/$1.err"
+}
+# lost_signal <tag> <heartbeat|wall> <threshold>: the run completed normally
+# (status 0, "done"), its report is well formed, the named signal was
+# MEASURED (>= threshold + 1 s), and paused-for still reads below threshold.
+lost_signal() {
+	local rec p w g h
+	rec=$(report_of "$1")
+	[[ "$(cat "$tmp/$1.rc")" == 0 ]] && grep -qx 'done' "$tmp/$1.out" && [[ -n "$rec" ]] || return 1
+	read -r p w g h <<<"$rec"
+	[[ "$p" -lt "$3" ]] || return 1
+	if [[ "$2" == heartbeat ]]; then
+		awk -v h="$h" -v t="$3" 'BEGIN { exit !(h >= t + 1) }'
+	else
+		awk -v w="$w" -v g="$g" -v t="$3" 'BEGIN { exit !(w - g - 2 >= t + 1) }'
+	fi
+}
 voided() { grep -q '^vm-test-run: this run was paused or stalled' "$tmp/$1.err"; }
 
 # stall_shows <script> <tag>: a 5 s stall reads as paused-for >= 4, VOID.
@@ -256,7 +281,8 @@ stall_shows() {
 	rc=$(pause_run "$1" "$2" 'sleep 4; echo done' -- MOCK_STALL_S=5)
 	[[ "$rc" == 0 && "$(paused_of "$2")" -ge 4 ]] && voided "$2" && grep -qx 'done' "$tmp/$2.out"
 }
-# frozen_shows <script> <tag>: 6 s the runner never saw reads as >= 3, VOID.
+# frozen_shows <script> <tag>: 6 s the runner never saw (a start delay standing
+# in for a stopped guest clock) reads as >= 3, VOID.
 frozen_shows() {
 	local rc
 	rc=$(pause_run "$1" "$2" 'sleep 1; echo done' -- MOCK_PRE_DELAY_S=6)
@@ -268,9 +294,9 @@ else
 	bad "stall: $(tr '\n' '|' <"$tmp/stall.err")"
 fi
 if frozen_shows "$script" frozen; then
-	ok "frozen guest clock: 6 s the runner never saw reports paused-for=$(paused_of frozen)s and the VOID line"
+	ok "unseen time: 6 s the runner never saw reports paused-for=$(paused_of frozen)s and the VOID line"
 else
-	bad "frozen guest clock: $(tr '\n' '|' <"$tmp/frozen.err")"
+	bad "unseen time: $(tr '\n' '|' <"$tmp/frozen.err")"
 fi
 quiet_rc=$(pause_run "$script" quiet 'sleep 2; echo done')
 if [[ "$quiet_rc" == 0 && "$(paused_of quiet)" == 0 ]] && ! voided quiet; then
@@ -399,17 +425,19 @@ fi
 
 # #19142 mutations.
 if mutant no-heartbeat-term 's/^	p = (h > x) ? h : x$/	p = x/'; then
-	if ! stall_shows "$tmp/no-heartbeat-term.sh" m4; then
-		ok "mutation no-heartbeat-term: the stall no longer shows (paused-for=$(paused_of m4)s)"
+	stall_shows "$tmp/no-heartbeat-term.sh" m4 || true
+	if lost_signal m4 heartbeat 4; then
+		ok "mutation no-heartbeat-term: a normal run measured the gap but reported it below threshold ($(report_of m4))"
 	else
-		bad "mutation no-heartbeat-term: the stall cell still passes; it cannot see the defect"
+		bad "mutation no-heartbeat-term: not a clean lost-signal run (rc $(cat "$tmp/m4.rc"), report [$(report_of m4)]): $(tr '\n' '|' <"$tmp/m4.err")"
 	fi
 fi
 if mutant no-wall-term 's/^	p = (h > x) ? h : x$/	p = h/'; then
-	if ! frozen_shows "$tmp/no-wall-term.sh" m5; then
-		ok "mutation no-wall-term: the frozen guest clock no longer shows (paused-for=$(paused_of m5)s)"
+	frozen_shows "$tmp/no-wall-term.sh" m5 || true
+	if lost_signal m5 wall 3; then
+		ok "mutation no-wall-term: a normal run measured the unseen time but reported it below threshold ($(report_of m5))"
 	else
-		bad "mutation no-wall-term: the frozen-clock cell still passes; it cannot see the defect"
+		bad "mutation no-wall-term: not a clean lost-signal run (rc $(cat "$tmp/m5.rc"), report [$(report_of m5)]): $(tr '\n' '|' <"$tmp/m5.err")"
 	fi
 fi
 # shellcheck disable=SC2016 # a sed program: the $ is literal
