@@ -4080,9 +4080,13 @@ never lock an operator out of a remote box it manages.
   overlay never had: `applyFabricIPVLAN` runs only from a config apply on BOTH
   standalone and cluster nodes, so a netlink failure outlasting those five seconds
   (a parent NIC still being renamed after a power cycle) left the fabric absent
-  until an operator happened to commit. It is also the only owner that can cover
-  the DEFERRED (`OnXSKBound`) overlays, which are created after the apply has
-  returned and so cannot report failure to the commit at all. Started
+  until an operator happened to commit. It also covers the post-bind
+  re-ensure. With the userspace dataplane active, `applyFabricIPVLAN` removes
+  an existing overlay before the first XSK bind and re-creates it IN THE SAME
+  APPLY, so that failure does reach the commit. The deferral to `OnXSKBound` was
+  disabled in dcc59c67df because it broke forwarding (#17343). The `OnXSKBound`
+  callback then re-ensures the overlays after the bind, outside any apply, where
+  only this loop can retry a failure. Started
   unconditionally in `Run` alongside `proxyARPReassertLoop` /
   `raDeadSenderReassertLoop`, it takes `applySem` BEFORE reading `ActiveConfig`
   (#4001) and re-checks its gate inside the semaphore; the gate is one netlink name
