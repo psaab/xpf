@@ -60,8 +60,8 @@ import (
 // # The server half may still be in SYN_RECV (#19125)
 //
 // "A dialed connection we hold open is ESTABLISHED" is true of OUR half
-// only. connect() returns once the client has the SYN-ACK and has sent
-// the final ACK; the SERVER half leaves TCP_SYN_RECV only when the
+// only. connect() may return once the client has the SYN-ACK and has
+// sent the final ACK; the SERVER half leaves TCP_SYN_RECV only when the
 // kernel has processed that ACK. On loopback that is softirq work, so a
 // table read made right after the dial can land before it — more often
 // on a loaded box. A gate's harness hit it once in 640 RG moves: the CLI
@@ -69,10 +69,14 @@ import (
 // manual failover was never sent.
 //
 // So when, and only when, the server's row is found in TCP_SYN_RECV, the
-// client re-reads the table on a bounded backoff (synRecvRereadDelays19125,
-// about 1 s in total, honouring the dial's context) until the row is
-// ESTABLISHED, and then applies the unchanged checks: an ESTABLISHED row,
-// owned by uid 0. Nothing is attributed from the SYN_RECV row. Each
+// client re-reads the table on a bounded backoff (synRecvRereadDelays19125)
+// until the row is ESTABLISHED, and then applies the unchanged checks: an
+// ESTABLISHED row, owned by uid 0. The whole verification, every table
+// lookup AND every sleep, runs under ONE deadline: the earlier of the
+// caller's and now + synRecvBudget19125 (1 s). Each lookup is cancellable
+// (lookupPeerCtx19125: the batcher's wait is abandoned, its buffered reply
+// dropped), and a result that arrives after the deadline is never used
+// (Codex P2 on 9eb7a29006). Nothing is attributed from the SYN_RECV row. Each
 // re-read is a fresh table scan (the batcher answers a query only from a
 // read that started after it). Every OTHER non-established state is
 // refused at once, as before: TIME_WAIT's mini-socket reports uid 0 and
@@ -93,15 +97,20 @@ func VerifyLoopbackServerConn(conn net.Conn) error {
 	return verifyLoopbackServerConn(context.Background(), conn)
 }
 
-// synRecvRereadDelays19125 is the bounded backoff between re-reads of a
-// server row found in TCP_SYN_RECV (#19125); about 1 s in total.
-// synRecvSleep19125 waits one step, returning early with ctx's error.
-// Both are variables so the cells can drive them.
+// synRecvBudget19125 bounds the whole verification: every lookup and every
+// sleep, under the earlier of this and the caller's deadline (#19125).
+const synRecvBudget19125 = time.Second
+
+// synRecvRereadDelays19125 is the backoff between re-reads of a server row
+// found in TCP_SYN_RECV (#19125): 868 ms of sleeps, leaving the rest of
+// synRecvBudget19125 for the lookups. synRecvSleep19125 waits one step,
+// returning early with ctx's error. lookupPeerFn19125 is LookupPeer. All
+// three are variables so the cells can drive them.
 var (
 	synRecvRereadDelays19125 = []time.Duration{
 		1 * time.Millisecond, 2 * time.Millisecond, 5 * time.Millisecond, 10 * time.Millisecond,
-		20 * time.Millisecond, 50 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond,
-		300 * time.Millisecond, 300 * time.Millisecond,
+		20 * time.Millisecond, 40 * time.Millisecond, 80 * time.Millisecond, 160 * time.Millisecond,
+		250 * time.Millisecond, 300 * time.Millisecond,
 	}
 	synRecvSleep19125 = func(ctx context.Context, d time.Duration) error {
 		t := time.NewTimer(d)
@@ -113,7 +122,32 @@ var (
 			return nil
 		}
 	}
+	lookupPeerFn19125 = LookupPeer
 )
+
+// lookupPeerCtx19125 runs one socket-table lookup that ctx can abandon. The
+// batcher's own wait is not cancellable (socketscan.go), so the lookup runs
+// in a goroutine. Its reply channel is buffered, so an abandoned lookup
+// finishes with its scan and leaks nothing. A result is used only if ctx
+// is still live once it has arrived. The shared batcher and the server path
+// are unchanged (Codex P2 on 9eb7a29006).
+func lookupPeerCtx19125(ctx context.Context, remote, local net.Addr) (PeerIdentity, error) {
+	if err := ctx.Err(); err != nil {
+		return PeerIdentity{}, err
+	}
+	ch := make(chan PeerIdentity, 1)
+	fn := lookupPeerFn19125 // read here: an abandoned goroutine must not read the variable later
+	go func() { ch <- fn(remote, local) }()
+	select {
+	case <-ctx.Done():
+		return PeerIdentity{}, ctx.Err()
+	case id := <-ch:
+		if err := ctx.Err(); err != nil {
+			return PeerIdentity{}, err
+		}
+		return id, nil
+	}
+}
 
 // loopbackDialer19125 is DialContext's dialer, a zero net.Dialer in
 // production. It is a variable only so a cell can pin the client port and
@@ -131,17 +165,22 @@ func verifyLoopbackServerConn(ctx context.Context, conn net.Conn) error {
 	if !remote.IP.IsLoopback() {
 		return nil
 	}
-	id := LookupPeer(remote, conn.LocalAddr())
+	ctx, cancel := context.WithTimeout(ctx, synRecvBudget19125)
+	defer cancel()
+	start := time.Now()
+	id, lerr := lookupPeerCtx19125(ctx, remote, conn.LocalAddr())
 	rereads := 0
-	var waited time.Duration
-	for !id.OK && id.synRecv && rereads < len(synRecvRereadDelays19125) {
-		d := synRecvRereadDelays19125[rereads]
-		if synRecvSleep19125(ctx, d) != nil {
+	for lerr == nil && !id.OK && id.synRecv && rereads < len(synRecvRereadDelays19125) {
+		if synRecvSleep19125(ctx, synRecvRereadDelays19125[rereads]) != nil {
 			break
 		}
 		rereads++
-		waited += d
-		id = LookupPeer(remote, conn.LocalAddr())
+		id, lerr = lookupPeerCtx19125(ctx, remote, conn.LocalAddr())
+	}
+	if lerr != nil {
+		return fmt.Errorf("refusing to talk to the server at %s: its owner lookup did not complete (%v; %d re-reads over %s) — "+
+			"not sending management RPCs to an unverified local server (#14581, #19125)",
+			remote, lerr, rereads, time.Since(start).Round(time.Millisecond))
 	}
 	if !id.OK {
 		detail := id.Detail
@@ -149,7 +188,8 @@ func verifyLoopbackServerConn(ctx context.Context, conn net.Conn) error {
 			detail = "the kernel socket table did not attribute this server"
 		}
 		if id.synRecv {
-			detail += fmt.Sprintf("; still SYN_RECV after %d re-reads over %s (#19125)", rereads, waited)
+			detail += fmt.Sprintf("; still SYN_RECV after %d re-reads over %s (#19125)",
+				rereads, time.Since(start).Round(time.Millisecond))
 		}
 		return fmt.Errorf("refusing to talk to the server at %s: its owner could not be attributed (%s) — "+
 			"not sending management RPCs to an unverified local server (#14581)", remote, detail)
