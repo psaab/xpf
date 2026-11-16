@@ -79,6 +79,14 @@ func (m *Manager) RefreshInterfaceRowsForLink(cfg *config.Config, linuxName stri
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// #19110: first, before any early return (so a refused or failed refresh
+	// still invalidates), bump the link generation of each RETH data member
+	// whose device changed. A member's retained non-Ethernet exemption is
+	// valid only for the generation it was observed under. Resolved from the
+	// membership authority, like the reconcile below, and by name, the same
+	// lookups that reconcile makes under m.mu.
+	m.noteDataMemberLinksLocked(resolveDataMemberIfindexes(m.genericDataMemberCfg), linuxName)
+
 	current := m.lastSnapshot
 	if current == nil || current.Config == nil || !configuredInterfaceLinkName(current.Config, linuxName) {
 		return false, nil

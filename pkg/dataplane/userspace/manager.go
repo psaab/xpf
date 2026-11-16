@@ -119,6 +119,10 @@ type Manager struct {
 	shimProgID       shimProgIDCache
 	memberLogged     map[string]string
 	entryProgramHook func() *ebpf.Program
+	// memberLink is each RETH data member's link generation and last resolved
+	// ifindex (#19110), bumped by the link-refresh path on a device change.
+	// Guarded by mu.
+	memberLink map[string]memberLinkState
 	// attachInterfaceXDPHook, when non-nil, replaces bpfShim.AttachXDP in the
 	// interface-link refresh reconciliation (#14133) so tests can observe the
 	// attach attempt without privileged BPF state. Production leaves it nil.

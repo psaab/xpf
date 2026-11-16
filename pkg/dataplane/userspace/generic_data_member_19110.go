@@ -74,6 +74,17 @@ func (m *Manager) unintendedGenericXDP() map[int]string {
 func (m *Manager) refreshGenericDataMembers(cfg *config.Config) {
 	members := m.resolveGenericDataMembers(cfg)
 	m.mu.Lock()
+	// The compile records each member's resolved ifindex as the baseline of
+	// its link generation (missing_data_member_19110.go), from this same
+	// resolution: no further lookup.
+	links := make(map[string]int)
+	for _, name := range localDataMemberNames(cfg) {
+		links[name] = 0
+	}
+	for ifindex, name := range members {
+		links[name] = ifindex
+	}
+	m.noteDataMemberLinksLocked(links, "")
 	// This compile's config becomes the membership AUTHORITY. A later
 	// refresh or revalidation re-resolves THIS config's members, never its
 	// own snapshot's, so a stale retained publication cannot replace them

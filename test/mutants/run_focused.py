@@ -51,7 +51,9 @@ before that fix scored SURVIVED. It needs no go toolchain.
 
 Every verdict line names the target's own status (pass, fail, skip, absent)
 and the cell's UTC start and end, so a cell can be checked against the gate
-logs' runner pause windows.
+logs' runner pause windows. When a decisive rerun ran, those trailing fields
+are prefixed "initial run:" (they describe the focused run that timed out),
+and the rerun's own status, binary and window are in the verdict text.
 The raw `go test -json` output of every cell that is not KILLED is saved under
 <work>/logs/<label>.json for diagnosis.
 
@@ -350,8 +352,12 @@ def main():
             build_tail=(last.stdout + last.stderr)[-400:].replace("\n", " | ") if build else None,
             timedout=timedout, conf=conf, need=need, present=present, marks=marks, passes=passes, fails=fails,
             skips=skips, pkgfail=pkgfail, out=out, tgt=tgt, expect=expect, started=started, ended=ended)
-        print("== %s: %s [target %s] [killers %s] [nonce in %s] [%s-%s UTC]" % (
-            label, verdict, tstat, ",".join(killers) or "-", ",".join(sorted(present)), started, ended), flush=True)
+        # After a decisive rerun the verdict's parenthetical is the rerun's
+        # evidence; these fields stay the INITIAL focused run's, and say so.
+        ini = "initial run: " if conf is not None else ""
+        print("== %s: %s [%starget %s] [%skillers %s] [%snonce in %s] [%s%s-%s UTC]" % (
+            label, verdict, ini, tstat, ini, ",".join(killers) or "-", ini, ",".join(sorted(present)), ini,
+            started, ended), flush=True)
         if not verdict.startswith("KILLED by target") or "confirmed alone" in verdict:
             with open(os.path.join(logs, label + ".json"), "w") as fh:
                 fh.write("\n".join(raw))

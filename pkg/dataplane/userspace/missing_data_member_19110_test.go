@@ -623,3 +623,109 @@ func TestMissingDataMemberNonEthernetExclusionSurvivesStalenessAndIdentification
 	g.m.observeDataMembers()
 	wantReady19110(t, g.m, "a non-Ethernet member while the program is unidentified")
 }
+
+// nonEthernetMember19110 makes ge-0-0-1 a known non-Ethernet member at the
+// compile's ifindex (29), observes it, and checks the exemption holds.
+func nonEthernetMember19110(t *testing.T) *memberFixture19110 {
+	t.Helper()
+	f := newMemberFixture19110(t, false)
+	f.k.mu.Lock()
+	f.k.devs["ge-0-0-1"] = &fakeDev19110{ifindex: 29, notAttachable: true}
+	f.k.mu.Unlock()
+	f.m.observeDataMembers()
+	wantReady19110(t, f.m, "fixture: a non-Ethernet member")
+	return f
+}
+
+// replace19110 replaces ge-0-0-1 with an Ethernet device that has no shim.
+func (f *memberFixture19110) replace19110(ifindex int) {
+	f.k.mu.Lock()
+	f.k.devs["ge-0-0-1"] = &fakeDev19110{ifindex: ifindex}
+	f.k.mu.Unlock()
+}
+
+// linkEvent19110 is the production link-refresh entry for one RTNL event name.
+func (f *memberFixture19110) linkEvent19110(t *testing.T, name string) {
+	t.Helper()
+	if _, err := f.m.RefreshInterfaceRowsForLink(f.cfg, name); err != nil {
+		t.Fatalf("fixture: link refresh for %s: %v", name, err)
+	}
+}
+
+// User decision after codex-h: the retained non-Ethernet exemption is bound to
+// the member's LINK GENERATION. A member replaced by an Ethernet NIC with no
+// shim, under an UNCHANGED config, must become a blocker at once (inside the
+// freshness window), stay one with the tick loop stalled, and be reported by
+// the next tick for what it is.
+func TestMissingDataMemberReplacedDeviceDropsTheExemption19110(t *testing.T) {
+	f := nonEthernetMember19110(t)
+	f.replace19110(41)
+	f.linkEvent19110(t, "ge-0-0-1")
+	if ready, reasons := ready19110(f.m, true); ready {
+		t.Fatalf("a replaced member kept its exemption within the freshness window: the device changed (%v)", reasons)
+	}
+	wantNotReady19110(t, f.m, "replaced, no tick yet", "device changed")
+	f.k.advance(10 * memberVerdictMaxAge) // the tick loop is stalled
+	if ready, reasons := ready19110(f.m, true); ready {
+		t.Fatalf("a replaced member kept its exemption with the ticks stalled: the device changed (%v)", reasons)
+	}
+	f.m.observeDataMembers() // ticks resume
+	wantNotReady19110(t, f.m, "the next tick", "not-attached, ifindex 41")
+}
+
+// The daemon coalesces RTNL events to the newest NAME, so a member's own event
+// can be lost. A member whose ifindex changed is still bumped by the refresh's
+// re-resolution, whatever name the event carried.
+func TestMissingDataMemberCoalescedReplacementDropsTheExemption19110(t *testing.T) {
+	f := nonEthernetMember19110(t)
+	f.replace19110(41)
+	f.linkEvent19110(t, "ge-0-0-9") // the member's own event was coalesced into another name
+	f.k.advance(10 * memberVerdictMaxAge)
+	if ready, reasons := ready19110(f.m, true); ready {
+		t.Fatalf("a member whose ifindex changed under a coalesced event kept its exemption (%v)", reasons)
+	}
+}
+
+// A re-create that KEEPS its ifindex is caught by the event that names it.
+func TestMissingDataMemberSameIfindexRecreateDropsTheExemption19110(t *testing.T) {
+	f := nonEthernetMember19110(t)
+	f.replace19110(29)
+	f.linkEvent19110(t, "ge-0-0-1")
+	f.k.advance(10 * memberVerdictMaxAge)
+	if ready, reasons := ready19110(f.m, true); ready {
+		t.Fatalf("a same-ifindex re-create named by its own event kept the exemption (%v)", reasons)
+	}
+}
+
+// Control: a link event for an UNRELATED interface, with the member's device
+// unchanged, keeps the exemption, even under a stale verdict. The generation
+// moves on a change to THIS member's device, not on any event: otherwise every
+// link event would turn every non-Ethernet member into a transient blocker.
+func TestMissingDataMemberUnrelatedLinkEventKeepsTheExemption19110(t *testing.T) {
+	f := nonEthernetMember19110(t)
+	f.linkEvent19110(t, "ge-0-0-9")
+	f.k.advance(10 * memberVerdictMaxAge)
+	if ready, reasons := ready19110(f.m, true); !ready {
+		t.Fatalf("an unrelated link event dropped an unchanged member's exemption: %v", reasons)
+	}
+}
+
+// The FENCE: an observation that started under generation g, and whose lookup
+// still saw the OLD non-Ethernet device while the replacement's link event
+// bumped the generation, carries g. It must not publish an exemption for the
+// new device.
+func TestMissingDataMemberObservationRacingAReplacementIsFenced19110(t *testing.T) {
+	f := nonEthernetMember19110(t)
+	f.k.onLook["ge-0-0-1"] = func() {
+		f.k.mu.Lock()
+		delete(f.k.onLook, "ge-0-0-1") // fire once: the refresh below looks the member up too
+		f.k.mu.Unlock()
+		f.linkEvent19110(t, "ge-0-0-1") // the replacement's event lands mid-observation
+	}
+	f.m.observeDataMembers() // its lookup still reads the old non-Ethernet device
+	f.replace19110(41)
+	f.k.advance(10 * memberVerdictMaxAge)
+	if ready, reasons := ready19110(f.m, true); ready {
+		t.Fatalf("an observation that raced the replacement published an exemption for the new device (%v)", reasons)
+	}
+}

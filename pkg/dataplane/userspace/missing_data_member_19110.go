@@ -59,12 +59,20 @@ import (
 //         same netdev). This is pure config, so it holds under any verdict;
 //       - a member with known non-Ethernet framing (dataplane.ShimAttachRefused),
 //         classified from every lookup, whether or not the program could be
-//         identified. Framing is a property of the device, not of attachment,
-//         so the exclusion is kept across verdict staleness while the verdict
-//         was made against the CURRENT config. Every tick re-observes it, so a
-//         replacement device is reclassified on the next tick. A stalled tick
-//         loop can leave it standing; readiness must not do the I/O to
-//         re-check it.
+//         identified. Framing is a property of the DEVICE, not of attachment,
+//         so the exclusion is kept across verdict staleness, but only while
+//         the verdict was made against the CURRENT config AND the member's
+//         device is the one observed. Device identity is the member's LINK
+//         GENERATION (memberLinkState, user decision after codex-h): the
+//         link-refresh path bumps it on any device change for the member
+//         (noteDataMemberLinksLocked), and every observation is stamped with
+//         the generation read at pass start, BEFORE its lookup. Readiness
+//         keeps the exclusion only while the stamp equals the current
+//         generation, a plain comparison with no I/O. A replaced member
+//         becomes a blocker at once, within the freshness window too, and
+//         stays one with the tick loop stalled. An observation that races a
+//         replacement carries the OLD generation, so it cannot publish an
+//         exemption for the new device.
 //     These are the refresh path's structural attach exclusions
 //     (refreshStructuralAttachAdmission).
 //   - NO shim program loaded is its own state: the check is skipped, because
@@ -202,9 +210,64 @@ type shimProgIDCache struct {
 
 // memberObservation is one member's observation, with its own timestamp.
 type memberObservation struct {
-	at     time.Time
-	kind   string // "" positive evidence; "excluded:*" not required; else missing
-	detail string
+	at      time.Time
+	kind    string // "" positive evidence; "excluded:*" not required; else missing
+	detail  string
+	linkGen uint64 // the member's link generation when the pass STARTED, before the lookup
+}
+
+// memberLinkState is one data member's device lifecycle as the attach paths
+// last resolved it (#19110). gen counts device changes; ifindex is the last
+// resolved index (0: absent or unresolved). Guarded by m.mu.
+type memberLinkState struct {
+	gen     uint64
+	ifindex int
+}
+
+// noteDataMemberLinksLocked bumps the link generation of every configured data
+// member whose device changed. resolved maps each member's Linux name to its
+// ifindex as just resolved by name (absent: 0). A member's generation moves
+// when the link event names it (a re-create that kept its ifindex, or any
+// other change to that device), and when its ifindex differs from the last
+// one recorded (add, remove, re-create). The daemon coalesces RTNL events to
+// the newest name, so the ifindex comparison is what catches a member whose
+// own event was coalesced away. eventName is "" for the compile, which records
+// the baseline from the ifindexes it already resolved. Generations only grow,
+// and names that leave the configuration keep theirs: a verdict made against
+// another config is never served anyway. Caller holds m.mu.
+func (m *Manager) noteDataMemberLinksLocked(resolved map[string]int, eventName string) {
+	if len(resolved) == 0 {
+		return
+	}
+	if m.memberLink == nil {
+		m.memberLink = map[string]memberLinkState{}
+	}
+	for name, ifindex := range resolved {
+		st := m.memberLink[name]
+		if name == eventName || ifindex != st.ifindex {
+			st.gen++
+		}
+		st.ifindex = ifindex
+		m.memberLink[name] = st
+	}
+}
+
+// resolveDataMemberIfindexes resolves each configured data member by name;
+// an unresolvable member is 0. It takes no Manager lock.
+func resolveDataMemberIfindexes(cfg *config.Config) map[string]int {
+	names := localDataMemberNames(cfg)
+	if names == nil {
+		return nil
+	}
+	out := make(map[string]int, len(names))
+	for _, name := range names {
+		ifindex, err := ifindexByNameFn(name)
+		if err != nil {
+			ifindex = 0
+		}
+		out[name] = ifindex
+	}
+	return out
 }
 
 // memberXDPVerdict is one pass's verdict. Guarded by m.mu.
@@ -250,6 +313,13 @@ func (m *Manager) observeDataMembers() {
 	cfg := m.genericDataMemberCfg
 	prog := m.entryProgramLocked()
 	cache := m.shimProgID
+	// Each member's link generation, read BEFORE any lookup: an observation
+	// that races a device replacement carries the old generation, so it can
+	// never publish an exemption for the new device.
+	gens := make(map[string]uint64, len(m.memberLink))
+	for name, st := range m.memberLink {
+		gens[name] = st.gen
+	}
 	m.mu.Unlock()
 	members := localDataMembers(cfg)
 	v := memberXDPVerdict{cfg: cfg, prog: prog, obs: map[string]memberObservation{}}
@@ -265,7 +335,7 @@ func (m *Manager) observeDataMembers() {
 		}
 		for _, mem := range members {
 			at := memberNow() // before the lookup: the evidence is at least this old
-			o := memberObservation{at: at}
+			o := memberObservation{at: at, linkGen: gens[mem.linuxName]}
 			if mem.disabled {
 				o.kind, o.detail = "excluded:admin-disabled", "excluded: administratively disabled"
 			} else {
@@ -383,11 +453,13 @@ func (m *Manager) missingDataMemberReasonsLocked(peerAlive bool) []string {
 			continue // not required: pure config, under any verdict
 		}
 		o, observed := v.obs[mem.linuxName]
-		if observed && v.cfg == cfg && o.kind == "excluded:non-ethernet" {
-			continue // not required: framing, kept across staleness for this config
-		}
 		detail := stale
-		if detail == "" {
+		if observed && v.cfg == cfg && o.kind == "excluded:non-ethernet" {
+			if o.linkGen == m.memberLink[mem.linuxName].gen {
+				continue // not required: framing, for this config and this device, under any verdict age
+			}
+			detail = "unverified: the member's device changed after it was observed as non-Ethernet"
+		} else if detail == "" {
 			switch {
 			case !observed:
 				detail = "unverified: not observed yet"
