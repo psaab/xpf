@@ -60,6 +60,7 @@ func newPreActivateManager18559(t *testing.T) (*Manager, *haSendRecorder18559) {
 		2: {RGID: 2, Active: true},
 	}
 	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.publishedSnapshot = 1 // the live helper acknowledged a snapshot (#19167 fold 2)
 	rec := &haSendRecorder18559{}
 	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
 		if req.Type == "update_ha_state" && req.HAState != nil {

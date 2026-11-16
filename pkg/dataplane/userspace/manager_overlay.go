@@ -135,6 +135,31 @@ func (m *Manager) PublishRouteOverlaySnapshot(cfg *config.Config, overlay []conf
 // false while latched; without this bit a route-only republish would mark
 // scheduled DENY/REJECT rules inactive and renew the helper lease around them.
 func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (published bool, err error) {
+	outcome, err := m.PublishRouteOverlaySnapshotOutcome(cfg, overlay, schedulerState, failClosed)
+	return outcome == RouteOverlayPublished, err
+}
+
+// RouteOverlayOutcome is what a route overlay publish did (#19167 fold 2).
+type RouteOverlayOutcome int
+
+const (
+	// RouteOverlayRetained: nothing reached a running helper. Either there
+	// is no published snapshot yet, or the helper is down and the routes
+	// were folded into the retained snapshot for the restart replay (#16643),
+	// or the duplicate skip matched but no live helper holds a published
+	// snapshot. Also the outcome alongside any error.
+	RouteOverlayRetained RouteOverlayOutcome = iota
+	// RouteOverlayUnchanged: the rebuilt snapshot equals the one the live
+	// helper acknowledged, so that helper already holds these routes.
+	RouteOverlayUnchanged
+	// RouteOverlayPublished: the live helper acknowledged a new snapshot.
+	RouteOverlayPublished
+)
+
+// PublishRouteOverlaySnapshotOutcome is PublishRouteOverlaySnapshotWithLatch
+// with the outcome kept, so a caller that needs EVIDENCE the helper holds the
+// routes can tell "unchanged on this helper" from "retained only".
+func (m *Manager) PublishRouteOverlaySnapshotOutcome(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (outcome RouteOverlayOutcome, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	wasDebt := m.snapshotRetryDebtLocked()
@@ -168,14 +193,14 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 
 	if cfg == nil {
 		if m.lastSnapshot == nil {
-			return false, nil
+			return RouteOverlayRetained, nil
 		}
 		cfg = m.lastSnapshot.Config
 	}
 	if cfg == nil || m.lastSnapshot == nil {
 		// No published snapshot yet: the overlay is cached (deferred
 		// commit) and the next full apply will carry it.
-		return false, nil
+		return RouteOverlayRetained, nil
 	}
 	if m.proc == nil || m.proc.Process == nil {
 		// #16643: the helper is down, so nothing is enforced right now —
@@ -195,7 +220,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		// suppresses the deferred overlay commit so the actuator stays
 		// dirty and retries.
 		if schedulerState == nil && routeOnlyPublishHybrid(cfg, m.lastSnapshot.Config) {
-			return false, fmt.Errorf("refusing route-only publish: cfg content differs from the applied " +
+			return RouteOverlayRetained, fmt.Errorf("refusing route-only publish: cfg content differs from the applied " +
 				"snapshot; publishing would ACK a config whose snapshot sections were not rebuilt (#5680)")
 		}
 		next, _ := m.cloneRetainedSnapshotLocked()
@@ -218,13 +243,13 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		var routeErr error
 		next.Routes, next.LearnedRouteImportCapped, routeErr = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryNowLocked())
 		if routeErr != nil {
-			return false, fmt.Errorf("build route overlay snapshot: %w", routeErr)
+			return RouteOverlayRetained, fmt.Errorf("build route overlay snapshot: %w", routeErr)
 		}
 		next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
 		next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
 		if schedulerState != nil {
 			if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
-				return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
+				return RouteOverlayRetained, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
 			}
 			next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
 			next.schedulerActiveStateSet = true
@@ -243,7 +268,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		m.lastSnapshot = &next
 		m.rebuildNeighborIndex()
 		m.rebuildMonitoredIfindexes()
-		return false, nil
+		return RouteOverlayRetained, nil
 	}
 
 	// #5680: fail-closed partial-publish guard. A route-only publish rebuilds
@@ -276,7 +301,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// content fallback only rejects a genuinely divergent config, never a
 	// distinct-but-equal one.
 	if routeOnlyPublishHybrid(cfg, m.lastSnapshot.Config) {
-		return false, fmt.Errorf("refusing route-only publish: cfg content differs from the applied " +
+		return RouteOverlayRetained, fmt.Errorf("refusing route-only publish: cfg content differs from the applied " +
 			"snapshot; publishing would ACK a config whose snapshot sections were not rebuilt (#5680)")
 	}
 
@@ -285,7 +310,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 			slog.Warn("userspace: failed to disarm helper after refusing overlay publish",
 				"protocol_err", err, "err", disarmErr)
 		}
-		return false, fmt.Errorf("refusing route overlay publish to incompatible helper: %w", err)
+		return RouteOverlayRetained, fmt.Errorf("refusing route overlay publish to incompatible helper: %w", err)
 	}
 
 	next, _ := m.cloneRetainedSnapshotLocked()
@@ -322,7 +347,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// blackhole this issue is about.
 	next.Routes, next.LearnedRouteImportCapped, err = buildRouteSnapshotsWithRGPrimary(cfg, next.Interfaces, desiredOverlay, m.rgPrimaryNowLocked())
 	if err != nil {
-		return false, fmt.Errorf("build route overlay snapshot: %w", err)
+		return RouteOverlayRetained, fmt.Errorf("build route overlay snapshot: %w", err)
 	}
 	next.builtRouteOverlay = cloneRouteOverlay(desiredOverlay)
 	next.Interfaces = markConnectedRGPeerOwned(cfg, next.Interfaces, m.rgPrimaryNowLocked())
@@ -347,7 +372,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	// never carries scheduler state).
 	if schedulerState != nil {
 		if err := m.rebuildScheduledPolicySectionsWithLatchLocked(&next, cfg, schedulerCopy, failClosed); err != nil {
-			return false, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
+			return RouteOverlayRetained, fmt.Errorf("build policy overlay snapshot for scheduler state: %w", err)
 		}
 		next.schedulerActiveState = copyPolicySchedulerActiveState(schedulerCopy)
 		next.schedulerActiveStateSet = true
@@ -389,17 +414,23 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 		if schedulerState != nil {
 			m.commitPolicySchedulerActiveStateFromSnapshotLocked(&next)
 		}
-		return false, nil
+		// #19167 fold 2: "unchanged" is evidence that the helper holds these
+		// routes only when a live helper acknowledged a snapshot. Otherwise
+		// the hash describes nothing a running helper enforces.
+		if m.helperHoldsPublishedSnapshotLocked() {
+			return RouteOverlayUnchanged, nil
+		}
+		return RouteOverlayRetained, nil
 	}
 
 	var status ProcessStatus
 	// #2124: disarm before publishing an unsupported-config snapshot.
 	if err := m.disarmBeforeUnsupportedPublishLocked(&next); err != nil {
-		return false, err
+		return RouteOverlayRetained, err
 	}
 	m.consumeRevalidateAttachLocked(&publishSnap)
 	if err := m.requestApplySnapshotPrehashedLocked(&publishSnap, &status, pub.hash, pub.hashOK); err != nil {
-		return false, fmt.Errorf("publish route overlay snapshot: %w", err)
+		return RouteOverlayRetained, fmt.Errorf("publish route overlay snapshot: %w", err)
 	}
 	// The helper accepted the overlay snapshot, so commit any scheduler state
 	// it carries to the applied/show cache. Error returns above leave that
@@ -413,7 +444,7 @@ func (m *Manager) PublishRouteOverlaySnapshotWithLatch(cfg *config.Config, overl
 	}
 	slog.Info("userspace: route overlay snapshot published",
 		"generation", next.Generation, "overlay_routes", len(desiredOverlay))
-	return true, nil
+	return RouteOverlayPublished, nil
 }
 
 // RepublishCurrentCaptureAuthority republishes the manager's retained snapshot

@@ -8,6 +8,7 @@ import (
 	"github.com/vishvananda/netlink"
 
 	"github.com/psaab/xpf/pkg/coalesce"
+	"github.com/psaab/xpf/pkg/config"
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 	"github.com/psaab/xpf/pkg/routing"
 )
@@ -291,14 +292,17 @@ const (
 	// connectedRGRepublished: a snapshot was published and its FIB
 	// generation bump confirmed.
 	connectedRGRepublished connectedRGRepublishOutcome = iota
-	// connectedRGRepublishUnchanged: the rebuilt snapshot equals the last one
-	// the helper acknowledged (a duplicate skip with no FIB bump owed), so the
-	// helper already holds these routes. The duplicate gate is against the
-	// CURRENT helper's publication: a helper reset clears it.
+	// connectedRGRepublishUnchanged: the rebuilt snapshot equals the one the
+	// LIVE helper acknowledged (a duplicate skip with no FIB bump owed), so
+	// that helper already holds these routes. The publisher reports this only
+	// with a live helper holding a published snapshot, and a helper reset
+	// clears its dedup hash (#19167 fold 2).
 	connectedRGRepublishUnchanged
-	// connectedRGRepublishSkipped: nothing was published at all: the daemon
-	// is resetting, there is no store or active config, or the dataplane is
-	// not an overlay publisher.
+	// connectedRGRepublishSkipped: nothing reached a running helper. The
+	// daemon is resetting, there is no store or active config, the dataplane
+	// is not an overlay publisher, or the publisher only folded the routes
+	// into its retained snapshot (helper down, or no snapshot published yet;
+	// #19167 fold 2).
 	connectedRGRepublishSkipped
 	// connectedRGRepublishFailed: the publish or its FIB bump failed.
 	connectedRGRepublishFailed
@@ -318,13 +322,27 @@ func (d *Daemon) republishConnectedRGOutcome(reason string) connectedRGRepublish
 		return connectedRGRepublishSkipped
 	}
 	schedulerState, schedulerFailClosed := policySchedulerPublicationState(d.scheduler.Load(), time.Now())
-	published, err := pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
+	var routes dpuserspace.RouteOverlayOutcome
+	var err error
+	if op, ok := pub.(routeOverlayOutcomePublisher); ok {
+		routes, err = op.PublishRouteOverlaySnapshotOutcome(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
+	} else {
+		var published bool
+		published, err = pub.PublishRouteOverlaySnapshotWithLatch(cfg, d.ipmonActiveOverlay(), schedulerState, schedulerFailClosed)
+		routes = dpuserspace.RouteOverlayUnchanged
+		if published {
+			routes = dpuserspace.RouteOverlayPublished
+		}
+	}
 	if err != nil {
 		slog.Warn("HA connected-route republish failed; next ownership edge or commit retries",
 			"reason", reason, "err", err)
 		return connectedRGRepublishFailed
 	}
-	if !published && !d.pendingFIBBump {
+	if routes != dpuserspace.RouteOverlayPublished && !d.pendingFIBBump {
+		if routes == dpuserspace.RouteOverlayRetained {
+			return connectedRGRepublishSkipped
+		}
 		return connectedRGRepublishUnchanged
 	}
 	if _, err := pub.BumpFIBGeneration(); err != nil {
@@ -334,7 +352,18 @@ func (d *Daemon) republishConnectedRGOutcome(reason string) connectedRGRepublish
 		return connectedRGRepublishFailed
 	}
 	d.pendingFIBBump = false
+	if routes == dpuserspace.RouteOverlayRetained {
+		return connectedRGRepublishSkipped // the bump settled, but no helper holds the routes
+	}
 	return connectedRGRepublished
+}
+
+// routeOverlayOutcomePublisher is the route publisher's outcome-reporting form
+// (#19167 fold 2). A retained-only fold (helper down, no snapshot yet) is
+// "skipped", not "unchanged": it is no evidence a running helper holds the
+// routes.
+type routeOverlayOutcomePublisher interface {
+	PublishRouteOverlaySnapshotOutcome(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (dpuserspace.RouteOverlayOutcome, error)
 }
 
 // scheduleConnectedRGRepublish refreshes helper routes after an RG

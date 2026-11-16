@@ -568,6 +568,17 @@ func (a *LegacyDataPlaneAdapter) PublishRouteOverlaySnapshotWithLatch(cfg *confi
 	return m.PublishRouteOverlaySnapshotWithLatch(cfg, overlay, schedulerState, failClosed)
 }
 
+// PublishRouteOverlaySnapshotOutcome passes the route publisher's outcome
+// through (#19167 fold 2): published, unchanged on the live helper, or
+// retained only.
+func (a *LegacyDataPlaneAdapter) PublishRouteOverlaySnapshotOutcome(cfg *config.Config, overlay []config.RouteOverlayEntry, schedulerState map[string]bool, failClosed bool) (RouteOverlayOutcome, error) {
+	m, err := a.managerOrErr()
+	if err != nil {
+		return RouteOverlayRetained, err
+	}
+	return m.PublishRouteOverlaySnapshotOutcome(cfg, overlay, schedulerState, failClosed)
+}
+
 func (a *LegacyDataPlaneAdapter) BumpFIBGeneration() (uint32, error) {
 	m, err := a.managerOrErr()
 	if err != nil {

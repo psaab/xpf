@@ -1179,9 +1179,9 @@ func (m *Manager) helperExitedChanLocked() chan struct{} {
 // stop would leave exactly the stale readiness the issue is about; before this
 // existed the crash path cleared nothing at all.
 func (m *Manager) resetAfterHelperGoneLocked() {
-	// #19167 fold 1: the routes a pre-activation published went to the helper
-	// that is gone. Drop their readiness and move the epoch, so a publish
-	// still in flight for the old helper cannot open the RG on the next one.
+	// #19167: the routes a pre-activation published went to the helper that
+	// is gone. Move the epoch, so neither a publish still in flight for the
+	// old helper nor readiness reached under it can open the RG on the next.
 	m.dropTransferPreActivationRoutesLocked()
 	m.stopEventStreamLocked()
 	if m.syncCancel != nil {
@@ -1215,6 +1215,11 @@ func (m *Manager) resetAfterHelperGoneLocked() {
 	m.sessionRepairOverflowReplayOverflow = false
 
 	m.publishedSnapshot = 0
+	// #19167 fold 2: the dedup hash describes what the GONE helper acknowledged.
+	// Kept, a rebuilt snapshot equal to it would be skipped as "unchanged" for
+	// a replacement helper that never received it. The restart replay records
+	// the hash again for the new helper.
+	m.lastSnapshotHash = [32]byte{}
 	// #7465: a new helper starts with an EMPTY HA inventory, so the fact that the
 	// previous process had been told says nothing about this one. Without this
 	// clear the arm gate would pass on a restarted helper that has never been
