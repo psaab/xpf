@@ -1,0 +1,163 @@
+# Exported *ForTest* seams in non-test Go code (#17342), checked by
+# internal/fortestcensus (make go-fortest-seam-rule).
+#
+# The deadcode gate cannot see an uncalled EXPORTED method on a live type
+# (docs/testing.md, "What the deadcode gate cannot see"), so every exported
+# func or method whose name contains ForTest (ForTesting too) needs a row
+# here: <package dir>.<Name> or <package dir>.(<Receiver>).<Name>, a TAB,
+# and a one-line reason it is exported. A seam without a row fails; a row
+# naming no such seam fails. Nothing counts callers: when a seam's last
+# caller goes, delete the seam and its row in the same change (or unexport
+# it, and the deadcode gate takes over).
+#
+# Seeded 2026-11-16 from today's tree as-is, with each reason derived from
+# an exact `git grep` of its callers.
+pkg/api.(Server).HTTPHandlerForTest	cross-package seam: called by tests in pkg/daemon
+pkg/api.(Server).HTTPSCertForTest	cross-package seam: called by tests in pkg/daemon
+pkg/api.(Server).HTTPSHandlerForTest	cross-package seam: called by tests in pkg/daemon
+pkg/api.(Server).HTTPSLegDrainedForTest	cross-package seam: called by tests in pkg/daemon
+pkg/api.MutationBodyBudgetForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/api.MutationBodyBytesAdmittedForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/api.MutationBodyWaitersForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/api.PeerIdentityWaitersForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/api.PeerLookupPoolForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/api.PeerLookupSlotsInUseForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/api.SetDefaultTLSSelfSignedDirForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/authz.HostAddrScansForTest	cross-package seam: called by tests in pkg/api
+pkg/authz.SetPasswdPathForTest	cross-package seam: called by tests in pkg/api, pkg/daemon, pkg/grpcapi
+pkg/authz.SetProcNetTCPPathsForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/authz.SocketScansForTest	cross-package seam: called by tests in pkg/api
+pkg/clockskew.(Monitor).SetTickForTest	called by in-package tests only (exported as-is; #17342 seeded without renames); also named in non-test code in pkg/daemon
+pkg/cluster.(Manager).BuildHeartbeatForTesting	cross-package seam: called by tests in pkg/grpcapi
+pkg/cluster.(Manager).ClearPeerGroupStateForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).HBSuppressStartForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).HandlePeerHeartbeatForTesting	cross-package seam: called by tests in pkg/daemon, pkg/grpcapi
+pkg/cluster.(Manager).HandlePeerTimeoutForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).NotePeerWallClockForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi
+pkg/cluster.(Manager).PeerNeverSeenSyncFreshForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).SetFakePeerSyncSourceForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/cluster.(Manager).SetGroupStateForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi and 1 more
+pkg/cluster.(Manager).SetHBSuppressStartForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).SetHeartbeatEndpointForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).SetPeerGroupStateForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi and 1 more
+pkg/cluster.(Manager).SetPeerHeartbeatAgeForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(Manager).SetUnconfirmedTakeoverForTesting	cross-package seam: called by tests in pkg/cli, pkg/grpcapi
+pkg/cluster.(SessionSync).AckConfigApplyForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).ApplyQueuedMessagesForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).ConfigGenCounterForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).DeleteJournalGenerationV4ForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).DeleteJournalGenerationV6ForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).DischargeColdPrimeForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).FillSendQueueForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).InstallUnauthenticatedConnForTest	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).PrimePeerSnapshotIncarnationForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).ReceiverSessionTimeoutProfileForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).ScopedDeleteJournalEntryForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).ScopedDeleteJournalEntryV6ForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SentInstallGenerationV4ForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetConnectedForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetOverdueConfigApplyDebtForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetPeerDHCPLeaseSnapshotForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetPeerDHCPLeasesForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetPeerIPsecSAsForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetPeerReceiveAgeForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetPeerSnapshotProtocolVersionForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetPendingColdPrimeForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).SetScopedPolicyDeleteCapableForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).StampIngressFoldForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).StampNatScopeFoldForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.(SessionSync).TakeQueuedMessageTypeForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.SetFabricAuthGraceStatePathForTesting	cross-package seam: called by tests in pkg/daemon, pkg/grpcapi
+pkg/cluster.SetHeartbeatRestartRetryDelayForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.SetPeerEpochStatePathForTesting	cross-package seam: called by tests in pkg/daemon, pkg/grpcapi
+pkg/cluster.SetStateDirForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/cluster.SetUnkeyedAuthorityClocksForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon
+pkg/cluster.SetUnkeyedAuthorityGraceStatePathForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi
+pkg/cluster.SetUnkeyedAuthorityPersistForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/config.FRRNameAlias16867ForTest	cross-package seam: called by tests in pkg/frr
+pkg/config.SeedDNSAnswerCacheForTest	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon
+pkg/config.SetLookupAddressDNSNameForTest	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/configstore and 1 more
+pkg/config.ValidateClusterAuthKeyOverlapForTest	cross-package seam: called by tests in pkg/cluster
+pkg/configstore.(Store).CancelConfirmTimerForTesting	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon and 1 more
+pkg/configstore.(Store).ConfirmGenForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon
+pkg/configstore.(Store).InvokeRollbackTimerForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon
+pkg/configstore.(Store).SetAfterCandidateGateSampleForTesting	cross-package seam: called by tests in pkg/api, pkg/grpcapi
+pkg/configstore.(Store).SetCompiledForTesting	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon and 1 more
+pkg/configstore.(Store).SetConfirmPrevCfgForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/configstore.(Store).SetPersistRetryBackoffForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/configstore.(Store).SetWriteActiveForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/configstore.(Store).SetWriteActiveMarkerForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/configstore.HoldCommitCheckSlotForTest	cross-package seam: called by tests in pkg/eventengine
+pkg/dataplane.(Manager).SetDetachDebtForTest	cross-package seam: called by tests in pkg/api, pkg/dataplane/userspace
+pkg/dataplane.(Manager).SetLinkForTest	cross-package seam: called by tests in pkg/dataplane/userspace
+pkg/dataplane.SetDetachXDPFlagClearFnForTest	cross-package seam: called by tests in pkg/dataplane/userspace
+pkg/dataplane.SetXDPTransitionSeamForTest	cross-package seam: called by tests in pkg/dataplane/userspace
+pkg/dataplane/userspace.(EventStream).SetLastAppliedSequenceForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(Manager).ReleaseHeldRGsForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(Manager).ResolveIngressFoldForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(PolicySnapshotRecoveryFixtureForTest).ManagerForTest	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(PolicySnapshotRecoveryFixtureForTest).RegenerateNeighborForTest	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(PolicySnapshotRecoveryFixtureForTest).ScriptLostNextApplyAckForTest	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(PolicySnapshotRecoveryFixtureForTest).StateForTest	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.(PolicySnapshotRecoveryFixtureForTest).TickForTest	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.NewPolicySnapshotRecoveryFixtureForTest	cross-package seam: called by tests in pkg/daemon
+pkg/dataplane/userspace.NewSessionInventoryOverflowManagerForTest	cross-package seam: called by tests in pkg/cluster
+pkg/dataplane/userspace.StableRethLinkLocalTargetsForTest	cross-package seam: called by tests in pkg/daemon
+pkg/ddns.(Manager).OwnedForTesting	cross-package seam: called by tests in pkg/dhcpserver
+pkg/ddns.(Manager).OwnedKeysForTesting	cross-package seam: called by tests in pkg/dhcpserver
+pkg/ddns.(SurfaceAManager).SetCheckIPRootCAsForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/ddns.NewManagerForTesting	cross-package seam: called by tests in pkg/api; also named in non-test code in pkg/dhcpserver
+pkg/ddns.NewSurfaceAManagerForTesting	cross-package seam: called by tests in pkg/api
+pkg/denyaudit.ResetWindowsForTest	cross-package seam: called by tests in pkg/api
+pkg/dhcp.(Manager).CommitLeaseForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcp.(Manager).CommitLeaseWithPDsForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcp.(Manager).HasOptionStateForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/dhcp.(Manager).ProtectedIPv4PrefixesForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcp.(Manager).ProtectedIPv6PrefixesForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcp.(Manager).ReplaceDelegatedPrefixesForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcp.(Manager).RunningClientHandlesForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi
+pkg/dhcp.(Manager).SeedDelegatedPrefixesForTesting	cross-package seam: called by tests in pkg/api
+pkg/dhcp.(Manager).SeedLeaseForTesting	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon and 1 more
+pkg/dhcp.(Manager).SetKernelHasAddressForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/dhcp.(Manager).SetStateDirForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/dhcp.NewManagerForTesting	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon and 1 more
+pkg/dhcp.NewManagerForTestingWithHooks	called by in-package tests only (exported as-is; #17342 seeded without renames); also named in non-test code in pkg/dhcp
+pkg/dhcp.SetRecompileDebounceForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcpserver.(Manager).ApplyFailedForTesting	cross-package seam: called by tests in pkg/daemon; also named in non-test code in pkg/daemon
+pkg/dhcpserver.(Manager).SetKeaOwnerLookupForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/dhcpserver.(Manager).SetLeaseSyncSeamsForTesting	cross-package seam: called by tests in pkg/cli, pkg/cluster, pkg/daemon and 1 more
+pkg/dhcpserver.(Manager).SetUnitActiveForTesting	cross-package seam: called by tests in pkg/cli, pkg/grpcapi
+pkg/dhcpserver.(Manager).SetWarnForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/dhcpserver.NewDDNSManagerForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/dhcpserver.NewManagerForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/factoryreset.RedirectWipePathsForTesting	cross-package seam: called by tests in pkg/daemon, pkg/grpcapi
+pkg/frr.ManagedSectionMarkersForTest	cross-package seam: called by tests in pkg/daemon
+pkg/frr.NewForTest	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon and 1 more
+pkg/frr.SetFRRGroupResolverForTest	cross-package seam: called by tests in pkg/daemon, pkg/factoryreset
+pkg/fsatomic.SetAfterRenameSyncDirForTesting	cross-package seam: called by tests in pkg/cluster, pkg/configstore, pkg/upgrade
+pkg/fsatomic.SetRenameFileForTesting	cross-package seam: called by tests in pkg/cluster, pkg/configstore, pkg/upgrade
+pkg/ipsec.(Manager).SetSwanctlForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/linuxsock.(PpollRecv).AttachPollFnForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/linuxsock.(PpollRecv).AttachRecvFnForTest	no caller today; kept: it is the only setter of the recvFn field that PpollRecv.Recv branches on (#17231), so deleting it orphans a product-code branch and belongs with a pkg/linuxsock change, not a seam cleanup
+pkg/linuxsock.NewPpollRecvForTest	cross-package seam: called by tests in pkg/daemon, pkg/lldp
+pkg/lldp.FailIfSessionForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/lldp.SetInterfaceByNameForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/lldp.SetInterfacesForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/logging.(LocalLogWriter).SyncForTest	called by in-package tests only (lw.SyncForTest in pkg/logging tests; exported as-is; #17342 seeded without renames)
+pkg/logging.(TraceWriter).SyncForTest	cross-package seam: called by tests in pkg/daemon (daemon_flowtrace_3932_test.go, on d.traceWriterPtr) and pkg/logging
+pkg/logging.SetTraceLogDirForTest	cross-package seam: called by tests in pkg/daemon
+pkg/natpoolalarm.(Monitor).SetTickForTest	called by in-package tests only (exported as-is; #17342 seeded without renames); also named in non-test code in pkg/daemon
+pkg/networkd.ResetReloadDebtForTest	cross-package seam: called by tests in pkg/dataplane
+pkg/osident.SetPasswdPathForTest	called only from non-test code in pkg/authz (a seam that wraps it)
+pkg/routing.NewManagerWithLinkAndTermOpsForTest	cross-package seam: called by tests in pkg/daemon; also named in non-test code in pkg/routing
+pkg/routing.NewManagerWithLinkOpsForTest	cross-package seam: called by tests in pkg/cli, pkg/cluster, pkg/daemon and 2 more; also named in non-test code in pkg/routing
+pkg/routing.NewManagerWithLinkTermAndRuleOpsForTest	cross-package seam: called by tests in pkg/daemon
+pkg/routing.NewManagerWithRouteListerForTest	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi
+pkg/routing.NewManagerWithRuleOpsForTest	cross-package seam: called by tests in pkg/daemon
+pkg/routing.SetLearnedRouteListFnForTest	cross-package seam: called by tests in pkg/dataplane/userspace
+pkg/scheduler.(Scheduler).LatchRepublishForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/scheduler.(Scheduler).SetTickIntervalForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/upgrade.(SignalGuard).DeliverForTest	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/vrrp.(Manager).SeedInstanceForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/vrrp.SendGARPReservedModeForTesting	cross-package seam: called by tests in pkg/daemon
+pkg/vrrp.SetGARPSeamsForTesting	cross-package seam: called by tests in pkg/daemon

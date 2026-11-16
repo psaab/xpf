@@ -611,6 +611,11 @@ bad idea".
   `ForTest` seams only); stale rows red, so the list only shrinks.
   The seeded `LEGACY-DEBT` baseline is pre-existing debt to delete
   per-package with its row — never a place to park new dead code.
+  Its blind spot: an uncalled EXPORTED method on a type that reaches an
+  interface reads reachable (measured, `docs/testing.md` "What the deadcode
+  gate cannot see"). Exported `*ForTest*` seams are therefore listed with a
+  reason in `scripts/go-fortest-seams.allow` (`make go-fortest-seam-rule`,
+  #17342); delete a seam and its row with its last caller.
 
 ## API shape discipline
 

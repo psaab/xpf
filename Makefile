@@ -1751,19 +1751,19 @@ go-deadcode-gate:
 test-go-deadcode-gate-lib:
 	bash ./scripts/go-deadcode-gate-selftest.sh
 
-# #17342: every *ForTest* hook in non-test Go code has a caller, or a
-# baseline row with its defining file and a reason
-# (scripts/go-fortest-liveness.allow). A Go test (internal/fortestcensus):
-# references are identifiers resolved by go/parser + go/types, so comments
-# and strings never count, and hooks are keyed by package, receiver and name.
-# It runs in `make test-go`; these targets run it alone (the census, or its
-# fixture cells). Needs the Go toolchain: run it on a test runner.
-.PHONY: go-fortest-liveness-census test-go-fortest-liveness-census-lib
-go-fortest-liveness-census:
-	$(GO) test -count=1 -run '^TestForTestHooksAreLiveInThisModule17342$$' ./internal/fortestcensus/
+# #17342: every EXPORTED *ForTest* func or method in non-test Go code has a
+# row with a reason in scripts/go-fortest-seams.allow, and every row names one
+# that exists. Purely syntactic (go/parser; nothing counts callers): the guard
+# for the class the deadcode gate cannot see, an uncalled exported method on a
+# live type (docs/testing.md). A Go test (internal/fortestcensus); it runs in
+# `make test-go`, and these targets run it alone (the rule, or its fixture
+# cells). Needs the Go toolchain: run it on a test runner.
+.PHONY: go-fortest-seam-rule test-go-fortest-seam-rule-lib
+go-fortest-seam-rule:
+	$(GO) test -count=1 -run '^TestExportedForTestSeamsHaveARow17342$$' ./internal/fortestcensus/
 
-test-go-fortest-liveness-census-lib:
-	$(GO) test -count=1 -run '^TestForTestCensus' ./internal/fortestcensus/
+test-go-fortest-seam-rule-lib:
+	$(GO) test -count=1 -run '^TestForTestSeamRule' ./internal/fortestcensus/
 
 test-ignored-cell-census-lib:
 	bash ./test/incus/ignored-cell-census-selftest.sh
