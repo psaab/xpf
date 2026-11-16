@@ -69,8 +69,10 @@ pins this layout with a crate-wide census:
 - `poll_descriptor/frag_assoc.rs`: the flowless-fragment NAT retry (#10957) makes
   its own `source_nat_decision_for_flow(...)` decision and DROPS the fragment on
   any failure, which is fail-closed. It does not call
-  `record_source_nat_failure`, so a pool failure there leaves no source-NAT
-  exception: a counting gap, not a fail-open.
+  `record_source_nat_failure`. A pool failure there is counted only by the
+  generic `nat_frag_untranslated_dropped` (shared with the retry's other drop
+  reasons), with no `nat_alloc_fail` and no source-NAT exception. That is a
+  visibility gap, not a fail-open (#19146).
 
 > #3121 reduction (was four sites): NPTv6 outbound source translation now
 > COMPOSES with destination NAT. Each path (the normal new-session Permit-NAT
