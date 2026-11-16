@@ -1,3 +1,4 @@
+vrf_session_identity_doc_guard	vrf_session_identity_doc_claims_still_match_the_code	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
 xpf-userspace-dp	afxdp::coordinator::idle_lease_sync_8121::tests::a_shared_pool_exports_its_lease_once_8121	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::idle_lease_sync_8121::tests::an_import_routes_by_pool_name_and_counts_an_unknown_pool_8121	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::inject::inject_length_tests::at_max_packet_length_is_accepted	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -65,7 +66,6 @@ xpf-userspace-dp	afxdp::coordinator::tests::aggregate_cos_waterfill_min_excludes
 xpf-userspace-dp	afxdp::coordinator::tests::aggregate_cos_waterfill_min_max_sentinel_when_no_candidate	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::bind_failure_cause_survives_the_failclosed_teardown_8558	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::bind_incomplete_leaves_no_bound_sibling_8388	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::tests::both_paths_open_full_seven_pin_bundle_before_ok_6243	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::bringup_replay_reads_the_live_map_and_still_filters_purged_tunnels_8157	coordinator replay path; wrapping_add only constructs a distinct fixture key, not the #9499 overflow oracle
 xpf-userspace-dp	afxdp::coordinator::tests::build_cos_owner_worker_by_queue_falls_back_when_no_ready_workers_exist	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::build_cos_owner_worker_by_queue_prefers_lowest_worker_with_tx_binding	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -131,7 +131,6 @@ xpf-userspace-dp	afxdp::coordinator::tests::queue_warm_pass_skips_tunnel_routes	
 xpf-userspace-dp	afxdp::coordinator::tests::queue_warm_pass_skips_when_owning_rg_inactive	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::queue_warm_pass_warms_fabric_peer_over_parent_ifindex	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_all_mandatory_maps_open_advances_published_generation	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::tests::reconcile_all_seven_pin_faults_lock_stage_and_binding_strings_6243	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_bind_incomplete_clears_all_records_6242	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_build_failure_returns_integrity_err_and_keeps_prior_generation_3789	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_empty_optional_pins_advance_published_generation	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -140,11 +139,9 @@ xpf-userspace-dp	afxdp::coordinator::tests::reconcile_mandatory_map_open_failure
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_missing_pin_returns_map_setup_err_3789	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_missing_session_pin_keeps_prior_generation_published	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_none_snapshot_refreshes_bindings_clearing_reset_survivor_fields	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::tests::reconcile_partial_spawn_failure_preserves_launched_records_6242	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_policy_references_undefined_zone_still_fails_closed_3402	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_post_teardown_worker_spawn_failure_fails_closed_4952	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_present_conntrack_pin_open_failure_keeps_prior_generation	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::tests::reconcile_present_dnat_pin_open_failure_keeps_prior_generation	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_present_optional_pins_open_ok_advance_generation	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_snapshot_integrity_error_preserves_prior_generation_and_state	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::reconcile_with_none_snapshot_reaches_no_snapshot_early_exit	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -175,7 +172,6 @@ xpf-userspace-dp	afxdp::coordinator::tests::routing_domain_7160::routing_domains
 xpf-userspace-dp	afxdp::coordinator::tests::routing_domain_7160::synced_routing_domain_resolves_through_the_logical_unit	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::session_delete_fan_out_sheds_dead_workers_9900	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::shim_maps_view_places_configured_uncovered_ingress_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::tests::spawn_failure_does_leave_bound_siblings_8388	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::spawn_supervised_aux_catches_non_string_panic_payload	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::spawn_supervised_aux_catches_string_panic_and_returns_cleanly	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::tests::spawn_supervised_aux_runs_body_to_completion_when_no_panic	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -226,7 +222,6 @@ xpf-userspace-dp	afxdp::coordinator::wg_control::kernel_path::tests::disposition
 xpf-userspace-dp	afxdp::coordinator::wg_control::kernel_path::tests::ingress_classification_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::kernel_path::tests::inner_destination_parses_both_families_and_refuses_short_headers_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::kernel_path::tests::locality_excludes_interface_nat_like_the_shim_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
-xpf-userspace-dp	afxdp::coordinator::wg_control::kernel_path::tests::v4_key_matches_the_shims_native_endian_parse_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::attempt_give_up_ignores_same_pass_stale_actions	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::bind_wg_socket_requests_pktinfo_before_any_datagram_9594	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::wg_control::tests::canonicalize_endpoint_passthrough	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
@@ -282,3 +277,19 @@ xpf-userspace-dp	afxdp::coordinator::worker_manager::records_authority_tests_720
 xpf-userspace-dp	afxdp::coordinator::worker_manager::records_authority_tests_7209::d_stop_and_clear_signals_every_worker_before_joining_any_7209	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::worker_manager::records_authority_tests_7209::f_a_real_join_handle_never_outlives_its_record_7209	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
 xpf-userspace-dp	afxdp::coordinator::worker_manager::records_authority_tests_7209::g_clearing_records_while_a_thread_is_un_joined_fails_loudly_7209	coordinator lifecycle/control-plane path; no #9499 wrapping/debug_assert invariant
+xpf-userspace-dp	afxdp::session_glue::tests::purge_translated_synced_hit_releases_nat64_reservation_5295	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	afxdp::tests_bindless_fence_ordering_12904::fenced_miss_publishes_no_session_and_holds_no_pool_identity_12904	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	afxdp::tests_iface_nat64_14367::interface_then_nat64_is_refused_14367	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	afxdp::tests_nat64_overlap_8115::a_nat64_mint_is_refused_when_a_source_pool_owns_the_identity_8115	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	afxdp::tests_nat64_overlap_8115::a_source_nat_mint_is_refused_when_a_nat64_prefix_owns_the_identity_8115	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	afxdp::tests_synced_iface_15146::a_synced_interface_import_is_refused_when_a_nat64_flow_owns_the_identity_15146	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::napt64_without_deterministic_stays_round_robin	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_10788_untracked_release_leaves_idle_bib_lease	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_15283_pool_port_range_is_honoured	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_15283_range_change_resets_allocator	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_4512_foreign_pool_addr_skips_reserve	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_4512_non_nat64_decision_reserves_nothing	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_4512_reverse_entry_reserves_nothing	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_4512_synced_session_reserves_translated_port	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_4518_new_rule_has_no_previous_to_reuse	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed
+xpf-userspace-dp	nat64::tests::nat64_4518_pool_change_resets_allocator	RED ON MASTER IN BOTH PROFILES (#19166): fails alone in --release too, so not a debug-leg find; leg 1 keeps it red; restore to debug-leg.tests when #19166 is fixed

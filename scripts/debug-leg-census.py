@@ -277,18 +277,31 @@ def validate(root: Path, listed: set[tuple[str, str]], ignored: set[tuple[str, s
     family = {key for key in live if any(token in key[1] for token in FAMILY_TOKENS)}
     family_ignored = family & ignored
     family_runnable = family & runnable
+    # #19163: every drift equation is evaluated before failing. Raising on the
+    # first one (the ignored equation, checked first) reported 9 cells and
+    # masked 1911 unregistered and 99 stale ones, so the registries drifted
+    # for two weeks behind a failure that looked small.
+    drift: list[str] = []
     if tests & ignored:
-        raise CensusError(f"debug-leg.tests has missing/ignored entries: [{sample_keys(tests & ignored)}]")
+        drift.append(f"debug-leg.tests has missing/ignored entries: [{sample_keys(tests & ignored)}]")
     if excluded & ignored:
-        raise CensusError(f"debug-leg.excluded has missing/ignored entries: [{sample_keys(excluded & ignored)}]")
-    require_set_equal("ignored family equation X = F intersection I", family_ignored, ignored_registry)
-    require_set_equal("family partition A union E = F intersection R", family_runnable, tests | excluded)
+        drift.append(f"debug-leg.excluded has missing/ignored entries: [{sample_keys(excluded & ignored)}]")
+    for label, actual, expected in (
+        ("ignored family equation X = F intersection I", family_ignored, ignored_registry),
+        ("family partition A union E = F intersection R", family_runnable, tests | excluded),
+    ):
+        try:
+            require_set_equal(label, actual, expected)
+        except CensusError as exc:
+            drift.append(str(exc))
     if tests & excluded:
-        raise CensusError(f"family partition A intersection E is non-empty: [{sample_keys(tests & excluded)}]")
+        drift.append(f"family partition A intersection E is non-empty: [{sample_keys(tests & excluded)}]")
     if tests - runnable:
-        raise CensusError(f"debug-leg.tests has missing live entries: [{sample_keys(tests - runnable)}]")
+        drift.append(f"debug-leg.tests has missing live entries: [{sample_keys(tests - runnable)}]")
     if excluded - runnable:
-        raise CensusError(f"debug-leg.excluded has missing live entries: [{sample_keys(excluded - runnable)}]")
+        drift.append(f"debug-leg.excluded has missing live entries: [{sample_keys(excluded - runnable)}]")
+    if drift:
+        raise CensusError(f"{len(drift)} registry check(s) failed:\n  - " + "\n  - ".join(drift))
     raw_selected = {}
     for target, path_value in tests:
         raw_selected.setdefault(path_value, []).append(target)
