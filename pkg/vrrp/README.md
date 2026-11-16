@@ -767,6 +767,20 @@ source cannot put a valid same-family advert on the wire (`sendPacket` errors),
 so the peer never receives an advert from it and only one side steps down; the
 source re-resolves on the advert-send path and a healthy node re-elects cleanly.
 
+**Both sources unresolved: no tie-break at all (#18716).** "Only one side
+steps down" assumes one side can send a same-family advert. When NEITHER node
+has a non-VIP IPv4 on the interface (VIPs are excluded from the advert source),
+no IPv4 advert is ever sent, the IPv6 adverts are ignored by a v4-bearing
+instance, and two equal-priority MASTERs both stay MASTER, both holding the
+VIPs. The daemon's legacy-mode demotion reaches equal priority on every RG move
+(the new primary forces MASTER at 200 while the old one is still at 200), so
+there the old master's priority-0 resign is what ends it. With an unresponsive
+helper that resign now goes first (`pkg/daemon/README.md`, "Legacy VRRP mode:
+the resign goes first"). `legacy_equal_priority_18716_test.go` pins the three
+equal-priority outcomes with real run loops, and that the resign hands the VIP
+over break-before-make: its priority-0 advert is never sent while it still
+holds the VIP.
+
 ## Instance identity — kernel name + family key (#5083)
 
 `CollectInstances` (the generic, interface-level collector) must produce a

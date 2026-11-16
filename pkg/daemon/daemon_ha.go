@@ -835,8 +835,9 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// GARP/NA re-announce and clears the RA/DHCP services), skip the
 		// peer-barrier demotion prep (there is no live helper to drain), and
 		// bound the helper-side demotion. The healthy path keeps the #18563
-		// ordering unchanged. Direct (no-RETH-VRRP) mode only: in legacy
-		// VRRP mode the VIPs follow the VRRP resign below (#18716).
+		// ordering unchanged. In legacy VRRP mode the VIPs follow the VRRP
+		// resign, so the same edge resigns the RETH VRRP FIRST instead
+		// (#18716, below).
 		//
 		// The release covers EVERY RG, not just this event's: cluster events
 		// are handled one at a time, so a sibling RG demoted in the same
@@ -858,25 +859,48 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// below is bounded, so the two cannot disagree. The fence ack after
 		// the write re-samples it fresh (helperDownFenceSilentAck), because
 		// by then the entry sample may be seconds old.
-		helperDownDemotion := clusterDemotionEdge && noRethVRRP && d.helperDownForDemotion()
-		controlSilentAtEntry := helperDownDemotion && d.helperControlSilentForPrep()
+		//
+		// #18716, legacy VRRP mode: there the VIPs follow the RETH VRRP
+		// resign, which used to run only AFTER the 5 s prep. Meanwhile the
+		// new primary forces MASTER at priority 200 while this node is still
+		// MASTER at 200, and the IPv4 tie-break decides: no window, the VIP
+		// left on this (wedged) node, or, without a non-VIP IPv4 on the RETH
+		// member, both MASTER. So with the helper down, the priority-0
+		// resign goes FIRST (the peer takes over on it within milliseconds),
+		// for every RG this node no longer owns, and then the same
+		// prep-skip and bounded write as direct mode. A healthy helper keeps
+		// the #485 order: prep, resign, write.
+		//
+		// The legacy arm keys on the same edge as the resign it moves
+		// (primary to secondary or secondary-hold), so it resigns nothing
+		// the old order would not have.
+		rethResignEdge := ev.OldState == cluster.StatePrimary &&
+			(ev.NewState == cluster.StateSecondary || ev.NewState == cluster.StateSecondaryHold)
+		helperDown := clusterDemotionEdge && d.helperDownForDemotion()
+		helperDownDemotion := helperDown && noRethVRRP
+		legacyHelperDown := helperDown && !noRethVRRP && rethResignEdge
+		controlSilentAtEntry := helperDown && d.helperControlSilentForPrep()
 		if helperDownDemotion {
 			slog.Warn("cluster: demoting with an unresponsive helper; releasing VIPs before helper-side demotion (#18701)",
 				"rg", ev.GroupID, "helper", d.helperElectionReason(), "control_silent", controlSilentAtEntry)
 			d.releaseDirectVIPsHelperDown("cluster-secondary-helper-down")
 		}
-		if clusterDemotionEdge && d.dataplane() != nil && !controlSilentAtEntry {
-			d.tryPrepareUserspaceRGDemotion(ev.GroupID)
-		}
 		// #6177 item 1: capture the RETH resign barrier so the fence verdict
 		// below can be released on the VIPs actually leaving the interface,
 		// not merely on the resignation having been signalled.
 		var rethResign vipReleaseBarrier
-		if !noRethVRRP {
-			if ev.OldState == cluster.StatePrimary &&
-				(ev.NewState == cluster.StateSecondary || ev.NewState == cluster.StateSecondaryHold) {
-				rethResign = d.resignRethRG(ev.GroupID)
-			}
+		rethResignDone := false
+		if legacyHelperDown {
+			slog.Warn("cluster: demoting with an unresponsive helper in legacy VRRP mode; resigning RETH VRRP before helper-side demotion (#18716)",
+				"rg", ev.GroupID, "helper", d.helperElectionReason(), "control_silent", controlSilentAtEntry)
+			rethResign = d.resignLostRethRGsHelperDown(ev.GroupID)
+			rethResignDone = true
+		}
+		if clusterDemotionEdge && d.dataplane() != nil && !controlSilentAtEntry {
+			d.tryPrepareUserspaceRGDemotion(ev.GroupID)
+		}
+		if !noRethVRRP && !rethResignDone && rethResignEdge {
+			rethResign = d.resignRethRG(ev.GroupID)
 		}
 		// Deactivation: blackhole routes first (if transitioning
 		// to inactive), then clear rg_active.
@@ -903,12 +927,13 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 					d.tryPrepareUserspaceRGDemotion(ev.GroupID)
 				}
 				var err error
-				if helperDownDemotion {
-					// #18701/#18715: bounded only when the control socket was
-					// silent at entry, and even then the real result is awaited
-					// if the socket answers by the time the bound expires. A
-					// failed or abandoned write leaves the apply unrecorded, so
-					// the reconcile loop retries it, as for any failed apply.
+				if helperDown {
+					// #18701/#18715 (#18716: legacy mode too): bounded only
+					// when the control socket was silent at entry, and even
+					// then the real result is awaited if the socket answers by
+					// the time the bound expires. A failed or abandoned write
+					// leaves the apply unrecorded, so the reconcile loop
+					// retries it, as for any failed apply.
 					err = d.helperDownRGActiveWrite(ctx, rt.HA(), ev.GroupID, cur, controlSilentAtEntry)
 				} else {
 					err = rt.HA().SetRGActive(ctx, ev.GroupID, cur)
@@ -916,6 +941,13 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 				var silentAck error = errors.New("not a helper-down demotion")
 				if err != nil && helperDownDemotion {
 					silentAck = d.helperDownFenceSilentAck(ev.GroupID, controlSilentAtEntry)
+				}
+				if err != nil && legacyHelperDown {
+					// #18716: in legacy mode the VIPs are VRRP's. The fence is
+					// resolved from their actual release (awaitRethVIPRelease,
+					// below) when the control socket was silent at entry and is
+					// silent now, as #18715 does with the direct VIPs.
+					silentAck = d.legacyHelperDownFenceSilentAck(rethResign, controlSilentAtEntry)
 				}
 				switch {
 				case err != nil && silentAck == nil:
@@ -929,8 +961,13 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 					// not-yet-armed helper, or one that recovered mid-write), the
 					// other workers may still forward until the write lands, so
 					// an error there is a refusal and keeps the #6371 abort.
-					slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper's control socket is silent and every VIP of the group is confirmed released (#18701)",
-						"rg", ev.GroupID, "active", cur, "err", err)
+					if legacyHelperDown {
+						slog.Warn("failed to update rg_active from cluster event; the helper's control socket is silent, so the failover fence follows the RETH VRRP VIP release instead (#18716)",
+							"rg", ev.GroupID, "active", cur, "err", err)
+					} else {
+						slog.Warn("failed to update rg_active from cluster event; failover still reported actuated because the helper's control socket is silent and every VIP of the group is confirmed released (#18701)",
+							"rg", ev.GroupID, "active", cur, "err", err)
+					}
 				case err != nil:
 					slog.Warn("failed to update rg_active from cluster event",
 						"rg", ev.GroupID, "active", cur, "err", err, "fence_not_acked_because", silentAck)
@@ -1691,8 +1728,13 @@ func (d *Daemon) reconcileRGState() {
 	// this, an RG that still needs its demotion applied runs the 5 s prep and
 	// an unbounded write before its own VIP reconcile, and a later RG waits
 	// behind both.
-	reconcileHelperDown := noRethVRRP && d.helperDownForDemotion()
-	if reconcileHelperDown {
+	//
+	// #18716: the prep skip and the bounded write apply in legacy VRRP mode
+	// too. There the VIPs follow the RETH VRRP resign, which the demotion
+	// event already sent first; a dropped event is resigned by the VRRP
+	// posture safety net below.
+	reconcileHelperDown := d.helperDownForDemotion()
+	if reconcileHelperDown && noRethVRRP {
 		d.releaseDirectVIPsHelperDown("reconcile-helper-down")
 	}
 
