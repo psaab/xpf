@@ -710,6 +710,11 @@ impl Coordinator {
         #[cfg(test)]
         let synced_import_cap_override = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let steering_owners = Arc::new(crate::afxdp::bpf_map::SteeringRowOwners::default());
+        // #19147: every removal of a shared entry, and every wholesale clear,
+        // releases the coordinator's steering claims through the shared store.
+        sessions
+            .owner_rg_indexes
+            .attach_coordinator_steering(Arc::clone(&steering_owners), Arc::clone(&bpf_maps));
         let session_domain = crate::afxdp::SessionDomain::new(
             &sessions,
             &workers,

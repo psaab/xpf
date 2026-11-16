@@ -2208,6 +2208,24 @@ pub(super) fn release_coordinator_session_rows(map: SteeringMap<'_>, owner: &Ses
     );
 }
 
+/// #19147: give up exactly the rows the COORDINATOR holds for `owner`, and
+/// nothing else. The shared store calls this on every removal of `owner`'s
+/// shared entry (`remove_shared_session_if`), because a coordinator claim
+/// stands for that shared authority. Unlike
+/// [`release_coordinator_session_rows`] it names no row: a removal of an
+/// entry the coordinator never claimed is a registry lookup with no BPF
+/// syscall, and an unowned row is left to the releases that name it.
+pub(super) fn release_coordinator_held_rows(map: SteeringMap<'_>, owner: &SessionKey) {
+    release_session_rows(
+        SteeringMap {
+            holder: SteeringHolder::Coordinator,
+            ..map
+        },
+        owner,
+        &[],
+    );
+}
+
 pub(super) fn release_all_session_rows(map: SteeringMap<'_>, owner: &SessionKey) {
     // The owner's OWN row is named, not just whatever the holder is recorded as holding.
     // A row no one is registered for — one an earlier helper incarnation left in the

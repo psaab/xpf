@@ -30,6 +30,16 @@
 //! import, bringup replay, RG activation) claims its row with the coordinator
 //! bit, so an aliased teardown cannot delete it in the handoff window; every
 //! authoritative removal of the shared entry releases that claim.
+//! - **Enforced by the shared store, not by call sites (#19147).** The removal
+//!   primitive `remove_shared_session_if` releases the coordinator's held rows
+//!   for every key it removes, still under the shared-session lock. The
+//!   wholesale `SharedSessionOwnerRgIndexes::clear` retires every coordinator
+//!   claim (`retire_coordinator`, no BPF delete).
+//! - **The handle:** both reach the registry through the handle
+//!   `Coordinator::new` attaches to the index set; every worker and tunnel
+//!   thread works on a clone that shares it.
+//! - **Why:** before #19147, eight removal paths (the census in #19147)
+//!   released nothing, and the claim outlived the session.
 //!
 //! **Actions are recorded (#14650).** Each owner records the action byte it
 //! published. A physical row shared by owners with different actions is
@@ -446,6 +456,38 @@ impl SteeringRowOwners {
             holdings.retain(|_, held| {
                 held.retain_mut(|(_, claim, _)| {
                     claim.workers = 0;
+                    !claim.is_empty()
+                });
+                !held.is_empty()
+            });
+        }
+    }
+
+    /// Drop every COORDINATOR claim WITHOUT a BPF delete, preserving worker
+    /// claims (#19147). The mirror of [`Self::retire_workers`], for a wholesale
+    /// clear of the shared session store
+    /// (`SharedSessionOwnerRgIndexes::clear`): the shared authority every
+    /// coordinator claim stands for is gone. Before #19147 the coordinator
+    /// claims survived that clear with nothing behind them, so a later worker
+    /// teardown could never delete those rows (the #9560 leak class). Rows
+    /// left with no holder linger unowned, as `retire_workers` leaves worker
+    /// rows; a later release that names the row deletes it.
+    pub(crate) fn retire_coordinator(&self) {
+        for shard in self.rows.shards().iter() {
+            let mut rows = lock(shard);
+            rows.retain(|_, owners| {
+                owners.retain_mut(|(_, claim, _)| {
+                    claim.coordinator = false;
+                    !claim.is_empty()
+                });
+                !owners.is_empty()
+            });
+        }
+        for shard in self.holdings.shards().iter() {
+            let mut holdings = lock(shard);
+            holdings.retain(|_, held| {
+                held.retain_mut(|(_, claim, _)| {
+                    claim.coordinator = false;
                     !claim.is_empty()
                 });
                 !held.is_empty()
