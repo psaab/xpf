@@ -19,7 +19,7 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_local(
     // install_with_protocol_with_origin let max_sessions
     // refuse the worker-table copy while the reactive
     // shared-hit materialization
-    // (materialize_shared_session_hit) reinstalls the
+    // (apply_deferred_shared_materialization) reinstalls the
     // reverse entry uncapped on the next reply packet — a
     // futile cap that only polluted create_drops and
     // delayed/voided the prewarm. Use the uncapped

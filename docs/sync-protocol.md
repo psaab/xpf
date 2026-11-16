@@ -356,8 +356,9 @@ That reservation used to happen ONLY inside the worker-local upsert, which is
 driven by a command enqueued **after** the shared session entry was published.
 `publish_shared_session` makes the entry visible on every packet-path lookup
 surface at once (`synced`, `nat`, `forward_wire`), and
-`materialize_shared_session_hit` forwards on `replica.decision` — including
-`decision.nat` — without reserving anything. A worker that sampled an empty
+the shared-hit materialize (`materialize_current_shared_under_permit`)
+forwards on the shared row's decision — including `decision.nat` — without
+reserving anything. A worker that sampled an empty
 command queue just before the coordinator's push proceeds straight into
 `poll_binding` with the entry already live.
 

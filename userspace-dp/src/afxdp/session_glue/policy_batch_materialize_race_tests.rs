@@ -13,8 +13,10 @@
 //!
 //! The cell makes the interleaving deterministic. The mock worker runs the
 //! REAL `handle_delete_policy_batch` with a private ack counter, then
-//! materializes the flow's next packet through the REAL
-//! `materialize_shared_session_hit`, and only then acks the coordinator. In
+//! materializes the flow's next packet through `materialize_shared_session_hit`
+//! (test-only since #19153 fold 2: it runs the same `materialize_capture` and
+//! core the poll path reaches through `apply_deferred_shared_materialization`),
+//! and only then acks the coordinator. In
 //! production the ack comes first and the packet races the coordinator's
 //! shared removal; ordering the materialize before the ack is the same
 //! state at the moment the coordinator removes the shared rows.

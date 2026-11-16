@@ -3349,9 +3349,9 @@ fn reserve6600_entry(src_port: u16, pool_port: u16) -> SyncedSessionEntry {
 /// with the refusal returned by nothing, counted by nothing and logged by
 /// nothing. A worker that sampled an empty command queue just before the push
 /// proceeds into `poll_binding` with the entry already live, and
-/// `materialize_shared_session_hit` forwards on `replica.decision.nat` without
-/// reserving anything. The session then advertised a translation this node did
-/// not own.
+/// the shared-hit materialize (`materialize_current_shared_under_permit`)
+/// forwards on the shared row's `decision.nat` without reserving anything.
+/// The session then advertised a translation this node did not own.
 ///
 /// Reverting the pre-publish reservation in `upsert_synced_session` makes case
 /// (b) go red: the entry is published and fanned out with the port unreserved.

@@ -504,23 +504,61 @@ Now the materialize joins the worker install protocol:
   The session id is the identity rule's (`same_synced_incarnation`), checked
   first. Origin, the HA generation, the publisher's last flags, packet
   counters and clocks, PPTP call ids and the publisher's lease hold are not
-  compared: nothing in this packet's handling reads them, and normal refreshes
-  rewrite them. Equal: the row is installed with this packet's TCP flags
-  (close state, timeout) and fabric adoption, and every capture-derived
+  compared. Some are read elsewhere on the packet path, so each has its own
+  reason (fold 3 corrected fold 2's "nothing reads them";
+  `materialize_divergence`'s doc has the list): the install takes the CURRENT
+  origin and joins the CURRENT lease hold after the classification, the
+  service counters and clocks only rise within an incarnation, the
+  generation's only consumer (the synced purge) is never armed with a
+  materialize, and the flags' close class and handshake stage are compared,
+  decoded. Equal: the row is installed with this packet's TCP flags (close
+  state, timeout) and fabric adoption, and every capture-derived
   effect stands. Different, or the captured incarnation absent or superseded:
   the current row is installed clean (its own carried flags, no adoption), so
   a dropped RST or FIN cannot have reset or closed it; the promotion and the
   revalidation are dropped (each would write the capture's content over the
   installed row); and the packet is dropped (its frame recycled, as the
   post-verdict input-filter drop does). The next packet resolves the
-  installed row as a worker hit and promotes it.
+  installed row as a worker hit and promotes it, except on the wire-alias
+  path below.
+- **The wire-alias capture (fold 3, Codex re-check P2).** A translated packet
+  redirected over the fabric resolves through the shared forward-wire alias:
+  on a local miss, and also when this worker's own row is a fabric wire
+  placeholder (fabric ingress, SNAT only, `is_fabric_wire_placeholder`). A
+  materialized row of such a flow is itself a placeholder, so every later
+  packet comes back to the alias. Every writer updates the canonical row and
+  the alias in separate lock sections, canonical first: the ct-slice and the
+  completing cache hit restamp the handshake stage, the policy rebind
+  (`restamp_shared_policy_entries`) rewrites the policy and zone fields, and
+  every publish writes the canonical row, then the NAT map, then the wire map.
+  So the alias can lag, in any field, for as long as its writer is descheduled
+  between the two sections. Before fold 3 the capture was the alias: the
+  materialize re-read the canonical row, found the lagged field different and
+  dropped the packet, and did so for every packet until the writer caught up.
+  Now the resolver captures the alias's CURRENT canonical row whenever the
+  alias slot is that row's republication: a forward row under the alias's key
+  whose own wire key is this packet's tuple
+  (`shared_ops/lookup.rs::lookup_shared_forward_wire_capture`). So the capture
+  and the re-read agree by construction. The rule is the wire key, not the
+  alias's session id: a publish of a new incarnation under the same tuple and
+  translation writes the canonical row first, so in that window the alias's id
+  is itself the lagging field. The bound: a drop needs a canonical write
+  inside that one packet's capture-to-claim window, so each such write drops
+  at most one packet per worker, and lag between the alias and its canonical
+  row drops nothing, however long it lasts. A canonical row that is absent, a
+  reverse row, or under another translation is a delete or a replacement, not
+  lag: the alias stays the capture and is dropped as before (`SharedAbsent`,
+  `Superseded`). Cost: one more shared-map lock and one clone per alias hit,
+  never nested with the wire-map lock.
 - **The drop counter.** Every such drop counts in
   `MATERIALIZE_DIVERGENCE_DROPS`, exported as
   `ProcessStatus.materialize_divergence_drops` and the Prometheus counter
   `xpf_userspace_materialize_divergence_drops_total`. A drop needs a shared
   write inside one packet's capture-to-claim window (microseconds) that
-  changes a compared field, so a normal takeover should leave it at 0; a gate
-  can now check that instead of assuming it.
+  changes a compared field (fold 3 removed the wire-alias lag that broke this
+  bound). Read it as a delta across a takeover, not as an invariant zero: a
+  sibling's promotion or restamp that lands inside a window still drops that
+  one packet.
 - **Cost.** One materialize attempt per flow per worker, unless it is refused,
   in which case the flow's next packet tries again for as long as the cause
   lasts. A held pair costs the non-allocating claim pre-check (lock
@@ -555,6 +593,16 @@ Pinned by:
   the packet's RST or FIN (close state and timeout an import's), an equal row
   takes the FIN, a differing row never takes fabric adoption, and the field
   table (every authority field drops, every refresh field does not).
+- `afxdp/tests_wire_alias_lag_19153.rs` (fold 3), on the real poll pipeline
+  with a fresh flow cache per packet: worker A's canonical row is ahead of its
+  wire alias (handshake Established vs Pending, a policy rebind, or a new
+  incarnation of the same tuple and translation mid-publish), and three
+  translated fabric packets on worker B resolve the alias (the first on a
+  miss, the rest through B's placeholder row). None is dropped, v4 and v6.
+  Controls: a change published inside the first packet's capture..claim
+  window still drops that one packet and the next forwards; the old wire alias
+  of a replaced incarnation (new session id and source port) is never
+  forwarded and installs nothing.
 - `afxdp/session_glue/leak_revoke_9951_tests.rs` (L1-L3): on a removed and
   re-added leak, a current row stamped with the revoked incarnation drops the
   packet and is not promoted; one stamped with the live incarnation, and the
@@ -3063,7 +3111,8 @@ source tuple (reply mis-delivery / a session-hijack surface).
   (flow-hash steering pins the flow to one worker), are never refreshed, all age
   out, and the LAST one to reap emptied the mask and freed a `(pool_addr, port)`
   the owner was still using — mid-flow pool-port reuse. A second path needs no
-  reserve at all: `session_glue::materialize_shared_session_hit` installs a
+  reserve at all: the shared-hit materialize
+  (`session_glue::materialize_current_shared_under_permit`) installs a
   `WorkerLocalImport` replica off the shared map WITHOUT reserving, and
   `reap_expired_sessions` releases for every expired entry with no origin or
   holder filter.

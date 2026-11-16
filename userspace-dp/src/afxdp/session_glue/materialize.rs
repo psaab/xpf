@@ -229,24 +229,38 @@ pub(in crate::afxdp) enum MaterializeDivergence {
 ///   `upsert_synced_with_origin` decodes them (an unknown or legacy 0 stage
 ///   is Established, 0 close is open); other protocols install neither.
 ///
-/// Not compared, and why (none of them is read by this packet's resolve or
-/// verdict, and each is rewritten on the normal path):
+/// Not compared. Some of these ARE read elsewhere on the packet path; each
+/// reason says why a difference cannot make this packet's capture-derived
+/// effects wrong (#19153 fold 3 corrects fold 2's blanket "nothing reads
+/// them"):
 /// - `key`: the core re-read the row under the capture's key;
-/// - `session_id`: judged by `promote::same_synced_incarnation`, the one
-///   identity rule, before this classification;
-/// - `origin`: the ownership marker that promotion and demotion rewrite with
-///   the content unchanged (`shared_ops/owner_rg.rs`); the core installs by
-///   the current origin (`Installed` or `SharedLocal`), and the Owner verdict
-///   reads origin only on the foreign path, which never materializes;
+/// - `session_id`: the identity, judged first by
+///   `promote::same_synced_incarnation` (with its legacy exception for a
+///   current id of 0);
+/// - `origin`: resolution and promotion read it, and TUN provenance has
+///   forwarding meaning. Ordinary promotion and demotion rewrite it with the
+///   content unchanged (`shared_ops/owner_rg.rs`); the install takes the
+///   CURRENT origin (`Installed` or `SharedLocal`; a TUN row stays TUN), and a
+///   promotion re-checks current shared ownership under its own permit. This
+///   covers those transitions; it is not a claim that any origin change is
+///   immaterial;
 /// - `generation`: the HA install generation, bumped by every re-import of
-///   the same incarnation;
-/// - `tcp_flags`: the publisher's last-seen flags;
-/// - `fwd_packets`, `rev_packets`, `sibling_last_seen_ns`, `last_served_ns`:
-///   node-level service evidence and packet clocks, restamped as the flow is
-///   served (`shared_ops/restamp.rs`);
-/// - `pptp_call_ids`: read only on re-export; local publishes write 0;
-/// - `persistent_lease_hold`: the publisher's lease reference, which the core
-///   joins on the current row's exact hold.
+///   the same incarnation. Its consumer, the deferred synced purge, is never
+///   armed with a materialization (`keep_transient` picks one);
+/// - `tcp_flags`: the publisher's last-seen flags. On `None` this packet's
+///   flags replace them; on `Drop` they are the clean install's own. The
+///   close class and handshake stage they imply are compared, decoded;
+/// - `fwd_packets`, `rev_packets`: service evidence the fabric-adoption gate
+///   reads. A same-incarnation publish keeps their maxima
+///   (`publish_shared_session`) and every restamp takes the max, so a normal
+///   refresh only raises them and cannot withdraw evidence the capture had;
+/// - `sibling_last_seen_ns`, `last_served_ns`: packet clocks for the expiry
+///   and restore fences, also monotonic per incarnation at publish. Neither
+///   supplies a route or a translation to this packet;
+/// - `pptp_call_ids`: re-export data, absent from `into_session_install`;
+/// - `persistent_lease_hold`: read by the install, which fails if it cannot
+///   join it. The core joins the CURRENT row's exact hold after this
+///   classification and never replays the captured one.
 pub(in crate::afxdp) fn materialize_divergence(
     forwarding: &ForwardingState,
     captured: &SyncedSessionEntry,
@@ -371,7 +385,9 @@ fn live_leak_incarnation(forwarding: &ForwardingState, entry: &SyncedSessionEntr
 /// capture ([`MaterializeDivergence::Drop`]). No log. Fold 2 (r24 P3):
 /// exported as `ProcessStatus.materialize_divergence_drops` and the
 /// Prometheus counter `xpf_userspace_materialize_divergence_drops_total`, so
-/// a gate can check that a normal takeover drops nothing here.
+/// a gate can measure what a takeover drops here. Read it as a delta across
+/// the takeover, not as an invariant zero: a sibling's shared write that lands
+/// inside one packet's capture-to-claim window still drops that one packet.
 pub(in crate::afxdp) static MATERIALIZE_DIVERGENCE_DROPS: AtomicU64 = AtomicU64::new(0);
 
 /// Bump [`MATERIALIZE_DIVERGENCE_DROPS`] for one recycled packet.
@@ -695,8 +711,15 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
 ///   capture's content over the installed row; and the poll site recycles the
 ///   packet instead of forwarding it on a decision shared no longer names.
 ///
-/// The next packet resolves the installed row as a worker hit (or current
-/// shared state) and promotes normally: two packets.
+/// The next packet resolves the installed row as a worker hit, or current
+/// shared state, and promotes normally. One exception (fold 3, Codex re-check
+/// P2): a row that is a fabric wire placeholder sends every translated packet
+/// back to the shared wire alias (`shared_ops/lookup.rs`). That capture is the
+/// alias's CURRENT canonical row (`lookup_shared_forward_wire_capture`), never
+/// the alias's own lagging copy, so it equals the re-read unless a canonical
+/// write lands in that packet's own capture-to-claim window. Each such write
+/// can drop at most one packet per worker. Lag between the alias and its
+/// canonical row, however long, drops nothing.
 ///
 /// Every `deferred_*` effect of `ResolvedFlowSessionDecision`, on `Drop`:
 /// - `deferred_synced_promotion`: DROPPED. It carries the capture's decision

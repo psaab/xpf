@@ -993,8 +993,8 @@ pub(super) fn import_on_with_service(
 }
 
 /// fw1's translated forward packet, redirected over the fabric with the
-/// LAN zone stamp.
-fn fabric_forward_frame(
+/// LAN zone stamp. Also the #19153 fold-3 wire-alias cells' packet.
+pub(super) fn fabric_forward_frame(
     forwarding: &ForwardingState,
     family: Family,
 ) -> (Vec<u8>, UserspaceDpMeta) {

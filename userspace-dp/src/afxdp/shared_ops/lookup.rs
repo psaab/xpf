@@ -715,6 +715,70 @@ pub(in crate::afxdp) fn lookup_shared_forward_wire_match(
     Some(candidate)
 }
 
+/// #19153 fold 3 (Codex re-check P2): the packet resolver's read of a shared
+/// forward-wire alias. The alias is a republication of the canonical forward
+/// row under its translated tuple, and every writer updates the two maps in
+/// separate lock sections, canonical first:
+/// - the handshake restamp: the ct-slice
+///   (`restamp_shared_handshakes_established`, then the count restamps, then
+///   `restamp_shared_forward_wire_established`) and the completing cache hit
+///   (`flow_cache_hit.rs`: `restamp_shared_handshake_established`, then
+///   `restamp_shared_forward_wire_established`);
+/// - the policy rebind (`restamp_shared_policy_entries`: canonical, then the
+///   NAT aliases, then the wire alias);
+/// - every publish (`publish_shared_session`: canonical, then the NAT map,
+///   then the wire map).
+///
+/// So the alias can lag its canonical row in any field for as long as the
+/// writer is descheduled between its two sections. The materialize re-reads
+/// the CANONICAL row under its permit and compares it with the capture
+/// (`materialize_divergence`). A capture taken from a lagging alias therefore
+/// differed, and the packet was dropped. The row it installed is a fabric wire
+/// placeholder, so the next packet came back to the alias and was dropped
+/// too, until the writer finished.
+///
+/// The capture is therefore the canonical row itself whenever the alias slot
+/// is that row's republication: a forward row under the alias's key whose OWN
+/// wire key is this one (`forward_wire_key(row.key, row.decision.nat)`). This
+/// packet's decision then comes from the content the materialize re-reads; the
+/// two differ only when a canonical write lands inside this packet's
+/// capture-to-claim window. The alias contributes only its key, the canonical
+/// key, whose uniqueness for this wire key the ambiguity index has proven.
+///
+/// The rule is the wire key, not the alias's session id: a publish of a new
+/// incarnation under the same tuple and translation writes the canonical row
+/// before the alias, so in that window the alias's id is itself the lagging
+/// field. The canonical row is then what the alias slot is about to hold, and
+/// what a packet on the canonical tuple already resolves. A canonical row
+/// that is absent, a reverse row, or under another translation (its wire key
+/// is another tuple) is a delete or a replacement, not lag: the alias is
+/// returned unchanged and the materialize judges it as before (`SharedAbsent`
+/// or `Superseded`, a drop).
+///
+/// Cost: one more shared-map lock and one clone, on an alias hit only. The
+/// locks are taken one after another, never nested.
+fn lookup_shared_forward_wire_capture(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    wire_key: &SessionKey,
+) -> Option<SyncedSessionEntry> {
+    let alias = lookup_shared_forward_wire_match(
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        wire_key,
+    )?;
+    let canonical = lock_shared_recover(shared_sessions)
+        .get(&alias.key)
+        .filter(|canonical| {
+            !canonical.metadata.is_reverse
+                && crate::session::forward_wire_key(&canonical.key, canonical.decision.nat)
+                    == *wire_key
+        })
+        .cloned();
+    Some(canonical.unwrap_or(alias))
+}
+
 /// Recover the canonical tuple for a translated transient alias only when the
 /// shared forward-wire candidate carries the same nonzero session identity.
 /// The index stores one candidate per wire key, so a wire-tuple collision must
@@ -1319,15 +1383,23 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared_and_payload(
     {
         return None;
     }
+    // #19153 fold 3: every wire-alias hit below is captured as its current
+    // canonical row (`lookup_shared_forward_wire_capture`).
+    let wire_capture = || {
+        lookup_shared_forward_wire_capture(
+            shared_sessions,
+            shared_forward_wire_sessions,
+            shared_owner_rg_indexes,
+            key,
+        )
+    };
     match sessions.lookup_with_origin_deferring_authority_with_payload(key, now_ns, tcp_flags, payload_len) {
         crate::session::SessionExpiryProbe::Live((lookup, origin)) => {
             if is_fabric_wire_placeholder(
                 lookup.metadata.fabric_ingress,
                 lookup.metadata.is_reverse,
                 lookup.decision,
-            ) && let Some(shared) =
-                lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
-            {
+            ) && let Some(shared) = wire_capture() {
                 return Some(ResolvedSessionLookup::shared(shared));
             }
             return Some(ResolvedSessionLookup::local_query(lookup, origin));
@@ -1347,9 +1419,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared_and_payload(
                 lookup.metadata.fabric_ingress,
                 lookup.metadata.is_reverse,
                 lookup.decision,
-            ) && let Some(shared) =
-                lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
-            {
+            ) && let Some(shared) = wire_capture() {
                 return Some(ResolvedSessionLookup::shared(shared));
             }
             return Some(ResolvedSessionLookup::local(matched.key, lookup, origin));
@@ -1359,10 +1429,7 @@ pub(in crate::afxdp) fn lookup_session_across_scopes_with_shared_and_payload(
     }
     lookup_shared_session(shared_sessions, key)
         .map(ResolvedSessionLookup::shared)
-        .or_else(|| {
-            lookup_shared_forward_wire_match(shared_forward_wire_sessions, shared_owner_rg_indexes, key)
-                .map(ResolvedSessionLookup::shared)
-        })
+        .or_else(|| wire_capture().map(ResolvedSessionLookup::shared))
 }
 
 #[cfg(test)]
