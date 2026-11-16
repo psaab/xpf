@@ -1156,9 +1156,10 @@ test-vm-test-run-sync-lib:
 
 # #19133: test-rust reports every failure: every target inside leg 1
 # (--no-fail-fast) and every leg (a red leg no longer stops the ones after it).
-# Runs the real recipe from `make -n test-rust` on a fixture crate whose leg 1
-# and leg 2 are both red; both must be named. Needs cargo and the pinned
-# toolchain.
+# Runs the real recipe from `make -n test-rust`: leg 1 with real cargo on a
+# red fixture crate, and the whole recipe under a stub cargo and stub census
+# that witness every leg and fail any one on request. The stub half needs only
+# make and sh; the cargo half SKIPs (77) without the pinned toolchain.
 .PHONY: test-rust-leg1-lib
 test-rust-leg1-lib:
 	bash ./scripts/test-rust-leg1-selftest.sh

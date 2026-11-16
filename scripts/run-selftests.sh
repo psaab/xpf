@@ -472,11 +472,12 @@ run_shell test/mutation/selftest-bpf-exist-cannot-create_6923.sh --selftest
 # Dry runs (`make -n clean`) only, with a positive control on the old recipe.
 run_shell scripts/clean-shared-cargo-selftest.sh
 # #19133: `make test-rust` reports every failure. Its real recipe (from
-# `make -n test-rust`), run line by line as make runs it on a fixture crate
-# whose leg 1 and leg 2 are red, must report both fixture failures in leg 1 and
-# name leg 1 AND leg 2 as failed. Two mutations (no --no-fail-fast; leg 1 not
-# recording its failure) must each hide something. Builds a two-file crate;
-# SKIPs without cargo or the pinned toolchain.
+# `make -n test-rust`), run line by line as make runs it: leg 1 under real
+# cargo on a red fixture crate must report both failures, and the whole recipe
+# under a stub cargo and census must run every leg whatever fails, name
+# exactly the failed legs, and pass when none fails. Leg-drop, record-drop and
+# summary mutations must each be caught. SKIPs (77) the cargo half without the
+# pinned toolchain.
 run_bash scripts/test-rust-leg1-selftest.sh
 # #18738: the shim-ext-parity acceptance harness's signal handling and ROWS
 # filter, against a stub cargo in a throwaway checkout. Seconds; no Rust build.
