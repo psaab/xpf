@@ -2427,14 +2427,19 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
     // so it cannot use up the budget. It is only a hang guard, for a burst that
     // never reaches encap.
     let counters = engine.counters();
-    let mut drops = 0;
     for _ in 0..12_000 {
-        drops = counters.encap_drops_no_session.load(Ordering::Relaxed);
-        if drops >= 2 {
+        if counters.encap_drops_no_session.load(Ordering::Relaxed) >= 2 {
             break;
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    // Stop and JOIN the control thread before judging anything. The counters
+    // are separate Relaxed atomics, so seeing one reach 2 does not order a
+    // read of the other; the join makes every write the thread made visible
+    // here (a happens-before edge), so the reads below are exact.
+    stop.store(true, Ordering::Relaxed);
+    handle.join().expect("join");
+    let drops = counters.encap_drops_no_session.load(Ordering::Relaxed);
     assert!(
         drops >= 2,
         "the burst did not take the NoSession arm for both packets in 12000 polls (no-session drops {drops})"
@@ -2451,8 +2456,6 @@ fn wg_tun_burst_skips_publish_without_session_10038() {
             && test_wire.lock().expect("wire map").is_empty(),
         "a non-Sent encap must publish nothing"
     );
-    stop.store(true, Ordering::Relaxed);
-    handle.join().expect("join");
 }
 
 /// Parent-review (GPT-3 + SPARK-A1): TUN-read provenance through the real
