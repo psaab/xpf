@@ -148,8 +148,6 @@ var declaredUnboundedForks = []unboundedForkExemption{
 		"the limited wrapper — it holds a slot across this call"},
 	{"exec_timeout.go", "combinedOutputTimeout", "diagcmd.CombinedOutputTimeout",
 		"the limited wrapper — it holds a slot across this call"},
-	{"exec_timeout.go", "outputTimeoutUnlimited", "diagcmd.OutputTimeout",
-		"delegates to the shared diagcmd implementation (#17203)"},
 	{"exec_timeout.go", "combinedOutputTimeoutUnlimited", "diagcmd.CombinedOutputTimeout",
 		"delegates to the shared diagcmd implementation (#17203)"},
 	{"exec_timeout.go", "runTimeout", "diagcmd.RunTimeout",

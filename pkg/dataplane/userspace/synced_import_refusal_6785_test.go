@@ -352,19 +352,6 @@ func syncedImportWireRow17116ByVariant(t *testing.T, variant string) syncedImpor
 	return syncedImportWireRow17116{}
 }
 
-func readRepairWireFixture11360(t *testing.T, name string) ControlResponse {
-	t.Helper()
-	variant := map[string]string{
-		"pending":  "AppliedRepairPending",
-		"overflow": "AppliedRepairOverflow",
-	}[name]
-	if variant == "" {
-		t.Fatalf("repair wire fixture %q is missing", name)
-	}
-	row := syncedImportWireRow17116ByVariant(t, variant)
-	return ControlResponse{OK: row.OK, Error: row.Error}
-}
-
 // A pre-change reader does not recognize the dedicated repair prefix, so it
 // takes the generic unknown-response path. That must fail closed on helper
 // health, but it must never look like the rollback-class semantic refusal.

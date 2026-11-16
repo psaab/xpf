@@ -379,42 +379,6 @@ func userspaceMapABIDiff(embedded, ref userspaceMapABI) string {
 	return ""
 }
 
-// validateSharedMapExpectedABI checks an embedded shim map (named by `name`)
-// against the Go-side single source of truth (userspaceShimSharedMapSpecs) for
-// the ABI fields cilium/ebpf compares beyond MaxEntries/Flags already asserted
-// by the caller: Type, KeySize, ValueSize. This catches an embedded-vs-Go ABI
-// drift even on a fresh node that has no live pin to compare against (#5307
-// expected-value arm; #5484 generalized so the v6 DNAT steering table gets the
-// same fresh-node protection as v4). Only maps with a Go-side expected shape
-// are validated here; the other pinned shim maps
-// are Rust-defined and are guarded by the live-pin comparison. A name with no
-// Go SSOT spec returns nil (nothing to compare against).
-func validateSharedMapExpectedABI(embedded *ebpf.MapSpec, name string) error {
-	want := sharedShimMapSpecByName(name)
-	if want == nil {
-		return nil
-	}
-	if embedded.Type != want.Type {
-		return fmt.Errorf(
-			"%s type drift: embedded=%s, expected=%s (userspace shim compatibility map). %s",
-			name, embedded.Type, want.Type, userspaceShimGenerateRemediation,
-		)
-	}
-	if embedded.KeySize != want.KeySize {
-		return fmt.Errorf(
-			"%s key_size drift: embedded=%d, expected=%d (userspace shim compatibility map). %s",
-			name, embedded.KeySize, want.KeySize, userspaceShimGenerateRemediation,
-		)
-	}
-	if embedded.ValueSize != want.ValueSize {
-		return fmt.Errorf(
-			"%s value_size drift: embedded=%d, expected=%d (userspace shim compatibility map). %s",
-			name, embedded.ValueSize, want.ValueSize, userspaceShimGenerateRemediation,
-		)
-	}
-	return nil
-}
-
 func sharedShimMapSpecByName(name string) *ebpf.MapSpec {
 	for _, s := range userspaceShimSharedMapSpecs() {
 		if s.Name == name {

@@ -767,13 +767,10 @@ func (s *Store) compileTreeWithPackedTailGate18771(tree *config.ConfigTree, elig
 	return s.compileTreeAsWithPackedTailGate18771(tree, false, eligible)
 }
 
-// compileTreeAs is compileTree for a commit whose committer is known.
-// bootstrapImport is true only for the daemon's bootstrap import (an internal
-// authority named BootstrapPrincipal); see placeholderJudgedLocked.
-func (s *Store) compileTreeAs(tree *config.ConfigTree, bootstrapImport bool) (*config.Config, error) {
-	return s.compileTreeAsWithPackedTailGate18771(tree, bootstrapImport, false)
-}
-
+// compileTreeAsWithPackedTailGate18771 is compileTree for a commit whose
+// committer is known. bootstrapImport is true only for the daemon's bootstrap
+// import (an internal authority named BootstrapPrincipal); see
+// placeholderJudgedLocked.
 func (s *Store) compileTreeAsWithPackedTailGate18771(tree *config.ConfigTree, bootstrapImport, eligible bool) (*config.Config, error) {
 	compiled, _, err := s.compileTreeAsDrops18771(tree, bootstrapImport, eligible)
 	return compiled, err
@@ -811,11 +808,11 @@ func (s *Store) placeholderJudgedLocked(bootstrapImport bool) bool {
 	return !bootstrapImport
 }
 
-// compileTreeStrictWithCurrent is compileTreeStrict with the compiled
-// config active immediately before the candidate supplied for the
-// #16025 fold-2 staged-rotation gate. Only Store candidate paths pass a
-// non-nil current; CheckText/day-0 callers use compileTreeStrict (nil),
-// so a fresh candidate cannot claim the migration exception.
+// compileTreeStrict compiles with no active config (current nil). Only Store
+// candidate paths pass a non-nil current, the config active immediately before
+// the candidate, for the #16025 fold-2 staged-rotation gate; CheckText/day-0
+// callers use this one, so a fresh candidate cannot claim the migration
+// exception.
 func compileTreeStrict(tree *config.ConfigTree, nodeID int) (*config.Config, error) {
 	return compileTreeStrictWithPackedTailGate18771(tree, nodeID, false)
 }
@@ -824,19 +821,12 @@ func compileTreeStrictWithPackedTailGate18771(tree *config.ConfigTree, nodeID in
 	return compileTreeStrictWithCurrentAndPackedTailGate18771(tree, nodeID, nil, eligible)
 }
 
-// compileTreeStrictWithCurrent judges the #18744 placeholder gate iff
-// current is non-nil, the config package's default. Store commit paths use
-// compileTreeStrictJudged with the store's own decision.
-func compileTreeStrictWithCurrent(tree *config.ConfigTree, nodeID int, current *config.Config) (*config.Config, error) {
-	return compileTreeStrictWithCurrentAndPackedTailGate18771(tree, nodeID, current, false)
-}
-
+// compileTreeStrictWithCurrentAndPackedTailGate18771 judges the #18744
+// placeholder gate iff current is non-nil, the config package's default. Store
+// commit paths use compileTreeStrictJudgedWithPackedTailGate18771 with the
+// store's own decision.
 func compileTreeStrictWithCurrentAndPackedTailGate18771(tree *config.ConfigTree, nodeID int, current *config.Config, eligible bool) (*config.Config, error) {
 	return compileTreeStrictJudgedWithPackedTailGate18771(tree, nodeID, current, current != nil, eligible)
-}
-
-func compileTreeStrictJudged(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders bool) (*config.Config, error) {
-	return compileTreeStrictJudgedWithPackedTailGate18771(tree, nodeID, current, judgePlaceholders, false)
 }
 
 func compileTreeStrictJudgedWithPackedTailGate18771(tree *config.ConfigTree, nodeID int, current *config.Config, judgePlaceholders, eligible bool) (*config.Config, error) {
