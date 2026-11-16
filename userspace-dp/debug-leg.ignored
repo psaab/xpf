@@ -1,2 +1,11 @@
+xpf-userspace-dp	afxdp::frame::tests_nat_rewrite::nat64_15956_build_bench	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	afxdp::frame::tests_nat_rewrite::nat64_15956_resize_ab_bench	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	afxdp::frame::tests_native_gre_ecn::native_gre_live_forwarded_builder_has_no_allocations_17272	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	afxdp::frame::wg::tests::wireguard_live_forwarded_builder_has_no_allocations_17272	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	afxdp::session_glue::pbr_install_table_9752_tests::close_check_and_publish_churn_11299	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
 xpf-userspace-dp	afxdp::session_glue::tests::reconcile_cost_9327	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	afxdp::worker::loop_body::restore_fence_19063_tests::evidence_published_after_the_hold_still_keeps_the_session_19063	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	nat::tests_newflow_lock::production_allocator_churn_reports_m1_and_m8_15956	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
 xpf-userspace-dp	nat::tests_pool::recycle_amortization_9327	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	session::established_hit_cost_18533_tests::established_cached_hit_probe_ns_18533	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
+xpf-userspace-dp	session::punt_seed_directory_18562_tests::punt_seed_directory_publish_cost_bench_18562	MEASUREMENT: ignored family path; preserve default non-ignored debug-leg semantics
