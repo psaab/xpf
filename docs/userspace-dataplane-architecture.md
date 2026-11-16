@@ -1182,7 +1182,9 @@ the NAT module applies it:
   different pool address. Pool-mode rules with missing pools, empty pools,
   invalid port ranges, malformed addresses, no address for the packet family,
   or exhausted translated tuples fail-closed at the current
-  `poll_descriptor.rs` source-NAT call sites before session creation or
+  source-NAT call sites (the `session_glue::compose_outbound_source_nat`
+  decision, recorded by its two callers in `poll_descriptor/mod.rs`; #19132)
+  before session creation or
   forwarding, and record recent-exception reasons such as
   `source_nat_pool_missing`, `source_nat_pool_empty`,
   `source_nat_pool_invalid_port_range`, and `source_nat_pool_exhausted`.
@@ -2787,7 +2789,7 @@ drop the quarantined zone and stay fail-closed). Refusing on skew retains the
 prior snapshot and reconverges once B's full apply lands
 (`m.lastSnapshot.Config == cfg`), under the existing #3780 retry semantics.
 #1377 now preserves unusable pool-mode source-NAT rules in the snapshot and
-fails closed at the `poll_descriptor.rs` source-NAT call sites for missing
+fails closed at the source-NAT call sites (`session_glue::compose_outbound_source_nat`, recorded in `poll_descriptor/mod.rs`) for missing
 pools, empty pools, invalid pool inputs, wrong-family-only pools, or allocator
 failure. The current slice adds bounded helper-local persistent-NAT lease reuse,
 allocator observability, and live-port exhaustion counters. #1449 records HA
