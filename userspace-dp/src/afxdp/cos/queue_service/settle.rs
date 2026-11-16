@@ -340,6 +340,29 @@ pub(super) fn settle_exact_prepared_scratch_submission_flow_fair_queue_gone(
     }
 }
 
+/// `build_cos_batch_from_queue_capped` with the full TX batch.
+#[inline]
+pub(super) fn build_cos_batch_from_queue(
+    queue: &mut CoSQueueRuntime,
+    queue_idx: usize,
+    root_budget: u64,
+    secondary_budget: u64,
+    phase: CoSServicePhase,
+    local_scratch: &mut VecDeque<TxRequest>,
+    prepared_scratch: &mut VecDeque<PreparedTxRequest>,
+) -> Option<CoSBatch> {
+    build_cos_batch_from_queue_capped(
+        queue,
+        queue_idx,
+        root_budget,
+        secondary_budget,
+        TX_BATCH_SIZE,
+        phase,
+        local_scratch,
+        prepared_scratch,
+    )
+}
+
 #[inline]
 // #4973: `local_scratch` / `prepared_scratch` are the per-worker reusable
 // batch deques (WorkerCos state). The selected arm `clear()`s its scratch at
@@ -349,11 +372,17 @@ pub(super) fn settle_exact_prepared_scratch_submission_flow_fair_queue_gone(
 // handler drains it empty and stores it back, so the ring-buffer allocation is
 // retained across drains instead of a `VecDeque::new()` per selected batch. The
 // non-selected arm's scratch is left untouched (keeps its capacity).
-pub(super) fn build_cos_batch_from_queue(
+// #19100 (Codex v6.2 P2-2): `max_packets` is a true packet limit on both
+// arms (a colocated turn passes its whole-packet opportunity credit), not a
+// byte estimate: a 1,500-byte head followed by 64-byte packets fit 24
+// packets into a "2-packet" byte budget.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_cos_batch_from_queue_capped(
     queue: &mut CoSQueueRuntime,
     queue_idx: usize,
     root_budget: u64,
     secondary_budget: u64,
+    max_packets: usize,
     phase: CoSServicePhase,
     local_scratch: &mut VecDeque<TxRequest>,
     prepared_scratch: &mut VecDeque<PreparedTxRequest>,
@@ -434,7 +463,7 @@ pub(super) fn build_cos_batch_from_queue(
             let mut remaining_root = root_budget;
             let mut remaining_secondary = secondary_budget;
             let mut batch_bytes = 0u64;
-            while local_scratch.len() < TX_BATCH_SIZE {
+            while local_scratch.len() < max_packets.min(TX_BATCH_SIZE) {
                 // #917 Phase 4 (#13062 / D1-04): V_min gate before the
                 // peek, mirroring drain_exact_local_items_to_scratch_
                 // flow_fair. `cos_queue_v_min_continue` self-gates to a
@@ -500,7 +529,7 @@ pub(super) fn build_cos_batch_from_queue(
             let mut remaining_root = root_budget;
             let mut remaining_secondary = secondary_budget;
             let mut batch_bytes = 0u64;
-            while prepared_scratch.len() < TX_BATCH_SIZE {
+            while prepared_scratch.len() < max_packets.min(TX_BATCH_SIZE) {
                 // #917 Phase 4 (#13062 / D1-04): V_min gate before the
                 // peek, mirroring drain_exact_prepared_items_to_scratch_
                 // flow_fair (and the Local arm above). Same self-gating

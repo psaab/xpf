@@ -75,6 +75,11 @@ use submit_prepared::submit_prepared;
 // submit_*.rs. mod.rs keeps the shared batch/selection types and the
 // drain_shaped_tx orchestration. Pure code motion: no logic changed.
 mod residual;
+pub(in crate::afxdp) use residual::{v61_accrue_turn_credit, v61_settle_turn};
+#[cfg(test)]
+pub(in crate::afxdp) use residual::{
+    V61_CREDIT_SHIFT, v61_funded_credits, v61_minimum_credits, v61_pace_share,
+};
 mod selectors;
 mod settle;
 mod waterfill;
@@ -83,13 +88,14 @@ use residual::{build_colocated_nonexact_turn_batch, nonexact_surplus_budget_unde
 use residual::residual_rate_and_burst;
 
 use selectors::{
-    select_cos_surplus_batch_filtered, select_exact_cos_guarantee_queue_with_lease_telemetry,
+    SurplusPass, select_cos_surplus_batch_filtered, select_exact_cos_guarantee_queue_with_lease_telemetry,
     select_nonexact_cos_guarantee_batch_into,
 };
 #[cfg(test)]
 pub(in crate::afxdp) use settle::estimate_cos_queue_wakeup_tick as estimate_cos_queue_wakeup_tick_for_test;
 use settle::{
     assign_local_dscp_rewrite, assign_prepared_dscp_rewrite, build_cos_batch_from_queue,
+    build_cos_batch_from_queue_capped,
     cos_batch_tx_made_progress, cos_guarantee_quantum_bytes, cos_guarantee_visit_cap_bytes,
     cos_surplus_quantum_bytes, estimate_cos_queue_wakeup_tick, release_exact_local_scratch_frames,
     release_exact_prepared_scratch, restore_exact_local_scratch_to_queue_head_flow_fair,
@@ -334,6 +340,10 @@ fn drain_primed_cos_root(
     // service (`build_colocated_nonexact_turn_batch`).
     if let Some(batch) = build_colocated_nonexact_turn_batch(binding, root_ifindex, now_ns) {
         let located = cos_batch_queue_ref(binding, root_ifindex, &batch);
+        #[cfg(test)]
+        if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
+            root.v61_test.turn_submits += 1;
+        }
         let sent = submit_cos_batch(binding, root_ifindex, batch, now_ns, shared_recycles);
         if let Some(root) = binding.cos.cos_interfaces.get_mut(&root_ifindex) {
             root.nonexact_turn = false;
@@ -517,7 +527,13 @@ fn build_nonexact_cos_batch_with_demand(
             local_scratch,
             prepared_scratch,
         ) {
-            Some(batch) => Some(batch),
+            Some(batch) => {
+                // #19100 v6.1 (Codex v6 P1-5): every non-exact build states
+                // whether its batch is a turn, so a turn left unsettled by
+                // Retry/Drop can never exempt this batch at settlement.
+                root.v6_inflight_turn = false;
+                Some(batch)
+            }
             None => {
                 // Strict priority applies to surplus service only. Non-exact
                 // queues with explicit transmit-rate guarantees keep their
@@ -532,15 +548,17 @@ fn build_nonexact_cos_batch_with_demand(
                     exact_demand_rate,
                     shared_exact_backlog.map(|backlog| &**backlog),
                 );
-                select_cos_surplus_batch_filtered(
+                let batch = select_cos_surplus_batch_filtered(
                     root,
                     now_ns,
-                    false,
+                    SurplusPass::Ordinary,
                     nonexact_budget,
                     root_limit,
                     local_scratch,
                     prepared_scratch,
-                )
+                );
+                root.v6_inflight_turn = false;
+                batch
             }
         }
     };

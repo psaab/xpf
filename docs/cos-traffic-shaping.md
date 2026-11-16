@@ -464,6 +464,84 @@ for each active reservation at this priority:
 This gives stable weighted sharing among reservations without implying any
 micro-flow logic inside a container.
 
+### Colocated Non-Exact Service Beside an Exact Class (#19025, #19100)
+
+**The problem.** The drain serves a worker's exact guarantee before anything
+else. On a worker whose exact class can take every service opportunity (the
+worker's TX capacity is below the class's allotment there), a non-exact queue
+colocated on that worker was never visited. In #19100 the class-11 instance
+sharing a worker with a capacity-bound exact class got 0 Gb/s for the whole
+window, while its peers on other workers were served from the shared residual
+pool.
+
+**The mechanism** (`queue_service::residual`). It is worker-local: no
+cross-worker state, and it never touches the shared residual pool.
+- After an exact service that made progress, while the worker has exact
+  backlog and non-exact backlog, one non-exact batch (a "turn") may go before
+  the next exact service.
+- **Credits.** Turns are paid from two local credits, bytes and packets.
+  Committed exact work earns them at phi/(1-phi) per exact byte and per exact
+  packet, where phi = min(R_local / shaping, 1/32) and R_local is the shaping
+  rate minus the rates of the locally backlogged exact queues, priced at each
+  commit. The ratio phi/(1-phi) is kept as an exact integer fraction: R_local /
+  reserved below the cap, and exactly 1/31 at it, so a positive residual never
+  rounds to zero (shaping 31 B/s with 30 B/s reserved still earns at 1/31).
+  Every committed turn byte and packet is charged. Credits are signed, so debt
+  carries.
+- **Arithmetic.** Credits are Q32 fixed point. Sub-unit remainders carry across
+  rate changes, rescaled to the new denominator.
+- **A funded turn** needs all of:
+  - the worker is behind its exact pace, measured from a coherent read of its
+    v8 allotment (an unavailable read opens no funded turn);
+  - exact tokens are still unspent;
+  - at least one byte and one whole packet of credit.
+
+  It takes at most its byte credit and at most its whole packets of credit. The
+  packet limit is a true limit in the batch builder.
+- **The minimum turn** is one packet per local 1 ms epoch, taken only when both
+  credits are out of debt, so a non-exact instance beside a gate that never
+  opens is not starved.
+- **#18748's pool floor.** A turn reads it without stamping its hold. An
+  attempt that cannot be built never parks the queue.
+
+**Bounds, per worker, over any interval.** Write E_p (E_b) for the packets
+(bytes) earned in the interval: the sum over exact commits of that commit's
+phi/(1-phi) times its committed packets (bytes). Then:
+- turn packets < E_p + 64 + 1 + 2^-32;
+- turn bytes < E_b + 64 TX frames + one frame + 2^-32 bytes.
+
+The terms:
+- 64 packets / 64 frames is the banked cap;
+- one packet and one frame is the minimum's debt;
+- 2^-32 is the fractional remainder a full bank still retains above its cap.
+
+**Coarser form.** Since phi ≤ 1/32 and turn counts are integers, turn packets
+≤ floor(committed exact packets / 31) + 65.
+
+**Progress.** Take any exact commit while R_local > 0, of a TX-batch size of
+s ≥ 1 bytes or packets, that does not hit the upper cap. With the exact ratio
+r / d (r ≥ 1), it raises the credit's exact value by more than
+(s × r × 2^32 − 1) / d Q32 units, across rate changes too (the remainder is
+rescaled, losing under 1 / d). A debt never reaches the upper cap, so it is
+always repaid after finitely many commits. At R_local = 0 nothing accrues,
+and nothing is owed.
+
+**The shipped contract.** These trades were accepted by the user on
+2026-11-15:
+- **Exact displacement.** The exact class pays up to its colocated share:
+  1.6% of the exact class in the lab shape, and up to 3.0% where root feedback
+  applies (8g of 25g, class 11 on four workers). phi_max = 1/32 caps funded
+  displacement at 3.1% of a worker.
+- **Fairness.** Per-binding fairness across workers (Gate 2) is report-only. A
+  colocated instance gets about R/3 in the lab, against its peers' about R/2
+  from the pool (CoV 0.49 against 0.333).
+- **The class bound.** Class 11 may exceed the residual R by the colocated
+  share (lab: 1.34 against 1.0).
+- **Not addressed here.** A small exact class on a slow worker beside a large
+  residual (8g of 25g on a 6g worker) loses about 20% of its rate through the
+  ordinary shared-pool path. That loss exists unchanged on master and is
+  tracked under #19119.
+
 ## Deferred Eligibility and Timer Wheel
 
 The scheduler needs a way to handle backlogged reservations that are

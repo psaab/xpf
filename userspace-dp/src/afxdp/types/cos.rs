@@ -694,6 +694,35 @@ pub(in crate::afxdp) struct CoSInterfaceRuntime {
     /// (`queue_service::build_colocated_nonexact_turn_batch`). Set by an
     /// exact service that made progress, cleared by the turn.
     pub(in crate::afxdp) nonexact_turn: bool,
+    /// #19100: the colocated turn's worker-local state
+    /// (`queue_service::residual`). The local 1 ms epoch.
+    pub(in crate::afxdp) v6_epoch: u64,
+    /// Turn credits in Q32 fixed point (`V61_CREDIT_SHIFT`): bytes and
+    /// packets, earned per committed exact byte/packet at phi/(1-phi),
+    /// charged per committed turn byte/packet, signed (debt carried).
+    pub(in crate::afxdp) v61_byte_credit: i64,
+    pub(in crate::afxdp) v61_opp_credit: i64,
+    /// This worker's exact pace (bytes/s), valid for the current pace
+    /// window only when `v61_pace_valid` (a coherent observation).
+    pub(in crate::afxdp) v61_pace_share: u64,
+    pub(in crate::afxdp) v61_pace_valid: bool,
+    /// Pace window: opened at the share observation; committed exact bytes
+    /// at the open, and turn bytes committed since.
+    pub(in crate::afxdp) v6_anchor_ns: u64,
+    pub(in crate::afxdp) v6_exact_at_epoch_start: u64,
+    pub(in crate::afxdp) v6_turn_sent: u64,
+    /// Accrual denominator (reserved_eff) and the sub-unit remainders of the
+    /// byte and packet credits under it.
+    pub(in crate::afxdp) v6_credit_rem: u64,
+    pub(in crate::afxdp) v61_opp_rem: u64,
+    pub(in crate::afxdp) v6_credit_den: u64,
+    /// This epoch's minimum turn has committed.
+    pub(in crate::afxdp) v6_min_turn_done: bool,
+    /// The batch just built is a turn (consumed at settlement).
+    pub(in crate::afxdp) v6_inflight_turn: bool,
+    /// Test-only turn counters for the drain simulator and witnesses.
+    #[cfg(test)]
+    pub(in crate::afxdp) v61_test: V61TestCounters,
     pub(in crate::afxdp) default_queue: u8,
     pub(in crate::afxdp) nonempty_queues: usize,
     pub(in crate::afxdp) runnable_queues: usize,
@@ -1932,3 +1961,18 @@ mod flow_fair_state_tests {
 #[cfg(test)]
 #[path = "cos_sojourn_tests.rs"]
 mod cos_sojourn_tests;
+
+/// #19100 (test-only): per-root colocated-turn counters, so simulations and
+/// cells read one root's turns instead of a process-global counter.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(in crate::afxdp) struct V61TestCounters {
+    /// Turn batches built, by kind.
+    pub(in crate::afxdp) funded_builds: u64,
+    pub(in crate::afxdp) minimum_builds: u64,
+    /// Turn batches handed to submit (any outcome).
+    pub(in crate::afxdp) turn_submits: u64,
+    /// Committed turn bytes and packets.
+    pub(in crate::afxdp) turn_bytes: u64,
+    pub(in crate::afxdp) turn_packets: u64,
+}

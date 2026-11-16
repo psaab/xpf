@@ -3191,3 +3191,107 @@ fn the_first_asker_in_an_epoch_cannot_take_a_peers_accrued_claim_19025() {
          binding 1 asked first (binding 1 took {first}, binding 0 got {second})"
     );
 }
+
+/// #19100 v6.1 (Codex v6 P1-4): the pace share is read as ONE coherent
+/// observation. With the epoch's cap and this worker's share published, the
+/// reader returns rate x share / cap; while a rotation is mid-write (the
+/// sequence word odd) it must NOT return a value paired from two epochs: it
+/// gives up (`None`; the caller then has no share and opens no funded turn,
+/// never the full class: `an_unavailable_share_never_prices_the_full_class_19100`).
+/// Mutant: two independent Acquire loads (returns a value regardless of the
+/// seqlock).
+#[test]
+fn the_pace_share_is_read_through_the_epoch_seqlock_19100() {
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 4, 3);
+    lease.rehydrate_worker_active_count(1, 1);
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 2_000);
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    v8.epoch.epoch_total_grant_cap.store(1_000_000, Ordering::Relaxed);
+    v8.worker_fair_share[1].store(250_000, Ordering::Relaxed);
+    let seq = v8.epoch.epoch_seq.load(Ordering::Acquire) & !1;
+    v8.epoch.epoch_seq.store(seq, Ordering::Release);
+    assert_eq!(
+        lease.v8_worker_share_of_rate(1, 8_000_000),
+        Some(2_000_000),
+        "premise: a published epoch gives rate x share / cap"
+    );
+    v8.epoch.epoch_seq.store(seq | 1, Ordering::Release);
+    assert_eq!(
+        lease.v8_worker_share_of_rate(1, 8_000_000),
+        None,
+        "a rotation mid-write (odd sequence) must not yield a cap and share from different epochs"
+    );
+}
+
+/// #19100 v6.2 (Codex v6.1 P2-8): the pace share survives an INTERLEAVED
+/// writer, not only an already-odd sequence. A writer thread republishes
+/// (cap, share) pairs with share = cap / 4 under the seqlock protocol (odd
+/// claim, Release fence, payload, even Release publish), alternating two
+/// caps, and holds each write open between the cap and the share store.
+/// Every value the reader returns must be rate / 4: a cap and a share from
+/// different epochs give rate / 8 or rate / 2. Mutant: two independent loads
+/// (M4), which return such torn pairs.
+#[test]
+fn the_pace_share_never_pairs_two_epochs_under_a_live_writer_19100() {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    let lease = SharedCoSQueueLease::new_v8(50_000_000, 256 * 1024, 4, 3);
+    lease.rehydrate_worker_active_count(1, 1);
+    let _ = lease.acquire_v8(1, EPOCH_DURATION_NS, 2_000);
+    // Every published pair, including the one readable before the writer
+    // thread first runs, is coherent: share = cap / 4.
+    lease.publish_epoch_share_for_test(1, 1_000_000, 250_000);
+    let v8 = lease.v8.as_ref().expect("v8 lease");
+    let stop = AtomicBool::new(false);
+    let published = AtomicU64::new(0);
+    let (torn, coherent, unavailable, overlap) = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut i = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                let cap = if i % 2 == 0 { 1_000_000 } else { 2_000_000 };
+                let seq = v8.epoch.epoch_seq.load(Ordering::Relaxed);
+                v8.epoch.epoch_seq.store(seq | 1, Ordering::Relaxed);
+                std::sync::atomic::fence(Ordering::Release);
+                v8.epoch.epoch_total_grant_cap.store(cap, Ordering::Relaxed);
+                // Hold the write open between the two payload stores, so a
+                // reader that does not validate the sequence lands in it.
+                for _ in 0..128 {
+                    std::hint::spin_loop();
+                }
+                v8.worker_fair_share[1].store(cap / 4, Ordering::Relaxed);
+                v8.epoch.epoch_seq.store((seq | 1) + 1, Ordering::Release);
+                published.fetch_add(1, Ordering::Relaxed);
+                for _ in 0..64 {
+                    std::hint::spin_loop();
+                }
+                i += 1;
+            }
+        });
+        // Codex v6.2 P2-8: read only while the writer is publishing, and
+        // witness the overlap (the reads must span many publications).
+        while published.load(Ordering::Relaxed) == 0 {
+            std::hint::spin_loop();
+        }
+        let first = published.load(Ordering::Relaxed);
+        let (mut torn, mut coherent, mut unavailable) = (0u64, 0u64, 0u64);
+        for _ in 0..2_000_000 {
+            match lease.v8_worker_share_of_rate(1, 8_000_000) {
+                Some(2_000_000) => coherent += 1,
+                Some(_) => torn += 1,
+                None => unavailable += 1,
+            }
+        }
+        let overlap = published.load(Ordering::Relaxed) - first;
+        stop.store(true, Ordering::Relaxed);
+        (torn, coherent, unavailable, overlap)
+    });
+    assert!(
+        overlap >= 1_000,
+        "premise: the reads overlapped only {overlap} writer publications"
+    );
+    assert_eq!(
+        torn, 0,
+        "{torn} reads paired a cap and a share from different epochs \
+         ({coherent} coherent, {unavailable} unavailable)"
+    );
+    assert!(coherent > 0, "premise: the reader observed published epochs ({unavailable} unavailable)");
+}

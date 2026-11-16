@@ -866,6 +866,7 @@ fn account_queue_drain_sent_bytes(
 pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
     root: &mut CoSInterfaceRuntime,
     queue_idx: usize,
+    sent_packets: u64,
     sent_bytes: u64,
 ) {
     if let Some(queue) = root.queues.get_mut(queue_idx) {
@@ -879,6 +880,10 @@ pub(in crate::afxdp) fn apply_direct_exact_queue_accounting(
         account_queue_drain_sent_bytes(queue, CoSServicePhase::Guarantee, sent_bytes, false);
     }
     root.tokens = root.tokens.saturating_sub(sent_bytes);
+    // #19100 v6.1: the colocated surplus's credit is earned HERE, when exact
+    // bytes commit, at the local ratio in force now (Codex v6 P2: pricing a
+    // later observation at a later ratio could fill the cap from one batch).
+    crate::afxdp::cos::queue_service::v61_accrue_turn_credit(root, queue_idx, sent_bytes, sent_packets);
 }
 
 #[inline]
@@ -914,7 +919,7 @@ pub(in crate::afxdp) fn apply_direct_exact_send_result_fields(
     sent_bytes: u64,
 ) {
     if let Some(root) = cos.cos_interfaces.get_mut(&root_ifindex) {
-        apply_direct_exact_queue_accounting(root, queue_idx, sent_bytes);
+        apply_direct_exact_queue_accounting(root, queue_idx, sent_packets, sent_bytes);
     }
     if let Some(shared_root_lease) = cos
         .cos_fast_interfaces
@@ -1073,6 +1078,7 @@ pub(in crate::afxdp) fn apply_cos_send_result(
     phase: CoSServicePhase,
     batch_bytes: u64,
     sent_bytes: u64,
+    sent_packets: u64,
     mut retry: VecDeque<TxRequest>,
 ) -> VecDeque<TxRequest> {
     // #4265 (R-2): the serviced queue's shared lease is debited in the
@@ -1115,9 +1121,13 @@ pub(in crate::afxdp) fn apply_cos_send_result(
                 .is_some_and(|queue| !queue.config.exact)
             && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
         let mut debit_nonexact_surplus_budget = false;
+        // #19100 v6-local: a turn is charged to its own credit and pace, not
+        // to the shared residual pool.
+        let turn = std::mem::take(&mut root.v6_inflight_turn);
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             lease_consume_queue_idx = Some(queue_idx);
-            debit_nonexact_surplus_budget = sent_bytes > 0
+            debit_nonexact_surplus_budget = !turn
+                && sent_bytes > 0
                 && !queue.config.exact
                 && matches!(phase, CoSServicePhase::Surplus)
                 && exact_demand_rate > 0;
@@ -1149,10 +1159,14 @@ pub(in crate::afxdp) fn apply_cos_send_result(
             // on exact / non-eligible / non-promoted queues.
             maybe_demote_drained_best_effort(queue);
         }
+        if turn {
+            // #19100: committed turn bytes and packets are charged to the
+            // pace and to both credits, carrying debt (`v61_settle_turn`).
+            crate::afxdp::cos::queue_service::v61_settle_turn(root, sent_bytes, sent_packets);
+        }
         if debit_nonexact_surplus_budget {
             if let Some(backlog) = shared_exact_backlog {
                 backlog.consume_residual_surplus_budget(sent_bytes);
-                backlog.consume_nonexact_claim(binding_slot, sent_bytes);
             } else {
                 root.nonexact_surplus_under_exact_tokens = root
                     .nonexact_surplus_under_exact_tokens
@@ -1197,6 +1211,7 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
     phase: CoSServicePhase,
     batch_bytes: u64,
     sent_bytes: u64,
+    sent_packets: u64,
     mut retry: VecDeque<PreparedTxRequest>,
 ) -> VecDeque<PreparedTxRequest> {
     // #4265 (R-2): the serviced queue's shared lease is debited in the
@@ -1237,9 +1252,13 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
                 .is_some_and(|queue| !queue.config.exact)
             && interface_has_backlogged_exact_queue(root, peer_exact_backlogged);
         let mut debit_nonexact_surplus_budget = false;
+        // #19100 v6-local: a turn is charged to its own credit and pace, not
+        // to the shared residual pool.
+        let turn = std::mem::take(&mut root.v6_inflight_turn);
         if let Some(queue) = root.queues.get_mut(queue_idx) {
             lease_consume_queue_idx = Some(queue_idx);
-            debit_nonexact_surplus_budget = sent_bytes > 0
+            debit_nonexact_surplus_budget = !turn
+                && sent_bytes > 0
                 && !queue.config.exact
                 && matches!(phase, CoSServicePhase::Surplus)
                 && exact_demand_rate > 0;
@@ -1273,10 +1292,14 @@ pub(in crate::afxdp) fn apply_cos_prepared_result(
             // ordering rationale.
             maybe_demote_drained_best_effort(queue);
         }
+        if turn {
+            // #19100: committed turn bytes and packets are charged to the
+            // pace and to both credits, carrying debt (`v61_settle_turn`).
+            crate::afxdp::cos::queue_service::v61_settle_turn(root, sent_bytes, sent_packets);
+        }
         if debit_nonexact_surplus_budget {
             if let Some(backlog) = shared_exact_backlog {
                 backlog.consume_residual_surplus_budget(sent_bytes);
-                backlog.consume_nonexact_claim(binding_slot, sent_bytes);
             } else {
                 root.nonexact_surplus_under_exact_tokens = root
                     .nonexact_surplus_under_exact_tokens
