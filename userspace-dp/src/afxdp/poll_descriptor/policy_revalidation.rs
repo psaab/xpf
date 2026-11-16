@@ -1021,6 +1021,8 @@ fn judged_line_is_non_owner_gateway_fallback(
 /// drops this packet without claiming ownership of the peer's session.
 /// A transient translated alias may use the resolver's identity-checked
 /// original tuple; without that proof it remains checked against the wire key.
+/// Fixture entry point; production calls [`source_nat_judgment_on_session_hit`].
+#[cfg(test)]
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn source_nat_revocation_on_session_hit(
     forwarding: &ForwardingState,
@@ -1201,6 +1203,39 @@ fn shared_forward_companion_for_reverse_hit(
     ))
 }
 
+/// The source-NAT verdict of one session hit, as the poll path consumes it.
+pub(super) enum SourceNatHitJudgment {
+    /// Nothing to revoke. The hit may seed the flow cache as usual.
+    Keep,
+    /// #18705: kept PROVISIONALLY. A reverse hit whose stored line would be
+    /// revoked was declined because this worker's `RefreshOwnerRGS` for the
+    /// current activation epoch is still pending. The packet forwards, but
+    /// it must NOT seed the flow cache: cache hits never revalidate source
+    /// NAT, and a refresh does not evict them, so a seeded entry would serve
+    /// the unjudged translation past both the bound and the refresh.
+    KeepUnjudged,
+    /// Revoke (`PolicyRevocation`).
+    Revoke(PolicyRevocation),
+}
+
+impl SourceNatHitJudgment {
+    /// The flow-cache admission gate: a provisional keep must not seed.
+    #[inline]
+    pub(super) fn withholds_flow_cache_seed(&self) -> bool {
+        matches!(self, Self::KeepUnjudged)
+    }
+
+    #[inline]
+    pub(super) fn into_revocation(self) -> Option<PolicyRevocation> {
+        match self {
+            Self::Revoke(revocation) => Some(revocation),
+            Self::Keep | Self::KeepUnjudged => None,
+        }
+    }
+}
+
+/// Fixture entry point: the judgment as a revocation, keep shapes merged.
+#[cfg(test)]
 #[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
 pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     forwarding: &ForwardingState,
@@ -1208,7 +1243,49 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     session_key: &SessionKey,
     metadata: &SessionMetadata,
     arrival_ingress_ifindex: u32,
-    _arrival_ingress_vlan_id: u16,
+    arrival_ingress_vlan_id: u16,
+    decision: SessionDecision,
+    flow: &SessionFlow,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+    source_nat_validation_key: Option<&SessionKey>,
+    now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
+    fabric_link_ingress: bool,
+    ha: Option<(&BTreeMap<i32, HAGroupRuntime>, u64)>,
+    shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
+) -> Option<PolicyRevocation> {
+    source_nat_judgment_on_session_hit(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        arrival_ingress_ifindex,
+        arrival_ingress_vlan_id,
+        decision,
+        flow,
+        origin,
+        source_nat_static,
+        source_nat_validation_key,
+        now_ns,
+        packet_icmp,
+        fabric_link_ingress,
+        ha,
+        shared_sessions,
+    )
+    .into_revocation()
+}
+
+/// The production source-NAT judgment of a session hit (see
+/// [`SourceNatHitJudgment`]).
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(super) fn source_nat_judgment_on_session_hit(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    arrival_ingress_ifindex: u32,
+    arrival_ingress_vlan_id: u16,
     decision: SessionDecision,
     flow: &SessionFlow,
     origin: SessionOrigin,
@@ -1229,6 +1306,54 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // hit finds no local forward companion. `None` keeps the sessionless
     // arm exactly as before.
     shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
+) -> SourceNatHitJudgment {
+    let mut unjudged = false;
+    match source_nat_judgment_core(
+        forwarding,
+        sessions,
+        session_key,
+        metadata,
+        arrival_ingress_ifindex,
+        arrival_ingress_vlan_id,
+        decision,
+        flow,
+        origin,
+        source_nat_static,
+        source_nat_validation_key,
+        now_ns,
+        packet_icmp,
+        fabric_link_ingress,
+        ha,
+        shared_sessions,
+        &mut unjudged,
+    ) {
+        Some(revocation) => SourceNatHitJudgment::Revoke(revocation),
+        None if unjudged => SourceNatHitJudgment::KeepUnjudged,
+        None => SourceNatHitJudgment::Keep,
+    }
+}
+
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+fn source_nat_judgment_core(
+    forwarding: &ForwardingState,
+    sessions: &mut SessionTable,
+    session_key: &SessionKey,
+    metadata: &SessionMetadata,
+    arrival_ingress_ifindex: u32,
+    _arrival_ingress_vlan_id: u16,
+    decision: SessionDecision,
+    flow: &SessionFlow,
+    origin: SessionOrigin,
+    source_nat_static: Option<bool>,
+    source_nat_validation_key: Option<&SessionKey>,
+    now_ns: u64,
+    packet_icmp: Option<(u8, u8)>,
+    fabric_link_ingress: bool,
+    ha: Option<(&BTreeMap<i32, HAGroupRuntime>, u64)>,
+    shared_sessions: Option<&Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>>,
+    // #18705 K1: set when the keep-while-refresh-pending decline returned
+    // `None` (a provisional keep), so the caller can withhold the cache seed.
+    unjudged: &mut bool,
 ) -> Option<PolicyRevocation> {
     // Derive the reverse key, forward query, and local target once. Common
     // reverse hits are Fresh/Stale and never consult the shared map; only the
@@ -1853,11 +1978,15 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
     // take this decline; neither do the shared-companion and sessionless
     // arms (`canonical_key: None`), which judge no stored local line. The
     // epoch load is reached only on this cold arm, after the cheap clauses,
-    // and the keep is bounded (`OWNER_RG_REFRESH_PENDING_KEEP_NS`).
+    // and the keep is bounded (`OWNER_RG_REFRESH_PENDING_KEEP_NS`). The keep
+    // is PROVISIONAL (K1): `unjudged` tells the poll path not to seed the
+    // flow cache from this packet, so every reply in the window takes the
+    // slow path and is judged again.
     if metadata.is_reverse
         && canonical_key.is_some()
         && sessions.owner_rg_refresh_pending(now_ns)
     {
+        *unjudged = true;
         return None;
     }
     Some(PolicyRevocation {

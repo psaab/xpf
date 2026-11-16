@@ -42,7 +42,11 @@ pub(in crate::afxdp) fn apply_worker_commands_at_view_epoch(
         conntrack_v4_fd,
         conntrack_v6_fd,
         forwarding,
-        &|| (Arc::clone(&view), view_epoch0),
+        &|| CommandView {
+            ha: Arc::clone(&view),
+            published_epoch0: view_epoch0,
+            refresh_forwarding: None,
+        },
         dynamic_neighbors,
         worker_id,
         scratch,
@@ -91,6 +95,45 @@ thread_local! {
         std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
 }
 
+/// #18705 test entry: `run_worker_command_phase` for the pipeline cells.
+#[cfg(test)]
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn run_worker_command_phase_for_test(
+    commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &ArcSwap<BTreeMap<i32, HAGroupRuntime>>,
+    ha_published_epoch0: &AtomicU32,
+    shared_runtime: &RuntimeViewReader,
+    worker_id: u32,
+    last_transition_debt_epoch: &mut u64,
+    last_session_import_repair_epoch: &mut u64,
+    transition_debt_pending: bool,
+    session_import_repair_pending: bool,
+) -> (
+    arc_swap::Guard<Arc<BTreeMap<i32, HAGroupRuntime>>>,
+    WorkerCommandResults,
+) {
+    run_worker_command_phase(
+        commands,
+        sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        -1,
+        -1,
+        forwarding,
+        ha_state,
+        ha_published_epoch0,
+        shared_runtime,
+        &Arc::new(ShardedNeighborMap::default()),
+        worker_id,
+        &mut VecDeque::new(),
+        last_transition_debt_epoch,
+        last_session_import_repair_epoch,
+        transition_debt_pending,
+        session_import_repair_pending,
+    )
+}
+
 /// One worker pass's command phase: decide whether commands or debt are due,
 /// apply them, and return the HA view the rest of the pass runs under.
 ///
@@ -114,6 +157,9 @@ pub(in crate::afxdp) fn run_worker_command_phase(
     forwarding: &ForwardingState,
     ha_state: &ArcSwap<BTreeMap<i32, HAGroupRuntime>>,
     ha_published_epoch0: &AtomicU32,
+    // #18705 K3: the runtime-view channel, for the forwarding a refresh
+    // re-resolves against (loaded with the HA view, after the drain).
+    shared_runtime: &RuntimeViewReader,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     worker_id: u32,
     scratch: &mut VecDeque<WorkerCommand>,
@@ -157,10 +203,22 @@ pub(in crate::afxdp) fn run_worker_command_phase(
         return (ha_state.load(), WorkerCommandResults::empty());
     }
     // Acquire pairs with `update_ha_state`'s Release publish (made after its
-    // `rg_runtime` store): the view loaded next shows that epoch's state.
-    let load_view = || -> CommandHaView {
+    // `rg_runtime` store): the HA view loaded next shows that epoch's state.
+    // K3: the forwarding is loaded AFTER the HA view. The coordinator
+    // publishes an activation's FIB (the #16270 connected-route republish,
+    // Go's `republishConnectedRGSync`) before `update_ha_state` stores the
+    // activation, both under the server lock, so this forwarding is at least
+    // as new as the FIB the HA view was activated against. The pass's own
+    // forwarding was loaded at tick start, before the drain, and is not.
+    let load_view = || -> CommandView {
         let published = ha_published_epoch0.load(Ordering::Acquire);
-        (ha_state.load_full(), Some(published))
+        let ha = ha_state.load_full();
+        let refresh_forwarding = shared_runtime.load().forwarding().clone();
+        CommandView {
+            ha,
+            published_epoch0: Some(published),
+            refresh_forwarding: Some(refresh_forwarding),
+        }
     };
     let results = apply_worker_commands_with_view(
         commands,

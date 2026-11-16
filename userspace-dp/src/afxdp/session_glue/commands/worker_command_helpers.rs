@@ -2,7 +2,7 @@ use super::super::*;
 use super::worker_command_dispatch::WorkerCommandDispatchContext;
 use super::{
     DeleteOrigin, handle_delete_synced_conditional, handle_delete_synced_with_guard,
-    handle_demote_owner_rgs, handle_refresh_owner_rgs, handle_upsert_synced,
+    handle_demote_owner_rgs, handle_refresh_owner_rgs_then_stamp, handle_upsert_synced,
 };
 
 /// Keep the terminal-transition purge side effect beside the delegated
@@ -35,26 +35,22 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs_command(
     ctx: &mut WorkerCommandDispatchContext<'_>,
     owner_rgs: Vec<i32>,
 ) {
-    if handle_refresh_owner_rgs(
+    // #18705: re-resolve against the forwarding loaded AFTER the drain (K3),
+    // and stamp the view's published epoch only if the full scan ran (K2).
+    // Never the reader's epoch here: an activation bumped after the view was
+    // loaded is not in the rows this refresh rewrote.
+    if handle_refresh_owner_rgs_then_stamp(
         ctx.sessions,
         ctx.session_map,
-        ctx.forwarding,
+        ctx.refresh_forwarding,
         ctx.ha_state,
         ctx.dynamic_neighbors,
         owner_rgs,
         ctx.now_ns,
         ctx.now_secs,
+        ctx.ha_view_epoch0,
     ) {
         flag_install_table_purge(ctx.worker_id);
-    }
-    // #18705: stamp the table with the epoch of the view this refresh ran
-    // under: every HA-managed row was just re-resolved under it. Also when
-    // the command named no RG > 0 (an RG0-only activation re-resolves no
-    // owner-RG line, so there is nothing to wait for). Never the reader's
-    // epoch at this point: an activation bumped after the view was loaded is
-    // not in the rows this refresh rewrote.
-    if let Some(view_epoch0) = ctx.ha_view_epoch0 {
-        ctx.sessions.note_owner_rgs_refreshed(view_epoch0);
     }
 }
 

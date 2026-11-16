@@ -1080,7 +1080,10 @@ pub(crate) fn worker_loop(
         // the view the rest of this pass runs under (loaded after the
         // apply). The pass used to load it here, before the queue check: a
         // `RefreshOwnerRGS` pushed in between was applied under the pre-
-        // activation view and its heal was lost.
+        // activation view and its heal was lost. A refresh also re-resolves
+        // against the forwarding loaded after the drain (`shared_runtime`),
+        // not this tick's `forwarding`, which can predate the activation's
+        // FIB (K3).
         let (ha_runtime, command_results) =
             crate::afxdp::session_glue::run_worker_command_phase(
                 &commands,
@@ -1091,6 +1094,7 @@ pub(crate) fn worker_loop(
                 &forwarding,
                 &ha_state,
                 &ha_published_epoch0,
+                &shared_runtime,
                 &dynamic_neighbors,
                 worker_id,
                 &mut command_scratch,

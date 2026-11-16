@@ -2679,18 +2679,45 @@ pending (`SessionTable::owner_rg_refresh_pending`).
 "Pending" means the node-level activation epoch `rg_epochs[0]`, bumped
 before the store, differs from the table's refresh stamp. A
 `RefreshOwnerRGS` (queued or #9720 debt) stamps the PUBLISHED epoch of the
-view it ran under. That view is loaded after the drain
-(`session_glue/README.md`).
+view it ran under, and only if it ran its full re-resolution scan; an
+RG0-only refresh stamps nothing. It re-resolves against the forwarding
+loaded with that view, after the drain (`session_glue/README.md`).
 
-The decline does not mark the row revalidated. The refresh clears the
-judgment, so the first hit after it runs the full judgment: a withdrawn
-translation is revoked one refresh late, never forgiven. The keep is also
-bounded: `OWNER_RG_REFRESH_PENDING_KEEP_NS` (1 s from this table's first
-decline for that epoch) limits the paths that deliver no stamp. These are
-a debt refresh superseded by a later demote, or stale-skipped, and a worker
-registered after the fan-out snapshot. Forward hits, the shared-companion
-arm and the sessionless arm (`canonical_key: None`) never take this
-decline. Cells: `tests_refresh_pending_18705.rs`,
+The keep is PROVISIONAL. The judgment returns
+`SourceNatHitJudgment::KeepUnjudged`, and the poll path then withholds the
+flow-cache seed for that packet (`flow_cache_snat_unjudged`). The packet
+forwards, but every reply in the window takes the slow path and is judged
+again. A cache hit never revalidates source NAT, and a refresh does not
+evict cache entries, so a seeded entry would serve the unjudged translation
+past both the bound and the refresh.
+
+The decline does not mark the row revalidated either. The refresh clears
+the judgment, so the first hit after it runs the full judgment: a withdrawn
+translation is revoked one refresh late, never forgiven.
+
+The keep is also bounded. `OWNER_RG_REFRESH_PENDING_KEEP_NS` (1 s from this
+table's first decline for that epoch) limits the paths that deliver no
+stamp:
+- a debt refresh superseded by a later demote, or stale-skipped;
+- an RG0-only activation;
+- a worker registered after the fan-out snapshot.
+
+What the keep covers:
+- **Node-wide.** `rg_epochs[0]` is bumped by ANY activation, so one RG's
+  activation arms the keep for every table on the node, including flows of
+  RGs that did not change.
+- **Reason-blind.** It defers every `StaleSourceNat` verdict on that arm,
+  including `InvalidNoLiveDynamicRules` and
+  `InvalidDynamicTranslationRebound`. Those are the binding-change reasons
+  the adjacent #16217 keep refuses to decline. A withdrawn or rebound
+  translation is therefore kept until the refresh lands or the bound
+  expires, then revoked at the next reply.
+- **Not covered:** forward hits, the shared-companion arm and the
+  sessionless arm (`canonical_key: None`) never take this decline. Zone
+  policy revalidation still runs on a kept reply.
+
+Cells: `tests_refresh_pending_18705.rs`,
+`tests_refresh_pending_pipeline_18705.rs`,
 `activation_before_refresh_keeps_the_flow_18691`. The operator-level
 account is in `docs/ha-failover-status.md` (#18531, #18691, #18705).
 

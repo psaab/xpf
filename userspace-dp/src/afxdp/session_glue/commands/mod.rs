@@ -53,7 +53,11 @@ pub(in crate::afxdp::session_glue) use delete_synced_if_table_unknown::handle_de
 pub(in crate::afxdp::session_glue) use export_owner_rg_sessions::handle_export_owner_rg_sessions;
 pub(in crate::afxdp::session_glue) use list_sessions_by_policy::handle_list_sessions_by_policy;
 pub(in crate::afxdp::session_glue) use query_session_counters::handle_query_session_counters;
+// #18705: production applies a refresh through the stamping wrapper; the bare
+// handler is reached by the session-glue unit tests only.
+#[cfg(test)]
 pub(in crate::afxdp::session_glue) use refresh_owner_rgs::handle_refresh_owner_rgs;
+pub(in crate::afxdp::session_glue) use refresh_owner_rgs::handle_refresh_owner_rgs_then_stamp;
 pub(in crate::afxdp::session_glue) use upsert_local::handle_upsert_local;
 pub(in crate::afxdp::session_glue) use upsert_synced::handle_upsert_synced;
 pub(super) use worker_command_dispatch::{WorkerCommandDispatchContext, dispatch_worker_commands};

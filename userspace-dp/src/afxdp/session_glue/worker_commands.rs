@@ -128,10 +128,34 @@ has_routing_domains: bool,
 has_multiple_zones: bool,) -> bool { allow_replace_local
     && uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) }
 
-/// #18705: the HA view a command dispatch runs under, and the PUBLISHED
-/// activation epoch that view is known to show (`None`: unknown, so a
-/// `RefreshOwnerRGS` dispatched under it does not stamp the table).
-pub(in crate::afxdp) type CommandHaView = (Arc<BTreeMap<i32, HAGroupRuntime>>, Option<u32>);
+/// #18705: what one command dispatch runs under, loaded together AFTER the
+/// drain (or the debt take) by the caller's view source.
+pub(in crate::afxdp) struct CommandView {
+    /// The HA view.
+    pub(in crate::afxdp) ha: Arc<BTreeMap<i32, HAGroupRuntime>>,
+    /// The PUBLISHED activation epoch `ha` is known to show (`None`:
+    /// unknown, so a `RefreshOwnerRGS` dispatched under it stamps nothing).
+    pub(in crate::afxdp) published_epoch0: Option<u32>,
+    /// K3: the forwarding a `RefreshOwnerRGS` re-resolves against, loaded
+    /// from the runtime view AFTER `ha`. The coordinator publishes the
+    /// activation's FIB (the #16270 connected-route republish) before it
+    /// stores the activation, both under the server lock, so this
+    /// forwarding is at least as new as the FIB `ha` was activated against.
+    /// The pass's own forwarding was loaded at tick start, before the
+    /// drain, and can still be the split FIB. `None`: the pass's forwarding
+    /// (a fixed fixture view).
+    pub(in crate::afxdp) refresh_forwarding: Option<Arc<ForwardingState>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// #18705 K4 test seam: runs once, on the calling thread, after the
+    /// slice is dispatched and BEFORE the #9720 debt take. It stands in for
+    /// a transition stored, and its refused push recorded as debt, in that
+    /// gap.
+    pub(in crate::afxdp) static AFTER_SLICE_DISPATCH_HOOK_18705:
+        std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
 
 /// Apply this worker's queued commands, then its position-ready #9720
 /// transition debt, each under the HA view `load_view` returns when called:
@@ -148,7 +172,7 @@ pub(in crate::afxdp) fn apply_worker_commands_with_view(
     forwarding: &ForwardingState,
     // #18705: called after the drain (and again after the debt take) for the
     // view each dispatch runs under — see `run_worker_command_phase`.
-    load_view: &dyn Fn() -> CommandHaView,
+    load_view: &dyn Fn() -> CommandView,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     // #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
     // in the worker loop. A peer-synced reservation is held by every worker, so
@@ -206,15 +230,16 @@ pub(in crate::afxdp) fn apply_worker_commands_with_view(
     ) = commands::take_worker_command_slice(commands, worker_id, scratch);
     if !scratch.is_empty() {
         // #18705: the view for this slice is loaded AFTER the drain above.
-        let (ha_view, ha_view_epoch0) = load_view();
+        let view = load_view();
         let mut dispatch_context = commands::WorkerCommandDispatchContext {
             sessions: &mut *sessions,
             session_map,
             conntrack_v4_fd,
             conntrack_v6_fd,
             forwarding,
-            ha_state: &ha_view,
-            ha_view_epoch0,
+            ha_state: &view.ha,
+            ha_view_epoch0: view.published_epoch0,
+            refresh_forwarding: view.refresh_forwarding.as_deref().unwrap_or(forwarding),
             dynamic_neighbors,
             worker_id,
             now_ns,
@@ -250,13 +275,19 @@ pub(in crate::afxdp) fn apply_worker_commands_with_view(
     // #11360 repair positions are advanced while the queue lock is held above,
     // so an importer cannot capture a prefix that the consumer has already
     // drained without its sequence being reflected in the target.
+    #[cfg(test)]
+    if let Some(hook) = AFTER_SLICE_DISPATCH_HOOK_18705.with(|hook| hook.borrow_mut().take()) {
+        hook();
+    }
     let transition_debt_pending = if queue_lock_acquired {
         let (ready, pending) =
             worker_queue::take_ready_transition_debt(worker_id, drained, !commands_backlogged);
         if !ready.is_empty() {
             // #18705: debt is recorded after the coordinator's store, so its
-            // view is loaded AFTER the debt take, not reused from the slice.
-            let (ha_view, ha_view_epoch0) = load_view();
+            // view is loaded AFTER the debt take, never reused from the slice
+            // (K4: a transition stored, and its refusal recorded, between the
+            // slice dispatch and this take is visible only to a fresh load).
+            let view = load_view();
             for op in ready {
                 dispatch_transition_debt_op(
                     sessions,
@@ -264,8 +295,9 @@ pub(in crate::afxdp) fn apply_worker_commands_with_view(
                     conntrack_v4_fd,
                     conntrack_v6_fd,
                     forwarding,
-                    &ha_view,
-                    ha_view_epoch0,
+                    &view.ha,
+                    view.published_epoch0,
+                    view.refresh_forwarding.as_deref().unwrap_or(forwarding),
                     dynamic_neighbors,
                     worker_id,
                     op,
@@ -334,6 +366,8 @@ fn dispatch_transition_debt_op(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     ha_view_epoch0: Option<u32>,
+    // #18705 K3: the forwarding a replayed refresh re-resolves against.
+    refresh_forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     worker_id: u32,
     op: worker_queue::TransitionDebtOp,
@@ -378,26 +412,25 @@ fn dispatch_transition_debt_op(
             let surviving: Vec<i32> = op.rgs().iter().copied().filter(rg_is_active).collect();
             worker_queue::HA_TRANSITION_REFRESH_STALE_SKIPPED
                 .fetch_add((op.rgs().len() - surviving.len()) as u64, Ordering::Relaxed);
-            if !surviving.is_empty() {
-                if commands::handle_refresh_owner_rgs(
+            // #18705: a replayed refresh re-resolves against the forwarding
+            // loaded after the debt take (K3) and stamps only if it ran the
+            // full scan (K2). A fully stale-skipped op stamps nothing: no row
+            // was re-resolved, and an older stamp only lengthens the bounded
+            // keep.
+            if !surviving.is_empty()
+                && commands::handle_refresh_owner_rgs_then_stamp(
                     sessions,
                     session_map,
-                    forwarding,
+                    refresh_forwarding,
                     ha_state,
                     dynamic_neighbors,
                     surviving,
                     now_ns,
                     now_secs,
-                ) {
-                    flag_install_table_purge(worker_id);
-                }
-                // #18705: the replayed refresh re-resolved every HA-managed
-                // row under this view. A fully stale-skipped op stamps
-                // nothing: no row was re-resolved, and an older stamp only
-                // lengthens the bounded keep.
-                if let Some(view_epoch0) = ha_view_epoch0 {
-                    sessions.note_owner_rgs_refreshed(view_epoch0);
-                }
+                    ha_view_epoch0,
+                )
+            {
+                flag_install_table_purge(worker_id);
             }
         }
         TransitionDebtKind::Vacate => {

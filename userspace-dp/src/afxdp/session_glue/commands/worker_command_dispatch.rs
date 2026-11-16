@@ -9,6 +9,10 @@ pub(in crate::afxdp::session_glue) struct WorkerCommandDispatchContext<'a> {
     /// #18705: the published activation epoch `ha_state` is known to show
     /// (`None`: unknown, so a refresh dispatched here stamps nothing).
     pub(in crate::afxdp::session_glue) ha_view_epoch0: Option<u32>,
+    /// #18705 K3: the forwarding `RefreshOwnerRGS` re-resolves against,
+    /// loaded after the drain (`CommandView::refresh_forwarding`). Every
+    /// other command keeps the pass's `forwarding`.
+    pub(in crate::afxdp::session_glue) refresh_forwarding: &'a ForwardingState,
     pub(in crate::afxdp::session_glue) dynamic_neighbors: &'a Arc<ShardedNeighborMap>,
     pub(in crate::afxdp::session_glue) worker_id: u32,
     pub(in crate::afxdp::session_glue) now_ns: u64,

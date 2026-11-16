@@ -15,10 +15,18 @@ use super::*;
 const PIPELINE_WORKER: u32 = 87;
 const HOOK_WORKER: u32 = 88;
 const DEBT_WORKER: u32 = 89;
+const RG0_ONLY_WORKER: u32 = 90;
+const FIB_RACE_WORKER: u32 = 91;
+const DEBT_GAP_WORKER: u32 = 92;
 
 /// HA status for this node: RG0 and RG2 (LAN) active, RG1 (WAN) as given.
 fn groups(rg1_active: bool) -> Vec<HAGroupStatus> {
-    [(0, true), (1, rg1_active), (2, true)]
+    groups_rg0(true, rg1_active)
+}
+
+/// HA status for this node: RG2 (LAN) active, RG0 and RG1 as given.
+fn groups_rg0(rg0_active: bool, rg1_active: bool) -> Vec<HAGroupStatus> {
+    [(0, rg0_active), (1, rg1_active), (2, true)]
         .into_iter()
         .map(|(rg_id, active)| HAGroupStatus {
             rg_id,
@@ -28,6 +36,23 @@ fn groups(rg1_active: bool) -> Vec<HAGroupStatus> {
         .collect()
 }
 
+/// The worker's runtime-view channel (what `worker_loop` reads through
+/// `shared_runtime`), publishing `forwarding`.
+fn runtime_channel(forwarding: ForwardingState) -> crate::afxdp::types::RuntimeViewChannel {
+    let channel = crate::afxdp::types::RuntimeViewChannel::default();
+    publish_fib(&channel, forwarding);
+    channel
+}
+
+/// The coordinator publishing a FIB, as the #16270 connected-route
+/// republish does before an activation.
+fn publish_fib(channel: &crate::afxdp::types::RuntimeViewChannel, forwarding: ForwardingState) {
+    channel.publish(Arc::new(crate::afxdp::types::RuntimeView::new(
+        ValidationState::default(),
+        Arc::new(forwarding),
+    )));
+}
+
 /// The LAN owner of the split as a coordinator plus one registered worker:
 /// the coordinator holds the split HA view (RG1 inactive, its own activation
 /// fan-out drained), and the worker's table holds the live flow imported
@@ -35,6 +60,18 @@ fn groups(rg1_active: bool) -> Vec<HAGroupStatus> {
 /// the published epoch exactly as `worker_loop` seeds it.
 fn split_node_worker(
     worker_id: u32,
+) -> (
+    crate::afxdp::Coordinator,
+    Arc<Mutex<VecDeque<WorkerCommand>>>,
+    SessionTable,
+) {
+    split_node_worker_seeded(worker_id, &groups(false))
+}
+
+/// As `split_node_worker`, from the seed HA status `seed`.
+fn split_node_worker_seeded(
+    worker_id: u32,
+    seed: &[HAGroupStatus],
 ) -> (
     crate::afxdp::Coordinator,
     Arc<Mutex<VecDeque<WorkerCommand>>>,
@@ -60,7 +97,7 @@ fn split_node_worker(
     );
     crate::afxdp::worker_queue::clear_transition_debt(worker_id);
     coordinator
-        .update_ha_state(&groups(false))
+        .update_ha_state(seed)
         .expect("seed the split HA view");
     commands.lock().expect("commands").clear();
     let (mut sessions, _, _) = lan_owner_import(Family::V4, false);
@@ -97,27 +134,26 @@ impl PassCarry {
 }
 
 /// One production command phase of `worker_id`'s pass; returns the view the
-/// rest of the pass polls under.
+/// rest of the pass polls under. `forwarding` is the pass's own snapshot,
+/// loaded at tick start; `runtime` is the channel it came from, which the
+/// phase reads again after the drain.
 fn worker_pass(
     coordinator: &crate::afxdp::Coordinator,
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
+    runtime: &crate::afxdp::types::RuntimeViewChannel,
     worker_id: u32,
     carry: &mut PassCarry,
 ) -> Arc<BTreeMap<i32, HAGroupRuntime>> {
-    let (view, results) = crate::afxdp::session_glue::run_worker_command_phase(
+    let (view, results) = crate::afxdp::session_glue::run_worker_command_phase_for_test(
         commands,
         sessions,
-        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
-        -1,
-        -1,
         forwarding,
         &coordinator.ha.rg_runtime,
         &coordinator.ha.published_epoch0,
-        &Arc::new(ShardedNeighborMap::default()),
+        &runtime.reader(),
         worker_id,
-        &mut VecDeque::new(),
         &mut carry.last_transition_debt_epoch,
         &mut carry.last_session_import_repair_epoch,
         carry.transition_debt_pending,
@@ -142,6 +178,8 @@ fn rg1_active(view: &BTreeMap<i32, HAGroupRuntime>) -> bool {
 #[test]
 fn reply_in_the_pass_before_the_refresh_lands_is_kept_18705() {
     let (coordinator, commands, mut sessions) = split_node_worker(PIPELINE_WORKER);
+    // The activation's FIB, already published (#16270).
+    let runtime = runtime_channel(fw1_owner_forwarding());
     let owner_forwarding = fw1_owner_forwarding();
     let key = exported_forward(&owner_forwarding, Family::V4).key;
     let mut carry = PassCarry::new(PIPELINE_WORKER);
@@ -161,6 +199,7 @@ fn reply_in_the_pass_before_the_refresh_lands_is_kept_18705() {
         &commands,
         &mut sessions,
         &owner_forwarding,
+        &runtime,
         PIPELINE_WORKER,
         &mut carry,
     );
@@ -181,6 +220,7 @@ fn reply_in_the_pass_before_the_refresh_lands_is_kept_18705() {
         &commands,
         &mut sessions,
         &owner_forwarding,
+        &runtime,
         PIPELINE_WORKER,
         &mut carry,
     );
@@ -213,6 +253,8 @@ fn reply_in_the_pass_before_the_refresh_lands_is_kept_18705() {
 #[test]
 fn refresh_pushed_after_the_queue_check_runs_under_the_stored_view_18705() {
     let (coordinator, commands, mut sessions) = split_node_worker(HOOK_WORKER);
+    // The activation's FIB, already published (#16270).
+    let runtime = runtime_channel(fw1_owner_forwarding());
     let coordinator = Arc::new(coordinator);
     let owner_forwarding = fw1_owner_forwarding();
     let key = exported_forward(&owner_forwarding, Family::V4).key;
@@ -237,6 +279,7 @@ fn refresh_pushed_after_the_queue_check_runs_under_the_stored_view_18705() {
         &commands,
         &mut sessions,
         &owner_forwarding,
+        &runtime,
         HOOK_WORKER,
         &mut carry,
     );
@@ -277,6 +320,8 @@ fn refresh_pushed_after_the_queue_check_runs_under_the_stored_view_18705() {
 #[test]
 fn debt_replayed_refresh_stamps_the_table_18705() {
     let (coordinator, commands, mut sessions) = split_node_worker(DEBT_WORKER);
+    // The activation's FIB, already published (#16270).
+    let runtime = runtime_channel(fw1_owner_forwarding());
     let owner_forwarding = fw1_owner_forwarding();
     let key = exported_forward(&owner_forwarding, Family::V4).key;
     {
@@ -303,6 +348,7 @@ fn debt_replayed_refresh_stamps_the_table_18705() {
             &commands,
             &mut sessions,
             &owner_forwarding,
+            &runtime,
             DEBT_WORKER,
             &mut carry,
         ));
@@ -334,4 +380,224 @@ fn debt_replayed_refresh_stamps_the_table_18705() {
         (0, 0, 2),
         "the healed line is judged valid"
     );
+}
+
+/// Pop the RG1 refresh `update_ha_state` just pushed: "published, not yet
+/// pushed" for this worker.
+fn take_rg1_refresh(commands: &Arc<Mutex<VecDeque<WorkerCommand>>>) -> WorkerCommand {
+    let mut pending = commands.lock().expect("commands");
+    let last = pending.pop_back().expect("fixture: a pushed command");
+    assert!(
+        matches!(&last, WorkerCommand::RefreshOwnerRGS { owner_rgs } if owner_rgs == &vec![1]),
+        "fixture: the RG1 activation pushed its refresh last"
+    );
+    last
+}
+
+/// K2 (#18705 review: Codex P1-2, r23 P2-1, r24 P2-1). RG0 activates alone
+/// (epoch k) and queues `RefreshOwnerRGS{[0]}`. RG1 then activates and
+/// publishes k+1, but its refresh is not yet pushed. The worker drains the
+/// RG0 command and loads the view AFTER the drain, so the view already shows
+/// RG1 active at k+1. The RG0 refresh re-resolves nothing (no RG > 0), so it
+/// must not stamp: the rows still carry the split-FIB line, and the reply
+/// must stay kept until the RG1 refresh lands.
+#[test]
+fn rg0_only_refresh_does_not_stamp_a_later_rg1_activation_18705() {
+    let (coordinator, commands, mut sessions) =
+        split_node_worker_seeded(RG0_ONLY_WORKER, &groups_rg0(false, false));
+    let runtime = runtime_channel(fw1_owner_forwarding());
+    let owner_forwarding = fw1_owner_forwarding();
+    let key = exported_forward(&owner_forwarding, Family::V4).key;
+    let mut carry = PassCarry::new(RG0_ONLY_WORKER);
+    coordinator
+        .update_ha_state(&groups_rg0(true, false))
+        .expect("activate RG0 alone");
+    coordinator
+        .update_ha_state(&groups_rg0(true, true))
+        .expect("activate RG1");
+    let rg1_refresh = take_rg1_refresh(&commands);
+    assert!(
+        commands
+            .lock()
+            .expect("commands")
+            .iter()
+            .all(|command| matches!(command, WorkerCommand::RefreshOwnerRGS { owner_rgs } if owner_rgs == &vec![0])),
+        "fixture: only the RG0 refresh is queued"
+    );
+    let view = worker_pass(
+        &coordinator,
+        &commands,
+        &mut sessions,
+        &owner_forwarding,
+        &runtime,
+        RG0_ONLY_WORKER,
+        &mut carry,
+    );
+    assert!(rg1_active(&view), "premise: the RG0 command ran under the RG1-active view");
+    assert_eq!(
+        stored_forward_line(&sessions, &key).egress_ifindex,
+        WAN_GATEWAY_UNIT_IFINDEX,
+        "premise: the RG0 refresh re-resolved nothing"
+    );
+    assert_ne!(
+        sessions.refreshed_rg_epoch0_for_test(),
+        coordinator.rg_epochs[0].load(Ordering::Relaxed),
+        "an RG0-only refresh must not stamp the view's epoch"
+    );
+    let (frame, meta) = wan_reply_frame_for(Family::V4);
+    let before = drive(&mut sessions, &owner_forwarding, &view, WAN, &frame, meta, 1);
+    assert_eq!(
+        (before.snat_revoked, before.closes, sessions.len()),
+        (0, 0, 2),
+        "the RG1 activation is still pending: the reply is kept"
+    );
+
+    commands.lock().expect("commands").push_back(rg1_refresh);
+    let view = worker_pass(
+        &coordinator,
+        &commands,
+        &mut sessions,
+        &owner_forwarding,
+        &runtime,
+        RG0_ONLY_WORKER,
+        &mut carry,
+    );
+    assert_eq!(
+        sessions.refreshed_rg_epoch0_for_test(),
+        coordinator.rg_epochs[0].load(Ordering::Relaxed),
+        "the RG1 refresh scans and stamps"
+    );
+    let (frame, meta) = wan_reply_frame_for(Family::V4);
+    let after = drive(&mut sessions, &owner_forwarding, &view, WAN, &frame, meta, 1);
+    assert_eq!(
+        (after.snat_revoked, after.closes, sessions.len()),
+        (0, 0, 2),
+        "the healed line is judged valid"
+    );
+}
+
+/// K3 (#18705 review: Codex P1-3). The worker took its forwarding snapshot
+/// at tick start, under the split FIB. Then, between that load and the
+/// drain, the coordinator republished the connected routes (#16270) and
+/// stored and pushed the RG1 activation. The refresh must re-resolve
+/// against the FIB published WITH the activation, not the pass's
+/// pre-activation snapshot: under the split FIB the line stays the reth0.50
+/// gateway line, the refresh stamps it "healed", and the next reply is
+/// revoked.
+#[test]
+fn refresh_runs_under_the_fib_published_with_the_activation_18705() {
+    let (coordinator, commands, mut sessions) = split_node_worker(FIB_RACE_WORKER);
+    let coordinator = Arc::new(coordinator);
+    let split_forwarding = rg_taking_node_forwarding();
+    let owner_forwarding = fw1_owner_forwarding();
+    let runtime = Arc::new(runtime_channel(rg_taking_node_forwarding()));
+    let key = exported_forward(&owner_forwarding, Family::V4).key;
+    let mut carry = PassCarry::new(FIB_RACE_WORKER);
+    commands
+        .lock()
+        .expect("commands")
+        .push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+    let activating = Arc::clone(&coordinator);
+    let publishing = Arc::clone(&runtime);
+    crate::afxdp::session_glue::AFTER_COMMAND_CHECK_HOOK_18705.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            publish_fib(&publishing, fw1_owner_forwarding());
+            activating
+                .update_ha_state(&groups(true))
+                .expect("activate RG1 after the pass took its forwarding");
+        }));
+    });
+    let view = worker_pass(
+        &coordinator,
+        &commands,
+        &mut sessions,
+        &split_forwarding,
+        &runtime,
+        FIB_RACE_WORKER,
+        &mut carry,
+    );
+    assert!(
+        commands.lock().expect("commands").is_empty() && rg1_active(&view),
+        "fixture: the pass drained the refresh the activation pushed"
+    );
+    assert_eq!(
+        stored_forward_line(&sessions, &key).egress_ifindex,
+        WAN_UNIT_IFINDEX,
+        "the refresh re-resolved against the FIB published with the activation"
+    );
+    let (frame, meta) = wan_reply_frame_for(Family::V4);
+    let out = drive(&mut sessions, &owner_forwarding, &view, WAN, &frame, meta, 1);
+    assert_eq!(
+        (out.snat_revoked, out.closes, sessions.len()),
+        (0, 0, 2),
+        "the healed line is judged valid"
+    );
+}
+
+/// K4 (#18705 review: Codex's predicted survivor). An RG1 activation lands
+/// AFTER the slice was dispatched and BEFORE the #9720 debt take. Its push
+/// is refused (the queue refilled to capacity), so it becomes debt, and the
+/// debt is ready in this same pass (the drain had emptied the queue). The
+/// debt must be dispatched under a view loaded after the take, which shows
+/// RG1 active. Reusing the slice's view (RG1 inactive) stale-skips the
+/// refresh: nothing heals, nothing stamps, and the debt is consumed.
+#[test]
+fn debt_recorded_after_the_slice_runs_under_a_fresh_view_18705() {
+    let (coordinator, commands, mut sessions) = split_node_worker(DEBT_GAP_WORKER);
+    let coordinator = Arc::new(coordinator);
+    let runtime = runtime_channel(fw1_owner_forwarding());
+    let owner_forwarding = fw1_owner_forwarding();
+    let key = exported_forward(&owner_forwarding, Family::V4).key;
+    let mut carry = PassCarry::new(DEBT_GAP_WORKER);
+    commands
+        .lock()
+        .expect("commands")
+        .push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+    let activating = Arc::clone(&coordinator);
+    let refill = Arc::clone(&commands);
+    crate::afxdp::session_glue::AFTER_SLICE_DISPATCH_HOOK_18705.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            {
+                let mut pending = refill.lock().expect("commands");
+                for _ in 0..crate::afxdp::worker_queue::MAX_PENDING_WORKER_COMMANDS {
+                    pending.push_back(WorkerCommand::ForgetPptpCall(0xDEAD_BEEF));
+                }
+            }
+            activating
+                .update_ha_state(&groups(true))
+                .expect("activate RG1 between the slice and the debt take");
+        }));
+    });
+    let view = worker_pass(
+        &coordinator,
+        &commands,
+        &mut sessions,
+        &owner_forwarding,
+        &runtime,
+        DEBT_GAP_WORKER,
+        &mut carry,
+    );
+    assert!(
+        crate::afxdp::worker_queue::transition_debt_for_test(DEBT_GAP_WORKER).is_empty(),
+        "fixture: the refused refresh was recorded and replayed in this pass"
+    );
+    assert_eq!(
+        stored_forward_line(&sessions, &key).egress_ifindex,
+        WAN_UNIT_IFINDEX,
+        "the debt refresh ran under a view that shows the activation"
+    );
+    assert_eq!(
+        sessions.refreshed_rg_epoch0_for_test(),
+        coordinator.rg_epochs[0].load(Ordering::Relaxed),
+        "and stamped the table"
+    );
+    let (frame, meta) = wan_reply_frame_for(Family::V4);
+    let out = drive(&mut sessions, &owner_forwarding, &view, WAN, &frame, meta, 1);
+    assert_eq!(
+        (out.snat_revoked, out.closes, sessions.len()),
+        (0, 0, 2),
+        "the healed line is judged valid"
+    );
+    // Leave no filler behind for the next test that reuses this queue id.
+    commands.lock().expect("commands").clear();
 }

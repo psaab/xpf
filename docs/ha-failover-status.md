@@ -778,24 +778,43 @@ against the stale split-FIB line, and revoked. The window was one RX
 batch, or longer while a refused refresh waited as #9720 transition debt.
 
 Each worker's session table now carries a refresh stamp: the node-level
-activation epoch of the HA view its last `RefreshOwnerRGS` ran under. While
-the current epoch differs from that stamp, a reply whose local forward
+activation epoch of the HA view its last full `RefreshOwnerRGS` ran under.
+A refresh naming only RG0 re-resolves nothing and stamps nothing. While the
+current epoch differs from that stamp, a reply whose local forward
 companion's stored line would be judged invalid is kept, not revoked. The
 row is not marked judged. The first hit after the refresh runs the full
 judgment, so a genuinely withdrawn translation is still revoked, one
 refresh later. Forward packets are judged on their live line throughout.
 
+The keep is provisional. A kept reply is forwarded but never cached in the
+flow cache, so every reply during the keep is judged again on the slow
+path. A cached reply would bypass the judgment until the cache entry aged
+out, past the refresh and past the bound.
+
 The keep lasts at most 1 s from the first time a table declines for that
 epoch. That limit covers the paths that never deliver a stamp; past it,
 the judgment runs as before.
 
-The same change fixes a second way to lose the heal. The worker loaded its
+Operators should know two properties of the keep:
+- **It is node-wide.** Any RG's activation arms it on every worker table
+  of the node, including flows of RGs that did not change.
+- **It is reason-blind.** It defers every source-NAT revocation of such a
+  reply, including a translation withdrawn or rebound by a commit (the
+  reasons the #16217 keep never defers). For up to 1 s after an
+  activation, or until the refresh lands, a withdrawn translation keeps
+  passing replies. It is then revoked at the next reply.
+
+The same change fixes two more ways to lose the heal. The worker loaded its
 pass view before it drained its queue, so a refresh pushed in that gap ran
 under the pre-activation view and rewrote nothing. The command-dispatch
-view is now loaded after the drain.
+view is now loaded after the drain. The refresh also used the FIB snapshot
+the worker took at the start of its pass, which can predate the
+connected-route republish that precedes every activation (#16270). It now
+re-resolves against the FIB loaded with the HA view, after the drain.
 
 Cells: `activation_before_refresh_keeps_the_flow_18691` (no longer
-ignored; v4/v6) and `tests_refresh_pending_18705.rs`. Analysis:
+ignored; v4/v6), `tests_refresh_pending_18705.rs` and
+`tests_refresh_pending_pipeline_18705.rs`. Analysis:
 `docs/log/18705.md`. Live impact was never observed: no `snat_revoked`
 increment at any crash takeover in #18683 run 3, with 1 s sampling.
 

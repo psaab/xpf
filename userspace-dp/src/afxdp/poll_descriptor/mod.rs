@@ -609,7 +609,7 @@ use filter::{
     revalidate_static_pbr_route_on_session_hit, stage11_input_filter_terminal,
 };
 use policy_revalidation::{
-    revalidate_zone_policy_on_session_hit, source_nat_revocation_on_session_hit_with_ingress,
+    revalidate_zone_policy_on_session_hit, source_nat_judgment_on_session_hit,
     tun_origin_forward, tun_origin_reverse, tun_origin_reverse_exempt,
 };
 
@@ -2699,6 +2699,11 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                 // reply repair (and, on the new-flow path, persist a
                 // rolled-back SNAT tuple) until cache invalidation.
                 let mut flow_cache_install_failed = false;
+                // #18705 K1: true when this packet's source-NAT judgment was a
+                // PROVISIONAL keep (the stored line was not judged because the
+                // worker's RG refresh is pending). Withholds the flow-cache
+                // seed below; the packet itself still forwards.
+                let mut flow_cache_snat_unjudged = false;
                 // #2218: the matched pre-routing DNAT/static-DNAT rule's
                 // per-rule hit counter, hoisted to the outer (post-resolution)
                 // scope so BOTH the inner miss-block install sites (LocalMiss,
@@ -3770,8 +3775,8 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // policy-generation/ICMP/foreign-hit gates: even a
                         // fresh policy verdict cannot keep a translation the
                         // live NAT configuration no longer permits.
-                        let mut session_hit_revocation =
-                            source_nat_revocation_on_session_hit_with_ingress(
+                        let source_nat_judgment =
+                            source_nat_judgment_on_session_hit(
                                 worker_ctx.forwarding,
                                 sessions,
                                 &resolved.key,
@@ -3796,6 +3801,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                                 // forward companion from the shared map.
                                 Some(worker_ctx.shared_sessions),
                             );
+                        // #18705 K1: a reply kept only because this worker's
+                        // RG refresh is pending forwards but must not seed
+                        // the flow cache (see `SourceNatHitJudgment`).
+                        flow_cache_snat_unjudged =
+                            source_nat_judgment.withholds_flow_cache_seed();
+                        let mut session_hit_revocation = source_nat_judgment.into_revocation();
                         let owner_icmp_verdict =
                             if session_hit_revocation.is_none() && foreign_arrival_zone.is_none() {
                                 owner_hit_icmp_verdict(
@@ -11252,7 +11263,10 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // #9950: fragments never seed the cache (same ident-less-key reason
                         // as the lookup gate above — a seeded 5-tuple would serve later
                         // datagrams' first fragments and bypass overlap + assoc installs).
-                        if !overlap_skip_cache_9950 {
+                        // #18705 K1: nor does a provisionally kept reply: a
+                        // cache hit never revalidates source NAT, so a seed
+                        // would serve the unjudged translation past the keep.
+                        if !overlap_skip_cache_9950 && !flow_cache_snat_unjudged {
                             stage_flow_cache_seed(
                                 &mut binding.flow.flow_cache,
                                 &flow,

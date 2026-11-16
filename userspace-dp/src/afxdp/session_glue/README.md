@@ -129,21 +129,51 @@ and again after the debt take. The queue (debt) mutex orders the
 coordinator's store before that load. The pass then polls under a view
 loaded after the apply.
 
-Each load reads `HaState::published_epoch0` (Acquire) first. That is the
-node-level activation epoch, published after the store. A
-`RefreshOwnerRGS` stamps it on the table, queued or replayed
-(`SessionTable::note_owner_rgs_refreshed`), including an RG0-only one,
-which re-resolves no owner-RG line. A fully stale-skipped debt refresh
-stamps nothing. The stamp is never `rg_epochs[0]` read at dispatch time:
-that counter is bumped before the store and can name an activation the
-view did not show. The reverse-hit source-NAT keep reads the stamp
-(`poll_descriptor/README.md`).
+Each load (`CommandView`) reads three things, in this order:
+1. `HaState::published_epoch0` (Acquire). That is the node-level
+   activation epoch, published after the store.
+2. The HA view.
+3. The runtime view's forwarding (K3).
 
-Pinned in `tests_refresh_pending_18705.rs`:
-`refresh_pushed_after_the_queue_check_runs_under_the_stored_view_18705`
-(the interleaving, through a `#[cfg(test)]` hook between the queue check
-and the drain), `reply_in_the_pass_before_the_refresh_lands_is_kept_18705`,
-and `debt_replayed_refresh_stamps_the_table_18705`.
+A `RefreshOwnerRGS` re-resolves against that forwarding, not the pass's
+tick-start snapshot. The coordinator publishes an activation's FIB (the
+#16270 connected-route republish, `republishConnectedRGSync` in Go) before
+`update_ha_state` stores the activation, and both run under the server
+lock. So a forwarding loaded after the HA view is at least as new as the
+FIB that view was activated against. The pass's own forwarding was loaded
+before the drain and can still be the split FIB. Every other command keeps
+the pass's forwarding.
+
+A refresh, queued or replayed, stamps the published epoch on the table
+(`handle_refresh_owner_rgs_then_stamp` ->
+`SessionTable::note_owner_rgs_refreshed`), but ONLY when it ran its full
+re-resolution scan, i.e. it named an RG > 0 (K2,
+`refresh_rescans_owner_rows`). An RG0-only command scans nothing. Its view
+can already show a LATER data-RG activation whose own refresh has not run,
+so stamping that view's epoch would end the later activation's keep over
+stale lines. Such a command stamps nothing; the keep stays on until a real
+refresh lands or the bound expires. A fully stale-skipped debt refresh also
+stamps nothing.
+
+The stamp is never `rg_epochs[0]` read at dispatch time: that counter is
+bumped before the store and can name an activation the view did not show.
+The debt view is a fresh load after the debt take, never the slice's
+(K4). The reverse-hit source-NAT keep reads the stamp; see the #18691 /
+#18705 paragraphs in `userspace-dp/src/afxdp/README.md`.
+
+Pinned in `tests_refresh_pending_pipeline_18705.rs`:
+- `refresh_pushed_after_the_queue_check_runs_under_the_stored_view_18705`:
+  the interleaving, through a `#[cfg(test)]` hook between the queue check
+  and the drain;
+- `reply_in_the_pass_before_the_refresh_lands_is_kept_18705`;
+- `debt_replayed_refresh_stamps_the_table_18705`;
+- `rg0_only_refresh_does_not_stamp_a_later_rg1_activation_18705` (K2);
+- `refresh_runs_under_the_fib_published_with_the_activation_18705` (K3): the
+  FIB plus the activation are published between the pass's forwarding load
+  and the drain;
+- `debt_recorded_after_the_slice_runs_under_a_fresh_view_18705` (K4),
+  through the `#[cfg(test)]` hook `AFTER_SLICE_DISPATCH_HOOK_18705` between
+  the slice dispatch and the debt take.
 
 ## A refused cross-worker `DeleteSynced` (#8114 item 4)
 

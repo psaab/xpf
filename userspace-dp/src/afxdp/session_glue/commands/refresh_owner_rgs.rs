@@ -9,6 +9,60 @@ use super::super::*;
 pub(in crate::afxdp::session_glue) type RefreshOwnerRgsItem =
     (SessionKey, SessionDecision, SessionMetadata, SessionOrigin, bool);
 
+/// Does a `RefreshOwnerRGS` naming `owner_rgs` run the full re-resolution
+/// scan? Only when it names an RG > 0; an RG0-only command returns before it
+/// (`handle_refresh_owner_rgs`). The single predicate for that early return
+/// and for #18705's stamp (`handle_refresh_owner_rgs_then_stamp`).
+#[inline]
+pub(in crate::afxdp::session_glue) fn refresh_rescans_owner_rows(owner_rgs: &[i32]) -> bool {
+    owner_rgs.iter().any(|owner_rg_id| *owner_rg_id > 0)
+}
+
+/// #18705: apply `RefreshOwnerRGS`, then stamp the table with
+/// `view_epoch0`, the published activation epoch of the HA view `ha_state`.
+///
+/// The stamp is credited ONLY when the refresh ran its full re-resolution
+/// scan, i.e. it named an RG > 0 (K2). That scan rewrites every HA-managed
+/// row under `ha_state`, so the rows then reflect every activation up to
+/// `view_epoch0`. An RG0-only command scans nothing. If it stamped the view's
+/// epoch, which may already include a LATER data-RG activation whose own
+/// refresh has not run, it would end that activation's keep over stale
+/// lines. So it stamps nothing, and the keep stays on until a real refresh
+/// lands or the bound expires.
+///
+/// `forwarding` must be at least as new as the FIB the activation was
+/// published against (K3; the caller passes the forwarding it loaded after
+/// the drain, `CommandView::refresh_forwarding`). `view_epoch0` of `None`
+/// (a fixed fixture view of unknown epoch) stamps nothing.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs_then_stamp(
+    sessions: &mut SessionTable,
+    session_map: SteeringMap<'_>,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    owner_rgs: Vec<i32>,
+    now_ns: u64,
+    now_secs: u64,
+    view_epoch0: Option<u32>,
+) -> bool {
+    let rescans = refresh_rescans_owner_rows(&owner_rgs);
+    let observed_terminal = handle_refresh_owner_rgs(
+        sessions,
+        session_map,
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        owner_rgs,
+        now_ns,
+        now_secs,
+    );
+    if rescans && let Some(view_epoch0) = view_epoch0 {
+        sessions.note_owner_rgs_refreshed(view_epoch0);
+    }
+    observed_terminal
+}
+
 /// Apply `WorkerCommand::RefreshOwnerRGS`: re-evaluate every
 /// HA-managed worker session (not just those currently indexed under
 /// the activated RG) and republish refreshed session-map entries.
@@ -28,7 +82,7 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs(
     now_ns: u64,
     now_secs: u64,
 ) -> bool {
-    if !owner_rgs.iter().any(|owner_rg_id| *owner_rg_id > 0) {
+    if !refresh_rescans_owner_rows(&owner_rgs) {
         return false;
     }
     sessions.activate_owner_rgs(&owner_rgs);
