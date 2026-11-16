@@ -447,6 +447,53 @@ fn withdrawn_translation_still_revokes_on_either_worker_18710() {
     }
 }
 
+/// #18705: the refresh-pending keep is for a LOCAL stored forward line only.
+/// A reply judged through the shared forward companion (this worker holds no
+/// forward row) judges the creating worker's own line, which no pending
+/// `RefreshOwnerRGS` on this worker can make stale; with an activation
+/// pending on this worker, a withdrawn translation still revokes there and
+/// the reply is dropped. Twin of the `reply_on_b` leg above with the epoch
+/// reader wired and bumped on B.
+#[test]
+fn shared_companion_withdrawn_translation_revokes_while_refresh_pending_18705() {
+    for (label, client) in [("interface", IFACE_CLIENT), ("pool", POOL_CLIENT)] {
+        let mut forwarding = fw1_owner_forwarding();
+        forwarding
+            .neighbors
+            .entry((LAN_IFINDEX, IpAddr::V4(client)))
+            .or_insert(NeighborEntry { mac: [0x10, 0x66, 0x6a, 0xfd, 0x4b, 0x5c] });
+        let mut withdrawn = forwarding.clone();
+        withdrawn.source_nat_rules.clear();
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let ha = owner_ha(now_secs);
+        let shared = Shared::new();
+        let mut a = SessionTable::new();
+        a.set_forwarding_revalidation_gen(7, 9);
+        let (frame, meta) = lan_syn(client);
+        poll(&mut a, &shared, &forwarding, &ha, LAN, &frame, meta);
+        let mut key = forward_key();
+        key.src_ip = IpAddr::V4(client);
+        key.dst_port = 5210;
+        let (decision, _, _) = a.entry_with_origin(&key).expect("fixture: forward row");
+        let IpAddr::V4(translated) = decision.nat.rewrite_src.expect("translated") else {
+            panic!("v4")
+        };
+        let port = decision.nat.rewrite_src_port.unwrap_or(SPORT);
+        let mut b = SessionTable::new();
+        b.set_forwarding_revalidation_gen(8, 9);
+        let epoch0 = super::tests_lan_owner_idle_import_18691::wire_epoch_reader_18705(&mut b);
+        epoch0.fetch_add(1, Ordering::Relaxed);
+        let (frame, meta) = wan_syn_ack(translated, port);
+        let reply = poll_at(&mut b, &shared, &withdrawn, &ha, WAN, &frame, meta, 8);
+        assert_eq!(reply.session_hit, 1, "{label}: the reply hits the shared reverse row");
+        assert_eq!(
+            (reply.snat_revoked, reply.closes, reply.tx),
+            (1, 0, [0, 0, 0]),
+            "{label}: a shared-companion judgment is not held by a pending refresh"
+        );
+    }
+}
+
 /// Review fold (AC #1, flow identity): the shared row at the original tuple
 /// can belong to a NEWER flow on the same client tuple with a different
 /// translation. A reply for the OLDER translation must not be validated by

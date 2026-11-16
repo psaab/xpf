@@ -68,6 +68,8 @@ mod resolution;
 // #17207: widened from private to `pub(in crate::afxdp)` so
 // afxdp/mod.rs can name these leaves directly (see there).
 pub(in crate::afxdp) mod worker_commands;
+// #18705: the worker pass's command phase (view loaded after the drain).
+mod command_phase;
 pub(in crate::afxdp) mod revalidation;
 
 mod tx_cancel;
@@ -80,6 +82,7 @@ pub(super) use forward_commit::{
 };
 pub(super) use resolution::*;
 pub(super) use worker_commands::*;
+pub(super) use command_phase::*;
 pub(super) use revalidation::*;
 pub(super) use tx_cancel::*;
 pub(super) use resolve::*;

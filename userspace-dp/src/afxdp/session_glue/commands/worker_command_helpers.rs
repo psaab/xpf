@@ -47,6 +47,15 @@ pub(in crate::afxdp::session_glue) fn handle_refresh_owner_rgs_command(
     ) {
         flag_install_table_purge(ctx.worker_id);
     }
+    // #18705: stamp the table with the epoch of the view this refresh ran
+    // under: every HA-managed row was just re-resolved under it. Also when
+    // the command named no RG > 0 (an RG0-only activation re-resolves no
+    // owner-RG line, so there is nothing to wait for). Never the reader's
+    // epoch at this point: an activation bumped after the view was loaded is
+    // not in the rows this refresh rewrote.
+    if let Some(view_epoch0) = ctx.ha_view_epoch0 {
+        ctx.sessions.note_owner_rgs_refreshed(view_epoch0);
+    }
 }
 
 /// Apply the existing stale-replay fence before delegating a synced upsert.

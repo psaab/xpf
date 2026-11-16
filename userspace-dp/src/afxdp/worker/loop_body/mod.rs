@@ -276,6 +276,7 @@ pub(crate) fn worker_loop(
     let WorkerSharedDataplane {
         runtime: shared_runtime,
         ha_state,
+        ha_published_epoch0,
         local_tunnel_deliveries,
         wg_uncovered_queues,
         fabrics: shared_fabrics,
@@ -373,6 +374,10 @@ pub(crate) fn worker_loop(
     // node's ONE directory, which the embedded-ICMP matcher reads when an
     // error for a punted flow lands on a worker other than the seed's.
     sessions.set_punt_seed_directory(std::sync::Arc::clone(&shared_owner_rg_indexes.punt_seeds));
+    // #18705: seed the table's `RefreshOwnerRGS` stamp with the PUBLISHED
+    // activation epoch (setup wired the reader at the bumped one). Every row
+    // this table will hold is installed under a view loaded after this read.
+    sessions.seed_owner_rg_refresh_epoch(ha_published_epoch0.load(Ordering::Acquire));
     // #5143: STARTUP READINESS report. The in-thread XSK/UMEM binds are now
     // done — `bindings` holds ONLY the planned bindings that actually bound
     // (setup's Err arm records a bind failure by leaving the failed binding
@@ -1069,51 +1074,31 @@ pub(crate) fn worker_loop(
                 }
             }
         }
-        let ha_runtime = ha_state.load();
-        // Only apply commands when pending — avoids lock overhead on
-        // every loop iteration in the common (empty-queue) case.
-        // #1807: a poisoned mutex is recovered (and the poison cleared)
-        // instead of reading as "no commands" — that turned one worker
-        // panic into permanent deafness to coordinator commands.
-        let has_commands = crate::afxdp::worker_queue::try_lock_recover(&commands)
-            .map(|q| !q.is_empty())
-            .unwrap_or(false);
-        // #9720/#11360: sample both positional-debt epochs EVERY pass. A
-        // record that lands after a queue drain still schedules the out-of-band
-        // repair even when no later command arrives.
-        let transition_debt_epoch = crate::afxdp::worker_queue::transition_debt_epoch(worker_id);
-        let debt_epoch_changed = transition_debt_epoch != last_transition_debt_epoch;
-        let session_import_repair_epoch =
-            crate::afxdp::worker_queue::session_import_repair_epoch(worker_id);
-        let import_repair_epoch_changed =
-            session_import_repair_epoch != last_session_import_repair_epoch;
-        let should_apply = crate::afxdp::worker_queue::should_apply_worker_commands(
-            has_commands,
-            debt_epoch_changed,
-            transition_debt_pending,
-            import_repair_epoch_changed,
-            session_import_repair_pending,
-        );
-        let command_results = if should_apply {
-            apply_worker_commands(
+        // #18705: the command phase loads the HA view AFTER it drains the
+        // queue (and the #9720 debt), so a transition stored before its
+        // command was pushed is always visible to that command, and returns
+        // the view the rest of this pass runs under (loaded after the
+        // apply). The pass used to load it here, before the queue check: a
+        // `RefreshOwnerRGS` pushed in between was applied under the pre-
+        // activation view and its heal was lost.
+        let (ha_runtime, command_results) =
+            crate::afxdp::session_glue::run_worker_command_phase(
                 &commands,
                 &mut sessions,
                 session_map.handle(),
                 conntrack_v4_fd,
                 conntrack_v6_fd,
                 &forwarding,
-                ha_runtime.as_ref(),
+                &ha_state,
+                &ha_published_epoch0,
                 &dynamic_neighbors,
                 worker_id,
                 &mut command_scratch,
-            )
-        } else {
-            WorkerCommandResults::empty()
-        };
-        if should_apply {
-            last_transition_debt_epoch = transition_debt_epoch;
-            last_session_import_repair_epoch = session_import_repair_epoch;
-        }
+                &mut last_transition_debt_epoch,
+                &mut last_session_import_repair_epoch,
+                transition_debt_pending,
+                session_import_repair_pending,
+            );
         let WorkerCommandResults {
             cancelled_keys,
             mut deleted_synced_keys,

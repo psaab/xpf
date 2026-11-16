@@ -1838,6 +1838,28 @@ pub(super) fn source_nat_revocation_on_session_hit_with_ingress(
             return None;
         }
     }
+    // #18705: a reverse hit judges the LOCAL forward companion's STORED line
+    // (no live substitution, above). `update_ha_state` publishes an RG
+    // activation before it pushes `RefreshOwnerRGS`, so between the two this
+    // worker can poll under the activated view while that line still
+    // predates the activation (the LAN owner's split-FIB reth0.50 default
+    // for a reth0.80 translation): judged invalid, the valid flow was
+    // revoked mid-failover. While this table's refresh for the current
+    // activation epoch is pending, decline. No stamp
+    // (`mark_source_nat_revalidated`), so the first hit after the refresh,
+    // whose `refresh_for_ha_transition` cleared the judgment, runs it in
+    // full: a withdrawn translation is still revoked, one refresh later.
+    // Forward hits are judged on the live re-resolution (above) and never
+    // take this decline; neither do the shared-companion and sessionless
+    // arms (`canonical_key: None`), which judge no stored local line. The
+    // epoch load is reached only on this cold arm, after the cheap clauses,
+    // and the keep is bounded (`OWNER_RG_REFRESH_PENDING_KEEP_NS`).
+    if metadata.is_reverse
+        && canonical_key.is_some()
+        && sessions.owner_rg_refresh_pending(now_ns)
+    {
+        return None;
+    }
     Some(PolicyRevocation {
         canonical_key,
         decision: forward_decision,

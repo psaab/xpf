@@ -2096,6 +2096,31 @@ struct ProbeCostProbes {
     undo_records: AtomicU64,
 }
 
+/// #18705: how long a reverse hit's source-NAT revocation may be declined
+/// while this table has not applied the `RefreshOwnerRGS` for the current
+/// node-level activation epoch, counted from the table's first decline for
+/// that epoch value (`SessionTable::owner_rg_refresh_pending`).
+///
+/// The keep covers the window between `update_ha_state` publishing an
+/// activation and this worker dispatching the refresh. Where the refresh is
+/// delivered, that window is a few worker passes: a queued command drains at
+/// the next pass, and a refused push (#9720 debt) dispatches once the
+/// backlog it was refused behind has drained, at most
+/// `MAX_PENDING_WORKER_COMMANDS / WORKER_COMMAND_DRAIN_BUDGET` = 16 passes
+/// (or at once when the queue empties). A pass is bounded by the same
+/// 256-command budget (~256 us measured, #7201) plus one RX batch, so the
+/// window is milliseconds. `worker_queue.rs` pins the bound at least 6x over
+/// 16 passes of 10 ms each.
+///
+/// The bound is for the paths that deliver no refresh stamp, so that the
+/// keep can never become a standing exemption from revocation
+/// (docs/log/18705.md, concern B): a #9720 debt refresh superseded by a
+/// later demote of every RG it named, or one whose RGs were all demoted
+/// again before it replayed; and a worker registered after the activation
+/// fan-out took its record snapshot. Past the bound the judgment runs as
+/// it did before #18705.
+pub(crate) const OWNER_RG_REFRESH_PENDING_KEEP_NS: u64 = 1_000_000_000;
+
 /// #18562: a dropped table's seeds are gone, so are their directory rows (a
 /// worker's table outlives no worker; the node directory outlives them all).
 impl Drop for SessionTable {
@@ -2113,6 +2138,19 @@ pub(crate) struct SessionTable {
     /// (a table built outside a worker) leaves `seen_rg_epoch` untouched.
     /// Wired once in `worker_loop_setup`.
     rg_epoch_reader: Option<std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>>,
+    /// #18705: the node-level activation epoch (`rg_epochs[0]`) this table's
+    /// stored lines are known to reflect. It advances only when a
+    /// `RefreshOwnerRGS` (queued or #9720 debt) is dispatched, to the
+    /// PUBLISHED epoch of the HA view that dispatch ran under
+    /// (`Coordinator::update_ha_state` publishes it after the `rg_runtime`
+    /// store, so a view loaded after reading it is at least that new). While
+    /// the reader's epoch differs, an activation's refresh has not reached
+    /// this table and a reverse hit's stored forward line may predate it; see
+    /// `owner_rg_refresh_pending`.
+    refreshed_rg_epoch0: u32,
+    /// #18705: the pending epoch the keep first declined for, and when
+    /// (`owner_rg_refresh_pending`'s bound clock). Reset per epoch value.
+    owner_rg_refresh_pending_since: Option<(u32, u64)>,
     /// #18562: the node's punt-seed directory. `new()` gives a table a
     /// private one; `worker_loop` wires every worker of the node to the ONE
     /// in `SharedSessionOwnerRgIndexes::punt_seeds`. Written only by
@@ -2686,6 +2724,8 @@ impl SessionTable {
         let state = HotPathSeededState::new(seed);
         Self {
             rg_epoch_reader: None,
+            refreshed_rg_epoch0: 0,
+            owner_rg_refresh_pending_since: None,
             punt_seeds: std::sync::Arc::new(PuntSeedDirectory::new()),
             punt_seed_table_token: punt_seed_directory::next_punt_seed_table_token(),
             pptp: crate::session::pptp::PptpAssociations::default(),
@@ -2895,7 +2935,83 @@ impl SessionTable {
         &mut self,
         reader: std::sync::Arc<dyn Fn(i32) -> u32 + Send + Sync>,
     ) {
+        // #18705: a freshly wired table starts with nothing pending. The
+        // worker loop lowers the stamp to the PUBLISHED epoch right after
+        // setup (`seed_owner_rg_refresh_epoch`): the reader's epoch is bumped
+        // before the `rg_runtime` store, so on its own it can name an
+        // activation whose state no view has shown this worker yet.
+        self.refreshed_rg_epoch0 = reader(0);
+        self.owner_rg_refresh_pending_since = None;
         self.rg_epoch_reader = Some(reader);
+    }
+
+    /// #18705: seed the refresh stamp with the node's PUBLISHED activation
+    /// epoch at worker setup. Every row this table will hold is installed
+    /// under an HA view loaded after this read, so the view is at least that
+    /// new. An activation still between its epoch bump and its publish reads
+    /// as pending until its `RefreshOwnerRGS` reaches this worker (or the
+    /// `OWNER_RG_REFRESH_PENDING_KEEP_NS` bound expires, if this worker was
+    /// registered after the fan-out took its record snapshot).
+    pub(crate) fn seed_owner_rg_refresh_epoch(&mut self, published_epoch0: u32) {
+        self.refreshed_rg_epoch0 = published_epoch0;
+        self.owner_rg_refresh_pending_since = None;
+    }
+
+    /// #18705: a `RefreshOwnerRGS` was dispatched on this table under an HA
+    /// view whose published epoch is at least `view_epoch0`, so every
+    /// HA-managed row was re-resolved under a view showing every activation
+    /// up to that epoch. Monotone and wrap-safe: a dispatch under an older
+    /// view never moves the stamp back. The stamp is the view's epoch, never
+    /// the reader's at dispatch time: an activation bumped after the view was
+    /// loaded is not reflected in the rows this dispatch rewrote.
+    pub(crate) fn note_owner_rgs_refreshed(&mut self, view_epoch0: u32) {
+        if (view_epoch0.wrapping_sub(self.refreshed_rg_epoch0) as i32) > 0 {
+            self.refreshed_rg_epoch0 = view_epoch0;
+        }
+    }
+
+    /// #18705: is an RG activation's `RefreshOwnerRGS` still pending on this
+    /// table? True while the node-level activation epoch differs from the
+    /// refresh stamp, for at most `OWNER_RG_REFRESH_PENDING_KEEP_NS` after
+    /// this table first asked about that epoch value. A table with no epoch
+    /// reader (unit fixtures, a table built outside a worker) never reports
+    /// pending.
+    ///
+    /// Cold: the only caller is the reverse-hit source-NAT revocation, after
+    /// the judgment has already found the stored line invalid. One relaxed
+    /// load of `rg_epochs[0]` through the reader; no allocation.
+    pub(crate) fn owner_rg_refresh_pending(&mut self, now_ns: u64) -> bool {
+        let Some(reader) = self.rg_epoch_reader.as_ref() else {
+            return false;
+        };
+        let current = reader(0);
+        if current == self.refreshed_rg_epoch0 {
+            return false;
+        }
+        match self.owner_rg_refresh_pending_since {
+            Some((epoch, since)) if epoch == current => {
+                now_ns.saturating_sub(since) < OWNER_RG_REFRESH_PENDING_KEEP_NS
+            }
+            _ => {
+                self.owner_rg_refresh_pending_since = Some((current, now_ns));
+                true
+            }
+        }
+    }
+
+    /// #18705 test seam: the refresh stamp.
+    #[cfg(test)]
+    pub(crate) fn refreshed_rg_epoch0_for_test(&self) -> u32 {
+        self.refreshed_rg_epoch0
+    }
+
+    /// #18705 test seam: move the bound clock's start back by `by_ns`, as if
+    /// the first decline for the pending epoch happened that much earlier.
+    #[cfg(test)]
+    pub(crate) fn backdate_owner_rg_refresh_pending_for_test(&mut self, by_ns: u64) {
+        if let Some((_, since)) = self.owner_rg_refresh_pending_since.as_mut() {
+            *since = since.saturating_sub(by_ns);
+        }
     }
 
     /// #18562: share the node's punt-seed directory with this table. Called

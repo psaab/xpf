@@ -675,45 +675,80 @@ fn worker_queue_9720_loop_gate_wiring() {
     // helper-tested-but-unwired loop strands debt exactly like v2 while
     // every behavioral cell stays green (cells drive `apply_worker_commands`
     // directly and never pass through the loop gate).
-    let path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp/worker/loop_body/mod.rs");
-    let src = std::fs::read_to_string(&path).expect("read worker loop_body");
-    let code = blank_comments_and_strings(&src);
-    for token in [
-        "should_apply_worker_commands",
-        "transition_debt_epoch(worker_id)",
-        "last_transition_debt_epoch",
-        "transition_debt_pending",
-        "session_import_repair_epoch(worker_id)",
-        "last_session_import_repair_epoch",
-        "session_import_repair_pending",
+    //
+    // #18705: the gate moved out of the loop into
+    // `session_glue/command_phase.rs` (`run_worker_command_phase`), so the HA
+    // view could be loaded after the drain. The same agreement is checked
+    // across the two files: the phase samples, gates and consumes; the loop
+    // calls the phase with its carried locals and carries the pending flag.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/afxdp");
+    let read = |rel: &str| {
+        let src = std::fs::read_to_string(root.join(rel))
+            .unwrap_or_else(|e| panic!("read {rel}: {e}"));
+        blank_comments_and_strings(&src)
+    };
+    let looped = read("worker/loop_body/mod.rs");
+    let phase = read("session_glue/command_phase.rs");
+    for (file, code, tokens) in [
+        (
+            "worker/loop_body/mod.rs",
+            &looped,
+            &[
+                "run_worker_command_phase(",
+                "last_transition_debt_epoch",
+                "transition_debt_pending",
+                "last_session_import_repair_epoch",
+                "session_import_repair_pending",
+            ][..],
+        ),
+        (
+            "session_glue/command_phase.rs",
+            &phase,
+            &[
+                "should_apply_worker_commands",
+                "transition_debt_epoch(worker_id)",
+                "last_transition_debt_epoch",
+                "transition_debt_pending",
+                "session_import_repair_epoch(worker_id)",
+                "last_session_import_repair_epoch",
+                "session_import_repair_pending",
+            ][..],
+        ),
     ] {
-        assert!(
-            code.contains(token),
-            "precondition: the guard read a tree with no `{token}` in it at all, \
-             so its agreement checks below would pass vacuously"
-        );
+        for token in tokens {
+            assert!(
+                code.contains(token),
+                "precondition: the guard read {file} with no `{token}` in it at all, \
+                 so its agreement checks below would pass vacuously"
+            );
+        }
     }
     // Fresh load sampled into a local every pass (not hoisted, not reused).
     assert!(
-        code.contains("let transition_debt_epoch =")
-            && code.contains("transition_debt_epoch(worker_id)"),
-        "the loop must sample a fresh transition-debt epoch every pass"
+        phase.contains("let transition_debt_epoch =")
+            && phase.contains("transition_debt_epoch(worker_id)"),
+        "the command phase must sample a fresh transition-debt epoch every pass"
     );
     // The gate call itself.
     assert!(
-        code.contains("should_apply_worker_commands("),
-        "the loop must gate `apply_worker_commands` on `should_apply_worker_commands`"
+        phase.contains("should_apply_worker_commands("),
+        "the command phase must gate the apply on `should_apply_worker_commands`"
     );
     // Post-apply consume: last-observed is assigned the sampled epoch only
     // on passes that applied (a record landing mid-apply refires next pass).
     assert!(
-        code.contains("last_transition_debt_epoch = transition_debt_epoch;"),
+        phase.contains("*last_transition_debt_epoch = transition_debt_epoch;"),
         "last-observed must be consumed from the sampled epoch after apply"
+    );
+    // The loop hands the phase its carried last-observed epochs by reference.
+    assert!(
+        looped.contains("&mut last_transition_debt_epoch")
+            && looped.contains("&mut last_session_import_repair_epoch"),
+        "the loop must let the command phase consume its last-observed epochs"
     );
     // Pending carry across passes.
     assert!(
-        code.contains("transition_debt_pending = transition_debt_pending_now;"),
+        looped.contains("transition_debt_pending = transition_debt_pending_now;"),
         "the loop must carry `transition_debt_pending` across passes"
     );
 }

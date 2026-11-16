@@ -79,6 +79,16 @@ impl crate::afxdp::Coordinator {
         }
         let state = Arc::new(state);
         self.ha.rg_runtime.store(Arc::clone(&state));
+        // #18705: publish the activation epoch AFTER the store, still under
+        // `ha_mutex` (the only `rg_epochs[0]` writer runs under it, so this
+        // load reads the bump above). A worker that reads it and then loads
+        // `rg_runtime` holds a view that shows this activation; the
+        // `RefreshOwnerRGS` dispatched under that view stamps its table with
+        // it. Reading `rg_epochs[0]` instead could stamp a table "refreshed"
+        // for an activation its view did not show.
+        self.ha
+            .published_epoch0
+            .store(self.rg_epochs[0].load(Ordering::Relaxed), Ordering::Release);
         drop(_held);
         for line in debug_lines {
             eprintln!("{line}");

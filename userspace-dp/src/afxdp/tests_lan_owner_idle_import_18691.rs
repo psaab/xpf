@@ -27,7 +27,7 @@ use super::tests_support::*;
 use super::*;
 
 /// reth0.50 in the captured snapshot: the WAN gateway VLAN.
-const WAN_GATEWAY_UNIT_IFINDEX: i32 = 13;
+pub(super) const WAN_GATEWAY_UNIT_IFINDEX: i32 = 13;
 /// An egress/tx pair this node does not have: the peer's numbering, which
 /// is what the HA wire carries (`handle_upsert_synced`: "synced sessions
 /// arrive with the remote node's interface indices").
@@ -36,7 +36,7 @@ const PEER_TX_IFINDEX: i32 = 203;
 
 /// How the imported forward row names its egress.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Numbering {
+pub(super) enum Numbering {
     /// The peer's ifindexes (live): the #326 standby fallback cannot
     /// revalidate them, so the import keeps the split-FIB line.
     Peer,
@@ -46,7 +46,7 @@ enum Numbering {
 }
 
 /// Import the pair on `forwarding` under `ha`, as the HA import does.
-fn import_pair(
+pub(super) fn import_pair(
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
     family: Family,
@@ -96,7 +96,7 @@ fn import_pair(
 }
 
 /// The LAN owner's import of the live flow.
-fn lan_owner_import(family: Family, served: bool) -> (SessionTable, ForwardingState, u64) {
+pub(super) fn lan_owner_import(family: Family, served: bool) -> (SessionTable, ForwardingState, u64) {
     let forwarding = rg_taking_node_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let sessions = import_pair(
@@ -155,7 +155,10 @@ fn fabric_reply(
     drive(sessions, forwarding, ha, FABRIC, &frame, meta, 1)
 }
 
-fn stored_forward_line(sessions: &SessionTable, key: &crate::session::SessionKey) -> ForwardingResolution {
+pub(super) fn stored_forward_line(
+    sessions: &SessionTable,
+    key: &crate::session::SessionKey,
+) -> ForwardingResolution {
     sessions
         .entry_with_origin(key)
         .expect("fixture: imported forward row")
@@ -460,36 +463,68 @@ fn activation_refresh_heals_the_line_and_keeps_the_flow_18691() {
     }
 }
 
-/// Review (seat Y) window, pre-existing on master: the coordinator stores
-/// the activated HA state before it queues `RefreshOwnerRGS`, so a worker
-/// pass can load the new state, find its queue still empty, and judge a
-/// reply against the stale split-FIB line. RG1 is now forwarding-active
-/// here, so this decline no longer applies and the line names reth0.50:
-/// StaleSourceNat. The window is one RX batch, or longer while a refused
-/// refresh waits as transition debt (#9720). Ignored until that issue is
-/// fixed; it asserts the behaviour the fix must produce. Un-ignored on
-/// 36acce9efb it fails with `(snat_revoked, closes, len) = (1, 1, 0)`.
+/// #18705: the node-level activation epoch a fixture table starts at. Not
+/// 0, so a table whose refresh stamp were never seeded from its reader would
+/// read as pending without any activation (the reader control in
+/// `tests_refresh_pending_18705.rs` pins that it does not).
+pub(super) const EPOCH_BEFORE_ACTIVATION_18705: u32 = 7;
+
+/// #18705: wire `sessions` to a node-level activation-epoch counter, as
+/// `worker_loop_setup` wires a worker's table to the coordinator's
+/// `rg_epochs`, and return the counter. A fixture with no reader cannot
+/// observe the window: the table never knows an activation happened.
+pub(super) fn wire_epoch_reader_18705(sessions: &mut SessionTable) -> Arc<AtomicU32> {
+    let epoch0 = Arc::new(AtomicU32::new(EPOCH_BEFORE_ACTIVATION_18705));
+    let reader = Arc::clone(&epoch0);
+    sessions.set_rg_epoch_reader(Arc::new(move |_rg| reader.load(Ordering::Relaxed)));
+    epoch0
+}
+
+/// Review (seat Y) window, #18705: the coordinator stores the activated HA
+/// state (bumping the node-level activation epoch first) before it queues
+/// `RefreshOwnerRGS`, so a worker pass can load the new state, find its
+/// queue still empty, and judge a reply against the stale split-FIB line.
+/// RG1 is forwarding-active here, so the #18691 decline no longer applies
+/// and the line names reth0.50, whose address is not the reth0.80
+/// translation. The fixture wires the table's epoch reader and bumps the
+/// epoch with no refresh dispatched: the refresh is pending. The reply must
+/// be kept and delivered. Un-ignored on master c61aa074f0 it fails with
+/// `(snat_revoked, closes, len) = (1, 1, 0)` (StaleSourceNat, full-pair
+/// teardown). The twin above is the same flow after the refresh. IPv4 and
+/// IPv6.
 #[test]
-#[ignore = "#18705: a reply between the HA store and RefreshOwnerRGS judges the stale line"]
 fn activation_before_refresh_keeps_the_flow_18691() {
-    let (mut sessions, _, now_secs) = lan_owner_import(Family::V4, false);
-    let owner_forwarding = fw1_owner_forwarding();
-    let (frame, meta) = wan_reply_frame_for(Family::V4);
-    let out = drive(
-        &mut sessions,
-        &owner_forwarding,
-        &owner_ha(now_secs),
-        WAN,
-        &frame,
-        meta,
-        1,
-    );
-    assert_eq!(out.session_hit, 1, "the reply must hit the reverse row");
-    assert_eq!(
-        (out.snat_revoked, out.closes, sessions.len()),
-        (0, 0, 2),
-        "a line the refresh has not reached yet is no ground to revoke"
-    );
+    for family in [Family::V4, Family::V6] {
+        let (mut sessions, split_forwarding, now_secs) = lan_owner_import(family, false);
+        let key = exported_forward(&split_forwarding, family).key;
+        assert_eq!(
+            stored_forward_line(&sessions, &key).egress_ifindex,
+            WAN_GATEWAY_UNIT_IFINDEX,
+            "premise: imported under the split FIB ({family:?})"
+        );
+        let epoch0 = wire_epoch_reader_18705(&mut sessions);
+        // `update_ha_state` activates RG1: epoch bumped, view stored, and
+        // this worker has not dispatched the refresh.
+        epoch0.fetch_add(1, Ordering::Relaxed);
+        let owner_forwarding = fw1_owner_forwarding();
+        let (frame, meta) = wan_reply_frame_for(family);
+        let out = drive(
+            &mut sessions,
+            &owner_forwarding,
+            &owner_ha(now_secs),
+            WAN,
+            &frame,
+            meta,
+            1,
+        );
+        assert_eq!(out.session_hit, 1, "the reply must hit the reverse row ({family:?})");
+        assert_eq!(
+            (out.snat_revoked, out.closes, sessions.len()),
+            (0, 0, 2),
+            "a line the refresh has not reached yet is no ground to revoke ({family:?})"
+        );
+        assert_eq!(out.tx, [0, 0, 1], "the reply reaches the LAN host ({family:?})");
+    }
 }
 
 /// Review (seat X): on the LAN owner the decline never sends a packet out a

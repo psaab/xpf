@@ -864,6 +864,19 @@ pub(in crate::afxdp) fn push_shaped_local_bounded(
 /// syscalls the measurement could not pay.
 pub(in crate::afxdp) const WORKER_COMMAND_DRAIN_BUDGET: usize = 256;
 
+/// #18705: the reverse-hit source-NAT refresh-pending keep
+/// (`crate::session::OWNER_RG_REFRESH_PENDING_KEEP_NS`) must outlast the
+/// slowest DELIVERED refresh: a #9720 debt refresh is positioned behind at
+/// most a full queue, which drains in `capacity / budget` passes. 10 ms per
+/// pass is a deliberately pessimistic pass time (the measured command slice
+/// is ~256 us); the keep is at least 6x the result. Shrinking the keep, or
+/// growing the queue or shrinking the budget, past this fails the build.
+const _: () = assert!(
+    crate::session::OWNER_RG_REFRESH_PENDING_KEEP_NS
+        >= 6 * (MAX_PENDING_WORKER_COMMANDS.div_ceil(WORKER_COMMAND_DRAIN_BUDGET) as u64)
+            * 10_000_000
+);
+
 /// The budget must be a strict fraction of the queue capacity.
 ///
 /// Compile-time, and deliberately HERE rather than in the test module: the

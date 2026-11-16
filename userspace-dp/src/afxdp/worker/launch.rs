@@ -115,6 +115,10 @@ pub(crate) struct WorkerSharedDataplane {
     /// `types/runtime_view.rs`.
     pub(in crate::afxdp) runtime: RuntimeViewReader,
     pub(in crate::afxdp) ha_state: Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>,
+    /// #18705: the activation epoch published with `ha_state`
+    /// (`HaState::published_epoch0`), read before each command-dispatch view
+    /// load and once at setup to seed the table's refresh stamp.
+    pub(in crate::afxdp) ha_published_epoch0: Arc<AtomicU32>,
     pub(in crate::afxdp) local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>>,
     /// #10597: live control→worker WG uncovered forward queues.
     pub(in crate::afxdp) wg_uncovered_queues: Arc<
@@ -151,6 +155,7 @@ impl WorkerSharedDataplane {
         Self {
             runtime: coord.ha.runtime_reader(),
             ha_state: coord.ha.rg_runtime.clone(),
+            ha_published_epoch0: coord.ha.published_epoch0.clone(),
             local_tunnel_deliveries: coord.local_tunnel_deliveries.clone(),
             wg_uncovered_queues: coord.wg_uncovered_queues.clone(),
             fabrics: coord.ha.fabrics.clone(),
@@ -359,6 +364,10 @@ mod tests {
         // the single `RuntimeView` ArcSwap.
         assert!(bundle.runtime.same_channel(&coord.ha.runtime_reader()));
         assert!(Arc::ptr_eq(&bundle.ha_state, &coord.ha.rg_runtime));
+        assert!(Arc::ptr_eq(
+            &bundle.ha_published_epoch0,
+            &coord.ha.published_epoch0
+        ));
         assert!(Arc::ptr_eq(&bundle.fabrics, &coord.ha.fabrics));
         assert!(Arc::ptr_eq(&bundle.mirror_targets, &coord.mirror_targets));
         assert!(Arc::ptr_eq(&bundle.rg_epochs, &coord.rg_epochs));

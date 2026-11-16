@@ -2666,9 +2666,33 @@ A node with no HA view judges everything. When the node later activates the RG, 
 decline is off and the line is judged as the owner's. That is correct only
 after `RefreshOwnerRGS` re-resolves it against the activated FIB, which
 relies on the #16270 ordering (connected prefixes republished before
-`SetRGActive`). The window between the HA store and the queued refresh is
-#18705. The operator-level account is in
-`docs/ha-failover-status.md` (#18531, #18691).
+`SetRGActive`).
+
+The window between the HA store and the refresh is closed by #18705. A
+reverse hit judges the LOCAL forward companion's STORED line. Forward hits
+substitute the live re-resolution; reverse hits never do. Before the
+refresh lands, that line can predate the activation. So a reverse-hit
+`StaleSourceNat` revocation with a local stored companion
+(`canonical_key: Some`) is declined while this worker's refresh is still
+pending (`SessionTable::owner_rg_refresh_pending`).
+
+"Pending" means the node-level activation epoch `rg_epochs[0]`, bumped
+before the store, differs from the table's refresh stamp. A
+`RefreshOwnerRGS` (queued or #9720 debt) stamps the PUBLISHED epoch of the
+view it ran under. That view is loaded after the drain
+(`session_glue/README.md`).
+
+The decline does not mark the row revalidated. The refresh clears the
+judgment, so the first hit after it runs the full judgment: a withdrawn
+translation is revoked one refresh late, never forgiven. The keep is also
+bounded: `OWNER_RG_REFRESH_PENDING_KEEP_NS` (1 s from this table's first
+decline for that epoch) limits the paths that deliver no stamp. These are
+a debt refresh superseded by a later demote, or stale-skipped, and a worker
+registered after the fan-out snapshot. Forward hits, the shared-companion
+arm and the sessionless arm (`canonical_key: None`) never take this
+decline. Cells: `tests_refresh_pending_18705.rs`,
+`activation_before_refresh_keeps_the_flow_18691`. The operator-level
+account is in `docs/ha-failover-status.md` (#18531, #18691, #18705).
 
 A reverse hit whose forward companion this worker has not materialized
 (`SourceNatRevalidationTarget::NoLocalEntry`) can be judged on the forward row

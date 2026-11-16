@@ -128,14 +128,27 @@ has_routing_domains: bool,
 has_multiple_zones: bool,) -> bool { allow_replace_local
     && uses_kernel_local_session_map_entry(key, decision, metadata, origin, has_routing_domains, has_multiple_zones) }
 
-pub(in crate::afxdp) fn apply_worker_commands(
+/// #18705: the HA view a command dispatch runs under, and the PUBLISHED
+/// activation epoch that view is known to show (`None`: unknown, so a
+/// `RefreshOwnerRGS` dispatched under it does not stamp the table).
+pub(in crate::afxdp) type CommandHaView = (Arc<BTreeMap<i32, HAGroupRuntime>>, Option<u32>);
+
+/// Apply this worker's queued commands, then its position-ready #9720
+/// transition debt, each under the HA view `load_view` returns when called:
+/// once after the drain, once more after the debt take (#18705; see
+/// `command_phase.rs`, which owns the production view source and the
+/// fixture entry points).
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn apply_worker_commands_with_view(
     commands: &Arc<Mutex<VecDeque<WorkerCommand>>>,
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,
     conntrack_v4_fd: c_int,
     conntrack_v6_fd: c_int,
     forwarding: &ForwardingState,
-    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    // #18705: called after the drain (and again after the debt take) for the
+    // view each dispatch runs under — see `run_worker_command_phase`.
+    load_view: &dyn Fn() -> CommandHaView,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     // #6211 F2: THIS worker's id, threaded from `WorkerLaunchPlan::worker_id`
     // in the worker loop. A peer-synced reservation is held by every worker, so
@@ -191,14 +204,17 @@ pub(in crate::afxdp) fn apply_worker_commands(
         queue_lock_acquired,
         drained,
     ) = commands::take_worker_command_slice(commands, worker_id, scratch);
-    {
+    if !scratch.is_empty() {
+        // #18705: the view for this slice is loaded AFTER the drain above.
+        let (ha_view, ha_view_epoch0) = load_view();
         let mut dispatch_context = commands::WorkerCommandDispatchContext {
             sessions: &mut *sessions,
             session_map,
             conntrack_v4_fd,
             conntrack_v6_fd,
             forwarding,
-            ha_state,
+            ha_state: &ha_view,
+            ha_view_epoch0,
             dynamic_neighbors,
             worker_id,
             now_ns,
@@ -237,23 +253,29 @@ pub(in crate::afxdp) fn apply_worker_commands(
     let transition_debt_pending = if queue_lock_acquired {
         let (ready, pending) =
             worker_queue::take_ready_transition_debt(worker_id, drained, !commands_backlogged);
-        for op in ready {
-            dispatch_transition_debt_op(
-                sessions,
-                session_map,
-                conntrack_v4_fd,
-                conntrack_v6_fd,
-                forwarding,
-                ha_state,
-                dynamic_neighbors,
-                worker_id,
-                op,
-                now_ns,
-                now_secs,
-                &mut cancelled_keys,
-                &mut cancelled_keys_seen,
-                &mut vacate_all_shared_exact_slots,
-            );
+        if !ready.is_empty() {
+            // #18705: debt is recorded after the coordinator's store, so its
+            // view is loaded AFTER the debt take, not reused from the slice.
+            let (ha_view, ha_view_epoch0) = load_view();
+            for op in ready {
+                dispatch_transition_debt_op(
+                    sessions,
+                    session_map,
+                    conntrack_v4_fd,
+                    conntrack_v6_fd,
+                    forwarding,
+                    &ha_view,
+                    ha_view_epoch0,
+                    dynamic_neighbors,
+                    worker_id,
+                    op,
+                    now_ns,
+                    now_secs,
+                    &mut cancelled_keys,
+                    &mut cancelled_keys_seen,
+                    &mut vacate_all_shared_exact_slots,
+                );
+            }
         }
         pending
     } else {
@@ -311,6 +333,7 @@ fn dispatch_transition_debt_op(
     conntrack_v6_fd: c_int,
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    ha_view_epoch0: Option<u32>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
     worker_id: u32,
     op: worker_queue::TransitionDebtOp,
@@ -355,8 +378,8 @@ fn dispatch_transition_debt_op(
             let surviving: Vec<i32> = op.rgs().iter().copied().filter(rg_is_active).collect();
             worker_queue::HA_TRANSITION_REFRESH_STALE_SKIPPED
                 .fetch_add((op.rgs().len() - surviving.len()) as u64, Ordering::Relaxed);
-            if !surviving.is_empty()
-                && commands::handle_refresh_owner_rgs(
+            if !surviving.is_empty() {
+                if commands::handle_refresh_owner_rgs(
                     sessions,
                     session_map,
                     forwarding,
@@ -365,9 +388,16 @@ fn dispatch_transition_debt_op(
                     surviving,
                     now_ns,
                     now_secs,
-                )
-            {
-                flag_install_table_purge(worker_id);
+                ) {
+                    flag_install_table_purge(worker_id);
+                }
+                // #18705: the replayed refresh re-resolved every HA-managed
+                // row under this view. A fully stale-skipped op stamps
+                // nothing: no row was re-resolved, and an older stamp only
+                // lengthens the bounded keep.
+                if let Some(view_epoch0) = ha_view_epoch0 {
+                    sessions.note_owner_rgs_refreshed(view_epoch0);
+                }
             }
         }
         TransitionDebtKind::Vacate => {

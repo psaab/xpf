@@ -18,7 +18,8 @@ sees the same sessions the userspace path is processing.
 | `resolution.rs` | Cached FIB/table resolution and the helpers that compare/rebuild it. |
 | `resolve.rs` | Per-packet flow/session resolution (`resolve_flow_session_decision*`). |
 | `forward_commit.rs` | Single source of truth for forward-session metadata, NAT composition, TCP epilogue, and shared-entry construction (#17021). |
-| `worker_commands.rs` | Worker-command tick (`apply_worker_commands`), replication enqueueing, and delete-drop repair. The public entry point stays below 200 lines; the ordered match lives in `commands/worker_command_dispatch.rs`. |
+| `worker_commands.rs` | Worker-command tick (`apply_worker_commands_with_view`), replication enqueueing, and delete-drop repair. The tick stays below 200 lines; the ordered match lives in `commands/worker_command_dispatch.rs`. The tick asks its caller for the HA view after the drain, and again after the #9720 debt take (#18705). |
+| `command_phase.rs` | One worker pass's command phase (`run_worker_command_phase`, #18705): the queue and debt checks, the apply, and the HA view the pass polls under. The view each dispatch runs under is loaded AFTER the drain, with the published activation epoch read just before it, because the coordinator stores a transition before it pushes the command. A `RefreshOwnerRGS` stamps that epoch on the table. Also holds the fixture entry points `apply_worker_commands` and `apply_worker_commands_at_view_epoch` (`#[cfg(test)]`). |
 | `revalidation.rs` | Policy/zone/SNAT session revalidation, purge sweeps, and BPF session-map mirror writers. |
 | `tx_cancel.rs` | TCP-RST queue cancellation and pending-frame recycling. |
 | `promote.rs` | Synced-session hit handling: `maybe_promote_synced_session` (promote a peer-synced hit to locally-owned) and `purge_translated_synced_hit` (drop + NAT-release a transient alias-owned hit). |
@@ -66,8 +67,10 @@ Mechanism and live evidence:
 ## Command ingest is budgeted (`apply_worker_commands`, #7201)
 
 `apply_worker_commands` is the worker's consumer for its
-`Arc<Mutex<VecDeque<WorkerCommand>>>` queue. It does **not** drain the
-whole queue.
+`Arc<Mutex<VecDeque<WorkerCommand>>>` queue. Since #18705 the production
+tick is `apply_worker_commands_with_view`, called from
+`run_worker_command_phase`. `apply_worker_commands` is its `#[cfg(test)]`
+fixed-view wrapper. It does **not** drain the whole queue.
 
 Each pass takes a contiguous FRONT prefix of at most
 `worker_queue::WORKER_COMMAND_DRAIN_BUDGET` (256) commands into a
@@ -106,6 +109,41 @@ Why, and what a change here must not break:
 - Export acks stay monotonic across a split: `worker/loop_body` stores
   `exported_sequences.iter().max()` per pass, and FIFO makes each pass's
   max strictly greater than the last.
+
+## The dispatch HA view is loaded after the drain (#18705)
+
+`update_ha_state` stores an RG transition in `rg_runtime` and only then
+pushes the command that carries it (`DemoteOwnerRGS`, `RefreshOwnerRGS`).
+A refused push becomes #9720 debt, also recorded after the store. Until
+#18705 the worker loaded its pass view first and drained its queue second.
+So a refresh pushed in that gap ran under the pre-activation view. Its rows
+re-resolved `HAInactive`, which the refresh does not rewrite, and the
+consumed command never came back; a debt replay was stale-skipped. The heal
+was lost. A demote drained the same way ran under a view where the RG was
+still active.
+
+`run_worker_command_phase` (`command_phase.rs`) checks the queue and the
+debt epochs and loads no view before it applies. The tick
+(`apply_worker_commands_with_view`) calls the view source after the drain,
+and again after the debt take. The queue (debt) mutex orders the
+coordinator's store before that load. The pass then polls under a view
+loaded after the apply.
+
+Each load reads `HaState::published_epoch0` (Acquire) first. That is the
+node-level activation epoch, published after the store. A
+`RefreshOwnerRGS` stamps it on the table, queued or replayed
+(`SessionTable::note_owner_rgs_refreshed`), including an RG0-only one,
+which re-resolves no owner-RG line. A fully stale-skipped debt refresh
+stamps nothing. The stamp is never `rg_epochs[0]` read at dispatch time:
+that counter is bumped before the store and can name an activation the
+view did not show. The reverse-hit source-NAT keep reads the stamp
+(`poll_descriptor/README.md`).
+
+Pinned in `tests_refresh_pending_18705.rs`:
+`refresh_pushed_after_the_queue_check_runs_under_the_stored_view_18705`
+(the interleaving, through a `#[cfg(test)]` hook between the queue check
+and the drain), `reply_in_the_pass_before_the_refresh_lands_is_kept_18705`,
+and `debt_replayed_refresh_stamps_the_table_18705`.
 
 ## A refused cross-worker `DeleteSynced` (#8114 item 4)
 

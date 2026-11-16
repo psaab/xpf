@@ -769,13 +769,35 @@ and the stored line is judged as the owner's. That is correct only because
 carries the connected prefix again. That in turn rests on the #16270
 ordering: connected prefixes are republished before `SetRGActive`. The
 cell `activation_refresh_heals_the_line_and_keeps_the_flow_18691` pins the
-healed path (v4/v6). One window is pre-existing on master and is NOT closed
-here. The coordinator stores the activated HA state before it queues
-`RefreshOwnerRGS`. A worker pass that loads the new state while its queue
-is still empty judges a reply against the stale split-FIB line, and
-revokes. The window is one RX batch, or longer while a refused refresh
-waits as #9720 transition debt. It is pinned, ignored, by
-`activation_before_refresh_keeps_the_flow_18691` and tracked in #18705.
+healed path (v4/v6).
+
+#18705 closes the window before the refresh. The coordinator stores the
+activated HA state before it queues `RefreshOwnerRGS`. A worker pass that
+loaded the new state while its queue was still empty judged a reply
+against the stale split-FIB line, and revoked. The window was one RX
+batch, or longer while a refused refresh waited as #9720 transition debt.
+
+Each worker's session table now carries a refresh stamp: the node-level
+activation epoch of the HA view its last `RefreshOwnerRGS` ran under. While
+the current epoch differs from that stamp, a reply whose local forward
+companion's stored line would be judged invalid is kept, not revoked. The
+row is not marked judged. The first hit after the refresh runs the full
+judgment, so a genuinely withdrawn translation is still revoked, one
+refresh later. Forward packets are judged on their live line throughout.
+
+The keep lasts at most 1 s from the first time a table declines for that
+epoch. That limit covers the paths that never deliver a stamp; past it,
+the judgment runs as before.
+
+The same change fixes a second way to lose the heal. The worker loaded its
+pass view before it drained its queue, so a refresh pushed in that gap ran
+under the pre-activation view and rewrote nothing. The command-dispatch
+view is now loaded after the drain.
+
+Cells: `activation_before_refresh_keeps_the_flow_18691` (no longer
+ignored; v4/v6) and `tests_refresh_pending_18705.rs`. Analysis:
+`docs/log/18705.md`. Live impact was never observed: no `snat_revoked`
+increment at any crash takeover in #18683 run 3, with 1 s sampling.
 
 ### Never-again gates
 

@@ -18,6 +18,15 @@ pub(in crate::afxdp) struct HaState {
     /// `ServerState → ha` (leaf, acyclic); hold is µs (no slow ops, no
     /// logging inside).
     pub(in crate::afxdp) ha_mutex: Arc<Mutex<()>>,
+    /// #18705: the node-level activation epoch (`Coordinator::rg_epochs[0]`)
+    /// as of the last `rg_runtime` store by `update_ha_state`, stored
+    /// (Release) AFTER that store and under `ha_mutex`. `rg_epochs[0]` itself
+    /// is bumped BEFORE the store (#2120), so it can name an activation no
+    /// view shows yet; this one cannot: a reader that loads it (Acquire) and
+    /// then loads `rg_runtime` holds a view at least as new as the state
+    /// stored with it. Workers stamp their `RefreshOwnerRGS` dispatches with
+    /// it (`SessionTable::note_owner_rgs_refreshed`).
+    pub(in crate::afxdp) published_epoch0: Arc<AtomicU32>,
     pub(in crate::afxdp) fabrics: Arc<ArcSwap<Vec<FabricLink>>>,
     /// #6592: the single worker-visible runtime gate — validation AND
     /// forwarding in ONE `Arc`, so a reader can never pair them across
@@ -46,6 +55,7 @@ impl HaState {
         Self {
             rg_runtime: Arc::new(ArcSwap::from_pointee(BTreeMap::new())),
             ha_mutex: Arc::new(Mutex::new(())),
+            published_epoch0: Arc::new(AtomicU32::new(0)),
             fabrics: Arc::new(ArcSwap::from_pointee(Vec::new())),
             runtime: RuntimeViewChannel::default(),
         }

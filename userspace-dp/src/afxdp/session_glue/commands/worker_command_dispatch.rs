@@ -6,6 +6,9 @@ pub(in crate::afxdp::session_glue) struct WorkerCommandDispatchContext<'a> {
     pub(in crate::afxdp::session_glue) conntrack_v6_fd: c_int,
     pub(in crate::afxdp::session_glue) forwarding: &'a ForwardingState,
     pub(in crate::afxdp::session_glue) ha_state: &'a BTreeMap<i32, HAGroupRuntime>,
+    /// #18705: the published activation epoch `ha_state` is known to show
+    /// (`None`: unknown, so a refresh dispatched here stamps nothing).
+    pub(in crate::afxdp::session_glue) ha_view_epoch0: Option<u32>,
     pub(in crate::afxdp::session_glue) dynamic_neighbors: &'a Arc<ShardedNeighborMap>,
     pub(in crate::afxdp::session_glue) worker_id: u32,
     pub(in crate::afxdp::session_glue) now_ns: u64,
