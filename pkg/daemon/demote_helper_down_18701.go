@@ -479,3 +479,50 @@ func (d *Daemon) confirmOwnerlessInactive(rgID int) error {
 	}
 	return nil
 }
+
+// resignLostRethRGsHelperDown is the legacy VRRP mode analogue of
+// releaseDirectVIPsHelperDown (#18716). With an unresponsive local helper, it
+// resigns the RETH VRRP (priority 0, so the peer takes over within
+// milliseconds) of the event's RG, BEFORE any helper round trip. It returns
+// that RG's barrier, for the fence.
+//
+// Cluster events are handled one at a time, so a sibling RG lost in the same
+// election would otherwise keep its VIPs behind this handler's prep and write.
+// So it also resigns every sibling whose VRRP posture already needs a resign:
+// cluster non-primary with any VRRP instance still MASTER. That is the
+// reconcile safety net's predicate (CheckVRRPPosture), applied without its 2 s
+// delay. The delay exists for a transient this path cannot be in: VRRP taking
+// over on peer loss before the cluster promotes. A demotion edge means the
+// peer is alive and won an election. As in the safety net, nothing is resigned
+// during VRRP sync hold. An RG this node owns, or whose VRRP is not MASTER, is
+// left alone (its own event resigns it on its own edge).
+func (d *Daemon) resignLostRethRGsHelperDown(eventRG int) vipReleaseBarrier {
+	barrier := d.resignRethRG(eventRG)
+	if d.cluster == nil || (d.vrrpMgr != nil && d.vrrpMgr.InSyncHold()) {
+		return barrier
+	}
+	for _, rg := range d.cluster.GroupStates() {
+		id := rg.GroupID
+		if id == eventRG || d.cluster.IsLocalPrimary(id) || !d.getOrCreateRGState(id).AnyVRRPMaster() {
+			continue
+		}
+		d.resignRethRG(id)
+	}
+	return barrier
+}
+
+// legacyHelperDownFenceSilentAck decides, in legacy VRRP mode, whether a failed
+// helper-down rg_active write may still report the failover fence actuated
+// (#18716, the legacy twin of helperDownFenceSilentAck). The control socket
+// must have been silent at entry and be silent now (fresh sample), and there
+// must be a RETH resign barrier: the fence is then resolved from the VIPs'
+// actual release (awaitRethVIPRelease), never from the write.
+func (d *Daemon) legacyHelperDownFenceSilentAck(rethResign vipReleaseBarrier, silentAtEntry bool) error {
+	if !silentAtEntry || !d.helperControlConfirmedSilent() {
+		return errors.New("the helper's control socket answered, so the rg_active write's failure is a refusal")
+	}
+	if rethResign == nil {
+		return errors.New("no RETH VRRP resign barrier to resolve the fence from")
+	}
+	return nil
+}

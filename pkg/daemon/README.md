@@ -5524,9 +5524,9 @@ releases every non-owned RG's VIPs before any per-RG helper round trip, takes
 one control-socket sample per RG for the prep and the bound, and joins any
 write still in flight.
 
-A healthy helper keeps the #18563/#18620 order unchanged. Legacy VRRP mode is
-also unchanged: there the VIPs follow the VRRP resign, and that resign waits
-behind the 5 s prep, so a similar window may exist there (#18716).
+A healthy helper keeps the #18563/#18620 order unchanged. Legacy VRRP mode has
+its own arm: there the VIPs follow the VRRP resign, which now goes first (see
+"Legacy VRRP mode: the resign goes first (#18716)" below).
 
 **What an operator sees.** One WARN per demoted RG:
 
@@ -5570,9 +5570,10 @@ may wait on the Manager's `m.mu` behind the wedged helper's round trips
 (#18711). That delays the rg_active bookkeeping and the next RG's handler,
 but no longer the VIP release.
 
-Direct mode only, pinned: in legacy VRRP mode a not-ready helper causes no
-direct-VIP add or remove on either path, because VRRP owns those addresses
-there.
+The direct-VIP release is direct mode only, pinned: in legacy VRRP mode a
+not-ready helper causes no direct-VIP add or remove on either path, because
+VRRP owns those addresses there. Legacy mode resigns the VRRP instead (#18716,
+below).
 
 Cells, in `demote_helper_down_18701_test.go`:
 - with an unresponsive helper, the VIPs are released before the rg_active
@@ -5602,6 +5603,92 @@ their services under `directVIPMu`. The silence verdict is a time threshold
 (#18685) that can flip inside it, so a second read could skip the bound but
 run the prep, or the reverse, within one demotion. The cell flips the verdict
 inside the VIP removal (review L, fold 5).
+
+## Legacy VRRP mode: the resign goes first (#18716)
+
+In legacy VRRP mode (`no-private-rg-election` without `no-reth-vrrp`) the RETH
+VIPs are VRRP's, and they leave a demoted node only on its priority-0 resign.
+That resign used to run after the 5 s demotion prep (#485 order: prep, resign,
+write), and the rg_active write after it was unbounded. With a wedged helper,
+both burn their deadlines first.
+
+Meanwhile the new primary forces MASTER at priority 200 (`ForceRGMaster` on
+its promotion edge), while the old primary is still MASTER at 200: its
+priority changes only through the resign or the debounced priority update at
+the end of its handler. Equal priority falls to the RFC 5798 §6.4.3 tie-break,
+which a dual-stack RETH instance runs on IPv4 adverts only (#4376,
+`pkg/vrrp/README.md`). There are three outcomes, each pinned with real run
+loops in `pkg/vrrp/legacy_equal_priority_18716_test.go`:
+
+1. The new primary's IPv4 advert source is higher. The old master steps down
+   within an advert interval or two. No lasting window.
+2. The old master's is higher. The NEW primary steps down, and the VIP stays
+   on the old (wedged) node until it resigns. A single-owner blackhole.
+3. Neither node has a non-VIP IPv4 on the RETH member. No IPv4 advert can be
+   sent, the IPv6 adverts do not decide the tie-break, and both nodes stay
+   MASTER holding the VIP until the old one resigns. The dual-VIP shape.
+
+Which shape a deployment is in depends on whether each node's RETH member
+carries a non-VIP IPv4. That has not been measured on a legacy-mode cluster;
+the lab clusters run the compiler default. In every shape the old master's
+resign ends it. The handover the resign itself drives is break-before-make:
+the VIP leaves the old node before its priority-0 advert, the advert a BACKUP
+peer takes over on, goes on the wire.
+
+**The fix.** On a primary to secondary (or secondary-hold) demotion edge with
+the helper down (the #18697/#18685 verdict, as in direct mode), legacy mode
+now:
+
+1. resigns the event RG's RETH VRRP FIRST, before any helper round trip;
+2. also resigns every sibling RG whose VRRP posture already needs a resign:
+   cluster non-primary with any VRRP instance still MASTER. That is the
+   reconcile safety net's predicate (`CheckVRRPPosture`), applied without its
+   2 s delay. The delay is for VRRP taking over on peer loss before the
+   cluster promotes, which a demotion edge rules out: the peer is alive and
+   won an election. As in the safety net, nothing extra is resigned during
+   VRRP sync hold. An owned RG, or one whose VRRP is not MASTER, is left to
+   its own event;
+3. then runs the same prep skip and bounded write as direct mode (one
+   control-socket sample decides both).
+
+The resign keys on the same edge the old resign used, so a primary to disabled
+or lost edge still resigns nothing. The prep skip and the bound apply on every
+helper-down demotion edge, as in direct mode. A healthy helper keeps prep,
+resign, write.
+
+**The fence.** For a peer-requested failover (an evacuation of this node) the
+peer promotes only on this node's applied-ack. When the bounded write fails
+with the control socket silent at entry and still silent (fresh sample), the
+ack is resolved from the RETH VIPs' actual release (`awaitRethVIPRelease`,
+#6177), never from the write: the ack cannot come while the VIPs are still on
+this node, and it does come once they leave. Before #18716 that write failure
+aborted the evacuation and left the RG on the wedged node (#16592). A failed
+release still fails the ack, and with the control socket answering a failed
+write is a refusal (#6371), as in direct mode.
+
+**The reconcile pass** skips the prep and bounds the write in legacy mode too,
+so the VRRP posture safety net behind it (2 s mismatch, then a resign) is not
+held behind them. It does not resign early: there the 2 s delay still guards
+the peer-loss transient.
+
+**What an operator sees.** One WARN per demotion:
+
+    cluster: demoting with an unresponsive helper in legacy VRRP mode; resigning RETH VRRP before helper-side demotion (#18716)
+
+with `rg`, the verdict reason and `control_silent`, followed by the VRRP
+`forced resignation` lines. When the bounded write fails silently:
+
+    failed to update rg_active from cluster event; the helper's control socket is silent, so the failover fence follows the RETH VRRP VIP release instead (#18716)
+
+Cells, in `legacy_helper_down_18716_test.go`: the resign comes before the
+write and the silent prep is skipped, within the bound; with the control
+thread answering, resign then prep then write; the healthy order; no resign on
+a primary to disabled edge; every lost MASTER sibling resigned before the
+event RG's write; an owned sibling, a non-MASTER sibling, and any sibling
+during sync hold left alone; the fence following the release (clean release
+acks, failed release and an answering refusal do not); the reconcile bound.
+Eleven daemon mutants and three VRRP mutants each fail a named cell (see
+`docs/log/18716.md`).
 
 ## A transfer request for a group neither node owns (#18715)
 
