@@ -472,6 +472,64 @@ func (m *Manager) DataGroupIDs() []int {
 	return m.dataGroupIDsLocked()
 }
 
+// GroupIDs returns every configured redundancy group, RG0 included, in
+// ascending order. Like DataGroupIDs it runs no transfer-readiness callback
+// (#19169): GroupStates and GroupState call transferReadinessFn for each group
+// they return, which in production reaches routing discovery and FRR queries
+// (up to 2 s per group). Callers that need only the IDs, on HA hot paths, use
+// this instead.
+func (m *Manager) GroupIDs() []int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ids := make([]int, 0, len(m.groups))
+	for rgID := range m.groups {
+		ids = append(ids, rgID)
+	}
+	sort.Ints(ids)
+	return ids
+}
+
+// LocalGroupState returns this node's state for rgID, and whether the manager
+// knows the group at all. One RLock, no allocation, no transfer-readiness
+// callback (#19169): GroupState runs that callback (routing and FRR queries,
+// up to 2 s), which a caller that needs only the state must not pay on an HA
+// path.
+func (m *Manager) LocalGroupState(rgID int) (NodeState, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	rg, ok := m.groups[rgID]
+	if !ok {
+		return StateSecondary, false
+	}
+	return rg.State, true
+}
+
+// GroupMonitorFailures is one group's ID and its current monitor failures.
+type GroupMonitorFailures struct {
+	GroupID      int
+	MonitorFails []string
+}
+
+// MonitorFailuresByGroup returns every configured group's monitor failures, in
+// ascending group order, with no transfer-readiness callback (#19169). It is
+// for the transit gate's election-debt tick, which installs and clears
+// monitor debt on every group and must not wait on readiness probes: that
+// debt is what moves the RGs away from a sick helper.
+func (m *Manager) MonitorFailuresByGroup() []GroupMonitorFailures {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]GroupMonitorFailures, 0, len(m.groups))
+	for rgID, rg := range m.groups {
+		var fails []string
+		if len(rg.MonitorFails) > 0 {
+			fails = append([]string(nil), rg.MonitorFails...)
+		}
+		out = append(out, GroupMonitorFailures{GroupID: rgID, MonitorFails: fails})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].GroupID < out[j].GroupID })
+	return out
+}
+
 // dataGroupIDsLocked is DataGroupIDs for callers already holding m.mu
 // (read or write). #16475: Go's sync.RWMutex prohibits recursive read
 // locking — a writer queued between the outer and inner RLock wedges

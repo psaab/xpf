@@ -226,7 +226,7 @@ func TestPeerAlreadyPrimaryConfirmsFirstSecondaryReconcile_12171(t *testing.T) {
 }
 
 // TestStaleSecondarySnapshotDoesNotConsumePromotionLatch_12171 reproduces
-// the GroupState readiness-callback interleaving: the snapshot says Secondary,
+// the snapshot-to-recheck interleaving: the snapshot says Secondary,
 // then a self-election event runs before reconciliation compares the gate.
 func TestStaleSecondarySnapshotDoesNotConsumePromotionLatch_12171(t *testing.T) {
 	d := recoveredSecondaryDaemon12171(t)
@@ -235,16 +235,16 @@ func TestStaleSecondarySnapshotDoesNotConsumePromotionLatch_12171(t *testing.T) 
 		t.Fatal("precondition: initial reconcile must preserve the window and arm the gate")
 	}
 
+	// The interleaving lands right after the RG0 state sample and before the
+	// recheck (rg0OwnershipSnapshotHook; until #19169 the readiness callback
+	// that GroupState ran at that point).
 	var once sync.Once
-	d.cluster.SetTransferReadinessFunc(func(rgID int) (bool, []string) {
-		if rgID == 0 {
-			once.Do(func() {
-				d.cluster.SetGroupStateForTesting(0, cluster.StatePrimary)
-				deliverRG0OwnershipEvent12171(d, cluster.StateSecondary, cluster.StatePrimary)
-			})
-		}
-		return true, nil
-	})
+	d.rg0OwnershipSnapshotHook = func() {
+		once.Do(func() {
+			d.cluster.SetGroupStateForTesting(0, cluster.StatePrimary)
+			deliverRG0OwnershipEvent12171(d, cluster.StateSecondary, cluster.StatePrimary)
+		})
+	}
 	d.reconcileRG0ConfigOwnership()
 
 	if !d.cluster.IsLocalPrimary(0) {
@@ -273,15 +273,12 @@ func TestStalePrimarySnapshotDoesNotReopenConfigWrites_12171(t *testing.T) {
 	deliverRG0OwnershipEvent12171(d, cluster.StateSecondary, cluster.StatePrimary)
 
 	var once sync.Once
-	d.cluster.SetTransferReadinessFunc(func(rgID int) (bool, []string) {
-		if rgID == 0 {
-			once.Do(func() {
-				d.cluster.SetGroupStateForTesting(0, cluster.StateSecondary)
-				deliverRG0OwnershipEvent12171(d, cluster.StatePrimary, cluster.StateSecondary)
-			})
-		}
-		return true, nil
-	})
+	d.rg0OwnershipSnapshotHook = func() {
+		once.Do(func() {
+			d.cluster.SetGroupStateForTesting(0, cluster.StateSecondary)
+			deliverRG0OwnershipEvent12171(d, cluster.StatePrimary, cluster.StateSecondary)
+		})
+	}
 	d.reconcileRG0ConfigOwnership()
 
 	if d.cluster.IsLocalPrimary(0) {

@@ -473,7 +473,10 @@ func (d *Daemon) applyTransitElectionDebtKeepArm(dataplaneReady, crashLooping, k
 	if d.cluster == nil {
 		return
 	}
-	for _, rg := range d.cluster.GroupStates() {
+	// #19169: monitor failures only, so no transfer-readiness callbacks. This
+	// debt is what moves the RGs off a sick helper; it must not wait on
+	// routing and FRR probes.
+	for _, rg := range d.cluster.MonitorFailuresByGroup() {
 		hasArmDebt, hasCrashLoopDebt := false, false
 		for _, iface := range rg.MonitorFails {
 			switch iface {

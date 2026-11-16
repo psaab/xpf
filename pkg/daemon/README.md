@@ -5354,6 +5354,43 @@ releases every non-owned RG's VIPs before any per-RG helper round trip, takes
 one control-socket sample per RG for the prep and the bound, and joins any
 write still in flight.
 
+**No readiness probe ahead of the release (#19169).** The cluster's
+`GroupStates()` and `GroupState()` run the transfer-readiness callback for
+every group they return. In production that is `userspaceTransferReadiness`:
+routing discovery plus FRR queries, bounded at 2 s per group. Before #19169,
+these HA paths used them only for IDs, ownership or monitor failures:
+- the release enumerated RGs with `GroupStates()`;
+- every direct VIP reconcile read ownership with `GroupState()` under
+  `directVIPMu`;
+- the reconcile pass built its RG set with `GroupStates()`;
+- the transit gate's election-debt tick read monitor failures with
+  `GroupStates()`.
+
+- `reconcileRG0ConfigOwnership`, at the TOP of the reconcile pass (ahead of
+  its helper-down release), read RG0's state with `GroupState(0)`.
+
+So with a learned route missing and FRR slow, the first VIP removal could
+wait about 2 s per group, and so could the debt that moves the RGs off the
+sick helper. They now use `DataGroupIDs`, `LocalGroupPrimary`, `GroupIDs`,
+`MonitorFailuresByGroup` and `LocalGroupState`, none of which run the
+callback. No production caller in `pkg/daemon` uses `GroupState` or
+`GroupStates` any more.
+
+The callers that keep the callback need readiness: operator displays and APIs
+(`show chassis cluster`, gRPC status, the CLI failover check) and `HAState`.
+
+**The census is a test, not a judgment.**
+`TestNoFailoverPathRunsTheReadinessCallback19169` installs a readiness
+callback that FAILS the test if invoked, then drives every failover-path entry
+point:
+- a helper-down demotion;
+- the reconcile pass, including RG0 config ownership and its release;
+- a direct-VIP reconcile;
+- the election-debt tick.
+
+A new caller on any of them goes red. It is how the RG0 caller, which the hand
+census had missed, was found.
+
 A healthy helper keeps the #18563/#18620 order unchanged. Legacy VRRP mode is
 also unchanged: there the VIPs follow the VRRP resign, and that resign waits
 behind the 5 s prep, so a similar window may exist there (#18716).
