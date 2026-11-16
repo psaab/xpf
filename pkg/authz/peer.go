@@ -111,6 +111,12 @@ import (
 // state enum under a name that means "TCP state".
 const tcpEstablished = 1
 
+// tcpSynRecv is TCP_SYN_RECV (include/net/tcp_states.h). LookupPeer never
+// attributes a row in this state; it only flags it (PeerIdentity.synRecv) so the
+// CLIENT half of #14581 can wait for the server half of a connection it just
+// dialed to finish its handshake (#19125, client.go).
+const tcpSynRecv = 3
+
 // procNetTCPPath and procNetTCP6Path are the socket-table sources. They are
 // variables so a test can point the parser at a fixture; production never
 // changes them.
@@ -445,6 +451,10 @@ type PeerIdentity struct {
 	// Detail explains a missing or unusable identity, for the denial message and
 	// the audit log. Never carries a secret.
 	Detail string
+	// synRecv reports that the matching row was found in TCP_SYN_RECV (never
+	// with OK). Only the client half reads it, to re-read the table for a
+	// bounded time (#19125, client.go); it attributes nothing.
+	synRecv bool
 }
 
 // LookupPeer identifies the peer end of an accepted TCP connection, where
@@ -591,8 +601,9 @@ func LookupPeer(client, server net.Addr) PeerIdentity {
 	}
 	if found {
 		return PeerIdentity{
-			Local:  true,
-			Detail: fmt.Sprintf("peer socket is in TCP state %d, not established", state),
+			Local:   true,
+			Detail:  fmt.Sprintf("peer socket is in TCP state %d, not established", state),
+			synRecv: state == tcpSynRecv,
 		}
 	}
 	// No row at all. This is the ONLY place the address classification still
