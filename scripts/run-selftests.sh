@@ -371,13 +371,6 @@ run_bash scripts/testguard-overlay-selftest.sh
 # row and malformed rows, and greens on an exact fixture match. Hermetic
 # (recorded analyser output via DEADCODE_OUTPUT); no toolchain.
 run_bash scripts/go-deadcode-gate-selftest.sh
-# #17342: every *ForTest* hook in non-test Go code has a caller (comment lines
-# do not count), or a row in scripts/go-fortest-liveness.allow with a reason;
-# a stale row fails too. deadcode cannot see an uncalled exported method of a
-# live type, which this name-based census can. The self-test pairs each claim
-# with a fixture the census must reject, plus two mutants.
-run_shell scripts/go-fortest-liveness-census.sh
-run_bash scripts/go-fortest-liveness-census-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
 run_shell scripts/scratch-pinning-selftest.sh
 # #14647: the affected-Go-test selector must seed from non-Go paths and

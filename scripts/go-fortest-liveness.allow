@@ -1,5 +1,7 @@
-# Baseline for scripts/go-fortest-liveness-census.sh (#17342): *ForTest* hooks
-# in non-test Go code that nothing calls, each with the reason it stays.
-# Format: <name>\t<file>\t<reason>. The census fails on a row whose hook gained
-# a caller or was deleted, so this list cannot outlive its entries.
-AttachRecvFnForTest	pkg/linuxsock/ppoll.go	it is the only setter of the recvFn field that PpollRecv.Recv branches on (#17231); deleting it orphans that product-code branch, so it goes with a product change, not a test-seam cleanup
+# Baseline for the *ForTest* liveness census (internal/fortestcensus, #17342):
+# hooks in non-test Go code that nothing calls, each with the reason it stays.
+# Format: <hook id>\t<defining file>\t<reason>, where the hook id is
+# <package dir>.<Name> or <package dir>.(<Receiver>).<Name>. The census fails
+# on a row whose hook gained a caller, moved to another file, or is gone, so
+# this list cannot outlive its entries.
+pkg/linuxsock.(PpollRecv).AttachRecvFnForTest	pkg/linuxsock/ppoll.go	it is the only setter of the recvFn field that PpollRecv.Recv branches on (#17231); deleting it orphans that product-code branch, so it goes with a product change, not a test-seam cleanup

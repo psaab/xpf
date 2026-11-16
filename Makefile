@@ -1712,14 +1712,18 @@ test-go-deadcode-gate-lib:
 	bash ./scripts/go-deadcode-gate-selftest.sh
 
 # #17342: every *ForTest* hook in non-test Go code has a caller, or a
-# baseline row with a reason (scripts/go-fortest-liveness.allow). Hermetic
-# source scan; the self-test runs fixture trees plus two mutants.
+# baseline row with its defining file and a reason
+# (scripts/go-fortest-liveness.allow). A Go test (internal/fortestcensus):
+# references are identifiers resolved by go/parser + go/types, so comments
+# and strings never count, and hooks are keyed by package, receiver and name.
+# It runs in `make test-go`; these targets run it alone (the census, or its
+# fixture cells). Needs the Go toolchain: run it on a test runner.
 .PHONY: go-fortest-liveness-census test-go-fortest-liveness-census-lib
 go-fortest-liveness-census:
-	sh scripts/go-fortest-liveness-census.sh
+	$(GO) test -count=1 -run '^TestForTestHooksAreLiveInThisModule17342$$' ./internal/fortestcensus/
 
 test-go-fortest-liveness-census-lib:
-	bash ./scripts/go-fortest-liveness-census-selftest.sh
+	$(GO) test -count=1 -run '^TestForTestCensus' ./internal/fortestcensus/
 
 test-ignored-cell-census-lib:
 	bash ./test/incus/ignored-cell-census-selftest.sh
