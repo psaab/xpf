@@ -490,6 +490,16 @@ fn promoted_shared_hit_rechecks_removed_leak_9951() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &flow.forward_key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let shared = SharedSessionRefs {
         sessions: &shared_sessions,
         nat_sessions: &shared_nat_sessions,

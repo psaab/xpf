@@ -302,13 +302,39 @@ fn drive_at(
     ha: &BTreeMap<i32, HAGroupRuntime>,
     ingress: usize,
     frame: &[u8],
-    mut meta: UserspaceDpMeta,
+    meta: UserspaceDpMeta,
     config_generation: u64,
     neighbor_generation: u64,
 ) -> Outcome {
+    let shared = Arc::new(Mutex::new(FastMap::default()));
+    drive_at_with_shared(
+        sessions,
+        forwarding,
+        ha,
+        ingress,
+        frame,
+        meta,
+        config_generation,
+        neighbor_generation,
+        &shared,
+    )
+}
+
+/// As `drive_at`, against the caller's shared `synced` map.
+#[expect(clippy::too_many_arguments, reason = "test harness")]
+fn drive_at_with_shared(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    ingress: usize,
+    frame: &[u8],
+    mut meta: UserspaceDpMeta,
+    config_generation: u64,
+    neighbor_generation: u64,
+    shared: &Arc<Mutex<FastMap<crate::session::SessionKey, SyncedSessionEntry>>>,
+) -> Outcome {
     meta.config_generation = config_generation;
     let mut bindings = bindings();
-    let shared = Arc::new(Mutex::new(FastMap::default()));
     let (_batch, dbg, _egress) = txn_run_multi_binding_at_generations(
         &mut bindings,
         ingress,
@@ -317,7 +343,7 @@ fn drive_at(
         ha,
         frame,
         meta,
-        &shared,
+        shared,
         config_generation,
         neighbor_generation,
     );
@@ -356,14 +382,8 @@ pub(super) fn lan_ack(
     lan_ack_at(sessions, forwarding, ha, 7, neighbor_generation)
 }
 
-/// As `lan_ack`, in a pass at config generation `config_generation`.
-fn lan_ack_at(
-    sessions: &mut SessionTable,
-    forwarding: &ForwardingState,
-    ha: &BTreeMap<i32, HAGroupRuntime>,
-    config_generation: u64,
-    neighbor_generation: u64,
-) -> Outcome {
+/// The mid-stream LAN -> WAN ACK frame and its descriptor meta.
+fn lan_ack_frame() -> (Vec<u8>, UserspaceDpMeta) {
     let frame = build_txn_tcp_syn_frame_v4(
         LAN_HOST,
         WAN_HOST,
@@ -377,6 +397,18 @@ fn lan_ack_at(
     meta.flow_dst_addr[..4].copy_from_slice(&WAN_HOST.octets());
     meta.flow_src_port = SPORT;
     meta.flow_dst_port = DPORT;
+    (frame, meta)
+}
+
+/// As `lan_ack`, in a pass at config generation `config_generation`.
+fn lan_ack_at(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha: &BTreeMap<i32, HAGroupRuntime>,
+    config_generation: u64,
+    neighbor_generation: u64,
+) -> Outcome {
+    let (frame, meta) = lan_ack_frame();
     drive_at(
         sessions,
         forwarding,
@@ -459,7 +491,32 @@ fn promoted_on_owner(forwarding: &ForwardingState, now_ns: u64) -> SessionTable 
     // imported forward row (Owner verdict -> SharedPromote) and forwards it
     // out the WAN. The reverse half is served by another worker in
     // production, so nothing re-stamps this row's source-NAT judgment.
-    let takeover = lan_ack(&mut sessions, forwarding, &owner_ha(now_secs), 0);
+    // #18552 (review F2): the promotion re-reads shared authority under its
+    // permit and promotes only the incarnation shared still names. The HA
+    // import published the pair to shared before it fanned it out to the
+    // workers, so the takeover packet runs against that shared row.
+    let imported_shared = Arc::new(Mutex::new(FastMap::default()));
+    for key in [forward_key(), reverse_key()] {
+        let entry = sessions
+            .synced_entry_for(&key)
+            .unwrap_or_else(|| panic!("fixture: the imported pair holds {key:?}"));
+        imported_shared
+            .lock()
+            .expect("imported shared")
+            .insert(key, entry);
+    }
+    let (frame, meta) = lan_ack_frame();
+    let takeover = drive_at_with_shared(
+        &mut sessions,
+        forwarding,
+        &owner_ha(now_secs),
+        LAN,
+        &frame,
+        meta,
+        7,
+        0,
+        &imported_shared,
+    );
     assert_eq!(
         takeover.session_hit, 1,
         "takeover packet must hit the import"

@@ -901,6 +901,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             authority_deferred: hit.authority_deferred,
             deferred_forwarding_revalidation,
             deferred_synced_promotion,
+            promotion_deferred: false,
             deferred_shared_materialization,
             deferred_synced_purge,
             fabric_adopted,
@@ -1072,6 +1073,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         // was stamped at install); never a deferred local hit.
         authority_deferred: false,
         deferred_synced_promotion: None,
+        promotion_deferred: false,
         deferred_shared_materialization: None,
         deferred_forwarding_revalidation: None,
         deferred_synced_purge: None,

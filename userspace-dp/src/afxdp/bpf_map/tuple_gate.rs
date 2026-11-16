@@ -283,6 +283,45 @@ impl TupleGate {
         Ok(permits)
     }
 
+    /// #18552 (review r24 P3-1): an ADVISORY, non-allocating pre-check for a
+    /// non-blocking install claim on `keys`. True when `try_acquire_installs`
+    /// would refuse right now: a map-wide clear is pending or active, a
+    /// canonical key's entry is not Idle (a lease, a sibling's install or
+    /// close permit, or a `with_publish` publisher holds it), or the key has no
+    /// entry and its shard is full.
+    ///
+    /// A caller that retries on its next packet (the synced promotion) calls
+    /// this first, so a refusal that lasts as long as its holder (a lease's
+    /// drain, up to `ACQUIRE_BUDGET`, or a whole clear) costs lock operations
+    /// only, not the keys Vec, the permits Vec, the admission Arc and an entry
+    /// insert-and-rollback per packet. It never inserts an entry and never
+    /// takes an admission slot. `false` promises nothing: the state can change
+    /// before the claim, and `try_acquire_installs` stays the authority.
+    pub(crate) fn install_claim_would_refuse(&self, keys: &[&SessionKey]) -> bool {
+        {
+            let admission =
+                lock_tolerant_counted(&self.admission, Some(&TUPLE_GATE_POISON_RECOVERIES));
+            if admission.clear_pending || admission.clear_active {
+                return true;
+            }
+        }
+        keys.iter().any(|key| {
+            let canonical = Self::canonical(key);
+            let index = Self::shard_index(&canonical);
+            let entries = lock_tolerant_counted(
+                &self.shards.shard_at(index).get().entries,
+                Some(&TUPLE_GATE_POISON_RECOVERIES),
+            );
+            match entries.get(&canonical) {
+                Some(entry) => {
+                    lock_tolerant_counted(entry, Some(&TUPLE_GATE_POISON_RECOVERIES)).state
+                        != GateState::Idle
+                }
+                None => entries.len() >= SHARD_CAP,
+            }
+        })
+    }
+
     pub(crate) fn acquire_lease(
         self: &Arc<Self>,
         keys: impl IntoIterator<Item = SessionKey>,
@@ -539,6 +578,15 @@ pub(crate) struct InstallPermit {
     key: SessionKey,
     entry: Arc<Mutex<GateEntry>>,
     admission: Arc<TupleAdmission>,
+}
+
+impl InstallPermit {
+    /// #18552 (review P3-1): whether this permit fences `key` (canonical
+    /// bare-tuple compare), mirroring [`GateLease::covers`]. Lets a raw
+    /// RMW that takes a permit as its admission witness check the witness.
+    pub(crate) fn covers(&self, key: &SessionKey) -> bool {
+        self.key == TupleGate::canonical(key)
+    }
 }
 
 impl Drop for InstallPermit {
@@ -1002,5 +1050,60 @@ mod tests {
         assert!(fenced.clear_active, "a map-wide clear fence is visible");
         drop(fence);
         assert!(!gate.probe(&k).clear_active);
+    }
+
+    /// #18552 (r24 P3-1): the promotion's advisory pre-check agrees with
+    /// `try_acquire_installs` on every refusal class a held tuple can show,
+    /// and it never creates a gate entry (the allocation it exists to avoid).
+    #[test]
+    fn install_claim_would_refuse_tracks_every_holder_without_inserting_18552() {
+        let gate = Arc::new(TupleGate::new());
+        let forward = key(1855, 0);
+        let reply = key(1856, 0);
+        assert!(
+            !gate.install_claim_would_refuse(&[&forward, &reply]),
+            "an idle pair must not be refused"
+        );
+        assert_eq!(
+            gate.probe(&forward).state,
+            "absent",
+            "the pre-check must not insert a gate entry for an idle tuple"
+        );
+        assert_eq!(gate.probe(&forward).shard_len, 0);
+
+        // A lease on only the REPLY key refuses the pair.
+        let lease = gate.acquire_lease([key(1856, 4)]).unwrap();
+        assert!(gate.install_claim_would_refuse(&[&forward, &reply]));
+        assert!(gate.try_acquire_installs([forward.clone(), reply.clone()]).is_err());
+        drop(lease);
+
+        // A sibling's install (or close) permit.
+        let install = gate.try_acquire_install(&forward).unwrap();
+        assert!(gate.install_claim_would_refuse(&[&forward, &reply]));
+        drop(install);
+
+        // A `with_publish` publisher, observed from inside its closure.
+        let refused_inside_publish = gate
+            .with_publish(&reply, || gate.install_claim_would_refuse(&[&forward, &reply]))
+            .unwrap();
+        assert!(refused_inside_publish, "a publisher holds the tuple");
+
+        // A map-wide clear fence.
+        let fence = gate.begin_clear().unwrap();
+        assert!(gate.install_claim_would_refuse(&[&forward, &reply]));
+        drop(fence);
+
+        assert!(!gate.install_claim_would_refuse(&[&forward, &reply]));
+        drop(gate.try_acquire_installs([forward.clone(), reply.clone()]).unwrap());
+    }
+
+    /// #18552 (review P3-1): `InstallPermit::covers` compares canonical
+    /// tuples, as `GateLease::covers` does.
+    #[test]
+    fn install_permit_covers_its_canonical_tuple_only_18552() {
+        let gate = Arc::new(TupleGate::new());
+        let permits = gate.try_acquire_installs([key(1855, 3)]).unwrap();
+        assert!(permits[0].covers(&key(1855, 9)), "the routing domain is not identity");
+        assert!(!permits[0].covers(&key(1857, 3)));
     }
 }

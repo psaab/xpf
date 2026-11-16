@@ -1463,6 +1463,26 @@ impl crate::afxdp::ha::SessionDomain {
             Ok(lease) => lease,
             Err(_) => return SyncedImportOutcome::RejectedGateBusy,
         };
+        // #18552 (review F3): every ownership decision below (the #9678 gate
+        // and the two steering publishes) uses an HA view loaded AFTER the
+        // lease, as the delete path does. The pre-lease snapshot above only
+        // prepared the lease keys and synthesized the reverse companion, whose
+        // key does not depend on HA state.
+        //
+        // Why the reload is enough: a worker promotes only on a hit it resolved
+        // to `ForwardCandidate` from its own load of this same `rg_runtime`
+        // (`worker/launch.rs`), so that load read the activation store. It then
+        // releases its install permit under the tuple's gate mutexes, and this
+        // lease took the same mutexes, after that release, before reaching
+        // Held. So the worker's load happens-before the load below, and by
+        // read-read coherence on the one ArcSwap this load sees the activation
+        // or a later store. A later deactivation is then the current truth and
+        // the #9678 gate correctly lets the peer row replace a demoted one.
+        // The pre-lease view could predate the activation: with it, a
+        // `SharedPromote` row (generation 0, so the #2170 check never fires)
+        // read as replaceable, and the import freed the live T1.
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let ha_state = self.rg_runtime.load();
         // The candidate snapshot above is only for lease-key preparation.
         // Re-read all authoritative shared state while the lease excludes
         // tuple writers; generation, capacity, ownership, and merge decisions

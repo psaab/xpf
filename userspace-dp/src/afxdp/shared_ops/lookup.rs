@@ -876,6 +876,13 @@ pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     pub(in crate::afxdp) deferred_forwarding_revalidation: Option<DeferredForwardingRevalidation>,
     /// #12644: promotion writes held until the #9519 Owner verdict.
     pub(in crate::afxdp) deferred_synced_promotion: Option<DeferredSyncedPromotion>,
+    /// #18552 (review F1): set after the Owner verdict when this packet's
+    /// promotion was deferred in a way only a later RESOLVED hit can retry
+    /// (`SyncedPromotion::suppresses_flow_cache_seed`). The poll site then
+    /// keeps the packet out of the flow cache, because flow-cache hits never
+    /// promote. Distinct from `install_failed`, which also gates the session-hit
+    /// fragment association: a deferred promotion leaves a live session behind.
+    pub(in crate::afxdp) promotion_deferred: bool,
     /// #12644: shared-map materialization held until an Owner verdict.
     pub(in crate::afxdp) deferred_shared_materialization: Option<DeferredSharedMaterialization>,
     /// #12644: transient-hit teardown held until an Owner verdict.

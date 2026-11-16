@@ -197,6 +197,139 @@ fn run_promote_after_flip_hook() {
     }
 }
 
+// #18552 (review F4b) test seam: runs once, on the promoting thread, after the
+// shared publish and before the sibling fan-out (`replicate_session_upsert`).
+// A cell probes the tuple gate here to pin that the install permit is still
+// held while the fan-out is queued.
+#[cfg(test)]
+std::thread_local! {
+    static PROMOTE_BEFORE_FANOUT_HOOK_18552: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+pub(in crate::afxdp) fn set_promote_before_fanout_hook_for_test(hook: impl FnOnce() + 'static) {
+    PROMOTE_BEFORE_FANOUT_HOOK_18552.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_promote_before_fanout_hook() {
+    let hook = PROMOTE_BEFORE_FANOUT_HOOK_18552.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+/// #18552 (review F2): which incarnation the SHARED row for `key` names,
+/// judged against THIS worker's row for `key`.
+///
+/// Identity is the RT_FLOW session id plus the NAT decision: the two fields
+/// both the worker row and `SyncedSessionEntry` carry. The worker row does not
+/// store the peer's install generation, and a same-incarnation resend bumps
+/// the generation (the peer stamps every send from one climbing counter), so
+/// generation is deliberately not compared: such a resend is still `Current`.
+/// A new incarnation of a reused 5-tuple carries a different session id, and
+/// a translation change a different NAT decision; either is `Superseded`.
+///
+/// A shared session id of 0 is the unknown/legacy sentinel (a peer that
+/// predates the field). The worker never stores 0: it mints a node-local id
+/// for such a row (`session/install.rs`), so the ids cannot match and only
+/// the NAT decision is compared. The harm F2 guards against (a freed T1, a
+/// late companion) needs a different translation, which that still catches.
+///
+/// Called under the promotion's install permit, which excludes every import
+/// and delete lease of the tuple, so the answer holds until the permit drops.
+/// The caller keys the reverse/forward question itself: this helper is
+/// direction-agnostic and judges exactly the row stored under `key`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::afxdp) enum SyncedRowIncarnation {
+    /// Shared names this worker row's incarnation and is still peer-synced.
+    Current,
+    /// This worker has no row under `key`.
+    WorkerAbsent,
+    /// No shared row under `key`: a completed delete whose `DeleteSynced` is
+    /// still queued for this worker.
+    SharedAbsent,
+    /// Shared names a different incarnation (session id or NAT differs): a
+    /// completed import whose `UpsertSynced` is still queued for this worker.
+    Superseded,
+    /// Shared names this incarnation but already as locally owned (a sibling's
+    /// `SharedPromote`, whose replicated upsert is queued for this worker).
+    SharedLocal,
+}
+
+pub(in crate::afxdp) fn synced_row_incarnation(
+    sessions: &SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+) -> SyncedRowIncarnation {
+    let Some((session_id, nat)) = sessions.ct_slice_emit_identity_for(key) else {
+        return SyncedRowIncarnation::WorkerAbsent;
+    };
+    let shared = lock_shared_recover(shared_sessions);
+    match shared.get(key) {
+        None => SyncedRowIncarnation::SharedAbsent,
+        Some(entry)
+            if entry.decision.nat != nat
+                || (entry.session_id != 0 && entry.session_id != session_id) =>
+        {
+            SyncedRowIncarnation::Superseded
+        }
+        Some(entry) if !entry.origin.is_peer_synced() => SyncedRowIncarnation::SharedLocal,
+        Some(_) => SyncedRowIncarnation::Current,
+    }
+}
+
+/// #18552: what one synced-promotion attempt did. Every outcome other than
+/// `Promoted` leaves the worker row, shared authority, the conntrack origin
+/// bit, steering and the sibling queues exactly as they were: every check runs
+/// before the flip, so no return path can leave the worker row `SharedPromote`
+/// with the shared row still peer-synced (review r24 P2-1(b)).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::afxdp) enum SyncedPromotion {
+    /// Not promotable, or not a `ForwardCandidate` (the pre-#18552 no-op).
+    NotAttempted,
+    Promoted,
+    /// TRANSIENT: the install claim on the pair was refused. The row stays
+    /// promotable and only a resolved hit retries it.
+    Deferred,
+    /// TERMINAL: the #10612 stale-replay fence (the row's zones vanished).
+    StaleReplayFenced,
+    /// TERMINAL: shared authority no longer names this row's incarnation.
+    NotCurrent(SyncedRowIncarnation),
+    /// The worker-row flip did not apply (the pre-#18552 no-op).
+    FlipDeclined,
+}
+
+impl SyncedPromotion {
+    /// #18552 (review F1): whether THIS packet must not seed the flow cache.
+    /// Flow-cache hits never promote (`flow_cache_hit.rs`) and forwarding
+    /// entries never TTL-expire, so a seeded deferral is never retried.
+    ///
+    /// - `Deferred` suppresses: the refusal lasts as long as its holder, so the
+    ///   next packet must resolve and retry.
+    /// - `NotCurrent(Superseded)` suppresses: the replacing `UpsertSynced` is
+    ///   queued and lands at this worker's next command drain, which bounds it.
+    ///   A cache hit checks only that the backing row is live, not its
+    ///   incarnation, so an entry seeded from the superseded row would keep
+    ///   serving the old decision after the repair and never promote it.
+    /// - `NotCurrent(SharedAbsent)` does not: the queued `DeleteSynced` evicts
+    ///   the key's cache entries itself (#6457). If no delete were queued,
+    ///   suppression would cost a slow-path trip per packet with no end.
+    /// - `NotCurrent(SharedLocal)` does not: shared already records local
+    ///   ownership, so the #9678 and #9714 gates hold, and the sibling's queued
+    ///   upsert makes this row non-promotable; the incarnation is the same.
+    /// - `StaleReplayFenced` does not: the fence is permanent until a purge
+    ///   removes the row, so suppression would be unbounded.
+    /// - The rest change nothing a later hit could retry.
+    pub(in crate::afxdp) fn suppresses_flow_cache_seed(self) -> bool {
+        matches!(
+            self,
+            Self::Deferred | Self::NotCurrent(SyncedRowIncarnation::Superseded)
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::afxdp) enum SessionHitVerdict {
     Owner,
@@ -212,15 +345,31 @@ pub(in crate::afxdp) enum SessionHitVerdict {
 /// kernel session map, mirrored into the shared maps under
 /// `SharedPromote` origin, and replicated to peer worker commands.
 ///
-/// #18552: the worker-row flip and the shared publish run under the worker
-/// install permit for the session key and its reply tuple, taken without
-/// blocking. Without it a peer import could run between them, see the older
-/// peer row in the shared map, pass the coordinator's #9678 ownership gate
-/// and retire the flow's live NAT allocation. A refused permit (an HA import or
-/// delete holds the tuple lease, a sibling worker holds an install permit, or a
-/// map clear is fenced) skips the promotion for this packet only: the packet
-/// forwards on the synced hit and the row stays promotable, so the next hit
-/// retries (`resolve.rs` arms a deferred promotion on every such hit).
+/// #18552: the worker-row flip, the shared publish and the sibling fan-out run
+/// under the worker install permit for the session key and its reply tuple,
+/// taken without blocking. Without it a peer import could run between the flip
+/// and the publish, see the older peer row in the shared map, pass the
+/// coordinator's #9678 ownership gate and retire the flow's live NAT
+/// allocation. Every check runs BEFORE the flip, so an outcome other than
+/// `Promoted` changes nothing:
+///
+/// - TRANSIENT, `Deferred`: the install claim is refused. The holder is an HA
+///   import, delete, pressure-shed, policy-batch or mirror-only lease; a
+///   sibling worker's install, close-barrier or GC-teardown permit; a
+///   `with_publish` BPF publisher; a full gate shard; or a map-wide clear
+///   fence. A non-allocating pre-check (`install_claim_would_refuse`) refuses
+///   the common case before `try_acquire_installs` allocates. The packet
+///   forwards on the synced hit, the row stays promotable, and the caller
+///   keeps this packet out of the flow cache, so the next resolved hit
+///   retries (`resolve.rs` arms a deferred promotion on every such hit).
+/// - TERMINAL, `StaleReplayFenced` (#10612) or `NotCurrent`: under the permit,
+///   the shared row no longer names this worker row's incarnation (it was
+///   replaced or deleted, and the worker command that repairs this row is
+///   still queued), or a sibling already promoted it. A later hit after the
+///   repair promotes the current incarnation.
+///
+/// [`SyncedPromotion::suppresses_flow_cache_seed`] says which outcomes keep
+/// the packet out of the flow cache, and why.
 ///
 /// The compatibility wrapper keeps the pre-#1346 13-argument shape for tests;
 /// the production variant adds the two conntrack fds to invalidate only origin.
@@ -237,11 +386,11 @@ fn promote_synced_session_with_conntrack(
     protocol: u8,
     tcp_flags: u8,
     ack: Option<u32>,
-) -> SessionMetadata {
+) -> (SessionMetadata, SyncedPromotion) {
     if !origin.is_promotable_synced()
         || decision.resolution.disposition != ForwardingDisposition::ForwardCandidate
     {
-        return metadata;
+        return (metadata, SyncedPromotion::NotAttempted);
     }
 
     let mut promoted = metadata;
@@ -251,20 +400,48 @@ fn promote_synced_session_with_conntrack(
     if fabric_ingress {
         promoted.fabric_ingress = true;
     }
+    // #10612 (M4): fence stale replays before anything changes. A row that
+    // lingered through an unvalidated purge (purge no-op) must not be flipped
+    // or published to shared/BPF/peer after its zones vanished. #18552 (review
+    // r24 P2-1(b)): this used to run after the flip and return with the worker
+    // row `SharedPromote` and the shared row still peer-synced. The fence reads
+    // only the promoted metadata and the zone set, so it needs no permit.
+    if crate::afxdp::session_glue::synced_entry_is_stale_replay(
+        SessionOrigin::SharedPromote,
+        &promoted,
+        forwarding,
+    ) {
+        crate::afxdp::session_glue::note_stale_replay_fence_drop();
+        return (promoted, SyncedPromotion::StaleReplayFenced);
+    }
     // #18552: hold the install permit from before the flip until the shared
     // publish and the sibling fan-out are done. An import's tuple lease then
     // either refuses this promotion or waits for it and re-reads a shared row
     // that is already `SharedPromote`, which its #9678 gate stops. Never
-    // blocks: a refusal is the same no-op as a flip that did not apply.
-    let Ok(install_permits) = crate::afxdp::bpf_map::global_tuple_gate()
-        .try_acquire_installs([key.clone(), reverse_session_key(key, decision.nat)])
-    else {
-        return promoted;
+    // blocks: a refusal changes nothing and the next resolved hit retries.
+    let reverse_key = reverse_session_key(key, decision.nat);
+    let gate = crate::afxdp::bpf_map::global_tuple_gate();
+    // Review r24 P3-1: refuse without allocating while a holder lasts.
+    if gate.install_claim_would_refuse(&[key, &reverse_key]) {
+        return (promoted, SyncedPromotion::Deferred);
+    }
+    let Ok(install_permits) = gate.try_acquire_installs([key.clone(), reverse_key]) else {
+        return (promoted, SyncedPromotion::Deferred);
     };
+    // #18552 (review F2): an import or delete that completed BEFORE the permit
+    // was taken has already rewritten shared authority and queued this
+    // worker's repair. The worker row is then a superseded (or deleted)
+    // incarnation, and promoting it would overwrite the current shared row and
+    // make the queued repair be refused as a local-ownership clobber. Promote
+    // only the incarnation shared still names.
+    let incarnation = synced_row_incarnation(sessions, shared.sessions, key);
+    if incarnation != SyncedRowIncarnation::Current {
+        return (promoted, SyncedPromotion::NotCurrent(incarnation));
+    }
     // #13939/#17092: `promote_synced_with_origin` strips any FIN/RST; the
     // Owner-only `Defer::None` replay (`apply_deferred_owner_hit`) after the
     // authority verdict re-applies the close and propagates it.
-    if sessions.promote_synced_with_origin(SessionUpdate {
+    if !sessions.promote_synced_with_origin(SessionUpdate {
         key,
         decision,
         metadata: promoted.clone(),
@@ -274,76 +451,70 @@ fn promote_synced_session_with_conntrack(
         tcp_flags,
         ack,
     }) {
-        #[cfg(test)]
-        run_promote_after_flip_hook();
-        // #10612 (M4): fence stale replays at promote-publish ingress. A row
-        // that lingered through an unvalidated purge (purge no-op) must not be
-        // published to shared/BPF/peer after its zones vanished. The local
-        // flip above stands (the row is live locally); only the authoritative
-        // republish is fenced.
-        if crate::afxdp::session_glue::synced_entry_is_stale_replay(
-            SessionOrigin::SharedPromote,
-            &promoted,
-            forwarding,
-        ) {
-            crate::afxdp::session_glue::note_stale_replay_fence_drop();
-            return promoted;
-        }
-        // The helper's promotion flips a peer-synced row to local ownership.
-        // Clear only the origin bit in the conntrack mirror; counters,
-        // timestamps, NAT state, and creation time remain untouched.
-        // #18552: the `_under_permit` RMW, because the gated variant needs an
-        // Idle tuple and would decline under this promotion's own permit.
-        crate::afxdp::bpf_map::update_session_cluster_synced_origin_under_permit(
-            shared.conntrack.v4,
-            shared.conntrack.v6,
-            key,
-            false,
-            &install_permits,
-        );
-        // #1789: count a failed shared-promote publish (shim would miss the
-        // key -> NO_SESSION degraded path for the promoted flow).
-        if publish_session_map_entry_for_session(
-            session_map,
-            key,
-            decision,
-            &promoted,
-            forwarding.has_routing_domains,
-            forwarding.has_multiple_zones,
-        )
-        .is_err()
-        {
-            crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
-        // #17058: build from the live row via the one shared construction,
-        // then apply the promote overrides (origin, promoted metadata,
-        // decision, protocol and the packet's tcp_flags). Every other
-        // wire field (session_id, close/handshake state, counters,
-        // PPTP pair, lease hold, SNAT provenance, leak incarnation) is
-        // the live value `synced_entry_for` read in one lookup.
-        // `synced_entry_for` leaves sibling recency empty; the shared
-        // same-incarnation publish merge preserves the serving sibling's stamp.
-        let Some(mut promoted_entry) = sessions.synced_entry_for(key) else {
-            return promoted;
-        };
-        promoted_entry.decision = decision;
-        promoted_entry.metadata = promoted.clone();
-        promoted_entry.origin = SessionOrigin::SharedPromote;
-        promoted_entry.protocol = protocol;
-        promoted_entry.tcp_flags = tcp_flags;
-        publish_shared_session(
-            shared.sessions,
-            shared.nat_sessions,
-            shared.forward_wire_sessions,
-            shared.owner_rg_indexes,
-            &promoted_entry,
-        );
-        replicate_session_upsert(shared.peer_worker_commands, shared.worker_commands_by_id, &promoted_entry);
+        return (promoted, SyncedPromotion::FlipDeclined);
     }
+    #[cfg(test)]
+    run_promote_after_flip_hook();
+    // #17058: build from the live row via the one shared construction,
+    // then apply the promote overrides (origin, promoted metadata,
+    // decision, protocol and the packet's tcp_flags). Every other
+    // wire field (session_id, close/handshake state, counters,
+    // PPTP pair, lease hold, SNAT provenance, leak incarnation) is
+    // the live value `synced_entry_for` read in one lookup.
+    // `synced_entry_for` leaves sibling recency empty; the shared
+    // same-incarnation publish merge preserves the serving sibling's stamp.
+    // #18552: read right after the flip, before any BPF write. The flip just
+    // refreshed this row in place and an in-place refresh never removes a row,
+    // so `None` cannot follow a flip that applied; were it to, there would be
+    // no row left in `SharedPromote` and nothing published.
+    let Some(mut promoted_entry) = sessions.synced_entry_for(key) else {
+        return (promoted, SyncedPromotion::FlipDeclined);
+    };
+    promoted_entry.decision = decision;
+    promoted_entry.metadata = promoted.clone();
+    promoted_entry.origin = SessionOrigin::SharedPromote;
+    promoted_entry.protocol = protocol;
+    promoted_entry.tcp_flags = tcp_flags;
+    // The helper's promotion flips a peer-synced row to local ownership.
+    // Clear only the origin bit in the conntrack mirror; counters,
+    // timestamps, NAT state, and creation time remain untouched.
+    // #18552: the `_under_permit` RMW, because the gated variant needs an
+    // Idle tuple and would decline under this promotion's own permit.
+    crate::afxdp::bpf_map::update_session_cluster_synced_origin_under_permit(
+        shared.conntrack.v4,
+        shared.conntrack.v6,
+        key,
+        false,
+        &install_permits,
+    );
+    // #1789: count a failed shared-promote publish (shim would miss the
+    // key -> NO_SESSION degraded path for the promoted flow).
+    if publish_session_map_entry_for_session(
+        session_map,
+        key,
+        decision,
+        &promoted,
+        forwarding.has_routing_domains,
+        forwarding.has_multiple_zones,
+    )
+    .is_err()
+    {
+        crate::afxdp::bpf_map::SESSION_PUBLISH_ERRORS_SHARED
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    publish_shared_session(
+        shared.sessions,
+        shared.nat_sessions,
+        shared.forward_wire_sessions,
+        shared.owner_rg_indexes,
+        &promoted_entry,
+    );
+    #[cfg(test)]
+    run_promote_before_fanout_hook();
+    replicate_session_upsert(shared.peer_worker_commands, shared.worker_commands_by_id, &promoted_entry);
     // #18552: released only after the shared publish and the fan-out.
     drop(install_permits);
-    promoted
+    (promoted, SyncedPromotion::Promoted)
 }
 
 pub(in crate::afxdp) fn maybe_promote_synced_session(
@@ -380,6 +551,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session(
         tcp_flags,
         None,
     )
+    .0
 }
 /// Evaluate the session-hit verdict before applying any deferred synced
 /// materialization, purge, or promotion. Foreign and unresolved packets leave
@@ -427,7 +599,7 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
         shared.conntrack,
         Tick::from_ns(promotion.now_ns),
     );
-    resolved.metadata = promote_synced_session_with_conntrack(
+    let (metadata, outcome) = promote_synced_session_with_conntrack(
         sessions,
         session_map,
         shared,
@@ -441,6 +613,10 @@ pub(in crate::afxdp) fn maybe_promote_synced_session_with_conntrack(
         promotion.tcp_flags,
         promotion.ack,
     );
+    resolved.metadata = metadata;
+    // #18552 (review F1): the poll site keeps this packet out of the flow
+    // cache, so a deferred promotion is retried by the next resolved hit.
+    resolved.promotion_deferred = outcome.suppresses_flow_cache_seed();
 }
 
 

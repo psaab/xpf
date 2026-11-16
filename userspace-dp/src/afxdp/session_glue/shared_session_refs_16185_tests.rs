@@ -141,6 +141,16 @@ fn shared_refs_maps_and_peer_queue_reach_promote_16185() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
     let by_id = WorkerCommandQueues::new(BTreeMap::from([(7u32, peer_queue.clone())]));
@@ -310,6 +320,7 @@ fn shared_refs_conntrack_v4_reaches_purge_16185() {
         authority_deferred: false,
         deferred_forwarding_revalidation: None,
         deferred_synced_promotion: None,
+        promotion_deferred: false,
         deferred_shared_materialization: None,
         deferred_synced_purge: Some(DeferredSyncedPurge {
             key: wire_key.clone(),
@@ -519,6 +530,16 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
     let shared_nat_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_forward_wire_sessions = Arc::new(Mutex::new(FastMap::default()));
     let shared_owner_rg_indexes = SharedSessionOwnerRgIndexes::default();
+    // #18552 (F2): the HA import publishes this row's shared twin before the
+    // worker holds it, and the promotion promotes only the incarnation shared names.
+    crate::afxdp::testfx::publish_shared_twin_for_test(
+        &sessions,
+        &key,
+        &shared_sessions,
+        &shared_nat_sessions,
+        &shared_forward_wire_sessions,
+        &shared_owner_rg_indexes,
+    );
     let peer_queue = Arc::new(Mutex::new(VecDeque::new()));
     let peer_worker_commands = vec![peer_queue.clone()];
     let shared = SharedSessionRefs {
@@ -547,6 +568,7 @@ fn shared_refs_conntrack_v4_reaches_deferred_promotion_16185() {
         install_failed: false,
         authority_deferred: false,
         deferred_forwarding_revalidation: None,
+        promotion_deferred: false,
         deferred_synced_promotion: Some(DeferredSyncedPromotion {
             key: key.clone(),
             decision,
