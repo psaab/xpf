@@ -328,8 +328,18 @@ grace cadence: going fatal there handed the squatter a persistent kill
 switch (`Restart=on-failure` loops the exit) while it impersonated the
 management server. The client half of the same fix is in `pkg/authz`'s
 `client.go`: the remote `cli` and `pkg/upgrade` verify at dial time that
-a loopback server is privileged-owned before writing any RPC, so a
-squatter is never handed `set`/`load` payloads. Separately, both sshd
+a loopback server is owned by uid 0 (#14982) before writing any RPC, so
+a squatter is never handed `set`/`load` payloads.
+
+The server half of a connection the client has just dialed can still be
+in `TCP_SYN_RECV`. `connect()` returns before the server's kernel has
+processed the final ACK, and on a loaded box a gate saw the CLI refuse
+the real xpfd ("peer socket is in TCP state 3", #19125). So for that one
+state only, the client re-reads the table on a bounded backoff (about
+1 s, within the dial's context), then applies the unchanged checks
+(ESTABLISHED, uid 0). A SYN_RECV row is never attributed. Every other
+non-established state, TIME_WAIT's uid-0 mini-socket included, is still
+refused at once, and the server-side #5278 attribution never waits. Separately, both sshd
 drop-ins (image factory and daemon-managed) set `DisableForwarding yes`,
 closing the `ssh -R` squat path for login accounts.
 
