@@ -103,7 +103,7 @@ func TestRethUnitNumberVsVlanIDStrictReject14573(t *testing.T) {
 func TestRethUnitNumberVsVlanIDUnitGatePrecedesCollision14573(t *testing.T) {
 	err := compileSet7795(t, rethUnitNumberVsVlanLines14573(false)...)
 	if err == nil {
-		t.Fatal("strict CompileConfig accepted an untagged non-zero reth unit; "+
+		t.Fatal("strict CompileConfig accepted an untagged non-zero reth unit; " +
 			"expected #15034/#16583 to refuse before #14573")
 	}
 	t.Logf("strict unit-gate refusal: %v", err)

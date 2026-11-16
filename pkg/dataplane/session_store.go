@@ -119,10 +119,10 @@ type ClusterBulkReconcileInput struct {
 }
 
 type ClusterBulkReconcileResult struct {
-	StaleV4          int
-	StaleV6          int
-	DeletedV4        int
-	DeletedV6        int
+	StaleV4   int
+	StaleV6   int
+	DeletedV4 int
+	DeletedV6 int
 	// OwnershipChanged means the BulkStart snapshot failed a per-batch or
 	// final validation; callers must not acknowledge the bulk.
 	OwnershipChanged bool

@@ -1419,11 +1419,11 @@ type SessionSync struct {
 	IsPrimaryFn        func() bool
 	// IsPrimaryForRGFn reports whether the local node is primary for a given RG.
 	// Bulk use also requires RGMastershipSnapshotFn and WithRGMastershipSnapshotFn; this bool misses flip-backs/delete races.
-	IsPrimaryForRGFn           func(rgID int) bool
+	IsPrimaryForRGFn func(rgID int) bool
 	// RGMastershipSnapshotFn returns a coherent local-primary answer and role
 	// generation for one RG. WithRGMastershipSnapshotFn validates generations
 	// and runs each stale-delete batch while role transitions are excluded.
-	RGMastershipSnapshotFn    func(rgID int) (primary bool, generation uint64)
+	RGMastershipSnapshotFn     func(rgID int) (primary bool, generation uint64)
 	WithRGMastershipSnapshotFn func(snapshot map[int]uint64, apply func() error) (bool, error)
 	// PeerBootEpochFn reports the peer's across-reboot boot-epoch floor and
 	// whether the peer has PROVED it emits boot epochs (#7762).
@@ -2819,7 +2819,7 @@ func (s *SessionSync) WaitForIdle(timeout time.Duration, stableSamples int, samp
 // judges by, taken when the bulk STARTS (#9655).
 type zoneOwnershipSnapshot struct {
 	// zones stores ShouldSyncZone's answer for each named zone.
-	zones           map[uint16]bool
+	zones map[uint16]bool
 	// fallbackPrimary is the captured RG 0 answer for absent zones.
 	fallbackPrimary bool
 	useRG           bool
