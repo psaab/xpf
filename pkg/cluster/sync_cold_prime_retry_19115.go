@@ -250,12 +250,14 @@ func (s *SessionSync) nextSweepDelay(interval time.Duration) time.Duration {
 	//
 	// An OVERDUE one (its deadline passed while this sweep ran: the gate
 	// skipped it just before the deadline, then the enumeration crossed it)
-	// is re-checked at coldPrimeRetryPollDelay, not after another profile
-	// interval (#19135 review, Codex P2-1). Only while the sweep could run it
-	// (bulkRetryRunnableNow): disconnected, paused or fenced, it keeps the
-	// profile interval instead of polling. The floor is a poll, never 0: an
-	// aged re-drive skipped because another re-drive holds
-	// bulkRedriveInFlight must not spin the loop.
+	// is re-checked within coldPrimeRetryPollDelay, not after another
+	// profile interval (#19135 review, Codex P2-1). The 1 s is a CAP
+	// (min(d, coldPrimeRetryPollDelay)): an already-shorter delay is kept,
+	// and this branch itself never lowers the delay below it, so an aged
+	// re-drive skipped because another re-drive holds bulkRedriveInFlight
+	// cannot spin the loop. Only while the sweep could run the retry
+	// (bulkRetryRunnableNow): disconnected, paused, missing a store or a
+	// primary predicate, or capability-fenced, this branch adds nothing.
 	if s.forceResync.Load() || s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue() {
 		if notBefore, now := s.bulkRetryNotBeforeNs(), s.nowMono(); notBefore > now {
 			d = min(d, time.Duration(notBefore-now))

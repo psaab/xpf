@@ -499,8 +499,9 @@ func TestBarrierReprimeBehindAFailedPredecessorDoesNotExport19135(t *testing.T) 
 //   - a held-back forced retry whose deadline passes while the sweep runs
 //     (the enumeration crossed it after the gate skipped) must be re-checked
 //     at coldPrimeRetryPollDelay, not after another profile interval;
-//   - while the sweep could not run it (disconnected, paused, fenced), the
-//     profile interval stands: no poll.
+//   - EXACTLY min(base, coldPrimeRetryPollDelay), never zero or negative;
+//   - while the sweep could not run it (paused, either capability fence,
+//     disconnected), the profile interval stands: no poll.
 func TestOverdueHeldBackRetryIsPolledNotDeferred19135(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
@@ -520,17 +521,30 @@ func TestOverdueHeldBackRetryIsPolledNotDeferred19135(t *testing.T) {
 	if !ss.bulkRetryRunnableNow() {
 		t.Fatal("FIXTURE: a connected, unpaused, unfenced primary must be able to run the retry")
 	}
-	if got := ss.nextSweepDelay(profile); got > coldPrimeRetryPollDelay {
-		t.Fatalf("#19135: an OVERDUE held-back forced retry was scheduled %v out (profile %v); it must be re-checked within %v",
-			got, profile, coldPrimeRetryPollDelay)
+	// EXACTLY the cap: a zero or negative delay would spin the loop, and a
+	// longer one defers the retry (#19135 re-check, Codex P3).
+	if got, want := ss.nextSweepDelay(profile), min(base, coldPrimeRetryPollDelay); got != want {
+		t.Fatalf("#19135: an OVERDUE held-back forced retry was scheduled %v out (profile %v); want exactly %v (min(base, coldPrimeRetryPollDelay))",
+			got, profile, want)
 	}
-	ss.incrementalPauseDepth.Add(1)
-	if got := ss.nextSweepDelay(profile); got != base {
-		t.Fatalf("#19135: while paused an overdue retry polled at %v; the profile interval %v must stand", got, base)
+	// Not runnable: this branch adds nothing, so the profile interval stands.
+	notRunnable := func(state string, enter, leave func()) {
+		t.Helper()
+		enter()
+		defer leave()
+		if ss.bulkRetryRunnableNow() {
+			t.Fatalf("FIXTURE: %s must make the retry not runnable", state)
+		}
+		if got := ss.nextSweepDelay(profile); got != base {
+			t.Fatalf("#19135: while %s an overdue retry was scheduled at %v; the profile interval %v must stand", state, got, base)
+		}
 	}
-	ss.incrementalPauseDepth.Add(-1)
-	ss.stats.Connected.Store(false)
-	if got := ss.nextSweepDelay(profile); got != base {
-		t.Fatalf("#19135: while disconnected an overdue retry polled at %v; the profile interval %v must stand", got, base)
-	}
+	notRunnable("paused", func() { ss.incrementalPauseDepth.Add(1) }, func() { ss.incrementalPauseDepth.Add(-1) })
+	notRunnable("fenced for an install-table-incapable peer",
+		func() { ss.peerIncarnationState().bulkFencedForPeer.Store(true) },
+		func() { ss.peerIncarnationState().bulkFencedForPeer.Store(false) })
+	notRunnable("fenced for an IPsec-incapable peer",
+		func() { ss.peerIncarnationState().bulkFencedForIpsecPeer.Store(true) },
+		func() { ss.peerIncarnationState().bulkFencedForIpsecPeer.Store(false) })
+	notRunnable("disconnected", func() { ss.stats.Connected.Store(false) }, func() { ss.stats.Connected.Store(true) })
 }

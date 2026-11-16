@@ -6164,12 +6164,15 @@ it.
         re-armed, `bulkAckRetryOwed` left set, the fence still armed.
       - `nextSweepDelay` arms the sweep timer EXACTLY at the deadline for a
         held-back forced or aged retry. A deadline that passes while the
-        sweep runs (an OVERDUE retry) is re-checked at
-        `coldPrimeRetryPollDelay` (1 s), not after another profile interval,
-        but only while the sweep could run it: a primary predicate set, no
-        incremental pause, connected, a session store, and no capability
-        fence (`bulkRetryRunnableNow`). Otherwise the profile interval
-        stands, and a reconnect or the fence's lifting reaches it. The
+        sweep runs (an OVERDUE retry) is re-checked within
+        `coldPrimeRetryPollDelay` (1 s), not after another profile
+        interval. The 1 s is a cap (`min`): an already-shorter delay is
+        kept, and this branch never lowers the delay below it. It applies
+        only while the sweep could run the retry: a primary predicate set,
+        no incremental pause, connected, a session store, and no capability
+        fence (`bulkRetryRunnableNow`). Otherwise this branch adds nothing;
+        the profile interval (or another branch's shorter delay) stands,
+        and a reconnect or the fence's lifting reaches the retry. The
         barrier re-prime is polled by the 0.5 s barrier refusals and needs
         no timer.
       - NOT held back: a forced resync consumed at connect, the connect-time
