@@ -41,12 +41,15 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 	// on top for IP addressing. BPF attaches to the parent.
 	// Track which overlays are configured so stale ones can be cleaned up (#128).
 	//
-	// When the userspace dataplane is active, DEFER IPVLAN creation until
-	// after XSK binds complete. The kernel checks for upper devices (like
-	// IPVLAN) at XSK bind time — if an IPVLAN exists, zerocopy bind fails
-	// and falls back to copy mode (~3 Gbps). Deferring lets the fabric
-	// parent bind XSK in zerocopy first, then the IPVLAN is added for
-	// sync/heartbeat addressing.
+	// With the userspace dataplane active and the XSK bind not yet notified,
+	// an existing overlay is removed and then re-created IN THIS APPLY
+	// (#17343). The removal was meant to let the fabric parent bind XSK in
+	// zerocopy (the kernel refuses zerocopy with an upper device such as an
+	// IPVLAN; copy mode is ~3 Gbps), with creation deferred until after the
+	// bind. dcc59c67df disabled that deferral because it broke forwarding, so
+	// creation falls through to fabricEnsureFn below and its failure is
+	// joined into the commit. The OnXSKBound callback re-ensures these
+	// overlays after the bind.
 	activeFabricOverlays := make(map[string]bool)
 	var deferredOverlays []deferredIPVLAN
 	bindingCtrl, isUserspaceDP := d.dataplane().(userspaceXSKBindingController)
@@ -61,24 +64,24 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 		if unit, ok := ifCfg.Units[0]; ok {
 			addrs = unit.Addresses
 		}
-		// When userspace DP is active, remove any existing IPVLAN and
-		// defer recreation until after XSK binds in zerocopy. The kernel
-		// checks for upper devices at bind time — IPVLAN blocks zerocopy.
-		// On subsequent applyConfig calls (config change), the IPVLAN
-		// already exists from the OnXSKBound callback and XSK is already
-		// bound, so the xskBoundNotified guard prevents re-deletion.
+		// Before the first XSK bind: remove any existing IPVLAN, then fall
+		// through to create it now (see the function comment; #17343). Once
+		// the bind is notified, the guard skips the removal and the overlay
+		// is only reconciled.
 		if isUserspaceDP {
 			if bindingCtrl != nil && !bindingCtrl.XSKBoundNotified() {
-				// First applyConfig — remove stale IPVLAN so XSK can zerocopy.
+				// First applyConfig: remove the stale IPVLAN; it is
+				// re-created below in this apply.
 				if link, err := netlink.LinkByName(fabLinux); err == nil {
-					_ = d.deleteFabricOverlay(link, "deferred zerocopy XSK bind")
+					_ = d.deleteFabricOverlay(link, "pre-XSK-bind reset, re-created in this apply")
 				}
 				deferredOverlays = append(deferredOverlays, deferredIPVLAN{
 					parent: parentLinux, name: fabLinux, addrs: addrs, mtu: ifCfg.MTU,
 				})
-				slog.Info("deferring fabric IPVLAN creation until XSK binds complete",
+				slog.Info("creating fabric IPVLAN before the XSK bind; it is re-ensured after the bind",
 					"parent", parentLinux, "name", fabLinux, "mtu", fabricMTU10216(ifCfg.MTU))
-				// continue // DISABLED: deferred IPVLAN broke forwarding
+				// No `continue`: deferring creation broke forwarding
+				// (dcc59c67df), so it is created below in this apply.
 			}
 			// XSK already bound — fall through to reconcile.
 		}
@@ -125,10 +128,11 @@ func (d *Daemon) applyFabricIPVLAN(cfg *config.Config) error {
 			}
 		}
 	}
-	// The deferred (OnXSKBound) overlays above are created asynchronously after
-	// this function has returned, so their failure cannot be reported here at
-	// all. fabricIPVLANReassertLoop (#6791) is the retry owner that covers both
-	// that window and a transient failure outlasting the in-apply retries.
+	// Every overlay above was created (or failed) in this apply, and a failure
+	// is joined into the commit here, including the pre-XSK-bind ones (#17343).
+	// The OnXSKBound callback re-ensures those after the bind, outside the
+	// apply; fabricIPVLANReassertLoop (#6791) is the retry owner for a failure
+	// there and for a transient failure outlasting the in-apply retries.
 	return errors.Join(fabricErrs...)
 }
 
