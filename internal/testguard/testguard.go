@@ -54,10 +54,6 @@ func RequireDisposable(t interface {
 	}
 }
 
-// Intent returns the wrapper-provided advisory sentinel without treating it as
-// proof that the current host is disposable.
-func Intent() string { return os.Getenv(SentinelEnv) }
-
 func namespaceDiffers(selfPath, initPath string) (bool, error) {
 	self, err := os.Readlink(selfPath)
 	if err != nil {

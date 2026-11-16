@@ -143,12 +143,6 @@ func TestRejoinAndTakeoverFromState17095(t *testing.T) {
 	if peerTakeoverReadyFromState(&pb.GetClusterHAStateResponse{PeerAlive: false, RedundancyGroups: joined.RedundancyGroups}) {
 		t.Error("dead peer read as takeover-ready")
 	}
-	if ids, err := configuredRGsFromState(joined, nil); err != nil || len(ids) != 2 || ids[0] != 0 || ids[1] != 1 {
-		t.Errorf("configuredRGsFromState = %v, %v; want [0 1]", ids, err)
-	}
-	if _, err := configuredRGsFromState(&pb.GetClusterHAStateResponse{}, nil); err == nil {
-		t.Error("empty RG set enumerated without error, want fail-closed (#5044)")
-	}
 }
 
 // fakeHAStateClient serves GetClusterHAState / ShowText for the

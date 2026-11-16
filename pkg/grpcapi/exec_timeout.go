@@ -123,12 +123,6 @@ func combinedOutputTimeout(ctx context.Context, name string, args ...string) ([]
 	return diagcmd.CombinedOutputTimeout(ctx, name, args...)
 }
 
-// outputTimeoutUnlimited is outputTimeout without the concurrency cap. See the
-// exemption list above before using it.
-func outputTimeoutUnlimited(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return diagcmd.OutputTimeout(ctx, name, args...)
-}
-
 // combinedOutputTimeoutUnlimited is combinedOutputTimeout without the
 // concurrency cap. See the exemption list above before using it.
 func combinedOutputTimeoutUnlimited(ctx context.Context, name string, args ...string) ([]byte, error) {
