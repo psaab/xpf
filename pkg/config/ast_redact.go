@@ -820,12 +820,12 @@ func maskCompareFingerprints(diff string) string {
 // sites owned by node; indices naming ancestors are retained for classification
 // but consumers transform or inspect only indices at or beyond baseLen.
 type redactionSiteList struct {
-	node          *Node
-	full          []string
-	baseLen       int
-	secrets       []int
-	urls          []int
-	embedded      []embeddedPayloadSite
+	node     *Node
+	full     []string
+	baseLen  int
+	secrets  []int
+	urls     []int
+	embedded []embeddedPayloadSite
 }
 
 // walkSecretSites is the only recursive AST redaction walk. It classifies each
@@ -1688,7 +1688,6 @@ func urlLeafKeywordIndex(full []string, idx int) int {
 	}
 	return keep
 }
-
 
 // embeddedCommandSecretHit15209 reports path when an embedded command
 // ALREADY carries SecretDataPlaceholder in a secret VALUE position

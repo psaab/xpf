@@ -155,7 +155,6 @@ func TestSchemaExitScrubPartiallyOverlappingURLNeedles18997(t *testing.T) {
 	}
 }
 
-
 // Escaped arm of the same cell shape: a sentinel-containing credential
 // with a newline renders under %q with escapes; raw-only spanning (the
 // first sentinel fix) cannot match it. The unified span pass covers

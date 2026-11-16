@@ -36,8 +36,8 @@ var peerSyncRefusalCases18622 = []peerSyncRefusalCase18622{
 		wantError:      "changing the chassis cluster control-link interface from",
 	},
 	{
-		name:           "9121-config-sync-endpoint",
-		activeCluster:  "set chassis cluster cluster-id 1\n" +
+		name: "9121-config-sync-endpoint",
+		activeCluster: "set chassis cluster cluster-id 1\n" +
 			"set chassis cluster node 0\n" +
 			"set chassis cluster authentication-key peer-sync-18622-psk\n" +
 			"set chassis cluster fabric-interface fab0\n" +
