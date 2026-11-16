@@ -553,9 +553,9 @@ skill. Work lands on `master` as ordinary commits:
   2026-11-08: "running the dataplane on this host is a bad idea ...
   run them in a VM on tcp or udp, make new vms if necessary").**
   - Every test command runs in a test-runner VM on a lab host,
-    `tcp:xpf-testrunner{,2}` or `udp:xpf-testrunner{,2,3,4}` (two runners per
-    host since 2026-11-09; udp got a third on 2026-11-10 and a fourth on
-    2026-11-16), through
+    `tcp:xpf-testrunner{,2,3}` or `udp:xpf-testrunner{,2,3,4}` (two runners
+    per host since 2026-11-09; udp got a third on 2026-11-10, and udp a fourth
+    and tcp a third on 2026-11-16), through
     `scripts/vm-test-run.sh [--runner R] [--name lane] [--root] -- <cmd>`.
   - "Every test command" covers: `cargo test` and mutation matrices for
     userspace-dp/userspace-xdp, Go package suites, `make test`,
