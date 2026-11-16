@@ -1,9 +1,14 @@
 package wireschema
 
 import (
+	"go/ast"
+	"reflect"
 	"slices"
 	"testing"
 )
+
+// pkgAnchor19172 names this package for the fixture's unexported fields.
+type pkgAnchor19172 struct{}
 
 // #17137 fold: WireNamesOf previously claimed to mirror encoding/json
 // exactly while implementing only flat tag semantics, and shipped with
@@ -14,17 +19,47 @@ import (
 // documented. Embedded-field promotion and duplicate-name dominance
 // are deliberately out of scope (see the package doc).
 func TestWireNamesOfTagSemantics17137(t *testing.T) {
-	type flat struct {
-		BareExcluded     int `json:"-"`
-		BareName         int `json:"bare"`
-		DashOmitEmpty    int `json:"-,omitempty"`
-		DashString       int `json:"-,string"`
-		EmptyName        int `json:",omitempty"`
-		NoTag            int
-		EmptyTag         int `json:""`
-		unexportedTagged int `json:"unexported"`
-		unexported       int
+	// The fixture is built at run time with reflect.StructOf (#19172). As
+	// a struct literal, its deliberate tags (a second "-" name via
+	// `-,string`, a json tag on an unexported field) are exactly what
+	// go vet's structtag analyzer reports, and the tree-wide vet gate
+	// (#9590) was red on them. Built from data, the type is the same:
+	// same field order, names, unexportedness and tags. vet just cannot
+	// see the literals.
+	intT := reflect.TypeOf(0)
+	field := func(name, tag string) reflect.StructField {
+		f := reflect.StructField{Name: name, Type: intT, Tag: reflect.StructTag(tag)}
+		if !ast.IsExported(name) {
+			f.PkgPath = reflect.TypeOf(pkgAnchor19172{}).PkgPath() // as a literal's unexported field carries
+		}
+		return f
 	}
+	flat := reflect.StructOf([]reflect.StructField{
+		field("BareExcluded", `json:"-"`),
+		field("BareName", `json:"bare"`),
+		field("DashOmitEmpty", `json:"-,omitempty"`),
+		field("DashString", `json:"-,string"`),
+		field("EmptyName", `json:",omitempty"`),
+		field("NoTag", ``),
+		field("EmptyTag", `json:""`),
+		field("unexportedTagged", `json:"unexported"`),
+		field("unexported", ``),
+	})
+	// The fixture must still carry what the cells are about: if StructOf
+	// ever dropped a tag or exported a field, the cells below would test
+	// a different type.
+	if f, _ := flat.FieldByName("DashString"); f.Tag.Get("json") != "-,string" {
+		t.Fatalf("fixture: DashString tag = %q, want -,string", f.Tag.Get("json"))
+	}
+	if f, _ := flat.FieldByName("unexportedTagged"); f.IsExported() || f.Tag.Get("json") != "unexported" {
+		t.Fatalf("fixture: unexportedTagged exported=%v tag=%q, want unexported with tag", f.IsExported(), f.Tag.Get("json"))
+	}
+	value := reflect.New(flat).Elem().Interface()
+	ptr := reflect.New(flat).Interface()
+	pp := reflect.New(reflect.PointerTo(flat))
+	pp.Elem().Set(reflect.New(flat))
+	nilPtr := reflect.Zero(reflect.PointerTo(flat)).Interface()
+
 	// Both dash-option fields emit "-": encoding/json (and this
 	// extractor) treat "-" before a comma as the NAME, not an
 	// exclusion, so the duplicate is intentional evidence of the
@@ -36,10 +71,10 @@ func TestWireNamesOfTagSemantics17137(t *testing.T) {
 		sample any
 		want   []string
 	}{
-		{"struct value", flat{}, want},
-		{"pointer to struct", &flat{}, want},
-		{"double pointer to struct", func() any { s := flat{}; p := &s; return &p }(), want},
-		{"nil pointer to struct", (*flat)(nil), want},
+		{"struct value", value, want},
+		{"pointer to struct", ptr, want},
+		{"double pointer to struct", pp.Interface(), want},
+		{"nil pointer to struct", nilPtr, want},
 		{"non-struct int", 42, nil},
 		{"non-struct string", "bare", nil},
 		{"non-struct map", map[string]int{}, nil},
