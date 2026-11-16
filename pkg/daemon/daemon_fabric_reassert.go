@@ -47,10 +47,11 @@ var fabricIPVLANRetryDelay = time.Second
 // and no session-sync transport, having reported (before this change) a
 // successful commit.
 //
-// It is also the only owner that can cover the DEFERRED overlays: when the
-// userspace dataplane is active, creation is postponed to the OnXSKBound
-// callback, which runs after the apply has returned, so its failure cannot
-// reach the commit result at all.
+// It also covers the post-bind re-ensure: with the userspace dataplane active,
+// the OnXSKBound callback re-ensures the fabric overlays after the XSK bind,
+// outside any apply, so a failure there cannot reach a commit result. (The
+// overlays themselves are created in the apply; the deferral to OnXSKBound was
+// disabled in dcc59c67df, #17343.)
 //
 // Always-on and mode-agnostic, mirroring the two sibling loops: it re-reads the
 // active config each tick rather than capturing one at start, so a fabric
