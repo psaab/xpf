@@ -784,6 +784,28 @@ a time), and a BACKUP peer takes over within 50 ms of that advert. A node that
 already lost the tie-break is BACKUP at the resign and correctly sends no
 priority-0 advert.
 
+**A forced resign's barrier settles after its burst (#18716 fold 2).** The
+forced-resign arm (`resignWithBurst`) runs `becomeBackupNoResignAck`, sends its
+three priority-0 adverts, and only then settles the armed `ResignBarrier`s
+(`notifyResigned`). The settle is deferred, so it runs on every exit:
+- **a failed VIP removal:** the removal error, and no burst;
+- **a send failure:** nil, because the VIPs are off;
+- **a panic while sending:** nil;
+- **a panic while removing:** `errForcedResignIncomplete`.
+
+A daemon waiter is never left hanging. `resign_settle_18716_test.go` pins each
+case.
+Every other `becomeBackup` still settles them at the end of the transition. So
+for a forced resign, a completed barrier means "VIPs off AND priority 0 on the
+wire". The daemon relies on that: it removes the stable router link-local on
+barrier completion. That address sorts below the per-node link-locals, so
+`resolveIPv6LinkLocal` picks it as the IPv6 advert source and the peer learns
+it as the master source. Removed before the burst, the burst would go out from
+a deleted address, or from a re-resolved per-node source that the peer's
+#16018 gate drops as an unknown master. `resign_ll_source_18716_test.go` pins
+this on an IPv6-only RETH with the real `resolveIPv6LinkLocal` and
+`admitAndRecord`, over both address-watcher orderings.
+
 ## Instance identity — kernel name + family key (#5083)
 
 `CollectInstances` (the generic, interface-level collector) must produce a
