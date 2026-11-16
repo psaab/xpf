@@ -2482,7 +2482,10 @@ The other re-drive failures (`tombstone dropped` under churn, a generation
 change) no longer hold a window open. Each one costs a re-drive on the owed-debt
 schedule: 1 s after the failure ends, then 2 s and 4 s, and if it keeps
 failing 8 s, 16 s, then every 30 s, independent of the sweep profile (#19115,
-`pkg/cluster/README.md`).
+`pkg/cluster/README.md`). Since #19135 the forced resync, the aged-ack re-drive
+and the barrier-fence re-prime share that one backoff episode. The price, a
+held-back forced resync waiting up to 30 s after the export recovers, is
+written up in `docs/ha-failover-status.md`.
 
 ## Incremental Sweep and Delete Journal
 

@@ -1259,14 +1259,31 @@ schedule of its own, independent of the sweep's 15 s / 60 s profile (#19115):
   succeeds. That attempt starts after up to 30 s of backoff from the moment
   the failed attempt completes, plus any scheduling and lock delay (and a
   drain that starts during a failing attempt also waits for it to end).
-  Retry the drain then. This backoff applies only to
-  the cold-prime re-drive; other retries of a failing bulk (a forced resync,
-  an aged unacknowledged bulk, the barrier re-prime) keep their own earlier
-  cadence (#19135);
+  Retry the drain then. Since #19135 the SAME backoff, one episode with one
+  failure count and one deadline, also holds back the other retries of a
+  failing bulk: a forced resync (after a delete-journal overflow), an aged
+  unacknowledged bulk, and the barrier re-prime;
 - while an ack for it is younger than 35 s, not at all (#9626);
 - while the bulk is fenced for a peer that has not proved a capability
   (install-table identity, IPsec discriminator), not at all, until the peer's
   capability frame lifts the fence.
+
+**A failing export can leave standby sessions stale for up to 30 s (#19135).**
+A forced resync is how the primary corrects the standby's session table after
+a delete-journal overflow: the standby may still hold sessions the primary has
+closed. While the export keeps failing, that resync is held to the shared
+backoff.
+- **The consequence:** once the export recovers, the held-back resync can
+  still wait up to 30 s (plus scheduling and lock delay) from the end of the
+  last failed attempt. A crash takeover inside that window can find standby
+  sessions up to 30 s stale: closed flows not yet removed.
+- **This is the same trade the user accepted for #19115's drain refusals.**
+  The alternative is a full export attempt every sweep tick (as fast as 1 s)
+  while the export is failing.
+- **Any successful authoritative bulk resets the episode,** so the next
+  retry, or a new forced resync, goes at once.
+- **What is never held back:** a forced resync consumed when the connection
+  is set up, the connect-time cold prime, and a peer's bulk request.
 
 The debt is paid when the peer acks a bulk, and the line disappears. A bulk
 that is merely pending ends this refusal, but not every refusal. After the

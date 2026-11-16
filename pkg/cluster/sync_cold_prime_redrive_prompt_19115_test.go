@@ -956,46 +956,13 @@ func TestSweepWakesDoNotPostponeTheSweep19115(t *testing.T) {
 	}
 }
 
-// TestForcedResyncKeepsItsCadence19115 pins the narrowed scope (the user's
-// decision of 2026-11-15 on Codex findings 1 and 17 on design v4): the retry
-// backoff holds back ONLY the owed cold-prime re-drive. A forced resync armed
-// while the backoff is closed (a bulk failed just now) goes on the next sweep
-// tick, as before #19115. Holding it to the deadline is the v4 gate that was
-// removed, and it also cost a slow profile interval when no debt was owed to
-// schedule the deadline (Codex finding 18).
-func TestForcedResyncKeepsItsCadence19115(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	snap := &flakySnapshot19115{}
-	ss := primarySync19115(t, ctx, sweepProfiles19115[0], snap.read)
-	conn := newBulkCaptureConn()
-	t.Cleanup(func() { conn.Close() })
-	ss.handleNewConnection(ctx, 0, conn, true)
-	epoch, _, pending := ss.PendingBulkAck()
-	if !pending {
-		t.Fatal("FIXTURE: want the cold prime sent and pending")
-	}
-	ss.handleMessage(conn, syncMsgBulkAck, epochPayload9626(epoch))
-	if ss.needColdPrime.Load() {
-		t.Fatal("FIXTURE: the ack did not discharge the debt")
-	}
-	snap.failures.Store(1)
-	if err := ss.doBulkSync(); err == nil {
-		t.Fatal("FIXTURE: want the injected bulk failure")
-	}
-	if ss.bulkRetryBackoffOpen() {
-		t.Fatal("FIXTURE: the failure must close the backoff for 1 s")
-	}
-	bulks := ss.stats.BulkSyncs.Load()
-	ss.forceResync.Store(true) // a delete-journal overflow
-	const bound = 600 * time.Millisecond
-	took, ok := waitForBulkSyncs19115(ss, bulks+1, bound)
-	if !ok {
-		t.Fatalf("#19115 (narrowed scope): a forced resync armed inside the owed re-drive's 1 s backoff was not sent within %v "+
-			"under a 50 ms sweep; the backoff holds back only the owed cold-prime re-drive", bound)
-	}
-	t.Logf("forced resync sent %v after it was armed, inside the backoff", took.Round(time.Millisecond))
-}
+// TestForcedResyncKeepsItsCadence19115 (removed): it pinned #19115's narrowed
+// scope, in which a forced resync re-armed after a failure kept its
+// no-backoff cadence. #19135 holds it to the ONE retry backoff, with its
+// deadline scheduled; that contract is pinned by
+// TestForcedResyncWaitsForTheBackoffAndFiresAtItsDeadline19135 and
+// TestHeldBackRetryIsScheduledExactlyAtItsDeadline19135
+// (sync_bulk_retry_backoff_19135_test.go).
 
 // TestIneligibleOwedRetryDoesNotFallThroughToAgedRetry19115 (Codex finding
 // 1): while a debt is owed it governs every sweep retry. An owed debt inside

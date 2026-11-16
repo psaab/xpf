@@ -551,16 +551,25 @@ func (s *SessionSync) syncSweep() int {
 	// arm exactly once (CAS true->false); re-arm on failure so a later sweep or
 	// reconnect retries. flushDeleteJournal already ran this tick, so any tail
 	// still queued replays before this snapshot's window closes.
-	// #19115: at most one bulk per tick, in this priority. Only the owed
-	// cold-prime re-drive is held to the retry backoff (bulkRetryNotBefore,
-	// sync_cold_prime_retry_19115.go). A forced resync re-armed after a failure
-	// and the aged-ack re-drive keep their pre-#19115 cadence, a retry on the
-	// next sweep tick (scoped out by the user's decision of 2026-11-15; the
-	// missing backoff there is #19135).
+	// #19115/#19135: at most one bulk per tick, in this priority, and EVERY
+	// retry below is held to the ONE retry backoff (bulkRetryNotBefore,
+	// sync_cold_prime_retry_19115.go): the forced resync, the owed cold-prime
+	// re-drive and the aged-ack re-drive. Each rechecks it under bulkSendMu
+	// (a waiter behind a predecessor's failure sees that failure's deadline),
+	// a held-back retry keeps its obligation armed, and nextSweepDelay
+	// schedules the deadline so being held back never costs a profile
+	// interval.
 	switch {
-	case s.forceResync.CompareAndSwap(true, false):
+	case s.forceResync.Load() && s.bulkRetryBackoffOpen() && s.forceResync.CompareAndSwap(true, false):
 		slog.Warn("cluster sync: forcing full bulk resync after delete-journal overflow (standby may retain stale sessions)")
-		if err := s.doBulkSync(); err != nil {
+		// #19135: the backoff is rechecked under bulkSendMu; a skip re-arms.
+		sent, err := s.doBulkSyncAdmitted(s.bulkRetryBackoffOpen)
+		if !sent && err == nil {
+			s.forceResync.Store(true)
+			slog.Debug("cluster sync: forced resync held back by the retry backoff; re-armed",
+				"retry_in", time.Duration(max(s.bulkRetryNotBeforeNs()-s.nowMono(), 0)).Round(time.Millisecond))
+		}
+		if err != nil {
 			s.forceResync.Store(true)
 			// #9752 round 4 / #17113: a fenced bulk is a quiet skip
 			// (each fence already counted and warned once), not a hot
@@ -618,7 +627,7 @@ func (s *SessionSync) syncSweep() int {
 		if s.owedColdPrimeRetryEligible() && s.bulkRedriveInFlight.CompareAndSwap(false, true) {
 			s.redriveOwedColdPrime()
 		}
-	case (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) &&
+	case (s.bulkAckRetryOwed.Load() || s.forcedBulkRetryDue()) && s.bulkRetryBackoffOpen() &&
 		s.bulkRedriveInFlight.CompareAndSwap(false, true):
 		// A forced resync or another authoritative bulk may be withheld at
 		// BulkEnd without discharging cold-prime debt. Re-send an aged,

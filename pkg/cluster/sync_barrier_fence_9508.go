@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"sync/atomic"
+	"time"
 )
 
 // #9508: the session-sync readiness barrier claims something about ONE ordered
@@ -113,6 +114,16 @@ func (s *SessionSync) scheduleBarrierFenceReprime(reason string) {
 			"pending_epoch", s.pendingBulkAckEpoch.Load())
 		return
 	}
+	// #19135: the re-prime is held to the ONE retry backoff. While it is
+	// closed the fence stays armed and the barrier keeps refusing safely; the
+	// next refused barrier after the deadline (the admission retries every
+	// 0.5 s) starts the re-prime, so no timer is needed and no export is
+	// spent while the export is failing.
+	if !s.bulkRetryBackoffOpen() {
+		slog.Debug("cluster sync: barrier fence re-prime held back by the retry backoff",
+			"reason", reason, "retry_in", time.Duration(max(s.bulkRetryNotBeforeNs()-s.nowMono(), 0)).Round(time.Millisecond))
+		return
+	}
 	if !s.fence.reprimeInFlight.CompareAndSwap(false, true) {
 		return
 	}
@@ -129,7 +140,8 @@ func (s *SessionSync) scheduleBarrierFenceReprime(reason string) {
 		// bulk sent meanwhile may already be awaiting the ack that discharges
 		// the fence.
 		if _, err := s.doBulkSyncAdmitted(func() bool {
-			return s.barrierFenced() && s.stats.Connected.Load() && !s.fenceDischargeAwaited()
+			return s.barrierFenced() && s.stats.Connected.Load() && !s.fenceDischargeAwaited() &&
+				s.bulkRetryBackoffOpen()
 		}); err != nil {
 			slog.Warn("cluster sync: barrier-fence re-prime failed; the next refused barrier retries it", "err", err)
 		}

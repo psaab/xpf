@@ -6152,12 +6152,26 @@ it.
     - It resets on a successful send (BulkEnd written), a discharge, the
       runtime being wired, and a new debt generation.
     - It never touches the #18752 owed age or last failure.
-    - The other retries keep their earlier cadence, by the user's decision
-      of 2026-11-15: a forced resync re-armed after a failure and the
-      aged-ack re-drive retry on the next sweep tick, the barrier-fence
-      re-prime on the next refused barrier, and the daemon prime on its own
-      schedule. They have no backoff; that predates #19115 and is #19135
-      (Codex findings 1 and 17 on design v4).
+    - **Since #19135 it is ONE episode for every authoritative retry:** the
+      owed re-drive, a forced resync re-armed after a failure, the aged-ack
+      re-drive and the barrier-fence re-prime. They share one failure count
+      and one deadline. Before, the last three retried on every sweep tick
+      or refused barrier with no backoff, a full export each (Codex findings
+      1, 17 and 18 on #19115 v4).
+      - Each rechecks the backoff under `bulkSendMu`, so a waiter behind a
+        predecessor's failure sees that failure's deadline.
+      - A held-back retry keeps its obligation armed: `forceResync`
+        re-armed, `bulkAckRetryOwed` left set, the fence still armed.
+      - `nextSweepDelay` arms the sweep timer EXACTLY at the deadline for a
+        held-back forced or aged retry. The barrier re-prime is polled by
+        the 0.5 s barrier refusals and needs no timer.
+      - NOT held back: a forced resync consumed at connect, the connect-time
+        cold prime, a peer's bulk request, and the daemon prime (its own
+        schedule).
+      - The price, accepted as #19115's was: a forced resync can wait up to
+        30 s after the export recovers, so a takeover inside that window can
+        find standby sessions up to 30 s stale. Any success resets the
+        episode. See `docs/ha-failover-status.md`.
   - **The owed debt governs.** While a debt is owed, the sweep's retry is the
     owed re-drive or nothing. It may start only when no young ack covers the
     debt, the bulk is not fenced (`bulkFenceNow`: exactly the window's
