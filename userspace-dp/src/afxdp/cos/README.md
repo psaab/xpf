@@ -297,10 +297,16 @@ mod.rs for further file-level breakdown.
   to the residual, and residual one binding cannot use stays available to the
   others. The bucket is first-come.
   It is read before transmit and debited after it, with a saturating debit.
-  So bindings whose read-to-debit windows overlap can overspend it by up to
-  (concurrent spenders − 1) × one batch per window, and that excess is
-  forgiven, not carried. This predates the #19100 stack (fb33f3ae9a);
-  reserve-before-submit is #19144.
+  - Each collision of k spenders, each with one batch outstanding, can
+    overspend it by up to (k − 1) × one batch, and that excess is forgiven,
+    not carried.
+  - The allowance is per collision. It is not per 1 ms epoch, and it is not a
+    cumulative conservation bound: repeated collisions forgive repeatedly.
+  - With k spenders in lockstep, ordinary surplus can therefore run near
+    k × R in the long run, capped only by the root lease and the shaping
+    rate.
+  - This predates the #19100 stack (fb33f3ae9a). Reserve-before-submit is
+    #19144.
   #19025 added a turn for the colocated non-exact queue on a binding whose
   exact class was just served, first drawn on that bucket through accruing
   per-binding claims. #19100 removed the claims and made the turn
@@ -340,7 +346,7 @@ mod.rs for further file-level breakdown.
 
   - #19100's turns close #18748's multi-millisecond unserved stretches.
   - The colocated rate is equal or higher.
-  - The cost is up to about 4% of total best-effort in the longer flips
+  - The cost is about 5% of total best-effort in the longer flips
     (5/5 ms: 8.0 against 8.4 at 96 KB; 12.8 against 13.4 on the default
     root). This is measured, not attributed.
   - #19025's 2.1-2.4 Gb/s trade came from its claims and its floor-hold

@@ -538,9 +538,16 @@ and nothing is owed.
 - **The class bound.** Class 11 may exceed the residual R by the colocated
   share (lab: 1.34 against 1.0).
   - Ordinary surplus is held to R by the shared pool only up to the pool's
-    read-then-debit race. Bindings whose read-to-debit windows overlap can
-    overspend it by up to (concurrent spenders − 1) × one batch per window,
-    and the excess is forgiven.
+    read-then-debit race. The pool is read before transmit and debited after
+    it, with a saturating debit.
+    - Each collision of k spenders, each with one batch outstanding, can
+      overspend it by up to (k − 1) × one batch, and that excess is forgiven,
+      not carried.
+    - That allowance is per collision. It is not per 1 ms epoch, and it is
+      not a cumulative conservation bound: repeated collisions forgive
+      repeatedly.
+    - So with k spenders in lockstep, ordinary surplus can run near k × R in
+      the long run, capped only by the root lease and the shaping rate.
   - That race predates this stack: it is on master since fb33f3ae9a.
     Reserve-before-submit is tracked as #19144.
 - **Not addressed here.** A small exact class on a slow worker beside a large
