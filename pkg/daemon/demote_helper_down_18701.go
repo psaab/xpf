@@ -480,37 +480,6 @@ func (d *Daemon) confirmOwnerlessInactive(rgID int) error {
 	return nil
 }
 
-// resignLostRethRGsHelperDown is the legacy VRRP mode analogue of
-// releaseDirectVIPsHelperDown (#18716). With an unresponsive local helper, it
-// resigns the RETH VRRP (priority 0, so the peer takes over within
-// milliseconds) of the event's RG, BEFORE any helper round trip. It returns
-// that RG's barrier, for the fence.
-//
-// Cluster events are handled one at a time, so a sibling RG lost in the same
-// election would otherwise keep its VIPs behind this handler's prep and write.
-// So it also resigns every sibling whose VRRP posture already needs a resign:
-// cluster non-primary with any VRRP instance still MASTER. That is the
-// reconcile safety net's predicate (CheckVRRPPosture), applied without its 2 s
-// delay. The delay exists for a transient this path cannot be in: VRRP taking
-// over on peer loss before the cluster promotes. A demotion edge means the
-// peer is alive and won an election. As in the safety net, nothing is resigned
-// during VRRP sync hold. An RG this node owns, or whose VRRP is not MASTER, is
-// left alone (its own event resigns it on its own edge).
-func (d *Daemon) resignLostRethRGsHelperDown(eventRG int) vipReleaseBarrier {
-	barrier := d.resignRethRG(eventRG)
-	if d.cluster == nil || (d.vrrpMgr != nil && d.vrrpMgr.InSyncHold()) {
-		return barrier
-	}
-	for _, rg := range d.cluster.GroupStates() {
-		id := rg.GroupID
-		if id == eventRG || d.cluster.IsLocalPrimary(id) || !d.getOrCreateRGState(id).AnyVRRPMaster() {
-			continue
-		}
-		d.resignRethRG(id)
-	}
-	return barrier
-}
-
 // legacyHelperDownFenceSilentAck decides, in legacy VRRP mode, whether a failed
 // helper-down rg_active write may still report the failover fence actuated
 // (#18716, the legacy twin of helperDownFenceSilentAck). The control socket
@@ -523,6 +492,85 @@ func (d *Daemon) legacyHelperDownFenceSilentAck(rethResign vipReleaseBarrier, si
 	}
 	if rethResign == nil {
 		return errors.New("no RETH VRRP resign barrier to resolve the fence from")
+	}
+	return nil
+}
+
+// stableLLCheckedBarrier wraps the legacy helper-down resign barrier so the
+// failover fence also requires the stable router link-local to be off this
+// node (#18716 review P2-2). The VRRP barrier covers only the VRRP VIPs; the
+// link-local is the shared IPv6 default-router identity, which the daemon
+// manages and removes best-effort (a failed delete only warns). A nil inner
+// barrier stays nil: the caller then has no release to resolve the fence from.
+func (d *Daemon) stableLLCheckedBarrier(rgID int, inner vipReleaseBarrier) vipReleaseBarrier {
+	if inner == nil {
+		return nil
+	}
+	return &stableLLBarrier{inner: inner, check: func() error { return d.stableLinkLocalConfirmedAbsent(rgID) }}
+}
+
+type stableLLBarrier struct {
+	inner vipReleaseBarrier
+	check func() error
+}
+
+func (b *stableLLBarrier) Done() <-chan struct{} { return b.inner.Done() }
+
+// Err is the VRRP release verdict, then a fresh read of the link-local.
+func (b *stableLLBarrier) Err() error {
+	if err := b.inner.Err(); err != nil {
+		return err
+	}
+	return b.check()
+}
+
+// stableLinkLocalConfirmedAbsent returns nil only when rgID's stable router
+// link-local is on none of the RG's netdevs, read fresh from the kernel. It is
+// the link-local half of directVIPsConfirmedAbsent, for legacy VRRP mode,
+// where the VRRP barrier already covers the VIPs. A dump failure or a link
+// lookup error other than "not found" is an error; an interface that does not
+// exist carries no address.
+func (d *Daemon) stableLinkLocalConfirmedAbsent(rgID int) error {
+	if d.stableLLConfirmAbsentFn != nil {
+		return d.stableLLConfirmAbsentFn(rgID)
+	}
+	if d.store == nil {
+		return nil
+	}
+	cfg := d.store.ActiveConfig()
+	if cfg == nil || cfg.Chassis.Cluster == nil {
+		return nil
+	}
+	netdevs := cfg.RemoveNetdevs(rgID)
+	if len(netdevs) == 0 {
+		return nil
+	}
+	stableLL, _ := netip.AddrFromSlice(config.StableRethLinkLocal(cfg.Chassis.Cluster.ClusterID, rgID).To16())
+	linkByName := d.linkByNameFn
+	if linkByName == nil {
+		linkByName = netlink.LinkByName
+	}
+	rows, err := directVIPAddrDumpFn()
+	if err != nil {
+		return fmt.Errorf("address dump failed: %w", err)
+	}
+	for _, netdev := range netdevs {
+		link, err := linkByName(netdev)
+		if err != nil {
+			var notFound netlink.LinkNotFoundError
+			if errors.As(err, &notFound) {
+				continue
+			}
+			return fmt.Errorf("resolve %s: %w", netdev, err)
+		}
+		if link == nil || link.Attrs() == nil {
+			return fmt.Errorf("resolve %s: no link attributes", netdev)
+		}
+		for _, row := range rows {
+			if row.LinkIndex == link.Attrs().Index && row.Prefix.Addr() == stableLL {
+				return fmt.Errorf("stable router link-local %s is still on %s", stableLL, netdev)
+			}
+		}
 	}
 	return nil
 }

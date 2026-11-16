@@ -777,9 +777,12 @@ VIPs. The daemon's legacy-mode demotion reaches equal priority on every RG move
 there the old master's priority-0 resign is what ends it. With an unresponsive
 helper that resign now goes first (`pkg/daemon/README.md`, "Legacy VRRP mode:
 the resign goes first"). `legacy_equal_priority_18716_test.go` pins the three
-equal-priority outcomes with real run loops, and that the resign hands the VIP
-over break-before-make: its priority-0 advert is never sent while it still
-holds the VIP.
+equal-priority outcomes with real run loops, and that the resign hands the VIPs
+over break-before-make: a MASTER's priority-0 advert is never sent while it
+still holds ANY of its VIPs (both families are tracked; the deletes are one at
+a time), and a BACKUP peer takes over within 50 ms of that advert. A node that
+already lost the tie-break is BACKUP at the resign and correctly sends no
+priority-0 advert.
 
 ## Instance identity — kernel name + family key (#5083)
 

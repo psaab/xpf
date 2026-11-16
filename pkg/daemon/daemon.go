@@ -1981,6 +1981,14 @@ type Daemon struct {
 	rgActiveLateFail       map[int]bool
 	directAddStableLLFn    func(int)
 	directRemoveStableLLFn func(int)
+	// #18716 unit-test seams for the legacy helper-down handover:
+	// removeStableRethLLFn replaces removeStableRethLinkLocal,
+	// clearRethServicesFn replaces clearRethServicesForRG, and
+	// stableLLConfirmAbsentFn replaces stableLinkLocalConfirmedAbsent.
+	// Production leaves all three nil.
+	removeStableRethLLFn    func(int)
+	clearRethServicesFn     func(int)
+	stableLLConfirmAbsentFn func(int) error
 
 	// linkDelFn removes a network interface. Defaults to netlink.LinkDel;
 	// overridden in tests so the #8372 fabric-overlay reaper can be driven

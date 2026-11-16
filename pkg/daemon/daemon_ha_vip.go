@@ -273,6 +273,10 @@ func addStableLLToInterface(ifName string, ll net.IP) {
 // VlanID-selected netdev plus the bare member, with no placement predicate,
 // so an address installed by an older rule is still found.
 func (d *Daemon) removeStableRethLinkLocal(rgID int) {
+	if d.removeStableRethLLFn != nil {
+		d.removeStableRethLLFn(rgID)
+		return
+	}
 	if d.store == nil {
 		return
 	}

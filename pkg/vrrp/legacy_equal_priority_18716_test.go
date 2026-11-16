@@ -34,21 +34,48 @@ import (
 // itself drives is break-before-make: no instant at which both nodes hold the
 // VIP.
 
-var vip18716 = net.ParseIP("10.0.61.1")
+// The RETH instance carries one VIP per family. The holds track BOTH (review
+// P3-3): VIPs are removed one at a time, so a check on one family alone
+// cannot see a priority-0 advert sent between the two deletes.
+var (
+	vip4_18716 = net.ParseIP("10.0.61.1")
+	vip6_18716 = net.ParseIP("2001:db8:61::1")
+)
+
+// held18716 records which of a node's VIPs are on its interface.
+type held18716 struct{ v4, v6 atomic.Bool }
+
+func (h *held18716) any() bool { return h.v4.Load() || h.v6.Load() }
+func (h *held18716) all() bool { return h.v4.Load() && h.v6.Load() }
+
+func (h *held18716) slot(ip net.IP) *atomic.Bool {
+	switch {
+	case ip.Equal(vip4_18716):
+		return &h.v4
+	case ip.Equal(vip6_18716):
+		return &h.v6
+	}
+	return nil
+}
 
 type pair18716 struct {
-	oldMgr, peerMgr     *Manager
-	old, peer           *vrrpInstance
-	oldHolds, peerHolds atomic.Bool
-	// bothHeld latches when either node ADDS the VIP while the other holds it.
+	oldMgr, peerMgr   *Manager
+	old, peer         *vrrpInstance
+	oldHeld, peerHeld held18716
+	// bothHeld latches when either node ADDS a VIP while the other holds any.
 	bothHeld atomic.Bool
 	// peerClaims counts the new primary's VIP adds; a forced MASTER claim can
 	// be lost again within one advert interval, faster than a poll sees it.
 	peerClaims atomic.Int32
 	// prio0WhileHeld latches when the old master puts a priority-0 advert on
-	// the wire while it still holds the VIP: the takeover signal must follow
+	// the wire while it still holds ANY VIP: the takeover signal must follow
 	// the release, or the peer can claim before it.
 	prio0WhileHeld atomic.Bool
+	// firstPrio0 is when the old master's first priority-0 advert went on the
+	// wire (UnixNano, 0 = never); peerClaimAfterPrio0 is the new primary's
+	// first VIP add after it (later re-adds by the VIP reconcile don't move
+	// it).
+	firstPrio0, peerClaimAfterPrio0 atomic.Int64
 }
 
 func newPair18716(t *testing.T, oldV4, peerV4 net.IP) *pair18716 {
@@ -58,7 +85,7 @@ func newPair18716(t *testing.T, oldV4, peerV4 net.IP) *pair18716 {
 		t.Fatal("setup: no RETH VRID for RG1")
 	}
 	p := &pair18716{oldMgr: NewManager(), peerMgr: NewManager()}
-	mk := func(mgr *Manager, holds, other *atomic.Bool, claims *atomic.Int32, v4, ll net.IP) *vrrpInstance {
+	mk := func(mgr *Manager, held, other *held18716, claims *atomic.Int32, v4, ll net.IP) *vrrpInstance {
 		vi := newInstance(Instance{
 			Interface:         "reth18716",
 			GroupID:           vrid,
@@ -72,20 +99,23 @@ func newPair18716(t *testing.T, oldV4, peerV4 net.IP) *pair18716 {
 		vi.suppressGARP.Store(true)
 		installFakeVIPNetlink(vi)
 		vi.addrAddFn = func(_ netlink.Link, a *netlink.Addr) error {
-			if a.IP.Equal(vip18716) {
-				if other.Load() {
+			if slot := held.slot(a.IP); slot != nil {
+				if other.any() {
 					p.bothHeld.Store(true)
 				}
-				holds.Store(true)
+				slot.Store(true)
 				if claims != nil {
 					claims.Add(1)
+					if p.firstPrio0.Load() != 0 {
+						p.peerClaimAfterPrio0.CompareAndSwap(0, time.Now().UnixNano())
+					}
 				}
 			}
 			return nil
 		}
 		vi.addrDelFn = func(_ netlink.Link, a *netlink.Addr) error {
-			if a.IP.Equal(vip18716) {
-				holds.Store(false)
+			if slot := held.slot(a.IP); slot != nil {
+				slot.Store(false)
 			}
 			return nil
 		}
@@ -94,8 +124,8 @@ func newPair18716(t *testing.T, oldV4, peerV4 net.IP) *pair18716 {
 		mgr.mu.Unlock()
 		return vi
 	}
-	p.old = mk(p.oldMgr, &p.oldHolds, &p.peerHolds, nil, oldV4, net.ParseIP("fe80::a"))
-	p.peer = mk(p.peerMgr, &p.peerHolds, &p.oldHolds, &p.peerClaims, peerV4, net.ParseIP("fe80::b"))
+	p.old = mk(p.oldMgr, &p.oldHeld, &p.peerHeld, nil, oldV4, net.ParseIP("fe80::a"))
+	p.peer = mk(p.peerMgr, &p.peerHeld, &p.oldHeld, &p.peerClaims, peerV4, net.ParseIP("fe80::b"))
 
 	// The wire: each advert reaches the other node with its sender's source
 	// address for that family. Like sendPacket, an IPv4 advert without a
@@ -109,8 +139,11 @@ func newPair18716(t *testing.T, oldV4, peerV4 net.IP) *pair18716 {
 		if src == nil {
 			return fmt.Errorf("no source address on %s", sender.cfg.Interface)
 		}
-		if sender == p.old && pkt.Priority == 0 && p.oldHolds.Load() {
-			p.prio0WhileHeld.Store(true)
+		if sender == p.old && pkt.Priority == 0 {
+			if p.oldHeld.any() {
+				p.prio0WhileHeld.Store(true)
+			}
+			p.firstPrio0.CompareAndSwap(0, time.Now().UnixNano())
 		}
 		cp := *pkt
 		cp.SrcIP = src
@@ -134,7 +167,7 @@ func newPair18716(t *testing.T, oldV4, peerV4 net.IP) *pair18716 {
 	// The old primary holds the RG.
 	p.oldMgr.ForceRGMaster(1)
 	waitFor18716(t, "the old primary to become MASTER and hold the VIP", func() bool {
-		return p.old.getState() == StateMaster && p.oldHolds.Load()
+		return p.old.getState() == StateMaster && p.oldHeld.all()
 	})
 	// The election moves the RG: the new primary forces MASTER at 200 while
 	// the old one is still MASTER at 200. ForceRGMaster only signals the run
@@ -168,17 +201,34 @@ func holdFor18716(t *testing.T, d time.Duration, what string, cond func() bool) 
 	}
 }
 
-// resignEndsIt18716: the old master's priority-0 resign leaves exactly one
-// holder, the new primary, and its priority-0 adverts follow its release.
-func resignEndsIt18716(t *testing.T, p *pair18716) {
+// resignEndsIt18716: the old node's resign leaves exactly one holder, the new
+// primary. When the old node is still MASTER (oldMaster), its priority-0
+// adverts must exist and follow its release; a node that already lost the
+// tie-break is BACKUP and correctly sends none. When the peer is BACKUP
+// (peerBackup), the peer must take over ON that advert, within 50 ms of it,
+// not on its ~100 ms master-down timer.
+func resignEndsIt18716(t *testing.T, p *pair18716, oldMaster, peerBackup bool) {
 	t.Helper()
+	if got := p.old.getState() == StateMaster; got != oldMaster {
+		t.Fatalf("setup: old node MASTER=%v at the resign, want %v", got, oldMaster)
+	}
 	p.oldMgr.ResignRG(1)
 	waitFor18716(t, "the resign to hand the VIP to the new primary", func() bool {
-		return !p.oldHolds.Load() && p.old.getState() == StateBackup &&
-			p.peerHolds.Load() && p.peer.getState() == StateMaster
+		return !p.oldHeld.any() && p.old.getState() == StateBackup &&
+			p.peerHeld.all() && p.peer.getState() == StateMaster
 	})
 	if p.prio0WhileHeld.Load() {
 		t.Fatal("the old master sent its priority-0 resign while it still held the VIP")
+	}
+	first := p.firstPrio0.Load()
+	if oldMaster && first == 0 {
+		t.Fatal("the MASTER's resign put no priority-0 advert on the wire")
+	}
+	if peerBackup {
+		claimed := p.peerClaimAfterPrio0.Load()
+		if took := time.Duration(claimed - first); claimed == 0 || took > 50*time.Millisecond {
+			t.Fatalf("the new primary claimed the VIP %s after the priority-0 advert, want within 50ms", took)
+		}
 	}
 }
 
@@ -187,10 +237,10 @@ func resignEndsIt18716(t *testing.T, p *pair18716) {
 func TestLegacyEqualPriorityNewPrimaryHigherV4_18716(t *testing.T) {
 	p := newPair18716(t, net.ParseIP("10.0.61.2"), net.ParseIP("10.0.61.3"))
 	waitFor18716(t, "the old master to lose the tie-break", func() bool {
-		return !p.oldHolds.Load() && p.old.getState() == StateBackup &&
-			p.peerHolds.Load() && p.peer.getState() == StateMaster
+		return !p.oldHeld.any() && p.old.getState() == StateBackup &&
+			p.peerHeld.all() && p.peer.getState() == StateMaster
 	})
-	resignEndsIt18716(t, p)
+	resignEndsIt18716(t, p, false, false)
 }
 
 // TestLegacyEqualPriorityOldMasterHigherV4_18716 is outcome 2: the NEW primary
@@ -201,13 +251,13 @@ func TestLegacyEqualPriorityNewPrimaryHigherV4_18716(t *testing.T) {
 func TestLegacyEqualPriorityOldMasterHigherV4_18716(t *testing.T) {
 	p := newPair18716(t, net.ParseIP("10.0.61.3"), net.ParseIP("10.0.61.2"))
 	waitFor18716(t, "the new primary to lose the tie-break", func() bool {
-		return p.peer.getState() == StateBackup && !p.peerHolds.Load()
+		return p.peer.getState() == StateBackup && !p.peerHeld.any()
 	})
 	holdFor18716(t, 300*time.Millisecond, "the VIP staying on the old master", func() bool {
-		return p.oldHolds.Load() && !p.peerHolds.Load()
+		return p.oldHeld.all() && !p.peerHeld.any()
 	})
 	p.bothHeld.Store(false) // the forced claim above is the tie-break's, not the resign's
-	resignEndsIt18716(t, p)
+	resignEndsIt18716(t, p, true, true)
 	if p.bothHeld.Load() {
 		t.Fatal("the resign handover added the VIP on the new primary while the old one still held it")
 	}
@@ -219,11 +269,11 @@ func TestLegacyEqualPriorityOldMasterHigherV4_18716(t *testing.T) {
 func TestLegacyEqualPriorityNoIPv4SourceBothMaster_18716(t *testing.T) {
 	p := newPair18716(t, nil, nil)
 	waitFor18716(t, "the new primary to become MASTER", func() bool {
-		return p.peer.getState() == StateMaster && p.peerHolds.Load()
+		return p.peer.getState() == StateMaster && p.peerHeld.all()
 	})
 	holdFor18716(t, 500*time.Millisecond, "both nodes holding the VIP", func() bool {
-		return p.oldHolds.Load() && p.peerHolds.Load() &&
+		return p.oldHeld.all() && p.peerHeld.all() &&
 			p.old.getState() == StateMaster && p.peer.getState() == StateMaster
 	})
-	resignEndsIt18716(t, p)
+	resignEndsIt18716(t, p, true, false)
 }

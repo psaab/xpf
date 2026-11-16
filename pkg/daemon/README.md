@@ -5465,60 +5465,137 @@ resign ends it. The handover the resign itself drives is break-before-make:
 the VIP leaves the old node before its priority-0 advert, the advert a BACKUP
 peer takes over on, goes on the wire.
 
-**The fix.** On a primary to secondary (or secondary-hold) demotion edge with
-the helper down (the #18697/#18685 verdict, as in direct mode), legacy mode
-now:
+**The fix.** It applies on a primary to secondary (or secondary-hold)
+demotion edge with the helper down (the #18697/#18685 verdict, as in direct
+mode). The resign keys on the same edge the old resign used, so a primary to
+disabled or lost edge still resigns nothing. Two code paths are involved,
+because in legacy mode the rg_active write is not where it seems:
 
-1. resigns the event RG's RETH VRRP FIRST, before any helper round trip;
-2. also resigns every sibling RG whose VRRP posture already needs a resign:
-   cluster non-primary with any VRRP instance still MASTER. That is the
-   reconcile safety net's predicate (`CheckVRRPPosture`), applied without its
-   2 s delay. The delay is for VRRP taking over on peer loss before the
-   cluster promotes, which a demotion edge rules out: the peer is alive and
-   won an election. As in the safety net, nothing extra is resigned during
-   VRRP sync hold. An owned RG, or one whose VRRP is not MASTER, is left to
-   its own event;
-3. then runs the same prep skip and bounded write as direct mode (one
-   control-socket sample decides both).
+1. **The cluster handler** (`handleClusterEventMerged`):
+   1. removes the stable router link-local (the shared IPv6 default-router
+      identity, which VRRP does not manage) from this node;
+   2. resigns the event RG's RETH VRRP. Both happen BEFORE any helper round
+      trip, and the link-local leaves before the priority-0 advert the peer
+      takes over on, so it is break-before-make by construction, like the
+      VIPs;
+   3. skips the prep when the control socket is silent.
 
-The resign keys on the same edge the old resign used, so a primary to disabled
-or lost edge still resigns nothing. The prep skip and the bound apply on every
-helper-down demotion edge, as in direct mode. A healthy helper keeps prep,
-resign, write.
+   With the RG's VRRP still MASTER at the edge, legacy desired
+   (`cluster || all-MASTER`) stays true across the cluster edge. The handler
+   then writes NOTHING; review fold 1 found the first version's "bounded
+   write" here was dead code in exactly this shape. The handler writes only
+   when the RG's VRRP was not all MASTER at the edge: the tie-break already
+   lost, or a partially MASTER RG. That write is bounded as in direct mode.
+2. **The VRRP BACKUP arm** (`handleVRRPEvent`), which runs when the resign
+   lands, is where the target shape's write happens. With the helper down it:
+   1. releases the stable link-local (idempotent here) and clears the RA/DHCP
+      services FIRST. This is the first point where the RG's state reads
+      inactive, and `clearRethServicesForRG` snapshots that state, so it
+      cannot move into the cluster handler;
+   2. skips the prep when the control socket is silent (one sample decides
+      both the prep and the bound);
+   3. bounds the write.
 
-**The fence.** For a peer-requested failover (an evacuation of this node) the
-peer promotes only on this node's applied-ack. When the bounded write fails
-with the control socket silent at entry and still silent (fresh sample), the
-ack is resolved from the RETH VIPs' actual release (`awaitRethVIPRelease`,
-#6177), never from the write: the ack cannot come while the VIPs are still on
-this node, and it does come once they leave. Before #18716 that write failure
-aborted the evacuation and left the RG on the wedged node (#16592). A failed
-release still fails the ack, and with the control socket answering a failed
-write is a refusal (#6371), as in direct mode.
+   Before, this arm always ran the 5 s prep and then an unbounded write, and
+   released the link-local and services only after both, all on the single
+   VRRP event goroutine.
+
+A healthy helper keeps the old orders: in the handler prep, resign, write; in
+the BACKUP arm prep, write, then link-local and services.
+
+Only the event's RG is resigned. A first version also resigned every sibling
+that was cluster non-primary with VRRP MASTER, and review (fold 1) removed it:
+- **Such a sibling may be a legitimate takeover.** A demotion edge does not
+  prove the peer is alive: election also demotes on local weight 0 with no
+  peer at all, and events queue. If the peer dies after RG1's demotion was
+  queued, RG2's VRRP takes over before the cluster promotes RG2, and RG1's
+  handler would then resign RG2 into a no-VIP window, possibly on the
+  surviving node.
+- **Enumerating the groups is not free.** `GroupStates()` runs the
+  transfer-readiness callback for every group (routing and FRR queries, up to
+  2 s each) before it returns.
+
+Siblings therefore stay on their own events and on the 2 s VRRP posture safety
+net, unchanged. The legacy arm calls no `GroupStates()`.
+
+**The fence.** For a peer-requested failover (an evacuation of this node), two
+promotions on the peer have to be kept apart:
+- **The peer's CLUSTER promotion** waits for this node's applied-ack.
+- **The peer's VRRP** takes the VIPs over autonomously on this node's
+  priority-0 advert, without waiting for the ack. That advert is only sent
+  after the VIPs are off this node.
+
+With the helper down, the ack resolves from the actual release
+(`awaitRethVIPRelease`), and the release now includes the stable link-local:
+the VRRP VIPs leaving is not enough while the IPv6 default-router address is
+still here (a fresh kernel read, `stableLinkLocalConfirmedAbsent`). In the
+target shape no handler write happens, so the release alone decides the ack.
+
+Where the handler does write and the bounded write fails:
+- **Control socket silent at entry and still silent (fresh sample):** the ack
+  still follows the release instead of failing. Before #18716 that failure
+  aborted the evacuation and left the RG on the wedged node (#16592).
+- **Control answering:** a failed write is a refusal (#6371), as in direct
+  mode.
+
+A failed release fails the ack.
 
 **The reconcile pass** skips the prep and bounds the write in legacy mode too,
 so the VRRP posture safety net behind it (2 s mismatch, then a resign) is not
 held behind them. It does not resign early: there the 2 s delay still guards
 the peer-loss transient.
 
-**What an operator sees.** One WARN per demotion:
+**What remains.**
+- On the election path both nodes act on their own events, so in shapes 1
+  and 3 an equal-priority overlap runs from the peer's force to this node's
+  resign. It is no longer stretched by helper timeouts, but it is not zero.
+- The services clear and the write in the BACKUP arm still run on the one
+  VRRP event goroutine, now bounded per RG.
+
+**What an operator sees.** In the cluster handler, one WARN per demotion:
 
     cluster: demoting with an unresponsive helper in legacy VRRP mode; resigning RETH VRRP before helper-side demotion (#18716)
 
-with `rg`, the verdict reason and `control_silent`, followed by the VRRP
-`forced resignation` lines. When the bounded write fails silently:
+In the VRRP BACKUP arm:
+
+    vrrp: demoting with an unresponsive helper; releasing the router link-local and services before helper-side demotion (#18716)
+
+Both carry `rg`, the verdict reason and `control_silent`. When the handler's
+bounded write fails silently:
 
     failed to update rg_active from cluster event; the helper's control socket is silent, so the failover fence follows the RETH VRRP VIP release instead (#18716)
 
-Cells, in `legacy_helper_down_18716_test.go`: the resign comes before the
-write and the silent prep is skipped, within the bound; with the control
-thread answering, resign then prep then write; the healthy order; no resign on
-a primary to disabled edge; every lost MASTER sibling resigned before the
-event RG's write; an owned sibling, a non-MASTER sibling, and any sibling
-during sync hold left alone; the fence following the release (clean release
-acks, failed release and an answering refusal do not); the reconcile bound.
-Eleven daemon mutants and three VRRP mutants each fail a named cell (see
-`docs/log/18716.md`).
+**Cells**, in `legacy_helper_down_18716_test.go`. Each ordering cell runs on
+both edges: the manual secondary-hold one and the election primary to
+secondary one.
+- **Target shape (RG still VRRP MASTER at the edge):**
+  - the link-local leaves before the resign;
+  - the handler reaches neither the prep nor the write;
+  - the BACKUP arm clears the services before a bounded write and skips the
+    silent prep;
+  - with control answering, services, then prep, then a write that waits;
+  - a healthy BACKUP arm keeps prep, write, services;
+  - the fence waits for the link-local as well as the VRRP release.
+- **Handler-write shape:**
+  - resign before write, silent prep skipped, bounded;
+  - resign, prep, write when control answers;
+  - the healthy order;
+  - no resign on a primary to disabled edge;
+  - the fence follows the release. A clean release acks. A failed release,
+    an answering refusal, and a socket that was silent at entry but answers
+    by the bound (the fresh sample) do not.
+- **Sibling:** a cluster-secondary sibling with VRRP MASTER is never resigned
+  by another RG's demotion, and the event RG's resign does not wait on a
+  blocking transfer-readiness callback.
+- **Reconcile:** the bound.
+
+The VRRP cells:
+- track BOTH VIP families;
+- require a MASTER's resign to put priority 0 on the wire only after every
+  VIP is off;
+- require a BACKUP peer to take over within 50 ms of that advert.
+
+Every mutant listed in `docs/log/18716.md` fails a named cell.
 
 ## A transfer request for a group neither node owns (#18715)
 

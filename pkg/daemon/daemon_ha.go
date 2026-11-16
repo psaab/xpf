@@ -865,11 +865,28 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		// new primary forces MASTER at priority 200 while this node is still
 		// MASTER at 200, and the IPv4 tie-break decides: no window, the VIP
 		// left on this (wedged) node, or, without a non-VIP IPv4 on the RETH
-		// member, both MASTER. So with the helper down, the priority-0
-		// resign goes FIRST (the peer takes over on it within milliseconds),
-		// for every RG this node no longer owns, and then the same
-		// prep-skip and bounded write as direct mode. A healthy helper keeps
-		// the #485 order: prep, resign, write.
+		// member, both MASTER. So with the helper down, this RG's priority-0
+		// resign goes FIRST (a BACKUP peer takes over on it within
+		// milliseconds), and then the same prep skip as direct mode. A
+		// healthy helper keeps the #485 order: prep, resign, write.
+		//
+		// Where the write happens (#18716 review P2-1): with this RG's VRRP
+		// still MASTER at the edge (the shape this issue is about), legacy
+		// desired is cluster || all-MASTER and stays true here, so tr is
+		// unchanged and this handler writes nothing. The write then happens
+		// in handleVRRPEvent's BACKUP arm once the resign lands, which
+		// carries the same helper-down treatment. The bounded write below
+		// is reached only when the RG's VRRP was not all MASTER at the edge
+		// (the tie-break already lost, or a partially MASTER RG).
+		//
+		// Only this event's RG (#18716 review). A sibling that is cluster
+		// non-primary with VRRP MASTER may be a legitimate takeover: the
+		// peer may have died after this event was queued, or this node may
+		// have been demoted on local weight 0 with no peer at all, and VRRP
+		// takes over before the cluster promotes. Siblings stay on their own
+		// events and the 2 s VRRP posture safety net. Nothing here may call
+		// GroupStates() either: it runs the transfer-readiness callback for
+		// every group (routing/FRR queries, up to 2 s each).
 		//
 		// The legacy arm keys on the same edge as the resign it moves
 		// (primary to secondary or secondary-hold), so it resigns nothing
@@ -893,7 +910,18 @@ func (d *Daemon) handleClusterEventMerged(ctx context.Context, ev cluster.Cluste
 		if legacyHelperDown {
 			slog.Warn("cluster: demoting with an unresponsive helper in legacy VRRP mode; resigning RETH VRRP before helper-side demotion (#18716)",
 				"rg", ev.GroupID, "helper", d.helperElectionReason(), "control_silent", controlSilentAtEntry)
-			rethResign = d.resignLostRethRGsHelperDown(ev.GroupID)
+			// #18716 review P2-2: the stable router link-local is the
+			// shared IPv6 default-router identity, and VRRP does not manage
+			// it. It used to leave this node only in the VRRP BACKUP arm,
+			// after the prep and the write, while the new primary adds it
+			// (NODAD) on its MASTER event. Remove it BEFORE the resign, so
+			// it is off this node before the priority-0 advert the peer
+			// takes over on: break-before-make by construction, like the
+			// VIPs. The RA/DHCP services are cleared in the VRRP BACKUP arm
+			// (handleVRRPEvent), the first point where this RG's state reads
+			// inactive; clearRethServicesForRG snapshots that state.
+			d.removeStableRethLinkLocal(ev.GroupID)
+			rethResign = d.stableLLCheckedBarrier(ev.GroupID, d.resignRethRG(ev.GroupID))
 			rethResignDone = true
 		}
 		if clusterDemotionEdge && d.dataplane() != nil && !controlSilentAtEntry {
@@ -1405,9 +1433,27 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 			// then clear rg_active. Re-read desired state to
 			// guard against interleaved cluster goroutine.
 			d.injectBlackholeRoutes(rgID)
+			// #18716 review P2-1: in legacy VRRP mode this arm, not the
+			// cluster handler, is where a demotion's rg_active write
+			// happens when the RG was still VRRP MASTER at the cluster edge
+			// (desired = cluster || all-MASTER stays true there). With the
+			// helper down it gets the cluster path's treatment: the stable
+			// router link-local and the RA/DHCP services go FIRST, the prep
+			// is skipped when the control socket is silent (one sample
+			// decides the prep and the bound), and the write is bounded. A
+			// healthy helper keeps prep, write, then link-local and services.
+			desiredActive, _ := s.CurrentDesired()
+			helperDown := !desiredActive && d.dataplane() != nil && d.helperDownForDemotion()
+			controlSilent := helperDown && d.helperControlSilentForPrep()
+			if helperDown {
+				slog.Warn("vrrp: demoting with an unresponsive helper; releasing the router link-local and services before helper-side demotion (#18716)",
+					"rg", rgID, "helper", d.helperElectionReason(), "control_silent", controlSilent)
+				d.removeStableRethLinkLocal(rgID)
+				d.clearRethServicesForRG(rgID)
+			}
 			if rt := d.dataplane(); rt != nil {
 				cur, _ := s.CurrentDesired()
-				if !cur {
+				if !cur && !controlSilent {
 					d.tryPrepareUserspaceRGDemotion(rgID)
 				}
 				// The desired-state re-read can observe a concurrent
@@ -1422,10 +1468,20 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 				if cur && !republishReady {
 					slog.Warn("vrrp: connected-route republish failed during BACKUP recheck; skipping rg_active activation",
 						"rg", rgID)
-				} else if err := rt.HA().SetRGActive(ctx, rgID, cur); err != nil {
-					slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
 				} else {
-					applied = recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+					var err error
+					if helperDown && !cur {
+						// A failed or abandoned write leaves the apply
+						// unrecorded, so the reconcile loop retries it.
+						err = d.helperDownRGActiveWrite(ctx, rt.HA(), rgID, cur, controlSilent)
+					} else {
+						err = rt.HA().SetRGActive(ctx, rgID, cur)
+					}
+					if err != nil {
+						slog.Warn("failed to update rg_active", "rg", rgID, "err", err)
+					} else {
+						applied = recordRGActiveAppliedIfCurrentOrStable(s, tr, cur)
+					}
 				}
 				if cur && d.cluster != nil && d.cluster.IsLocalPrimary(rgID) {
 					ready := applied && s.AllVRRPMaster() && !s.NeedsApply()
@@ -1433,8 +1489,10 @@ func (d *Daemon) handleVRRPEvent(ctx context.Context, ev vrrp.VRRPEvent, mirror 
 				}
 				d.RefreshFabricFwd()
 			}
-			d.removeStableRethLinkLocal(rgID)
-			d.clearRethServicesForRG(rgID)
+			if !helperDown {
+				d.removeStableRethLinkLocal(rgID)
+				d.clearRethServicesForRG(rgID)
+			}
 			// #16690: re-gate probes + close publish gate on standby.
 			d.scheduleIPMonGating("vrrp-backup")
 		}
@@ -2553,6 +2611,10 @@ func clearRethRASendersWithoutGoodbyePeer(clearer raScopedClearer, cfg, peerCfg 
 // for RETH interfaces belonging to the given RG. Called on VRRP BACKUP
 // transition. If other RGs are still MASTER, their services remain active.
 func (d *Daemon) clearRethServicesForRG(rgID int) {
+	if d.clearRethServicesFn != nil {
+		d.clearRethServicesFn(rgID)
+		return
+	}
 	generation, staleCompletions, claimed := d.beginRethServicesEdge(rgID, false)
 	if !claimed {
 		return
