@@ -271,9 +271,11 @@ func (s *Server) untargetedFencedResign(ctx context.Context, op clusterfailover.
 // filled from mgr: this node's state now, and the peer as owner when the
 // heartbeat view reports it primary. Shared with the in-process CLI twin.
 func untargetedNoLongerPrimaryReply(mgr *cluster.Manager, rg, peerNode int) string {
+	// #19169: the reply needs only the state, so no transfer-readiness
+	// callback (routing discovery, then FRR) runs before it.
 	state := "not primary"
-	if g := mgr.GroupState(rg); g != nil {
-		state = g.State.String()
+	if st, known := mgr.LocalGroupState(rg); known {
+		state = st.String()
 	}
 	owner := -1
 	if mgr.IsPeerPrimary(rg) {

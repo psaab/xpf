@@ -47,3 +47,42 @@ func TestReadinessFreeAccessors19169(t *testing.T) {
 		t.Fatalf("control: GroupStates ran the callback %d times, want 3", n)
 	}
 }
+
+// #19169 (codex-e P3): MonitorFailuresByGroup returns a SNAPSHOT. Returning
+// rg.MonitorFails itself would expose the backing array SetMonitorWeight
+// sorts and edits in place. Several failures are installed; a mutation on
+// either side must not show up on the other.
+func TestMonitorFailuresByGroupIsASnapshot19169(t *testing.T) {
+	m := NewManager(0, 1)
+	m.UpdateConfig(&config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{
+		{ID: 1, NodePriorities: map[int]int{0: 200}},
+	}})
+	for _, iface := range []string{"ge-0-0-3", "ge-0-0-1", "ge-0-0-2"} {
+		m.SetMonitorWeight(1, iface, true, 10)
+	}
+	failsOf := func(gs []GroupMonitorFailures) []string {
+		for _, g := range gs {
+			if g.GroupID == 1 {
+				return g.MonitorFails
+			}
+		}
+		return nil
+	}
+	snap := failsOf(m.MonitorFailuresByGroup())
+	want := []string{"ge-0-0-1", "ge-0-0-2", "ge-0-0-3"}
+	if !reflect.DeepEqual(snap, want) {
+		t.Fatalf("setup: RG1 failures %v, want %v", snap, want)
+	}
+	// The caller's side: writing into the snapshot must not reach the group.
+	snap[0] = "caller-wrote-this"
+	if got := failsOf(m.MonitorFailuresByGroup()); !reflect.DeepEqual(got, want) {
+		t.Fatalf("a write into the returned slice changed the group's failures: %v", got)
+	}
+	// The manager's side: recovering one monitor (an in-place edit of the
+	// group's slice) must not change a snapshot taken before it.
+	before := failsOf(m.MonitorFailuresByGroup())
+	m.SetMonitorWeight(1, "ge-0-0-1", false, 10)
+	if !reflect.DeepEqual(before, want) {
+		t.Fatalf("a monitor recovery rewrote an earlier snapshot: %v, want %v", before, want)
+	}
+}

@@ -250,9 +250,11 @@ func (c *CLI) untargetedFencedResign(op clusterfailover.Op, targetNode int, epoc
 	if errors.Is(err, cluster.ErrNoLongerPrimary) {
 		slog.Info("cluster failover: the group already left this node during the untargeted request; nothing to resign",
 			"rg", op.RG, "target_node", targetNode, "err", err)
+		// #19169: the reply needs only the state, so no transfer-readiness
+		// callback (routing discovery, then FRR) runs before it.
 		state := "not primary"
-		if g := c.cluster.GroupState(op.RG); g != nil {
-			state = g.State.String()
+		if st, known := c.cluster.LocalGroupState(op.RG); known {
+			state = st.String()
 		}
 		owner := -1
 		if c.cluster.IsPeerPrimary(op.RG) {

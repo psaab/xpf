@@ -54,9 +54,9 @@ func (s *Server) GetStatus(ctx context.Context, _ *pb.GetStatusRequest) (*pb.Get
 		resp.SessionCount = int32(v4 + v6)
 	}
 	if s.cluster != nil {
-		rg0 := s.cluster.GroupState(0)
-		if rg0 != nil {
-			if rg0.State == cluster.StatePrimary {
+		// #19169: the role needs only RG0's state, not a readiness probe.
+		if rg0, known := s.cluster.LocalGroupState(0); known {
+			if rg0 == cluster.StatePrimary {
 				resp.ClusterRole = "primary"
 			} else {
 				resp.ClusterRole = "secondary"

@@ -5373,20 +5373,39 @@ So with a learned route missing and FRR slow, the first VIP removal could
 wait about 2 s per group, and so could the debt that moves the RGs off the
 sick helper. They now use `DataGroupIDs`, `LocalGroupPrimary`, `GroupIDs`,
 `MonitorFailuresByGroup` and `LocalGroupState`, none of which run the
-callback. No production caller in `pkg/daemon` uses `GroupState` or
+callback. No production caller outside `pkg/cluster` uses `GroupState` or
 `GroupStates` any more.
 
-The callers that keep the callback need readiness: operator displays and APIs
-(`show chassis cluster`, gRPC status, the CLI failover check) and `HAState`.
+Codex-e's review found four more callers that read only a group's state:
+- the untargeted failover's "already left this node" reply, in the CLI
+  (`cli_request_chassis.go`) and in gRPC (`server_diag_system_action.go`).
+  The operator's failover answer waited on routing discovery and FRR;
+- the CLI prompt prefix (`clusterPrefix`, on every prompt);
+- gRPC status's cluster role.
+
+All four use `LocalGroupState` now. The callers that keep the callback
+display readiness itself: the `show chassis cluster` builders in
+`pkg/cluster/status.go`, and `HAState` (`pkg/cluster/ha_state.go`).
 
 **The census is a test, not a judgment.**
 `TestNoFailoverPathRunsTheReadinessCallback19169` installs a readiness
-callback that FAILS the test if invoked, then drives every failover-path entry
-point:
-- a helper-down demotion;
-- the reconcile pass, including RG0 config ownership and its release;
-- a direct-VIP reconcile;
-- the election-debt tick.
+callback that FAILS the test if invoked while armed. Each entry point runs
+through its OUTER entry, as its own subtest from a fresh fixture, and must
+produce its own effect there. Codex-e's review: one shared actuation assertion
+had been satisfied by the first handler alone. The entry points:
+- a helper-down demotion: the handler releases RG1's VIPs;
+- the reconcile pass with the demotion event dropped: the pass itself
+  releases them;
+- a direct-VIP reconcile of a group no longer owned;
+- the helper-down release of a group no longer owned;
+- the REAL transit-gate tick (`reassertTransitGate`) across every debt
+  transition: healthy, an intentional stop (keepArm), an unexpected exit, a
+  crash loop and recovery, with each step's arm and crash-loop debt and
+  weight asserted;
+- an ownerless transfer-out accept and its confirmation (#18715).
+
+The CLI and gRPC failover replies carry the same trap in
+`untargeted_reply_readiness_19169_test.go`.
 
 A new caller on any of them goes red. It is how the RG0 caller, which the hand
 census had missed, was found.
