@@ -18,7 +18,21 @@ second runner on each host was added 2026-11-09, when one free runner was
 saturated; the third udp runner on 2026-11-10, while long tcp gate cells kept
 both tcp runners paused): Debian 14 (forky, matching the deb-building workstation; Ubuntu 26.04 ships libelf 0.194, below the #9931 minimum 0.195), 8 vCPU at low CPU priority, 32 GiB RAM,
 150 GiB disk, Go per `go.mod`, and Rust per `userspace-dp/rust-toolchain.toml`.
-Run them from the worktree:
+They also carry the deadcode gate's own Go release at `/usr/lib/go-<version>`
+(`DEADCODE_GO_VERSION` in `scripts/resolve-deadcode-go.sh`), and export
+`XPF_DEADCODE_REQUIRE=1` from `/etc/profile.d/xpf-testrunner.sh`, so a runner
+without it FAILS the deadcode legs instead of skipping them (#19152; before
+that, every runner's `make test-go` reported that gate NOT-EXAMINED). Create a
+runner with the `incus` steps in `scripts/provision-testrunner.sh`, then
+provision it from the workstation, which derives the toolchain versions from
+the checkout:
+
+```bash
+scripts/provision-testrunner.sh --runner udp:xpf-testrunner
+scripts/provision-testrunner.sh --runner udp:xpf-testrunner --toolchains-only  # update an existing runner
+```
+
+Run tests from the worktree:
 
 ```bash
 scripts/vm-test-run.sh -- make test

@@ -26,7 +26,10 @@ are recorded.
 | Proto header and regen check | `make proto-check`, then `make proto-regen-check` (pinned protoc regen-diff; #16195) | `test.yml` job `proto` |
 Scoped deadcode is the exception to the Go job's main toolchain: that
 job still uses `go-version-file: go.mod` (go1.24.9). The workflow installs
-the `golang.org/dl/go1.26.9` wrapper under `$RUNNER_TEMP`, downloads its
+the `golang.org/dl/go1.26.9` wrapper under `$RUNNER_TEMP` (the release is
+`DEADCODE_GO_VERSION` in `scripts/resolve-deadcode-go.sh`;
+`scripts/go-deadcode-gate-selftest.sh` fails if the workflow installs
+another), downloads its
 SDK, and sets `DEADCODE_GO` only on `make check-nft-deadcode`; setup-go's
 Go 1.24.9 PATH remains unchanged for every other step. The target shares
 `scripts/resolve-deadcode-go.sh` with the module-wide gate and pins
