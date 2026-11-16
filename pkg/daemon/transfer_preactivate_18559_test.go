@@ -21,6 +21,7 @@ type fakePreActivateDP struct {
 	publishErr error
 	reverted   bool
 	marked     []int
+	published  []int // the RGs the publish marked routes-ready (#19167)
 	until      time.Time
 }
 
@@ -33,7 +34,8 @@ func (f *fakePreActivateDP) BeginTransferPreActivation(rgIDs []int, until time.T
 	}
 }
 
-func (f *fakePreActivateDP) PublishTransferPreActivation() error {
+func (f *fakePreActivateDP) PublishTransferPreActivation(rgIDs []int) error {
+	f.published = append([]int(nil), rgIDs...)
 	f.recordCall("ha-publish")
 	return f.publishErr
 }
@@ -62,6 +64,11 @@ func TestBeginTransferPreActivationRoutesBeforeHelper18559(t *testing.T) {
 	}
 	if !reflect.DeepEqual(dp.marked, []int{1, 2}) {
 		t.Fatalf("marked %v, want [1 2]", dp.marked)
+	}
+	// #19167: the helper publish is what makes the RGs routes-ready, so it
+	// must name exactly the RGs whose routes the republish above carried.
+	if !reflect.DeepEqual(dp.published, []int{1, 2}) {
+		t.Fatalf("published %v, want [1 2]: the helper publish must mark the republished RGs routes-ready", dp.published)
 	}
 }
 

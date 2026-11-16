@@ -17,6 +17,19 @@ package userspace
 // not close the window, and none of the activation-keyed side effects (VIPs,
 // GARP, services) run early.
 //
+// An entry has two stages (#19167). Begin makes it ROUTES-PENDING: the route
+// builder already treats the RG as locally owned (routeRGPrimaryLocked), so
+// the caller's republish carries its connected prefixes, but the helper is
+// NOT yet told the RG is active. PublishTransferPreActivation makes it
+// ROUTES-READY, after that republish succeeded, and only then does it count in
+// the helper-facing inventory (effectiveHAGroupLocked). Every helper publisher
+// reads that one function, so the periodic status poll, which runs outside
+// the daemon's applySem, can no longer publish the RG active in the window
+// between Begin and the route republish. Before #19167 it could: the
+// helper's activation refresh (RefreshOwnerRGs) then ran against the
+// pre-activation FIB during a planned failover, and the later explicit
+// publish brought no second refresh because the RG was already active.
+//
 // An entry ends in exactly three ways:
 //   - the real promotion lands (UpdateRGActive true) or a real demotion lands
 //     (UpdateRGActive true->false): the cluster truth supersedes the overlay;
@@ -30,37 +43,61 @@ import (
 	"time"
 )
 
-// BeginTransferPreActivation marks rgIDs pre-active until the deadline. It
-// performs no I/O: the caller republishes the connected-RG routes (which now
-// see these RGs as locally owned) and then calls PublishTransferPreActivation,
-// the same routes-before-rg_active order the promotion path keeps (#16270).
-// IDs <= 0 are ignored: RG0 owns no forwarding.
+// transferPreActivation is one pre-active RG: its backstop deadline, and
+// whether its connected routes are published, which is what lets the helper
+// be told the RG is active (#19167).
+type transferPreActivation struct {
+	until       time.Time
+	routesReady bool
+}
+
+// BeginTransferPreActivation marks rgIDs pre-active until the deadline,
+// ROUTES-PENDING. It performs no I/O: the caller republishes the connected-RG
+// routes (which now see these RGs as locally owned) and then calls
+// PublishTransferPreActivation, the same routes-before-rg_active order the
+// promotion path keeps (#16270). IDs <= 0 are ignored: RG0 owns no forwarding.
+//
+// Re-beginning an RG that is still live and routes-ready only extends its
+// deadline: its routes are already in the helper FIB, and dropping it back to
+// pending would make the next helper publish close its forwarding mid-window.
 func (m *Manager) BeginTransferPreActivation(rgIDs []int, until time.Time) {
 	if m == nil {
 		return
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
 	for _, rgID := range rgIDs {
 		if rgID <= 0 {
 			continue
 		}
 		if m.transferPreActive == nil {
-			m.transferPreActive = make(map[int]time.Time)
+			m.transferPreActive = make(map[int]transferPreActivation)
 		}
-		m.transferPreActive[rgID] = until
+		ready := m.transferPreActiveLocked(rgID, now) && m.transferPreActive[rgID].routesReady
+		m.transferPreActive[rgID] = transferPreActivation{until: until, routesReady: ready}
 	}
 }
 
-// PublishTransferPreActivation sends the effective HA inventory to the helper
-// so the pre-active RGs start forwarding. A no-op without a running helper or
+// PublishTransferPreActivation marks rgIDs ROUTES-READY and sends the effective
+// HA inventory to the helper, so those RGs start forwarding. The caller calls
+// it only after its connected-route republish succeeded (#19167). It takes the
+// RGs explicitly: a concurrent transfer's Begin may have added another entry
+// whose routes are not published yet, and that one must stay pending. IDs with
+// no pre-activation are ignored. A no-op publish without a running helper or
 // an HA inventory.
-func (m *Manager) PublishTransferPreActivation() error {
+func (m *Manager) PublishTransferPreActivation(rgIDs []int) error {
 	if m == nil {
 		return nil
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for _, rgID := range rgIDs {
+		if entry, ok := m.transferPreActive[rgID]; ok {
+			entry.routesReady = true
+			m.transferPreActive[rgID] = entry
+		}
+	}
 	if len(m.haGroups) == 0 {
 		return nil
 	}
@@ -120,10 +157,18 @@ func (m *Manager) TransferPreActiveRGs() []int {
 	return out
 }
 
-// transferPreActiveLocked reports whether rgID is pre-active at now.
+// transferPreActiveLocked reports whether rgID is pre-active at now, at either
+// stage. The route builder uses this: a routes-pending RG's connected prefixes
+// must be in the republish that makes it ready.
 func (m *Manager) transferPreActiveLocked(rgID int, now time.Time) bool {
-	until, ok := m.transferPreActive[rgID]
-	return ok && now.Before(until)
+	entry, ok := m.transferPreActive[rgID]
+	return ok && now.Before(entry.until)
+}
+
+// transferPreActiveForHelperLocked reports whether rgID is pre-active AND
+// routes-ready at now: the only stage the helper may see as active (#19167).
+func (m *Manager) transferPreActiveForHelperLocked(rgID int, now time.Time) bool {
+	return m.transferPreActiveLocked(rgID, now) && m.transferPreActive[rgID].routesReady
 }
 
 // supersedeTransferPreActiveLocked is called from UpdateRGActive: a real
@@ -141,9 +186,9 @@ func (m *Manager) supersedeTransferPreActiveLocked(rgID int, prior HAGroupStatus
 }
 
 // effectiveHAGroupLocked is the helper-facing view of one group: the cluster
-// truth, plus Active for a live pre-activation.
+// truth, plus Active for a live, routes-ready pre-activation (#19167).
 func (m *Manager) effectiveHAGroupLocked(group HAGroupStatus, now time.Time) HAGroupStatus {
-	if !group.Active && m.transferPreActiveLocked(group.RGID, now) {
+	if !group.Active && m.transferPreActiveForHelperLocked(group.RGID, now) {
 		group.Active = true
 	}
 	return group
