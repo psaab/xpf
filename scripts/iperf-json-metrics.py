@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import datetime
 import json
 import statistics
 import sys
@@ -222,6 +223,17 @@ def score_planned_move(move, rows, args, inside):
     }
 
 
+def _outside_zero_entry(stream_id, start, end, start_ms):
+    """#19168: one outside-window zero interval, named by stream and by the
+    wall clock (the client's test start plus the interval offset; empty when
+    the log carries no start timestamp)."""
+    wall = ""
+    if start_ms is not None:
+        wall = datetime.datetime.fromtimestamp(float(start_ms) / 1000.0 + start, datetime.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    return {"stream": stream_id, "start": round(start, 3), "end": round(end, 3), "wall_start_utc": wall}
+
+
 def summarize(path, args):
     transition_mode = bool(args.event_sec or args.planned_move)
     summary = {
@@ -246,6 +258,9 @@ def summarize(path, args):
         "zero_intervals_total": 0,
         "stream_zero_intervals_total": 0,
         "stream_zero_intervals_outside_events_total": 0,
+        # #19168: each interval counted above, so a FAIL on the count can be
+        # attributed: {"stream", "start", "end", "wall_start_utc"}.
+        "stream_zero_intervals_outside_events": [],
         "zero_streams_outside_events_total": 0,
         "zero_streams_total": 0,
         "planned_moves": [],
@@ -281,6 +296,16 @@ def summarize(path, args):
         start = next((event.get("data") or {} for event in data if event.get("event") == "start"), {})
         test_start = start.get("test_start", {}) or {}
     summary["protocol"] = str(test_start.get("protocol") or "").upper()
+    # #19168: the client's test-start wall clock (iperf3's start timestamp),
+    # so each interval can be named by its wall-clock time.
+    start_stamp = {}
+    if payload["format"] == "json":
+        start_stamp = data.get("start", {}).get("timestamp", {}) or {}
+    elif payload["format"] == "json-stream":
+        start_stamp = start.get("timestamp", {}) or {}
+    start_ms = start_stamp.get("timemillisecs")
+    if start_ms is None and start_stamp.get("timesecs") is not None:
+        start_ms = float(start_stamp["timesecs"]) * 1000.0
     sum_sent = end.get("sum_sent") or end.get("sum") or {}
     sum_received = end.get("sum_received") or {}
     throughput_summary = end_throughput_summary(end)
@@ -425,6 +450,7 @@ def summarize(path, args):
     stream_zero_outside_total = 0
     zero_stream_ids = set()
     zero_stream_ids_outside = set()
+    outside_zero = []
     # Per-interval rows for the planned-move scoring: bounds, aggregate rate,
     # and each stream's zero flag.
     rows = []
@@ -451,6 +477,7 @@ def summarize(path, args):
                     stream_zero_resume_excused += 1
                 elif not excluded:
                     stream_zero_outside_total += 1
+                    outside_zero.append(_outside_zero_entry(stream_id, interval_start, interval_end, start_ms))
                     zero_stream_ids_outside.add(stream_id)
         rows.append((interval_start, interval_end, interval_total, stall_by_stream, zero_by_stream, rate_by_stream))
     moves_out = [score_planned_move(move, rows, args, inside) for move in planned]
@@ -489,6 +516,7 @@ def summarize(path, args):
     summary["observed_end_sec"] = observed_end
     summary["stream_zero_intervals_total"] = stream_zero_total
     summary["stream_zero_intervals_outside_events_total"] = stream_zero_outside_total
+    summary["stream_zero_intervals_outside_events"] = outside_zero
     summary["stream_zero_intervals_resume_excused_total"] = stream_zero_resume_excused
     summary["zero_streams_outside_events_total"] = len(zero_stream_ids_outside)
     summary["zero_streams_total"] = len(zero_stream_ids)

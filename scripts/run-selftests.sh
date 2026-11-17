@@ -518,6 +518,7 @@ run_bash test/incus/cos-apply-lib-selftest.sh
 run_bash test/incus/rss-pin-selftest.sh
 run_bash test/incus/host-inbound-selftest.sh
 run_bash test/incus/iperf-throughput-selftest.sh
+run_bash test/incus/failover-evidence-selftest.sh
 # #18977: verdict emission must follow a successful ledger write; the fixture
 # .deb supplies real staged executable hashes and the cell artifacts are local.
 run_bash test/incus/compare-gate-selftest.sh

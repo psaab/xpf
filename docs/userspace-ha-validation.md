@@ -795,6 +795,21 @@ named in the cell's text.
   is not wholly inside a registered window. Planned-move zeros are scored by
   their move cell instead, so they are never counted twice. A stall that
   outlasts its window counts here too.
+  When it is non-zero, its line names each interval: `stream <id> at <UTC>
+  (+<start>-<end> s)`, at most 8 (#19168). The wall-clock time is the iperf3
+  client's test-start timestamp plus the interval offset.
+- **Evidence (#19168).** Every run, PASS or FAIL, copies its iperf3 evidence
+  into `FAILOVER_ARTIFACT_DIR` (default
+  `$TMPDIR/failover-evidence/<UTC>-<pid>`) before any verdict, and prints
+  `failover iperf3 evidence archived to <dir>`. The evidence is:
+  - the per-stream json-stream log, whose LAN-host copy at
+    `/tmp/iperf3-failover.log` the next run overwrites;
+  - the metrics JSON;
+  - the producer and gate stderr;
+  - `outside-zero-intervals.tsv`: stream, start, end, and wall-clock UTC
+    of each counted interval.
+  A gate that keeps a result dir per run should point `FAILOVER_ARTIFACT_DIR`
+  into it.
 - **Whole run:** `zero_intervals_total` is aggregate zero intervals PLUS
   per-stream zero intervals, with no window excluded. The crash alone zeroes
   every stream for 1–3 intervals (8 streams give 8–24), so a fixed limit of 2

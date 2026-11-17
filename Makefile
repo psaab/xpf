@@ -1130,7 +1130,7 @@ test-clean-shared-cargo-lib:
 # The standalone instance name defaults to xpf-fw; override it for an
 # ad-hoc/renamed VM with `XPF_INSTANCE=<name> make test-deploy` (#2162). The
 # env var flows through to setup.sh (INSTANCE_NAME=${XPF_INSTANCE:-xpf-fw}).
-.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy test-wire-gate-hermetic-lib
+.PHONY: test-env-init test-vm standalone-test-vm test-ct test-deploy test-deploy-lib test-mutate-lib test-cluster-lock-lib test-target-services-lib test-cluster-env-lib test-iperf-throughput-lib test-cos-apply-lib test-mouse-elephant-lib test-fbf-steering-lib test-host-inbound-lib test-host-inbound test-host-inbound-failover test-wire-policy-deny test-wire-policy-deny-lib test-wire-appmatch-twins test-wire-appmatch-twins-lib test-wire-zone-matrix test-wire-zone-matrix-lib test-wire-hostinbound-deny test-wire-hostinbound-deny-lib test-wire-nat-frag-needed test-wire-nat-frag-needed-lib test-wire-conntrack-lifecycle test-wire-conntrack-lifecycle-lib test-cc-rollback-functional test-persistent-nat-failover test-dhcp-lease-failover test-ssh test-destroy test-status test-start test-stop test-restart test-logs test-journal test-screen-probe-lib mouse-target-up mouse-target-status mouse-target-destroy test-wire-gate-hermetic-lib test-failover-evidence-lib
 
 .PHONY: test-v6-na-recovery-lib
 test-env-init:
@@ -1753,6 +1753,14 @@ harness-ledger-lint:
 
 test-iperf-throughput-lib:
 	bash ./test/incus/iperf-throughput-selftest.sh
+
+# #19168: test-failover.sh archives its iperf3 evidence (json-stream log,
+# metrics, outside-zero-intervals.tsv) PASS or FAIL, and names each
+# outside-window zero interval's stream and wall clock in the verdict line.
+# Hermetic: a fixture log through the real producer and the extracted
+# functions. Also a leg of `make selftest`.
+test-failover-evidence-lib:
+	bash ./test/incus/failover-evidence-selftest.sh
 
 # Self-test the #8336 crafted-frame screen-probe analysis layer: the function
 # that turns an armed-state flag plus two counter sample pairs into DROPPED /

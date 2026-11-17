@@ -849,7 +849,14 @@ legacy_expected = {
     "client_error": "",
     "post_duration_intervals_excluded": 0,
 }
-assert legacy_no_event == json.dumps(legacy_expected, sort_keys=True), legacy_no_event
+# #19168: the per-interval list behind the outside counter is checked on its
+# own (one row per counted interval; this json fixture carries no start stamp,
+# so no wall clock); everything else must still equal the snapshot exactly.
+legacy_obj = json.loads(legacy_no_event)
+outside_rows = legacy_obj.pop("stream_zero_intervals_outside_events")
+assert len(outside_rows) == legacy_obj["stream_zero_intervals_outside_events_total"] == 16, outside_rows
+assert all(set(r) == {"stream", "start", "end", "wall_start_utc"} and r["wall_start_utc"] == "" for r in outside_rows), outside_rows
+assert json.dumps(legacy_obj, sort_keys=True) == json.dumps(legacy_expected, sort_keys=True), legacy_no_event
 PY
 ok "#19021: demonstrated-throughput outage predicate, no-event output, and peak reporting are covered"
 

@@ -145,6 +145,10 @@ MAX_FAILOVER_POLICY_DENIED_DELTA="${MAX_FAILOVER_POLICY_DENIED_DELTA:-0}"
 # Set MAX_ZERO_INTERVALS to gate it absolutely anyway.
 MAX_ZERO_INTERVALS="${MAX_ZERO_INTERVALS:-}"
 MAX_STREAM_ZERO_INTERVALS="${MAX_STREAM_ZERO_INTERVALS:-0}"
+# #19168: FAILOVER_ARTIFACT_DIR receives this run's iperf3 evidence (the
+# json-stream log, the metrics, outside-zero-intervals.tsv), PASS or FAIL;
+# default $TMPDIR/failover-evidence/<UTC>-<pid>. A gate should point it into
+# its own per-run result dir.
 # #12618: the whole-run per-stream budget applies only outside the transition
 # windows (full intervals only); see the producer's --event-sec (the crash:
 # EXCUSED) and --planned-move (the harness's own moves: scored PASS/COST/FAIL,
@@ -2522,6 +2526,51 @@ ha_crash_resume_at() {
 		printf '%s\n' "$failover_at_seconds"
 	fi
 }
+# #19168: failover_archive_evidence <dir> copies this run's iperf3 evidence
+# (the per-stream json-stream log the LAN host keeps at a FIXED path, which
+# the next run overwrites, the metrics, the producer and gate stderr) into
+# <dir>, and writes outside-zero-intervals.tsv: one row per per-stream zero
+# interval counted outside the crash and planned-move windows (stream, start
+# and end seconds, wall-clock UTC). It runs PASS or FAIL, before any verdict,
+# so a FAIL's evidence survives the run. A failure here only warns.
+failover_archive_evidence() {
+	local dir=$1 f
+	if ! mkdir -p "$dir" 2>/dev/null; then
+		echo "WARNING: cannot create the evidence dir ${dir}; this run's iperf3 evidence is not archived (#19168)" >&2
+		return 0
+	fi
+	for f in "$LOCAL_IPERF_LOG" "$LOCAL_IPERF_METRICS" "$LOCAL_IPERF_PRODUCER_ERR" "$LOCAL_IPERF_GATE_ERR"; do
+		[[ -e "$f" ]] && cp -p -- "$f" "$dir/" 2>/dev/null
+	done
+	python3 -c '
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1])).get("stream_zero_intervals_outside_events") or []
+except Exception:
+    rows = []
+print("stream\tstart_s\tend_s\twall_start_utc")
+for r in rows:
+    print("%s\t%s\t%s\t%s" % (r.get("stream", "?"), r.get("start", ""), r.get("end", ""), r.get("wall_start_utc", "")))
+' "$LOCAL_IPERF_METRICS" >"${dir}/outside-zero-intervals.tsv" 2>/dev/null || true
+	echo "==> failover iperf3 evidence archived to ${dir} (#19168)"
+}
+# failover_outside_zero_detail <metrics>: the outside-window zero intervals,
+# named for the verdict line ("stream 7 at <UTC> (+3.0-4.0 s)", at most 8,
+# then "+N more"); empty when there are none.
+failover_outside_zero_detail() {
+	python3 -c '
+import json, sys
+try:
+    rows = json.load(open(sys.argv[1])).get("stream_zero_intervals_outside_events") or []
+except Exception:
+    rows = []
+parts = ["stream %s at %s (+%s-%s s)" % (r.get("stream", "?"), r.get("wall_start_utc") or "unknown time", r.get("start", "?"), r.get("end", "?")) for r in rows[:8]]
+if len(rows) > 8:
+    parts.append("+%d more" % (len(rows) - 8))
+print("; ".join(parts))
+' "$1" 2>/dev/null || true
+}
+FAILOVER_ARTIFACT_DIR="${FAILOVER_ARTIFACT_DIR:-${TMPDIR:-/var/worktrees/.cache/tmpdir}/failover-evidence/$(date -u +%Y%m%dT%H%M%SZ)-$$}"
 LOCAL_IPERF_LOG="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.json-stream.log"
 LOCAL_IPERF_METRICS="${TMPDIR:-/var/worktrees/.cache/tmpdir}/iperf3-failover.$$.metrics.json"
 LOCAL_IPERF_GATE_ERR="${LOCAL_IPERF_METRICS}.gate.err"
@@ -2548,6 +2597,7 @@ else
 	[[ -n "$iperf_gate_reason" ]] || iperf_gate_reason="ha_metrics_gate rejected metrics"
 fi
 # M1 JSON capture/gate fixture end
+failover_archive_evidence "$FAILOVER_ARTIFACT_DIR"
 
 if [[ "$iperf_gate_ok" == true ]]; then
 	# Recorded for the master-relative comparison (the ledger's
@@ -2559,7 +2609,13 @@ if [[ "$iperf_gate_ok" == true ]]; then
 	else
 		info "iperf3 whole-run zero-throughput intervals: ${zero_intervals_total} (recorded as whole_run_zero_intervals and judged master-relative, not gated: the crash's by-design detection and activation, about 1.1-1.5 s in the lab, alone zero every stream)"
 	fi
-	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)" \
+	# #19168: name each outside interval (stream, wall clock) in the line.
+	outside_zero_detail=""
+	if [[ "$stream_zero_intervals_outside_events_total" != 0 ]]; then
+		outside_zero_detail=$(failover_outside_zero_detail "$LOCAL_IPERF_METRICS")
+		outside_zero_detail=" [${outside_zero_detail:-intervals not listed}; evidence ${FAILOVER_ARTIFACT_DIR}]"
+	fi
+	ha_emit_verdict "iperf3 whole-run per-stream zero intervals outside the crash and planned-move windows (${stream_zero_intervals_outside_events_total}, limit ${MAX_STREAM_ZERO_INTERVALS} via MAX_STREAM_ZERO_INTERVALS; ${zero_streams_outside_events_total} affected stream(s); ${stream_zero_intervals_total} total)${outside_zero_detail}" \
 		ha_counter_at_most_verdict "$stream_zero_intervals_outside_events_total" "$MAX_STREAM_ZERO_INTERVALS" "whole-run per-stream zero intervals outside the [T, T+3] windows (MAX_STREAM_ZERO_INTERVALS)"
 	info "iperf3 whole-run zero-throughput streams: ${zero_streams_total} (${zero_streams_outside_events_total} outside the crash and planned-move windows)"
 	# #18692: zero seconds of streams that resumed before the crash cell's
