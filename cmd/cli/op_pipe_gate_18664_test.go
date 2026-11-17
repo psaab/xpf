@@ -45,7 +45,13 @@ type rec18664 struct {
 	config   []*pb.ShowConfigRequest
 	rollback []*pb.ShowRollbackRequest
 	compare  []*pb.ShowCompareRequest
-	text     []string
+	// text is each ShowText call's topic, and filters its filter, in the
+	// same order. They are kept APART (#19184): #19015 once folded the filter
+	// into the topic record, which silently changed what every topic-only
+	// cell compared against and turned four #18664/#18666 cells red with no
+	// product change.
+	text    []string
+	filters []string
 }
 
 func (f *rec18664) ShowCompare(_ context.Context, in *pb.ShowCompareRequest, _ ...grpc.CallOption) (*pb.ShowCompareResponse, error) {
@@ -64,7 +70,8 @@ func (f *rec18664) ShowRollback(_ context.Context, in *pb.ShowRollbackRequest, _
 }
 
 func (f *rec18664) ShowText(_ context.Context, in *pb.ShowTextRequest, _ ...grpc.CallOption) (*pb.ShowTextResponse, error) {
-	f.text = append(f.text, in.GetTopic()+"filter="+in.GetFilter())
+	f.text = append(f.text, in.GetTopic())
+	f.filters = append(f.filters, in.GetFilter())
 	if in.GetTopic() == "class-of-service:reth0.80" {
 		return &pb.ShowTextResponse{Output: "Interface: reth0.80\n"}, nil
 	}
@@ -144,8 +151,10 @@ func TestOpDataPlaneStatisticsLossProbes19015(t *testing.T) {
 			if err != nil {
 				t.Fatalf("dispatch(%q) = %v; want ShowText with filter %q", tc.line, err, tc.filter)
 			}
-			if len(f.text) != 1 || f.text[0] != "chassis-cluster-data-plane-statisticsfilter="+tc.filter {
-				t.Fatalf("dispatch(%q) text=%v; want one data-plane statistics ShowText filter=%q", tc.line, f.text, tc.filter)
+			if !reflect.DeepEqual(f.text, []string{"chassis-cluster-data-plane-statistics"}) ||
+				!reflect.DeepEqual(f.filters, []string{tc.filter}) {
+				t.Fatalf("dispatch(%q) topics=%v filters=%q; want one data-plane statistics ShowText with filter %q",
+					tc.line, f.text, f.filters, tc.filter)
 			}
 		})
 	}
@@ -170,8 +179,8 @@ func TestOpDataPlaneStatisticsLossProbes19015(t *testing.T) {
 func TestOpPipeOnOtherCommands18664(t *testing.T) {
 	t.Run("show chassis cluster status | match node", func(t *testing.T) {
 		f, out, err := dispatch18664(t, "show chassis cluster status | match node", false)
-		if err != nil || !reflect.DeepEqual(f.text, []string{"chassis-cluster-status"}) {
-			t.Fatalf("err=%v topics=%v; want ShowText(chassis-cluster-status)", err, f.text)
+		if err != nil || !reflect.DeepEqual(f.text, []string{"chassis-cluster-status"}) || !reflect.DeepEqual(f.filters, []string{""}) {
+			t.Fatalf("err=%v topics=%v filters=%q; want ShowText(chassis-cluster-status) (no server-side filter: the pipe is applied by the CLI)", err, f.text, f.filters)
 		}
 		if out != "node0 primary\nnode1 secondary\n" {
 			t.Fatalf("output %q; want only the matching lines", out)
@@ -179,8 +188,8 @@ func TestOpPipeOnOtherCommands18664(t *testing.T) {
 	})
 	t.Run("show route | count", func(t *testing.T) {
 		f, out, err := dispatch18664(t, "show route | count", false)
-		if err != nil || !reflect.DeepEqual(f.text, []string{"route-all"}) {
-			t.Fatalf("err=%v topics=%v; want ShowText(route-all)", err, f.text)
+		if err != nil || !reflect.DeepEqual(f.text, []string{"route-all"}) || !reflect.DeepEqual(f.filters, []string{""}) {
+			t.Fatalf("err=%v topics=%v filters=%q; want ShowText(route-all) (no server-side filter: the pipe is applied by the CLI)", err, f.text, f.filters)
 		}
 		if out != "Count: 3 lines\n" {
 			t.Fatalf("output %q; want Count: 3 lines", out)
@@ -188,8 +197,8 @@ func TestOpPipeOnOtherCommands18664(t *testing.T) {
 	})
 	t.Run("show version | match secondary", func(t *testing.T) {
 		f, out, err := dispatch18664(t, "show version | match secondary", false)
-		if err != nil || !reflect.DeepEqual(f.text, []string{"version"}) {
-			t.Fatalf("err=%v topics=%v; want ShowText(version)", err, f.text)
+		if err != nil || !reflect.DeepEqual(f.text, []string{"version"}) || !reflect.DeepEqual(f.filters, []string{""}) {
+			t.Fatalf("err=%v topics=%v filters=%q; want ShowText(version) (no server-side filter: the pipe is applied by the CLI)", err, f.text, f.filters)
 		}
 		if out != "node1 secondary\n" {
 			t.Fatalf("output %q; want only the matching line", out)
@@ -197,8 +206,8 @@ func TestOpPipeOnOtherCommands18664(t *testing.T) {
 	})
 	t.Run("show version | count", func(t *testing.T) {
 		f, out, err := dispatch18664(t, "show version | count", false)
-		if err != nil || !reflect.DeepEqual(f.text, []string{"version"}) {
-			t.Fatalf("err=%v topics=%v; want ShowText(version)", err, f.text)
+		if err != nil || !reflect.DeepEqual(f.text, []string{"version"}) || !reflect.DeepEqual(f.filters, []string{""}) {
+			t.Fatalf("err=%v topics=%v filters=%q; want ShowText(version) (no server-side filter: the pipe is applied by the CLI)", err, f.text, f.filters)
 		}
 		if out != "Count: 3 lines\n" {
 			t.Fatalf("output %q; want Count: 3 lines", out)
@@ -470,8 +479,8 @@ func TestOpLeafUnconsumedSuffixRefused18666(t *testing.T) {
 // refuses glued/separated pipes and a second word before rendering or RPC.
 func TestOpClassOfServiceOptionalSelector18666(t *testing.T) {
 	f, out, err := dispatch18664(t, "show class-of-service interface reth0.80", false)
-	if err != nil || !reflect.DeepEqual(f.text, []string{"class-of-service:reth0.80"}) {
-		t.Fatalf("dispatch(selector) err=%v topics=%v; want filtered ShowText topic", err, f.text)
+	if err != nil || !reflect.DeepEqual(f.text, []string{"class-of-service:reth0.80"}) || !reflect.DeepEqual(f.filters, []string{""}) {
+		t.Fatalf("dispatch(selector) err=%v topics=%v filters=%q; want the selector in the ShowText topic, with no separate filter", err, f.text, f.filters)
 	}
 	if out != "Interface: reth0.80\n" {
 		t.Fatalf("selector output %q; want filtered interface view", out)
