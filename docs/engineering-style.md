@@ -2081,9 +2081,21 @@ they repeatedly bite:
   defaults to loss, and its VM-target guard (shims, `systemctl
   daemon-reload`) runs on them. A udp tuple without the udp env ran that
   guard on the LOSS firewalls without the loss lock, inside another agent's
-  loss measurement (2026-11-16). Since #19165, `with-cluster.sh` refuses
-  (exit 2, before taking the lock) a canonical lock tuple whose cluster
-  differs from the env's `INCUS_REMOTE`.
+  loss measurement (2026-11-16). Since #19165, `with-cluster.sh` applies one
+  TOTAL rule to the cell's TARGET SET: `INCUS_REMOTE`, the qualified refs
+  `FW0`/`FW1`/`CLUSTER_LAN_HOST`/`DMZ_TARGET_REF`/`MOUSE_TARGET_REF`, and
+  the bare `*_NAME`s. A selftest census fails if `cluster-env.sh` exports a
+  remote-qualified value outside the set.
+  - Every invocation resolves the set once and refuses (exit 2, before the
+    lock) unless `INCUS_REMOTE` and every resolved ref are on the lock's
+    cluster. A ref that resolves bare under a remote env is refused too.
+  - The outer cell exports the resolved values and their digest
+    (`XPF_CLUSTER_TARGETS_DIGEST`). A nested cell refuses unless what it
+    inherits is byte for byte that set. A stripped environment, like the
+    sg re-exec that forwards only `BPFRX_*`/`XPF_*`, must instead re-resolve
+    to exactly that set.
+  - The command always runs with the resolved values, never the caller's
+    raw ones: a bare `FW1=xpf-udp-fw1` runs as `udp:xpf-udp-fw1`.
   Never give a gate and ordinary command for one physical cluster different
   tuples. See the campaign skill and CLAUDE.md for the full path table.
   | Actor | Protocol |

@@ -153,14 +153,17 @@ ok "rm-while-held fails closed with SPLIT MUTEX diagnosis; reclaim works after h
 #        (bash -c stands in otherwise). This pins the
 #        deadlock/double-build regression path (Codex code-r1 F3).
 # shellcheck disable=SC2016  # single quotes deliberate: expansion happens inside the cell
-"$WC" "case-h outer" -- env XPF_CLUSTER_SKIP_BUILD=1 BPFRX_CLUSTER_ENV=/tmp/fake.env bash -c '
+# #19165: a nested cell may not switch the cluster env, so the forwarded
+# BPFRX_CLUSTER_ENV is the enclosing cell's own (a real file), not a fake one.
+H_ENV="$(cd "${SCRIPT_DIR}/../.." && pwd)/test/incus/udp-userspace-cluster.env"
+BPFRX_CLUSTER_ENV="$H_ENV" "$WC" "case-h outer" -- env XPF_CLUSTER_SKIP_BUILD=1 bash -c '
 	# Replicate cluster-setup.sh lines 39-60 verbatim: dynamic prefix
 	# forwarding + printf %q command rebuild + group re-exec.
 	local_env=""
 	for _v in "${!BPFRX_@}" "${!XPF_@}"; do
 		local_env+="${_v}=$(printf "%q" "${!_v}") "
 	done
-	inner="${local_env}$(printf "%q " "'"$WC"'" case-h-inner -- bash -c "[ \"\${XPF_CLUSTER_SKIP_BUILD:-}\" = 1 ] && [ \"\${BPFRX_CLUSTER_ENV:-}\" = /tmp/fake.env ]")"
+	inner="${local_env}$(printf "%q " "'"$WC"'" case-h-inner -- bash -c "[ \"\${XPF_CLUSTER_SKIP_BUILD:-}\" = 1 ] && [ \"\${BPFRX_CLUSTER_ENV:-}\" = '"$H_ENV"' ]")"
 	if command -v sg >/dev/null 2>&1 && id -nG | grep -qw incus-admin; then
 		sg incus-admin -c "$inner"
 	else
@@ -214,7 +217,7 @@ XPF_CLUSTER_LOCK="$T/k/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/k/owner" XPF_
 K_RC=$?
 set -e
 [[ $K_RC -eq 2 && ! -e "$T/k/ran" ]] || fail "(k) udp lock + loss env: expected refusal (2) with the command not run, got rc=$K_RC ran=$([[ -e "$T/k/ran" ]] && echo yes || echo no): $(tr '\n' '|' <"$T/k.out")"
-grep -q 'REFUSED: the lock tuple is the udp cluster.*resolves loss' "$T/k.out" || fail "(k) the refusal does not name both clusters: $(tr '\n' '|' <"$T/k.out")"
+grep -q 'REFUSED: the lock tuple is the udp cluster.*resolve INCUS_REMOTE=loss' "$T/k.out" || fail "(k) the refusal does not name both clusters: $(tr '\n' '|' <"$T/k.out")"
 [[ ! -s "$T/k/owner" ]] || fail "(k) the refused cell wrote an owner file: it took the lock"
 XPF_CLUSTER_LOCK="$T/k/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/k/owner" XPF_CLUSTER_EPOCH="$T/k/epoch" \
 	BPFRX_CLUSTER_ENV="${REPO_ROOT}/test/incus/udp-userspace-cluster.env" \
@@ -254,27 +257,85 @@ set -e
 grep -q 'FW0=loss:xpf-userspace-fw0 is on the loss cluster' "$T/m.out" || fail "(m) the nested refusal does not name the target: $(tr '\n' '|' <"$T/m.out")"
 ok "resolved FW0/FW1 are checked against the lock's cluster (#19165, Codex on b7g N2): an explicit loss: override is refused, also on the reentrant path; a same-cluster override runs"
 
-# ── #19165 fold (Codex on b7h, N2): the resolver-reset shape. (n) An outer
-#    udp cell's command sources the LOSS env (exported loss FW0/FW1 and its
-#    provenance), then runs a nested cell with BPFRX_CLUSTER_ENV back on udp.
-#    cluster-env.sh's cross-env reset resolves udp targets, but the reentrant
-#    exec would run with the inherited loss ones: refused. Control: a nested
-#    cell inheriting the outer udp targets runs.
+# ── #19165 total target rule (Codex on b7g/b7h: N2, N7, N8). wc_run <tag>
+#    <env> <lock-cluster> [VAR=val ...] -- <cmd...>: one cell under a cluster
+#    lock tuple in $T/<tag>, output in $T/<tag>.out, status printed.
+wc_run() {
+	local tag=$1 envf=$2 cl=$3; shift 3
+	local -a vars=()
+	while [[ $# -gt 0 && "$1" != -- ]]; do vars+=("$1"); shift; done
+	shift
+	mkdir -p "$T/$tag"
+	set +e
+	env "${vars[@]}" XPF_CLUSTER_LOCK="$T/$tag/xpf-cluster-${cl}.lock" XPF_CLUSTER_OWNER="$T/$tag/owner" \
+		XPF_CLUSTER_EPOCH="$T/$tag/epoch" BPFRX_CLUSTER_ENV="$envf" "$WC" "case-$tag" -- "$@" >"$T/$tag.out" 2>&1
+	echo $?
+	set -e
+}
 LOSS_ENV="${REPO_ROOT}/test/incus/loss-userspace-cluster.env"
-mkdir -p "$T/n"
-set +e
-XPF_CLUSTER_LOCK="$T/n/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/n/owner" XPF_CLUSTER_EPOCH="$T/n/epoch" \
-	BPFRX_CLUSTER_ENV="$UDP_ENV" \
-	"$WC" "case-n outer" -- bash -c '
-		export BPFRX_CLUSTER_ENV="$3"; source "$4/cluster-env.sh" >/dev/null
-		BPFRX_CLUSTER_ENV="$2" "$0" "case-n inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"
-		BPFRX_CLUSTER_ENV="$2" bash -c "unset FW0 FW1; source \"$4/cluster-env.sh\" >/dev/null; \"$0\" \"case-n control\" -- touch \"$1/ctl\"; echo \$? >\"$1/ctl.rc\""' \
-	"$WC" "$T/n" "$UDP_ENV" "$LOSS_ENV" "$SCRIPT_DIR" >"$T/n.out" 2>&1
-N_RC=$?
-set -e
-[[ $N_RC -eq 0 && "$(cat "$T/n/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/n/ran" ]] || fail "(n) a nested cell inheriting loss FW0/FW1 under BPFRX_CLUSTER_ENV=udp and the udp lock: expected the inner refused (2) and nothing run, got outer=$N_RC inner=$(cat "$T/n/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/n.out")"
-grep -q 'the inherited FW0=loss:xpf-userspace-fw0 is not what the cluster env resolves (udp:xpf-udp-fw0)' "$T/n.out" || fail "(n) the refusal does not name the inherited target: $(tr '\n' '|' <"$T/n.out")"
-[[ "$(cat "$T/n/ctl.rc" 2>/dev/null)" == 0 && -e "$T/n/ctl" ]] || fail "(n) control: a nested cell inheriting the udp targets did not run (rc=$(cat "$T/n/ctl.rc" 2>/dev/null)): $(tr '\n' '|' <"$T/n.out")"
-ok "a nested cell whose inherited FW0/FW1 differ from what the held cluster's env resolves is refused (#19165, Codex on b7h N2); inherited same-cluster targets run"
+# (n) the resolver-reset shape: the outer udp cell's command sources the loss
+#     env, then nests with BPFRX_CLUSTER_ENV back on udp: refused.
+rc=$(wc_run n "$UDP_ENV" udp -- bash -c 'export BPFRX_CLUSTER_ENV="$3"; source "$4/cluster-env.sh" >/dev/null; BPFRX_CLUSTER_ENV="$2" "$0" "case-n inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"' "$WC" "$T/n" "$UDP_ENV" "$LOSS_ENV" "$SCRIPT_DIR")
+[[ $rc -eq 0 && "$(cat "$T/n/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/n/ran" ]] && grep -q "a nested cell's targets are not the set its enclosing cell validated" "$T/n.out" ||
+	fail "(n) resolver-reset nested cell: rc=$rc inner=$(cat "$T/n/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/n.out")"
+# (o) N2, a BARE override. Non-nested: allowed, and the command sees it
+#     QUALIFIED (it runs with the resolved values). Nested: refused.
+rc=$(wc_run o "$UDP_ENV" udp FW1=xpf-udp-fw1 -- bash -c 'printf "%s %s %s\n" "$FW1" "$INCUS_REMOTE" "${#XPF_CLUSTER_TARGETS_DIGEST}" >"$0/seen"' "$T/o")
+[[ $rc -eq 0 && "$(cat "$T/o/seen" 2>/dev/null)" == "udp:xpf-udp-fw1 udp 64" ]] ||
+	fail "(o) a bare FW1 override, non-nested: rc=$rc seen=[$(cat "$T/o/seen" 2>/dev/null)], want the qualified value and a digest: $(tr '\n' '|' <"$T/o.out")"
+rc=$(wc_run o2 "$UDP_ENV" udp -- bash -c 'FW1=xpf-udp-fw1 "$0" "case-o2 inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"' "$WC" "$T/o2")
+[[ $rc -eq 0 && "$(cat "$T/o2/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/o2/ran" ]] && grep -q "a nested cell's targets are not the set .*(FW1=xpf-udp-fw1)" "$T/o2.out" ||
+	fail "(o) a bare FW1 override, nested: inner=$(cat "$T/o2/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/o2.out")"
+# (p) N7, CLUSTER_LAN_HOST on loss under the udp lock: refused, non-nested
+#     and nested.
+rc=$(wc_run p "$UDP_ENV" udp CLUSTER_LAN_HOST=loss:cluster-userspace-host -- touch "$T/p/ran")
+[[ $rc -eq 2 && ! -e "$T/p/ran" ]] && grep -q 'CLUSTER_LAN_HOST=loss:cluster-userspace-host is on the loss cluster' "$T/p.out" ||
+	fail "(p) CLUSTER_LAN_HOST on loss, non-nested: rc=$rc: $(tr '\n' '|' <"$T/p.out")"
+rc=$(wc_run p2 "$UDP_ENV" udp -- bash -c 'CLUSTER_LAN_HOST=loss:cluster-userspace-host "$0" "case-p2 inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"' "$WC" "$T/p2")
+[[ "$(cat "$T/p2/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/p2/ran" ]] ||
+	fail "(p) CLUSTER_LAN_HOST on loss, nested: inner=$(cat "$T/p2/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/p2.out")"
+# (q) N8, an inherited INCUS_REMOTE=loss with the udp FW0/FW1 and env:
+#     refused (the env file would overwrite it only in the resolver).
+rc=$(wc_run q "$UDP_ENV" udp -- bash -c 'INCUS_REMOTE=loss "$0" "case-q inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"' "$WC" "$T/q")
+[[ "$(cat "$T/q/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/q/ran" ]] && grep -q "a nested cell's targets are not the set .*(INCUS_REMOTE=loss)" "$T/q.out" ||
+	fail "(q) inherited INCUS_REMOTE=loss, nested: inner=$(cat "$T/q/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/q.out")"
+# (r) a ref that resolves BARE under a remote env (DMZ_TARGET_REF keeps an
+#     override as given): refused, it would address the default remote.
+rc=$(wc_run r "$UDP_ENV" udp DMZ_TARGET_REF=xpf-zone-matrix-dmz -- touch "$T/r/ran")
+[[ $rc -eq 2 && ! -e "$T/r/ran" ]] && grep -q 'DMZ_TARGET_REF=xpf-zone-matrix-dmz resolves bare' "$T/r.out" ||
+	fail "(r) a bare DMZ_TARGET_REF: rc=$rc: $(tr '\n' '|' <"$T/r.out")"
+# (s) controls: a qualified same-cluster override runs, non-nested and
+#     nested; a plain nested cell runs.
+rc=$(wc_run s "$UDP_ENV" udp CLUSTER_LAN_HOST=udp:cluster-udp-host -- bash -c '"$0" "case-s inner" -- touch "$1/ran"' "$WC" "$T/s")
+[[ $rc -eq 0 && -e "$T/s/ran" ]] || fail "(s) qualified same-cluster override + nested: rc=$rc: $(tr '\n' '|' <"$T/s.out")"
+# (u) the STRIPPED shape (cluster-setup.sh's sg re-exec forwards only
+#     BPFRX_*/XPF_*): a nested cell with no target variables re-resolves and
+#     runs when it resolves the enclosing cell's set; with the env switched to
+#     loss it is refused.
+rc=$(wc_run u "$UDP_ENV" udp -- bash -c 'fwd=(); for v in "${!BPFRX_@}" "${!XPF_@}"; do fwd+=("$v=${!v}"); done
+	env -i HOME="$HOME" PATH="$PATH" "${fwd[@]}" "$0" "case-u inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"
+	env -i HOME="$HOME" PATH="$PATH" "${fwd[@]}" BPFRX_CLUSTER_ENV="$2" "$0" "case-u loss" -- touch "$1/loss-ran"; echo $? >"$1/loss.rc"' "$WC" "$T/u" "$LOSS_ENV")
+[[ "$(cat "$T/u/inner.rc" 2>/dev/null)" == 0 && -e "$T/u/ran" && "$(cat "$T/u/loss.rc" 2>/dev/null)" == 2 && ! -e "$T/u/loss-ran" ]] ||
+	fail "(u) stripped nested env: inner=$(cat "$T/u/inner.rc" 2>/dev/null) loss=$(cat "$T/u/loss.rc" 2>/dev/null): $(tr '\n' '|' <"$T/u.out")"
+# (u2) under a lock that names no cluster (no remote check applies), the
+#      digest alone must refuse a stripped nested cell that switches env.
+rc=$(wc_run u2 "$UDP_ENV" private -- bash -c 'fwd=(); for v in "${!BPFRX_@}" "${!XPF_@}"; do fwd+=("$v=${!v}"); done
+	env -i HOME="$HOME" PATH="$PATH" "${fwd[@]}" BPFRX_CLUSTER_ENV="$2" "$0" "case-u2 inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"' "$WC" "$T/u2" "$LOSS_ENV")
+[[ "$(cat "$T/u2/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/u2/ran" ]] && grep -q "a nested cell's targets are not the set" "$T/u2.out" ||
+	fail "(u2) stripped nested env switch under a private lock: inner=$(cat "$T/u2/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/u2.out")"
+# (t) census: every variable cluster-env.sh exports with a remote-qualified
+#     value, and every *_REF / *_NAME, is in with-cluster.sh's target set.
+set_line=$(sed -n 's/^XPF_CLUSTER_TARGET_VARS="\(.*\)"$/\1/p' "$WC")
+for envf in "$LOSS_ENV" "${REPO_ROOT}/test/incus/tcp-userspace-cluster.env" "$UDP_ENV"; do
+	outside=$(env -i HOME="$HOME" PATH="$PATH" BPFRX_CLUSTER_ENV="$envf" bash -c '
+		source "$1/cluster-env.sh" >/dev/null 2>&1
+		for v in $(compgen -e); do
+			case "${!v}" in loss:*|tcp:*|udp:*) echo "$v" ;; esac
+			case "$v" in *_REF|*_NAME|FW[0-9]|CLUSTER_LAN_HOST|INCUS_REMOTE) echo "$v" ;; esac
+		done' _ "$SCRIPT_DIR" | sort -u | while read -r v; do [[ " $set_line " == *" $v "* ]] || echo "$v"; done)
+	[[ -z "$outside" ]] || fail "(t) $(basename "$envf") exports instance/remote variables outside the target set: $outside"
+done
+[[ -n "$set_line" ]] || fail "(t) cannot read XPF_CLUSTER_TARGET_VARS from with-cluster.sh"
+ok "#19165 total target rule: resolver-reset (n), bare override (o; qualified when run, refused nested), CLUSTER_LAN_HOST on loss (p), inherited INCUS_REMOTE (q), bare ref (r), same-cluster controls (s), stripped sg-shaped env (u), target-set census (t)"
 
 echo "ALL ${PASS} CASES PASS"

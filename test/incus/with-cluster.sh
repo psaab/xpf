@@ -55,83 +55,99 @@ shift
 [[ "$1" == "--" ]] || usage
 shift
 
-# #19165: the lock tuple and the targets must name the same cluster. The
-# lock comes from XPF_CLUSTER_LOCK, but FW0/FW1, which the VM-target guard
-# below touches (shims, systemctl daemon-reload) and the cell's command
-# drives, come from cluster-env.sh, which defaults to loss. A tcp/udp lock
-# tuple without BPFRX_CLUSTER_ENV therefore ran that guard on the LOSS
-# firewalls without the loss lock, inside another agent's loss measurement
-# (2026-11-16). The RESOLVED FW0/FW1 are checked, not only the env's
-# INCUS_REMOTE label (fold of Codex on b7g, N2): cluster-env.sh keeps an
-# already-qualified override, so FW0=loss:... under the udp env and lock
-# still targets loss. Checked before the lock is taken, so a mismatched cell
-# never holds one, and BEFORE the reentrant return below, so a nested cell
-# cannot change targets under its ancestor's lock either. A private lock path
-# (the selftests) names no cluster; a bare target (the legacy local cluster,
-# no INCUS_REMOTE) names no remote to compare.
+# #19165: the cell's TARGETS and its lock must name the same cluster, by one
+# TOTAL rule rather than a case per resolution path (fold of the Codex checks
+# of b7g/b7h, N2/N7/N8, after three rounds of per-case fixes):
+#   - The TARGET SET is every variable a cell command uses to address an
+#     incus instance or remote: INCUS_REMOTE, the qualified refs, and the bare
+#     names a command may join with INCUS_REMOTE. The selftest's census fails
+#     when cluster-env.sh exports a remote-qualified value outside this set.
+#   - Every invocation resolves the set once (cluster-env.sh, in a subshell),
+#     and refuses unless INCUS_REMOTE and every resolved ref are on the lock's
+#     cluster. A ref that resolves BARE under a remote env would address the
+#     client's default remote, so it is refused too.
+#   - The outer cell exports the RESOLVED values and their digest
+#     (XPF_CLUSTER_TARGETS_DIGEST). A nested invocation refuses unless its
+#     inherited set is byte for byte what the outer cell exported, and equals
+#     its own resolution.
+#   - The command always runs with the resolved, exported values, never the
+#     caller's raw ones.
+# A private lock path (the selftests) and an env with no INCUS_REMOTE (the
+# legacy local cluster) name no remote to compare; the digest rule still holds.
+XPF_CLUSTER_TARGET_VARS="INCUS_REMOTE FW0 FW1 CLUSTER_LAN_HOST DMZ_TARGET_REF MOUSE_TARGET_REF FW0_NAME FW1_NAME CLUSTER_LAN_HOST_NAME DMZ_TARGET_NAME MOUSE_TARGET_NAME"
+XPF_CLUSTER_TARGET_REFS="FW0 FW1 CLUSTER_LAN_HOST DMZ_TARGET_REF MOUSE_TARGET_REF"
 case "$(basename -- "$XPF_CLUSTER_LOCK")" in
 xpf-cluster.lock) LOCK_CLUSTER=loss ;;
 xpf-cluster-tcp.lock) LOCK_CLUSTER=tcp ;;
 xpf-cluster-udp.lock) LOCK_CLUSTER=udp ;;
 *) LOCK_CLUSTER= ;;
 esac
-# lock_target_mismatch: print why the resolved targets are not the lock's
-# cluster, nothing when they are. In a subshell (command substitution), so
-# the reentrant path's environment is left exactly as the caller set it.
-lock_target_mismatch() {
-	# The targets as the caller's environment carries them. The reentrant path
-	# below execs with exactly these, so they must be what the lock's cluster
-	# env resolves (fold of Codex on b7h, N2: cluster-env.sh's cross-env reset
-	# discards inherited loss targets and resolves udp, so checking only the
-	# resolved values passed a cell that then ran with the inherited loss ones).
-	# shellcheck disable=SC2034 # read below by name: ${!inherited}
-	local inherited_fw0=${FW0:-} inherited_fw1=${FW1:-}
-	# shellcheck source=cluster-env.sh
-	source "${SCRIPT_DIR}/cluster-env.sh" >/dev/null || {
-		echo "cluster-env.sh could not resolve the targets"
-		return 0
-	}
-	if [[ -n "${INCUS_REMOTE:-}" && "$INCUS_REMOTE" != "$LOCK_CLUSTER" ]]; then
-		echo "the cluster env resolves ${INCUS_REMOTE} (FW0=${FW0})"
-		return 0
-	fi
-	local var target inherited
-	for var in FW0 FW1; do
-		target=${!var:-}
-		if [[ "$target" == *:* && "${target%%:*}" != "$LOCK_CLUSTER" ]]; then
-			echo "${var}=${target} is on the ${target%%:*} cluster"
-			return 0
-		fi
-		inherited=inherited_${var,,}
-		inherited=${!inherited}
-		# Qualified as the env would qualify it, so a bare same-cluster
-		# override still matches.
-		if [[ -n "$inherited" && "$(_xpf_cluster_ref "$inherited")" != "$target" ]]; then
-			echo "the inherited ${var}=${inherited} is not what the cluster env resolves (${target}); a nested cell would run with the inherited one"
-			return 0
-		fi
-	done
+targets_refuse() {
+	echo "[with-cluster] REFUSED: $*. Export BPFRX_CLUSTER_ENV for the lock's cluster with its lock tuple, and no target override for another cluster (#19165)" >&2
+	exit 2
 }
+target_snapshot() { # one "NAME=value" line per target variable, as this shell has them
+	local v
+	for v in $XPF_CLUSTER_TARGET_VARS; do printf '%s=%s\n' "$v" "${!v-}"; done
+}
+snapshot_value() { sed -n "s/^$1=//p" <<<"$2"; }
+target_digest() { sha256sum | cut -d' ' -f1; }
+inherited_targets=$(target_snapshot)
+# shellcheck source=cluster-env.sh
+if ! resolved_targets=$(source "${SCRIPT_DIR}/cluster-env.sh" >/dev/null && target_snapshot); then
+	targets_refuse "cluster-env.sh could not resolve the targets"
+fi
 if [[ -n "$LOCK_CLUSTER" ]]; then
-	mismatch=$(lock_target_mismatch)
-	if [[ -n "$mismatch" ]]; then
-		echo "[with-cluster] REFUSED: the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK}) but ${mismatch}; the cell would touch firewalls the lock does not cover. Export BPFRX_CLUSTER_ENV for ${LOCK_CLUSTER} (test/incus/${LOCK_CLUSTER}-userspace-cluster.env) with its lock tuple, and no FW0/FW1 override for another cluster (#19165)" >&2
-		exit 2
+	resolved_remote=$(snapshot_value INCUS_REMOTE "$resolved_targets")
+	if [[ -n "$resolved_remote" ]]; then
+		[[ "$resolved_remote" == "$LOCK_CLUSTER" ]] ||
+			targets_refuse "the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK}) but the targets resolve INCUS_REMOTE=${resolved_remote} (FW0=$(snapshot_value FW0 "$resolved_targets"))"
+		for target_var in $XPF_CLUSTER_TARGET_REFS; do
+			target_val=$(snapshot_value "$target_var" "$resolved_targets")
+			[[ -n "$target_val" ]] || continue
+			[[ "$target_val" == *:* ]] ||
+				targets_refuse "the lock tuple is the ${LOCK_CLUSTER} cluster's but ${target_var}=${target_val} resolves bare, which addresses the client's default remote"
+			[[ "${target_val%%:*}" == "$LOCK_CLUSTER" ]] ||
+				targets_refuse "the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK}) but ${target_var}=${target_val} is on the ${target_val%%:*} cluster"
+		done
 	fi
 fi
+resolved_digest=$(target_digest <<<"$resolved_targets")
+export_resolved_targets() {
+	local line
+	while IFS= read -r line; do
+		[[ -n "$line" ]] && export "${line%%=*}=${line#*=}"
+	done <<<"$resolved_targets"
+}
 
 # Reentrant case: a live ancestor cell already holds the lock. Run the
 # command directly — no second acquire, no owner write, no trap (the
 # outer cell owns cleanup). `env --` pins the command to an EXTERNAL
 # binary: a shell builtin like `exec` would otherwise run inside this
 # wrapper shell, drop the lock early, and skip the cleanup trap (Codex
-# code-r1 F1). Cells are processes by contract.
+# code-r1 F1). Cells are processes by contract. #19165: only with the
+# targets the enclosing cell validated, unchanged.
 if xpf_cluster_lock_held; then
+	inherited_digest=$(target_digest <<<"$inherited_targets")
+	# A STRIPPED environment carries no target at all: cluster-setup.sh's sg
+	# re-exec forwards only BPFRX_*/XPF_* variables. Such a cell re-resolves,
+	# and its resolution must equal the enclosing cell's exactly. Any target
+	# the caller DOES carry must be the enclosing cell's, unchanged.
+	if [[ -z "$(sed -n 's/^[A-Z0-9_]*=.//p' <<<"$inherited_targets")" ]]; then
+		inherited_digest=$resolved_digest
+	fi
+	if [[ "${XPF_CLUSTER_TARGETS_DIGEST:-}" != "$inherited_digest" || "$resolved_digest" != "$inherited_digest" ]]; then
+		first_diff=$(diff <(printf '%s\n' "$inherited_targets") <(printf '%s\n' "$resolved_targets") | sed -n 's/^< //p' | head -1) || true
+		targets_refuse "a nested cell's targets are not the set its enclosing cell validated and exported (${first_diff:-the digest differs from XPF_CLUSTER_TARGETS_DIGEST})"
+	fi
+	export_resolved_targets
 	exec env -- "$@"
 fi
 
 # shellcheck source=cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
+export_resolved_targets
+export XPF_CLUSTER_TARGETS_DIGEST="$resolved_digest"
 
 WAITED=0
 # Timeout: digits only, forced base-10 (a leading zero like "08" must
