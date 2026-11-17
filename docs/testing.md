@@ -23,8 +23,8 @@ Each Go release is installed once into its own directory
 place. The build Go is published by flipping the `go`/`gofmt` links in
 `/usr/local/bin` and `/usr/bin` (a new symlink renamed over the old one), so
 an upgrade is safe with lanes running: a running lane keeps its tree, and a
-crash leaves the old or the new link. Old versions stay until an explicit
-`--gc-toolchains`, which is refused while a lane is live. They also carry the
+crash leaves the old or the new link. Nothing deletes a toolchain: old
+versions stay (see "Reclaiming old Go releases" below). They also carry the
 deadcode gate's own Go release at `/usr/lib/go-<version>`
 (`DEADCODE_GO_VERSION` in `scripts/resolve-deadcode-go.sh`), and export
 `XPF_DEADCODE_REQUIRE=1` from `/etc/profile.d/xpf-testrunner.sh`, so a runner
@@ -37,8 +37,20 @@ the checkout:
 ```bash
 scripts/provision-testrunner.sh --runner udp:xpf-testrunner
 scripts/provision-testrunner.sh --runner udp:xpf-testrunner --toolchains-only  # update an existing runner
-scripts/provision-testrunner.sh --runner udp:xpf-testrunner --gc-toolchains    # drop unpublished versions (idle only)
 ```
+
+**Reclaiming old Go releases** is a manual step, not code (#19152: an
+automatic GC deleted the published release when a checkout asked for another,
+and "idle" was an observation, not a barrier). On a DRAINED runner, i.e. no
+lane running and none about to start (tell the lanes first, and check that
+no `/work/*` process, `runner` process or `/run/xpf-root-lane.lock` holder is
+live):
+1. read the published targets: `readlink -f /usr/local/bin/go /usr/bin/go
+   /usr/local/go`, and the deadcode release in
+   `scripts/resolve-deadcode-go.sh`;
+2. remove only a `/usr/local/go-<v>` or `/usr/lib/go-<v>` that none of those
+   resolve into;
+3. re-check with `go version` as `runner` and with the deadcode resolver.
 
 Run tests from the worktree:
 

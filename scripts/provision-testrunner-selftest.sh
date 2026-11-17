@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # scripts/provision-testrunner-selftest.sh -- the Go toolchain install in
 # scripts/provision-testrunner.sh never replaces a toolchain in place, never
-# leaves a published path missing, and never deletes an old version except by
-# an explicit, idle-only --gc-toolchains (#19152; folds of the Codex reviews of
-# b7e and b7f). Hermetic: the script's functions are sourced and run against a
-# scratch tree, with the download and the lane probe stubbed. Cells:
+# leaves a published path missing, and never deletes a toolchain (#19152; folds
+# of the Codex reviews of b7e, b7f and b7g: the GC was removed). Hermetic: the
+# script's functions are sourced and run against a scratch tree, with the
+# download stubbed. Cells:
 #   - fresh install: the versioned dir is created and the links resolve to it;
 #   - upgrade: a new versioned dir, the links flip to it, the old tree stays;
 #   - the same version again: nothing changes, nothing is left behind;
@@ -12,10 +12,9 @@
 #   - a versioned dir with the wrong content: refused, untouched;
 #   - a pre-versioned real /usr/local/go directory: left alone by publish;
 #   - the rename that publishes a link fails: the old link still resolves;
-#   - --gc-toolchains with a lane live: refused (75), nothing removed; idle:
-#     only unpublished versions, the legacy dir and staging dirs go.
+#   - the script carries no deletion of a toolchain path at all.
 # Mutations: publish made non-atomic (unlink, then link), an install that
-# deletes the other versions, GC without the idle check.
+# deletes the other versions.
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/provision-testrunner.sh"
@@ -47,8 +46,6 @@ scenario() {
 		source "$under"
 		set +e
 		fetch_go() { go_tree "$2/go" "${FAKE_FETCH_VER:-$1}"; }
-		lane_activity() { [[ -n "${FAKE_BUSY:-}" ]] && echo "runner process: $FAKE_BUSY"; return 0; }
-		export GC_LOCAL="$R/usr/local" GC_LIB="$R/usr/lib"
 		publish_build() { # publish_build <version>
 			publish_link "$R/usr/local/go-$1/bin/go" "$R/usr/local/bin/go"
 			publish_link "$R/usr/local/go-$1" "$R/usr/local/go"
@@ -66,8 +63,6 @@ run_cells() { # run_cells <script>: one line per cell
 	echo "wrongdir $(scenario "$1" wrongdir 'go_tree "$R/usr/local/go-1.25.0" 1.99.0; install_go_version 1.25.0 "$R/usr/local/go-1.25.0"; echo "rc=$? $(ver_of "$R/usr/local/go-1.25.0/bin/go")"')"
 	echo "legacy $(scenario "$1" legacy 'go_tree "$R/usr/local/go" 1.24.9; install_go_version 1.25.0 "$R/usr/local/go-1.25.0"; publish_build 1.25.0; echo "$([[ -d "$R/usr/local/go" && ! -L "$R/usr/local/go" ]] && echo dir-kept || echo replaced) $(ver_of "$R/usr/local/bin/go")"')"
 	echo "renamefail $(scenario "$1" renamefail 'install_go_version 1.24.9 "$R/usr/local/go-1.24.9"; publish_build 1.24.9; install_go_version 1.25.0 "$R/usr/local/go-1.25.0"; rename_into_place() { return 1; }; publish_build 1.25.0; echo "rc=$? $(ver_of "$R/usr/local/bin/go")"')"
-	echo "gcbusy $(scenario "$1" gcbusy 'install_go_version 1.24.9 "$R/usr/local/go-1.24.9"; install_go_version 1.25.0 "$R/usr/local/go-1.25.0"; publish_build 1.25.0; FAKE_BUSY=cargo gc_toolchains "$R/usr/local/go-1.25.0" "$R/usr/lib/go-1.26.9"; echo "rc=$? $(ls "$R/usr/local" | grep -c "^go-")"')"
-	echo "gcidle $(scenario "$1" gcidle 'go_tree "$R/usr/local/go" 1.23.0; install_go_version 1.24.9 "$R/usr/local/go-1.24.9"; install_go_version 1.25.0 "$R/usr/local/go-1.25.0"; mkdir "$R/usr/local/.go-9.stage.x"; publish_link "$R/usr/local/go-1.25.0/bin/go" "$R/usr/local/bin/go"; gc_toolchains "$R/usr/local/go-1.25.0" "$R/usr/lib/go-1.26.9"; echo "rc=$? left=$(cd "$R/usr/local" && ls -A | grep "go" | tr "\n" " ")go=$(ver_of "$R/usr/local/bin/go")"')"
 }
 result() { sed -n "s/^$1 //p" "$2"; }
 
@@ -79,8 +74,14 @@ expect "a wrong download: nothing installed, the link unchanged" "$(result baddl
 expect "a versioned dir with the wrong content: refused, untouched" "$(result wrongdir "$tmp/real.txt")" "rc=2 go1.99.0"
 expect "a pre-versioned /usr/local/go directory: left alone" "$(result legacy "$tmp/real.txt")" "dir-kept go1.25.0"
 expect "the publishing rename fails: the old link still resolves" "$(result renamefail "$tmp/real.txt")" "rc=2 go1.24.9"
-expect "--gc-toolchains with a lane live: refused, nothing removed" "$(result gcbusy "$tmp/real.txt")" "rc=75 2"
-expect "--gc-toolchains idle: only the published version remains" "$(result gcidle "$tmp/real.txt")" "rc=0 left=go-1.25.0 go=go1.25.0"
+# No GC (fold of Codex on b7g): nothing in the script may delete a toolchain
+# path. The only rm -rf left is the failed-download staging cleanup.
+rmlines=$(grep -nE 'rm -r|rm -fr|rmdir' "$script" | grep -v '^#' | grep -vE 'rm -rf "\$stage"$|rmdir "\$stage"$|rm -f "\$tmp"' || true)
+if [[ -z "$rmlines" ]] && ! grep -q -- '--gc-toolchains' "$script"; then
+	ok "no toolchain deletion: the script has no GC and removes only its own staging"
+else
+	bad "a deletion is back in the provision script: $rmlines"
+fi
 
 # mutant <name> <sed program>: a copy of the script with one change.
 mutant() {
@@ -97,11 +98,5 @@ if mutant install-deletes-old 's|^\tmv -T "$stage/go" "$dir"$|\trm -rf "$(dirnam
 	run_cells "$tmp/install-deletes-old.sh" >"$tmp/m2.txt"
 	[[ "$(result upgrade "$tmp/m2.txt")" != "go1.25.0 old=go1.24.9" ]] && ok "mutation install-deletes-old: the upgrade cell loses the old tree" || bad "mutation install-deletes-old: the upgrade cell still passes"
 fi
-# shellcheck disable=SC2016
-if mutant gc-ignores-lanes 's/^\tbusy=$(lane_activity)$/\tbusy=/'; then
-	run_cells "$tmp/gc-ignores-lanes.sh" >"$tmp/m3.txt"
-	[[ "$(result gcbusy "$tmp/m3.txt")" != "rc=75 2" ]] && ok "mutation gc-ignores-lanes: the busy-GC cell removes versions" || bad "mutation gc-ignores-lanes: the busy-GC cell still refuses"
-fi
-
 echo "provision-testrunner selftest: ${pass} passed, ${fail} failed"
 [[ "$fail" -eq 0 ]]
