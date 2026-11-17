@@ -673,6 +673,15 @@ pub(in crate::afxdp) fn build_frag_needed_v4(
         let mut loopback_primary: Option<Ipv4Addr> = None;
         let mut interface_primary: Option<Ipv4Addr> = None;
         for connected in &forwarding.connected_v4 {
+            // #19171: peer-owned rows are in transit now; their host address
+            // is a VIP the peer holds, never this node's source.
+            if forwarding
+                .connected_v4_peer_owned
+                .iter()
+                .any(|held| held.ifindex == connected.ifindex && held.host == connected.host)
+            {
+                continue;
+            }
             let connected_in_instance = if routing_instance.is_empty() {
                 connected.table == "inet.0"
             } else {
@@ -794,6 +803,15 @@ pub(in crate::afxdp) fn build_packet_too_big_v6(
         let mut loopback_primary: Option<Ipv6Addr> = None;
         let mut interface_primary: Option<Ipv6Addr> = None;
         for connected in &forwarding.connected_v6 {
+            // #19171: peer-owned rows are in transit now; their host address
+            // is a VIP the peer holds, never this node's source.
+            if forwarding
+                .connected_v6_peer_owned
+                .iter()
+                .any(|held| held.ifindex == connected.ifindex && held.host == connected.host)
+            {
+                continue;
+            }
             let connected_in_instance = if routing_instance.is_empty() {
                 connected.table == "inet6.0"
             } else {

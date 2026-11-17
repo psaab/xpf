@@ -63,6 +63,28 @@ retain is healed by the next FIB bump, as for a `ForwardCandidate`.
 Mechanism and live evidence:
 `docs/fabric-cross-chassis-fwd.md` (#18659), `docs/log/18659.md`.
 
+**Since #19171 these guards rarely decide anything.** They existed because the
+split FIB withheld a peer-owned connected prefix, so a fresh lookup answered a
+LAN destination with the WAN default route. The prefix now stays in the
+transit FIB, and HA judges it at lookup time. A split-node refresh of such a
+row therefore computes `HAInactive` on the destination's own LAN unit, where it
+used to compute a retained `FabricRedirect`.
+- **Delivery is unchanged.** A non-fabric packet still crosses the fabric (the
+  redirect is composed when the packet is sent), and a fabric-link packet still
+  drops.
+- **What a refresh writes.** The SESSION TABLE row keeps its `FabricRedirect`:
+  a refresh never rewrites a row to `HAInactive`. What it PUBLISHES does
+  change: the BPF session map, which the data-display surface mirrors, now
+  carries `HAInactive` on the LAN unit for such a row, where it carried
+  `FabricRedirect` on the fabric.
+- **What synthesis stores.** A reverse synthesized with no fabric peer stores
+  `HAInactive` on the LAN unit, where it used to store `FabricRedirect` intent.
+  Both fail closed.
+
+The #15958b cells re-pin the stored value and assert the delivered outcome
+(`fw0_refresh_then_reply_19171`). Stage B removes the guards that can no longer
+fire.
+
 ## Command ingest is budgeted (`apply_worker_commands`, #7201)
 
 `apply_worker_commands` is the worker's consumer for its

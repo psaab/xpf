@@ -285,12 +285,23 @@ pub(super) fn rebuild_leak_incarnation_indexes(state: &mut ForwardingState) {
     }
 }
 pub(super) fn sort_connected(state: &mut ForwardingState) {
-    state
-        .connected_v4
-        .sort_by(|a, b| b.prefix.prefix_len().cmp(&a.prefix.prefix_len()));
-    state
-        .connected_v6
-        .sort_by(|a, b| b.prefix.prefix_len().cmp(&a.prefix.prefix_len()));
+    // #19171: transit rows tie-break equal lengths to the LOWEST ifindex too,
+    // the canonical rule `connected_lpm_ifindex` (#17053) and the peer-owned
+    // list below already use. Peer-owned rows now live in transit, so a
+    // gateway binding or lookup between equal-length rows never depends on
+    // snapshot row order (before: a stable sort kept snapshot order).
+    state.connected_v4.sort_by(|a, b| {
+        b.prefix
+            .prefix_len()
+            .cmp(&a.prefix.prefix_len())
+            .then(a.ifindex.cmp(&b.ifindex))
+    });
+    state.connected_v6.sort_by(|a, b| {
+        b.prefix
+            .prefix_len()
+            .cmp(&a.prefix.prefix_len())
+            .then(a.ifindex.cmp(&b.ifindex))
+    });
     // #18517: equal-length peer-owned rows tie-break to the LOWEST ifindex
     // (the #10645/#17053 canonical rule), so the bound egress never depends
     // on snapshot row order.

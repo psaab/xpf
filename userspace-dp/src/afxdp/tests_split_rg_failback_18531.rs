@@ -1219,10 +1219,11 @@ fn rg_taking_node_window_keeps_alias_only_flow_18531() {
             let (stored, _, _) = sessions
                 .entry_with_origin(&alias_key)
                 .expect("fixture: alias imported");
+            // #19171 re-base: the peer-owned WAN prefix now stays in transit, so the import resolves the WAN server on its connected unit reth0.80 (14, where the translation was minted), not by the withheld FIB's gateway line reth0.50 (13).
             assert_eq!(
                 (stored.resolution.disposition, stored.resolution.egress_ifindex),
-                (ForwardingDisposition::MissingNeighbor, 13),
-                "fixture: a cold import stores MissingNeighbor on reth0.50 ({family:?})"
+                (ForwardingDisposition::MissingNeighbor, WAN_UNIT_IFINDEX),
+                "fixture (#19171): a cold import stores MissingNeighbor on reth0.80 ({family:?})"
             );
         }
         let (frame, meta) = fabric_forward_frame(window_fwd, family);

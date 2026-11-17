@@ -6669,6 +6669,73 @@ fn split_rg_punt_origin_wan_reverse_tcp_fabric_tx_15958b() {
     }
 }
 
+/// #19171 (2a): the DELIVERED outcome a stored-marker re-pin must keep. Runs
+/// the production refresh over `rgs`, then drives one WAN TCP reply of the fw0
+/// pair (172.16.80.200:443 -> 172.16.80.8:12345, or the v6 twin). Returns the
+/// TX counts on `[WAN, fabric, LAN]`, the captured frame's destination MAC, and
+/// the reverse's stored disposition after the refresh.
+fn fw0_refresh_then_reply_19171(
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    v6: bool,
+) -> ([u64; 3], Option<[u8; 6]>, Vec<ForwardingDisposition>) {
+    let now_ns = monotonic_nanos();
+    crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+        sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        forwarding,
+        ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        vec![1, 2],
+        now_ns,
+        now_ns / 1_000_000_000,
+    );
+    let mut stored = Vec::new();
+    sessions.iter_with_origin(|_key, decision, metadata, _origin| {
+        if metadata.is_reverse {
+            stored.push(decision.resolution.disposition);
+        }
+    });
+    let wan_mac = [0x02, 0xbf, 0x72, 0x16, 0x01, 0x00];
+    let (frame, mut meta) = if v6 {
+        let wan: Ipv6Addr = "2001:559:8585:80::200".parse().expect("wan v6");
+        let snat: Ipv6Addr = "2001:559:8585:80::8".parse().expect("snat v6");
+        let frame = build_txn_tcp_frame_v6(wan, snat, 443, 12345, TCP_FLAG_ACK, wan_mac);
+        let mut meta = txn_meta_v6(14, frame.len());
+        meta.tcp_flags = TCP_FLAG_ACK;
+        meta.flow_src_addr = wan.octets();
+        meta.flow_dst_addr = snat.octets();
+        (frame, meta)
+    } else {
+        let frame = build_txn_tcp_syn_frame_v4(
+            Ipv4Addr::new(172, 16, 80, 200),
+            Ipv4Addr::new(172, 16, 80, 8),
+            443,
+            12345,
+            TCP_FLAG_ACK,
+            wan_mac,
+        );
+        let mut meta = txn_meta_v4(14, TCP_FLAG_ACK, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&[172, 16, 80, 200]);
+        meta.flow_dst_addr[..4].copy_from_slice(&[172, 16, 80, 8]);
+        (frame, meta)
+    };
+    meta.ingress_vlan_id = 80;
+    meta.protocol = PROTO_TCP;
+    meta.flow_src_port = 443;
+    meta.flow_dst_port = 12345;
+    let mut bindings = wan_lan_bindings_fw0_15958b();
+    let (_batch, _dbg, egress) =
+        txn_run_multi_binding_15958(&mut bindings, 0, sessions, forwarding, ha_state, &frame, meta);
+    let tx = |b: &BindingWorker| b.live.tx_packets.load(std::sync::atomic::Ordering::Relaxed);
+    (
+        [tx(&bindings[0]), tx(&bindings[1]), tx(&bindings[2])],
+        egress.and_then(|f| f.get(0..6).map(|m| m.try_into().expect("6 bytes"))),
+        stored,
+    )
+}
+
 /// Fold cell (GLM B1): an HA RefreshOwnerRGS pass must not launder
 /// the stored FabricRedirect companion back onto the WAN gateway
 /// route. Synthesize the fw0 pair, run the production refresh
@@ -6702,19 +6769,28 @@ fn split_rg_refresh_keeps_fabric_redirect_15958b() {
             !reverse_items.is_empty(),
             "v6={v6}: refresh must visit the reverse companion"
         );
+        // #19171 (2a) re-pin. The refresh's computed (and published) disposition.
+        // Old: FabricRedirect on the fabric parent (4). New: HAInactive on the
+        // peer-owned LAN unit (5). The table row itself keeps FabricRedirect.
+        // The peer-owned LAN row now stays in transit, so the refresh answers
+        // it and HA demotes it, instead of the withheld FIB's WAN gateway route
+        // the retain verdict had to refuse. Never the WAN either way.
         for (_, decision, metadata, _, _) in &reverse_items {
             assert_eq!(
-                decision.resolution.disposition,
-                ForwardingDisposition::FabricRedirect,
-                "v6={v6}: refresh must keep FabricRedirect, got {:?} (metadata egress_zone={})",
+                (decision.resolution.disposition, decision.resolution.egress_ifindex),
+                (ForwardingDisposition::HAInactive, 5),
+                "v6={v6}: the refresh stores HAInactive on the LAN unit, got {:?} (metadata egress_zone={})",
                 decision.resolution,
                 metadata.egress_zone
             );
-            assert_eq!(
-                decision.resolution.egress_ifindex, 4,
-                "v6={v6}: redirect egress must be the fabric parent"
-            );
         }
+        // The DELIVERED outcome is unchanged: the WAN reply crosses the fabric.
+        let (tx, _, stored) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, v6);
+        assert!(
+            stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+            "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+        );
+        assert_eq!(tx, [0, 1, 0], "v6={v6}: delivered over the fabric, never the WAN or the LAN");
     }
 }
 
@@ -6753,16 +6829,22 @@ fn split_rg_unresolved_gateway_fixture_shape_18659() {
         let looked_up =
             crate::afxdp::forwarding::lookup_forwarding_resolution(&forwarding, lan_host)
                 .resolution;
-        assert_eq!(
-            looked_up.disposition,
-            ForwardingDisposition::MissingNeighbor,
-            "{lan_host}: the split FIB must answer the WAN gateway, unresolved, got {looked_up:?}"
+        // #19171 re-base: this precondition described the withheld FIB, which
+        // answered the LAN client by the WAN default route's unresolved
+        // gateway (MissingNeighbor on ge-0-0-2.50, 13). The peer-owned LAN
+        // row now stays in transit, so the FIB answers the client on its own
+        // LAN unit (5); the unresolved WAN gateway is no longer consulted.
+        assert!(
+            matches!(
+                looked_up.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            ) && looked_up.egress_ifindex == 5,
+            "{lan_host}: #19171: the FIB answers the peer-owned LAN unit, got {looked_up:?}"
         );
-        assert_eq!(looked_up.egress_ifindex, 13, "{lan_host}: via ge-0-0-2.50");
-        assert_eq!(
+        assert_ne!(
             looked_up.next_hop,
             Some(gateway),
-            "{lan_host}: default-route gateway"
+            "{lan_host}: #19171: never the WAN default route's gateway"
         );
         assert_eq!(
             crate::afxdp::session_glue::connected_owner_rg_for_target(&forwarding, lan_host),
@@ -6806,19 +6888,26 @@ fn split_rg_refresh_keeps_fabric_redirect_unresolved_gateway_18659() {
             !reverse_items.is_empty(),
             "v6={v6}: refresh must visit the reverse companion"
         );
+        // #19171 (2a) re-pin. Computed (published) disposition, old: FabricRedirect on 4.
+        // New: HAInactive on the peer-owned LAN unit (5): the refresh no
+        // longer sees the unresolved WAN gateway at all, because the LAN row
+        // answers the client. Never ge-0-0-2.50 either way.
         for (_, decision, _, _, _) in &reverse_items {
             assert_eq!(
-                decision.resolution.disposition,
-                ForwardingDisposition::FabricRedirect,
+                (decision.resolution.disposition, decision.resolution.egress_ifindex),
+                (ForwardingDisposition::HAInactive, 5),
                 "v6={v6}: an unresolved WAN gateway must not launder the peer-owned reply \
                  onto ge-0-0-2.50, got {:?}",
                 decision.resolution
             );
-            assert_eq!(
-                decision.resolution.egress_ifindex, 4,
-                "v6={v6}: fabric parent"
-            );
         }
+        // The DELIVERED outcome is unchanged: the WAN reply crosses the fabric.
+        let (tx, _, stored) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, v6);
+        assert!(
+            stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+            "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+        );
+        assert_eq!(tx, [0, 1, 0], "v6={v6}: delivered over the fabric, never ge-0-0-2.50 or the LAN");
     }
 }
 
@@ -7426,7 +7515,7 @@ fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
     // Build the pair against the fabric-ful state, then refresh
     // against the fabric-less state (peer link down at transition).
-    let sessions = {
+    let mut sessions = {
         let f = fw0_forwarding_15958b();
         fw0_both_halves_sessions_15958b(&f, now_ns)
     };
@@ -7445,14 +7534,24 @@ fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
         !reverse_items.is_empty(),
         "refresh must visit the reverse companion"
     );
+    // #19171 (2a) re-pin. Computed (published) disposition, old: the FabricRedirect marker
+    // (fail closed at TX). New: HAInactive on the peer-owned LAN unit (5),
+    // which fails closed too, and is never the WAN candidate.
     for (_, decision, _, _, _) in &reverse_items {
         assert_eq!(
-            decision.resolution.disposition,
-            ForwardingDisposition::FabricRedirect,
-            "no-fabric refresh must retain the FabricRedirect marker (fail closed), got {:?}",
+            (decision.resolution.disposition, decision.resolution.egress_ifindex),
+            (ForwardingDisposition::HAInactive, 5),
+            "no-fabric refresh must fail closed, never the WAN candidate, got {:?}",
             decision.resolution
         );
     }
+    // The DELIVERED outcome is unchanged: with no fabric, nothing leaves.
+    let (tx, _, stored) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, false);
+    assert!(
+        stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+        "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+    );
+    assert_eq!(tx, [0, 0, 0], "no fabric: the reply is dropped, never sent out the WAN or the LAN");
 }
 
 /// Round-2 item 3 composition: an HAInactive enforced resolution for
@@ -7721,7 +7820,7 @@ fn split_rg_refresh_retargets_current_peer_15958b() {
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
     let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
-    let sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
     // Peer replaced: same parent ifindex, different peer MAC.
     let mut forwarding2 = fw0_forwarding_15958b();
     for fabric in forwarding2.fabrics.iter_mut() {
@@ -7739,18 +7838,29 @@ fn split_rg_refresh_retargets_current_peer_15958b() {
         .filter(|(_, _, m, _, _)| m.is_reverse)
         .collect();
     assert!(!reverse_items.is_empty());
+    // #19171 (2a) re-pin. Computed (published) disposition, old: a FabricRedirect carrying
+    // the current peer MAC. New: HAInactive on the peer-owned LAN unit (5),
+    // which carries no peer MAC: the redirect, and so the peer it targets,
+    // is resolved when the packet is sent. The delivered check below pins
+    // that the reply reaches the CURRENT peer.
     for (_, decision, _, _, _) in &reverse_items {
         assert_eq!(
-            decision.resolution.disposition,
-            ForwardingDisposition::FabricRedirect
-        );
-        assert_eq!(
-            decision.resolution.neighbor_mac,
-            Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
-            "refresh must target the CURRENT peer MAC, got {:?}",
-            decision.resolution.neighbor_mac
+            (decision.resolution.disposition, decision.resolution.egress_ifindex),
+            (ForwardingDisposition::HAInactive, 5)
         );
     }
+    let (tx, dst_mac, stored) =
+        fw0_refresh_then_reply_19171(&mut sessions, &forwarding2, &ha_state, false);
+    assert!(
+        stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+        "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+    );
+    assert_eq!(tx, [0, 1, 0], "delivered over the fabric");
+    assert_eq!(
+        dst_mac,
+        Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]),
+        "the delivered reply targets the CURRENT peer MAC"
+    );
 }
 
 /// Round-3 item 3: companion first synthesized with NO fabric peer
@@ -7760,7 +7870,7 @@ fn split_rg_synth_no_peer_failclosed_15958b() {
     let mut forwarding = fw0_forwarding_15958b();
     forwarding.fabrics.clear();
     let now_ns = monotonic_nanos();
-    let sessions = fw0_both_halves_sessions_15958b_allow_unresolved_15958b(&forwarding, now_ns);
+    let mut sessions = fw0_both_halves_sessions_15958b_allow_unresolved_15958b(&forwarding, now_ns);
     // Every stored row must avoid WAN egress (13/6): forwards are
     // WAN candidates (their own direction), reverse companions must
     // be FabricRedirect markers, never ForwardCandidate/WAN.
@@ -7768,10 +7878,13 @@ fn split_rg_synth_no_peer_failclosed_15958b() {
     sessions.iter_with_origin(|_key, decision, metadata, _origin| {
         if metadata.is_reverse {
             saw_reverse = true;
+            // #19171 (2a) re-pin. Old stored disposition: FabricRedirect
+            // intent. New: HAInactive on the peer-owned LAN unit (5); with no
+            // fabric peer both fail closed, and neither is the WAN.
             assert_eq!(
-                decision.resolution.disposition,
-                ForwardingDisposition::FabricRedirect,
-                "no-peer synthesis must store FabricRedirect intent, got {:?}",
+                (decision.resolution.disposition, decision.resolution.egress_ifindex),
+                (ForwardingDisposition::HAInactive, 5),
+                "no-peer synthesis must fail closed on the LAN unit, got {:?}",
                 decision.resolution
             );
             assert_ne!(
@@ -7781,6 +7894,12 @@ fn split_rg_synth_no_peer_failclosed_15958b() {
         }
     });
     assert!(saw_reverse, "fixture must install reverse companions");
+    // The DELIVERED outcome is unchanged: with no fabric peer the reply is
+    // dropped, and nothing leaves by the WAN or the LAN.
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let (tx, _, _) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, false);
+    assert_eq!(tx, [0, 0, 0], "no fabric peer: the reply is dropped");
 }
 
 fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(
@@ -7903,6 +8022,10 @@ fn fw0_both_halves_sessions_15958b_allow_unresolved_15958b(
 /// FabricRedirect — accepting any owner-active candidate would
 /// launder the reply onto the WAN egress. WAN-side TCP hit: fabric
 /// TX 1, WAN TX 0, LAN TX 0.
+///
+/// #19171: the marked LAN row now stays in transit, so this mixed state no
+/// longer arises: with RG2 active the reply is delivered on the LAN (see the
+/// re-base note below). The retain arm it exercised is a Stage B deletion.
 #[test]
 fn split_rg_transient_mixed_state_retains_redirect_15958b() {
     // Split FIB (fw0) + failback HA state (RG2 active): the transient.
@@ -7948,13 +8071,19 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
         meta,
     );
     assert!(batch.session_hits >= 1, "transient hit must session-hit");
+    // #19171 re-base, a DELIVERED-outcome change. This "transient" was the
+    // FIB lagging HA: RG2 active here while the FIB still withheld its LAN
+    // row, so the only safe answer was to keep redirecting. The marked row
+    // now stays in transit, the FIB names the LAN, and the live HA state
+    // (RG2 active) delivers locally. Before: fabric TX 1, LAN TX 0. Now:
+    // LAN TX 1, fabric TX 0. Still never the WAN.
     assert_eq!(
         bindings[1]
             .live
             .tx_packets
             .load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "transient state must retain redirect: fabric TX 1"
+        0,
+        "#19171: RG2 is active, so nothing is redirected"
     );
     assert_eq!(
         bindings[0]
@@ -7969,10 +8098,10 @@ fn split_rg_transient_mixed_state_retains_redirect_15958b() {
             .live
             .tx_packets
             .load(std::sync::atomic::Ordering::Relaxed),
-        0,
-        "transient state must not transmit LAN (FIB not yet republished)"
+        1,
+        "#19171: RG2 is active and the LAN row is in transit, so the reply is delivered on the LAN"
     );
-    assert!(egress.is_some(), "fabric frame must be emitted");
+    assert!(egress.is_some(), "the LAN frame must be emitted");
 }
 
 /// Round-5 cross-RI ownership: the same connected prefix in two
