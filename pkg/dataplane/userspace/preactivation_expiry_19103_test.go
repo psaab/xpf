@@ -2,6 +2,10 @@ package userspace
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -548,3 +552,160 @@ func TestExpiredFirstEntryIsRecordedInactive19103(t *testing.T) {
 	}
 }
 
+// codex-e's fold-1 re-check P2: the CONTROL-socket inventory publishers built
+// their groups and then waited on controlReqMu with no deadline. An off-lock
+// owner-RG export can hold that queue for seconds, and the helper's control
+// handler mints a FRESH lease from an Active. Shape: an owed RG1 expiry plus a
+// pre-active RG2 sibling whose deadline passes while the inventory waits in
+// the queue. Both control publishers, syncHAStateLocked and UpdateRGActive,
+// must send RG2 inactive and RECORD what they sent.
+func TestControlQueueReExpiresTheInventory19103(t *testing.T) {
+	for _, publisher := range []string{"syncHAState", "UpdateRGActive"} {
+		t.Run(publisher, func(t *testing.T) {
+			m, _ := newPreActivateManager18559(t)
+			until := time.Now().Add(time.Minute)
+			clk := &clock19103{now: until.Add(-time.Second)}
+			m.preActivateNowFn = clk.get
+			m.mu.Lock()
+			m.haGroups[2] = HAGroupStatus{RGID: 2} // cluster truth: inactive
+			m.cfg.ControlSocket = "control-19103.sock"
+			m.controlRequestHook = nil
+			m.transferPreActive = map[int]transferPreActivation{
+				1: {until: until.Add(-time.Hour), routesReady: true, readyEpoch: m.helperEpoch}, // the owed expiry
+				2: {until: until, routesReady: true, readyEpoch: m.helperEpoch},                 // the expiring sibling
+			}
+			m.mu.Unlock()
+			queued := make(chan struct{}, 1)
+			m.controlQueueHook = func(req ControlRequest) {
+				if req.Type == "update_ha_state" {
+					select {
+					case queued <- struct{}{}:
+					default:
+					}
+				}
+			}
+			var sent []HAGroupStatus
+			m.controlLockedTransportHook = func(req ControlRequest) (ControlResponse, error) {
+				if req.Type == "update_ha_state" && req.HAState != nil {
+					sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+				}
+				return ControlResponse{OK: true, Status: readyHelperStatus()}, nil
+			}
+			m.controlReqMu.Lock() // an off-lock export holds the control queue
+			done := make(chan error, 1)
+			go func() {
+				if publisher == "syncHAState" {
+					m.mu.Lock()
+					err := m.syncHAStateLocked()
+					m.mu.Unlock()
+					done <- err
+					return
+				}
+				done <- m.UpdateRGActive(0, false)
+			}()
+			select {
+			case <-queued:
+			case <-time.After(5 * time.Second):
+				m.controlReqMu.Unlock()
+				t.Fatal("the publisher never queued an update_ha_state")
+			}
+			clk.set(until.Add(time.Second)) // RG2's deadline passes in the queue
+			m.controlReqMu.Unlock()
+			select {
+			case err := <-done:
+				if err != nil && err.Error() != "userspace_ctrl map not loaded" {
+					t.Fatalf("%s: %v", publisher, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("the publisher never finished")
+			}
+			active := func(gs []HAGroupStatus, rg int) (bool, bool) {
+				for _, g := range gs {
+					if g.RGID == rg {
+						return g.Active, true
+					}
+				}
+				return false, false
+			}
+			if a, ok := active(sent, 2); !ok || a {
+				t.Fatalf("sent inventory %+v: RG2 active=%v present=%v, want present and INACTIVE (its deadline passed in the queue)", sent, a, ok)
+			}
+			m.mu.Lock()
+			recorded := append([]HAGroupStatus(nil), m.haWatchdogHelperInventory...)
+			m.mu.Unlock()
+			if a, ok := active(recorded, 2); !ok || a {
+				t.Fatalf("acknowledged inventory %+v: RG2 must be recorded as SENT (inactive), not as built", recorded)
+			}
+		})
+	}
+}
+
+// codex-e's fold-1 re-check: re-expiry must be STRUCTURAL. Every production
+// update_ha_state inventory either carries its overlay deadlines into the
+// control primitive (which re-expires after controlReqMu) or is the empty
+// standalone clear. The session-socket sender is the generation-fenced path,
+// which re-expires after sessionMu. A census of the package's non-test
+// sources fails on any other construction.
+func TestEveryHAInventorySendCarriesItsDeadlines19103(t *testing.T) {
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	controlSites := 0
+	var bad []string
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines := strings.Split(string(raw), "\n")
+		fn := ""
+		for i, line := range lines {
+			if strings.HasPrefix(line, "func ") {
+				fn = line
+			}
+			code := line
+			if j := strings.Index(code, "//"); j >= 0 {
+				code = code[:j]
+			}
+			if !strings.Contains(code, `"update_ha_state"`) {
+				continue
+			}
+			at := fmt.Sprintf("%s:%d", f, i+1)
+			switch {
+			case strings.Contains(fn, "func reexpireHAInventory("):
+				continue // the re-expiry itself
+			case strings.Contains(fn, "requestHAWatchdogSessionLockedAtPath("):
+				if !strings.Contains(string(raw), "groups = expireHAGroups(groups, activeUntil, m.preActivateNow())") {
+					bad = append(bad, at+": the session sender lost its post-queue re-expiry")
+				}
+				continue
+			}
+			end := i + 10
+			if end > len(lines) {
+				end = len(lines)
+			}
+			lit := strings.Join(lines[i:end], "\n")
+			if !strings.Contains(lit, "haActiveUntil:") && !strings.Contains(lit, "Groups: []HAGroupStatus{},") {
+				bad = append(bad, at+": an HA inventory sent without its overlay deadlines ("+strings.TrimSpace(line)+")")
+			}
+			controlSites++
+		}
+	}
+	if controlSites < 3 {
+		t.Fatalf("census found %d control-socket inventory sites, want the sync, the election publish and the clear (3)", controlSites)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("HA inventory sends that bypass the re-expiry:\n%s", strings.Join(bad, "\n"))
+	}
+	pc, err := os.ReadFile("process_control.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(pc), "reexpireHAInventory(&req, m.preActivateNow())") {
+		t.Fatal("the control primitive no longer re-expires the HA inventory after controlReqMu")
+	}
+}

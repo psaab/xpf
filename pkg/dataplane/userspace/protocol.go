@@ -824,6 +824,12 @@ type ControlRequest struct {
 	// (apply_snapshot, bump_fib_generation; ctrlStampGrantFor); 0 grants
 	// nothing.
 	CtrlStampDeadlineMonoNS uint64 `json:"ctrl_stamp_deadline_mono_ns,omitempty"`
+	// haActiveUntil carries, for an update_ha_state inventory, the deadline of
+	// every Active that only a transfer pre-activation authorized (#19103 fold
+	// 2). Unexported, so it never reaches the wire. The control primitive
+	// re-expires the inventory with it after acquiring controlReqMu, and the
+	// caller reads back what was ACTUALLY sent from HAState.
+	haActiveUntil map[int]time.Time
 }
 
 // LeaseExportRequest is the #16589 paging window for the lease exports.

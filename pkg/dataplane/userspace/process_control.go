@@ -177,8 +177,20 @@ func (m *Manager) requestDetailedLocked(req ControlRequest) (ControlResponse, er
 // so paged exports can release m.mu while waiting on a helper response and
 // revalidate the helper/config generation before applying the response.
 func (m *Manager) requestDetailedAtSocket(req ControlRequest, controlSocket string) (resp ControlResponse, retErr error) {
+	if m.controlQueueHook != nil {
+		m.controlQueueHook(req) // unit-test seam: the caller is about to queue
+	}
 	m.controlReqMu.Lock()
 	defer m.controlReqMu.Unlock()
+	// #19103 fold 2: an HA inventory is re-expired HERE, after the control
+	// queue lock, the same rule the session sender applies after sessionMu.
+	// An off-lock owner-RG export can hold this queue for seconds; an
+	// overlay Active that expired meanwhile must not reach the helper, whose
+	// control handler mints a FRESH lease from it.
+	reexpireHAInventory(&req, m.preActivateNow())
+	if m.controlLockedTransportHook != nil {
+		return m.controlLockedTransportHook(req)
+	}
 	// #18685: every round trip is liveness evidence. The silence clock starts
 	// here, after controlReqMu, so time spent queued behind other callers is
 	// never charged to the helper.
@@ -808,6 +820,7 @@ func (m *Manager) requestLocked(req ControlRequest, status *ProcessStatus) error
 		m.partialUpdateEpoch.Add(1)
 	}
 	if m.controlRequestHook != nil {
+		reexpireHAInventory(&req, m.preActivateNow()) // as the primitive would
 		return m.controlRequestHook(req, status)
 	}
 	resp, err := m.requestDetailedLocked(req)
@@ -821,4 +834,15 @@ func (m *Manager) requestLocked(req ControlRequest, status *ProcessStatus) error
 		*status = *resp.Status
 	}
 	return nil
+}
+
+// reexpireHAInventory clears, in an update_ha_state inventory, every Active
+// whose pre-activation deadline has passed by now (#19103 fold 2). It writes
+// through the request's HAState pointer, so the caller records what was
+// actually sent.
+func reexpireHAInventory(req *ControlRequest, now time.Time) {
+	if req.Type != "update_ha_state" || req.HAState == nil || len(req.haActiveUntil) == 0 {
+		return
+	}
+	req.HAState.Groups = expireHAGroups(req.HAState.Groups, req.haActiveUntil, now)
 }

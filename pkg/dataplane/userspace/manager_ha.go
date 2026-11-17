@@ -57,10 +57,12 @@ func (m *Manager) syncHAStateLocked() error {
 		HAState: &HAStateUpdateRequest{
 			Groups: groups,
 		},
+		haActiveUntil: m.haWatchdogDeadlinesLocked(groups), // #19103 fold 2
 	}
 	if err := m.requestLocked(req, &status); err != nil {
 		return err
 	}
+	groups = req.HAState.Groups // what was SENT, after the queue's re-expiry
 	// The helper has acknowledged this full inventory. Clear the persistent
 	// obligation before reconciling the returned status or desired forwarding:
 	// either later step may fail, but repeating an acknowledged inventory on
@@ -1636,6 +1638,7 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 		HAState: &HAStateUpdateRequest{
 			Groups: groups,
 		},
+		haActiveUntil: m.haWatchdogDeadlinesLocked(groups), // #19103 fold 2
 	}
 	// Log the HA state being sent to helper (info level only for RG transitions).
 	for _, g := range groups {
@@ -1652,6 +1655,7 @@ func (m *Manager) UpdateRGActive(rgID int, active bool) error {
 	// inventory and holds ctrl one extra tick during takeover. Safe: the Active
 	// bits just written to rg_active are the ones the helper acknowledged.
 	m.pendingHAStateReplay = false
+	groups = req.HAState.Groups // what was SENT, after the queue's re-expiry
 	m.adoptHelperInventoryLocked(groups)
 	m.publishHAWatchdogSnapshotLocked()
 	if active {
