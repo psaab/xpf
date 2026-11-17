@@ -79,6 +79,13 @@ esac
 # cluster, nothing when they are. In a subshell (command substitution), so
 # the reentrant path's environment is left exactly as the caller set it.
 lock_target_mismatch() {
+	# The targets as the caller's environment carries them. The reentrant path
+	# below execs with exactly these, so they must be what the lock's cluster
+	# env resolves (fold of Codex on b7h, N2: cluster-env.sh's cross-env reset
+	# discards inherited loss targets and resolves udp, so checking only the
+	# resolved values passed a cell that then ran with the inherited loss ones).
+	# shellcheck disable=SC2034 # read below by name: ${!inherited}
+	local inherited_fw0=${FW0:-} inherited_fw1=${FW1:-}
 	# shellcheck source=cluster-env.sh
 	source "${SCRIPT_DIR}/cluster-env.sh" >/dev/null || {
 		echo "cluster-env.sh could not resolve the targets"
@@ -88,11 +95,19 @@ lock_target_mismatch() {
 		echo "the cluster env resolves ${INCUS_REMOTE} (FW0=${FW0})"
 		return 0
 	fi
-	local var target
+	local var target inherited
 	for var in FW0 FW1; do
 		target=${!var:-}
 		if [[ "$target" == *:* && "${target%%:*}" != "$LOCK_CLUSTER" ]]; then
 			echo "${var}=${target} is on the ${target%%:*} cluster"
+			return 0
+		fi
+		inherited=inherited_${var,,}
+		inherited=${!inherited}
+		# Qualified as the env would qualify it, so a bare same-cluster
+		# override still matches.
+		if [[ -n "$inherited" && "$(_xpf_cluster_ref "$inherited")" != "$target" ]]; then
+			echo "the inherited ${var}=${inherited} is not what the cluster env resolves (${target}); a nested cell would run with the inherited one"
 			return 0
 		fi
 	done

@@ -254,4 +254,27 @@ set -e
 grep -q 'FW0=loss:xpf-userspace-fw0 is on the loss cluster' "$T/m.out" || fail "(m) the nested refusal does not name the target: $(tr '\n' '|' <"$T/m.out")"
 ok "resolved FW0/FW1 are checked against the lock's cluster (#19165, Codex on b7g N2): an explicit loss: override is refused, also on the reentrant path; a same-cluster override runs"
 
+# ── #19165 fold (Codex on b7h, N2): the resolver-reset shape. (n) An outer
+#    udp cell's command sources the LOSS env (exported loss FW0/FW1 and its
+#    provenance), then runs a nested cell with BPFRX_CLUSTER_ENV back on udp.
+#    cluster-env.sh's cross-env reset resolves udp targets, but the reentrant
+#    exec would run with the inherited loss ones: refused. Control: a nested
+#    cell inheriting the outer udp targets runs.
+LOSS_ENV="${REPO_ROOT}/test/incus/loss-userspace-cluster.env"
+mkdir -p "$T/n"
+set +e
+XPF_CLUSTER_LOCK="$T/n/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/n/owner" XPF_CLUSTER_EPOCH="$T/n/epoch" \
+	BPFRX_CLUSTER_ENV="$UDP_ENV" \
+	"$WC" "case-n outer" -- bash -c '
+		export BPFRX_CLUSTER_ENV="$3"; source "$4/cluster-env.sh" >/dev/null
+		BPFRX_CLUSTER_ENV="$2" "$0" "case-n inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"
+		BPFRX_CLUSTER_ENV="$2" bash -c "unset FW0 FW1; source \"$4/cluster-env.sh\" >/dev/null; \"$0\" \"case-n control\" -- touch \"$1/ctl\"; echo \$? >\"$1/ctl.rc\""' \
+	"$WC" "$T/n" "$UDP_ENV" "$LOSS_ENV" "$SCRIPT_DIR" >"$T/n.out" 2>&1
+N_RC=$?
+set -e
+[[ $N_RC -eq 0 && "$(cat "$T/n/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/n/ran" ]] || fail "(n) a nested cell inheriting loss FW0/FW1 under BPFRX_CLUSTER_ENV=udp and the udp lock: expected the inner refused (2) and nothing run, got outer=$N_RC inner=$(cat "$T/n/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/n.out")"
+grep -q 'the inherited FW0=loss:xpf-userspace-fw0 is not what the cluster env resolves (udp:xpf-udp-fw0)' "$T/n.out" || fail "(n) the refusal does not name the inherited target: $(tr '\n' '|' <"$T/n.out")"
+[[ "$(cat "$T/n/ctl.rc" 2>/dev/null)" == 0 && -e "$T/n/ctl" ]] || fail "(n) control: a nested cell inheriting the udp targets did not run (rc=$(cat "$T/n/ctl.rc" 2>/dev/null)): $(tr '\n' '|' <"$T/n.out")"
+ok "a nested cell whose inherited FW0/FW1 differ from what the held cluster's env resolves is refused (#19165, Codex on b7h N2); inherited same-cluster targets run"
+
 echo "ALL ${PASS} CASES PASS"
