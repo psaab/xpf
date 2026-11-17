@@ -703,71 +703,22 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             }
         });
         let mut decision = resolved.decision;
-        let resolution_target = resolution_target_for_session(flow, decision);
-        let leak_incarnation = shared_leak_incarnation
-            .filter(|incarnation| *incarnation != 0)
-            .or_else(|| sessions.leak_incarnation(&resolved_key));
-        let leak_revoked = leak_incarnation.is_some_and(|incarnation| {
-            !super::forwarding::leak_incarnation_is_live(forwarding, resolution_target, incarnation)
-        });
-        let looked_up_resolution = if let Some(stamped_incarnation) =
-            leak_incarnation.filter(|_| leak_revoked)
-        {
-            // #9951: a revoked provenance stamp bypasses every cached arm,
-            // including the synced-session fallback (which intentionally
-            // keeps cached fallback for ordinary peer imports).
-            let refreshed = lookup_forwarding_resolution_for_session_without_cache(
-                forwarding,
-                dynamic_neighbors,
-                flow,
-                decision,
-            )
-            .resolution;
-            let current_incarnation =
-                leak_incarnation_for_session(forwarding, decision, resolution_target);
-            if current_incarnation.is_some_and(|current| current != stamped_incarnation) {
-                super::no_route_resolution(None)
-            } else {
-                refreshed
-            }
-        } else if forwarding_stale {
-            lookup_forwarding_resolution_for_session_without_cache(
-                forwarding,
-                dynamic_neighbors,
-                flow,
-                decision,
-            )
-            .resolution
-        } else if hit_origin.is_peer_synced() {
-            lookup_forwarding_resolution_for_synced_session(
-                forwarding,
-                dynamic_neighbors,
-                flow,
-                decision,
-            )
-            .resolution
-        } else {
-            lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
-                .resolution
-        };
-        // #15958b/#17047: stored-session re-resolution is the ONE
-        // consolidated pipeline in resolution.rs (lookup variant
-        // chosen above; prefer/HA-enforce/fabric composition and
-        // the rehome-or-retain verdict inside). A stored
-        // FabricRedirect companion must not be re-resolved onto a
-        // gateway/default route: on the punt origin the FIB answers
-        // the LAN target with the WAN gateway route, and the
-        // retained-redirect guard keeps the fabric egress instead.
-        decision.resolution = super::reresolve_stored_session(
+        // #19164 v3: the reply's stored-reverse re-resolution, extracted by code
+        // motion into `reverse_reply_resolution` so the embedded-ICMP return
+        // consumes the SAME verdict a reply would (no partial mirror).
+        decision.resolution = reverse_reply_resolution(
+            sessions,
             forwarding,
             ha_state,
             dynamic_neighbors,
             now_secs,
-            &resolved.decision,
-            &resolved.metadata,
+            &resolved,
             resolved_key,
-            resolution_target,
-            looked_up_resolution,
+            hit_origin,
+            shared_leak_incarnation,
+            flow,
+            forwarding_stale,
+            decision,
             super::FabricArrival::Packet {
                 fabric_ingress,
                 fabric_link_ingress,
@@ -777,58 +728,6 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
                 adopted_recovery: adopted_recovery.as_ref(),
             },
         );
-        // #16217 (FZDiag34 reverse leg; FZDiag35 conversion):
-        // a REVERSE hit whose stored decision still egresses LOCALLY
-        // (ForwardCandidate) while the reply destination's connected
-        // owner has departed this node must cross the fabric to the
-        // new owner — it must NOT be re-served/re-seeded from the
-        // departed member. Live fw0 (trace cellX): reverse hits
-        // re-resolve from the stored reverse decision egress=5
-        // (ge-0-0-1, RG1's member; the member's egress row carries
-        // the surviving RG2, so neither HA enforcement nor the
-        // egress-row departed arms can see RG1's departure) and TX
-        // every WAN reply into the dead member; the cache arm evicts
-        // once and the slow path re-seeds the same candidate
-        // forever.
-        //
-        // FZDiag35: the conversion no longer gates on the session's
-        // stored owner stamp at all. That stamp was derived from the
-        // reply-egress row at synthesis (RG2, surviving) for the
-        // stamp=2 half of live rows, so the old metadata gate could
-        // never convert them — the gate is dropped and the test is
-        // purely destination-based: `dest_rg`, the connected owner
-        // of the reply destination (the client LAN prefix's owner
-        // RG, RG1 at seed), must be KNOWN (>0) and NOT
-        // forwarding-active locally. Soundness: this is a reverse
-        // hit on a local ForwardCandidate, so the reply would TX
-        // toward `resolution_target` (the client); if that
-        // destination's connected owner is a departed RG, local TX
-        // is by definition into the departed member — the fabric
-        // redirect to the new owner is the only correct serve.
-        // There is NO false-convert shape: a destination whose
-        // connected owner is locally active (the ordinary
-        // locally-served reply) keeps `destination_local` and is
-        // served bit-identically; an unknown owner (dest_rg==0,
-        // e.g. a gateway/default-routed destination with no
-        // connected prefix) is not peer-ownership and never
-        // converts. Anti-loop: a fabric-link arrival never
-        // re-redirects. Non-reverse hits are bit-identical.
-        // #18659: a local MissingNeighbor (the unresolved WAN gateway
-        // a split FIB names for a peer-owned client) converts on the
-        // same terms; see the helper.
-        if let Some(redirect) = reverse_hit_departed_destination_redirect(
-            forwarding,
-            ha_state,
-            now_secs,
-            fabric_link_ingress,
-            resolved.metadata.is_reverse,
-            resolution_target,
-            install_table_name_for_session(forwarding, decision, resolution_target),
-            resolved.metadata.egress_zone,
-            decision.resolution.disposition,
-        ) {
-            decision.resolution = redirect;
-        }
         // #9752: a terminal outcome arms this worker's purge walk (D8).
         if decision.resolution.disposition == ForwardingDisposition::TableUnavailable {
             flag_install_table_purge(worker_id);
@@ -1555,3 +1454,164 @@ ha_startup_grace_until_secs: u64,) -> ForwardingResolution {
     enforced
 }
 
+/// #19164 v3: the stored-session re-resolution a PACKET on `resolved` gets, as
+/// the session-hit arm computes it, moved here verbatim so the embedded-ICMP
+/// return can consume the SAME verdict. That ends the partial-mirror class:
+/// round 1 missed the retain verdict, round 2 the alias handoff, and both were
+/// copies of part of this.
+///
+/// The stages, in order:
+/// 1. the lookup variant: #9951's leak revocation, then the cache-free variant
+///    when the stamp is stale, the synced variant for a peer-synced hit, else
+///    the cached one;
+/// 2. `reresolve_stored_session` (the alias handoff, prefer-local, HA,
+///    fabric composition, the retain verdict, the #19171 derivation);
+/// 3. #16217's departed-destination conversion for a reverse hit.
+///
+/// It returns the resolution only. The caller keeps its own post-processing
+/// (purge flags, deferred writes).
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn reverse_reply_resolution(
+    sessions: &SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    resolved: &SessionLookup,
+    resolved_key: &SessionKey,
+    hit_origin: SessionOrigin,
+    shared_leak_incarnation: Option<u64>,
+    flow: &SessionFlow,
+    forwarding_stale: bool,
+    decision: SessionDecision,
+    arrival: FabricArrival<'_>,
+) -> ForwardingResolution {
+    let mut decision = decision;
+    let resolution_target = resolution_target_for_session(flow, decision);
+    let fabric_link_ingress = matches!(
+        arrival,
+        FabricArrival::Packet {
+            fabric_link_ingress: true,
+            ..
+        }
+    );
+    let leak_incarnation = shared_leak_incarnation
+        .filter(|incarnation| *incarnation != 0)
+        .or_else(|| sessions.leak_incarnation(&resolved_key));
+    let leak_revoked = leak_incarnation.is_some_and(|incarnation| {
+        !super::forwarding::leak_incarnation_is_live(forwarding, resolution_target, incarnation)
+    });
+    let looked_up_resolution = if let Some(stamped_incarnation) =
+        leak_incarnation.filter(|_| leak_revoked)
+    {
+        // #9951: a revoked provenance stamp bypasses every cached arm,
+        // including the synced-session fallback (which intentionally
+        // keeps cached fallback for ordinary peer imports).
+        let refreshed = lookup_forwarding_resolution_for_session_without_cache(
+            forwarding,
+            dynamic_neighbors,
+            flow,
+            decision,
+        )
+        .resolution;
+        let current_incarnation =
+            leak_incarnation_for_session(forwarding, decision, resolution_target);
+        if current_incarnation.is_some_and(|current| current != stamped_incarnation) {
+            super::no_route_resolution(None)
+        } else {
+            refreshed
+        }
+    } else if forwarding_stale {
+        lookup_forwarding_resolution_for_session_without_cache(
+            forwarding,
+            dynamic_neighbors,
+            flow,
+            decision,
+        )
+        .resolution
+    } else if hit_origin.is_peer_synced() {
+        lookup_forwarding_resolution_for_synced_session(
+            forwarding,
+            dynamic_neighbors,
+            flow,
+            decision,
+        )
+        .resolution
+    } else {
+        lookup_forwarding_resolution_for_session(forwarding, dynamic_neighbors, flow, decision)
+            .resolution
+    };
+    // #15958b/#17047: stored-session re-resolution is the ONE
+    // consolidated pipeline in resolution.rs (lookup variant
+    // chosen above; prefer/HA-enforce/fabric composition and
+    // the rehome-or-retain verdict inside). A stored
+    // FabricRedirect companion must not be re-resolved onto a
+    // gateway/default route: on the punt origin the FIB answers
+    // the LAN target with the WAN gateway route, and the
+    // retained-redirect guard keeps the fabric egress instead.
+    decision.resolution = super::reresolve_stored_session(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        &resolved.decision,
+        &resolved.metadata,
+        resolved_key,
+        resolution_target,
+        looked_up_resolution,
+        arrival,
+    );
+    // #16217 (FZDiag34 reverse leg; FZDiag35 conversion):
+    // a REVERSE hit whose stored decision still egresses LOCALLY
+    // (ForwardCandidate) while the reply destination's connected
+    // owner has departed this node must cross the fabric to the
+    // new owner — it must NOT be re-served/re-seeded from the
+    // departed member. Live fw0 (trace cellX): reverse hits
+    // re-resolve from the stored reverse decision egress=5
+    // (ge-0-0-1, RG1's member; the member's egress row carries
+    // the surviving RG2, so neither HA enforcement nor the
+    // egress-row departed arms can see RG1's departure) and TX
+    // every WAN reply into the dead member; the cache arm evicts
+    // once and the slow path re-seeds the same candidate
+    // forever.
+    //
+    // FZDiag35: the conversion no longer gates on the session's
+    // stored owner stamp at all. That stamp was derived from the
+    // reply-egress row at synthesis (RG2, surviving) for the
+    // stamp=2 half of live rows, so the old metadata gate could
+    // never convert them — the gate is dropped and the test is
+    // purely destination-based: `dest_rg`, the connected owner
+    // of the reply destination (the client LAN prefix's owner
+    // RG, RG1 at seed), must be KNOWN (>0) and NOT
+    // forwarding-active locally. Soundness: this is a reverse
+    // hit on a local ForwardCandidate, so the reply would TX
+    // toward `resolution_target` (the client); if that
+    // destination's connected owner is a departed RG, local TX
+    // is by definition into the departed member — the fabric
+    // redirect to the new owner is the only correct serve.
+    // There is NO false-convert shape: a destination whose
+    // connected owner is locally active (the ordinary
+    // locally-served reply) keeps `destination_local` and is
+    // served bit-identically; an unknown owner (dest_rg==0,
+    // e.g. a gateway/default-routed destination with no
+    // connected prefix) is not peer-ownership and never
+    // converts. Anti-loop: a fabric-link arrival never
+    // re-redirects. Non-reverse hits are bit-identical.
+    // #18659: a local MissingNeighbor (the unresolved WAN gateway
+    // a split FIB names for a peer-owned client) converts on the
+    // same terms; see the helper.
+    if let Some(redirect) = reverse_hit_departed_destination_redirect(
+        forwarding,
+        ha_state,
+        now_secs,
+        fabric_link_ingress,
+        resolved.metadata.is_reverse,
+        resolution_target,
+        install_table_name_for_session(forwarding, decision, resolution_target),
+        resolved.metadata.egress_zone,
+        decision.resolution.disposition,
+    ) {
+        decision.resolution = redirect;
+    }
+    decision.resolution
+}
