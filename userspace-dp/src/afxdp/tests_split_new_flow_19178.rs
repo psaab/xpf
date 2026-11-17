@@ -16,9 +16,11 @@
 //! - only `wan -> lan` permits: the fix admits, the base denies (WAN -> WAN);
 //! - only `wan -> wan` permits: the base hairpins out the WAN, the fix denies.
 
+use super::test_fixtures::nat_snapshot_with_fabric;
 use super::tests_split_rg_failback_18531::rg;
 use super::tests_support::*;
 use super::*;
+use crate::{NeighborSnapshot, PolicyRuleSnapshot};
 
 const LAN_SERVER4: Ipv4Addr = Ipv4Addr::new(10, 0, 61, 102);
 const WAN_CLIENT4: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
