@@ -47,7 +47,9 @@ func rounds19140(owner, peer *Manager, n int) (transitions, dual int) {
 	last := [2]bool{owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)}
 	for range n {
 		owner.handlePeerHeartbeat(peer.buildHeartbeat())
+		evaluate19140(owner)
 		peer.handlePeerHeartbeat(owner.buildHeartbeat())
+		evaluate19140(peer)
 		now := [2]bool{owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)}
 		if now != last {
 			transitions++
@@ -250,10 +252,19 @@ func TestCommittedOwnerWithMemberShimDebtHandsBack19140(t *testing.T) {
 		t.Fatal("precondition: the transfer settled on the new owner")
 	}
 	chargeMemberShim19140(newOwner, true)
-	exchangeElection12164(oldOwner, newOwner)
+	// Fold 2: the healthy peer's readiness must come from an evaluation that
+	// started after the charge, so the exchange runs its daemon's readiness
+	// pass per received frame (rounds19140), as production does.
+	rounds19140(newOwner, oldOwner, 4)
 	if newOwner.IsLocalPrimary(1) || !oldOwner.IsLocalPrimary(1) {
 		t.Fatalf("the committed owner kept the RG at the member-shim floor over a healthy peer: new=%s/%d old=%s/%d",
 			newOwner.GroupState(1).State, newOwner.GroupState(1).Weight,
 			oldOwner.GroupState(1).State, oldOwner.GroupState(1).Weight)
 	}
+}
+
+// evaluate19140 is one readiness pass of m's daemon (#19140 fold 2): it stamps
+// m's CURRENT readiness with the latest peer heartbeat m has received.
+func evaluate19140(m *Manager) {
+	m.CompleteReadinessEvaluation(m.BeginReadinessEvaluation())
 }

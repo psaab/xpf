@@ -849,6 +849,13 @@ type PeerGroupState struct {
 	// yield deliberately does not (a node with no armed dataplane yields to
 	// a heavier peer whatever that peer's readiness).
 	takeoverNotReady bool
+	// readinessAware reports that the frame carried the XPFR section, which
+	// every sender of the #19140 build emits. False means an older peer.
+	readinessAware bool
+	// readinessEvalSeq is the frame's readiness-evaluation stamp: the
+	// heartbeat sequence of THIS node's that the peer had received when its
+	// last readiness evaluation started (#19140 fold 2).
+	readinessEvalSeq uint64
 }
 
 // heartbeatSender sends periodic heartbeat packets.

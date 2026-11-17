@@ -4193,34 +4193,51 @@ indefinitely.
   The heartbeat's `takeoverReady` is weight-only, and a peer can be not-ready
   at weight 255 for a reason that installs no floor debt. Several such reasons
   leave it unable to forward the RG, or a whole RETH of it (table below). So
-  each heartbeat carries an optional MAC-covered `XPFR` readiness section
-  (`heartbeat_wire.go`): a 256-bit bitmap of the data RGs whose `rg.Ready` is
-  false on the sender, never RG0.
+  each heartbeat carries a MAC-covered `XPFR` readiness section
+  (`heartbeat_wire.go`). It holds the sender's readiness-evaluation stamp
+  (fold 2, below), then a 256-bit bitmap of the data RGs whose `rg.Ready` is
+  false on the sender, never RG0. A sender of this build emits it on EVERY
+  frame, so its absence means an older sender.
   - The receiver records it per frame (`PeerGroupState.takeoverNotReady`): a
     frame without it clears it, and peer loss drops it.
   - A member-shim owner yields only to a peer that does not flag the RG.
-  - **The flag must be CAUSALLY after the charge.** A yield on readiness the
-    peer sampled before the charge hands the RG to a peer that may already be
-    not-ready. That peer then promotes DEGRADED through `peerYieldedOwnership`,
-    and nothing hands the RG back. Two orderings bite:
+  - **The readiness must come from an EVALUATION that started after the
+    charge** (fold 2). A yield on readiness older than the charge hands the
+    RG to a peer that may already be not-ready, and three orderings were
+    found:
     - the charge's own election runs against the peer's last installed
       frame;
     - a frame the peer BUILT before its not-ready edge ARRIVES after the
-      charge (codex-d's #19140 review: a later receipt proves nothing, and
-      HMAC and anti-replay admit such a frame).
+      charge. A later receipt proves nothing (codex-d), and HMAC and
+      anti-replay admit such a frame;
+    - a frame the peer built AFTER receiving a post-charge heartbeat still
+      copies its CACHED `rg.Ready`, which only its daemon's reconcile pass
+      (about 2 s) refreshes. So a valid post-charge echo can carry a
+      pre-charge value (codex-c, and r23's P3-A). The consequence is worse
+      than a degraded handoff. The peer promotes NORMALLY on the stale
+      value, its arm debt then ties it at the floor with this node, nothing
+      moves (#12164 needs a heavier peer, and the sticky hold holds), and
+      the WHOLE RG black-holes, where before only one RETH member was
+      broken.
 
-    So the charge records this node's heartbeat sequence
-    (`memberShimChargedAtSeq`, from `hbCounter`). The yield needs the
-    peer's frame to echo our session and a LATER sequence
-    (`heartbeatEchoSequence`): the peer built it, and sampled its readiness,
-    after receiving a heartbeat this node sent after the charge. That costs
-    about one heartbeat round trip on a producer that already waits a 10 s
-    grace. (Fold 1's receipt counter, `peerFrameCount`, is removed, not kept
-    beside it.)
-  - **Residual: the bit is the peer's LAST EVALUATED readiness.**
-    `buildHeartbeat` copies `rg.Ready`, which the peer's daemon refreshes in
-    its reconcile pass. A frame built after the charge therefore carries
-    readiness no older than that pass, not a fresh evaluation.
+    The fix is CAUSAL, with no time constant:
+    - the daemon's readiness pass calls `BeginReadinessEvaluation` BEFORE it
+      computes anything. That captures the latest heartbeat of ours the
+      peer has received;
+    - after every RG's `SetRGReady`, the pass calls
+      `CompleteReadinessEvaluation`;
+    - from then on, the XPFR section carries that stamp
+      (`ReadinessEvalSeq`), but only while the frame echoes the same
+      session;
+    - the charge records this node's heartbeat sequence
+      (`memberShimChargedAtSeq`, from `hbCounter`), and the yield needs the
+      peer's stamp past it, in the session its frame echoes, with the RG
+      unflagged (`memberShimPeerReadyAfterChargeLocked`).
+
+    The peer's readiness VALUE therefore comes from an evaluation that
+    started after it received a post-charge heartbeat. The removed
+    mechanisms are not kept beside it: fold 1's receipt counter, and a
+    time-span hold tried on the way to this fix.
   - **Residual: the member-shim reason is node-global** (r23 P3-1, #19176).
     One shim-less or UNVERIFIED member on the peer makes `rg.Ready` false
     for EVERY data RG, so a peer that could serve this RG still withholds
@@ -4237,18 +4254,20 @@ indefinitely.
   - Arm debt ignores the flag and keeps #12164's never-strands contract
     (`TestNonPreemptArmDebtYieldNeverStrandsUnreadyPeer12164`): a node with
     no armed dataplane forwards nothing.
-  - **Older peers.** An older peer sends no section and reads as ready, so a
-    mixed-version pair keeps the #12164 behaviour: the yield goes, and a
-    not-ready peer promotes degraded through `peerYieldedOwnership`. The table
-    below is that residual.
+  - **Older peers.** An older peer sends no section, so there is no stamp to
+    check. It is held to the fold-1 echo rule (a frame echoing a post-charge
+    heartbeat) and reads as ready. A mixed-version pair therefore keeps the
+    #12164 behaviour: the yield goes, and a not-ready peer promotes degraded
+    through `peerYieldedOwnership`. The table below is that residual.
   - **Why a section and not a reserved monitor entry.** An older receiver
     would list a reserved monitor entry as a DOWN peer monitor, and the monitor
     section is capped at 255 entries.
   - **Compatibility.** The section sits after `XPFT`, before the fixed-tail
     epoch and auth trailers, so older readers never parse it.
   - **Frame size.** A maximal keyed frame (255 groups, all data RGs flagged,
-    echo, clock, epoch, auth) is at most 1440 of the 1472-byte bound before
-    monitors.
+    the stamp, echo, clock, epoch, auth) is at most 1448 of the 1472-byte
+    bound before monitors: the 1440 measured for fold 1, plus the 8-byte
+    stamp.
 
   Cells: `readiness_section_19140_test.go`. They cover the round trip, the
   real pre-section decoder, MAC coverage, the maximal frame, the sender

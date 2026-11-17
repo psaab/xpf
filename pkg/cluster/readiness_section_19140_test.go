@@ -49,6 +49,17 @@ func TestReadinessSectionRoundTrip19140(t *testing.T) {
 	if got, _ := UnmarshalHeartbeat(with); len(got.TakeoverNotReady) != 0 {
 		t.Fatalf("an all-ready frame decoded not-ready RGs %v", got.TakeoverNotReady)
 	}
+	// Fold 2: a sender of this build emits the section on every frame, so an
+	// ALL-READY frame carries it, with its evaluation stamp.
+	aware := readinessPacket19140(nil)
+	aware.ReadinessSection, aware.ReadinessEvalSeq = true, 0x0102030405060708
+	got, err := UnmarshalHeartbeat(MarshalHeartbeat(aware))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.ReadinessSection || got.ReadinessEvalSeq != 0x0102030405060708 || len(got.TakeoverNotReady) != 0 {
+		t.Fatalf("an all-ready aware frame decoded section=%v stamp=%#x not-ready=%v", got.ReadinessSection, got.ReadinessEvalSeq, got.TakeoverNotReady)
+	}
 }
 
 // The real pre-section decoder (a verbatim copy of UnmarshalHeartbeat before
@@ -108,11 +119,21 @@ func TestReadinessSectionIsMACCovered19140(t *testing.T) {
 	if at < 0 {
 		t.Fatal("no readiness section in the keyed frame")
 	}
+	bitmap := at + 4 + 8                 // magic, then the evaluation stamp
 	for _, bit := range []int{0, 1, 2} { // clear RG1, set RG0, set RG2
 		tampered := append([]byte(nil), frame...)
-		tampered[at+4] ^= 1 << bit
+		tampered[bitmap] ^= 1 << bit
 		if verifyHeartbeatMAC(tampered, key) {
 			t.Fatalf("flipping readiness bit %d still verifies: the section is outside the MAC", bit)
+		}
+	}
+	// Fold 2: the evaluation stamp is MAC-covered too, so an on-path writer
+	// cannot advance it past a charge.
+	for _, b := range []int{0, 7} {
+		tampered := append([]byte(nil), frame...)
+		tampered[at+4+b] ^= 0x80
+		if verifyHeartbeatMAC(tampered, key) {
+			t.Fatalf("flipping stamp byte %d still verifies: the stamp is outside the MAC", b)
 		}
 	}
 }
@@ -122,6 +143,7 @@ func TestReadinessSectionIsMACCovered19140(t *testing.T) {
 // the keyed frame stays within maxHeartbeatSize.
 func TestReadinessSectionFitsTheMaximalFrame19140(t *testing.T) {
 	pkt := readinessPacket19140(nil)
+	pkt.ReadinessSection, pkt.ReadinessEvalSeq = true, ^uint64(0) // the largest stamp
 	pkt.Groups = nil
 	for id := 0; id < maxHeartbeatGroups; id++ {
 		pkt.Groups = append(pkt.Groups, HeartbeatGroup{GroupID: uint8(id), Priority: 100, Weight: 255})
@@ -139,6 +161,9 @@ func TestReadinessSectionFitsTheMaximalFrame19140(t *testing.T) {
 	got, err := UnmarshalHeartbeat(frame)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got.ReadinessEvalSeq != ^uint64(0) {
+		t.Fatalf("maximal frame lost the evaluation stamp: %#x", got.ReadinessEvalSeq)
 	}
 	if len(got.TakeoverNotReady) != maxHeartbeatGroups-1 || len(got.Groups) != maxHeartbeatGroups {
 		t.Fatalf("maximal frame decoded %d not-ready RGs and %d groups, want %d and %d",
@@ -226,11 +251,13 @@ func TestMemberShimYieldRespectsPeerReadiness19140(t *testing.T) {
 	run := func(t *testing.T, owner, peer *Manager, stripped bool, rounds int) (dual int) {
 		for range rounds {
 			hb := peer.buildHeartbeat()
-			if stripped {
-				hb.TakeoverNotReady = nil
+			if stripped { // an older sender: no section at all
+				hb.TakeoverNotReady, hb.ReadinessSection, hb.ReadinessEvalSeq = nil, false, 0
 			}
 			owner.handlePeerHeartbeat(hb)
+			evaluate19140(owner)
 			peer.handlePeerHeartbeat(owner.buildHeartbeat())
+			evaluate19140(peer)
 			if owner.IsLocalPrimary(1) && peer.IsLocalPrimary(1) {
 				dual++
 			}
@@ -364,4 +391,92 @@ func ownerWeight19140(m *Manager, rgID int) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.groups[rgID].Weight
+}
+
+// The sender's stamp is the peer heartbeat it had received when its readiness
+// evaluation STARTED, not when the frame is sent (fold 2). A peer frame that
+// arrives during the evaluation does not advance the stamp, and a frame that
+// echoes a different peer session carries no stamp at all.
+func TestReadinessStampIsTheEvaluationStart19140(t *testing.T) {
+	m, other := memberShimPair19140(t, false, 200, 100)
+	exchangeElection12164(m, other)
+	if hb := m.buildHeartbeat(); !hb.ReadinessSection || hb.ReadinessEvalSeq != 0 {
+		t.Fatalf("before any evaluation: section=%v stamp=%d, want the section with stamp 0", hb.ReadinessSection, hb.ReadinessEvalSeq)
+	}
+	m.handlePeerHeartbeat(other.buildHeartbeat())
+	m.mu.RLock()
+	startSeq := m.latestPeerHeartbeatSequence
+	m.mu.RUnlock()
+	eval := m.BeginReadinessEvaluation()
+	m.handlePeerHeartbeat(other.buildHeartbeat()) // arrives DURING the evaluation
+	m.CompleteReadinessEvaluation(eval)
+	hb := m.buildHeartbeat()
+	if hb.ReadinessEvalSeq != startSeq || hb.PeerHeartbeatSequence <= startSeq {
+		t.Fatalf("stamp %d (echo %d), want the evaluation-start sequence %d, below the echo", hb.ReadinessEvalSeq, hb.PeerHeartbeatSequence, startSeq)
+	}
+	m.mu.Lock()
+	m.latestPeerHeartbeatSession++ // the peer restarted: a new session
+	m.mu.Unlock()
+	if hb := m.buildHeartbeat(); hb.ReadinessEvalSeq != 0 {
+		t.Fatalf("a frame echoing a NEW peer session carried the old session's stamp %d", hb.ReadinessEvalSeq)
+	}
+}
+
+// codex-c's P2-RECHECK-1, deterministic. Readiness publication is held across
+// the charge and the challenge:
+//   - the peer receives the owner's POST-charge heartbeat, so its echo is
+//     valid, but it has not re-evaluated readiness;
+//   - it builds F, whose bitmap is the stale, unflagged pre-charge value;
+//   - it then publishes Ready=false;
+//   - only then is F delivered.
+//
+// F must not take the RG. The control: a fresh post-charge evaluation that
+// finds the peer ready yields.
+func TestStaleReadinessValueCannotTakeTheRG19140(t *testing.T) {
+	for _, preempt := range []bool{true, false} {
+		setup := func(t *testing.T) (*Manager, *Manager, uint64) {
+			t.Helper()
+			owner, peer := memberShimPair19140(t, preempt, 200, 100)
+			exchangeElection12164(owner, peer)
+			evaluate19140(peer) // a PRE-charge evaluation: Ready=true
+			chargeMemberShim19140(owner, true)
+			owner.mu.RLock()
+			charged := owner.memberShimChargedAtSeq[1]
+			owner.mu.RUnlock()
+			peer.handlePeerHeartbeat(owner.buildHeartbeat()) // the post-charge challenge
+			return owner, peer, charged
+		}
+		t.Run(fmt.Sprintf("stale-value/preempt=%v", preempt), func(t *testing.T) {
+			owner, peer, charged := setup(t)
+			f := peer.buildHeartbeat() // no evaluation since the challenge
+			if f.PeerHeartbeatSequence <= charged || len(f.TakeoverNotReady) != 0 {
+				t.Fatalf("setup: F echoes %d (charge %d) and flags %v; want a post-charge echo, unflagged", f.PeerHeartbeatSequence, charged, f.TakeoverNotReady)
+			}
+			eval := peer.BeginReadinessEvaluation()
+			peer.SetRGReady(1, false, []string{"userspace helper not running"})
+			peer.CompleteReadinessEvaluation(eval)
+			owner.handlePeerHeartbeat(f)
+			peer.handlePeerHeartbeat(owner.buildHeartbeat())
+			if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
+				t.Fatal("the owner yielded on a frame whose readiness predates the charge")
+			}
+			if _, dual := rounds19140(owner, peer, 6); dual != 0 || !owner.IsLocalPrimary(1) {
+				t.Fatalf("after the flagged frames: owner primary=%v, dual rounds %d", owner.IsLocalPrimary(1), dual)
+			}
+		})
+		t.Run(fmt.Sprintf("fresh-evaluation-control/preempt=%v", preempt), func(t *testing.T) {
+			owner, peer, charged := setup(t)
+			evaluate19140(peer) // a POST-charge evaluation: still ready
+			f := peer.buildHeartbeat()
+			if f.ReadinessEvalSeq <= charged {
+				t.Fatalf("setup: the fresh evaluation stamped %d, not past the charge %d", f.ReadinessEvalSeq, charged)
+			}
+			owner.handlePeerHeartbeat(f)
+			peer.handlePeerHeartbeat(owner.buildHeartbeat())
+			rounds19140(owner, peer, 3)
+			if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) {
+				t.Fatal("a fresh post-charge evaluation that finds the peer ready did not take the yield")
+			}
+		})
+	}
 }

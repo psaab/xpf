@@ -86,10 +86,16 @@ const (
 	// ignores it. It follows the clock section (or the echo, or the HA
 	// version) INSIDE the body, so it is MAC-covered like XPFT, and before the
 	// fixed-tail epoch and auth trailers. Older readers stop before it and
-	// never see it. It is emitted only when some RG is not ready, and it is
-	// per-frame state: a frame without it means "every RG ready".
+	// never see it.
+	//
+	// Layout: magic, then the 8-byte little-endian readiness-evaluation stamp
+	// (#19140 fold 2), then the 32-byte bitmap. The stamp is the heartbeat
+	// sequence of OURS the sender had received when its last readiness
+	// evaluation STARTED (0 = none for our current session). A sender of this
+	// build emits the section on EVERY frame, so its absence means an older
+	// sender, never "all ready". It is per-frame state.
 	heartbeatReadinessMagic       = "XPFR"
-	heartbeatReadinessTrailerSize = 4 + 32
+	heartbeatReadinessTrailerSize = 4 + 8 + 32
 	// heartbeatAuthMagic marks the optional #4107 PSK/HMAC auth trailer.
 	// Distinct from heartbeatMagic ("BPFX") so a reader can unambiguously
 	// detect a trailer at the tail of a frame. The trailer is appended AFTER
@@ -137,10 +143,12 @@ const (
 //	  peer session/sequence received by the sender.
 //	  Optional "XPFT" clock section (#18585): the sender's wall clock as
 //	  int64 unix nanoseconds, used only to MEASURE peer clock offset.
-//	  Optional "XPFR" readiness section (#19140): a 256-bit bitmap of the
-//	  wire RG ids whose takeover readiness is false on the sender (data RGs
-//	  only), present only when some RG is not ready. A RETH member-shim
-//	  election debt yields only to a peer that does not flag the RG here.
+//	  Optional "XPFR" readiness section (#19140): the sender's
+//	  readiness-evaluation stamp (uint64), then a 256-bit bitmap of the wire
+//	  RG ids whose takeover readiness is false on the sender (data RGs only).
+//	  A sender of this build emits it on every frame. A RETH member-shim
+//	  election debt yields only to a peer that does not flag the RG here AND
+//	  whose stamp shows a readiness evaluation that started after the charge.
 //
 // The echo trailer is additive and appears before optional fixed-tail
 // authentication/epoch trailers. Older readers ignore it after the version
@@ -176,6 +184,14 @@ type HeartbeatPacket struct {
 	// section it is reserved ahead of the best-effort monitors, and it is
 	// MAC-covered.
 	TakeoverNotReady []uint8
+	// ReadinessSection reports that the section is present: set by every
+	// sender of this build, and on decode. Absent means an older sender.
+	ReadinessSection bool
+	// ReadinessEvalSeq is the section's stamp (#19140 fold 2): the heartbeat
+	// sequence of the RECEIVER's that the sender had received when its last
+	// readiness evaluation started, for the session it echoes in this frame.
+	// 0 means no evaluation has started since it first heard that session.
+	ReadinessEvalSeq uint64
 }
 
 // HeartbeatGroup is a per-RG entry in the heartbeat.
@@ -362,7 +378,7 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 		clockTrailerSize = heartbeatClockTrailerSize
 	}
 	readinessTrailerSize := 0
-	if len(pkt.TakeoverNotReady) > 0 {
+	if pkt.ReadinessSection || len(pkt.TakeoverNotReady) > 0 {
 		readinessTrailerSize = heartbeatReadinessTrailerSize
 	}
 	optionalSections := echoTrailerSize + clockTrailerSize + readinessTrailerSize
@@ -449,6 +465,8 @@ func marshalHeartbeatBody(pkt *HeartbeatPacket, tailReserve int) []byte {
 		if readinessTrailerSize != 0 {
 			copy(buf[off:off+len(heartbeatReadinessMagic)], heartbeatReadinessMagic)
 			off += len(heartbeatReadinessMagic)
+			binary.LittleEndian.PutUint64(buf[off:off+8], pkt.ReadinessEvalSeq)
+			off += 8
 			for _, id := range pkt.TakeoverNotReady {
 				buf[off+int(id)/8] |= 1 << (id % 8)
 			}
@@ -574,6 +592,9 @@ func UnmarshalHeartbeat(data []byte) (*HeartbeatPacket, error) {
 		if off+heartbeatReadinessTrailerSize <= len(data) &&
 			string(data[off:off+len(heartbeatReadinessMagic)]) == heartbeatReadinessMagic {
 			off += len(heartbeatReadinessMagic)
+			pkt.ReadinessSection = true
+			pkt.ReadinessEvalSeq = binary.LittleEndian.Uint64(data[off : off+8])
+			off += 8
 			for i := 0; i < 256; i++ {
 				if data[off+i/8]&(1<<(uint(i)%8)) != 0 {
 					pkt.TakeoverNotReady = append(pkt.TakeoverNotReady, uint8(i))

@@ -5304,7 +5304,12 @@ member-shim debt"):
 - two charged nodes do not move.
 
 The yield goes only to a peer whose heartbeat does not flag the RG not-ready
-(the `XPFR` readiness section, `pkg/cluster/README.md`). An older peer sends no
+(the `XPFR` readiness section, `pkg/cluster/README.md`), per a readiness
+evaluation that started AFTER the charge. The reconcile pass that publishes
+every RG's readiness (`SetRGReady`) is that evaluation. It calls
+`BeginReadinessEvaluation` before computing anything and
+`CompleteReadinessEvaluation` after the last RG, so the stamp it publishes
+provably precedes the values (#19140 fold 2). An older peer sends no
 flag and keeps the #12164 behaviour (a degraded handoff rather than an
 ownerless RG); the class table there is that mixed-version residual.
 

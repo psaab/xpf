@@ -1262,21 +1262,70 @@ func (m *Manager) floorYieldDebtLocked(rgID int, peer *PeerGroupState) bool {
 	if m.dataplaneArmDebtLocked(rgID) > 0 {
 		return true
 	}
-	// The peer's readiness must be CAUSALLY after the charge. A yield on
-	// readiness the peer sampled before it hands the RG to a peer that may
-	// already be not-ready; that peer then takes it DEGRADED and nothing hands
-	// it back. A later RECEIPT proves nothing (a frame built before the charge
-	// can arrive after it, codex-d's #19140 review). The frame must ECHO a
-	// heartbeat sequence this node sent after the charge: the peer built it,
-	// and sampled its readiness, after receiving that heartbeat. That costs
-	// about one heartbeat round trip on a producer that already waits 10 s.
-	// Residual: the peer's bit is its LAST EVALUATED readiness (rg.Ready,
-	// refreshed by its daemon's reconcile pass), not a fresh evaluation per
-	// frame.
 	return m.monitorWeights[monitorKey{rgID: rgID, iface: RethMemberShimMonitorIface}] > 0 &&
-		peer != nil && !peer.takeoverNotReady &&
-		peer.heartbeatEchoSession == m.LocalProcessToken() &&
-		peer.heartbeatEchoSequence > m.memberShimChargedAtSeq[rgID]
+		m.memberShimPeerReadyAfterChargeLocked(rgID, peer)
+}
+
+// memberShimPeerReadyAfterChargeLocked reports whether the peer's latest frame
+// shows the RG takeover-ready per a readiness EVALUATION that started after
+// this node's member-shim charge (#19140 fold 2, codex-c and r23).
+//
+// Neither a later receipt nor a later echo is enough. The bitmap copies the
+// peer's cached rg.Ready, which only its daemon's reconcile pass (about 2 s)
+// refreshes, so a frame that echoes a post-charge heartbeat can still carry a
+// pre-charge value. A yield on that value hands the RG to a peer whose helper
+// may already be stopped: it promotes on the stale value, its arm debt then
+// ties it at the floor, nothing moves, and the WHOLE RG black-holes. So a
+// sender of this build stamps every frame with the sequence of OUR heartbeat
+// it had received when its last readiness evaluation STARTED
+// (readinessEvalSeq). The yield needs that stamp past the charge, in the
+// session the frame echoes.
+//
+// An OLDER peer sends no section. It keeps the documented mixed-version
+// residual: the fold-1 echo rule. Caller holds m.mu.
+func (m *Manager) memberShimPeerReadyAfterChargeLocked(rgID int, peer *PeerGroupState) bool {
+	if peer == nil || peer.heartbeatEchoSession != m.LocalProcessToken() {
+		return false
+	}
+	charged := m.memberShimChargedAtSeq[rgID]
+	if !peer.readinessAware {
+		return peer.heartbeatEchoSequence > charged // mixed-version residual
+	}
+	return !peer.takeoverNotReady && peer.readinessEvalSeq > charged
+}
+
+// ReadinessEvaluation identifies the peer heartbeat this node had received when
+// a readiness evaluation started (#19140 fold 2).
+type ReadinessEvaluation struct {
+	session, seq uint64
+}
+
+// BeginReadinessEvaluation is called at the START of a readiness evaluation
+// pass, before any readiness is computed. It captures the latest peer
+// heartbeat received, so the stamp provably precedes the evaluation.
+func (m *Manager) BeginReadinessEvaluation() ReadinessEvaluation {
+	if m == nil {
+		return ReadinessEvaluation{}
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return ReadinessEvaluation{session: m.latestPeerHeartbeatSession, seq: m.latestPeerHeartbeatSequence}
+}
+
+// CompleteReadinessEvaluation records e as the stamp of the evaluation pass
+// that just published every RG's readiness (SetRGReady). Frames built from
+// now on carry it. An older stamp never replaces a newer one in the same
+// session.
+func (m *Manager) CompleteReadinessEvaluation(e ReadinessEvaluation) {
+	if m == nil || e.session == 0 {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if e.session == m.readyEvalSession && e.seq <= m.readyEvalSeq {
+		return
+	}
+	m.readyEvalSession, m.readyEvalSeq = e.session, e.seq
 }
 
 // SetStartupSyncHold installs or clears the #16741 startup-sync-hold

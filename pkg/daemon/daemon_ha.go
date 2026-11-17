@@ -1673,11 +1673,18 @@ func (d *Daemon) reconcileRGState() {
 	}
 
 	if mon := d.cluster.Monitor(); mon != nil {
+		// #19140 fold 2: stamp the evaluation with the peer heartbeat already
+		// received BEFORE any readiness is computed, and publish the stamp
+		// only after every RG's result is in. The peer's member-shim yield
+		// trusts this node's readiness bitmap only from an evaluation that
+		// started after its charge.
+		eval := d.cluster.BeginReadinessEvaluation()
 		for _, rgID := range rgIDs {
 			ifReady, ifReasons := mon.RGInterfaceReady(rgID)
 			ready, reasons := d.takeoverReadinessForRG(reconcileDP, rgID, ifReady, ifReasons, fabricReady, noRethVRRP)
 			d.cluster.SetRGReady(rgID, ready, reasons)
 		}
+		d.cluster.CompleteReadinessEvaluation(eval)
 	}
 
 	// anyRGChanged collects per-RG transitions so the #1827

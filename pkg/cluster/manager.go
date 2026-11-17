@@ -218,6 +218,13 @@ type Manager struct {
 	// after receiving a heartbeat this node sent after the charge
 	// (floorYieldDebtLocked). Guarded by mu.
 	memberShimChargedAtSeq map[int]uint64
+	// readyEvalSession/readyEvalSeq stamp this node's last COMPLETED
+	// readiness evaluation with the peer heartbeat (session, sequence) it had
+	// received when that evaluation started (#19140 fold 2). buildHeartbeat
+	// sends the sequence in the XPFR section while it echoes that session.
+	// Guarded by mu.
+	readyEvalSession uint64
+	readyEvalSeq     uint64
 	// Advances on local RG creation and every primary-role transition; guarded by mu.
 	mastershipGen   uint64
 	mu              sync.RWMutex

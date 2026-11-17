@@ -645,6 +645,13 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 
 	// #19140: every data RG whose takeover readiness is false. RG0 is never
 	// flagged: it carries no RETH and is never a member-shim yield target.
+	// Fold 2: the section rides on EVERY frame, with the stamp of the last
+	// readiness evaluation that started after this node received the peer
+	// session it echoes here (0 when none did).
+	pkt.ReadinessSection = true
+	if m.readyEvalSession != 0 && m.readyEvalSession == pkt.PeerHeartbeatSession {
+		pkt.ReadinessEvalSeq = m.readyEvalSeq
+	}
 	for _, rg := range m.groups {
 		if rg.GroupID != 0 && !rg.Ready {
 			pkt.TakeoverNotReady = append(pkt.TakeoverNotReady, wireRGID(rg.GroupID))
@@ -915,6 +922,8 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 			peerWasPrimaryThisSession: wasPrimary || NodeState(g.State) == StatePrimary,
 			takeoverReady:             int(g.Weight) > maxRedundancyGroupWeight-DataplaneArmMonitorCost,
 			takeoverNotReady:          localID != 0 && notReady[g.GroupID],
+			readinessAware:            pkt.ReadinessSection,
+			readinessEvalSeq:          pkt.ReadinessEvalSeq,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace
