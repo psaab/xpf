@@ -49,7 +49,7 @@ fn ha_map(groups: &[(i32, bool)]) -> Arc<ArcSwap<BTreeMap<i32, HAGroupRuntime>>>
     ))
 }
 
-fn address(family: &str, address: &str) -> InterfaceAddressSnapshot {
+pub(super) fn address(family: &str, address: &str) -> InterfaceAddressSnapshot {
     InterfaceAddressSnapshot {
         family: family.to_string(),
         address: address.to_string(),
@@ -58,7 +58,7 @@ fn address(family: &str, address: &str) -> InterfaceAddressSnapshot {
     }
 }
 
-fn route(family: &str, table: &str, destination: &str, next_hops: &[&str], preference: i32) -> RouteSnapshot {
+pub(super) fn route(family: &str, table: &str, destination: &str, next_hops: &[&str], preference: i32) -> RouteSnapshot {
     RouteSnapshot {
         table: table.to_string(),
         family: family.to_string(),
@@ -95,7 +95,7 @@ fn neighbor(interface: &str, ifindex: i32, family: &str, ip: &str) -> NeighborSn
 /// The split-node base: WAN unit peer-owned, gateways emitted bare (the Go
 /// shape for `next-hop <gw>`), so nothing lends the WAN gateway an egress
 /// except the peer-owned binding.
-fn split_node_snapshot() -> ConfigSnapshot {
+pub(super) fn split_node_snapshot() -> ConfigSnapshot {
     let mut snapshot = nat_snapshot_with_fabric();
     for route in &mut snapshot.routes {
         for nh in &mut route.next_hops {
@@ -114,7 +114,7 @@ fn split_node_snapshot() -> ConfigSnapshot {
     snapshot
 }
 
-fn find_route_v4<'a>(state: &'a ForwardingState, table: &str, dst: &str) -> &'a RouteEntryV4 {
+pub(super) fn find_route_v4<'a>(state: &'a ForwardingState, table: &str, dst: &str) -> &'a RouteEntryV4 {
     let net: PrefixV4 = PrefixV4::from_net(dst.parse().expect("v4 prefix"));
     state
         .routes_v4
@@ -123,7 +123,7 @@ fn find_route_v4<'a>(state: &'a ForwardingState, table: &str, dst: &str) -> &'a 
         .unwrap_or_else(|| panic!("FIXTURE: {table} has no {dst} row"))
 }
 
-fn find_route_v6<'a>(state: &'a ForwardingState, table: &str, dst: &str) -> &'a RouteEntryV6 {
+pub(super) fn find_route_v6<'a>(state: &'a ForwardingState, table: &str, dst: &str) -> &'a RouteEntryV6 {
     let net: PrefixV6 = PrefixV6::from_net(dst.parse().expect("v6 prefix"));
     state
         .routes_v6
