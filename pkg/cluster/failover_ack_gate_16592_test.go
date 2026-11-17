@@ -32,8 +32,8 @@ func ackGateFixture16592(t *testing.T, preempt bool) (requester, owner *Manager)
 	ownCfg := makeConfig(makeRG(0, preempt, map[int]int{0: 100, 1: 200}))
 	requester.UpdateConfig(reqCfg)
 	owner.UpdateConfig(ownCfg)
-	<-requester.Events()
-	<-owner.Events()
+	recvEvent19161(t, requester.Events(), "the next event")
+	recvEvent19161(t, owner.Events(), "the next event")
 	owner.mu.Lock()
 	owner.groups[0].State = StatePrimary
 	owner.groups[0].Ready = true
@@ -172,10 +172,10 @@ func TestAckGateBatchRequestAckFailureDoesNotPromote16592(t *testing.T) {
 			)
 			requester.UpdateConfig(reqCfg)
 			owner.UpdateConfig(ownCfg)
-			<-requester.Events()
-			<-requester.Events()
-			<-owner.Events()
-			<-owner.Events()
+			recvEvent19161(t, requester.Events(), "the next event")
+			recvEvent19161(t, requester.Events(), "the next event")
+			recvEvent19161(t, owner.Events(), "the next event")
+			recvEvent19161(t, owner.Events(), "the next event")
 			owner.mu.Lock()
 			for _, id := range []int{1, 2} {
 				owner.groups[id].State = StatePrimary

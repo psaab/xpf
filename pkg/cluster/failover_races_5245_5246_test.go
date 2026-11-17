@@ -110,7 +110,7 @@ func TestManualFailover_ResetDuringPreHookWins(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events() // drain the initial secondary→primary election event
+	recvEvent19161(t, m.Events(), "drain the initial secondary→primary election event")
 
 	if !m.IsLocalPrimary(0) {
 		t.Fatal("precondition: node should be primary for RG0")

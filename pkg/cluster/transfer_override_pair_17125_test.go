@@ -33,13 +33,13 @@ func TestFinalizePeerTransferOutClearsTransferOverride17125(t *testing.T) {
 		makeRG(1, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatalf("ManualFailover() error = %v", err)
 	}
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	armTransferOverride17125(m, 0)
 	armTransferOverride17125(m, 1)
 
@@ -67,15 +67,15 @@ func TestFinalizePeerTransferOutBatchClearsTransferOverride17125(t *testing.T) {
 		makeRG(3, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if _, err := m.ManualFailoverBatch([]int{1, 2}); err != nil {
 		t.Fatalf("ManualFailoverBatch() error = %v", err)
 	}
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 	armTransferOverride17125(m, 1)
 	armTransferOverride17125(m, 2)
 	armTransferOverride17125(m, 3)

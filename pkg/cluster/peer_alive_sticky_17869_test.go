@@ -17,7 +17,7 @@ func TestPeerAliveNotStickyWithoutHeartbeat17869(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200, 1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.HandlePeerHeartbeatForTesting(&HeartbeatPacket{
 		NodeID:            1,

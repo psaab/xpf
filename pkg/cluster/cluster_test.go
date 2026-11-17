@@ -171,7 +171,7 @@ func TestUpdateConfig_PreservesState(t *testing.T) {
 
 	// Drain events from initial election.
 	for i := 0; i < 2; i++ {
-		<-m.Events()
+		recvEvent19161(t, m.Events(), "the next event")
 	}
 
 	// Manually failover RG 0.
@@ -239,7 +239,7 @@ func TestSetMonitorWeight_Down(t *testing.T) {
 	m.UpdateConfig(cfg)
 
 	// Drain election event.
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Mark an interface down with weight 100.
 	m.SetMonitorWeight(0, "trust0", true, 100)
@@ -263,7 +263,7 @@ func TestSetMonitorWeight_AllDown(t *testing.T) {
 		makeRG(0, false, map[int]int{0: 200}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events() // drain initial election
+	recvEvent19161(t, m.Events(), "drain initial election")
 
 	// Bring down two interfaces totaling 255+.
 	m.SetMonitorWeight(0, "trust0", true, 200)
@@ -284,7 +284,7 @@ func TestSetMonitorWeight_Recovery(t *testing.T) {
 		makeRG(0, false, map[int]int{0: 200}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.SetMonitorWeight(0, "trust0", true, 255)
 	// Weight = 0, secondary.
@@ -313,7 +313,7 @@ func TestSetMonitorWeight_DuplicateDown(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Same interface reported down twice — should not double-count.
 	m.SetMonitorWeight(0, "trust0", true, 100)
@@ -332,7 +332,7 @@ func TestManualFailover(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events() // election event
+	recvEvent19161(t, m.Events(), "election event")
 
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatal(err)
@@ -370,7 +370,7 @@ func TestManualFailover_PreHookRunsBeforeResign(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	called := false
 	m.SetPreManualFailoverHook(func(rgID int) error {
@@ -396,7 +396,7 @@ func TestManualFailover_PreHookErrorPreventsResign(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.SetPreManualFailoverHook(func(rgID int) error {
 		return fmt.Errorf("boom")
@@ -421,7 +421,7 @@ func TestManualFailover_RetryablePreHookRetriesThenSucceeds(t *testing.T) {
 	m.preManualFailoverRetryInterval = 5 * time.Millisecond
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	attempts := 0
 	m.SetPreManualFailoverHook(func(rgID int) error {
@@ -453,7 +453,7 @@ func TestManualFailover_RetryablePreHookTimeoutKeepsPrimary(t *testing.T) {
 	m.preManualFailoverRetryInterval = 5 * time.Millisecond
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	attempts := 0
 	m.SetPreManualFailoverHook(func(rgID int) error {
@@ -487,7 +487,7 @@ func TestManualFailover_RejectsBackToBack(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Pre-hook blocks until released, simulating a long barrier wait.
 	hookStarted := make(chan struct{})
@@ -536,8 +536,8 @@ func TestManualFailover_DifferentRGsAllowed(t *testing.T) {
 	)
 	m.UpdateConfig(cfg)
 	// Drain both RG events.
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Pre-hook blocks for RG 0 but not RG 1.
 	hookStarted := make(chan struct{})
@@ -573,7 +573,7 @@ func TestManualFailover_InProgressClearedOnPreHookError(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.SetPreManualFailoverHook(func(rgID int) error {
 		return fmt.Errorf("fatal hook error")
@@ -598,7 +598,7 @@ func TestRequestPeerFailoverCommitsLocalPrimaryWithoutHeartbeatObservation(t *te
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -646,7 +646,7 @@ func TestRequestPeerFailoverAllowsTransferWithSyncWhenHeartbeatLost(t *testing.T
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.peerEverSeen = true
@@ -695,8 +695,8 @@ func TestRequestPeerFailoverBatchCommitsLocalPrimaryTogether(t *testing.T) {
 		makeRG(2, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -752,8 +752,8 @@ func TestRequestPeerFailoverBatchAllowsTransferWithSyncWhenHeartbeatLost(t *test
 		makeRG(2, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.peerEverSeen = true
@@ -806,7 +806,7 @@ func TestRequestPeerFailoverWaitsForLocalCommitReadyHookBeforePeerCommit(t *test
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -852,7 +852,7 @@ func TestRequestPeerFailoverAbortsToPriorPeerStateWhenLocalCommitReadyHookFails(
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -900,8 +900,8 @@ func TestRequestPeerFailoverBatchAbortsWhenLocalCommitReadyHookFails(t *testing.
 		makeRG(2, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -951,7 +951,7 @@ func TestRequestPeerFailoverRequiresLocalReadiness(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	m.mu.Lock()
 	rg := m.groups[0]
 	rg.Ready = false
@@ -990,7 +990,7 @@ func TestRequestPeerFailoverRequiresLocalTransferReadiness(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -1034,11 +1034,11 @@ func TestRequestPeerFailoverTransferReadinessFailurePreservesManualFailover(t *t
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatalf("ManualFailover() error = %v", err)
 	}
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -1083,11 +1083,11 @@ func TestRequestPeerFailoverPeerSendFailurePreservesManualFailover(t *testing.T)
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatalf("ManualFailover() error = %v", err)
 	}
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -1131,12 +1131,12 @@ func TestFinalizePeerTransferOutClearsSecondaryHold(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatalf("ManualFailover() error = %v", err)
 	}
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if err := m.FinalizePeerTransferOut(0); err != nil {
 		t.Fatalf("FinalizePeerTransferOut() error = %v", err)
@@ -1157,14 +1157,14 @@ func TestFinalizePeerTransferOutBatchClearsSecondaryHold(t *testing.T) {
 		makeRG(2, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if _, err := m.ManualFailoverBatch([]int{1, 2}); err != nil {
 		t.Fatalf("ManualFailoverBatch() error = %v", err)
 	}
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if err := m.FinalizePeerTransferOutBatch([]int{2, 1}); err != nil {
 		t.Fatalf("FinalizePeerTransferOutBatch() error = %v", err)
@@ -1184,7 +1184,7 @@ func TestPeerTransferOutOverrideSurvivesHeartbeatRefreshUntilCommit(t *testing.T
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
@@ -1226,7 +1226,7 @@ func TestNotePeerTransferCommittedPreservesPeerTransferOutDuringGrace(t *testing
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	pkt := &HeartbeatPacket{
 		NodeID:    1,
@@ -1276,7 +1276,7 @@ func TestHandlePeerHeartbeatSkipsTransferOverridesForAbsentRG(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.transferOverrides[0] = transferOverride{reqID: 77}
@@ -1298,7 +1298,7 @@ func TestHandlePeerTimeoutSuppressedDuringRecentTransferCommitGrace(t *testing.T
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200, 1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatalf("ManualFailover() error = %v", err)
@@ -1343,7 +1343,7 @@ func TestFinalizePeerTransferOutClearsStaleInboundTransferGrace(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	pkt := &HeartbeatPacket{
 		NodeID:    1,
@@ -1393,8 +1393,8 @@ func TestFinalizePeerTransferOutBatchClearsStaleInboundTransferGrace(t *testing.
 		makeRG(2, true, map[int]int{0: 100}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
+	recvEvent19161(t, m.Events(), "the next event")
 
 	pkt := &HeartbeatPacket{
 		NodeID:    1,
@@ -1446,7 +1446,7 @@ func TestFormatStatusShowsSeparateTransferReadiness(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
 		ClusterID: 1,
@@ -1477,7 +1477,7 @@ func TestFormatStatusShowsSoftwareVersions(t *testing.T) {
 	m.SetSoftwareVersion("local-build")
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:          1,
 		ClusterID:       1,
@@ -1507,7 +1507,7 @@ func TestFormatInformationShowsUnknownPeerSoftwareVersion(t *testing.T) {
 	m.SetSoftwareVersion("local-build")
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,
 		ClusterID: 1,
@@ -1533,7 +1533,7 @@ func TestHAProtocolVersionMismatchIgnoresUnknownPeerAfterTimeout(t *testing.T) {
 	m.SetHAProtocolVersion(2)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100, 1: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:            1,
@@ -1558,10 +1558,10 @@ func TestResetFailover(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	_, _ = m.ManualFailover(0)
-	<-m.Events() // drain failover event
+	recvEvent19161(t, m.Events(), "drain failover event")
 
 	if err := m.ResetFailover(0); err != nil {
 		t.Fatal(err)
@@ -1729,7 +1729,7 @@ func TestMultipleMonitorWeights(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Three interfaces down with different weights.
 	m.SetMonitorWeight(0, "trust0", true, 50)
@@ -1776,7 +1776,7 @@ func TestElectionSkipsDisabled(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Force state to disabled directly (simulating admin action).
 	m.mu.Lock()

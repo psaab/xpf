@@ -23,7 +23,7 @@ func TestElection_DualActive_DuplicateNodeIDYields(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200})) // non-preempt
 	m.UpdateConfig(cfg)
-	<-m.Events() // drain initial single-node election
+	recvEvent19161(t, m.Events(), "drain initial single-node election")
 
 	// Force local to primary.
 	m.mu.Lock()
@@ -58,7 +58,7 @@ func TestElection_Preempt_DuplicateNodeIDYields(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200})) // preempt enabled
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.groups[0].State = StatePrimary

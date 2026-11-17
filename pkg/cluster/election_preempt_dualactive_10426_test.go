@@ -22,7 +22,7 @@ func setupPreemptDualActiveWinner(t *testing.T) *Manager {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200})) // preempt, high priority
 	m.UpdateConfig(cfg)
-	<-m.Events() // drain the UpdateConfig event
+	recvEvent19161(t, m.Events(), "drain the UpdateConfig event")
 
 	m.mu.Lock()
 	m.groups[0].State = StatePrimary
@@ -77,7 +77,7 @@ func TestElection_PreemptDualActive_TieWinnerEmitsReaffirm(t *testing.T) {
 	m := NewManager(0, 1) // lower node ID wins the tie
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.groups[0].State = StatePrimary
@@ -134,7 +134,7 @@ func TestElection_PreemptDualActive_LoserYieldsWithoutReaffirm(t *testing.T) {
 	m := NewManager(1, 1) // higher node ID, lower priority: loses both ways
 	cfg := makeConfig(makeRG(0, true, map[int]int{1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.groups[0].State = StatePrimary
@@ -205,7 +205,7 @@ func TestElection_NonPreemptDualActive_WinnerControl(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200})) // preempt disabled
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.groups[0].State = StatePrimary

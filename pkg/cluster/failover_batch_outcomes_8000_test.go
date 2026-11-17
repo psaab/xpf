@@ -56,7 +56,7 @@ func newPrimaryManager8000(t *testing.T, rgIDs ...int) *Manager {
 	}
 	m.UpdateConfig(makeConfig(rgs...))
 	for range rgIDs {
-		<-m.Events() // drain each initial secondary→primary election
+		recvEvent19161(t, m.Events(), "drain each initial secondary→primary election")
 	}
 	for _, id := range rgIDs {
 		if !m.IsLocalPrimary(id) {

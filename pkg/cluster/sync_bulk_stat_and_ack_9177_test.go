@@ -46,7 +46,7 @@ func statusFor9177(t *testing.T, s *SessionSync) string {
 	// does. Without this the section is absent and every "the line is not
 	// there" assertion below would pass vacuously.
 	m.UpdateConfig(makeConfig(makeRG(0, true, map[int]int{0: 100})))
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	m.SetSyncStats(s)
 	out := m.FormatInformation()
 	if !strings.Contains(out, "Cold synchronization:") {
