@@ -184,8 +184,16 @@ func (m *Manager) nextRIPGroupIndex16625() int {
 // compiler also preserves top-level exports separately so their
 // legacy chain remains independent from group exports. With no
 // groups, Redistribute keeps its existing ordered-chain semantics.
-func (m *Manager) renderRIPGroupPool17688(rip *config.RIPConfig, po *config.PolicyOptionsConfig, clusterMode bool, metrics *qnhMetricScope11447) string {
-	if len(rip.Groups) == 0 {
+//
+// #19182: "no groups" means the OPERATOR configured none. groupLess
+// is that fact, decided by the caller BEFORE #16866 synthesizes its
+// implicit per-interface gate group; len(rip.Groups) cannot tell, since
+// the synthesized copy always carries one. Testing only the length
+// sent every group-less config through the pool, which drops a bare
+// token that shares a source with a policy, and with it the
+// #15158 cluster deny-tag map on a bare `redistribute static`.
+func (m *Manager) renderRIPGroupPool17688(rip *config.RIPConfig, po *config.PolicyOptionsConfig, clusterMode bool, metrics *qnhMetricScope11447, groupLess bool) string {
+	if groupLess || len(rip.Groups) == 0 {
 		return m.resolveRedistributeChainCluster15158(rip.Redistribute, po, "rip", clusterMode, qnhMetricScopeForDaemon11447(metrics, "rip"))
 	}
 	pool := m.ripGroupPool17688(rip, po, qnhMetricScopeForDaemon11447(metrics, "rip"))
@@ -195,9 +203,12 @@ func (m *Manager) renderRIPGroupPool17688(rip *config.RIPConfig, po *config.Poli
 	return formatRedistEntries(pool.entries)
 }
 
-func (m *Manager) renderRIPPerGroup16625(rip *config.RIPConfig, enrolled []string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447, instanceIdx int) (defs string, body string) {
+// groupLess reports that the operator configured no RIP group: rip then
+// carries #16866's synthesized implicit group, which gates interfaces
+// but must not change the redistribution semantics (#19182).
+func (m *Manager) renderRIPPerGroup16625(rip *config.RIPConfig, enrolled []string, policyOptions *config.PolicyOptionsConfig, clusterMode bool, qnhMetrics *qnhMetricScope11447, instanceIdx int, groupLess bool) (defs string, body string) {
 	var db, bb strings.Builder
-	bb.WriteString(m.renderRIPGroupPool17688(rip, policyOptions, clusterMode, qnhMetrics))
+	bb.WriteString(m.renderRIPGroupPool17688(rip, policyOptions, clusterMode, qnhMetrics, groupLess))
 	chains := ripGroupChains16625(rip, enrolled)
 	for idx, cg := range chains {
 		var v4, v6 []string

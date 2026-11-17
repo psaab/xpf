@@ -1403,7 +1403,14 @@ R22 #5).
   (deny-tag, then permit) instead of the unfiltered verb. Operator statics
   are untagged and keep flowing, including an operator static default.
   Non-cluster renders are byte-identical: no tag, no deny sequence, bare
-  redistribution stays bare.
+  redistribution stays bare. **#19182:** for RIP this holds on both
+  redistribution paths. A RIP config with no operator group renders
+  `Redistribute` as the ordered chain (`resolveRedistributeChainCluster15158`),
+  even though #16866 synthesizes an implicit group for the per-interface
+  gate. Whether the operator configured a group is decided before that
+  synthesis and passed down; #17688's union pool applies only to
+  operator-configured groups, and its bare static entries carry the same
+  cluster guard map.
 - **A DHCP route's `vrf` clause names the KERNEL namespace, not the Junos
   one (#9136).** `DHCPRoute.VRF` carries the BARE routing-instance name —
   the suppression maps in `renderDHCPDefaults` key on it and are internally

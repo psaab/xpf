@@ -128,12 +128,15 @@ func (m *Manager) renderRIP16125(b *strings.Builder, rip *config.RIPConfig, vrfS
 				// render deny-all), so no enrolled interface is
 				// ever left ungated.
 				ripForRender16866 := rip
+				// #19182: decided BEFORE the synthesis below adds
+				// the implicit group, which only gates interfaces.
+				groupLess19182 := len(rip.Groups) == 0
 				if len(rip.Groups) == 0 && len(enrolled16625) > 0 {
 					synth := *rip
 					synth.Groups = []*config.RIPGroup{{Name: "xpf-implicit-16866", Interfaces: append([]string(nil), enrolled16625...), Export: append([]string(nil), rip.Redistribute...)}}
 					ripForRender16866 = &synth
 				}
-				ripDefs16866, ripBody16866 := m.renderRIPPerGroup16625(ripForRender16866, enrolled16625, policyOptions, clusterMode, qnhMetrics, m.nextRIPGroupIndex16625())
+				ripDefs16866, ripBody16866 := m.renderRIPPerGroup16625(ripForRender16866, enrolled16625, policyOptions, clusterMode, qnhMetrics, m.nextRIPGroupIndex16625(), groupLess19182)
 				b.WriteString(ripDefs16866)
 				fmt.Fprintf(b, "router rip%s\n", vrfSuffix)
 				// #16620: pin RIP to the Junos RIP preference 100; see
