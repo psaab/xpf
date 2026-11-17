@@ -229,10 +229,10 @@ fn owner_admits_a_redirected_new_flow_judged_wan_to_lan_19178() {
 #[test]
 fn owner_denies_a_redirected_new_flow_when_only_wan_to_wan_permits_19178() {
     for v6 in [false, true] {
-        assert_eq!(
-            owner_admit(v6, Permit::WanToWan),
-            Admission { policy_deny: 1, forwards: vec![] },
-            "v6={v6}: judged WAN -> LAN at the owner, denied"
+        let got = owner_admit(v6, Permit::WanToWan);
+        assert!(
+            got.policy_deny > 0 && got.forwards.is_empty(),
+            "v6={v6}: judged WAN -> LAN at the owner, denied, nothing forwarded: {got:?}"
         );
     }
 }

@@ -116,6 +116,14 @@ fn peer_owned_subnet_broadcast_is_a_directed_broadcast_19171() {
 #[test]
 fn peer_owned_connected_prefix_outranks_an_equal_length_next_table_route_19171() {
     let mut snapshot = forwarding_snapshot_with_next_table(true);
+    // A CONFIGURED next-table route (the census row's reader,
+    // `junos_next_table_winner_v4`), not a kernel-model leak rule: those run
+    // before longest-prefix match and no connected row pre-empts them.
+    for route in &mut snapshot.routes {
+        if route.table == "inet.0" && route.destination == "8.8.8.0/24" {
+            route.next_table_route = true;
+        }
+    }
     snapshot.interfaces.push(InterfaceSnapshot {
         name: "reth8.0".to_string(),
         zone: "wan".to_string(),
