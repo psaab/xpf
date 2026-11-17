@@ -76,6 +76,7 @@ clean_cargo_verdict := $(strip \
 clean_cargo_verdict := $(or $(firstword $(clean_cargo_verdict)),remove)
 
 # eBPF compilation flags
+.PHONY: test-git-leg
 .PHONY: all generate generate-userspace-xdp build-userspace-xdp build build-ctl build-userspace-dp build-userspace-dp-debug-log check-userspace-dt-needed proto install clean test test-go test-rust test-miri miri-census test-miri-census-lib test-race-dp audit-check test-connectivity test-connectivity-mtr-selftest test-wire-properties test-failover test-rolling-upgrade test-double-failover test-active-active test-stress-failover test-ha-crash test-chained-crash test-private-rg test-restart-connectivity test-harness-ledger-lib harness-compare harness-compare-all harness-coverage harness-ledger-lint test-wire-routing-separation test-wire-routing-separation-lib test-failover-clock-lib test-ha-assurance-lib test-failover-client-lib clippy-rust
 
 all: generate build build-ctl
@@ -1223,6 +1224,16 @@ test-mutate-lib:
 # force-stop/failover smoke script routes through the lock, and the cell
 # serializes/queues/re-enters correctly). Private lock path, mocked incus —
 # no cluster, no network. Run this after touching the lock or smoke wiring.
+# #19080: the Go tests that need a git checkout. Runner lanes sync no .git, so
+# these skip there with a named reason (internal/testguard.RequireGitCheckout)
+# and run here, in a lane that syncs a shallow repo (HEAD down to the
+# merge-base, origin/master at the merge-base). Every named test must PASS; a
+# skip or a missing test fails the leg. Run it as
+#   scripts/vm-test-run.sh --with-git -- make test-git-leg
+# Never in a mutation lane (no git metadata in a mutation sandbox).
+test-git-leg:
+	XPF_REQUIRE_GIT=1 bash ./scripts/test-git-leg.sh
+
 test-cluster-lock-lib:
 	bash ./test/incus/with-cluster-selftest.sh
 	bash ./test/incus/cluster-cell-selftest.sh

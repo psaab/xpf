@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // Tier tags and thresholds, mirroring scripts/refactoring-audit.sh.
@@ -256,6 +258,7 @@ func heatmapDrift(committed, generated map[string]string) heatmapDriftReport {
 // well-formed inputs.
 func TestGlobalHeatmapFreshnessAdvisory(t *testing.T) {
 	root := repoRoot(t)
+	testguard.RequireGitCheckout(t, root)
 	committedPath := filepath.Join(root, "docs", "refactoring-audit-current.txt")
 	b, err := os.ReadFile(committedPath)
 	if err != nil {
@@ -384,6 +387,7 @@ func TestHeatmapArtifactWellFormed(t *testing.T) {
 // tree, re-creating the ignore-this-signal failure #6617 is about.
 func TestGeneratorDeterministic(t *testing.T) {
 	root := repoRoot(t)
+	testguard.RequireGitCheckout(t, root)
 	first := runScript(t, root, "scripts/refactoring-audit.sh")
 	second := runScript(t, root, "scripts/refactoring-audit.sh")
 	if first != second {

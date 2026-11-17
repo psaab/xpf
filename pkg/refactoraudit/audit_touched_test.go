@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // This file holds the HARD half of the #7253 split: a file THE PR TOUCHES
@@ -230,6 +232,7 @@ func readAccepted(t *testing.T, root string) []acceptedCrossing {
 // TestUndeterminableBaseFailsLoudly.
 func TestTouchedFileCrossedModularityThreshold(t *testing.T) {
 	root := repoRoot(t)
+	testguard.RequireGitCheckout(t, root)
 	touched := parseTouched(t, "scripts/refactoring-audit-touched.sh",
 		runScript(t, root, "scripts/refactoring-audit-touched.sh"))
 	crossings := thresholdCrossings(touched)
@@ -541,6 +544,7 @@ func TestAcceptedFileWellFormed(t *testing.T) {
 // of near-misses must not be.
 func TestAuditedPathPredicateAgreesWithGenerator(t *testing.T) {
 	root := repoRoot(t)
+	testguard.RequireGitCheckout(t, root)
 	rows := parseHeatmap(t, "freshly generated heatmap", generatedHeatmap(t))
 
 	var paths []string

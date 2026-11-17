@@ -69,6 +69,18 @@
 # exits 143 and still names the write; a TERM during the handback is ignored
 # until it ends; a nested --root run is refused. Mutations: a per-run lock,
 # the interrupt report dropped, an interruptible handback, no nested check.
+#
+# #19080, --with-git (the mock keeps the sync's tar stream; a fixture repo has
+# a branch two commits off master's c2, and origin/master moved on to c5):
+#   - refused, before any sync and without running the command, under
+#     XPF_MUTATION_LANE=1, with --mutation, and with --no-sync;
+#   - the synced .git is shallow, HEAD is the branch tip, origin/master is the
+#     merge-base c2, c1 is absent, and the index lists the tracked files; the
+#     worktree files (an untracked one included) sync beside it;
+#   - a plain sync carries no .git; a --mutation lane exports
+#     XPF_MUTATION_LANE=1 to its command.
+#   Mutations: the mutation-lane refusal dropped, XPF_MUTATION_LANE ignored,
+#   no index, full history instead of the merge-base cut, the export dropped.
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -97,7 +109,15 @@ exec) shift 2; [[ "${1:-}" == -- ]] && shift ;;
 *) exit 90 ;;
 esac
 case "${1:-}" in
-test) exit 0 ;;
+test)
+	# #19080: a captured sync has no go.mod, so skip the module check.
+	[[ -n "${MOCK_SYNC_CAPTURE:-}" && "${3:-}" == */go.mod ]] && exit 1
+	exit 0 ;;
+python3)
+	# #19080: the sync. MOCK_SYNC_CAPTURE keeps the tar stream it was given.
+	[[ -n "${MOCK_SYNC_CAPTURE:-}" ]] || exit 94
+	cat >"$MOCK_SYNC_CAPTURE"
+	exit 0 ;;
 find)
 	# The root handback. #19162: MOCK_FIND_DELAY_S stretches it, with
 	# markers, so a cell can signal the script in the middle of it.
@@ -873,6 +893,113 @@ if mutant inverted-compare 's/comm -13 /comm -12 /'; then
 	fi
 fi
 reset_state
+
+# ── #19080: --with-git (a shallow repo synced with the tree) ──────────────
+# Fixture: master c1-c2; the branch adds c3, c4 on c2; origin/master moved on
+# to c5. So HEAD = c4, the merge-base = c2, and c1 must NOT be in the lane.
+g="$tmp/grepo"
+gc() { git -C "$g" -c user.name=t -c user.email=t@t "$@"; }
+git init -q "$g"
+for c in c1 c2; do echo "$c" >"$g/$c"; gc add "$c"; gc commit -q -m "$c"; done
+git_c1=$(gc rev-parse HEAD~1) git_c2=$(gc rev-parse HEAD)
+gc checkout -q -b side
+for c in c3 c4; do echo "$c" >"$g/$c"; gc add "$c"; gc commit -q -m "$c"; done
+git_c4=$(gc rev-parse HEAD)
+gc checkout -q --detach "$git_c2"; echo c5 >"$g/c5"; gc add c5; gc commit -q -m c5
+gc update-ref refs/remotes/origin/master HEAD
+gc checkout -q side
+echo untracked >"$g/u.txt"
+# git_run <script> <tag> [opts...] [-- ENV=...]: vm-test-run.sh from the fixture
+# repo with the sync captured; the command records that it ran.
+git_run() {
+	local under=$1 tag=$2 rc=0
+	shift 2
+	local opts=() envs=()
+	while [[ $# -gt 0 && "$1" != -- ]]; do opts+=("$1"); shift; done
+	[[ "${1:-}" == -- ]] && shift
+	envs=("$@")
+	mkdir -p "$tmp/$tag"
+	(cd "$g" && env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" MOCK_SYNC_CAPTURE="$tmp/$tag/sync.tar" "${envs[@]}" \
+		bash "$under" --runner mock:runner --name lane "${opts[@]}" -- "touch /work/lane/tmp/ran-$tag") \
+		>"$tmp/$tag.out" 2>"$tmp/$tag.err" || rc=$?
+	echo "$rc"
+}
+# A refusal: status 2, the reason named, the command never ran, nothing synced.
+git_refused() { # <tag> <rc> <reason regex>
+	[[ "$2" == 2 && ! -e "$tmp/work/lane/tmp/ran-$1" && ! -e "$tmp/$1/sync.tar" ]] && grep -Eq "$3" "$tmp/$1.err"
+}
+# The captured stream's .git: shallow, HEAD = c4, origin/master = the merge
+# base c2, c1 absent, an index that lists the tracked files, and the synced
+# worktree files (the untracked one included) beside it.
+git_lane_ok() { # <tag>
+	local x="$tmp/$1/x"
+	mkdir -p "$x" && tar -xf "$tmp/$1/sync.tar" -C "$x" 2>/dev/null || return 1
+	[[ -d "$x/.git" && -f "$x/u.txt" && -f "$x/c4" ]] || return 1
+	[[ "$(git -C "$x" rev-parse --is-shallow-repository)" == true ]] || return 1
+	[[ "$(git -C "$x" rev-parse HEAD)" == "$git_c4" ]] || return 1
+	[[ "$(git -C "$x" rev-parse refs/remotes/origin/master)" == "$git_c2" ]] || return 1
+	[[ "$(git -C "$x" merge-base origin/master HEAD)" == "$git_c2" ]] || return 1
+	! git -C "$x" cat-file -e "${git_c1}^{commit}" 2>/dev/null || return 1
+	[[ "$(git -C "$x" ls-files | tr '\n' ' ')" == "c1 c2 c3 c4 " ]] || return 1
+	[[ -z "$(git -C "$x" diff --name-only origin/master -- c1 c2)" ]]
+}
+rc=$(git_run "$script" g1 --with-git -- XPF_MUTATION_LANE=1)
+if git_refused g1 "$rc" 'refusing --with-git in a mutation lane'; then
+	ok "#19080: --with-git under XPF_MUTATION_LANE=1 is refused before the sync; the command never runs"
+else
+	bad "#19080: --with-git under XPF_MUTATION_LANE=1 (rc $rc): $(tr '\n' '|' <"$tmp/g1.err")"
+fi
+rc=$(git_run "$script" g2 --with-git --mutation)
+if git_refused g2 "$rc" 'refusing --with-git in a mutation lane'; then
+	ok "#19080: --with-git --mutation is refused"
+else
+	bad "#19080: --with-git --mutation (rc $rc): $(tr '\n' '|' <"$tmp/g2.err")"
+fi
+rc=$(git_run "$script" g3 --with-git --no-sync)
+if git_refused g3 "$rc" 'refusing --with-git with --no-sync'; then
+	ok "#19080: --with-git --no-sync is refused"
+else
+	bad "#19080: --with-git --no-sync (rc $rc): $(tr '\n' '|' <"$tmp/g3.err")"
+fi
+rc=$(git_run "$script" g4 --with-git)
+if [[ "$rc" == 0 && -e "$tmp/work/lane/tmp/ran-g4" ]] && git_lane_ok g4; then
+	ok "#19080: --with-git syncs a shallow .git: HEAD, origin/master at the merge-base, nothing older, the index read"
+else
+	bad "#19080: --with-git sync (rc $rc): $(tr '\n' '|' <"$tmp/g4.err")"
+fi
+rc=$(git_run "$script" g5)
+if [[ "$rc" == 0 && -s "$tmp/g5/sync.tar" ]] && ! tar -tf "$tmp/g5/sync.tar" | grep -q '^\.git/'; then
+	ok "#19080: a plain sync carries no .git"
+else
+	bad "#19080: plain sync (rc $rc) carried .git or failed: $(tr '\n' '|' <"$tmp/g5.err")"
+fi
+rc=$(pause_run "$script" g6 'echo "M=${XPF_MUTATION_LANE:-}" >/work/lane/tmp/g6.txt' --mutation)
+if [[ "$rc" == 0 && "$(cat "$tmp/work/lane/tmp/g6.txt" 2>/dev/null)" == M=1 ]]; then
+	ok "#19080: a --mutation lane exports XPF_MUTATION_LANE=1 to its command"
+else
+	bad "#19080: --mutation lane (rc $rc) exported '$(cat "$tmp/work/lane/tmp/g6.txt" 2>/dev/null)'"
+fi
+# Mutations: each must flip its cell.
+if mutant git-no-refusal 's/^if \[\[ "\$with_git" -eq 1 && "\$mutation" -eq 1 \]\]; then$/if false; then/'; then
+	rc=$(git_run "$tmp/git-no-refusal.sh" gm1 --with-git -- XPF_MUTATION_LANE=1)
+	if ! git_refused gm1 "$rc" 'refusing --with-git in a mutation lane'; then ok "mutation git-no-refusal: the mutation-lane cell fails"; else bad "mutation git-no-refusal: still refused"; fi
+fi
+if mutant git-env-ignored 's/^\[\[ -n "\${XPF_MUTATION_LANE:-}" \]\] && mutation=1$/true/'; then
+	rc=$(git_run "$tmp/git-env-ignored.sh" gm2 --with-git -- XPF_MUTATION_LANE=1)
+	if ! git_refused gm2 "$rc" 'refusing --with-git in a mutation lane'; then ok "mutation git-env-ignored: the XPF_MUTATION_LANE cell fails"; else bad "mutation git-env-ignored: still refused"; fi
+fi
+if mutant git-no-index 's/^\t\tgit -C "\$dir" read-tree HEAD &&$/\t\ttrue \&\&/'; then
+	rc=$(git_run "$tmp/git-no-index.sh" gm3 --with-git)
+	if ! { [[ "$rc" == 0 ]] && git_lane_ok gm3; }; then ok "mutation git-no-index: the shallow-repo cell fails"; else bad "mutation git-no-index: the shallow-repo cell still passes"; fi
+fi
+if mutant git-full-history 's/--depth="\$((n + 1))"/--depth=1000/'; then
+	rc=$(git_run "$tmp/git-full-history.sh" gm4 --with-git)
+	if ! { [[ "$rc" == 0 ]] && git_lane_ok gm4; }; then ok "mutation git-full-history: the shallow-repo cell fails"; else bad "mutation git-full-history: the shallow-repo cell still passes"; fi
+fi
+if mutant git-no-export 's/^\[\[ "\$mutation" -eq 1 \]\] && env_prefix+=.*$/true/'; then
+	rc=$(pause_run "$tmp/git-no-export.sh" gm5 'echo "M=${XPF_MUTATION_LANE:-}" >/work/lane/tmp/gm5.txt' --mutation)
+	if [[ "$(cat "$tmp/work/lane/tmp/gm5.txt" 2>/dev/null)" != M=1 ]]; then ok "mutation git-no-export: the export cell fails"; else bad "mutation git-no-export: the export cell still passes"; fi
+fi
 
 echo "vm-test-run selftest: ${pass} passed, ${fail} failed, ${skip} skipped"
 [[ "$fail" -eq 0 ]]

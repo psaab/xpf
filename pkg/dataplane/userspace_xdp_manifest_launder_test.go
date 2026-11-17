@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // TestFreshnessGateRejectsHandRegeneratedManifest13963 archives the committed
@@ -14,6 +16,7 @@ import (
 // invokes the production freshness test in that isolated copy. The wrapper
 // succeeds only when that production gate rejects the stale-object manifest.
 func TestFreshnessGateRejectsHandRegeneratedManifest13963(t *testing.T) {
+	testguard.RequireGitCheckout(t, ".")
 	root, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		t.Fatalf("find repository root: %v", err)

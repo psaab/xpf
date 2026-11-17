@@ -630,6 +630,10 @@ run_bash scripts/vm-test-run-selftest.sh
 # build. A symlinked lane and a bind mount under the lane must be refused with
 # an outside sentinel intact. Four mutants. SKIPs without cargo.
 run_bash scripts/vm-test-run-sync-selftest.sh
+# #19080: the Go tests that need a git checkout. In a lane synced with
+# `scripts/vm-test-run.sh --with-git` they run and must all PASS; anywhere
+# without a git work tree this is a named SKIP (77) pointing at that leg.
+run_bash scripts/test-git-leg.sh
 # #8302: the harness result ledger. Hermetic -- fixtures only, no cluster.
 #
 # harness-result-selftest.sh drives the whole adapter table, whose reason for

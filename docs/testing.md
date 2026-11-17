@@ -243,6 +243,30 @@ that lint), and run `make close-keyword-lint` on the workstation. Legs that
 run git themselves (for example `scripts/no-git-stash-selftest.sh`, which uses
 `git grep`) still fail on a runner for the same reason.
 
+The Go tests that need a checkout (#19080) do not fail there. They SKIP,
+naming their leg (`internal/testguard.RequireGitCheckout`), and run in a lane
+that syncs a shallow repo:
+
+    scripts/vm-test-run.sh --with-git -- make test-git-leg
+
+- **What `--with-git` syncs:** a `.git` built from the local object store.
+  It holds HEAD and its history down to the merge-base with
+  `XPF_AUDIT_BASE_REF` (default `origin/master`), with
+  `refs/remotes/origin/master` at that merge-base and the index read from
+  HEAD. Nothing older is included.
+- **Lane name:** the default lane name gets a `-git` suffix.
+- **What the leg does:** it runs exactly the named tests
+  (`scripts/test-git-leg.sh`, kept in step with the `RequireGitCheckout`
+  calls) with `XPF_REQUIRE_GIT=1`, under which a missing checkout fails
+  instead of skipping. Every named test must PASS; a skip, a failure or a
+  test that did not run fails the leg.
+- **In `scripts/run-selftests.sh`:** the same script runs as a leg, and is a
+  named SKIP wherever there is no work tree.
+- **Never in a mutation lane:** a mutation sandbox must contain no git
+  metadata. `vm-test-run.sh` refuses `--with-git` with `--mutation`, or when
+  `XPF_MUTATION_LANE=1` is in its environment (`scripts/mutate.sh` exports
+  it). A `--mutation` lane exports `XPF_MUTATION_LANE=1` to its command.
+
 The runners share their lab host's CPUs with that host's cluster. A gate
 measurement cell therefore pauses every runner on that host
 (every instance named `xpf-testrunner*`, enumerated with

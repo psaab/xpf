@@ -21,6 +21,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$here/mutate-lib.sh"
 
 REPO="${REPO:?set REPO to the worktree to mutate}"
+# #19080: every cell is a mutation lane; vm-test-run.sh refuses --with-git
+# under it (a mutation sandbox must contain no git metadata).
+export XPF_MUTATION_LANE=1
 SPEC="${1:?usage: mutate.sh <spec.tsv> [out.tsv]}"
 # #8231: per-cell `go test -json` side file, truncated by gate_go before each run.
 GOTESTJSON_LOG="${GOTESTJSON_LOG:-$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp -t mutate-gotest-json.XXXXXX)}"

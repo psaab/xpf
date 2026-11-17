@@ -33,6 +33,15 @@
 #   --allow-xpf-state
 #              run a --root leg even when the runner's /var/lib/xpf holds
 #              state (see "Runner state" below); the entries are still listed.
+#   --with-git sync a SHALLOW git repo with the tree (see "Git" below), for
+#              the tests that need one: `--with-git -- make test-git-leg`.
+#              The default lane name gets a -git suffix, so the git leg never
+#              thrashes the plain lane's build. Refused with --no-sync and in a
+#              mutation lane.
+#   --mutation mark this lane as a mutation lane: XPF_MUTATION_LANE=1 is set
+#              in the lane, and --with-git is refused. Also set by
+#              XPF_MUTATION_LANE=1 in the caller's environment (scripts/mutate.sh
+#              exports it).
 #
 #   If the runner is FROZEN (a gate cell pauses its same-host runner while it
 #   measures), the script waits for it to resume, up to XPF_TEST_RUNNER_WAIT_S
@@ -116,6 +125,18 @@
 # runner too: the source tree is replaced on every sync. No .git is copied;
 # GOFLAGS gets -buildvcs=false.
 #
+# Git (#19080): a handful of Go tests need a git checkout (git ls-files, git
+# archive HEAD, the refactoring-audit changed set against origin/master).
+# Without .git they SKIP, naming `make test-git-leg`. --with-git adds a .git to
+# the synced tree: a shallow repo holding HEAD and its history down to the
+# merge-base with the base ref (XPF_AUDIT_BASE_REF, default origin/master),
+# with refs/remotes/origin/master AT that merge-base and the index read from
+# HEAD. It is built on the workstation from the local object store (nothing is
+# fetched from a remote) and lands in the lane like any other synced path, so
+# the next plain sync removes it. A mutation lane must contain no git metadata
+# (a mutant "restored" through git, or a cell that reads git state, would
+# score against the wrong tree), so --with-git is refused there.
+#
 # The lane's target dir is kept only when nothing is in doubt (#19134).
 # cargo calls a crate fresh when no source is newer than its artefacts, so a
 # kept target dir re-tested an OLD binary whenever the synced sources were
@@ -167,6 +188,9 @@ sync=1
 merge_stderr=1
 allow_unproven_root=0
 allow_xpf_state=0
+with_git=0
+mutation=0
+[[ -n "${XPF_MUTATION_LANE:-}" ]] && mutation=1
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--runner) runner="$2"; shift 2 ;;
@@ -176,6 +200,8 @@ while [[ $# -gt 0 ]]; do
 	--separate-stderr) merge_stderr=0; shift ;;
 	--allow-unproven-root) allow_unproven_root=1; shift ;;
 	--allow-xpf-state) allow_xpf_state=1; shift ;;
+	--with-git) with_git=1; shift ;;
+	--mutation) mutation=1; shift ;;
 	--) shift; break ;;
 	# The whole leading comment block, however long it grows (a fixed line
 	# range went stale twice as the header grew).
@@ -188,8 +214,20 @@ if [[ $# -eq 0 ]]; then
 	exit 2
 fi
 
+if [[ "$with_git" -eq 1 && "$mutation" -eq 1 ]]; then
+	echo "vm-test-run: refusing --with-git in a mutation lane (--mutation or XPF_MUTATION_LANE=${XPF_MUTATION_LANE:-}): a mutation sandbox must contain no git metadata (#19080)" >&2
+	exit 2
+fi
+if [[ "$with_git" -eq 1 && "$sync" -eq 0 ]]; then
+	echo "vm-test-run: refusing --with-git with --no-sync: the shallow repo is part of the sync (#19080)" >&2
+	exit 2
+fi
+
 top="$(git rev-parse --show-toplevel 2>/dev/null)" || { echo "vm-test-run: run from inside a worktree" >&2; exit 2; }
-[[ -n "$name" ]] || name="$(basename "$top")"
+if [[ -z "$name" ]]; then
+	name="$(basename "$top")"
+	[[ "$with_git" -eq 1 ]] && name="${name}-git"
+fi
 if [[ ! "$name" =~ ^[A-Za-z0-9._-]+$ || "$name" =~ ^\.+$ ]]; then
 	echo "vm-test-run: lane name must match [A-Za-z0-9._-]+ and not be all dots: $name" >&2
 	exit 2
@@ -580,9 +618,48 @@ except Refuse as exc:
     sys.exit(3)
 PY
 )
+# --with-git (#19080, see "Git" above): build the shallow repo the sync adds
+# as .git. Prints its directory; the caller removes it after the sync.
+build_shallow_git() {
+	local head mb n common dir
+	head=$(git -C "$top" rev-parse --verify --quiet 'HEAD^{commit}') ||
+		{ echo "vm-test-run: --with-git: no commit at HEAD (#19080)" >&2; return 1; }
+	mb=$(git -C "$top" merge-base "${XPF_AUDIT_BASE_REF:-origin/master}" "$head") ||
+		{ echo "vm-test-run: --with-git: no merge-base between ${XPF_AUDIT_BASE_REF:-origin/master} and HEAD; fetch it or set XPF_AUDIT_BASE_REF (#19080)" >&2; return 1; }
+	n=$(git -C "$top" rev-list --count "${mb}..${head}") || return 1
+	common=$(git -C "$top" rev-parse --path-format=absolute --git-common-dir) || return 1
+	{ [[ -n "${TMPDIR:-}" ]] || mkdir -p /var/worktrees/.cache/tmpdir; } &&
+		dir=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/vmtr-git.XXXXXX") || return 1
+	printf '%s\n' "$dir"
+	if git init -q --template= "$dir" &&
+		git -C "$dir" fetch -q --no-tags --depth="$((n + 1))" \
+			--upload-pack='git -c uploadpack.allowAnySHA1InWant=true upload-pack' \
+			"file://${common}" "$head" &&
+		git -C "$dir" update-ref refs/heads/xpf-lane "$head" &&
+		git -C "$dir" symbolic-ref HEAD refs/heads/xpf-lane &&
+		git -C "$dir" update-ref refs/remotes/origin/master "$mb" &&
+		git -C "$dir" read-tree HEAD &&
+		[[ "$(git -C "$dir" merge-base refs/remotes/origin/master HEAD)" == "$mb" ]]; then
+		echo "vm-test-run: --with-git: shallow repo: HEAD ${head:0:12}, origin/master = merge-base ${mb:0:12} (${n} commit(s) apart) (#19080)" >&2
+		return 0
+	fi
+	echo "vm-test-run: --with-git: could not build the shallow repo (#19080)" >&2
+	return 1
+}
+git_root=""
+if [[ "$with_git" -eq 1 ]]; then
+	if ! git_root=$(build_shallow_git); then
+		[[ -n "$git_root" ]] && rm -rf -- "$git_root"
+		exit 2
+	fi
+fi
 if [[ "$sync" -eq 1 ]]; then
-	if ! (cd "$top" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) |
-		incus exec "$runner" -- python3 -I -c "$lane_py" sync /work/ "${name}"; then
+	sync_rc=0
+	(cd "$top" && git ls-files -z -co --exclude-standard |
+		tar --null -cf - -T - ${git_root:+-C "$git_root" .git}) |
+		incus exec "$runner" -- python3 -I -c "$lane_py" sync /work/ "${name}" || sync_rc=$?
+	[[ -n "$git_root" ]] && rm -rf -- "$git_root"
+	if [[ "$sync_rc" -ne 0 ]]; then
 		echo "vm-test-run: could not prepare, decide on, or safely clean ${base} on ${runner}; refusing rather than risk testing a stale build (#19134)" >&2
 		exit 2
 	fi
@@ -630,6 +707,8 @@ fi
 gocache=/home/runner/.cache/go-build
 [[ "$as_root" -eq 1 ]] && gocache=/root/.cache/go-build
 env_prefix="export CARGO_TARGET_DIR='${base}/target' TMPDIR='${base}/tmp' GOTMPDIR=/wtgt GOCACHE='${gocache}' GOFLAGS='-buildvcs=false' XPF_TEST_RUNNER_LANE='${name}'; mkdir -p /wtgt 2>/dev/null || true; [ -f \"\$HOME/.cargo/env\" ] && . \"\$HOME/.cargo/env\"; cd '${base}/src' || { echo 'vm-test-run: no source tree at ${base}/src (sync it first)' >&2; exit 2; }"
+# #19080: a mutation lane says so to everything it runs.
+[[ "$mutation" -eq 1 ]] && env_prefix+="; export XPF_MUTATION_LANE=1"
 # #19139: one stream, in write order (see "Stream order" above).
 stream_prefix=""
 [[ "$merge_stderr" -eq 1 ]] && stream_prefix="exec 2>&1; "

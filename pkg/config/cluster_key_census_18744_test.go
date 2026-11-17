@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/psaab/xpf/internal/testguard"
 )
 
 // #18744 census: no tracked config or document carries a real chassis
@@ -95,6 +97,7 @@ func TestNoTrackedFileCarriesARealClusterKey18744(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	testguard.RequireGitCheckout(t, root)
 	out, err := exec.Command("git", "-C", root, "ls-files", "--", "*.conf", "*.set", "*.md").Output()
 	if err != nil {
 		t.Fatalf("git ls-files: %v", err)
