@@ -74,6 +74,7 @@ pkg/cluster.SetStateDirForTesting	cross-package seam: called by tests in pkg/dae
 pkg/cluster.SetUnkeyedAuthorityClocksForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon
 pkg/cluster.SetUnkeyedAuthorityGraceStatePathForTesting	cross-package seam: called by tests in pkg/cli, pkg/daemon, pkg/grpcapi
 pkg/cluster.SetUnkeyedAuthorityPersistForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
+pkg/cluster.UnkeyedGraceRecordLeakForTesting	cross-package seam: pkg/daemon's TestMain judges its run-shared unkeyed-grace record after the run with it (#19161), and pkg/cluster's leak cells call it
 pkg/config.FRRNameAlias16867ForTest	cross-package seam: called by tests in pkg/frr
 pkg/config.SeedDNSAnswerCacheForTest	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/daemon
 pkg/config.SetLookupAddressDNSNameForTest	cross-package seam: called by tests in pkg/api, pkg/cli, pkg/configstore and 1 more
