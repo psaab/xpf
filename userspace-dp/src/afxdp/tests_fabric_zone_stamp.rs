@@ -6769,8 +6769,9 @@ fn split_rg_refresh_keeps_fabric_redirect_15958b() {
             !reverse_items.is_empty(),
             "v6={v6}: refresh must visit the reverse companion"
         );
-        // #19171 (2a) re-pin. Old stored disposition: FabricRedirect on the
-        // fabric parent (4). New: HAInactive on the peer-owned LAN unit (5).
+        // #19171 (2a) re-pin. The refresh's computed (and published) disposition.
+        // Old: FabricRedirect on the fabric parent (4). New: HAInactive on the
+        // peer-owned LAN unit (5). The table row itself keeps FabricRedirect.
         // The peer-owned LAN row now stays in transit, so the refresh answers
         // it and HA demotes it, instead of the withheld FIB's WAN gateway route
         // the retain verdict had to refuse. Never the WAN either way.
@@ -6785,7 +6786,10 @@ fn split_rg_refresh_keeps_fabric_redirect_15958b() {
         }
         // The DELIVERED outcome is unchanged: the WAN reply crosses the fabric.
         let (tx, _, stored) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, v6);
-        eprintln!("#19171 v6={v6} keeps_fabric_redirect stored-after-refresh={stored:?}");
+        assert!(
+            stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+            "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+        );
         assert_eq!(tx, [0, 1, 0], "v6={v6}: delivered over the fabric, never the WAN or the LAN");
     }
 }
@@ -6884,7 +6888,7 @@ fn split_rg_refresh_keeps_fabric_redirect_unresolved_gateway_18659() {
             !reverse_items.is_empty(),
             "v6={v6}: refresh must visit the reverse companion"
         );
-        // #19171 (2a) re-pin. Old stored disposition: FabricRedirect on 4.
+        // #19171 (2a) re-pin. Computed (published) disposition, old: FabricRedirect on 4.
         // New: HAInactive on the peer-owned LAN unit (5): the refresh no
         // longer sees the unresolved WAN gateway at all, because the LAN row
         // answers the client. Never ge-0-0-2.50 either way.
@@ -6899,7 +6903,10 @@ fn split_rg_refresh_keeps_fabric_redirect_unresolved_gateway_18659() {
         }
         // The DELIVERED outcome is unchanged: the WAN reply crosses the fabric.
         let (tx, _, stored) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, v6);
-        eprintln!("#19171 v6={v6} unresolved_gateway stored-after-refresh={stored:?}");
+        assert!(
+            stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+            "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+        );
         assert_eq!(tx, [0, 1, 0], "v6={v6}: delivered over the fabric, never ge-0-0-2.50 or the LAN");
     }
 }
@@ -7527,7 +7534,7 @@ fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
         !reverse_items.is_empty(),
         "refresh must visit the reverse companion"
     );
-    // #19171 (2a) re-pin. Old stored disposition: the FabricRedirect marker
+    // #19171 (2a) re-pin. Computed (published) disposition, old: the FabricRedirect marker
     // (fail closed at TX). New: HAInactive on the peer-owned LAN unit (5),
     // which fails closed too, and is never the WAN candidate.
     for (_, decision, _, _, _) in &reverse_items {
@@ -7540,7 +7547,10 @@ fn split_rg_refresh_no_fabric_retains_redirect_15958b() {
     }
     // The DELIVERED outcome is unchanged: with no fabric, nothing leaves.
     let (tx, _, stored) = fw0_refresh_then_reply_19171(&mut sessions, &forwarding, &ha_state, false);
-    eprintln!("#19171 no_fabric stored-after-refresh={stored:?}");
+    assert!(
+        stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+        "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+    );
     assert_eq!(tx, [0, 0, 0], "no fabric: the reply is dropped, never sent out the WAN or the LAN");
 }
 
@@ -7828,7 +7838,7 @@ fn split_rg_refresh_retargets_current_peer_15958b() {
         .filter(|(_, _, m, _, _)| m.is_reverse)
         .collect();
     assert!(!reverse_items.is_empty());
-    // #19171 (2a) re-pin. Old stored disposition: a FabricRedirect carrying
+    // #19171 (2a) re-pin. Computed (published) disposition, old: a FabricRedirect carrying
     // the current peer MAC. New: HAInactive on the peer-owned LAN unit (5),
     // which carries no peer MAC: the redirect, and so the peer it targets,
     // is resolved when the packet is sent. The delivered check below pins
@@ -7841,7 +7851,10 @@ fn split_rg_refresh_retargets_current_peer_15958b() {
     }
     let (tx, dst_mac, stored) =
         fw0_refresh_then_reply_19171(&mut sessions, &forwarding2, &ha_state, false);
-    eprintln!("#19171 retarget stored-after-refresh={stored:?}");
+    assert!(
+        stored.iter().all(|d| *d == ForwardingDisposition::FabricRedirect),
+        "the table row keeps FabricRedirect (a refresh never rewrites a row to HAInactive; it publishes it): {stored:?}"
+    );
     assert_eq!(tx, [0, 1, 0], "delivered over the fabric");
     assert_eq!(
         dst_mac,
