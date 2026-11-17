@@ -103,6 +103,15 @@ func TestSharedGraceRecordWatchReportsAFixtureAnchor19161(t *testing.T) {
 	if got := stop(); got != "" {
 		t.Fatalf("a run-stamped write, or a write to another path, was reported:\n%s", got)
 	}
+	// A real wall anchor with more grace elapsed than the run has lasted: a
+	// fixture MONOTONIC clock (pkg/daemon's cells inject only that one).
+	stop = watchSharedGraceRecord19161(shared, runStart)
+	if err := unkeyedAuthorityPersist(shared, runStart.Add(time.Second), runStart.Add(time.Second), 72*time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if got := stop(); !strings.Contains(got, "elapsed=72h0m0s, more than this run has lasted") {
+		t.Fatalf("a real-anchored write with 72h elapsed was not reported: %q", got)
+	}
 	stop = watchSharedGraceRecord19161(shared, runStart)
 	fixture := time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 	if err := unkeyedAuthorityPersist(shared, fixture, fixture.Add(72*time.Hour), 72*time.Hour); err != nil {
@@ -112,5 +121,41 @@ func TestSharedGraceRecordWatchReportsAFixtureAnchor19161(t *testing.T) {
 	stopped = true
 	if !strings.Contains(got, shared) || !strings.Contains(got, "2026-11-03T12:00:00Z") || !strings.Contains(got, "goroutine") {
 		t.Fatalf("a fixture-anchored write of the shared record was not reported with its stack: %q", got)
+	}
+}
+
+// The cross-package check (pkg/daemon's TestMain): the record at the current
+// path is read back and judged by the same predicate.
+func TestUnkeyedGraceRecordLeakCheck19161(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unkeyed-authority-grace")
+	t.Cleanup(SetUnkeyedAuthorityGraceStatePathForTesting(path))
+	runStart := time.Now()
+	if got := UnkeyedGraceRecordLeakForTesting(runStart); got != "" {
+		t.Fatalf("no record reported as a leak: %q", got)
+	}
+	cases := []struct {
+		name     string
+		earliest time.Time
+		elapsed  time.Duration
+		want     string
+	}{
+		{"real anchor, real elapsed", runStart.Add(time.Second), time.Second, ""},
+		{"fixture wall anchor", time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC), time.Second, "before this run started"},
+		{"fixture monotonic elapsed", runStart.Add(time.Second), 72 * time.Hour, "more than this run has lasted"},
+	}
+	for _, c := range cases {
+		if err := persistUnkeyedAuthorityRecord(path, c.earliest, c.earliest, c.elapsed); err != nil {
+			t.Fatal(err)
+		}
+		got := UnkeyedGraceRecordLeakForTesting(runStart)
+		if (c.want == "") != (got == "") || (c.want != "" && !strings.Contains(got, c.want)) {
+			t.Errorf("%s: got %q, want a report containing %q", c.name, got, c.want)
+		}
+	}
+	if err := os.WriteFile(path, []byte("garbage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := UnkeyedGraceRecordLeakForTesting(runStart); !strings.Contains(got, "corrupt or legacy") {
+		t.Errorf("a corrupt record: got %q", got)
 	}
 }

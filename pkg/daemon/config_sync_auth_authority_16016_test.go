@@ -38,6 +38,7 @@ func TestUnauthenticatedConfigSyncRejectedOnceLocallyKeyed16016(t *testing.T) {
 		t.Fatalf("seed local keyed config: %v", err)
 	}
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	manager.UpdateConfig(&config.ClusterConfig{
 		ControlLinkAuthKey: config.NewSecret("local-key-16016"),
 	})
@@ -78,6 +79,7 @@ func TestMissingConfigSyncProvenanceFailsClosedBeforeConvergenceShortcut16016(t 
 	}
 	store.MarkActiveApplied()
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	manager.UpdateConfig(&config.ClusterConfig{
 		ControlLinkAuthKey: config.NewSecret("local-key-16016"),
 	})
@@ -107,6 +109,7 @@ func TestUnauthenticatedConfigCanProvisionFirstPeerKey16016(t *testing.T) {
 		t.Fatalf("seed unkeyed config: %v", err)
 	}
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	d := &Daemon{
 		applySem: semaphore.NewWeighted(1),
 		cluster:  manager,
@@ -144,6 +147,7 @@ func TestUnauthenticatedConfigSyncRejectedAfterUnkeyedGrace16016(t *testing.T) {
 		t.Fatalf("seed unkeyed config: %v", err)
 	}
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	if !manager.UnkeyedAuthorityExpired() {
 		t.Fatal("expired persisted anchor was not restored during manager config")
 	}
@@ -178,6 +182,7 @@ func TestUnauthenticatedConfigSyncRejectedAfterUnkeyedGrace16016(t *testing.T) {
 func TestPeerSyncFirstKeyApplyPreservesGraceAnchor16016(t *testing.T) {
 	anchorPath := isolateAuthorityAnchors16016(t)
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	manager.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	expiry := manager.UnkeyedGraceExpiry()
 	if expiry.IsZero() {
@@ -213,6 +218,7 @@ func TestDaemonProvenanceFirstKeyThenAuthenticatedClearKeepsOriginalGrace16016(t
 		t.Fatalf("seed unkeyed config: %v", err)
 	}
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	expiry := manager.UnkeyedGraceExpiry()
 	if expiry.IsZero() {
 		t.Fatal("unkeyed manager did not persist its initial grace cutoff")
@@ -320,6 +326,7 @@ func TestUnauthenticatedConfigSyncRechecksAuthorityAfterApplySemaphoreWait16016(
 		t.Fatalf("seed unkeyed config: %v", err)
 	}
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	if manager.UnkeyedAuthorityExpired() {
 		t.Fatal("test precondition: grace expired before admission")
 	}
@@ -418,6 +425,7 @@ func TestUnauthenticatedConfigSyncRechecksAuthorityAtStorePromotion16016(t *test
 		t.Fatalf("read persisted unshared mark: %v", err)
 	}
 	manager := newClusterManager(false)
+	t.Cleanup(manager.Stop) // #19161: before the anchor/clock restores (LIFO); its never-seen timer must not outlive them
 	if manager.UnkeyedAuthorityExpired() {
 		t.Fatal("test precondition: grace expired before admission")
 	}
