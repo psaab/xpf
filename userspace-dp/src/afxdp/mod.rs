@@ -857,6 +857,12 @@ mod tests_promote_permit_18552;
 #[cfg(test)]
 #[path = "tests_wire_alias_lag_19153.rs"]
 mod tests_wire_alias_lag_19153;
+// #19175: a FIN/RST that materializes a session half from the shared map
+// carries its close to the companion, the HA peer and the sibling workers
+// exactly as the same packet on a local row does.
+#[cfg(test)]
+#[path = "tests_materialize_close_19175.rs"]
+mod tests_materialize_close_19175;
 
 // #18722: the opening-replica GC retention reads the shared row's
 // ct-slice-restamped counts as its recency proof.

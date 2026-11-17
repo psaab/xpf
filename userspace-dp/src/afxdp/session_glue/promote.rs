@@ -774,7 +774,13 @@ fn promote_synced_session_with_conntrack(
     };
     // #13939/#17092: `promote_synced_with_origin` strips any FIN/RST; the
     // Owner-only `Defer::None` replay (`apply_deferred_owner_hit`) after the
-    // authority verdict re-applies the close and propagates it.
+    // authority verdict re-applies the close and propagates it. That holds for
+    // a local hit (`authority_deferred` from the lookup) and, since #19175, for
+    // a row this packet materialized from shared: the materialize installed it
+    // without the packet's FIN/RST and set `authority_deferred`
+    // (`apply_deferred_shared_materialization`). Before #19175 the install
+    // stamped the close itself and nothing replayed it, so the strip here was
+    // moot and the close never reached the companion or the HA peer.
     if !sessions.promote_synced_with_origin(SessionUpdate {
         key,
         decision,

@@ -3189,6 +3189,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // queue HA updates, or refresh the expiry wheel.
                         // Owner-only: a permitted foreign Forward must not
                         // keep any session-state mutation primitive.
+                        // #19175: also a FIN/RST whose shared hit this
+                        // packet materialized above: the install left the
+                        // close out and set `authority_deferred`, so the
+                        // close is applied here, after the promotion, with
+                        // the same progress test, companion propagation, HA
+                        // Update and close relay as a local hit's.
                         if foreign_arrival_zone.is_none() && resolved.authority_deferred {
                             // #16042: the Owner replay validates the parsed ack.
                             let ack = pending_tcp_seq_note.map(|(_, ack, _, _)| ack);

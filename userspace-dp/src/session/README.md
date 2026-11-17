@@ -561,6 +561,22 @@ carries two things across:
   we deliberately do not extend its expiry, so a handshake the client never
   completes still reaps on the opening window).
 
+**Materialized halves propagate too (#19175).** A FIN/RST that lands on a
+worker lacking the half it hits, while the shared map holds it, materializes
+that half from the shared row (`session_glue::apply_deferred_shared_materialization`).
+That install used to stamp the packet's close itself, outside this lookup:
+the companion was never told (a server RST left F on the established window,
+up to 1800 s), and neither were the HA peer (#9412 Update), the sibling
+workers (#18520 close relay) or the #16489 baseline. Now the install takes the
+shared row's carried close state, and the poll site's #13938 Owner replay
+applies the packet's close through this lookup, after the promotion, exactly
+as for a row already in the table: `stamp_tcp_close` sees real progress, and
+the propagation, the Update, the relay and the baseline seed all come from
+here. A packet whose materialize is dropped (#19153 `Drop`) closes nothing.
+The reverse-synthesis install (`shared_ops/reverse_synth.rs`, no local or
+shared reverse at all) still stamps the close at install; `docs/log/19175.md`
+has why.
+
 A missing companion (a `FabricRedirect` flow with no local reverse entry,
 or a half already independently reaped) is a no-op — the same fail-open
 posture as `account_packet`'s reverse hop. The propagation is gated behind
@@ -2769,7 +2785,8 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
   - NEITHER FIN bit for CLOSING, because the wire does not say which direction
     FINed and a guess would misclassify the other side's later FIN.
   The expiry comes from `tcp_close_window_ns`. A materialized shared hit keeps
-  the class too.
+  the class too. Its installing packet's own FIN or RST is not stamped by the
+  install; the Owner replay applies it through the lookup (#19175).
 
 - **Companions, promote and resends.** The class must survive every path that
   re-installs or re-sends the session, not only the first import.

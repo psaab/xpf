@@ -22,7 +22,8 @@
 //!   from the capture is installed with none of this packet's state (an RST
 //!   or FIN leaves its close state and timeout as an import would set them;
 //!   fabric adoption does not let it replace a local incumbent) and reports
-//!   `Drop`; an equal row takes the packet's FIN as before; and the
+//!   `Drop`; an equal row installs the same carried close state and owes the
+//!   packet's FIN to the Owner replay (#19175), which closes it; and the
 //!   classification table: every authority field drops, every refresh field
 //!   (generation, counters, packet clocks, origin, flags) does not.
 
@@ -417,12 +418,18 @@ fn a_differing_row_installs_without_the_packets_rst_or_fin_19153() {
     }
 }
 
-/// The equal-path control: the current row is the capture, so the install
-/// takes the packet's FIN exactly as before fold 2 (closing, fin_own, the
-/// close window), and the classification is `None`. v4 and v6.
+/// The equal-path control: the current row is the capture, so the
+/// classification is `None` and the packet stands. #19175: the install no
+/// longer takes the packet's FIN. It installs A's carried close state, exactly
+/// what an import of A sets (the same clean install a differing row gets), and
+/// the packet's FIN is owed to the Owner replay, which then sets closing,
+/// fin_own and the close window on the installed row, as on a local hit. Before
+/// #19175 the install stamped the FIN itself, so the replay saw no progress and
+/// the close never reached the companion or the HA peer. v4 and v6.
 #[test]
-fn an_equal_row_installs_with_the_packets_fin_19153() {
+fn an_equal_row_owes_the_packets_fin_to_the_owner_replay_19175() {
     let forwarding = zone_validated_forwarding();
+    let fin = crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK;
     for v6 in [false, true] {
         let shared = Shared::new();
         let key = family_key(v6, 42_102);
@@ -431,30 +438,31 @@ fn an_equal_row_installs_with_the_packets_fin_19153() {
         let captured = shared.capture(&key);
         let mut sessions = SessionTable::new();
 
-        let (outcome, divergence) = core_classified(
-            &mut sessions,
-            &shared,
-            &forwarding,
-            &captured,
-            crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_ACK,
-            false,
-        );
+        let (outcome, divergence) =
+            core_classified(&mut sessions, &shared, &forwarding, &captured, fin, false);
 
         assert_eq!(
             (outcome_name(&outcome), divergence),
             ("Installed", MaterializeDivergence::None),
             "v6={v6}: an unchanged row installs and the packet stands"
         );
-        let close = sessions.close_state_for_test(&key).expect("A is installed");
+        let installed = sessions.close_state_for_test(&key).expect("A is installed");
         assert_eq!(
-            (close.0, close.1, close.2),
+            installed,
+            imported_close_state(&a),
+            "v6={v6}: the install must take A's carried close state, not the packet's FIN \
+             (closing, reset, fin_own, fin_peer, idle window)"
+        );
+        sessions.apply_deferred_owner_hit(&key, NOW_NS, fin);
+        let replayed = sessions.close_state_for_test(&key).expect("A is installed");
+        assert_eq!(
+            (replayed.0, replayed.1, replayed.2),
             (true, false, true),
-            "v6={v6}: the FIN on an unchanged row must set closing and fin_own, as today"
+            "v6={v6}: the Owner replay of the FIN must set closing and fin_own"
         );
         assert_ne!(
-            close.4,
-            imported_close_state(&a).4,
-            "v6={v6}: the FIN must select the close window, not the established one"
+            replayed.4, installed.4,
+            "v6={v6}: the replayed FIN must select the close window, not the established one"
         );
     }
 }

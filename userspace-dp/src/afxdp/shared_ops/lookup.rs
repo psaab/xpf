@@ -925,7 +925,11 @@ pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     /// r1 C1).
     pub(in crate::afxdp) install_failed: bool,
     /// The local packet hit lookup deferred session mutation until the #9519
-    /// authority verdict; shared entries do not defer a local mutation.
+    /// authority verdict; shared entries do not defer a local mutation. #19175:
+    /// after an Owner verdict the deferred shared-hit materialize sets it when
+    /// it installed a row without this packet's TCP FIN or RST
+    /// (`apply_deferred_shared_materialization`), so the poll site's Owner
+    /// replay applies that close on the installed row as for a local hit.
     pub(in crate::afxdp) authority_deferred: bool,
     /// #13938: carried through from [`ResolvedSessionLookup::authority_deferred`].
     /// The poll site replays the complete hit mutation only after an Owner

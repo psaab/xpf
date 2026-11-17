@@ -248,8 +248,10 @@ pub(in crate::afxdp) enum MaterializeDivergence {
 ///   the same incarnation. Its consumer, the deferred synced purge, is never
 ///   armed with a materialization (`keep_transient` picks one);
 /// - `tcp_flags`: the publisher's last-seen flags. On `None` this packet's
-///   flags replace them; on `Drop` they are the clean install's own. The
-///   close class and handshake stage they imply are compared, decoded;
+///   flags replace them, except a FIN or RST, which the install never stamps
+///   (#19175: the Owner replay applies it); on `Drop` they are the clean
+///   install's own. The close class and handshake stage they imply are
+///   compared, decoded;
 /// - `fwd_packets`, `rev_packets`: service evidence the fabric-adoption gate
 ///   reads. A same-incarnation publish keeps their maxima
 ///   (`publish_shared_session`) and every restamp takes the max, so a normal
@@ -425,13 +427,38 @@ impl CapturedIncarnation {
 pub(in crate::afxdp) struct MaterializeInstall {
     pub(in crate::afxdp) now_ns: u64,
     /// The packet's TCP flags, stamped on an installed row equal to the
-    /// capture (its close state and timeout derive from them). A row that
-    /// differs keeps its own carried flags.
+    /// capture (its timeout derives from them). A row that differs keeps its
+    /// own carried flags. #19175: a TCP FIN or RST is never stamped here
+    /// ([`close_owed_to_owner_replay`]): the row takes its carried flags and
+    /// close class, and the poll path applies the packet's close through the
+    /// #13938 Owner replay.
     pub(in crate::afxdp) tcp_flags: u8,
     /// #16217: the replica may replace a non-peer-synced local incumbent. The
     /// adoption gate judged this packet against the shared state it read, so
     /// a row that differs from the capture never gets it.
     pub(in crate::afxdp) fabric_adopted: bool,
+}
+
+/// #19175: whether a packet's TCP close (FIN or RST) must be left out of the
+/// materialize install and applied by the #13938 Owner replay instead.
+///
+/// Why: an install that stamps the close (`upsert_synced_with_origin` derives
+/// `closing`, `reset` and `fin_own` from the install's flags) does it outside
+/// the local-hit state machine. None of the steps that carry a close to the
+/// rest of the flow run there: the companion propagation (#4109 F17), the HA
+/// Update (#9412), the cross-worker close relay (#18520) and the #16489
+/// closing-counter baseline all hang off `stamp_tcp_close` reporting progress
+/// in the lookup (`session/lookup.rs`). And once the install has stamped it,
+/// a replay of the same packet sees no progress. So the install takes the
+/// shared row's carried close state, as promotion strips the close from its
+/// flip (`promote_synced_with_origin`), and the poll site replays the packet
+/// on the installed row after the promotion, exactly as for a local hit.
+///
+/// Keyed on the session key's protocol, which is what the replay's lookup
+/// keys its close on (`is_tcp`).
+#[inline]
+pub(in crate::afxdp) fn close_owed_to_owner_replay(protocol: u8, tcp_flags: u8) -> bool {
+    protocol == PROTO_TCP && crate::tcp_flags::is_closing(tcp_flags)
 }
 
 /// #19153: what [`materialize_current_shared_under_permit`] did. Only
@@ -490,8 +517,11 @@ pub(in crate::afxdp) enum MaterializeOutcome {
 /// (`classify_against`, whose identity must be `expected`) the current row is
 /// compared with it ([`materialize_divergence`]) after the re-read and BEFORE
 /// any install. The returned divergence is what the packet may do:
-/// - `None`: the row is installed with this packet's TCP flags (its close
-///   state and timeout) and fabric adoption, exactly as before;
+/// - `None`: the row is installed with this packet's TCP flags and fabric
+///   adoption, exactly as before, except a TCP FIN or RST (#19175,
+///   [`close_owed_to_owner_replay`]): the row then keeps its carried flags
+///   and close class, and the caller owes the packet's close to the Owner
+///   replay;
 /// - `Drop`: the row is installed clean, with its own carried flags and no
 ///   adoption (it may then be refused by a local incumbent), and the caller
 ///   drops the packet. An absent or superseded capture is `Drop` too, with
@@ -593,9 +623,16 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
     }
     // What the install may take from this packet: everything when the row
     // equals the capture, nothing when it differs (Codex P2-1: an RST or FIN
-    // that is dropped must not have closed or reset the row first).
+    // that is dropped must not have closed or reset the row first). #19175:
+    // never the packet's FIN or RST. The row keeps its carried flags and close
+    // class, and the caller replays the close through the Owner replay, where
+    // the companion, the HA Update, the close relay and the closing-counter
+    // baseline see it.
     let (packet_tcp_flags, allow_replace_local) = match divergence {
-        MaterializeDivergence::None => (Some(tcp_flags), fabric_adopted),
+        MaterializeDivergence::None => (
+            (!close_owed_to_owner_replay(key.protocol, tcp_flags)).then_some(tcp_flags),
+            fabric_adopted,
+        ),
         MaterializeDivergence::Drop => (None, false),
     };
     let incumbent_persistent_hold = sessions.persistent_lease_hold_for(&replica.key);
@@ -624,7 +661,8 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
     // #17058: build the install via the one shared mapping
     // (`into_session_install`), then apply the materialize overrides:
     // the shared-hit origin, this packet's tcp_flags when the row equals the
-    // capture, and the locally acquired persistent hold (the shared row's
+    // capture (unless they carry a close, #19175), and the locally acquired
+    // persistent hold (the shared row's
     // hold belongs to its publisher). Every other field (id, close/handshake
     // state, counters, SNAT provenance, and a differing row's tcp_flags) is
     // the replica's carried value.
@@ -738,7 +776,21 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
 /// - `deferred_synced_purge`: never set with a materialization (the resolve
 ///   arms one or the other on `keep_transient`), so there is nothing to drop;
 /// - the #13938 owner-hit replay (`authority_deferred`): false for a shared
-///   hit (`ResolvedSessionLookup::shared`), so nothing is replayed.
+///   hit (`ResolvedSessionLookup::shared`) and left false, so nothing is
+///   replayed. The poll site recycles the frame before its replay arm anyway.
+///
+/// #19175, the packet's TCP close: a FIN or RST whose materialize INSTALLED a
+/// row equal to the capture (`Installed` or `SharedLocal`, divergence `None`)
+/// left the close out of the install ([`close_owed_to_owner_replay`]). This
+/// sets `resolved.authority_deferred`, so the poll site's #13938 Owner replay
+/// (`apply_deferred_owner_hit_with_ack` on `resolved.key`, the installed key)
+/// applies it as it does for a local hit: after the deferred promotion and the
+/// forwarding revalidation, through `stamp_tcp_close`, so the companion (F17),
+/// the HA Update, the close relay and the closing-counter baseline run from
+/// that one place. Every disposition replays, `FabricRedirect` included, as a
+/// local hit does. Nothing else owes it: a non-closing packet's flags are
+/// still installed as before; a refusal, a fence or a `Drop` installed this
+/// packet's nothing and replays nothing.
 ///
 /// Refusals keep their pre-fold handling: a held pair, a #10582 local
 /// incumbent, or a refused install of a row equal to the capture forwards on
@@ -767,7 +819,9 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
     };
     #[cfg(test)]
     run_materialize_before_claim_hook();
-    let (install_failed, divergence) = match materialize_capture(
+    // `installed`: the core installed a row (only `Installed` and
+    // `SharedLocal` change anything).
+    let (install_failed, divergence, installed) = match materialize_capture(
         sessions,
         shared_sessions,
         forwarding,
@@ -779,31 +833,46 @@ pub(in crate::afxdp::session_glue) fn apply_deferred_shared_materialization(
         },
     ) {
         // The #10612 miss shape: nothing installed, nothing failed.
-        CaptureMaterialize::CaptureFenced => (false, MaterializeDivergence::None),
-        CaptureMaterialize::Refused => (true, MaterializeDivergence::None),
-        CaptureMaterialize::Core(outcome, divergence) => {
-            let install_failed = match outcome {
-                MaterializeOutcome::Installed(installed)
-                | MaterializeOutcome::SharedLocal(installed) => {
-                    // What was installed is what was classified: a row judged
-                    // equal carries the capture's decision.
-                    debug_assert!(
-                        divergence != MaterializeDivergence::None
-                            || installed.decision == captured.decision,
-                        "#19153: an installed row classified equal differs from the capture"
-                    );
-                    false
-                }
-                MaterializeOutcome::StaleReplayFenced => false,
-                MaterializeOutcome::SharedAbsent
-                | MaterializeOutcome::Superseded
-                | MaterializeOutcome::InstallRefused => true,
-            };
-            (install_failed, divergence)
-        }
+        CaptureMaterialize::CaptureFenced => (false, MaterializeDivergence::None, false),
+        CaptureMaterialize::Refused => (true, MaterializeDivergence::None, false),
+        CaptureMaterialize::Core(outcome, divergence) => match outcome {
+            MaterializeOutcome::Installed(installed)
+            | MaterializeOutcome::SharedLocal(installed) => {
+                // What was installed is what was classified: a row judged
+                // equal carries the capture's decision.
+                debug_assert!(
+                    divergence != MaterializeDivergence::None
+                        || installed.decision == captured.decision,
+                    "#19153: an installed row classified equal differs from the capture"
+                );
+                (false, divergence, true)
+            }
+            MaterializeOutcome::StaleReplayFenced => (false, divergence, false),
+            MaterializeOutcome::SharedAbsent
+            | MaterializeOutcome::Superseded
+            | MaterializeOutcome::InstallRefused => (true, divergence, false),
+        },
     };
     resolved.install_failed = install_failed;
     resolved.materialize_divergence = divergence;
+    // #19175: the install left this packet's FIN or RST out (the core's
+    // `close_owed_to_owner_replay` rule); the poll site's Owner replay applies
+    // it on the installed row. The replay targets `resolved.key`, which for a
+    // shared hit IS the captured key (`ResolvedSessionLookup::shared` resolves
+    // to `Canonical(entry.key)`); on any other key it would mutate a row this
+    // packet did not install, so the close is withheld rather than misapplied.
+    if installed
+        && divergence == MaterializeDivergence::None
+        && close_owed_to_owner_replay(captured.key.protocol, tcp_flags)
+    {
+        debug_assert_eq!(
+            resolved.key, captured.key,
+            "#19175: a materialized close is replayed on a key the materialize did not install"
+        );
+        if resolved.key == captured.key {
+            resolved.authority_deferred = true;
+        }
+    }
     if resolved.session_id == 0 && !install_failed {
         resolved.session_id = sessions.session_id_for(&resolved.key);
     }

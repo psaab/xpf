@@ -1146,7 +1146,8 @@ pub(crate) use handshake_relay::{HANDSHAKE_RELAY_OUTBOX_DROPS, HandshakeRelay};
 #[cfg(test)]
 pub(crate) use handshake_relay::{
     HANDSHAKE_RELAY_OUTBOX_CAP as HANDSHAKE_RELAY_OUTBOX_CAP_FOR_TEST, HandshakeRelayStage,
-    RELAY_CLOSE_FIN_FORWARD, RELAY_CLOSE_FIN_REVERSE, handshake_relay_outbox_drops_this_thread_for_test,
+    RELAY_CLOSE_FIN_FORWARD, RELAY_CLOSE_FIN_REVERSE, RELAY_CLOSE_RESET,
+    handshake_relay_outbox_drops_this_thread_for_test,
 };
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
@@ -6807,6 +6808,15 @@ impl SessionTable {
             .map(|e| (e.closing, e.reset, e.fin_own, e.fin_peer, e.expires_after_ns))
     }
 
+    /// #19175: read the #16489 closing-counter baseline
+    /// (`closing_counters_seen`) of the entry under `key`, or `None` if no
+    /// live entry exists. A cell that pins whether a close ran through the
+    /// lookup's transition (which seeds it on the forward entry) reads this.
+    #[cfg(test)]
+    pub(crate) fn closing_counters_seen_for_test(&self, key: &SessionKey) -> Option<u64> {
+        self.entry_by_key(key).map(|e| e.closing_counters_seen)
+    }
+
     /// Unified session update function replacing promote_synced,
     /// refresh_local, and refresh_for_ha_activation.
     ///
@@ -7623,7 +7633,10 @@ impl SessionTable {
         // #13939/#17092: the Owner path replays the packet through a full
         // `Defer::None` lookup (`apply_deferred_owner_hit`) right after
         // promotion. Do not let its ACK bit complete a pending handshake before
-        // that replay's close propagates to the companion.
+        // that replay's close propagates to the companion. #19175: that replay
+        // also runs for a row the same packet materialized from shared (the
+        // materialize leaves the close out of its install and owes it to the
+        // replay).
         if is_closing(req.tcp_flags) {
             req.tcp_flags = 0;
         }

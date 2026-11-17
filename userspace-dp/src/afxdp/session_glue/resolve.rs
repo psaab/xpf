@@ -892,7 +892,10 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         created: reverse_installed,
         install_failed: !reverse_installed,
         // #10636: reverse-synthesized from a forward match (close, if any,
-        // was stamped at install); never a deferred local hit.
+        // was stamped at install); never a deferred local hit. #19175 moved
+        // a MATERIALIZED shared hit's close to the Owner replay; this install
+        // was left as it is (it runs before the verdict and publishes and
+        // replicates the packet's flags; see docs/log/19175.md).
         authority_deferred: false,
         deferred_synced_promotion: None,
         promotion_deferred: false,

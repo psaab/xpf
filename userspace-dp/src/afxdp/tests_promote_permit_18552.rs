@@ -367,6 +367,11 @@ impl Fixture {
                 || resolved.promotion_deferred
                 || resolved.materialize_divergence
                     == crate::afxdp::session_glue::MaterializeDivergence::Drop,
+            // #19175: the poll site's Owner-replay arm (it recycles a `Drop`
+            // packet before reaching it).
+            owes_owner_replay: resolved.authority_deferred
+                && resolved.materialize_divergence
+                    != crate::afxdp::session_glue::MaterializeDivergence::Drop,
         }
     }
 
@@ -420,6 +425,11 @@ struct HitOutcome {
     divergence: crate::afxdp::session_glue::MaterializeDivergence,
     /// Whether the poll site keeps this packet out of the flow cache.
     seed_suppressed: bool,
+    /// #19175: whether the poll site's #13938 Owner replay runs for this
+    /// packet (`authority_deferred`, which a materialize that left the
+    /// packet's FIN or RST out of its install sets). These cells drive the
+    /// deferred effects only, so a cell that needs the replay runs it.
+    owes_owner_replay: bool,
 }
 
 /// Report every broken leg together, so a red run names each one.
@@ -2183,10 +2193,11 @@ fn capture_replacement_revoked_leak_stamp_is_not_forwarded_zero_id_19153() {
     assert_capture_replacement(Replacement::LeakStamp, true, rg::TCP_ACK);
 }
 
-/// The equal-path control (fold 2): nothing replaces A, so the materialize
-/// installs A with this packet's FIN (closing, fin_own) and the packet is
-/// handled as before. The same packet through a replacement is the FIN cell
-/// above.
+/// The equal-path control (fold 2): nothing replaces A, so the packet is
+/// handled as before and A ends closing with fin_own. #19175: the materialize
+/// installs A with its carried close state and the poll site's Owner replay
+/// applies this packet's FIN (before #19175 the install stamped it). The same
+/// packet through a replacement is the FIN cell above.
 #[test]
 fn unchanged_row_takes_the_packets_fin_19153() {
     let mut fx = PollFixture::imported();
@@ -2657,13 +2668,18 @@ fn reply_first_materializes_queued_forward_v6_18552() {
 /// fold 2: `reverse_hit_forward_partner` calls the core with
 /// `classify_against` `None`, no TCP flags and no fabric adoption). The P1
 /// shape (this worker holds neither row, F's upsert still queued) with a reply
-/// carrying FIN or RST: R is materialized with the packet and promoted, and F
-/// is materialized from shared and promoted with it. F's close state and idle
-/// window must equal a CLEAN install of shared F (its own carried flags, as
-/// its queued `UpsertSynced` installs it). R's handling of its own flags is
-/// unchanged: R's close state equals the TRUE twin's (the same packet with F
-/// already present here, so F is not materialized), and it carries the
-/// packet's close, so the F leg is not vacuous.
+/// carrying FIN or RST: R is materialized and promoted, and F is materialized
+/// from shared and promoted with it. After the deferred effects, before the
+/// Owner replay: F's close state and idle window must equal a CLEAN install of
+/// shared F (its own carried flags, as its queued `UpsertSynced` installs it).
+///
+/// #19175: R's install no longer takes the reply's close either (R is clean
+/// too at that point) and the packet owes the Owner replay, which this cell
+/// runs as the poll site does. After it, R carries the packet's close (so the
+/// F leg is not vacuous) and F carries it through the companion propagation
+/// (F17): the close reaches F only through the replay, never through F's
+/// install. Both rows equal the TRUE twin's (the same packet with F already
+/// present here, so F is not materialized), before and after the replay.
 fn assert_absent_forward_takes_none_of_the_replys_flags(tcp_flags: u8) {
     let v6 = false;
     let run = |forward_present: bool| {
@@ -2714,33 +2730,56 @@ fn assert_absent_forward_takes_none_of_the_replys_flags(tcp_flags: u8) {
         };
         let forwarding = fx.coordinator.forwarding.clone();
         let hit = fx.hit_with_flags(&shared_reply, Some(materialize), &forwarding, tcp_flags);
-        (
-            hit.divergence,
-            fx.pair_origins(),
+        let installed = (
             fx.worker_sessions.close_state_for_test(&key),
             fx.worker_sessions.close_state_for_test(&reply),
+        );
+        // #19175: the poll site's Owner replay, after the deferred effects.
+        if hit.owes_owner_replay {
+            fx.worker_sessions
+                .apply_deferred_owner_hit(&reply, monotonic_nanos(), tcp_flags);
+        }
+        (
+            hit,
+            fx.pair_origins(),
+            installed,
+            (
+                fx.worker_sessions.close_state_for_test(&key),
+                fx.worker_sessions.close_state_for_test(&reply),
+            ),
             clean_forward,
         )
     };
-    let (divergence, origins, forward, reply, clean_forward) = run(false);
-    let (twin_divergence, twin_origins, _, twin_reply, _) = run(true);
+    let (hit, origins, (forward, reply), (forward_after, reply_after), clean_forward) = run(false);
+    let (twin_hit, twin_origins, (_, twin_reply), (twin_forward_after, twin_reply_after), _) =
+        run(true);
     let rst = tcp_flags & crate::tcp_flags::TCP_RST != 0;
-    let reply_closed = match reply {
+    let reply_closed = match reply_after {
         Some((closing, reset, fin_own, _, _)) => {
             closing && if rst { reset } else { fin_own && !reset }
         }
         None => false,
     };
+    // F17 (#4109): the reply's RST sticks `reset` on F; its FIN is F's PEER FIN.
+    let forward_closed = match forward_after {
+        Some((closing, reset, fin_own, fin_peer, _)) => {
+            closing && !fin_own && if rst { reset } else { fin_peer && !reset }
+        }
+        None => false,
+    };
     assert_legs(
         &format!(
-            "absent F, reply flags 0x{tcp_flags:02x}: divergence {divergence:?}, worker F/R, \
-             shared F/R {origins:?}; F close {forward:?} vs clean {clean_forward:?}; R close \
-             {reply:?} vs twin {twin_reply:?} (twin: {twin_divergence:?}, {twin_origins:?})"
+            "absent F, reply flags 0x{tcp_flags:02x}: hit {hit:?}, worker F/R, shared F/R \
+             {origins:?}; installed F {forward:?} vs clean {clean_forward:?}; installed R \
+             {reply:?} vs twin {twin_reply:?}; after the replay F {forward_after:?} vs twin \
+             {twin_forward_after:?}, R {reply_after:?} vs twin {twin_reply_after:?} (twin: \
+             {twin_hit:?}, {twin_origins:?})"
         ),
         &[
             (
-                divergence == crate::afxdp::session_glue::MaterializeDivergence::None
-                    && twin_divergence == crate::afxdp::session_glue::MaterializeDivergence::None,
+                hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None
+                    && twin_hit.divergence
+                        == crate::afxdp::session_glue::MaterializeDivergence::None,
                 "premise: the reply's materialize of R diverged from its capture",
             ),
             (
@@ -2754,16 +2793,28 @@ fn assert_absent_forward_takes_none_of_the_replys_flags(tcp_flags: u8) {
             (
                 clean_forward.is_some() && forward == clean_forward,
                 "F: the materialized F's close state or idle window is not a clean install of \
-                 shared F (the reply's flags reached F)",
+                 shared F (the reply's flags reached F's install)",
             ),
             (
                 reply == twin_reply,
-                "R: R's close state differs from the twin's (the F materialize changed R's own \
-                 handling of its flags)",
+                "R: R's installed close state differs from the twin's (the F materialize changed \
+                 R's own handling of its flags)",
+            ),
+            (
+                hit.owes_owner_replay && twin_hit.owes_owner_replay,
+                "#19175: the reply's FIN/RST materialize of R did not owe the Owner replay",
+            ),
+            (
+                reply_after == twin_reply_after && forward_after == twin_forward_after,
+                "#19175: after the Owner replay the pair differs from the twin's",
             ),
             (
                 reply_closed,
                 "control: R does not carry the reply's FIN or RST, so the F leg proves nothing",
+            ),
+            (
+                forward_closed,
+                "#19175: the reply's close did not reach F through the companion propagation",
             ),
         ],
     );
@@ -2779,6 +2830,117 @@ fn absent_forward_materialize_takes_none_of_the_replys_fin_v4_18552() {
 #[test]
 fn absent_forward_materialize_takes_none_of_the_replys_rst_v4_18552() {
     assert_absent_forward_takes_none_of_the_replys_flags(crate::tcp_flags::TCP_RST);
+}
+
+/// #19175 (h), the FabricRedirect interaction. A reply RST resolved to a
+/// fabric redirect (the peer serves it) on a worker that holds F (imported,
+/// `SyncImport`) but not R. No promotion runs (not a `ForwardCandidate`), so
+/// both halves stay peer-synced. The materialize still owes the Owner replay:
+/// a local hit on the same row replays whatever the disposition, and the two
+/// must not diverge. The replay closes R and, through F17, F on this node's
+/// table; it sends NO HA Update, because F is peer-synced and the emit's
+/// origin gate keeps a peer's flow silent (the owning peer announces its own
+/// close). The result equals the twin with R already in the table.
+#[test]
+fn fabric_redirect_materialize_replays_like_a_local_hit_19175() {
+    let rst = crate::tcp_flags::TCP_RST | crate::tcp_flags::TCP_ACK;
+    let run = |reverse_present: bool| {
+        let now_secs = monotonic_nanos() / 1_000_000_000;
+        let ha_state = BTreeMap::from([(RG, active_rg(now_secs))]);
+        let mut fx = fixture_shell(
+            false,
+            forwarding(),
+            ha_state,
+            peer_row(false, LOCAL_PORT, SEED_GENERATION, SEED_SESSION_ID),
+        );
+        assert_eq!(
+            fx.coordinator.upsert_synced_session(fx.original.clone()),
+            SyncedImportOutcome::Applied,
+            "premise (R present: {reverse_present}): the import completes"
+        );
+        let (key, reply) = (fx.key(), fx.local_reply());
+        let shared_forward = fx.shared(&key).expect("shared F");
+        let shared_reply = fx.shared(&reply).expect("shared R");
+        let mut install = |entry: SyncedSessionEntry| {
+            assert!(
+                fx.worker_sessions
+                    .upsert_synced_with_origin(entry.into_session_install(monotonic_nanos()), false),
+                "premise: the queued upsert installs"
+            );
+        };
+        install(shared_forward);
+        if reverse_present {
+            install(shared_reply.clone());
+        }
+        let _ = fx.worker_sessions.drain_deltas(64);
+        let mut redirected = shared_reply.clone();
+        redirected.decision.resolution = ForwardingResolution {
+            disposition: ForwardingDisposition::FabricRedirect,
+            ..test_resolution()
+        };
+        let forwarding = fx.coordinator.forwarding.clone();
+        let hit = fx.hit_with_flags(
+            &redirected,
+            (!reverse_present).then(|| shared_reply.clone()),
+            &forwarding,
+            rst,
+        );
+        // The poll site's replay: owed by the materialize, or the local hit's
+        // own deferral (`authority_deferred` from the lookup).
+        let replayed = hit.owes_owner_replay || reverse_present;
+        if replayed {
+            fx.worker_sessions
+                .apply_deferred_owner_hit(&reply, monotonic_nanos(), rst);
+        }
+        let updates = fx
+            .worker_sessions
+            .drain_deltas(64)
+            .into_iter()
+            .filter(|delta| delta.kind == crate::session::SessionDeltaKind::Update)
+            .count();
+        let mut relays = Vec::new();
+        fx.worker_sessions.drain_handshake_relays_into(&mut relays);
+        (
+            hit,
+            replayed,
+            fx.worker_origin(&key).map(|(_, origin)| origin),
+            fx.worker_sessions.close_state_for_test(&key),
+            fx.worker_sessions.close_state_for_test(&reply),
+            updates,
+            relays.len(),
+        )
+    };
+    let materialized = run(false);
+    let twin = run(true);
+    let (hit, _, forward_origin, forward, reply, updates, relays) = materialized;
+    assert_legs(
+        &format!("FabricRedirect materialize {materialized:?} vs local hit {twin:?}"),
+        &[
+            (
+                hit.divergence == crate::afxdp::session_glue::MaterializeDivergence::None,
+                "premise: the materialize diverged",
+            ),
+            (hit.owes_owner_replay, "the FabricRedirect materialize did not owe the replay"),
+            (
+                forward_origin == Some(SessionOrigin::SyncImport),
+                "premise: F was promoted (a fabric redirect must not promote)",
+            ),
+            (
+                reply.is_some_and(|(closing, reset, ..)| closing && reset),
+                "R is not reset on this node's table",
+            ),
+            (
+                forward.is_some_and(|(closing, reset, ..)| closing && reset),
+                "F17: F is not reset on this node's table",
+            ),
+            (updates == 0, "a peer-synced F announced the peer's close (an HA echo)"),
+            (relays == 1, "the close relay is not pending"),
+            (
+                (forward, reply, updates, relays) == (twin.3, twin.4, twin.5, twin.6),
+                "the materialized arm differs from the local hit",
+            ),
+        ],
+    );
 }
 
 /// The zero-id fixture: legacy incarnation A (policy 11) imported and drained,
