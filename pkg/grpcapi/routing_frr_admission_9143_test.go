@@ -22,7 +22,7 @@ type stubFRRExec9143g struct{ frr.RecordingExecutor }
 
 type failingFRRExec9143g struct{ frr.RecordingExecutor }
 
-func (failingFRRExec9143g) Vtysh(context.Context, string) (string, error) {
+func (*failingFRRExec9143g) Vtysh(context.Context, string) (string, error) {
 	return "", errors.New("vtysh: exit status 1: zebra unreachable")
 }
 
@@ -134,7 +134,7 @@ func TestGRPCFRRCancelledRPCAbortsTheRead9143(t *testing.T) {
 
 type ctxWatchExec9143g struct{ frr.RecordingExecutor }
 
-func (ctxWatchExec9143g) Vtysh(ctx context.Context, _ string) (string, error) {
+func (*ctxWatchExec9143g) Vtysh(ctx context.Context, _ string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}

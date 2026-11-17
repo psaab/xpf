@@ -67,7 +67,7 @@ func (routeLister15774) LinkByName(name string) (netlink.Link, error) {
 
 type frrExec15774 struct{ frr.RecordingExecutor }
 
-func (frrExec15774) Vtysh(_ context.Context, cmd string) (string, error) {
+func (*frrExec15774) Vtysh(_ context.Context, cmd string) (string, error) {
 	switch cmd {
 	case "show ip route vrf all json":
 		return `{"vrf-blue":{"10.9.0.0/24":[{"prefix":"10.9.0.0/24","protocol":"static","selected":true,"installed":true,"distance":5,"table":100,"nexthops":[{"ip":"192.0.2.1","interfaceName":"ge-0-0-0","active":true,"fib":true}]}]}}`, nil

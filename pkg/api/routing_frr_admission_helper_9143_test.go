@@ -11,6 +11,6 @@ import (
 // stay-500 control has something to measure.
 type failingFRRExec9143 struct{ frr.RecordingExecutor }
 
-func (failingFRRExec9143) Vtysh(context.Context, string) (string, error) {
+func (*failingFRRExec9143) Vtysh(context.Context, string) (string, error) {
 	return "", errors.New("vtysh \"show ip ospf database\": exit status 1: zebra unreachable")
 }
