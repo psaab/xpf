@@ -172,3 +172,95 @@ fn peer_owned_subnet_router_anycast_is_attributed_and_ha_gated_19171() {
         "HA gates the peer-owned unit's local delivery"
     );
 }
+
+/// #19171 cost: transit lookups with K peer-owned connected rows in the FIB.
+/// Before the fix those rows were withheld, so K = 0 is the master-equivalent
+/// cost for every K. The connected rows are scanned linearly
+/// (`select_v4_route`), so this is the price of keeping them in transit:
+/// - `off-link`: a routed destination, which scans every connected row;
+/// - `in-prefix`: a destination inside the LAST peer-owned prefix.
+///
+/// Ignored, release only:
+/// `cargo test --release --bin xpf-userspace-dp -- --ignored --exact
+///  afxdp::forwarding::tests_fib_peer_owned_19171::connected_lpm_cost_bench_19171 --nocapture`
+#[test]
+#[ignore = "MEASUREMENT: #19171 transit LPM cost per peer-owned connected row; gates nothing"]
+fn connected_lpm_cost_bench_19171() {
+    const N: u32 = 200_000;
+    for k in [0u16, 16, 128, 1024] {
+        let mut snapshot = split_node_snapshot();
+        for i in 0..k {
+            snapshot.interfaces.push(InterfaceSnapshot {
+                name: format!("reth{}.0", 100 + i),
+                zone: "lan".to_string(),
+                linux_name: format!("ge-1-{}-{}", i / 256, i % 256),
+                ifindex: 1000 + i32::from(i),
+                redundancy_group: 5,
+                connected_rg_peer_owned: true,
+                hardware_addr: format!("02:bf:73:{:02x}:{:02x}:01", i / 256, i % 256),
+                addresses: vec![address("inet", &format!("10.{}.{}.1/24", 100 + i / 256, i % 256))],
+                ..Default::default()
+            });
+        }
+        let state = build_forwarding_state(&snapshot);
+        let in_prefix = if k == 0 {
+            IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))
+        } else {
+            let last = k - 1;
+            IpAddr::V4(Ipv4Addr::new(10, (100 + last / 256) as u8, (last % 256) as u8, 77))
+        };
+        for (label, dst) in [
+            ("off-link", IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7))),
+            ("in-prefix", in_prefix),
+        ] {
+            let mut rounds = Vec::new();
+            for _ in 0..7 {
+                let started = std::time::Instant::now();
+                for _ in 0..N {
+                    std::hint::black_box(lookup_forwarding_resolution(&state, std::hint::black_box(dst)));
+                }
+                rounds.push(started.elapsed().as_nanos() as f64 / f64::from(N));
+            }
+            rounds.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+            eprintln!(
+                "COST19171A k={k} {label:>9}: median {:.1} ns/op (min {:.1}, max {:.1}) over 7 x {N}",
+                rounds[3], rounds[0], rounds[6]
+            );
+        }
+    }
+}
+
+/// Census row 14: a leak into a table whose only claim on the destination is
+/// a peer-owned connected prefix. `inet.0` leaks 8.8.8.0/24 to `blue.inet.0`;
+/// blue's own route for it is removed, and a peer-owned blue unit (`reth9.0`,
+/// RG1) carries 8.8.8.1/24. The leak target's claim now counts, so the lookup
+/// recurses into blue and answers Connected on that unit (then HA judges it).
+/// Before, the withheld prefix gave blue no claim.
+#[test]
+fn leak_target_claimed_only_by_a_peer_owned_prefix_resolves_its_unit_19171() {
+    let mut snapshot = forwarding_snapshot_with_next_table(true);
+    snapshot
+        .routes
+        .retain(|r| !(r.table == "blue.inet.0" && r.destination == "8.8.8.0/24"));
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth9.0".to_string(),
+        zone: "wan".to_string(),
+        routing_instance: "blue".to_string(),
+        linux_name: "ge-0-0-9".to_string(),
+        ifindex: 34,
+        redundancy_group: 1,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:09:00:22".to_string(),
+        addresses: vec![address("inet", "8.8.8.1/24")],
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let answer = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
+    assert!(
+        matches!(
+            answer.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ) && answer.egress_ifindex == 34,
+        "the leak target's peer-owned connected prefix answers, got {answer:?}"
+    );
+}
