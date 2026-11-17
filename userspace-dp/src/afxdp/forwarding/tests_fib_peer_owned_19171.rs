@@ -229,3 +229,38 @@ fn connected_lpm_cost_bench_19171() {
         }
     }
 }
+
+/// Census row 14: a leak into a table whose only claim on the destination is
+/// a peer-owned connected prefix. `inet.0` leaks 8.8.8.0/24 to `blue.inet.0`;
+/// blue's own route for it is removed, and a peer-owned blue unit (`reth9.0`,
+/// RG1) carries 8.8.8.1/24. The leak target's claim now counts, so the lookup
+/// recurses into blue and answers Connected on that unit (then HA judges it).
+/// Before, the withheld prefix gave blue no claim.
+#[test]
+fn leak_target_claimed_only_by_a_peer_owned_prefix_resolves_its_unit_19171() {
+    let mut snapshot = forwarding_snapshot_with_next_table(true);
+    snapshot
+        .routes
+        .retain(|r| !(r.table == "blue.inet.0" && r.destination == "8.8.8.0/24"));
+    snapshot.interfaces.push(InterfaceSnapshot {
+        name: "reth9.0".to_string(),
+        zone: "wan".to_string(),
+        routing_instance: "blue".to_string(),
+        linux_name: "ge-0-0-9".to_string(),
+        ifindex: 34,
+        redundancy_group: 1,
+        connected_rg_peer_owned: true,
+        hardware_addr: "02:bf:72:09:00:22".to_string(),
+        addresses: vec![address("inet", "8.8.8.1/24")],
+        ..Default::default()
+    });
+    let state = build_forwarding_state(&snapshot);
+    let answer = lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))).resolution;
+    assert!(
+        matches!(
+            answer.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ) && answer.egress_ifindex == 34,
+        "the leak target's peer-owned connected prefix answers, got {answer:?}"
+    );
+}
