@@ -180,6 +180,19 @@ rm -f "$held"
 exit "$rc"
 MOCK
 chmod +x "$tmp/bin/incus"
+# #19162 (Codex on b7g, F9): `comm` runs only in the runner-side report. With
+# MOCK_COMM_DELAY_S it records the lane shell's pid (its grandparent: the
+# report's command substitution sits between) and stretches the report, so a
+# cell can signal that shell mid-report.
+cat >"$tmp/bin/comm" <<'SHIM'
+#!/usr/bin/env bash
+if [[ -n "${MOCK_COMM_DELAY_S:-}" ]]; then
+	ps -o ppid= -p "$PPID" | tr -d ' ' >"$MOCK_ROOT/lane-pid"
+	sleep "$MOCK_COMM_DELAY_S"
+fi
+exec /usr/bin/comm "$@"
+SHIM
+chmod +x "$tmp/bin/comm"
 
 # The lane command, shaped like cargo test: libtest writes a result line in
 # two parts on stdout, then cargo reports the failure on stderr after the test
@@ -546,7 +559,8 @@ reset_state
 
 # A TERM during the command: the mock's client kills the remote lane with
 # SIGKILL (as a dropped connection would), so only the workstation's best
-# effort can name the write; it must, with 143.
+# effort reports. The lock ended with the lane, so it lists what is there
+# with the attribution UNKNOWN and never claims the write (Codex on b7g, F8).
 # term_reports <script> <tag>
 term_reports() {
 	local pid rc=0
@@ -561,12 +575,40 @@ term_reports() {
 	kill -TERM "$pid"
 	wait "$pid" || rc=$?
 	echo "$rc" >"$tmp/$2.rc"
-	[[ "$rc" == 143 ]] && grep -qE "$(wrote_re sig-wrote)" <(cat "$tmp/$2.out" "$tmp/$2.err")
+	[[ "$rc" == 143 ]] &&
+		grep -q "^vm-test-run: the --root command was interrupted; mock:runner:/var/lib/xpf now holds: sig-wrote (attribution unknown" <(cat "$tmp/$2.out" "$tmp/$2.err") &&
+		! grep -q 'this --root command wrote' <(cat "$tmp/$2.out" "$tmp/$2.err")
 }
 if term_reports "$script" st-term; then
-	ok "TERM during the command: exit 143, and the write is still named"
+	ok "TERM during the command: exit 143, the residue listed with the attribution unknown, never claimed"
 else
 	bad "TERM during the command: rc=$(cat "$tmp/st-term.rc") $(tr '\n' '|' <"$tmp/st-term.err")"
+fi
+reset_state
+
+# A TERM to the RUNNER-side lane shell while it reports (the mock's comm is
+# stretched): the finalizer ignores it, so the report completes and the
+# status is the command's (Codex on b7g, F9).
+# report_survives_term <script> <tag>
+report_survives_term() {
+	local pid rc=0 lp=
+	reset_state
+	rm -f "$tmp/lane-pid"
+	(cd "$tmp/repo" && exec env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" MOCK_COMM_DELAY_S=3 \
+		bash "$1" --runner mock:runner --name lane --no-sync --root -- 'touch /var/lib/xpf/f9-wrote') \
+		>"$tmp/$2.out" 2>"$tmp/$2.err" &
+	pid=$!
+	for _ in $(seq 100); do [[ -s "$tmp/lane-pid" ]] && break; sleep 0.1; done
+	lp=$(cat "$tmp/lane-pid" 2>/dev/null) || lp=
+	[[ -n "$lp" ]] && kill -TERM "$lp" 2>/dev/null
+	wait "$pid" || rc=$?
+	echo "$rc" >"$tmp/$2.rc"
+	[[ -n "$lp" && "$rc" == 0 ]] && grep -qE "$(wrote_re f9-wrote)\)$" <(cat "$tmp/$2.out" "$tmp/$2.err")
+}
+if report_survives_term "$script" st-f9; then
+	ok "TERM to the runner-side lane during its report: ignored; the report completes, status 0"
+else
+	bad "TERM during the runner-side report: rc=$(cat "$tmp/st-f9.rc") pid=$(cat "$tmp/lane-pid" 2>/dev/null) $(tr '\n' '|' <"$tmp/st-f9.err")"
 fi
 reset_state
 
@@ -794,6 +836,23 @@ if mutant lockwait-counted 's/w = t1 - t0 - lw$/w = t1 - t0/'; then
 		ok "mutation lockwait-counted: the lock-wait cell fails (the wait reads as a pause)"
 	else
 		bad "mutation lockwait-counted: the lock-wait cell still passes"
+	fi
+fi
+# The runner-side finalizer restores the default signal actions (the b7g F9
+# shape): a TERM mid-report kills the report.
+if mutant finalizer-restores-signals "s/^\ttrap '' TERM INT HUP$/\ttrap - TERM INT HUP/"; then
+	if ! report_survives_term "$tmp/finalizer-restores-signals.sh" m16; then
+		ok "mutation finalizer-restores-signals: the mid-report TERM cell fails (rc $(cat "$tmp/m16.rc"))"
+	else
+		bad "mutation finalizer-restores-signals: the mid-report TERM cell still passes"
+	fi
+fi
+# The interrupted report claims the write again (the b7g F8 shape).
+if mutant interrupted-claims "s/ (attribution unknown: its lock ended with it, so another root lane may have written since)/ (this --root command wrote production state)/"; then
+	if ! term_reports "$tmp/interrupted-claims.sh" m17; then
+		ok "mutation interrupted-claims: the TERM cell fails"
+	else
+		bad "mutation interrupted-claims: the TERM cell still passes"
 	fi
 fi
 if mutant inverted-compare 's/comm -13 /comm -12 /'; then
