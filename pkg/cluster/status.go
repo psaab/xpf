@@ -1155,7 +1155,9 @@ func (m *Manager) FormatIPMonitoringStatus() string {
 	mon := m.monitor
 	m.mu.RUnlock()
 
-	states := m.GroupStates()
+	// #19169: only group IDs and monitor failures are read here, so no
+	// transfer-readiness callback runs for this diagnostic.
+	states := m.MonitorFailuresByGroup()
 	var b strings.Builder
 	fmt.Fprintln(&b, "IP monitoring status:")
 	fmt.Fprintln(&b)

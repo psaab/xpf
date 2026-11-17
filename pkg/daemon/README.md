@@ -5557,9 +5557,17 @@ Codex-e's review found four more callers that read only a group's state:
 - the CLI prompt prefix (`clusterPrefix`, on every prompt);
 - gRPC status's cluster role.
 
-All four use `LocalGroupState` now. The callers that keep the callback
-display readiness itself: the `show chassis cluster` builders in
+All four use `LocalGroupState` now. `FormatIPMonitoringStatus`
+(`pkg/cluster/status.go`), which reads only group IDs and monitor failures,
+uses `MonitorFailuresByGroup`. The callers that keep the callback display
+readiness itself: the `show chassis cluster` builders in
 `pkg/cluster/status.go`, and `HAState` (`pkg/cluster/ha_state.go`).
+
+**A static guard keeps it that way.**
+`TestNoProductionDaemonCallerOfGroupState19169` fails if any non-test file
+in `pkg/daemon` calls `GroupStates(` or `.GroupState(`, outside an explicit
+allowlist that is empty today. It catches a future HA-path caller that the
+census's named entry points would miss.
 
 **The census is a test, not a judgment.**
 `TestNoFailoverPathRunsTheReadinessCallback19169` installs a readiness

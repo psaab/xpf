@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -323,7 +325,7 @@ func TestNoFailoverPathRunsTheReadinessCallback19169(t *testing.T) {
 			{name: "healthy", running: true, wantWeight: 255},
 			{name: "intentional stop (keepArm)", wantWeight: 255},
 			{name: "unexpected exit", notReady: true, wantArm: true, wantWeight: 1},
-			{name: "crash loop", looping: true, notReady: true, wantArm: true, wantCrash: true},
+			{name: "crash loop", looping: true, notReady: true, wantArm: true, wantCrash: true, wantWeight: 0},
 			{name: "recovery", running: true, wantWeight: 255},
 		} {
 			rt.running.Store(step.running)
@@ -340,7 +342,7 @@ func TestNoFailoverPathRunsTheReadinessCallback19169(t *testing.T) {
 			}
 			var w int
 			calls.observe(func() { w = weight() }) // the fixture reads weight via GroupStates
-			if step.wantWeight != 0 && w != step.wantWeight {
+			if w != step.wantWeight {              // every row, the crash loop's weight 0 included
 				t.Fatalf("%s: RG1 weight %d, want %d", step.name, w, step.wantWeight)
 			}
 		}
@@ -361,4 +363,46 @@ func TestNoFailoverPathRunsTheReadinessCallback19169(t *testing.T) {
 			t.Fatalf("readiness ran %d times", calls.Load())
 		}
 	})
+}
+
+// r23's P3-2: a STATIC guard behind the census. No non-test file in pkg/daemon
+// may call GroupStates( or .GroupState(, which run the transfer-readiness
+// callback, outside the allowlist below (empty today). The census drives
+// named entry points; this catches a new HA-path caller it would miss.
+func TestNoProductionDaemonCallerOfGroupState19169(t *testing.T) {
+	allow := map[string]bool{} // "file.go:line" of an approved caller, with a reason
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bad []string
+	scanned := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		raw, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		scanned++
+		for i, line := range strings.Split(string(raw), "\n") {
+			code := line
+			if j := strings.Index(code, "//"); j >= 0 {
+				code = code[:j]
+			}
+			if !strings.Contains(code, "GroupStates(") && !strings.Contains(code, ".GroupState(") {
+				continue
+			}
+			if at := fmt.Sprintf("%s:%d", f, i+1); !allow[at] {
+				bad = append(bad, at+": "+strings.TrimSpace(line))
+			}
+		}
+	}
+	if scanned < 50 {
+		t.Fatalf("setup: scanned only %d non-test files; the guard is not looking at pkg/daemon", scanned)
+	}
+	if len(bad) > 0 {
+		t.Fatalf("pkg/daemon production callers of GroupStates/GroupState (they run the transfer-readiness callback):\n%s", strings.Join(bad, "\n"))
+	}
 }
