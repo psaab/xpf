@@ -8,13 +8,18 @@
 //! to a LAN address.
 //!
 //! With the row present (#19171), the admission's FIB answer is the LAN
-//! interface. The policy is judged WAN -> LAN, the zone the destination is in.
-//! HA then demotes the peer-owned egress, and the flow crosses the fabric to
-//! the owner, which judges it again.
+//! interface. HA demotes that peer-owned egress, and the flow becomes a fabric
+//! redirect to the owner. A redirected new flow is not policy-judged on this
+//! node: the local transit admission (`transit_admission_verdict`) runs only
+//! for a ForwardCandidate. The OWNER judges it on arrival, against the zone
+//! pair the fabric stamp carries (WAN, the arrival zone) and its own LAN
+//! egress: WAN -> LAN, the zone the destination is in.
 //!
-//! The admitting/denying pair proves which zone pair was evaluated:
-//! - only `wan -> lan` permits: the fix admits, the base denies (WAN -> WAN);
-//! - only `wan -> wan` permits: the base hairpins out the WAN, the fix denies.
+//! Two policy configurations tell the zone pairs apart:
+//! - only `wan -> lan` permits: the base judged WAN -> WAN locally and denied;
+//!   the fix redirects, and the owner admits;
+//! - only `wan -> wan` permits: the base admitted WAN -> WAN locally and
+//!   hairpinned out the WAN; the fix redirects, and the owner denies.
 
 use super::test_fixtures::nat_snapshot_with_fabric;
 use super::tests_split_rg_failback_18531::rg;
@@ -140,16 +145,94 @@ fn split_new_flow_to_a_peer_owned_server_is_judged_in_its_zone_and_crosses_the_f
 }
 
 /// RED on the base: the hairpin. With only `wan -> wan` permitted, the base
-/// forwarded the new flow back out the WAN to the LAN address. Judged WAN ->
-/// LAN, it is denied and nothing leaves.
+/// admitted the new flow as WAN -> WAN and forwarded it back out the WAN to a
+/// LAN address. The fix never sends it out the WAN: it crosses the fabric,
+/// and the owner judges it (and denies it: see the owner cells below).
 #[test]
 fn split_new_flow_to_a_peer_owned_server_never_hairpins_out_the_wan_19178() {
     for v6 in [false, true] {
         let got = admit(v6, Permit::WanToWan, true);
         assert_eq!(
             got,
+            Admission {
+                policy_deny: 0,
+                forwards: vec![(ForwardingDisposition::FabricRedirect, 21)],
+            },
+            "v6={v6}: never out the WAN; handed to the owner over the fabric"
+        );
+    }
+}
+
+/// The owner's half. The LAN owner (RG2 active here, the WAN RG on the peer)
+/// receives the redirected SYN over the fabric, stamped with the WAN zone
+/// (the split node's arrival zone). It judges WAN -> LAN: admitted and
+/// delivered on the LAN when only `wan -> lan` permits, denied when only
+/// `wan -> wan` permits.
+fn owner_admit(v6: bool, permit: Permit) -> Admission {
+    let snapshot = snapshot(permit, false);
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, rg(false, now_secs)), (2, rg(true, now_secs))]);
+    let fabric_mac = [0x02, 0xbf, 0x72, 0xff, 0x00, 0x01];
+    let (mut frame, mut meta) = if v6 {
+        let frame = build_txn_tcp_frame_v6(WAN_CLIENT6, LAN_SERVER6, 40000, 443, TCP_FLAG_SYN, fabric_mac);
+        let mut meta = txn_meta_v6(21, frame.len());
+        meta.flow_src_addr = WAN_CLIENT6.octets();
+        meta.flow_dst_addr = LAN_SERVER6.octets();
+        (frame, meta)
+    } else {
+        let frame =
+            build_txn_tcp_syn_frame_v4(WAN_CLIENT4, LAN_SERVER4, 40000, 443, TCP_FLAG_SYN, fabric_mac);
+        let mut meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&WAN_CLIENT4.octets());
+        meta.flow_dst_addr[..4].copy_from_slice(&LAN_SERVER4.octets());
+        (frame, meta)
+    };
+    let [_, _, hi, lo] = forwarding.zone_name_to_id["wan"].to_be_bytes();
+    frame[6..12].copy_from_slice(&[0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo]);
+    meta.flow_src_port = 40000;
+    meta.flow_dst_port = 443;
+    let mut binding = BindingWorker::new_for_mirror_test(0, 0, 21, 0);
+    binding.interface = Arc::<str>::from("ge-0-0-0");
+    let mut sessions = SessionTable::new();
+    let (_batch, dbg) = txn_run_descriptor(&mut binding, &mut sessions, &forwarding, &ha_state, &frame, meta);
+    Admission {
+        policy_deny: dbg.policy_deny,
+        forwards: binding
+            .scratch
+            .scratch_forwards
+            .iter()
+            .map(|forward| (forward.decision.resolution.disposition, forward.target_ifindex))
+            .collect(),
+    }
+}
+
+/// Green on both: the owner judges the redirected flow WAN -> LAN and admits
+/// it when `wan -> lan` permits, delivering it on its LAN (24).
+#[test]
+fn owner_admits_a_redirected_new_flow_judged_wan_to_lan_19178() {
+    for v6 in [false, true] {
+        assert_eq!(
+            owner_admit(v6, Permit::WanToLan),
+            Admission {
+                policy_deny: 0,
+                forwards: vec![(ForwardingDisposition::ForwardCandidate, 24)],
+            },
+            "v6={v6}: the owner admits WAN -> LAN and delivers on its LAN"
+        );
+    }
+}
+
+/// Green on both: with only `wan -> wan` permitted, the owner denies the
+/// redirected flow, because it judges WAN -> LAN. So the fix's hairpin
+/// configuration ends in a deny at the owner, never in a WAN hairpin.
+#[test]
+fn owner_denies_a_redirected_new_flow_when_only_wan_to_wan_permits_19178() {
+    for v6 in [false, true] {
+        assert_eq!(
+            owner_admit(v6, Permit::WanToWan),
             Admission { policy_deny: 1, forwards: vec![] },
-            "v6={v6}: judged WAN -> LAN, denied, nothing forwarded"
+            "v6={v6}: judged WAN -> LAN at the owner, denied"
         );
     }
 }

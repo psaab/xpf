@@ -621,6 +621,9 @@ mod tests_noroute_unresolved_16021;
 #[cfg(test)]
 #[path = "tests_split_rg_gateway_18517.rs"]
 mod tests_split_rg_gateway_18517;
+#[cfg(test)]
+#[path = "tests_fib_peer_owned_19171.rs"]
+mod tests_fib_peer_owned_19171;
 // #18566: a cached FabricRedirect is superseded once its destination RG is
 // activated on this node.
 #[cfg(test)]

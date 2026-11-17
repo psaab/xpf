@@ -408,4 +408,29 @@ mod tests {
             "the refusal must identify the FIB response budget: {error}"
         );
     }
+
+    /// #19171 census row 20: a peer-owned connected prefix now stays in the
+    /// transit FIB, so `show route fib` on the split node lists it as a
+    /// connected row (before: absent). The split node's 172.16.80.0/24 on
+    /// `reth0.80` (RG1, peer-owned) is dumped.
+    #[test]
+    fn fib_dump_lists_a_peer_owned_connected_prefix_19171() {
+        let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+        snapshot.fib_generation = 9;
+        for iface in &mut snapshot.interfaces {
+            if iface.name == "reth0.80" {
+                iface.connected_rg_peer_owned = true;
+            }
+        }
+        let mut coordinator = super::super::Coordinator::new();
+        coordinator
+            .refresh_runtime_snapshot_disarmed(&snapshot)
+            .expect("publish the test snapshot");
+        let (_, rows) = coordinator.dump_fib().expect("dump fits");
+        assert!(
+            rows.iter()
+                .any(|row| row.table == "inet.0" && row.destination == "172.16.80.0/24"),
+            "the peer-owned connected prefix is dumped: {rows:?}"
+        );
+    }
 }
