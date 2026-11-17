@@ -2355,3 +2355,83 @@ fn gre1300_ipv6_1280_ptb_is_unactionable_without_diversion_16512() {
         "1280-byte inner fits the 1400 control budget"
     );
 }
+
+/// #19171 census row 19: a peer-owned connected row now stays in the transit
+/// FIB, but its host address is a VIP the peer holds. The Frag-Needed source
+/// fallback (an ingress with no primary address) must never pick it. Split
+/// node: `reth0.80` (12, RG1 peer-owned, 172.16.80.8/24) and `reth1.0` (24,
+/// 10.0.61.1/24) are equal-length rows of `inet.0`, and the transit sort puts
+/// the lower ifindex, the peer-owned one, first.
+/// FAIL-ON-REVERT: drop the peer-owned skip in `build_frag_needed_v4` and the
+/// source is 172.16.80.8.
+#[test]
+fn frag_needed_source_is_never_a_peer_held_vip_19171() {
+    let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    let mut forwarding = build_forwarding_state(&snapshot);
+    const NO_PRIMARY_INGRESS: i32 = 77;
+    let mut ingress = forwarding.egress.get(&24).cloned().expect("FIXTURE: reth1.0 egress row");
+    ingress.primary_v4 = None;
+    ingress.primary_v6 = None;
+    forwarding.egress.insert(NO_PRIMARY_INGRESS, ingress);
+    assert_eq!(
+        forwarding
+            .connected_v4
+            .iter()
+            .filter(|row| row.table == "inet.0")
+            .map(|row| row.ifindex)
+            .next(),
+        Some(12),
+        "FIXTURE: the peer-owned row sorts first in inet.0"
+    );
+    let (frame, meta) = inbound_v4_udp(1500, true);
+    let out = build_frag_needed_v4(&frame, meta, NO_PRIMARY_INGRESS, &forwarding, 1400)
+        .expect("a same-instance interface primary makes Frag-Needed buildable");
+    assert_eq!(
+        &out[26..30],
+        &Ipv4Addr::new(10, 0, 61, 1).octets(),
+        "the source is this node's own LAN primary, never the peer-held 172.16.80.8"
+    );
+}
+
+/// #19171 census row 19, the IPv6 twin: the Packet-Too-Big source fallback
+/// never picks the peer-held VIP of a peer-owned row now in transit
+/// (2001:559:8585:80::8 on `reth0.80`); it picks this node's own LAN primary.
+#[test]
+fn packet_too_big_source_is_never_a_peer_held_vip_19171() {
+    let mut snapshot = crate::afxdp::test_fixtures::nat_snapshot_with_fabric();
+    for iface in &mut snapshot.interfaces {
+        if iface.name == "reth0.80" {
+            iface.connected_rg_peer_owned = true;
+        }
+    }
+    let mut forwarding = build_forwarding_state(&snapshot);
+    const NO_PRIMARY_INGRESS: i32 = 77;
+    let mut ingress = forwarding.egress.get(&24).cloned().expect("FIXTURE: reth1.0 egress row");
+    ingress.primary_v4 = None;
+    ingress.primary_v6 = None;
+    forwarding.egress.insert(NO_PRIMARY_INGRESS, ingress);
+    assert_eq!(
+        forwarding
+            .connected_v6
+            .iter()
+            .filter(|row| row.table == "inet6.0")
+            .map(|row| row.ifindex)
+            .next(),
+        Some(12),
+        "FIXTURE: the peer-owned row sorts first in inet6.0"
+    );
+    let (frame, meta) = inbound_v6_udp(1500);
+    let out = build_packet_too_big_v6(&frame, meta, NO_PRIMARY_INGRESS, &forwarding, 1400)
+        .expect("a same-instance interface primary makes Packet-Too-Big buildable");
+    let lan: Ipv6Addr = "2001:559:8585:ef00::1".parse().expect("lan primary");
+    assert_eq!(
+        &out[22..38],
+        &lan.octets(),
+        "the source is this node's own LAN primary, never the peer-held 2001:559:8585:80::8"
+    );
+}
