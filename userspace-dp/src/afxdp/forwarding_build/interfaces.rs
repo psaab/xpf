@@ -1333,11 +1333,12 @@ pub(super) fn populate_interfaces(
                         tunnel_endpoint_id,
                         table: connected_table_v4.clone(),
                     };
+                    // PROBE (fix at the FIB): the peer-owned row stays in
+                    // transit; HA enforcement gives the peer-owned verdict.
                     if iface.connected_rg_peer_owned {
-                        state.connected_v4_peer_owned.push(row);
-                    } else {
-                        state.connected_v4.push(row);
+                        state.connected_v4_peer_owned.push(row.clone());
                     }
+                    state.connected_v4.push(row);
                 }
                 IpNet::V6(v6) => {
                     // #3182: NAT-decoupled full interface-IP set (see the V4
@@ -1396,11 +1397,12 @@ pub(super) fn populate_interfaces(
                         tunnel_endpoint_id,
                         table: connected_table_v6.clone(),
                     };
+                    // PROBE (fix at the FIB): the peer-owned row stays in
+                    // transit; HA enforcement gives the peer-owned verdict.
                     if iface.connected_rg_peer_owned {
-                        state.connected_v6_peer_owned.push(row);
-                    } else {
-                        state.connected_v6.push(row);
+                        state.connected_v6_peer_owned.push(row.clone());
                     }
+                    state.connected_v6.push(row);
                 }
             }
         }
