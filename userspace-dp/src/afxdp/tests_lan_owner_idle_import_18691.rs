@@ -472,11 +472,19 @@ fn activation_refresh_heals_the_line_and_keeps_the_flow_18691() {
 /// fixed; it asserts the behaviour the fix must produce. Un-ignored on
 /// 36acce9efb it fails with `(snat_revoked, closes, len) = (1, 1, 0)`.
 #[test]
-#[ignore = "#18705: a reply between the HA store and RefreshOwnerRGS judges the stale line"]
 fn activation_before_refresh_keeps_the_flow_18691() {
-    let (mut sessions, _, now_secs) = lan_owner_import(Family::V4, false);
+    activation_before_refresh_probe(Family::V4);
+}
+
+#[test]
+fn activation_before_refresh_keeps_the_flow_v6_probe_18691() {
+    activation_before_refresh_probe(Family::V6);
+}
+
+fn activation_before_refresh_probe(family: Family) {
+    let (mut sessions, _, now_secs) = lan_owner_import(family, false);
     let owner_forwarding = fw1_owner_forwarding();
-    let (frame, meta) = wan_reply_frame_for(Family::V4);
+    let (frame, meta) = wan_reply_frame_for(family);
     let out = drive(
         &mut sessions,
         &owner_forwarding,
@@ -486,11 +494,12 @@ fn activation_before_refresh_keeps_the_flow_18691() {
         meta,
         1,
     );
-    assert_eq!(out.session_hit, 1, "the reply must hit the reverse row");
+    eprintln!("PROBE18691 {family:?} session_hit={} snat_revoked={} closes={} len={} tx={:?}", out.session_hit, out.snat_revoked, out.closes, sessions.len(), out.tx);
+    assert_eq!(out.session_hit, 1, "the reply must hit the reverse row ({family:?})");
     assert_eq!(
         (out.snat_revoked, out.closes, sessions.len()),
         (0, 0, 2),
-        "a line the refresh has not reached yet is no ground to revoke"
+        "a line the refresh has not reached yet is no ground to revoke ({family:?})"
     );
 }
 
