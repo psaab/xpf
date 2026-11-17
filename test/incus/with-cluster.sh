@@ -55,6 +55,58 @@ shift
 [[ "$1" == "--" ]] || usage
 shift
 
+# #19165: the WRAPPER's OWN targets come from the held lock's cluster. On
+# 2026-11-16 a udp lock tuple without BPFRX_CLUSTER_ENV let cluster-env.sh
+# default to loss, and this wrapper's own VM-target guard (shims, mark-vm,
+# daemon-reload) ran on the LOSS firewalls without the loss lock.
+#   - A fixed map takes the lock tuple to its cluster's env file. When
+#     BPFRX_CLUSTER_ENV is unset, the wrapper exports that file, so a
+#     command that sources cluster-env.sh resolves the same cluster. When it
+#     names another file, the cell is refused. An EMPTY value is the legacy
+#     local cluster (no env file) and pairs only with the default (loss)
+#     tuple, which that flow uses.
+#   - The wrapper's own actions (the VM-target guard, the build-identity
+#     probe) use targets resolved from that env file ALONE, in a clean
+#     environment (`env -i`). Every inherited override is ignored.
+#   - The command gets the resolved env file as a convenience. The wrapper
+#     does NOT police variables a command reads on its own (FW0, FW1,
+#     CLUSTER_LAN_HOST, HOST, …): under the lock protocol those are the
+#     command author's responsibility.
+# A private lock path (the selftests) names no cluster: its targets resolve
+# from the caller's BPFRX_CLUSTER_ENV (or the default), still ignoring
+# inherited target overrides.
+case "$(basename -- "$XPF_CLUSTER_LOCK")" in
+xpf-cluster.lock) LOCK_CLUSTER=loss ;;
+xpf-cluster-tcp.lock) LOCK_CLUSTER=tcp ;;
+xpf-cluster-udp.lock) LOCK_CLUSTER=udp ;;
+*) LOCK_CLUSTER= ;;
+esac
+REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+lock_env_refuse() {
+	echo "[with-cluster] REFUSED: $*; the wrapper would act on firewalls the lock does not cover. Use the lock tuple and BPFRX_CLUSTER_ENV of the same cluster, or leave BPFRX_CLUSTER_ENV unset (#19165)" >&2
+	exit 2
+}
+wrapper_env_file=
+if [[ -n "$LOCK_CLUSTER" ]]; then
+	wrapper_env_file="${SCRIPT_DIR}/${LOCK_CLUSTER}-userspace-cluster.env"
+	if [[ ! -v BPFRX_CLUSTER_ENV ]]; then
+		export BPFRX_CLUSTER_ENV="$wrapper_env_file"
+	elif [[ -z "$BPFRX_CLUSTER_ENV" ]]; then
+		[[ "$LOCK_CLUSTER" == loss ]] ||
+			lock_env_refuse "BPFRX_CLUSTER_ENV is empty (the legacy local cluster) but the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK})"
+		wrapper_env_file=
+	else
+		given="$BPFRX_CLUSTER_ENV"
+		[[ "$given" == /* ]] || given="${REPO_DIR}/${given}"
+		[[ "$(realpath -m -- "$given")" == "$(realpath -m -- "$wrapper_env_file")" ]] ||
+			lock_env_refuse "BPFRX_CLUSTER_ENV=${BPFRX_CLUSTER_ENV} is not the ${LOCK_CLUSTER} cluster's env file but the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK})"
+	fi
+elif [[ -v BPFRX_CLUSTER_ENV ]]; then
+	wrapper_env_file="$BPFRX_CLUSTER_ENV"
+else
+	wrapper_env_file="${SCRIPT_DIR}/loss-userspace-cluster.env"
+fi
+
 # Reentrant case: a live ancestor cell already holds the lock. Run the
 # command directly — no second acquire, no owner write, no trap (the
 # outer cell owns cleanup). `env --` pins the command to an EXTERNAL
@@ -64,6 +116,23 @@ shift
 if xpf_cluster_lock_held; then
 	exec env -- "$@"
 fi
+
+# #19165: this cell's OWN targets, resolved before the lock is taken from the
+# env file chosen above, in a clean environment, so no inherited FW0/FW1/
+# INCUS_REMOTE override can steer the build probe or the VM-target guard.
+if ! wrapper_targets=$(env -i HOME="$HOME" PATH="$PATH" BPFRX_CLUSTER_ENV="$wrapper_env_file" \
+	bash -c 'source "$1/cluster-env.sh" >/dev/null 2>&1 || exit 3; printf "%s %s %s\n" "${INCUS_REMOTE:--}" "$FW0" "$FW1"' _ "$SCRIPT_DIR") ||
+	[[ -z "$wrapper_targets" ]]; then
+	echo "[with-cluster] ABORT: cannot resolve this cell's own targets from '${wrapper_env_file:-<no env file>}' (#19165)" >&2
+	exit 2
+fi
+read -r WRAPPER_REMOTE WRAPPER_FW0 WRAPPER_FW1 <<<"$wrapper_targets"
+if [[ -n "$LOCK_CLUSTER" && -n "$wrapper_env_file" ]] &&
+	[[ "$WRAPPER_REMOTE" != "$LOCK_CLUSTER" || "$WRAPPER_FW0" != "${LOCK_CLUSTER}:"* || "$WRAPPER_FW1" != "${LOCK_CLUSTER}:"* ]]; then
+	echo "[with-cluster] ABORT: ${wrapper_env_file} does not resolve to the ${LOCK_CLUSTER} cluster (INCUS_REMOTE=${WRAPPER_REMOTE} FW0=${WRAPPER_FW0} FW1=${WRAPPER_FW1}) (#19165)" >&2
+	exit 2
+fi
+export XPF_CLUSTER_WRAPPER_TARGETS="${WRAPPER_FW0} ${WRAPPER_FW1}"
 
 WAITED=0
 # Timeout: digits only, forced base-10 (a leading zero like "08" must
@@ -203,12 +272,14 @@ trap 'rm -f "$XPF_CLUSTER_OWNER" "$XPF_CLUSTER_BUILD_BASELINE" 2>/dev/null || tr
 echo "[with-cluster $(date +%H:%M:%S)] lock acquired (pid $$, purpose: ${PURPOSE})" >&2
 # A cluster cell is a V-class harness. Resolve its firewall targets and
 # prove both are VMs before the cell can run apt/systemctl or deploy code.
+# The command's own environment: cluster-env.sh as before (convenience; not
+# policed, see #19165 above).
 # shellcheck source=cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
 # shellcheck source=vm-target-guard.sh
 source "${SCRIPT_DIR}/vm-target-guard.sh"
-xpf_assert_vm_target "$FW0"
-xpf_assert_vm_target "$FW1"
+xpf_assert_vm_target "$WRAPPER_FW0"
+xpf_assert_vm_target "$WRAPPER_FW1"
 
 
 # Run the cell with the lock fd closed: children never inherit fd 9,

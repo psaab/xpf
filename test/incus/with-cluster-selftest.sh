@@ -18,6 +18,9 @@ trap 'rm -rf "$T"' EXIT
 mkdir -p "$T/bin"
 cat >"$T/bin/incus" <<'STUB'
 #!/usr/bin/env bash
+# #19165: when INCUS_CALL_LOG is set, record every call (which instance the
+# wrapper's own guard and probe touched).
+[[ -n "${INCUS_CALL_LOG:-}" ]] && printf '%s\n' "$*" >>"$INCUS_CALL_LOG"
 if [[ "$1" == list ]]; then
 	if [[ "${2:-}" == *: ]]; then name="${3:-}"; else name="${2#*:}"; fi
 	printf '[{"name":"%s","type":"virtual-machine"}]\n' "$name"
@@ -201,5 +204,58 @@ wait "$J_PID" || true
 XPF_CLUSTER_LOCK_TIMEOUT=99999999999999999999 "$WC" "case-j huge" -- true \
 	|| fail "(j) absurd timeout value broke acquire"
 ok "timeout env normalizes base-10 and degrades absurd values safely"
+
+# ── #19165: the wrapper's OWN targets come from the held lock's cluster.
+#    wc_cell <tag> <lock-cluster> [VAR=val ...] -- <cmd...>: one cell under
+#    that cluster's canonical lock name in $T/<tag>, with the build probe ON
+#    and every incus call logged to $T/<tag>/incus.log; prints the status.
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+UDP_ENV="${REPO_ROOT}/test/incus/udp-userspace-cluster.env"
+LOSS_ENV="${REPO_ROOT}/test/incus/loss-userspace-cluster.env"
+wc_cell() {
+	local tag=$1 cl=$2; shift 2
+	local -a vars=()
+	while [[ $# -gt 0 && "$1" != -- ]]; do vars+=("$1"); shift; done
+	shift
+	mkdir -p "$T/$tag"
+	set +e
+	env "${vars[@]}" XPF_CLUSTER_LOCK="$T/$tag/xpf-cluster-${cl}.lock" XPF_CLUSTER_OWNER="$T/$tag/owner" \
+		XPF_CLUSTER_EPOCH="$T/$tag/epoch" XPF_CLUSTER_BUILD_PROBE=1 INCUS_CALL_LOG="$T/$tag/incus.log" \
+		"$WC" "case-$tag" -- "$@" >"$T/$tag.out" 2>&1
+	echo $?
+	set -e
+}
+# wrapper_touched <tag>: the instances the wrapper's own guard and build probe
+# addressed (the command below touches none).
+wrapper_touched() { sed -E 's/(loss|tcp|udp): /\1:/g' "$T/$1/incus.log" 2>/dev/null | grep -oE '(loss|tcp|udp):[a-z0-9-]+|xpf-fw[01]' | sort -u | tr '\n' ' '; }
+# (k) the INCIDENT: a udp lock tuple with BPFRX_CLUSTER_ENV unset. The guard
+#     and probe now act on udp only, and the command gets the udp env file.
+rc=$(wc_cell k udp -u BPFRX_CLUSTER_ENV -- bash -c 'printf "%s\n" "$BPFRX_CLUSTER_ENV" >"$0/env"' "$T/k")
+[[ $rc -eq 0 && "$(wrapper_touched k)" == "udp:xpf-udp-fw0 udp:xpf-udp-fw1 " && "$(cat "$T/k/env")" == "$UDP_ENV" ]] ||
+	fail "(k) udp tuple, no env: rc=$rc touched=[$(wrapper_touched k)] env=[$(cat "$T/k/env" 2>/dev/null)]: $(tr '\n' '|' <"$T/k.out")"
+# (l) a mismatched env: refused before the lock, nothing run or touched.
+rc=$(wc_cell l udp BPFRX_CLUSTER_ENV="$LOSS_ENV" -- touch "$T/l/ran")
+[[ $rc -eq 2 && ! -e "$T/l/ran" && ! -s "$T/l/owner" && -z "$(wrapper_touched l)" ]] &&
+	grep -q 'REFUSED: BPFRX_CLUSTER_ENV=.*loss-userspace-cluster.env is not the udp cluster' "$T/l.out" ||
+	fail "(l) udp tuple + loss env: rc=$rc touched=[$(wrapper_touched l)]: $(tr '\n' '|' <"$T/l.out")"
+# (m) inherited target overrides are IGNORED for the wrapper's own actions
+#     (and not policed for the command, which still runs).
+rc=$(wc_cell m udp BPFRX_CLUSTER_ENV="$UDP_ENV" INCUS_REMOTE=loss FW0=loss:xpf-userspace-fw0 FW1=xpf-fw1 \
+	CLUSTER_LAN_HOST=loss:cluster-userspace-host -- touch "$T/m/ran")
+[[ $rc -eq 0 && -e "$T/m/ran" && "$(wrapper_touched m)" == "udp:xpf-udp-fw0 udp:xpf-udp-fw1 " ]] ||
+	fail "(m) inherited overrides: rc=$rc touched=[$(wrapper_touched m)]: $(tr '\n' '|' <"$T/m.out")"
+# (n) the legacy local cluster (BPFRX_CLUSTER_ENV empty) pairs with the
+#     default (loss) tuple only; its own targets are the bare local names.
+rc=$(wc_cell n loss BPFRX_CLUSTER_ENV= -- touch "$T/n/ran")
+[[ $rc -eq 0 && -e "$T/n/ran" && "$(wrapper_touched n)" == "xpf-fw0 xpf-fw1 " ]] ||
+	fail "(n) legacy empty env + loss tuple: rc=$rc touched=[$(wrapper_touched n)]: $(tr '\n' '|' <"$T/n.out")"
+rc=$(wc_cell n2 udp BPFRX_CLUSTER_ENV= -- touch "$T/n2/ran")
+[[ $rc -eq 2 && ! -e "$T/n2/ran" ]] && grep -q 'BPFRX_CLUSTER_ENV is empty (the legacy local cluster) but the lock tuple is the udp' "$T/n2.out" ||
+	fail "(n) legacy empty env + udp tuple: rc=$rc: $(tr '\n' '|' <"$T/n2.out")"
+# (o) the lock's own env file named relatively (as the Makefile does) is the
+#     same file: accepted.
+rc=$(cd "$REPO_ROOT" && wc_cell o udp BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env -- touch "$T/o/ran")
+[[ $rc -eq 0 && -e "$T/o/ran" ]] || fail "(o) relative udp env path: rc=$rc: $(tr '\n' '|' <"$T/o.out")"
+ok "#19165: the wrapper's own guard and probe act on the held lock's cluster only (incident shape, mismatched env refused, inherited overrides ignored, legacy local pairing, relative env path)"
 
 echo "ALL ${PASS} CASES PASS"

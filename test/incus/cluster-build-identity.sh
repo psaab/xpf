@@ -70,11 +70,17 @@ xpf_cluster_build_probe() {
 	# Resolve FW0/FW1 in a SUBSHELL so cluster-env.sh's exports cannot
 	# leak into the caller's environment (with-cluster.sh runs the cell
 	# with a deliberately minimal env contract).
-	refs="$(
-		# shellcheck source=cluster-env.sh
-		source "${dir}/cluster-env.sh" >/dev/null 2>&1 || true
-		printf '%s\n%s\n' "${FW0:-}" "${FW1:-}"
-	)"
+	if [[ -n "${XPF_CLUSTER_WRAPPER_TARGETS:-}" ]]; then
+		# #19165: with-cluster.sh's own targets, resolved from the held lock's
+		# cluster alone; inherited overrides cannot steer the probe.
+		refs="$(tr ' ' '\n' <<<"$XPF_CLUSTER_WRAPPER_TARGETS")"
+	else
+		refs="$(
+			# shellcheck source=cluster-env.sh
+			source "${dir}/cluster-env.sh" >/dev/null 2>&1 || true
+			printf '%s\n%s\n' "${FW0:-}" "${FW1:-}"
+		)"
+	fi
 	# -n: without it `incus exec` forwards this loop's stdin to the remote
 	# command, so the first node's call drains the node list and only FW0 is
 	# ever probed. A binary swapped on FW1 then diffs clean (#9683).

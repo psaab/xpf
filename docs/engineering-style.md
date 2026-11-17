@@ -2075,6 +2075,18 @@ they repeatedly bite:
   tcp/udp MUST export its matching `XPF_CLUSTER_LOCK`,
   `XPF_CLUSTER_OWNER`, and `XPF_CLUSTER_EPOCH` before calling any
   self-locking command; otherwise it silently uses the loss defaults.
+  `with-cluster.sh`'s OWN actions (its VM-target guard: shims, mark-vm,
+  `systemctl daemon-reload`; and its build-identity probe) target the held
+  lock's cluster ONLY (#19165). A fixed map takes the lock tuple to that
+  cluster's env file, and the targets resolve from it in a clean
+  environment, ignoring any inherited `FW0`/`FW1`/`INCUS_REMOTE`.
+  - `BPFRX_CLUSTER_ENV` unset: the wrapper exports the lock's env file.
+  - Set to another cluster's file: the cell is refused.
+  - Empty (the legacy local cluster): allowed only with the default tuple.
+  The wrapper does NOT police the variables a cell's command reads on its
+  own (`FW0`, `CLUSTER_LAN_HOST`, a script's `HOST`, …). Under this lock
+  protocol, a command that targets instances is its author's
+  responsibility.
   Never give a gate and ordinary command for one physical cluster different
   tuples. See the campaign skill and CLAUDE.md for the full path table.
   | Actor | Protocol |
