@@ -89,6 +89,17 @@ Route metadata crosses the Go→Rust snapshot boundary as `RouteSnapshot`
   carries no forwarding next-hop (it is a `NextTable` snapshot), so it
   never reaches this inference and is re-resolved in the target table's
   own scope by the recursion.
+  - **Peer-owned rows stay in transit (#19171).** A connected row whose RETH
+    unit belongs to the peer (`connected_rg_peer_owned`) is pushed into
+    `connected_v[46]` like any other row, and ALSO into
+    `connected_v[46]_peer_owned`, the build-time mark. A destination inside it
+    answers Connected on the peer-owned unit, and HA judges that egress at
+    lookup time. #15742 withheld the row instead, so the destination fell
+    through to the default route. The mark is read only where a peer-held
+    address must never stand for this node: the ICMP PTB source fallback.
+  - **Equal-length rows tie-break to the lowest ifindex (#19171).** `sort_connected`
+    orders transit rows by prefix length, then ifindex, the #17053 canonical
+    rule. Before, a stable sort kept snapshot order.
   - **Forwarding-instance default-interface exception (#11420/#11684/#12036).**
     Bare-gateway inference remains own-table-only. Go marks the canonical
     `<instance>.inet.0` and `<instance>.inet6.0` tables for
