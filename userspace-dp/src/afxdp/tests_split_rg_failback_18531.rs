@@ -35,7 +35,7 @@ pub(super) const WAN_HOST: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 200);
 pub(super) const SNAT_IP: Ipv4Addr = Ipv4Addr::new(172, 16, 80, 8);
 pub(super) const SPORT: u16 = 36552;
 /// A port-translated (PAT) source port, distinct from SPORT.
-const PAT_PORT: u16 = 40123;
+pub(super) const PAT_PORT: u16 = 40123;
 pub(super) const DPORT: u16 = 5211;
 /// Captured fw1 snapshot ifindexes: reth1.0 (LAN) = 5, reth0 (WAN parent)
 /// = 6, reth0.80 = 14, fabric parent ge-7-0-0 = 4.
@@ -862,7 +862,7 @@ pub(super) fn rg_taking_node_forwarding() -> ForwardingState {
 
 /// The window: the peer has demoted RG1, this node has not activated it,
 /// and RG2 (LAN) is the peer's.
-fn window_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
+pub(super) fn window_ha(now_secs: u64) -> BTreeMap<i32, HAGroupRuntime> {
     BTreeMap::from([
         (0, rg(false, now_secs)),
         (1, rg(false, now_secs)),
@@ -1115,7 +1115,7 @@ fn reverse_reply_case(served: bool) {
 // ---------------------------------------------------------------------------
 
 /// The alias row synthesized for a fabric-redirect delta.
-fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
+pub(super) fn alias_of(entry: &SyncedSessionEntry) -> SyncedSessionEntry {
     super::tests_support::imported_forward_wire_alias(entry)
 }
 
@@ -1142,7 +1142,7 @@ fn import_alias_only_under(
 }
 
 /// As `import_alias_only_under`, for the alias of `canonical`.
-fn import_alias_only_of(
+pub(super) fn import_alias_only_of(
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
@@ -1325,7 +1325,7 @@ pub(super) fn wan_reply_frame_for(family: Family) -> (Vec<u8>, UserspaceDpMeta) 
 }
 
 /// A WAN -> LAN reply addressed to the SNAT address on `dst_port`.
-fn wan_reply_frame_to(family: Family, dst_port: u16) -> (Vec<u8>, UserspaceDpMeta) {
+pub(super) fn wan_reply_frame_to(family: Family, dst_port: u16) -> (Vec<u8>, UserspaceDpMeta) {
     let (_, wan, snat) = addrs(family);
     let wan_mac = [0x02, 0xbf, 0x72, 0x16, 0x01, 0x01];
     let (frame, mut meta) = match (wan, snat) {
