@@ -175,12 +175,13 @@ fn lan_owner_idle_import_stores_wan_gateway_line_18691() {
         let (_, _, origin) = sessions.entry_with_origin(&key).expect("forward row");
         assert_eq!(origin, SessionOrigin::SyncImport, "{family:?}");
         let line = stored_forward_line(&sessions, &key);
+        // #19171: the import derives the WAN server's withheld connected interface (reth0.80, where the translation was minted) instead of the split-FIB gateway line (reth0.50); docs/log/19171.md records the probe (both modules 47/47 with only this premise changed).
         assert!(
             matches!(
                 line.disposition,
                 ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-            ) && line.egress_ifindex == WAN_GATEWAY_UNIT_IFINDEX,
-            "premise: the split FIB answers via the WAN gateway VLAN ({family:?}): {line:?}"
+            ) && line.egress_ifindex == WAN_UNIT_IFINDEX,
+            "premise (#19171): the import stores the withheld reth0.80 line ({family:?}): {line:?}"
         );
     }
 }
@@ -423,10 +424,11 @@ fn activation_refresh_heals_the_line_and_keeps_the_flow_18691() {
     for family in [Family::V4, Family::V6] {
         let (mut sessions, split_forwarding, now_secs) = lan_owner_import(family, false);
         let key = exported_forward(&split_forwarding, family).key;
+        // #19171: the import derives the WAN server's withheld connected interface (reth0.80, where the translation was minted) instead of the split-FIB gateway line (reth0.50); docs/log/19171.md records the probe (both modules 47/47 with only this premise changed).
         assert_eq!(
             stored_forward_line(&sessions, &key).egress_ifindex,
-            WAN_GATEWAY_UNIT_IFINDEX,
-            "premise: imported under the split FIB ({family:?})"
+            WAN_UNIT_IFINDEX,
+            "premise (#19171): imported under the split FIB on reth0.80 ({family:?})"
         );
         let owner_forwarding = fw1_owner_forwarding();
         apply_commands(
@@ -512,10 +514,11 @@ fn lan_owner_readdressed_translation_leaves_only_via_the_fabric_18691() {
         None,
     );
     let key = exported_forward(&forwarding, Family::V4).key;
+    // #19171: the import derives the WAN server's withheld connected interface (reth0.80, where the translation was minted) instead of the split-FIB gateway line (reth0.50); docs/log/19171.md records the probe (both modules 47/47 with only this premise changed).
     assert_eq!(
         stored_forward_line(&sessions, &key).egress_ifindex,
-        WAN_GATEWAY_UNIT_IFINDEX,
-        "premise: the split-FIB gateway line"
+        WAN_UNIT_IFINDEX,
+        "premise (#19171): the withheld reth0.80 line"
     );
     let out = lan_ack(&mut sessions, &forwarding, &split_ha(now_secs), 1);
     assert_eq!(out.session_hit, 1, "the LAN packet must hit the row");

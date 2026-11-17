@@ -93,6 +93,21 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
             entry.decision,
         )
         .resolution;
+        // #19171: a gateway-route mis-resolution of a connected destination
+        // (on a split node, the WAN default route for a server on a peer-owned
+        // LAN) is corrected to the destination's connected interface BEFORE the
+        // owner and HA decisions below. So the import keeps the right owner RG,
+        // and a standby import is ready on the right interface.
+        let resolution_target = resolution_target_for_session(&flow, entry.decision);
+        let raw_resolved = connected_owner_derivation(
+            forwarding,
+            dynamic_neighbors,
+            resolution_target,
+            install_table_name_for_session(forwarding, entry.decision, resolution_target),
+            raw_resolved,
+            None,
+        )
+        .unwrap_or(raw_resolved);
         let new_owner = owner_rg_for_resolution(forwarding, raw_resolved);
         if new_owner > 0 {
             entry.metadata.owner_rg_id = new_owner;

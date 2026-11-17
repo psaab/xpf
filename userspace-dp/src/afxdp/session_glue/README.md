@@ -63,6 +63,60 @@ retain is healed by the next FIB bump, as for a `ForwardCandidate`.
 Mechanism and live evidence:
 `docs/fabric-cross-chassis-fwd.md` (#18659), `docs/log/18659.md`.
 
+## One connected-owner derivation for every re-resolving writer (#19171)
+
+On a split node the withholding publish (#15742) removes a peer-owned LAN
+prefix from the transit FIB, so a fresh lookup answers a LAN destination with
+the WAN default route. Every writer that re-resolves a stored session runs that
+lookup. Without a correction, any of them could serve or STORE the WAN egress
+for a destination whose RG is the peer's.
+
+`connected_owner_derivation` (`resolution.rs`) is the one correction.
+- **When it fires:** the destination lies in a WITHHELD connected row of its
+  table (`connected_v4/v6_peer_owned`, #18517; membership is the peer-owned
+  property), and the fresh answer is a local candidate (ForwardCandidate or
+  MissingNeighbor on a non-fabric egress) on another interface.
+- **What it never touches:** a prefix the FIB holds. The FIB is authoritative
+  there, an operator's more-specific route included.
+- **What it returns:** that connected interface with its live neighbor
+  (MissingNeighbor if none). The stored value is never reused; a prefix that
+  moved would bring back a stale egress and MAC.
+- **It is HA-free.** The caller's own HA stage judges the result, once:
+  - the owner here: local delivery, also behind a lagging FIB;
+  - the owner the peer's, a non-fabric arrival: the redirect to the owner,
+    built from the CURRENT fabric binding;
+  - the owner the peer's, a fabric-link arrival: HAInactive, a refusal, so a
+    split view cannot ping-pong a packet over the fabric.
+- **Exemption:** an answer already on the withheld row's interface (a gateway
+  #18517 bound to that row) keeps its own next hop and MAC.
+- **Cost:**
+  - a node with nothing withheld pays one emptiness check;
+  - a packet whose answer is its stored egress pays one comparison;
+  - an HA command always checks, so an already-polluted row heals.
+  - Measured in `demote_connected_owner_19171_bench_tests.rs`: the refresh scan
+    at master's cost; a contradicted hit about 60 ns against master's 36 ns.
+- **Inputs are the canonical row's:** a NAT-alias self-target is decided
+  earlier by `alias_reverse_return_resolution`.
+
+**Where it runs:**
+
+| Writer | When |
+|---|---|
+| `reresolve_stored_session` (session-hit arm, reverse synthesis, demote, refresh) | Only where nothing else protects the row (`connected_owner_derivation_applies`). So the retain verdict (#15958b, #16524, #18659, #18672) and the hit arm's #16217 conversion are byte-for-byte unchanged. It runs for: an HA command on a non-redirect stored value; any fabric-link packet; a non-fabric-link forward packet on a non-redirect stored value. |
+| The forward-companion revalidation (`poll_descriptor/policy_revalidation.rs`) | Always (it has neither retain nor #16217). |
+| Forward synced imports (`commands/upsert_synced.rs`) | Before the import's owner and HA decisions, so a standby import stays ready on the right interface and keeps the right owner RG. |
+| Promotion, shared materialization, `upsert_local`, reverse imports | Covered transitively: they copy a decision from a covered producer, or a stale-stamped one that the first hit re-resolves. |
+
+**Not covered (coordinator decision):**
+- **new-flow admission:** a new flow is not a stored-row re-resolution, and
+  applying the derivation there changes which zone its policy is judged in.
+  That is its own admission-semantics change, filed as #19178.
+- **the reverse PBR/filter restamp:** out of scope. It persists an
+  operator-chosen filter route, a different contract.
+
+The caller matrix in `demote_connected_owner_19171_tests.rs` pins every
+covered writer under each ownership state.
+
 ## Command ingest is budgeted (`apply_worker_commands`, #7201)
 
 `apply_worker_commands` is the worker's consumer for its

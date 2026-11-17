@@ -584,6 +584,144 @@ pub(in crate::afxdp) fn connected_ifindex_for_target(
     connected_ifindex_for_target_in_table(forwarding, target, None)
 }
 
+/// #19171: where the connected-owner derivation runs. It runs only where the
+/// stored-session pipeline has NO other protection against a gateway-route
+/// mis-resolution, so every existing verdict is byte-for-byte unchanged:
+/// - **a stored FabricRedirect** keeps the rehome-or-retain verdict (#15958b,
+///   #16524, #18659, #18672), except on a fabric-LINK packet, which skips it
+///   (`rehome_skipped`, anti-loop);
+/// - **a non-fabric-link reverse packet** on a non-redirect stored value keeps
+///   the session-hit arm's #16217 conversion (`resolve.rs`), which runs after
+///   this pipeline.
+///
+/// So it covers:
+/// - an HA command (demote, refresh) on a non-redirect stored value;
+/// - any fabric-link packet;
+/// - a non-fabric-link FORWARD packet on a non-redirect stored value.
+fn connected_owner_derivation_applies(
+    fabric: FabricArrival<'_>,
+    stored: &SessionDecision,
+    metadata: &SessionMetadata,
+) -> bool {
+    let stored_redirect = stored.resolution.disposition == ForwardingDisposition::FabricRedirect;
+    match fabric {
+        FabricArrival::Command { .. } => !stored_redirect,
+        FabricArrival::Packet {
+            fabric_link_ingress: true,
+            ..
+        } => true,
+        FabricArrival::Packet { .. } => !stored_redirect && !metadata.is_reverse,
+    }
+}
+
+/// #19171: the connected-owner derivation, the ONE place a re-resolution corrects
+/// a gateway-route mis-resolution of a destination whose connected prefix the
+/// FIB WITHHOLDS. It is HA-free; the caller's own HA stage judges the result,
+/// once, with its own snapshot.
+///
+/// **When it fires.** The destination lies in a peer-owned connected row of its
+/// table (`connected_v4/v6_peer_owned`, #18517: exactly the rows #15742
+/// withholds from transit), and the fresh answer is a local candidate
+/// (ForwardCandidate or MissingNeighbor on a non-fabric egress) on another
+/// interface. On a split node the FIB then answers that destination with the
+/// WAN default route.
+/// - A destination in a prefix the FIB HOLDS is never derived: the FIB is
+///   authoritative there, including an operator's more-specific route.
+/// - A node with nothing withheld pays one emptiness check.
+/// - A FIB still withholding a prefix whose RG is local again (snapshot lag) is
+///   derived too, and HA then delivers locally.
+///
+/// **What it returns.** That row's interface, with the destination's LIVE
+/// neighbor on it (MissingNeighbor when there is none). The stored value is
+/// never used: a prefix that moved interfaces would otherwise bring back a
+/// stale egress and MAC. The caller's HA stage then gives:
+/// - the owner active here: local delivery;
+/// - the owner the peer's, a non-fabric arrival: HAInactive, which the caller
+///   turns into the redirect to the owner from the CURRENT fabric binding;
+/// - the owner the peer's, a fabric-link arrival: HAInactive, a refusal (no
+///   re-redirect, so a transient split view cannot ping-pong over the fabric).
+///
+/// **No derivation (`None`)** for:
+/// - a destination in no withheld row;
+/// - an answer already on the withheld row's interface (a gateway bound to
+///   that row by #18517 keeps its own next hop and MAC);
+/// - an answer that is not a local candidate;
+/// - `unchanged_egress == Some(the answer's egress)`: a packet whose answer is
+///   its stored egress pays one comparison.
+///
+/// **Inputs come from the CANONICAL row.** `target` is the row's own un-NAT
+/// destination. A NAT-alias row's self-target is decided earlier, by
+/// `alias_reverse_return_resolution`, and never reaches this.
+pub(in crate::afxdp) fn connected_owner_derivation(
+    forwarding: &ForwardingState,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    target: IpAddr,
+    table: Option<&str>,
+    fresh: ForwardingResolution,
+    unchanged_egress: Option<i32>,
+) -> Option<ForwardingResolution> {
+    let withheld = withheld_connected_ifindex(forwarding, target, table)?;
+    if unchanged_egress == Some(fresh.egress_ifindex) || fresh.egress_ifindex == withheld {
+        return None;
+    }
+    let local_candidate = matches!(
+        fresh.disposition,
+        ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+    ) && fresh.egress_ifindex > 0
+        && !super::forwarding::ingress_is_fabric(forwarding, fresh.egress_ifindex);
+    if !local_candidate {
+        return None;
+    }
+    let mut derived = ForwardingResolution {
+        disposition: ForwardingDisposition::ForwardCandidate,
+        local_ifindex: 0,
+        egress_ifindex: withheld,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: Some(target),
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 0,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
+    populate_egress_resolution(forwarding, withheld, &mut derived);
+    match super::lookup_neighbor_entry(forwarding, Some(dynamic_neighbors), withheld, target) {
+        Some(neighbor) => derived.neighbor_mac = Some(neighbor.mac),
+        None => derived.disposition = ForwardingDisposition::MissingNeighbor,
+    }
+    Some(derived)
+}
+
+/// #19171: the interface of the peer-owned (withheld) connected row that holds
+/// `target` in `table`, the longest such prefix first (the rows are sorted that
+/// way, `sort_connected`). Scoped by the row's own table, exactly as the FIB
+/// build's `peer_owned_connected_target_v4/v6` (#18517). Tunnel rows are not
+/// derived. `None` at once when nothing is withheld.
+fn withheld_connected_ifindex(forwarding: &ForwardingState, target: IpAddr, table: Option<&str>) -> Option<i32> {
+    match target {
+        IpAddr::V4(ip) => {
+            let want = table.unwrap_or("inet.0");
+            forwarding
+                .connected_v4_peer_owned
+                .iter()
+                .find(|row| row.table == want && row.prefix.contains(ip))
+                .filter(|row| row.tunnel_endpoint_id == 0 && row.ifindex > 0)
+                .map(|row| row.ifindex)
+        }
+        IpAddr::V6(ip) => {
+            let want = table.unwrap_or("inet6.0");
+            forwarding
+                .connected_v6_peer_owned
+                .iter()
+                .find(|row| row.table == want && row.prefix.contains(ip))
+                .filter(|row| row.tunnel_endpoint_id == 0 && row.ifindex > 0)
+                .map(|row| row.ifindex)
+        }
+    }
+}
+
 /// RI-scoped connected ifindex (round-5); see
 /// `connected_owner_rg_for_target_in_table`.
 ///
@@ -775,6 +913,27 @@ pub(in crate::afxdp) fn reresolve_stored_session(
         );
     }
     let install_table = install_table_name_for_session(forwarding, *stored, target);
+    // #19171: the connected-owner derivation, only where nothing else protects
+    // the stored session (`connected_owner_derivation_applies`).
+    let looked_up = if connected_owner_derivation_applies(fabric, stored, stored_metadata) {
+        // A packet's answer on the stored egress costs one comparison; a
+        // command always checks, so an already-polluted row heals.
+        let unchanged_egress = match fabric {
+            FabricArrival::Packet { .. } => Some(stored.resolution.egress_ifindex),
+            FabricArrival::Command { .. } => None,
+        };
+        connected_owner_derivation(
+            forwarding,
+            dynamic_neighbors,
+            target,
+            install_table,
+            looked_up,
+            unchanged_egress,
+        )
+        .unwrap_or(looked_up)
+    } else {
+        looked_up
+    };
     let looked_up = super::prefer_local_forward_candidate_for_fabric_ingress(
         forwarding,
         ha_state,
