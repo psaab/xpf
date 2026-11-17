@@ -404,8 +404,8 @@ pub(super) struct FlowCacheEntry {
     /// `SessionTable::backing_install_epoch_for_cache_hit` after the slow
     /// path's own installs, replacements and promotions for the packet. The
     /// fused cache-hit probe refuses a record with another epoch
-    /// (`ProbeHitVerdict::Replaced`, eviction arm
-    /// `post_hit_session_replaced`). Every same-key replacement stamps a new
+    /// (`ProbeHitVerdict::Replaced`, counted under the
+    /// `post_hit_session_dead_no_record` eviction arm). Every same-key replacement stamps a new
     /// epoch; in-place updates never move it (#9856), so a steady flow keeps
     /// hitting. `PROBE_NO_BACKING_ROW` when the seed's key resolved no
     /// record; `PROBE_ANY_INCARNATION` (no check) only on an entry built
@@ -1097,22 +1097,20 @@ pub(super) enum FlowCacheEvictionArm {
     /// #18656 sub-arms of PostHitSessionDead: which refusal inside the
     /// fused cache-hit probe (`SessionTable::probe_hit_inner`) fired.
     /// NoRecord: the packet key resolved no record on this worker's table
-    /// (direct key or reverse-translated alias). IdleCrossed: the record
+    /// (direct key or reverse-translated alias), or (#19173) it resolved a
+    /// record of another incarnation than the one the entry was seeded from
+    /// (`ProbeHitVerdict::Replaced`): the seeded record is gone either way.
+    /// #19173 measured a dedicated arm and dropped it: the extra slot
+    /// shifted `FlowCache`/`BindingLiveState` and cost the whole established
+    /// hit about 6 ns per packet (docs/log/19173.md). IdleCrossed: the record
     /// was found but its idle deadline had passed and no companion proved
     /// the flow live (#16223). PostHitSessionDead keeps the TTL-expiring
     /// liveness-only probe, which does not attribute.
     PostHitSessionDeadNoRecord = 20,
     PostHitSessionDeadIdleCrossed = 21,
-    /// #19173: the fused probe resolved a record for the key, but a
-    /// different incarnation than the one the entry was seeded from
-    /// (`ProbeHitVerdict::Replaced`): a same-key replacement such as
-    /// `UpsertSynced`/`UpsertLocal` or a local reinstall. Its own arm so a
-    /// seed/probe resolution disagreement (a re-seed that never sticks)
-    /// shows up here instead of hiding under the no-record arm.
-    PostHitSessionReplaced = 22,
 }
 
-pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 23;
+pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 22;
 
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
@@ -1138,7 +1136,6 @@ impl FlowCacheEvictionArm {
         Self::PostHitFabricRedirectDestinationNowLocal,
         Self::PostHitSessionDeadNoRecord,
         Self::PostHitSessionDeadIdleCrossed,
-        Self::PostHitSessionReplaced,
     ];
 
     pub(super) fn label(self) -> &'static str {
@@ -1173,7 +1170,6 @@ impl FlowCacheEvictionArm {
             }
             Self::PostHitSessionDeadNoRecord => "post_hit_session_dead_no_record",
             Self::PostHitSessionDeadIdleCrossed => "post_hit_session_dead_idle_crossed",
-            Self::PostHitSessionReplaced => "post_hit_session_replaced",
         }
     }
 }

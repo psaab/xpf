@@ -1599,10 +1599,20 @@ with no TTL.
   takes the entry's epoch and, under the record borrow it already holds,
   refuses a record with another epoch as `ProbeHitVerdict::Replaced`
   before any keepalive, accounting or undo. The hit path evicts the slot
-  like a dead row (`post_hit_session_replaced`) and the slow path judges
-  the live row. One field read and one compare per hit. The TTL arm's
-  liveness-only probe does not check: it never forwards on the cached
-  decision.
+  like a dead row and the slow path judges the live row. One field read
+  and one compare per hit. The TTL arm's liveness-only probe does not
+  check: it never forwards on the cached decision.
+- **Attribution.** A replaced-row refusal is counted under
+  `post_hit_session_dead_no_record` (the record the entry was seeded from
+  no longer exists). A dedicated `post_hit_session_replaced` arm was
+  built and measured: its extra counter slot shifted the `FlowCache` and
+  `BindingLiveState` layouts and cost the whole established hit +6.25 ns
+  per packet, against -3.90 ns for the same fix without it
+  (`docs/log/19173.md`). The trade-off: Prometheus and the CLI cannot tell
+  a replaced row from a missing one, so a replacement storm, or a seed and
+  probe that disagree on the row (a re-seed that never sticks), reads as a
+  no-record storm, the #18656 signature. `ProbeHitVerdict::Replaced`
+  still separates them in the session layer and its cells.
 - **What the slow path then does.** A replacing row arrives with an
   unvalidated filter stamp, so on a direct (non-foreign) arrival its first
   hit runs the #7212/#10467 route revalidation, which re-derives the
@@ -1636,7 +1646,8 @@ no-row sentinel), `afxdp/tests_flow_cache_incarnation_19173.rs` (the
 issue's repro on the poll path for `UpsertSynced` and `UpsertLocal`; the
 identical re-import control; ten in-place-updating hits stay hits), and
 `afxdp/tests_flow_cache_incarnation_19173_arm.rs` (the seed binds the
-served row; the eviction arm; the re-seed binds the replacing row).
+served row; a replaced hit is one no-record eviction; the re-seed binds
+the replacing row).
 Numbers and the writer analysis: `docs/log/19173.md`.
 
 ## Static input-filter revalidation stamp (#7212)

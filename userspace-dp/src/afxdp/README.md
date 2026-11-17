@@ -2385,9 +2385,11 @@ only while every one of these holds:
   from the record's write-once `install_epoch`; a same-key replacement
   (`UpsertSynced`, `UpsertLocal`, a local re-install) mints a new epoch,
   and the probe refuses the stale incarnation before any accounting
-  (`ProbeHitVerdict::Replaced`, eviction arm `post_hit_session_replaced`,
-  ordinal 22). In-place row updates never move the epoch, so a steady
-  flow keeps hitting. Design, the in-place-writer analysis and numbers:
+  (`ProbeHitVerdict::Replaced`, counted under the existing
+  `post_hit_session_dead_no_record` arm: a dedicated arm's extra counter
+  slot shifted `FlowCache`/`BindingLiveState` and cost the whole
+  established hit about 6 ns, so it was folded). In-place row updates
+  never move the epoch, so a steady flow keeps hitting. Design, the in-place-writer analysis and numbers:
   `session/README.md` "Flow-cache hits bind to the row's incarnation" and
   `docs/log/19173.md`.
 

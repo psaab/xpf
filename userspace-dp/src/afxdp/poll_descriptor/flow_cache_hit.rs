@@ -744,9 +744,10 @@ pub(super) fn stage_flow_cache_hit(
                 (false, crate::session::ProbeHitVerdict::IdleCrossed) => {
                     crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadIdleCrossed
                 }
-                (false, crate::session::ProbeHitVerdict::Replaced) => {
-                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionReplaced
-                }
+                // #19173: `Replaced` (the key resolved another incarnation
+                // than the seed's) folds into the no-record arm: the
+                // seeded record is gone. A dedicated arm cost ~6 ns per
+                // established hit in layout shift (docs/log/19173.md).
                 (false, _) => {
                     crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadNoRecord
                 }

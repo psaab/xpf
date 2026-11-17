@@ -1,6 +1,6 @@
 // #19173: what the fix adds, on the production poll path: the seed binds the
 // entry to the backing row's install incarnation, and a hit refused for a
-// replaced row is counted under its own eviction arm. The defect cells (and
+// replaced row is counted under the no-record eviction arm. The defect cells (and
 // the fixture) are in `tests_flow_cache_incarnation_19173.rs`, which compiles
 // on the pre-fix tree; these name fix-only API and do not.
 use super::tests_flow_cache_incarnation_19173::*;
@@ -22,10 +22,10 @@ fn live_epoch(fx: &Fixture) -> u64 {
 }
 
 /// The seed binds the entry to the row the slow path served, and a hit on a
-/// replaced row is refused under `post_hit_session_replaced`, never the
-/// no-record arm (the row exists; it is another incarnation).
+/// replaced row is refused and counted under `post_hit_session_dead_no_record`
+/// (the seeded record is gone), never the idle-crossed arm.
 #[test]
-fn seed_binds_the_backing_row_and_replacement_counts_its_own_arm_19173() {
+fn seed_binds_the_backing_row_and_replacement_counts_as_no_record_19173() {
     let mut fx = Fixture::seeded();
     let seeded = bound_epoch(&fx);
     assert_eq!(seeded, live_epoch(&fx), "the seed binds row A's incarnation");
@@ -35,14 +35,14 @@ fn seed_binds_the_backing_row_and_replacement_counts_its_own_arm_19173() {
     assert_ne!(live_epoch(&fx), seeded, "premise: the replacement is a new incarnation");
     assert_eq!(fx.send(0), Sent { cache_hit: false, egress: None });
     let arms = fx.binding.flow.flow_cache.evictions_by_arm;
-    assert_eq!(arms[Arm::PostHitSessionReplaced as usize], 1, "{arms:?}");
-    assert_eq!(arms[Arm::PostHitSessionDeadNoRecord as usize], 0, "{arms:?}");
+    assert_eq!(arms[Arm::PostHitSessionDeadNoRecord as usize], 1, "{arms:?}");
     assert_eq!(arms[Arm::PostHitSessionDeadIdleCrossed as usize], 0, "{arms:?}");
+    assert_eq!(arms.iter().sum::<u64>(), 1, "one eviction, on one arm: {arms:?}");
 }
 
 /// The re-seed after a replacement binds the REPLACING row, so the flow
 /// re-seeds once and then hits: an identical re-import (same table, same
-/// session id) costs one slow-path segment, attributed to the arm.
+/// session id) costs one slow-path segment, counted as no-record.
 #[test]
 fn re_seed_binds_the_replacing_row_19173() {
     let mut fx = Fixture::seeded();
@@ -69,7 +69,7 @@ fn re_seed_binds_the_replacing_row_19173() {
     assert_ne!(replaced, seeded, "premise: a re-import is a new incarnation");
     assert_eq!(fx.send(0), Sent { cache_hit: false, egress: Some(E1) });
     assert_eq!(
-        fx.binding.flow.flow_cache.evictions_by_arm[Arm::PostHitSessionReplaced as usize],
+        fx.binding.flow.flow_cache.evictions_by_arm[Arm::PostHitSessionDeadNoRecord as usize],
         1
     );
     assert_eq!(bound_epoch(&fx), replaced, "the re-seed binds the replacing row");
