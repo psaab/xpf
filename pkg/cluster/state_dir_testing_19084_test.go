@@ -16,6 +16,7 @@ import (
 // from another package's root-leg tests (#19084).
 func TestStateDirForTestingCoversEveryStatePath19084(t *testing.T) {
 	dir := t.TempDir()
+	before := bootEpochPath // TestMain's per-run redirect (#19161), not the production literal
 	restore := SetStateDirForTesting(dir)
 	redirected := map[string]bool{}
 	for _, p := range []string{bootEpochPath, peerEpochStatePath, fabricAuthGraceStatePath, unkeyedAuthorityGraceStatePath} {
@@ -25,8 +26,8 @@ func TestStateDirForTestingCoversEveryStatePath19084(t *testing.T) {
 		redirected[filepath.Base(p)] = true
 	}
 	restore()
-	if bootEpochPath != "/var/lib/xpf/ha-boot-epoch" {
-		t.Errorf("restore left bootEpochPath = %q", bootEpochPath)
+	if bootEpochPath != before {
+		t.Errorf("restore left bootEpochPath = %q, want %q", bootEpochPath, before)
 	}
 
 	lit := regexp.MustCompile(`(?m)^(?:var\s+)?\s*\w+\s*=\s*"(/var/lib/xpf/[^"]+)"`)

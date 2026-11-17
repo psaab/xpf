@@ -33,7 +33,7 @@ func TestElection_PeerLost_BecomesPrimary(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events() // drain initial single-node election
+	recvEvent19161(t, m.Events(), "drain initial single-node election")
 
 	// Simulate peer arriving then disappearing.
 	pkt := &HeartbeatPacket{
@@ -61,7 +61,7 @@ func TestElection_PeerHigherPriority_Preempt(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100})) // preempt enabled
 	m.UpdateConfig(cfg)
-	<-m.Events() // primary from single-node election
+	recvEvent19161(t, m.Events(), "primary from single-node election")
 
 	// Peer has higher priority.
 	pkt := &HeartbeatPacket{
@@ -83,7 +83,7 @@ func TestElection_LocalHigherPriority_Preempt(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 250})) // preempt, high priority
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Peer has lower priority and is currently primary.
 	pkt := &HeartbeatPacket{
@@ -105,7 +105,7 @@ func TestElection_NonPreempt_IncumbentStays(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 250})) // no preempt
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// We are primary. Peer arrives with higher priority but preempt=false.
 	pkt := &HeartbeatPacket{
@@ -127,7 +127,7 @@ func TestElection_SplitBrain_LowerNodeWins(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Both nodes think they are primary (split-brain).
 	pkt := &HeartbeatPacket{
@@ -149,7 +149,7 @@ func TestElection_SplitBrain_HigherNodeLoses(t *testing.T) {
 	m := NewManager(1, 1) // We are node 1 (higher)
 	cfg := makeConfig(makeRG(0, true, map[int]int{1: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Peer (node 0, lower ID) also primary.
 	pkt := &HeartbeatPacket{
@@ -261,7 +261,7 @@ func TestElection_LocalWeightZero_BecomesSecondary(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 250}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Peer is secondary.
 	pkt := &HeartbeatPacket{
@@ -286,7 +286,7 @@ func TestElection_PeerWeightZero_BecomesPrimary(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Peer has higher priority but weight 0.
 	pkt := &HeartbeatPacket{
@@ -308,7 +308,7 @@ func TestElection_ManualFailover_Preserved(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Manual failover.
 	_, _ = m.ManualFailover(0)
@@ -334,7 +334,7 @@ func TestElection_PeerSecondaryHold_BecomesPrimary(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	m.groups[0].State = StateSecondary
@@ -358,7 +358,7 @@ func TestElection_DualResign_TimeGuard(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Manual failover — just set, should NOT clear even if peer is also in
 	// transfer-out state.
@@ -399,7 +399,7 @@ func TestElection_DisabledState_Preserved(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Force disabled.
 	m.mu.Lock()
@@ -555,7 +555,7 @@ func TestElection_TiePriority_LowerNodeWins(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Both nodes have same effective priority, preempt enabled.
 	// Both are secondary initially for election purposes.
@@ -891,7 +891,7 @@ func TestElection_NonPreemptDualActive_LowerPriorityYields(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 100})) // non-preempt, low priority
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Force local to primary.
 	m.mu.Lock()
@@ -920,7 +920,7 @@ func TestElection_NonPreemptDualActive_TieBreakNodeID(t *testing.T) {
 	m := NewManager(1, 1)                                    // We are node 1 (higher)
 	cfg := makeConfig(makeRG(0, false, map[int]int{1: 200})) // non-preempt
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Force local to primary.
 	m.mu.Lock()
@@ -949,7 +949,7 @@ func TestElection_NonPreemptDualActive_WinnerStays(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200})) // non-preempt, high priority
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Force local to primary.
 	m.mu.Lock()
@@ -978,7 +978,7 @@ func TestElection_NonPreemptDualActive_PreemptSelfResolves(t *testing.T) {
 	m := NewManager(1, 1)                                   // We are node 1 (higher)
 	cfg := makeConfig(makeRG(0, true, map[int]int{1: 100})) // preempt enabled
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Force local to primary.
 	m.mu.Lock()
@@ -1022,7 +1022,7 @@ func setupDualActiveWinner(t *testing.T) *Manager {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200})) // non-preempt, high priority
 	m.UpdateConfig(cfg)
-	<-m.Events() // drain the UpdateConfig event
+	recvEvent19161(t, m.Events(), "drain the UpdateConfig event")
 
 	m.mu.Lock()
 	m.groups[0].State = StatePrimary

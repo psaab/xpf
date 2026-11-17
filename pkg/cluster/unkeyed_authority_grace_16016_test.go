@@ -269,7 +269,7 @@ func setupAuthorityManager16016(t *testing.T) (*Manager, *authorityClock16016, s
 	t.Cleanup(restorePath)
 	restoreClock := SetUnkeyedAuthorityClocksForTesting(clock.wallNow, clock.monoNow)
 	t.Cleanup(restoreClock)
-	m := NewManager(0, 1)
+	m := newManager16016(t, 0, 1)
 	m.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	return m, clock, path
 }
@@ -290,7 +290,7 @@ func TestUnkeyedGraceRollbackCannotRefundMonotonicElapsedAcrossRestarts16016(t *
 
 	clock.setWall(t0.Add(time.Hour))
 	clock.setMono(int64(time.Second))
-	firstRestart := NewManager(0, 1)
+	firstRestart := newManager16016(t, 0, 1)
 	firstRestart.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if got := firstRestart.UnkeyedGraceExpiry(); !got.Equal(t0.Add(72 * time.Hour)) {
 		t.Fatalf("first rollback restart expiry = %s, want %s", got, t0.Add(72*time.Hour))
@@ -300,7 +300,7 @@ func TestUnkeyedGraceRollbackCannotRefundMonotonicElapsedAcrossRestarts16016(t *
 
 	clock.setWall(t0.Add(time.Hour))
 	clock.setMono(int64(time.Second))
-	secondRestart := NewManager(0, 1)
+	secondRestart := newManager16016(t, 0, 1)
 	secondRestart.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if secondRestart.UnkeyedAuthorityExpired() {
 		t.Fatal("second rollback restart expired before cumulative monotonic time reached 72h")
@@ -312,7 +312,7 @@ func TestUnkeyedGraceRollbackCannotRefundMonotonicElapsedAcrossRestarts16016(t *
 
 	clock.setWall(t0.Add(time.Hour))
 	clock.setMono(int64(time.Second))
-	thirdRestart := NewManager(0, 1)
+	thirdRestart := newManager16016(t, 0, 1)
 	thirdRestart.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !thirdRestart.UnkeyedAuthorityExpired() {
 		t.Fatal("a further rollback/restart cycle reopened the expired grace")
@@ -344,7 +344,7 @@ func TestUnkeyedGraceSweepAndConfigTouchPersistExpiryAcrossRollback16016(t *test
 				m.checkUnkeyedGraceNotices()
 				expired = m.UnkeyedAuthorityExpired()
 			} else {
-				bootManager := NewManager(0, 1)
+				bootManager := newManager16016(t, 0, 1)
 				bootManager.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 				expired = bootManager.UnkeyedAuthorityExpired()
 			}
@@ -369,7 +369,7 @@ func TestUnkeyedGraceSweepAndConfigTouchPersistExpiryAcrossRollback16016(t *test
 
 			clock.setWall(earliest.Add(time.Hour))
 			clock.setMono(int64(time.Second))
-			restarted := NewManager(0, 1)
+			restarted := newManager16016(t, 0, 1)
 			restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 			if !restarted.UnkeyedAuthorityExpired() {
 				t.Fatalf("%s-triggered terminal record reopened after wall rollback and restart", trigger)
@@ -407,7 +407,7 @@ func TestUnkeyedGraceHighWaterRestartAndNoReanchor16016(t *testing.T) {
 	}
 	clock.setWall(time.Date(2026, 11, 3, 13, 0, 0, 0, time.UTC)) // roll back across restart
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !restarted.UnkeyedAuthorityExpired() {
 		t.Fatal("routine restart with a high-water record silently reopened grace")
@@ -420,7 +420,7 @@ func TestUnkeyedGraceRestartPreservesRemainingMonotonicBudget16016(t *testing.T)
 	_, clock, _ := setupAuthorityManager16016(t)
 	firstExpiry := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
 	clock.advance(24 * time.Hour)
-	original := NewManager(0, 1)
+	original := newManager16016(t, 0, 1)
 	original.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if got := original.UnkeyedGraceExpiry(); !got.Equal(firstExpiry) {
 		t.Fatalf("original expiry = %s, want %s", got, firstExpiry)
@@ -429,7 +429,7 @@ func TestUnkeyedGraceRestartPreservesRemainingMonotonicBudget16016(t *testing.T)
 	// Simulate a process restart after one day of grace. The restarted
 	// monotonic budget must be the 48 hours remaining, not another 72 hours.
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(firstExpiry) {
 		t.Fatalf("restart changed expiry to %s, want %s", got, firstExpiry)
@@ -452,7 +452,7 @@ func TestUnkeyedGraceCorruptFailsClosedAndFutureClamps16016(t *testing.T) {
 	if err := os.WriteFile(path, []byte("corrupt anchor\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	corrupt := NewManager(0, 1)
+	corrupt := newManager16016(t, 0, 1)
 	corrupt.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !corrupt.UnkeyedAuthorityExpired() || !corrupt.UnkeyedGraceAnchorCorrupt() {
 		t.Fatal("present corrupt anchor did not fail closed at boot")
@@ -461,7 +461,7 @@ func TestUnkeyedGraceCorruptFailsClosedAndFutureClamps16016(t *testing.T) {
 	if err := os.WriteFile(path, []byte(fmt.Sprintf("v1 %d %d\n", legacyEarliest.UnixNano(), legacyEarliest.UnixNano())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	legacy := NewManager(0, 1)
+	legacy := newManager16016(t, 0, 1)
 	legacy.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !legacy.UnkeyedAuthorityExpired() || !legacy.UnkeyedGraceAnchorCorrupt() {
 		t.Fatal("legacy v1 anchor without monotonic history did not fail closed")
@@ -474,7 +474,7 @@ func TestUnkeyedGraceCorruptFailsClosedAndFutureClamps16016(t *testing.T) {
 	if err := os.WriteFile(futurePath, []byte(fmt.Sprintf("v2 %d %d 0\n", future.UnixNano(), future.UnixNano())), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	clamped := NewManager(0, 1)
+	clamped := newManager16016(t, 0, 1)
 	clamped.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if clamped.UnkeyedAuthorityExpired() {
 		t.Fatal("future-dated anchor extended or prematurely expired the grace")
@@ -507,7 +507,7 @@ func TestUnkeyedGraceWriteFailureExpiresInProcess16016(t *testing.T) {
 	defer restorePersist()
 	restoreClock := SetUnkeyedAuthorityClocksForTesting(clock.wallNow, clock.monoNow)
 	defer restoreClock()
-	m := NewManager(0, 1)
+	m := newManager16016(t, 0, 1)
 	m.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !m.UnkeyedGraceNotPersisted() {
 		t.Fatal("failed anchor write was not exposed in status")
@@ -572,7 +572,7 @@ func TestUnkeyedGracePostRenameSyncErrorVisibleAcrossRestart16016(t *testing.T) 
 		t.Fatal("post-rename durability warning changed the in-process grace deadline")
 	}
 
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if restarted.UnkeyedAuthorityExpired() || !restarted.UnkeyedGraceExpiry().Equal(expiry) {
 		t.Fatalf("visible anchor did not preserve active expiry across immediate restart: expired=%t expiry=%s want=%s",
@@ -856,7 +856,7 @@ func TestKeyedSecondaryRestartConfirmedAbsentHoldsUntilHeartbeatProof16016(t *te
 		RedundancyGroups:   groupConfig.RedundancyGroups,
 		ControlLinkAuthKey: config.NewSecret(string(key)),
 	}
-	keyingSecondary := NewManager(1, 1)
+	keyingSecondary := newManager16016(t, 1, 1)
 	keyingSecondary.UpdateConfigFromBoot(groupConfig)
 	if !keyingSecondary.UnkeyedAuthorityExpired() {
 		t.Fatal("secondary did not load the expired unkeyed cutoff")
@@ -873,7 +873,7 @@ func TestKeyedSecondaryRestartConfirmedAbsentHoldsUntilHeartbeatProof16016(t *te
 	}
 
 	// Restart S after its local key commit, before any authenticated proof.
-	secondary := NewManager(1, 1)
+	secondary := newManager16016(t, 1, 1)
 	secondary.UpdateConfigFromBoot(keyedConfig)
 	if !secondary.RecoveryHoldActive() {
 		t.Fatal("keyed secondary restart did not restore the recovery hold")
@@ -1127,7 +1127,7 @@ func setupBareAuthorityManager16016(t *testing.T) (*Manager, *authorityClock1601
 	t.Cleanup(restorePath)
 	restoreClock := SetUnkeyedAuthorityClocksForTesting(clock.wallNow, clock.monoNow)
 	t.Cleanup(restoreClock)
-	return NewManager(0, 1), clock, path
+	return newManager16016(t, 0, 1), clock, path
 }
 
 func TestUnkeyedGraceFabricOnlyTransportAnchorsAndExpires16016(t *testing.T) {
@@ -1150,7 +1150,7 @@ func TestUnkeyedGraceFabricOnlyTransportAnchorsAndExpires16016(t *testing.T) {
 
 	// The pre-listener belt sees the same compiled transport fields and
 	// restores, rather than moving, the persisted cutoff.
-	bootManager := NewManager(0, 1)
+	bootManager := newManager16016(t, 0, 1)
 	bootManager.StampUnkeyedAuthorityAnchor(cfg)
 	if got := bootManager.UnkeyedGraceExpiry(); !got.Equal(expiry) {
 		t.Fatalf("fabric-only boot belt expiry = %s, want original %s", got, expiry)
@@ -1239,7 +1239,7 @@ func TestUnkeyedGraceSweepRatchetsHighWaterWithoutConfigTouch16016(t *testing.T)
 
 	clock.setWall(earliest.Add(time.Hour))
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if got := restarted.UnkeyedGraceExpiry(); !got.Equal(expiry) {
 		t.Fatalf("rollback restart moved cutoff to %s, want %s", got, expiry)
@@ -1260,7 +1260,7 @@ func TestUnkeyedGraceSweepRatchetsHighWaterWithoutConfigTouch16016(t *testing.T)
 	// restart remains expired rather than opening a third window.
 	clock.setWall(earliest.Add(25 * time.Hour))
 	clock.setMono(int64(time.Second))
-	restartedAgain := NewManager(0, 1)
+	restartedAgain := newManager16016(t, 0, 1)
 	restartedAgain.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !restartedAgain.UnkeyedAuthorityExpired() {
 		t.Fatal("repeated rollback restart reopened an expired grace window")
@@ -1337,7 +1337,7 @@ func TestUnkeyedGraceKeyedSweepDoesNotRewriteAndPeerClearKeepsOriginalCutoff1601
 	// prematurely expire.
 	clock.setWall(earliest.Add(time.Hour))
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfigFromBoot(&config.ClusterConfig{ControlInterface: "em0"})
 	if restarted.UnkeyedAuthorityExpired() {
 		t.Fatal("restart expired before cumulative elapsed time reached 72h")
@@ -1438,7 +1438,7 @@ func TestUnkeyedGraceRoutineRestartStaysExpired16016(t *testing.T) {
 	}
 	clock.setWall(time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC))
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	if !restarted.UnkeyedAuthorityExpired() {
 		t.Fatal("routine restart reopened expired grace")
@@ -1453,7 +1453,7 @@ func TestWrongRTCClockInstaExpiryHoldsAndAlarms16016(t *testing.T) {
 	cutoff := m.UnkeyedGraceExpiry()
 	clock.setWall(cutoff.Add(time.Hour))
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	notices := make(chan notice16016, 4)
 	restarted.SetUnkeyedGraceAlarmHook(func(rung string, raised bool, expiry time.Time) {
 		notices <- notice16016{rung: rung, raised: raised, expiry: expiry}
@@ -1493,7 +1493,7 @@ func TestUnkeyedGraceCorruptAnchorFailsClosed16016(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	notices := make(chan notice16016, 4)
 	restarted.SetUnkeyedGraceAlarmHook(func(rung string, raised bool, expiry time.Time) {
 		notices <- notice16016{rung: rung, raised: raised, expiry: expiry}
@@ -1592,7 +1592,7 @@ func TestLocalKeyThenPeerClearFailsClosedAcrossRestart16016(t *testing.T) {
 	}
 
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfigFromBoot(&config.ClusterConfig{ControlInterface: "em0"})
 	if !restarted.UnkeyedAuthorityExpired() {
 		t.Fatal("restart reopened the peer-cleared cluster without a local re-arm")
@@ -1610,7 +1610,7 @@ func TestBootKeyedPeerClearWithoutAnchorStaysExpired16016(t *testing.T) {
 		t.Fatalf("local key commit did not delete the old grace anchor: %v", err)
 	}
 	clock.setMono(int64(time.Second))
-	keyedRestart := NewManager(0, 1)
+	keyedRestart := newManager16016(t, 0, 1)
 	keyedRestart.UpdateConfigFromBoot(&config.ClusterConfig{
 		ControlInterface: "em0", ControlLinkAuthKey: config.NewSecret("local-key-16016"),
 	})
@@ -1689,7 +1689,7 @@ func TestUnkeyedGraceExpiredStatusSurfacesLocalReArm16016(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock.setMono(int64(time.Second))
-	restarted := NewManager(0, 1)
+	restarted := newManager16016(t, 0, 1)
 	restarted.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	corruptStatus := restarted.unkeyedAuthorityGraceStatus()
 	for _, want := range []string{

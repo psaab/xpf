@@ -34,7 +34,7 @@ func keyedSolePrimary10315(t *testing.T) (*Manager, *heartbeatReceiver) {
 	t.Helper()
 	m := NewManager(0, 1)
 	m.UpdateConfig(makeConfig(makeRG(0, false, map[int]int{0: 200})))
-	<-m.Events() // drain the initial single-node election (promotes to primary)
+	recvEvent19161(t, m.Events(), "drain the initial single-node election (promotes to primary)")
 	m.mu.Lock()
 	m.controlAuthKey = unsigned10315Key
 	m.mu.Unlock()
@@ -166,7 +166,7 @@ func TestKeyedSignedHeartbeatStillAccepted_10315(t *testing.T) {
 func TestUnkeyedUnsignedHeartbeatStillAccepted_10315(t *testing.T) {
 	m := NewManager(0, 1)
 	m.UpdateConfig(makeConfig(makeRG(0, false, map[int]int{0: 200})))
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	r := newHeartbeatReceiver(m, nil, DefaultHeartbeatThreshold, DefaultHeartbeatInterval, nil)
 	m.mu.Lock()
 	m.hbReceiver = r

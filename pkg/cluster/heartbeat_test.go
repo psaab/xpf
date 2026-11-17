@@ -137,7 +137,7 @@ func TestHandlePeerHeartbeat(t *testing.T) {
 	)
 	m.UpdateConfig(cfg)
 	// Drain initial election event.
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Simulate peer heartbeat.
 	pkt := &HeartbeatPacket{
@@ -175,7 +175,7 @@ func TestHandlePeerTimeout(t *testing.T) {
 		makeRG(0, false, map[int]int{0: 200}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// First set peer alive.
 	pkt := &HeartbeatPacket{
@@ -430,7 +430,7 @@ func TestPeerMonitorStatuses(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 200, 1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// No peer monitors initially.
 	if pm := m.PeerMonitorStatuses(); pm != nil {
@@ -496,7 +496,7 @@ func TestHandlePeerHeartbeat_LegacyHeartbeatDefaultsProtocolCompatibility(t *tes
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100, 1: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.handlePeerHeartbeat(&HeartbeatPacket{
 		NodeID:    1,

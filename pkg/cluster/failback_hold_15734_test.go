@@ -32,7 +32,7 @@ func TestManualHoldClearsAgainstCommittedPrimaryPeer15734(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(2, false, map[int]int{0: 200, 1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	// Local is the committed secondary with a manual hold re-armed
 	// (the stranded node0 view: secondary-hold, Manual=yes).
@@ -78,7 +78,7 @@ func TestManualHoldPreservedWithoutCommitPin15734(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(2, false, map[int]int{0: 200, 1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	if _, err := m.ManualFailover(2); err != nil {
 		t.Fatalf("ManualFailover: %v", err)
@@ -116,7 +116,7 @@ func TestManualHoldCommittedPrimaryRespectsTimeGuard15734(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(2, false, map[int]int{0: 200, 1: 100}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	m.mu.Lock()
 	rg := m.groups[2]

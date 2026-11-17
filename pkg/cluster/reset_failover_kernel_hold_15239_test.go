@@ -101,11 +101,11 @@ func TestResetFailoverNoHoldUnchanged15239(t *testing.T) {
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, false, map[int]int{0: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	if _, err := m.ManualFailover(0); err != nil {
 		t.Fatalf("ManualFailover: %v", err)
 	}
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 	if err := m.ResetFailover(0); err != nil {
 		t.Fatalf("ResetFailover: %v", err)
 	}

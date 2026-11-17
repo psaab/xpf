@@ -57,7 +57,7 @@ func TestResetFailoverClearsTransferCommitState14979(t *testing.T) {
 		makeRG(1, false, map[int]int{0: 200}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	armTransferState14979(m, 0)
 	armTransferState14979(m, 1)
@@ -91,7 +91,7 @@ func TestResetFailoverStopsForcingReclaimedPeerSecondaryHold14979(t *testing.T) 
 	m := NewManager(0, 1)
 	cfg := makeConfig(makeRG(0, true, map[int]int{0: 100, 1: 200}))
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	peerPrimary := &HeartbeatPacket{
 		NodeID:    1,
@@ -143,7 +143,7 @@ func TestResetFailoverStopsPeerTimeoutSuppression14979(t *testing.T) {
 		makeRG(1, false, map[int]int{0: 200}),
 	)
 	m.UpdateConfig(cfg)
-	<-m.Events()
+	recvEvent19161(t, m.Events(), "the next event")
 
 	armTransferState14979(m, 0)
 	armTransferState14979(m, 1)

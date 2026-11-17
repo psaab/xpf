@@ -29,8 +29,8 @@ func abortFixture16818(t *testing.T, reqPrio, ownPrio int) (requester, owner *Ma
 	owner = NewManager(1, 1)
 	requester.UpdateConfig(makeConfig(makeRG(0, false, prios)))
 	owner.UpdateConfig(makeConfig(makeRG(0, false, prios)))
-	<-requester.Events()
-	<-owner.Events()
+	recvEvent19161(t, requester.Events(), "the next event")
+	recvEvent19161(t, owner.Events(), "the next event")
 	// The owner starts primary and the requester secondary regardless of
 	// the priority ordering under test: pin both states with peerAlive
 	// false so UpdateConfig's initial election cannot promote the
@@ -191,10 +191,10 @@ func TestAbortedPeerFailoverBatchDemotesRequester16818(t *testing.T) {
 			owner := NewManager(1, 1)
 			requester.UpdateConfig(makeConfig(makeRG(1, false, prios), makeRG(2, false, prios)))
 			owner.UpdateConfig(makeConfig(makeRG(1, false, prios), makeRG(2, false, prios)))
-			<-requester.Events()
-			<-requester.Events()
-			<-owner.Events()
-			<-owner.Events()
+			recvEvent19161(t, requester.Events(), "the next event")
+			recvEvent19161(t, requester.Events(), "the next event")
+			recvEvent19161(t, owner.Events(), "the next event")
+			recvEvent19161(t, owner.Events(), "the next event")
 			owner.mu.Lock()
 			for _, id := range []int{1, 2} {
 				owner.groups[id].State = StatePrimary
