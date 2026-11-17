@@ -92,9 +92,12 @@
 # long as the remote command: overlapping root lanes wait for each other
 # (the waiter names the holder) instead of both observing an empty directory
 # and claiming each other's writes. A nested --root run from inside a root
-# lane (XPF_VMTR_ROOT_LANE) is refused rather than waiting on itself. An
-# INT/TERM during the command reports what it wrote, best effort, and exits
-# 130/143; INT/TERM during the handback after it are ignored until it ends.
+# lane (XPF_VMTR_ROOT_LANE) is refused rather than waiting on itself. The
+# runner side leaves through one finalizer that ignores TERM/INT/HUP through
+# its report. An INT/TERM to this script during the command ends it and
+# exits 130/143, listing what /var/lib/xpf then holds with the attribution
+# UNKNOWN (the lock ended with the command, so another lane may have written
+# since); INT/TERM during the handback after it are ignored until it ends.
 #
 # Stream order (#19139): `incus exec` carries the command's stdout and stderr
 # as two separate streams, and the workstation merges them (`>log 2>&1`) in
@@ -733,7 +736,6 @@ probe() {
 entries() { printf '%s\n' "$1" | tail -n +2 | grep -v '^$'; }
 before=$(probe)
 bstatus=${before%%$'\n'*}
-printf '%s\n' "$before" >"$VMTR_BEFORE_FILE" 2>/dev/null || true
 seen=
 case "$bstatus" in
 XPF_STATE=nonempty) seen="holds state an earlier root leg left ($(entries "$before" | tr '\n' ' ' | sed 's/ $//'))" ;;
@@ -766,43 +768,47 @@ report() {
 		echo "vm-test-run: this --root command wrote production state to ${VMTR_RUNNER}:${XPF_STATE_DIR}: ${new% } (#19162)" >&2
 	fi
 }
+# finalize <status>: the one way out, on the normal path and on a signal.
+# It IGNORES TERM/INT/HUP first and keeps them ignored through the report
+# and the exit (fold of Codex on b7g, F9: the normal path used to restore
+# the default actions before reporting, so a TERM then killed the report).
+# Idempotent: a second entry returns at once.
 cmd_pid=
-on_signal() {
+finalized=
+finalize() {
 	trap '' TERM INT HUP
-	if [ -n "$cmd_pid" ]; then kill "$cmd_pid" 2>/dev/null; fi
+	[ -n "$finalized" ] && return 0
+	finalized=1
+	if [ -n "$cmd_pid" ] && kill -0 "$cmd_pid" 2>/dev/null; then
+		kill "$cmd_pid" 2>/dev/null
+		wait "$cmd_pid" 2>/dev/null
+	fi
 	report
 	exit "$1"
 }
-trap 'on_signal 143' TERM
-trap 'on_signal 130' INT
-trap 'on_signal 129' HUP
+trap 'finalize 143' TERM
+trap 'finalize 130' INT
+trap 'finalize 129' HUP
 (
 @WRAPPED@
 ) &
 cmd_pid=$!
 wait "$cmd_pid"
-rc=$?
-trap - TERM INT HUP
-report
-rm -f -- "$VMTR_BEFORE_FILE" 2>/dev/null
-exit "$rc"
+finalize "$?"
 SH
 )
 # interrupted_report: the workstation's best effort after INT/TERM ended the
-# root command (and with it, its lock): compare the lane's recorded
-# before-state with what is there now. Another root lane may already run.
+# root command. Ending the client ends the remote lane and releases its lock,
+# so another root lane may already be running and writing: nothing seen now
+# can be attributed to this command (fold of Codex on b7g, F8). It reports
+# what /var/lib/xpf holds, and says the attribution is unknown.
 interrupted_report() {
-	local before_rec new
-	before_rec=$(incus exec "$runner" -- cat "${lane_before}" 2>/dev/null) || before_rec=
 	xpf_state_probe after
-	if [[ -z "$before_rec" || "$after_status" == error || "${before_rec%%$'\n'*}" == XPF_STATE=error* ]]; then
-		echo "vm-test-run: the --root command was interrupted; what it wrote to ${runner}:/var/lib/xpf is unknown (#19162)" >&2
-		return 0
-	fi
-	new=$(comm -13 <(printf '%s\n' "$before_rec" | tail -n +2 | grep -v '^$' | sort) <(printf '%s\n' "$after_entries" | grep -v '^$' | sort) | tr '\n' ' ') || true
-	if [[ -n "$new" ]]; then
-		echo "vm-test-run: this --root command wrote production state to ${runner}:/var/lib/xpf: ${new% } (#19162; after an interruption, best effort)" >&2
-	fi
+	case "$after_status" in
+	error) echo "vm-test-run: the --root command was interrupted, and ${runner}:/var/lib/xpf could not be inspected (#19162)" >&2 ;;
+	nonempty) echo "vm-test-run: the --root command was interrupted; ${runner}:/var/lib/xpf now holds: $(printf '%s\n' "$after_entries" | grep -v '^$' | tr '\n' ' ' | sed 's/ $//') (attribution unknown: its lock ended with it, so another root lane may have written since) (#19162)" >&2 ;;
+	esac
+	return 0
 }
 
 # #19142: the runner-side heartbeat (see "Disclosure" above). It writes
@@ -888,9 +894,8 @@ if [[ "$as_root" -eq 1 ]]; then
 	trap 'root_interrupted 130' INT
 	trap 'root_interrupted 143' TERM
 	# Per invocation: two runs of one lane name must not share (and
-	# overwrite) the script or the before-state record.
+	# overwrite) the script.
 	lane_script="${base}/tmp/.vmtr-root-lane.$$.sh"
-	lane_before="${base}/tmp/.vmtr-xpf-before.$$"
 	lane_lockwait="${base}/tmp/.vmtr-lockwait.$$"
 	# The replacement is QUOTED: bash 5.2's patsub_replacement would otherwise
 	# turn every `&` in the command (`2>&1`, `&&`) into the matched pattern.
@@ -898,7 +903,7 @@ if [[ "$as_root" -eq 1 ]]; then
 		incus exec "$runner" -- bash -c "mkdir -p '${base}/tmp' && cat >'${lane_script}'"
 	owner="lane=${name} pid=$$ host=$(hostname -s 2>/dev/null || echo unknown) since=$(date -u +%FT%TZ)"
 	lock_wait=${XPF_TEST_RUNNER_WAIT_S:-7200}
-	lane_env="export XPF_STATE_DIR=/var/lib/xpf VMTR_ROOT_OWNER=/run/xpf-root-lane.owner VMTR_BEFORE_FILE='${lane_before}' VMTR_LOCKWAIT_FILE='${lane_lockwait}' VMTR_ALLOW_XPF_STATE=${allow_xpf_state} VMTR_RUNNER='${runner}' VMTR_OWNER='${owner}'"
+	lane_env="export XPF_STATE_DIR=/var/lib/xpf VMTR_ROOT_OWNER=/run/xpf-root-lane.owner VMTR_LOCKWAIT_FILE='${lane_lockwait}' VMTR_ALLOW_XPF_STATE=${allow_xpf_state} VMTR_RUNNER='${runner}' VMTR_OWNER='${owner}'"
 	lock_wait_note="if ! flock -n /run/xpf-root-lane.lock true 2>/dev/null; then echo \"vm-test-run: waiting for another --root run on ${runner} to finish (holder: \$(cat /run/xpf-root-lane.owner 2>/dev/null || echo unknown)) (#19162)\" >&2; fi"
 	ws_t0=$(ws_now)
 	# In the background, so a TERM to this script runs root_interrupted now
