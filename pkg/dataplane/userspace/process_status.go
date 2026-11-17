@@ -727,6 +727,11 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 			// accounting has already run above because this poll still belongs
 			// to the same helper generation and link-cycle lease.
 			if m.lastStatusSeq != pollStatusSeq {
+				// #19103: an expiry owed to the helper does not wait for a
+				// poll reply the fence accepts. A concurrent publisher that
+				// keeps winning this race would otherwise starve it. It is
+				// serviced from the CURRENT status that publisher applied.
+				m.serviceOwedPreActivationExpiryLocked(m.lastStatus.HAGroups, haReplayAttemptedThisTick)
 				m.mu.Unlock()
 				slog.Debug("userspace: status poll discarded; newer helper status applied during helper RPC")
 				continue
@@ -912,4 +917,22 @@ func (m *Manager) preActivationExpiryOwedLocked(helperGroups []HAGroupStatus, no
 		return true
 	}
 	return false
+}
+
+// serviceOwedPreActivationExpiryLocked publishes the effective inventory when
+// the helper still reports active an RG whose pre-activation no longer
+// authorizes it (#19103). It applies the poll backstop's gates (cluster HA, no
+// replay this tick, the 2 s skip after an UpdateRGActive), but not its 5 s
+// throttle. Caller holds m.mu.
+func (m *Manager) serviceOwedPreActivationExpiryLocked(helperGroups []HAGroupStatus, haReplayAttemptedThisTick bool) {
+	if !m.clusterHA || haReplayAttemptedThisTick || time.Since(m.lastRGActivateTime) < 2*time.Second {
+		return
+	}
+	if !m.preActivationExpiryOwedLocked(helperGroups, time.Now()) {
+		return
+	}
+	if err := m.syncHAWatchdogOnlyLocked(); err != nil {
+		slog.Warn("userspace dataplane owed pre-activation expiry publish failed", "err", err)
+	}
+	m.lastHASyncTime = time.Now()
 }

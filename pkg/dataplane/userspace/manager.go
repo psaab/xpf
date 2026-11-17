@@ -423,6 +423,9 @@ type Manager struct {
 	// helper-facing view only: haGroups and the rg_active BPF map keep the
 	// cluster truth. See manager_ha_preactivate.go. Guarded by m.mu.
 	transferPreActive map[int]transferPreActivation
+	// preActivateNowFn replaces the pre-activation clock (#19103); unit-test
+	// seam, nil in production.
+	preActivateNowFn func() time.Time
 	// helperEpoch (#19167 fold 1) advances on every helper reset and every
 	// spawn. A pre-activation's routes-ready is bound to the epoch its Begin
 	// saw: a helper replaced between the route republish and the publish

@@ -654,6 +654,7 @@ func (m *Manager) requestHAWatchdogSessionAtPath(groups []HAGroupStatus, sockPat
 // this final fence drops it before dial.
 func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 	groups []HAGroupStatus,
+	activeUntil map[int]time.Time,
 	sockPath string,
 	processGen uint64,
 	intentGen uint64,
@@ -663,6 +664,12 @@ func (m *Manager) requestHAWatchdogSessionAtPathForGeneration(
 	}
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
+	// #19103: an Active that only a transfer pre-activation authorized is
+	// checked against its deadline HERE, after the queue. Time alone moves
+	// none of the generation fences below, and a request built just before
+	// the deadline can wait on sessionMu past it; sent as built, its Active
+	// would match the helper's stored entry and resurrect a lapsed lease.
+	groups = expireHAGroups(groups, activeUntil, m.preActivateNow())
 	// A demotion is announced before it can acquire m.mu. Recheck while holding
 	// sessionMu so refreshes already queued on the session socket cannot renew
 	// the pre-demotion snapshot. Per-RG (#11160): only an ACTIVE entry for a

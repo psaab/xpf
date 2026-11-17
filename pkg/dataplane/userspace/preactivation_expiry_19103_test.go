@@ -1,6 +1,9 @@
 package userspace
 
 import (
+	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -208,12 +211,16 @@ func TestPreActivationExpiryOwedPredicate19103(t *testing.T) {
 		clusterActive bool
 		helperActive  bool
 		want          bool
+		staleEpoch    bool // the entry was made ready under a replaced helper
 	}{
-		{"expired, helper still active, cluster inactive", &transferPreActivation{until: now.Add(-time.Second), routesReady: true}, false, true, true},
-		{"live pre-activation", &transferPreActivation{until: now.Add(time.Minute), routesReady: true}, false, true, false},
-		{"helper already inactive", &transferPreActivation{until: now.Add(-time.Second), routesReady: true}, false, false, false},
-		{"cluster truth active", &transferPreActivation{until: now.Add(-time.Second), routesReady: true}, true, true, false},
-		{"no pre-activation entry", nil, false, true, false},
+		// r24 P3-2: a LIVE deadline whose readiness belongs to a replaced
+		// helper no longer authorizes this one, so its demotion is owed.
+		{"live deadline, stale ready epoch", &transferPreActivation{until: now.Add(time.Minute), routesReady: true}, false, true, true, true},
+		{"expired, helper still active, cluster inactive", &transferPreActivation{until: now.Add(-time.Second), routesReady: true}, false, true, true, false},
+		{"live pre-activation", &transferPreActivation{until: now.Add(time.Minute), routesReady: true}, false, true, false, false},
+		{"helper already inactive", &transferPreActivation{until: now.Add(-time.Second), routesReady: true}, false, false, false, false},
+		{"cluster truth active", &transferPreActivation{until: now.Add(-time.Second), routesReady: true}, true, true, false, false},
+		{"no pre-activation entry", nil, false, true, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := newPreActivateManager18559(t)
@@ -229,6 +236,9 @@ func TestPreActivationExpiryOwedPredicate19103(t *testing.T) {
 			if tc.entry != nil {
 				e := *tc.entry
 				e.readyEpoch = m.helperEpoch
+				if tc.staleEpoch {
+					e.readyEpoch = m.helperEpoch + 1
+				}
 				m.transferPreActive[1] = e
 			}
 			helper := []HAGroupStatus{{RGID: 1, Active: tc.helperActive}}
@@ -238,3 +248,303 @@ func TestPreActivationExpiryOwedPredicate19103(t *testing.T) {
 		})
 	}
 }
+
+// clock19103 is a settable pre-activation clock (the preActivateNowFn seam).
+type clock19103 struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *clock19103) get() time.Time  { c.mu.Lock(); defer c.mu.Unlock(); return c.now }
+func (c *clock19103) set(t time.Time) { c.mu.Lock(); c.now = t; c.mu.Unlock() }
+
+// codex-e P2-2: the snapshot's groups and deadlines come from ONE time sample.
+// With two, a deadline falling between them gave an Active with no deadline.
+// The clock reads before the deadline once and after it on every later read:
+// the snapshot must still carry the deadline for the Active it publishes.
+func TestSnapshotRecordsTheDeadlineAtTheClockBoundary19103(t *testing.T) {
+	m, until := degradedPreActiveManager19103(t, time.Minute)
+	var reads atomic.Int32
+	m.preActivateNowFn = func() time.Time {
+		if reads.Add(1) == 1 {
+			return until.Add(-time.Nanosecond)
+		}
+		return until.Add(time.Nanosecond)
+	}
+	m.mu.Lock()
+	m.publishHAWatchdogSnapshotLocked()
+	snap := m.haWatchdogSnapshot.Load()
+	m.mu.Unlock()
+	if len(snap.groups) != 1 || !snap.groups[0].Active {
+		t.Fatalf("setup: snapshot groups %+v, want RG1 active (sampled before the deadline)", snap.groups)
+	}
+	if got, ok := snap.preActiveUntil[1]; !ok || !got.Equal(until) {
+		t.Fatalf("snapshot deadline for RG1 = %v (present %v), want %v: an Active with no deadline", got, ok, until)
+	}
+}
+
+// codex-e P2-3: a degraded refresh built while the pre-activation is live
+// waits on sessionMu past its deadline. The sender re-checks the deadline
+// after the queue; sent as built, the Active would resurrect a lapsed lease
+// (the #9629 Rust-mirror oracle).
+func TestQueuedDegradedRefreshExpiresAfterTheSessionQueue19103(t *testing.T) {
+	m, until := degradedPreActiveManager19103(t, time.Minute)
+	clk := &clock19103{now: until.Add(-time.Second)}
+	m.preActivateNowFn = clk.get
+	m.haWatchdogSessionLockHook = func() { clk.set(until.Add(time.Second)) } // the queue wait spans the deadline
+	oracle := newHARefreshOracle9629([]HAGroupStatus{{RGID: 1, Active: true, WatchdogTimestamp: 1}}, 10)
+	oracle.leaseUntil[1] = 9 // lapsed
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+			oracle.apply(req.HAState.Groups)
+		}
+		return nil
+	}
+	m.mu.Lock() // degraded: m.mu is held
+	err := m.UpdateHAWatchdog(1, 100)
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("degraded refresh: %v", err)
+	}
+	if len(sent) != 1 || sent[0].Active {
+		t.Fatalf("queued degraded send %+v: RG1 still Active after the queue outlasted its deadline", sent)
+	}
+	if oracle.forwardingActive(1) {
+		t.Fatal("the queued refresh resurrected the lapsed helper lease")
+	}
+}
+
+// codex-e P3: the merge's EXISTING-entry arm. A live degraded heartbeat
+// populates the merged state with RG1 active; the deadline passes with the
+// snapshot NOT rebuilt (m.mu still held); the next heartbeat must send RG1
+// inactive.
+func TestDegradedMergeExpiresAnExistingEntry19103(t *testing.T) {
+	m, until := degradedPreActiveManager19103(t, time.Minute)
+	clk := &clock19103{now: until.Add(-time.Second)}
+	m.preActivateNowFn = clk.get
+	var sends [][]HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sends = append(sends, append([]HAGroupStatus(nil), req.HAState.Groups...))
+		}
+		return nil
+	}
+	m.mu.Lock()
+	err1 := m.UpdateHAWatchdog(1, 100)
+	clk.set(until.Add(time.Second))
+	// Inside the 3 s IPC backstop: only the merge seeing the expiry (an
+	// active-state change) makes this send due.
+	err2 := m.UpdateHAWatchdog(1, 101)
+	m.mu.Unlock()
+	if err1 != nil || err2 != nil {
+		t.Fatalf("degraded refreshes: %v, %v", err1, err2)
+	}
+	if len(sends) != 2 || !sends[0][0].Active {
+		t.Fatalf("setup: sends %+v, want a live RG1-active send, then a second send", sends)
+	}
+	if sends[1][0].Active {
+		t.Fatalf("second send %+v: the merged entry kept RG1 active past its deadline", sends[1])
+	}
+}
+
+// codex-e P3: a different, legitimately active RG triggers the refresh; the
+// expired pre-active RG in the same full-set payload is sent inactive.
+func TestDegradedRefreshByAnotherRGExpiresThePreActiveOne19103(t *testing.T) {
+	m := sessionTestManager9629(t, map[int]HAGroupStatus{
+		1: {Active: false, WatchdogTimestamp: 1},
+		2: {Active: true, WatchdogTimestamp: 1},
+	})
+	until := time.Now().Add(time.Minute)
+	clk := &clock19103{now: until.Add(-time.Second)}
+	m.preActivateNowFn = clk.get
+	m.mu.Lock()
+	m.helperStatusObserved = true
+	m.lastStatus.HaSessionRefreshSupported = true
+	m.helperHAStatePublished = true
+	m.publishedSnapshot = 1
+	m.haWatchdogHelperInventory = []HAGroupStatus{{RGID: 1, Active: true, WatchdogTimestamp: 1}, {RGID: 2, Active: true, WatchdogTimestamp: 1}}
+	if m.transferPreActive == nil {
+		m.transferPreActive = make(map[int]transferPreActivation)
+	}
+	m.transferPreActive[1] = transferPreActivation{until: until, routesReady: true, readyEpoch: m.helperEpoch}
+	m.publishHAWatchdogSnapshotLocked()
+	m.mu.Unlock()
+	var sends [][]HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sends = append(sends, append([]HAGroupStatus(nil), req.HAState.Groups...))
+		}
+		return nil
+	}
+	active := func(gs []HAGroupStatus, rg int) bool {
+		for _, g := range gs {
+			if g.RGID == rg {
+				return g.Active
+			}
+		}
+		return false
+	}
+	m.mu.Lock()
+	err1 := m.UpdateHAWatchdog(2, 100) // RG2's heartbeat, while RG1 is live
+	clk.set(until.Add(time.Second))
+	err2 := m.UpdateHAWatchdog(2, 101) // RG2 again, inside the backstop; RG1 now expired
+	m.mu.Unlock()
+	if err1 != nil || err2 != nil {
+		t.Fatalf("degraded refreshes: %v, %v", err1, err2)
+	}
+	if len(sends) != 2 || !active(sends[0], 1) {
+		t.Fatalf("setup: sends %+v, want a first send with RG1 active", sends)
+	}
+	if active(sends[1], 1) || !active(sends[1], 2) {
+		t.Fatalf("RG2-triggered send %+v: want RG1 inactive (expired) and RG2 still active", sends[1])
+	}
+}
+
+// r24 P3-2: the cluster-truth clause in the deadline derivation. RG1's
+// cluster truth turned active (promoted) while its pre-activation entry is
+// still present: its Active is NOT the overlay's, so it carries no deadline,
+// and it stays active in a degraded send after the old deadline.
+func TestPromotedRGCarriesNoPreActivationDeadline19103(t *testing.T) {
+	m, until := degradedPreActiveManager19103(t, time.Minute)
+	clk := &clock19103{now: until.Add(-time.Second)}
+	m.preActivateNowFn = clk.get
+	m.mu.Lock()
+	m.haGroups[1] = HAGroupStatus{RGID: 1, Active: true, WatchdogTimestamp: 1} // the promotion landed
+	m.publishHAWatchdogSnapshotLocked()
+	snap := m.haWatchdogSnapshot.Load()
+	m.mu.Unlock()
+	if _, ok := snap.preActiveUntil[1]; ok {
+		t.Fatal("a promoted RG got a pre-activation deadline")
+	}
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+		}
+		return nil
+	}
+	clk.set(until.Add(time.Second))
+	m.mu.Lock()
+	err := m.UpdateHAWatchdog(1, 100)
+	m.mu.Unlock()
+	if err != nil || len(sent) != 1 || !sent[0].Active {
+		t.Fatalf("degraded send after the old deadline = %+v (%v): the promoted RG1 must stay active", sent, err)
+	}
+}
+
+// codex-e P2-1, through the REAL status loop. The only effective-active RG was
+// a pre-activation that has expired, and the helper still reports it active.
+// While every poll is off-lock, a concurrent non-HA publisher applies a newer
+// status, so every poll reply is discarded. The owed expiry must still reach
+// the helper.
+func TestDiscardedPollsStillServiceAnOwedExpiry19103(t *testing.T) {
+	old := statusLoopInterval
+	statusLoopInterval = 5 * time.Millisecond
+	t.Cleanup(func() { statusLoopInterval = old })
+	m, _ := stalePollManager16653(t)
+	m.mu.Lock()
+	m.clusterHA = true
+	m.haGroups = map[int]HAGroupStatus{0: {RGID: 0}, 1: {RGID: 1}, 2: {RGID: 2}}
+	m.haRGActiveMapWrite = func(int, bool) error { return nil }
+	m.publishedSnapshot = 1
+	m.transferPreActive = map[int]transferPreActivation{
+		1: {until: time.Now().Add(-time.Second), routesReady: true, readyEpoch: m.helperEpoch},
+	}
+	m.mu.Unlock()
+	helper := func(rg1Active bool) *ProcessStatus {
+		st := armedStatus16653()
+		st.HAGroups = []HAGroupStatus{{RGID: 0}, {RGID: 1, Active: rg1Active}, {RGID: 2}}
+		return st
+	}
+	var demoted atomic.Bool
+	m.controlRequestHook = func(req ControlRequest, status *ProcessStatus) error {
+		switch req.Type {
+		case "status":
+			// A concurrent non-HA publisher applies a newer status while this
+			// poll is off-lock, so this poll's reply will be discarded.
+			m.mu.Lock()
+			_ = m.applyHelperStatusLocked(helper(!demoted.Load()))
+			m.mu.Unlock()
+		case "update_ha_state":
+			if req.HAState != nil {
+				for _, g := range req.HAState.Groups {
+					if g.RGID == 1 && !g.Active {
+						demoted.Store(true)
+					}
+				}
+			}
+		}
+		if status != nil {
+			*status = *helper(!demoted.Load())
+		}
+		return nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); m.statusLoop(ctx, false) }()
+	t.Cleanup(func() { cancel(); <-done })
+	deadline := time.Now().Add(3 * time.Second)
+	for !demoted.Load() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !demoted.Load() {
+		t.Fatal("with every poll reply discarded, the owed expiry never reached the helper")
+	}
+}
+
+// codex-e P2-3, the LOCKED watchdog session arm: groups built under m.mu while
+// the pre-activation is live, sent off-lock after waiting on sessionMu past
+// its deadline. The sender re-checks the deadline the arm passed along.
+func TestQueuedLockedRefreshExpiresAfterTheSessionQueue19103(t *testing.T) {
+	m, until := degradedPreActiveManager19103(t, time.Minute)
+	clk := &clock19103{now: until.Add(-time.Second)}
+	m.preActivateNowFn = clk.get
+	m.haWatchdogSessionLockHook = func() { clk.set(until.Add(time.Second)) }
+	var sent []HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sent = append([]HAGroupStatus(nil), req.HAState.Groups...)
+		}
+		return nil
+	}
+	if err := m.UpdateHAWatchdog(1, 100); err != nil { // m.mu free: the locked arm
+		t.Fatalf("locked session refresh: %v", err)
+	}
+	if len(sent) != 1 || sent[0].RGID != 1 {
+		t.Fatalf("setup: locked-arm send %+v, want one RG1 refresh", sent)
+	}
+	if sent[0].Active {
+		t.Fatalf("locked-arm send %+v: RG1 still Active after the queue outlasted its deadline", sent)
+	}
+}
+
+// codex-e P3, the FIRST-entry merge arm: the first degraded heartbeat after
+// the deadline records RG1 inactive in the merged state, matching what is
+// sent. A second heartbeat inside the 3 s IPC backstop then has nothing to
+// send. Recording it active while the sender expires the payload would leave
+// the merged state disagreeing with the helper, and fire a spurious send.
+func TestExpiredFirstEntryIsRecordedInactive19103(t *testing.T) {
+	m, until := degradedPreActiveManager19103(t, time.Minute)
+	clk := &clock19103{now: until.Add(time.Second)} // already past the deadline
+	m.preActivateNowFn = clk.get
+	var sends [][]HAGroupStatus
+	m.sessionRequestHook = func(req ControlRequest, _ *ProcessStatus) error {
+		if req.HAState != nil {
+			sends = append(sends, append([]HAGroupStatus(nil), req.HAState.Groups...))
+		}
+		return nil
+	}
+	m.mu.Lock()
+	err1 := m.UpdateHAWatchdog(1, 100)
+	err2 := m.UpdateHAWatchdog(1, 101)
+	m.mu.Unlock()
+	if err1 != nil || err2 != nil {
+		t.Fatalf("degraded refreshes: %v, %v", err1, err2)
+	}
+	if len(sends) != 1 || sends[0][0].Active {
+		t.Fatalf("sends %+v: want exactly one send, RG1 inactive (the merged state matches it, so the second heartbeat owes nothing)", sends)
+	}
+}
+
