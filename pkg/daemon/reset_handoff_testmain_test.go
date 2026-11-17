@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/psaab/xpf/internal/testguard"
 	"github.com/psaab/xpf/pkg/api"
@@ -123,7 +124,18 @@ func TestMain(m *testing.M) {
 	_ = frr.SetFRRGroupResolverForTest(func() (int, bool) { return os.Getegid(), true })
 	// #19088: after the tests, no OS thread may be left outside the
 	// package's network namespace (testguard.Run).
+	runStart := time.Now()
 	code := testguard.Run(m)
+	// #19161: a Manager that outlived its test's injected unkeyed-grace clocks
+	// can persist a fixture grace into this run's shared record, and every
+	// later Manager in the run then loads it. The record must be one a
+	// real-clock Manager could have written during this run.
+	if leak := cluster.UnkeyedGraceRecordLeakForTesting(runStart); leak != "" {
+		fmt.Fprintf(os.Stderr, "pkg/daemon TestMain (#19161): %s\n", leak)
+		if code == 0 {
+			code = 1
+		}
+	}
 	os.RemoveAll(dir)
 	os.Exit(code)
 }

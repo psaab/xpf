@@ -27,6 +27,7 @@ func TestRequestUnkeyedGraceRestartUsesCurrentOperatorAndReportsCutoff16016(t *t
 	t.Cleanup(restoreClocks)
 
 	manager := cluster.NewManager(0, 1)
+	t.Cleanup(manager.Stop) // #19161: before the clock/path restores (LIFO); its never-seen timer must not outlive them
 	manager.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0"})
 	wall = wall.Add(73 * time.Hour)
 	mono += int64(73 * time.Hour)
@@ -103,6 +104,7 @@ func TestRequestForcePrimaryUsesCurrentOperator16016(t *testing.T) {
 
 	groups := []*config.RedundancyGroup{{ID: 0, NodePriorities: map[int]int{0: 100, 1: 200}}}
 	manager := cluster.NewManager(0, 1)
+	t.Cleanup(manager.Stop) // #19161: before the clock/path restores (LIFO); its never-seen timer must not outlive them
 	manager.UpdateConfig(&config.ClusterConfig{ControlInterface: "em0", RedundancyGroups: groups})
 	wall = wall.Add(73 * time.Hour)
 	mono += int64(73 * time.Hour)

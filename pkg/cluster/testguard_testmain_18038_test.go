@@ -47,28 +47,27 @@ func TestMain(m *testing.M) {
 }
 
 // watchSharedGraceRecord19161 reports a write of the run-shared unkeyed-grace
-// record whose earliest anchor predates the run (#19161). Every Manager that
-// legitimately writes that record stamps it with the real clock during the
-// run, so an anchor from before the run can only be a test's fixture clock
-// leaking out of its test: in #19161 a never-stopped manager's timer wrote a
-// fixture grace there, every later Manager held its election, and the
-// package hung far from the cell that leaked. The hour of slack absorbs a
-// wall-clock step; fixture anchors are days away. The returned func restores
-// the persist hook and returns the first offending write with its stack.
+// record that no real-clock Manager could make (#19161, graceRecordLeakReason:
+// an anchor from before the run, or more elapsed grace than the run has
+// lasted). Either can only be a test's fixture clock leaking out of its test:
+// in #19161 a never-stopped manager's timer wrote a fixture grace there, every
+// later Manager held its election, and the package hung far from the cell
+// that leaked. The returned func restores the persist hook and returns the
+// first offending write with its stack.
 func watchSharedGraceRecord19161(shared string, runStart time.Time) func() string {
 	var mu sync.Mutex
 	var first string
 	inner := unkeyedAuthorityPersist
 	unkeyedAuthorityPersist = func(path string, earliest, highWater time.Time, elapsed time.Duration) error {
-		if path == shared && earliest.Before(runStart.Add(-time.Hour)) {
-			mu.Lock()
-			if first == "" {
-				first = fmt.Sprintf("pkg/cluster TestMain (#19161): the run-shared grace record %s was written "+
-					"with earliest=%s, before this run started (%s): a test's fixture clock leaked out "+
-					"of its test (a Manager not stopped before its restores?). Writer:\n%s\n",
-					path, earliest.UTC().Format(time.RFC3339), runStart.UTC().Format(time.RFC3339), debug.Stack())
+		if path == shared {
+			if why := graceRecordLeakReason(earliest, elapsed, runStart, time.Now()); why != "" {
+				mu.Lock()
+				if first == "" {
+					first = fmt.Sprintf("pkg/cluster TestMain (#19161): a write of the run-shared grace record %s %s "+
+						"(a Manager not stopped before its restores?). Writer:\n%s\n", path, why, debug.Stack())
+				}
+				mu.Unlock()
 			}
-			mu.Unlock()
 		}
 		return inner(path, earliest, highWater, elapsed)
 	}

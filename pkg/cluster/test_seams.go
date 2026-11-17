@@ -488,3 +488,43 @@ func (m *Manager) NotePeerWallClockForTesting(peerMinusLocal time.Duration) {
 	now := time.Now()
 	m.notePeerWallClock(now.Add(peerMinusLocal).UnixNano(), now)
 }
+
+// UnkeyedGraceRecordLeakForTesting reports a leak into the CURRENT unkeyed-grace
+// record path (#19161): a record no Manager on the real clocks could have
+// written since runStart. A package TestMain that redirects the state dir calls
+// it after its tests. It returns "" when there is no record or it is consistent.
+func UnkeyedGraceRecordLeakForTesting(runStart time.Time) string {
+	path := unkeyedAuthorityGraceStatePath
+	now := time.Now()
+	earliest, _, elapsed, present, corrupt, _ := loadUnkeyedAuthorityRecord(path, now)
+	if !present && !corrupt {
+		return ""
+	}
+	if corrupt {
+		return fmt.Sprintf("the run-shared grace record %s is corrupt or legacy: something other than a run Manager wrote it", path)
+	}
+	if why := graceRecordLeakReason(earliest, elapsed, runStart, now); why != "" {
+		return fmt.Sprintf("the run-shared grace record %s %s", path, why)
+	}
+	return ""
+}
+
+// graceRecordLeakReason says why a grace record (its earliest anchor and
+// elapsed grace) cannot come from a Manager on the real clocks since runStart,
+// or "" when it can (#19161). A real-clock Manager anchors no earlier than the
+// run and accrues no more grace than the run has lasted, so an older anchor is
+// a fixture WALL clock and a longer elapsed is a fixture MONOTONIC clock: a
+// test's Manager outliving the restores of its injected clocks. The hour of
+// slack absorbs a clock step; fixture values are days away.
+func graceRecordLeakReason(earliest time.Time, elapsed time.Duration, runStart, now time.Time) string {
+	const slack = time.Hour
+	if earliest.Before(runStart.Add(-slack)) {
+		return fmt.Sprintf("carries earliest=%s, before this run started (%s): a fixture wall clock leaked out of its test",
+			earliest.UTC().Format(time.RFC3339), runStart.UTC().Format(time.RFC3339))
+	}
+	if ran := now.Sub(runStart); elapsed > ran+slack {
+		return fmt.Sprintf("carries elapsed=%s, more than this run has lasted (%s): a fixture monotonic clock leaked out of its test",
+			elapsed, ran.Round(time.Second))
+	}
+	return ""
+}
