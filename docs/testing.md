@@ -203,7 +203,7 @@ no leg passes `-v`. So:
 | `make vm-test-root` | the XDP shim's behavioural cells in the disposable VM leg. They SKIP without the required privilege, and the #1864 verifier gate does **not** substitute — two distinct WRONG fixes of the #7494 fragment bug both pass it. `make test` now prints a line saying it did not examine them. |
 | `make host-mutation-census` | mutation class, namespace boundary, and isolation proof for every kernel-mutating Go test in the guarded packages (#18038) |
 | `make go-skip-census` | every Go `t.Skip` in the tree, counted per bucket and ratcheted |
-| `make go-fortest-seam-rule` | every EXPORTED `*ForTest*` func or method in non-test Go code has a row with a reason in `scripts/go-fortest-seams.allow`, and every row names one that exists (#17342). Purely syntactic (go/parser; nothing counts callers): the guard for the class the deadcode gate cannot see, below. A Go test, `internal/fortestcensus`; it runs in `make test-go`, and needs the Go toolchain, so it runs on a runner |
+| `make go-fortest-seam-rule` | every EXPORTED `*ForTest*` func, method or interface method in non-test Go code has a row with a reason in `scripts/go-fortest-seams.allow`, and every row names one that exists (#17342). Purely syntactic (go/parser; nothing counts callers): the guard for the class the deadcode gate cannot see, below. A Go test, `internal/fortestcensus`; it runs in `make test-go`, and needs the Go toolchain, so it runs on a runner |
 | `make ignored-cell-census` | every Rust `#[ignore]`, including the third crate outside both workspaces |
 | `make test-cold-path-flooder` | 44 `#[test]`s in `test/incus/cold-path-flooder`, which was reached by nothing |
 | `make harness-census` | every runnable shell harness under `test/incus/` |
@@ -226,7 +226,7 @@ with each mutant appended to `pkg/clockskew/clockskew.go`:
 
 So a dead exported test seam on a live type is invisible to the gate. Its
 guard is the syntactic `make go-fortest-seam-rule`: an exported `*ForTest*`
-func or method needs a reasoned row in `scripts/go-fortest-seams.allow`, so a
+func, method or interface method needs a reasoned row in `scripts/go-fortest-seams.allow`, so a
 new one is a reviewed decision, and a row outliving its seam fails. The rule
 does not tell you a seam lost its last caller: when you remove a caller,
 check the seam, and delete it with its row (or unexport it, which hands it

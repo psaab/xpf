@@ -88,6 +88,7 @@ pkg/configstore.(Store).SetPersistRetryBackoffForTesting	cross-package seam: cal
 pkg/configstore.(Store).SetWriteActiveForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
 pkg/configstore.(Store).SetWriteActiveMarkerForTesting	called by in-package tests only (exported as-is; #17342 seeded without renames)
 pkg/configstore.HoldCommitCheckSlotForTest	cross-package seam: called by tests in pkg/eventengine
+pkg/daemon.(dhcpApplier).ApplyFailedForTesting	interface method: the daemon's dhcpServer field is this interface, so the #6535 converger cells in pkg/daemon read the production Manager's ApplyFailedForTesting through it
 pkg/dataplane.(Manager).SetDetachDebtForTest	cross-package seam: called by tests in pkg/api, pkg/dataplane/userspace
 pkg/dataplane.(Manager).SetLinkForTest	cross-package seam: called by tests in pkg/dataplane/userspace
 pkg/dataplane.SetDetachXDPFlagClearFnForTest	cross-package seam: called by tests in pkg/dataplane/userspace
