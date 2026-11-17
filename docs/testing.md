@@ -102,7 +102,9 @@ The script also prepares the runner environment:
   - A runner-user run warns.
   - After a `--root` command, every entry it added is named on stderr: that
     command wrote production state, so its test needs a redirect. An
-    interrupted (INT/TERM) root leg reports too, and keeps its 130/143.
+    interrupted (INT/TERM) root leg keeps its 130/143 and lists what the
+    directory then holds, with the attribution UNKNOWN: its lock ended with
+    the command, so another root lane may have written since.
   - The probe reports absent, empty, nonempty or error. A FAILED probe never
     reads as clean: `--root` is refused, or runs with the unknown state
     disclosed under `--allow-xpf-state`.
@@ -114,9 +116,11 @@ The script also prepares the runner environment:
     after the first has reported. Its wait is disclosed and not counted as a
     pause. A nested `--root` run from inside a root lane
     (`XPF_VMTR_ROOT_LANE`) is refused rather than waiting on itself.
-  - INT/TERM during the command ends it and reports what it wrote, best
-    effort, with 130/143. INT/TERM during the handback after it are ignored
-    until it completes.
+  - On the runner, the lane leaves through one finalizer that ignores
+    TERM/INT/HUP through its report, so a signal cannot cut the report
+    short. INT/TERM to `vm-test-run.sh` during the command ends it (130/143)
+    with the unattributed listing above; INT/TERM during the handback after
+    it are ignored until it completes.
     `testguard-run.sh` overlays `/` for root runs (#19084), so only a root
     command outside it can write there.
 - The command's stdout and stderr come back as ONE stream, in the order they
