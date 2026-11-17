@@ -452,7 +452,8 @@ established SNAT stream, on both nodes, through the source-NAT revalidation
 before this node activated it.* fw1 fabric-redirects the translated flow,
 and fw0's imported row re-resolves to `HAInactive`. With the #18519 split
 FIB that resolution is the default via the WAN gateway on reth0.50,
-because the peer-owned reth0.80 prefix is withheld. The validator judged
+because the peer-owned reth0.80 prefix is withheld (until #19171, which keeps
+it in the transit FIB; the import now resolves reth0.80 itself). The validator judged
 reth0.50's address against the reth0.80 translation and revoked the pair.
 That Close is not synced back (owner-RG gate, fw0 not yet primary), but
 fw0 had lost the session for good.
@@ -692,7 +693,9 @@ gateway fallback.** The node keeping the LAN RG of a split revoked a quiet
 SNAT flow at its first reply. That node held the flow only as rows
 sync-imported from the WAN owner. The worker import re-resolves the forward
 row against the split FIB, where the WAN RG's connected prefix (reth0.80)
-is withheld, and keeps that raw local line on purpose so the row is ready
+is withheld (until #19171: the prefix now stays in transit, so the import
+stores the reth0.80 line and this trigger no longer arises from imports), and
+keeps that raw local line on purpose so the row is ready
 at activation (#326). The line is therefore the default via the WAN
 gateway VLAN (reth0.50). The peer's own line cannot replace it, because it
 names the peer's ifindexes. The server's reply arrives over the fabric from

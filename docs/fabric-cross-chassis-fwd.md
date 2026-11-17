@@ -1685,6 +1685,66 @@ plus `zone_encoded_fabric_stamp_requires_link_authentication_16023`
 (unit dispositions incl. attested controls). Live-cluster third-host proof
 on a switched fabric VLAN is still owed before acceptance.
 
+## Peer-owned connected prefixes stay in the transit FIB (#19171)
+
+A connected prefix whose RETH unit belongs to the peer used to be WITHHELD from
+the helper's transit FIB (#15742): Go skipped its connected route row, and
+`populate_interfaces` kept it out of `connected_v4`/`connected_v6`. A
+destination inside it then resolved through whatever else covered it, normally
+the default route.
+- **WAN peer-owned (the shape #15742 was built for):** that default is itself
+  peer-owned, so HA or the cluster terminal redirected the flow. The answer was
+  right by accident of topology.
+- **LAN peer-owned, WAN active here:** the default is an ACTIVE WAN route.
+  Every writer that looked a LAN client up got a forwardable WAN answer: reply
+  re-resolution, imports, synthesis, refresh, PBR restamps, new-flow admission
+  (#19178), and ICMP returns.
+
+The withheld FIB also lagged HA, because it changed only on a republish after
+an ownership edge. Several compensations grew around those two facts: #16270,
+the #15958b/#18659/#18672 retain verdicts, #16217's reply conversion, the
+#18517 gateway fallback and #18691/#18705.
+
+**The rule now:** `populate_interfaces` keeps a peer-owned row in the transit
+rows. A lookup inside it answers Connected on the peer-owned unit, and live HA
+judges that egress at lookup time:
+- `HAInactive`, then the fabric redirect, for a non-fabric arrival;
+- a drop for a fabric-link arrival (anti-loop).
+
+Every caller of the FIB gets that answer; none needs a correction of its own.
+- **Longest-prefix match is unchanged.** It still compares route and connected
+  prefix lengths. A more specific route (an operator `/32` via an active
+  interface inside a peer-owned `/24`) still wins, and so does a more specific
+  operator discard.
+- **The mark is kept.** `connected_v*_peer_owned` still lists the rows whose
+  unit is peer-owned. Only the readers that must never treat a peer-held
+  address as this node's read it: the ICMP Frag-Needed/Packet-Too-Big source
+  fallback (`build_frag_needed_v4`, `build_packet_too_big_v6`).
+- **Equal-length transit rows break ties to the lowest ifindex** (the #17053
+  canonical rule), not snapshot order.
+
+**What an operator sees change on a split node:**
+- `show route fib` lists the peer-owned connected prefixes.
+- A refresh of a split-RG reverse row PUBLISHES `HAInactive` on the LAN unit to
+  the BPF session map, where it published a retained `FabricRedirect`. The
+  session-table row keeps its `FabricRedirect`. A no-peer synthesis stores
+  `HAInactive`. Delivery is unchanged in every case.
+- **A new flow to a peer-owned destination is not policy-judged here.** It
+  becomes a fabric redirect, and the owner judges it on arrival, as WAN -> LAN
+  (the stamp carries the arrival zone). Before, it was judged WAN -> WAN here,
+  and where that was permitted it hairpinned out the WAN (#19178).
+- A redirected reply carries its ARRIVAL zone, the stamp every HA-inactive
+  reply redirect carries. #16217's conversion stamped the reply's egress zone;
+  it no longer fires for this shape.
+
+**What can no longer fire (Stage B removes it):** #16270's connected-win under
+republication debt; the #15958b transient retain (a FIB that lags HA);
+#16216's stamped-terminal rescue for a destination inside a peer-owned prefix;
+the #18517 bare-gateway fallback. The paragraphs below describe the withheld
+FIB as it was when they were written.
+
+Census, cells, mutants and cost: `docs/log/19171.md`.
+
 ## Split node keeps statics whose gateway is peer-owned (#18517)
 
 On a split node (the WAN RG is peer-owned, the LAN RG is local) a new flow
@@ -1709,7 +1769,7 @@ to an unstamped `DiscardRoute`, and every new flow from the split node to the
 WAN was discarded (`show route fib` showed only `discard cluster-terminal`).
 
 The peer-owned prefix now counts as gateway coverage (`gatewayNetworks`) while
-staying out of the transit rows, so the split node keeps the configured default
+staying out of the transit rows (until #19171, which keeps it in them), so the split node keeps the configured default
 and fabric-redirects new WAN flows to the owner. A gateway covered by no prefix
 is still filtered exactly as #11317 intends.
 
@@ -1735,9 +1795,10 @@ destination's own ledger entry
 (`demoted_cluster_terminal_discard_route_rescues_via_fabric_16216`).
 
 **What the binding may bind.** `populate_interfaces` records a connected row in
-`connected_v4_peer_owned`/`connected_v6_peer_owned` exactly when it withholds
-that row from the transit `connected_v4`/`connected_v6` because the unit is
-peer-owned, and each row keeps its OWN routing table. The binding scans only
+`connected_v4_peer_owned`/`connected_v6_peer_owned` exactly when its unit is
+peer-owned (until #19171 it then also withheld the row from the transit
+`connected_v4`/`connected_v6`; it now keeps it there too, so the transit LPM
+binds the gateway first), and each row keeps its OWN routing table. The binding scans only
 those rows, filtered by `entry.table == table` (the #4446 scoping
 `infer_connected_route_target_*` applies to transit rows); equal-length matches
 pick the lowest ifindex, whatever the snapshot order
