@@ -410,6 +410,31 @@ every helper publisher. Two did not:
 - **Bound, once `m.mu` is free:** the deadline, plus at most one poll tick
   (1 s), plus the poll's existing 2 s skip after an `UpdateRGActive`.
 
+**Fold 1 (codex-e's review): the bound holds at the edges too.**
+- **A discarded poll still services an owed expiry.** The status loop drops
+  a poll whose status sequence moved while it was off-lock (#16653). A
+  concurrent non-HA publisher, such as a session-delta drain every 100 ms,
+  can keep winning that race. The discard branch therefore services an owed
+  expiry (`serviceOwedPreActivationExpiryLocked`) from the CURRENT status the
+  other publisher applied.
+- **One time sample per snapshot.** The groups and their deadlines are read
+  at the same instant (`haWatchdogGroupsAtLocked`, `haWatchdogDeadlinesLocked`).
+  A deadline is recorded for every Active the overlay authorized, even one
+  about to pass. Two samples let a deadline fall between them, and the
+  snapshot carried an Active with no deadline.
+- **The deadline is re-checked after the session queue.** Both the degraded
+  arm and the locked watchdog session arm pass the deadlines to
+  `requestHAWatchdogSessionAtPathForGeneration`, which expires them after
+  acquiring `sessionMu` (`expireHAGroups`). A request built just before the
+  deadline can wait there past it, and time moves none of the generation
+  fences.
+- **No per-call allocation for expired entries.** `effectiveHAGroupMapAtLocked`
+  returns the cluster truth when no entry counts for the helper. Expired
+  entries are NOT deleted when their expiry is delivered:
+  `EndTransferPreActivation` decides on the route withdrawal by the entry
+  EXISTING, and deleting it would make a later release skip the withdrawal
+  republish (r24 P3-3, answered this way).
+
 **The helper's half (acceptance 3), kept as it is.** An inactive refresh
 against a stored-active RG renews the stored lease only while that lease is
 still valid (`mismatch_renews_valid_stored_active_lease_9629`). It never

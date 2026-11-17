@@ -1713,12 +1713,18 @@ type haWatchdogSnapshot struct {
 // intent); activation remains at the acknowledged value until
 // UpdateRGActive succeeds.
 func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
+	return m.haWatchdogGroupsAtLocked(m.preActivateNow())
+}
+
+// haWatchdogGroupsAtLocked is haWatchdogGroupsLocked at one time sample
+// (#19103), for callers that derive the groups' deadlines at the same instant.
+func (m *Manager) haWatchdogGroupsAtLocked(now time.Time) []HAGroupStatus {
 	if !m.helperHAStatePublished || len(m.haWatchdogHelperInventory) == 0 {
 		return nil
 	}
 	// #18559: a live transfer pre-activation is Go-side intent like the
 	// cluster truth, so a refresh must not read it as a demotion.
-	desired := m.effectiveHAGroupMapLocked()
+	desired := m.effectiveHAGroupMapAtLocked(now)
 	groups := make([]HAGroupStatus, 0, len(m.haWatchdogHelperInventory))
 	for _, prior := range m.haWatchdogHelperInventory {
 		group := prior
@@ -1752,7 +1758,11 @@ func (m *Manager) haWatchdogGroupsLocked() []HAGroupStatus {
 // Caller holds m.mu. This function does not perform I/O and does not acquire
 // any lock other than the atomic pointer's internal synchronization.
 func (m *Manager) publishHAWatchdogSnapshotLocked() {
-	groups := m.haWatchdogGroupsLocked()
+	// #19103: ONE time sample for the groups and their deadlines. Two samples
+	// let a deadline fall between them: the groups said Active, the deadline
+	// loop found the entry already expired, and the snapshot carried an
+	// Active with no deadline.
+	groups := m.haWatchdogGroupsAtLocked(m.preActivateNow())
 	processLive := m.proc != nil && m.proc.Process != nil
 	sessionFastPath := m.helperHAStatePublished &&
 		m.helperStatusObserved &&
@@ -1761,17 +1771,7 @@ func (m *Manager) publishHAWatchdogSnapshotLocked() {
 		len(groups) != 0
 	processGen := m.haWatchdogProcessGen.Load()
 	intentGen := m.haWatchdogIntentGen.Load()
-	var preActiveUntil map[int]time.Time
-	now := time.Now()
-	for _, group := range groups {
-		if !group.Active || m.haGroups[group.RGID].Active || !m.transferPreActiveForHelperLocked(group.RGID, now) {
-			continue
-		}
-		if preActiveUntil == nil {
-			preActiveUntil = make(map[int]time.Time)
-		}
-		preActiveUntil[group.RGID] = m.transferPreActive[group.RGID].until
-	}
+	preActiveUntil := m.haWatchdogDeadlinesLocked(groups)
 	m.haWatchdogSnapshot.Store(&haWatchdogSnapshot{
 		groups:            groups,
 		preActiveUntil:    preActiveUntil,
@@ -1840,7 +1840,7 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 		m.haDegradedCurrent = make(map[int]haWatchdogIPCSyncState, len(snapshot.groups))
 	}
 	seen := make(map[int]struct{}, len(snapshot.groups))
-	now := time.Now()
+	now := m.preActivateNow()
 	for _, group := range snapshot.groups {
 		seen[group.RGID] = struct{}{}
 		// #19103: an Active that only a transfer pre-activation authorized
@@ -1934,7 +1934,7 @@ func (m *Manager) tryUpdateHAWatchdogWhileManagerMuHeld(
 	}
 
 	err := m.requestHAWatchdogSessionAtPathForGeneration(
-		groups, snapshot.sessionSocketPath, snapshot.processGen, snapshot.intentGen)
+		groups, snapshot.preActiveUntil, snapshot.sessionSocketPath, snapshot.processGen, snapshot.intentGen)
 	if errors.Is(err, errHARefreshNeedsControlSocket) ||
 		errors.Is(err, errHARefreshStaleProcess) ||
 		errors.Is(err, errHARefreshStaleIntent) {
@@ -2105,10 +2105,14 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// Prefer the helper-compatible acknowledged inventory in the session arm,
 	// including any pending demotion intent. Bare/legacy fixtures without a
 	// published helper inventory retain the direct manager view.
-	groups := m.haWatchdogGroupsLocked()
+	now := m.preActivateNow()
+	groups := m.haWatchdogGroupsAtLocked(now)
 	if len(groups) == 0 {
 		groups = m.effectiveHAGroupsLocked()
 	}
+	// #19103: the deadlines travel with the groups, and the sender re-checks
+	// them after the session queue.
+	activeUntil := m.haWatchdogDeadlinesLocked(groups)
 	sessionSocketPath := m.sessionSocketPath()
 	processGen := m.haWatchdogProcessGen.Load()
 	intentGen := m.haWatchdogIntentGen.Load()
@@ -2125,7 +2129,7 @@ func (m *Manager) UpdateHAWatchdog(rgID int, timestamp uint64) error {
 	// generation and intent checks run after sessionMu acquisition, so a queued
 	// sender cannot reach a replacement helper or resurrect a demoted owner.
 	err := m.requestHAWatchdogSessionAtPathForGeneration(
-		groups, sessionSocketPath, processGen, intentGen)
+		groups, activeUntil, sessionSocketPath, processGen, intentGen)
 	if errors.Is(err, errHARefreshNeedsControlSocket) ||
 		errors.Is(err, errHARefreshStaleProcess) ||
 		errors.Is(err, errHARefreshStaleIntent) {

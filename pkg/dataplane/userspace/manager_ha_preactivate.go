@@ -36,9 +36,12 @@ package userspace
 //   - the requester releases it (EndTransferPreActivation) on a failed or
 //     abandoned transfer, which republishes the effective inventory;
 //   - its backstop deadline passes, after which it no longer counts on any
-//     helper publisher (#19103): the status poll publishes the change, an
-//     owed expiry exempt from its 5 s sync throttle, and the degraded
-//     watchdog's snapshot carries the deadline (preActiveUntil).
+//     helper publisher (#19103): the status poll publishes the change (an
+//     owed expiry is exempt from its 5 s sync throttle and is serviced even
+//     when a poll reply is discarded), and every watchdog session send
+//     carries the deadline and re-checks it after the session queue. The
+//     residual while m.mu stays held is in pkg/dataplane/README.md, "Residual"
+//     under "Pre-activation expiry".
 
 import (
 	"errors"
@@ -254,7 +257,7 @@ func (m *Manager) effectiveHAGroupLocked(group HAGroupStatus, now time.Time) HAG
 
 // effectiveHAGroupsLocked returns the helper-facing inventory sorted by RG.
 func (m *Manager) effectiveHAGroupsLocked() []HAGroupStatus {
-	now := time.Now()
+	now := m.preActivateNow()
 	groups := make([]HAGroupStatus, 0, len(m.haGroups))
 	for _, group := range m.haGroups {
 		groups = append(groups, m.effectiveHAGroupLocked(group, now))
@@ -268,13 +271,80 @@ func (m *Manager) effectiveHAGroupsLocked() []HAGroupStatus {
 // effectiveHAGroupMapLocked is effectiveHAGroupsLocked keyed by RG, for the
 // signature and watchdog-inventory consumers.
 func (m *Manager) effectiveHAGroupMapLocked() map[int]HAGroupStatus {
-	if len(m.transferPreActive) == 0 {
+	return m.effectiveHAGroupMapAtLocked(m.preActivateNow())
+}
+
+// effectiveHAGroupMapAtLocked is the effective view at one time sample, so a
+// caller that also derives deadlines uses the SAME instant (#19103). With no
+// entry that counts for the helper it returns the cluster truth itself, so
+// expired entries kept for the release's route withdrawal cost no per-call
+// allocation.
+func (m *Manager) effectiveHAGroupMapAtLocked(now time.Time) map[int]HAGroupStatus {
+	overlay := false
+	for rgID := range m.transferPreActive {
+		if m.transferPreActiveForHelperLocked(rgID, now) {
+			overlay = true
+			break
+		}
+	}
+	if !overlay {
 		return m.haGroups
 	}
-	now := time.Now()
 	out := make(map[int]HAGroupStatus, len(m.haGroups))
 	for id, group := range m.haGroups {
 		out[id] = m.effectiveHAGroupLocked(group, now)
+	}
+	return out
+}
+
+// preActivateNow is the pre-activation clock; preActivateNowFn is a unit-test
+// seam (#19103), nil in production.
+func (m *Manager) preActivateNow() time.Time {
+	if m.preActivateNowFn != nil {
+		return m.preActivateNowFn()
+	}
+	return time.Now()
+}
+
+// haWatchdogDeadlinesLocked returns, for every group in groups whose Active
+// comes ONLY from a transfer pre-activation (the cluster truth is inactive and
+// an entry exists), that entry's deadline. The caller derived groups at the
+// same time sample, so an Active from the overlay always gets its deadline,
+// even one that is about to pass (#19103).
+func (m *Manager) haWatchdogDeadlinesLocked(groups []HAGroupStatus) map[int]time.Time {
+	var until map[int]time.Time
+	for _, group := range groups {
+		if !group.Active || m.haGroups[group.RGID].Active {
+			continue
+		}
+		entry, ok := m.transferPreActive[group.RGID]
+		if !ok {
+			continue
+		}
+		if until == nil {
+			until = make(map[int]time.Time)
+		}
+		until[group.RGID] = entry.until
+	}
+	return until
+}
+
+// expireHAGroups returns groups with every Active whose authorization ended at
+// or before now cleared (#19103). It copies only when something changes.
+func expireHAGroups(groups []HAGroupStatus, until map[int]time.Time, now time.Time) []HAGroupStatus {
+	var out []HAGroupStatus
+	for i, group := range groups {
+		deadline, ok := until[group.RGID]
+		if !group.Active || !ok || now.Before(deadline) {
+			continue
+		}
+		if out == nil {
+			out = append([]HAGroupStatus(nil), groups...)
+		}
+		out[i].Active = false
+	}
+	if out == nil {
+		return groups
 	}
 	return out
 }
