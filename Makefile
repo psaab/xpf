@@ -1751,7 +1751,7 @@ go-deadcode-gate:
 test-go-deadcode-gate-lib:
 	bash ./scripts/go-deadcode-gate-selftest.sh
 
-# #17342: every EXPORTED *ForTest* func or method in non-test Go code has a
+# #17342: every EXPORTED *ForTest* func, method or interface method in non-test Go code has a
 # row with a reason in scripts/go-fortest-seams.allow, and every row names one
 # that exists. Purely syntactic (go/parser; nothing counts callers): the guard
 # for the class the deadcode gate cannot see, an uncalled exported method on a
