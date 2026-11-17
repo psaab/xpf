@@ -28,7 +28,7 @@
 #     XPF_DEADCODE_REQUIRE=1, so on a provisioned runner a missing deadcode
 #     toolchain is a FAIL, not a skip.
 #
-#   scripts/provision-testrunner.sh --runner <remote:instance> [--toolchains-only | --gc-toolchains]
+#   scripts/provision-testrunner.sh --runner <remote:instance> [--toolchains-only]
 #   scripts/provision-testrunner.sh --print-versions
 #
 # Toolchains are never replaced in place (fold of Codex on b7f). Each Go
@@ -41,10 +41,10 @@
 # running keeps its old tree. /usr/local/go becomes a symlink too on a fresh
 # runner; an older runner's real /usr/local/go directory is left alone.
 #
-# Old versions are never deleted automatically. --gc-toolchains removes the
-# unpublished versions, that legacy directory and stale staging directories,
-# and is refused (exit 75) while a lane is live (a runner process, a process
-# under /work, or a held --root lane lock).
+# Nothing here ever deletes a toolchain (fold of Codex on b7g: a GC keyed on
+# the checkout's versions deleted the PUBLISHED one, and "idle" was an
+# observation, not a barrier). Old versions stay; reclaiming them is the
+# manual step in docs/testing.md, on a drained runner.
 #
 # --toolchains-only installs and publishes only the two Go toolchains and the
 # profile entry, skipping apt, rustup and the account setup: use it to bring
@@ -85,11 +85,10 @@ case "${1:-}" in
 	case "${3:-}" in
 	"") ;;
 	--toolchains-only) scope=toolchains ;;
-	--gc-toolchains) scope=gc ;;
 	*) runner= ;;
 	esac
 	if [[ -z "$runner" ]]; then
-		echo "usage: $0 --runner <remote:instance> [--toolchains-only | --gc-toolchains] | --print-versions" >&2
+		echo "usage: $0 --runner <remote:instance> [--toolchains-only] | --print-versions" >&2
 		exit 2
 	fi
 	derive_versions
@@ -111,22 +110,6 @@ case "${1:-}" in
 esac
 fi
 
-# lane_activity: print evidence of a live test lane, nothing when idle. A lane
-# is any `runner` process except its idle systemd --user session, any process
-# whose cwd is under /work, or a --root lane holding vm-test-run's runner lock
-# (#19162).
-lane_activity() {
-	local p c
-	ps -eo user=,pid=,args= | awk '$1 == "runner" && $3 != "/usr/lib/systemd/systemd" && $3 != "(sd-pam)" { print "runner process: " $0 }'
-	for p in /proc/[0-9]*; do
-		c=$(readlink "$p/cwd" 2>/dev/null) || continue
-		case "$c" in /work/*) echo "pid ${p#/proc/} has cwd $c" ;; esac
-	done
-	if [[ -e /run/xpf-root-lane.lock ]] && ! flock -n /run/xpf-root-lane.lock true; then
-		echo "a --root lane holds /run/xpf-root-lane.lock"
-	fi
-}
-
 # fetch_go <version> <dest>: unpack the go<version> release tarball into
 # <dest> (creating <dest>/go).
 fetch_go() {
@@ -135,8 +118,8 @@ fetch_go() {
 
 # install_go_version <version> <dir>: make <dir> (a versioned path such as
 # /usr/local/go-1.24.9) hold go<version>. Never replaces: a present <dir> that
-# holds that version is left alone, and one that does not is an error (only
-# --gc-toolchains removes it). The tree is unpacked beside <dir>, checked, and
+# holds that version is left alone, and one that does not is an error (move
+# it aside by hand on a drained runner). The tree is unpacked beside <dir>, checked, and
 # renamed into the empty path, so <dir> is either absent or complete.
 install_go_version() {
 	local ver=$1 dir=$2 stage
@@ -144,7 +127,7 @@ install_go_version() {
 		if "$dir/bin/go" version 2>/dev/null | grep -q " go$ver "; then
 			return 0
 		fi
-		echo "provision-testrunner: $dir exists but does not hold go$ver; it is never replaced in place (remove it with --gc-toolchains on an idle runner)" >&2
+		echo "provision-testrunner: $dir exists but does not hold go$ver; it is never replaced in place (move it aside by hand on a drained runner; docs/testing.md)" >&2
 		return 2
 	fi
 	stage=$(mktemp -d "$(dirname "$dir")/.go-$ver.stage.XXXXXX")
@@ -161,7 +144,7 @@ install_go_version() {
 # symlink is made beside it and renamed over it; rename(2) replaces the old
 # link in one step, so <link> always resolves to the old target or the new.
 # A <link> that is a real directory (a pre-versioned /usr/local/go) is left
-# alone: it is not ours to replace, and --gc-toolchains removes it.
+# alone: it is not ours to replace.
 publish_link() {
 	local target=$1 link=$2 tmp
 	if [[ -d "$link" && ! -L "$link" ]]; then
@@ -173,29 +156,6 @@ publish_link() {
 }
 # rename_into_place <src> <dst>: the one rename (a hook for the selftest).
 rename_into_place() { mv -T "$1" "$2"; }
-
-# gc_toolchains <keep-build-dir> <keep-dc-dir>: remove every other versioned
-# toolchain, a pre-versioned /usr/local/go directory and stale staging dirs.
-# Refused (75) while a lane is live. GO_ROOTS lists the parents to sweep.
-gc_toolchains() {
-	local keep_build=$1 keep_dc=$2 busy d
-	busy=$(lane_activity)
-	if [[ -n "$busy" ]]; then
-		echo "provision-testrunner: refusing --gc-toolchains while a lane is live; drain the runner first:" >&2
-		printf '  %s\n' "$busy" | head -5 >&2
-		return 75
-	fi
-	for d in "${GC_LOCAL:-/usr/local}"/go "${GC_LOCAL:-/usr/local}"/go-* "${GC_LIB:-/usr/lib}"/go-* \
-		"${GC_LOCAL:-/usr/local}"/.go-* "${GC_LIB:-/usr/lib}"/.go-*; do
-		[[ -e "$d" || -L "$d" ]] || continue
-		[[ "$d" == "$keep_build" || "$d" == "$keep_dc" ]] && continue
-		if [[ "$d" == */go && -L "$d" ]]; then
-			continue # the published /usr/local/go link itself
-		fi
-		echo "provision-testrunner: gc: removing $d" >&2
-		rm -rf "$d"
-	done
-}
 
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
@@ -223,10 +183,6 @@ if [[ "$scope" == full ]]; then
 fi
 build_dir="/usr/local/go-$go_ver"
 dc_dir="/usr/lib/go-$dc_ver"
-if [[ "$scope" == gc ]]; then
-	gc_toolchains "$build_dir" "$dc_dir"
-	exit $?
-fi
 install_go_version "$go_ver" "$build_dir"
 # Some selftests pin PATH to "...:/usr/bin:/bin" (deploy-lib-selftest's
 # clean-PATH make-deb guard), and the workstation's Go is in /usr/bin.
