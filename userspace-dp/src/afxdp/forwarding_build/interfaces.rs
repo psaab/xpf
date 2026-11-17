@@ -1333,11 +1333,20 @@ pub(super) fn populate_interfaces(
                         tunnel_endpoint_id,
                         table: connected_table_v4.clone(),
                     };
+                    // #19171 (the FIB-level fix): a peer-owned row STAYS in the
+                    // transit FIB. A destination inside it answers Connected on
+                    // the peer-owned interface, and the live HA state judges
+                    // that egress at lookup time (HAInactive, then the fabric
+                    // redirect or, for a fabric-link arrival, the drop). #15742
+                    // withheld it instead, so the destination fell through to
+                    // the default route, which on a LAN-peer-owned node is an
+                    // ACTIVE WAN route. `connected_v4_peer_owned` keeps the
+                    // build-time mark for the readers that must never treat a
+                    // peer-held address as this node's (the ICMP PTB source).
                     if iface.connected_rg_peer_owned {
-                        state.connected_v4_peer_owned.push(row);
-                    } else {
-                        state.connected_v4.push(row);
+                        state.connected_v4_peer_owned.push(row.clone());
                     }
+                    state.connected_v4.push(row);
                 }
                 IpNet::V6(v6) => {
                     // #3182: NAT-decoupled full interface-IP set (see the V4
@@ -1396,11 +1405,20 @@ pub(super) fn populate_interfaces(
                         tunnel_endpoint_id,
                         table: connected_table_v6.clone(),
                     };
+                    // #19171 (the FIB-level fix): a peer-owned row STAYS in the
+                    // transit FIB. A destination inside it answers Connected on
+                    // the peer-owned interface, and the live HA state judges
+                    // that egress at lookup time (HAInactive, then the fabric
+                    // redirect or, for a fabric-link arrival, the drop). #15742
+                    // withheld it instead, so the destination fell through to
+                    // the default route, which on a LAN-peer-owned node is an
+                    // ACTIVE WAN route. `connected_v6_peer_owned` keeps the
+                    // build-time mark for the readers that must never treat a
+                    // peer-held address as this node's (the ICMP PTB source).
                     if iface.connected_rg_peer_owned {
-                        state.connected_v6_peer_owned.push(row);
-                    } else {
-                        state.connected_v6.push(row);
+                        state.connected_v6_peer_owned.push(row.clone());
                     }
+                    state.connected_v6.push(row);
                 }
             }
         }
