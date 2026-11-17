@@ -330,29 +330,49 @@ fn stored_reverse(sessions: &SessionTable, key: &crate::session::SessionKey) -> 
     (decision.resolution.disposition, decision.resolution.egress_ifindex, origin)
 }
 
-/// RED-ON-BASE. A pair imported while the peer owned the LAN carries the
-/// import-time FabricRedirect on its reverse. Once RG2 is active here, the
-/// reply rehomes to the LAN and the error must too; the base sent the error to
-/// the demoted peer.
+/// RED-ON-BASE. A pair imported while the peer owned the LAN stores a reverse
+/// that does not deliver to the LAN. Once RG2 is active here, the reply
+/// rehomes to the LAN and the error must too. The base returned the stored
+/// value. Two import FIBs:
+/// - the LAN row present with RG2 inactive (the shape #19164 was filed on):
+///   the import stores a FabricRedirect, and the base sent the error to the
+///   demoted peer;
+/// - the production split FIB, the LAN prefix withheld (#15742): the import
+///   resolves the client by the WAN default, and the base sent the error by
+///   that stored WAN answer.
 #[test]
 fn icmp_error_follows_the_reply_after_lan_activation_19164() {
     let split = split_forwarding();
     let owner = fw1_owner_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
-    for family in [Family::V4, Family::V6] {
+    for (family, withheld) in [
+        (Family::V4, false),
+        (Family::V6, false),
+        (Family::V4, true),
+        (Family::V6, true),
+    ] {
+        let import_fib = if withheld { &split } else { &owner };
         let setup = || {
-            let sessions = imported_pair(&split, &split_node_ha(now_secs), family);
-            let (disposition, _, _) = stored_reverse(&sessions, &canonical_reverse_key(family, &split));
-            assert_eq!(
-                disposition,
-                ForwardingDisposition::FabricRedirect,
-                "fixture: imported while the peer owned the LAN ({family:?})"
-            );
+            let sessions = imported_pair(import_fib, &split_node_ha(now_secs), family);
+            let (disposition, egress, _) =
+                stored_reverse(&sessions, &canonical_reverse_key(family, import_fib));
+            if withheld {
+                assert!(
+                    !(disposition == ForwardingDisposition::ForwardCandidate && egress == LAN_IFINDEX),
+                    "fixture: the split import does not deliver to the LAN ({family:?}: {disposition:?} on {egress})"
+                );
+            } else {
+                assert_eq!(
+                    disposition,
+                    ForwardingDisposition::FabricRedirect,
+                    "fixture: imported while the peer owned the LAN ({family:?})"
+                );
+            }
             sessions
         };
         run_row(&Row {
-            name: "LAN activation",
+            name: if withheld { "LAN activation, withheld import" } else { "LAN activation" },
             family,
             setup: &setup,
             forwarding: &owner,
