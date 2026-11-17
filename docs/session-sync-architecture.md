@@ -639,23 +639,31 @@ Now the materialize joins the worker install protocol:
   and the re-read agree by construction. The rule is the wire key, not the
   alias's session id: a publish of a new incarnation under the same tuple and
   translation writes the canonical row first, so in that window the alias's id
-  is itself the lagging field. The bound: a drop needs a canonical write
-  inside that one packet's capture-to-claim window, so each such write drops
-  at most one packet per worker, and lag between the alias and its canonical
-  row drops nothing, however long it lasts. A canonical row that is absent, a
-  reverse row, or under another translation is a delete or a replacement, not
-  lag: the alias stays the capture and is dropped as before (`SharedAbsent`,
-  `Superseded`). Cost: one more shared-map lock and one clone per alias hit,
+  is itself the lagging field. The bound, for a SUCCESSFUL canonical capture
+  only: a drop needs a canonical write inside that one packet's
+  capture-to-claim window, so each such write drops at most one packet per
+  worker, and lag between the alias and its canonical row drops nothing,
+  however long it lasts. A canonical row that is absent, a reverse row, or
+  under another translation is a delete or a replacement, not lag: the alias
+  itself stays the capture and is dropped as before (`SharedAbsent`,
+  `Superseded`). Those obsolete-alias drops are outside this bound: after a
+  translation-changing replacement the old wire alias is never removed
+  (#19179, pre-existing), so every packet still arriving on the old wire
+  tuple is dropped and counted, with no canonical write involved. Cost: one more shared-map lock and one clone per alias hit,
   never nested with the wire-map lock.
 - **The drop counter.** Every such drop counts in
   `MATERIALIZE_DIVERGENCE_DROPS`, exported as
   `ProcessStatus.materialize_divergence_drops` and the Prometheus counter
-  `xpf_userspace_materialize_divergence_drops_total`. A drop needs a shared
-  write inside one packet's capture-to-claim window (microseconds) that
-  changes a compared field (fold 3 removed the wire-alias lag that broke this
-  bound). Read it as a delta across a takeover, not as an invariant zero: a
-  sibling's promotion or restamp that lands inside a window still drops that
-  one packet.
+  `xpf_userspace_materialize_divergence_drops_total`. For a successful
+  capture, a drop needs a shared write inside one packet's capture-to-claim
+  window (microseconds) that changes a compared field (fold 3 removed the
+  wire-alias lag that broke this bound). Read it as a delta across a
+  takeover, not as an invariant zero: a sibling's promotion or restamp that
+  lands inside a window still drops that one packet. The counter ALSO counts
+  obsolete-alias drops, which are not bounded per write: packets on the old
+  wire tuple of a translation-changing replacement resolve an alias that is
+  never removed (#19179) and drop every time. A rise without failover
+  activity, concentrated on one flow, points there, not at divergence.
 - **Cost.** One materialize attempt per flow per worker, unless it is refused,
   in which case the flow's next packet tries again for as long as the cause
   lasts. A held pair costs the non-allocating claim pre-check (lock

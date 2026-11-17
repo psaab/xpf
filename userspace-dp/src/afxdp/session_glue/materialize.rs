@@ -714,12 +714,17 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
 /// The next packet resolves the installed row as a worker hit, or current
 /// shared state, and promotes normally. One exception (fold 3, Codex re-check
 /// P2): a row that is a fabric wire placeholder sends every translated packet
-/// back to the shared wire alias (`shared_ops/lookup.rs`). That capture is the
-/// alias's CURRENT canonical row (`lookup_shared_forward_wire_capture`), never
-/// the alias's own lagging copy, so it equals the re-read unless a canonical
-/// write lands in that packet's own capture-to-claim window. Each such write
-/// can drop at most one packet per worker. Lag between the alias and its
-/// canonical row, however long, drops nothing.
+/// back to the shared wire alias (`shared_ops/lookup.rs`). When the alias slot
+/// is its canonical row's republication, that capture is the CURRENT canonical
+/// row (`lookup_shared_forward_wire_capture`), not the alias's own lagging
+/// copy, so it equals the re-read unless a canonical write lands in that
+/// packet's own capture-to-claim window. Each such write can drop at most one
+/// packet per worker, and lag between the alias and its canonical row,
+/// however long, drops nothing. When the predicate fails (the canonical row is
+/// absent, reverse, or under another translation) the capture IS the alias's
+/// copy and drops as `SharedAbsent`/`Superseded`; that is outside the bound,
+/// and an obsolete alias from a translation-changing replacement is never
+/// removed (#19179), so its packets drop every time.
 ///
 /// Every `deferred_*` effect of `ResolvedFlowSessionDecision`, on `Drop`:
 /// - `deferred_synced_promotion`: DROPPED. It carries the capture's decision
