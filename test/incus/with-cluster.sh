@@ -55,6 +55,56 @@ shift
 [[ "$1" == "--" ]] || usage
 shift
 
+# #19165: the lock tuple and the targets must name the same cluster. The
+# lock comes from XPF_CLUSTER_LOCK, but FW0/FW1, which the VM-target guard
+# below touches (shims, systemctl daemon-reload) and the cell's command
+# drives, come from cluster-env.sh, which defaults to loss. A tcp/udp lock
+# tuple without BPFRX_CLUSTER_ENV therefore ran that guard on the LOSS
+# firewalls without the loss lock, inside another agent's loss measurement
+# (2026-11-16). The RESOLVED FW0/FW1 are checked, not only the env's
+# INCUS_REMOTE label (fold of Codex on b7g, N2): cluster-env.sh keeps an
+# already-qualified override, so FW0=loss:... under the udp env and lock
+# still targets loss. Checked before the lock is taken, so a mismatched cell
+# never holds one, and BEFORE the reentrant return below, so a nested cell
+# cannot change targets under its ancestor's lock either. A private lock path
+# (the selftests) names no cluster; a bare target (the legacy local cluster,
+# no INCUS_REMOTE) names no remote to compare.
+case "$(basename -- "$XPF_CLUSTER_LOCK")" in
+xpf-cluster.lock) LOCK_CLUSTER=loss ;;
+xpf-cluster-tcp.lock) LOCK_CLUSTER=tcp ;;
+xpf-cluster-udp.lock) LOCK_CLUSTER=udp ;;
+*) LOCK_CLUSTER= ;;
+esac
+# lock_target_mismatch: print why the resolved targets are not the lock's
+# cluster, nothing when they are. In a subshell (command substitution), so
+# the reentrant path's environment is left exactly as the caller set it.
+lock_target_mismatch() {
+	# shellcheck source=cluster-env.sh
+	source "${SCRIPT_DIR}/cluster-env.sh" >/dev/null || {
+		echo "cluster-env.sh could not resolve the targets"
+		return 0
+	}
+	if [[ -n "${INCUS_REMOTE:-}" && "$INCUS_REMOTE" != "$LOCK_CLUSTER" ]]; then
+		echo "the cluster env resolves ${INCUS_REMOTE} (FW0=${FW0})"
+		return 0
+	fi
+	local var target
+	for var in FW0 FW1; do
+		target=${!var:-}
+		if [[ "$target" == *:* && "${target%%:*}" != "$LOCK_CLUSTER" ]]; then
+			echo "${var}=${target} is on the ${target%%:*} cluster"
+			return 0
+		fi
+	done
+}
+if [[ -n "$LOCK_CLUSTER" ]]; then
+	mismatch=$(lock_target_mismatch)
+	if [[ -n "$mismatch" ]]; then
+		echo "[with-cluster] REFUSED: the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK}) but ${mismatch}; the cell would touch firewalls the lock does not cover. Export BPFRX_CLUSTER_ENV for ${LOCK_CLUSTER} (test/incus/${LOCK_CLUSTER}-userspace-cluster.env) with its lock tuple, and no FW0/FW1 override for another cluster (#19165)" >&2
+		exit 2
+	fi
+fi
+
 # Reentrant case: a live ancestor cell already holds the lock. Run the
 # command directly — no second acquire, no owner write, no trap (the
 # outer cell owns cleanup). `env --` pins the command to an EXTERNAL
@@ -65,27 +115,8 @@ if xpf_cluster_lock_held; then
 	exec env -- "$@"
 fi
 
-# #19165: the lock tuple and the cluster env must name the same cluster.
-# The lock comes from XPF_CLUSTER_LOCK, but FW0/FW1, which the VM-target
-# guard below touches (shims, systemctl daemon-reload), come from
-# cluster-env.sh, which defaults to loss. A tcp/udp lock tuple without
-# BPFRX_CLUSTER_ENV therefore ran that guard on the LOSS firewalls without
-# the loss lock, inside another agent's loss measurement (2026-11-16).
-# Checked before the lock is taken, so a mismatched cell never holds one. A
-# private lock path (the selftests) names no cluster, and an env with no
-# INCUS_REMOTE (the legacy local cluster) has none to compare.
-case "$(basename -- "$XPF_CLUSTER_LOCK")" in
-xpf-cluster.lock) LOCK_CLUSTER=loss ;;
-xpf-cluster-tcp.lock) LOCK_CLUSTER=tcp ;;
-xpf-cluster-udp.lock) LOCK_CLUSTER=udp ;;
-*) LOCK_CLUSTER= ;;
-esac
 # shellcheck source=cluster-env.sh
 source "${SCRIPT_DIR}/cluster-env.sh"
-if [[ -n "$LOCK_CLUSTER" && -n "${INCUS_REMOTE:-}" && "$INCUS_REMOTE" != "$LOCK_CLUSTER" ]]; then
-	echo "[with-cluster] REFUSED: the lock tuple is the ${LOCK_CLUSTER} cluster's (${XPF_CLUSTER_LOCK}) but the cluster env resolves ${INCUS_REMOTE} (FW0=${FW0}); the cell would touch ${INCUS_REMOTE}'s firewalls without its lock. Export BPFRX_CLUSTER_ENV for ${LOCK_CLUSTER} (test/incus/${LOCK_CLUSTER}-userspace-cluster.env) with its lock tuple (#19165)" >&2
-	exit 2
-fi
 
 WAITED=0
 # Timeout: digits only, forced base-10 (a leading zero like "08" must

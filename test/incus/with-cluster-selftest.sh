@@ -222,4 +222,36 @@ XPF_CLUSTER_LOCK="$T/k/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/k/owner" XPF_
 [[ -e "$T/k/ran" ]] || fail "(k) udp lock + udp env: the command did not run"
 ok "a lock tuple and a cluster env naming different clusters are refused before the lock (#19165); a matched pair runs"
 
+# ── #19165 fold (Codex on b7g, N2): the RESOLVED targets are checked, not
+#    only the env label. (l) The udp env and udp lock with an explicit
+#    FW0=loss:... (cluster-env.sh keeps a qualified override) is refused, the
+#    command not run; an explicit udp: override runs. (m) A nested cell (the
+#    reentrant path, under its ancestor's udp lock) that overrides FW0 to loss
+#    is refused too.
+mkdir -p "$T/l"
+UDP_ENV="${REPO_ROOT}/test/incus/udp-userspace-cluster.env"
+set +e
+XPF_CLUSTER_LOCK="$T/l/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/l/owner" XPF_CLUSTER_EPOCH="$T/l/epoch" \
+	BPFRX_CLUSTER_ENV="$UDP_ENV" FW0=loss:xpf-userspace-fw0 \
+	"$WC" "case-l override" -- touch "$T/l/ran" >"$T/l.out" 2>&1
+L_RC=$?
+set -e
+[[ $L_RC -eq 2 && ! -e "$T/l/ran" ]] || fail "(l) udp lock + udp env + FW0=loss:...: expected refusal (2) with the command not run, got rc=$L_RC: $(tr '\n' '|' <"$T/l.out")"
+grep -q 'REFUSED: the lock tuple is the udp cluster.*FW0=loss:xpf-userspace-fw0 is on the loss cluster' "$T/l.out" || fail "(l) the refusal does not name the target: $(tr '\n' '|' <"$T/l.out")"
+[[ ! -s "$T/l/owner" ]] || fail "(l) the refused cell wrote an owner file: it took the lock"
+XPF_CLUSTER_LOCK="$T/l/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/l/owner" XPF_CLUSTER_EPOCH="$T/l/epoch" \
+	BPFRX_CLUSTER_ENV="$UDP_ENV" FW0=udp:xpf-udp-fw0 \
+	"$WC" "case-l same-cluster override" -- touch "$T/l/ran" >"$T/l2.out" 2>&1 || fail "(l) an explicit udp: override under the udp lock was refused: $(tr '\n' '|' <"$T/l2.out")"
+[[ -e "$T/l/ran" ]] || fail "(l) the explicit udp: override did not run"
+rm -f "$T/l/ran"
+set +e
+XPF_CLUSTER_LOCK="$T/l/xpf-cluster-udp.lock" XPF_CLUSTER_OWNER="$T/l/owner" XPF_CLUSTER_EPOCH="$T/l/epoch" \
+	BPFRX_CLUSTER_ENV="$UDP_ENV" \
+	"$WC" "case-m outer" -- bash -c 'FW0=loss:xpf-userspace-fw0 "$0" "case-m inner" -- touch "$1/ran"; echo $? >"$1/inner.rc"' "$WC" "$T/l" >"$T/m.out" 2>&1
+M_RC=$?
+set -e
+[[ $M_RC -eq 0 && "$(cat "$T/l/inner.rc" 2>/dev/null)" == 2 && ! -e "$T/l/ran" ]] || fail "(m) a nested cell overriding FW0 to loss under the outer udp lock: expected the inner refused (2) and nothing run, got outer=$M_RC inner=$(cat "$T/l/inner.rc" 2>/dev/null): $(tr '\n' '|' <"$T/m.out")"
+grep -q 'FW0=loss:xpf-userspace-fw0 is on the loss cluster' "$T/m.out" || fail "(m) the nested refusal does not name the target: $(tr '\n' '|' <"$T/m.out")"
+ok "resolved FW0/FW1 are checked against the lock's cluster (#19165, Codex on b7g N2): an explicit loss: override is refused, also on the reentrant path; a same-cluster override runs"
+
 echo "ALL ${PASS} CASES PASS"
