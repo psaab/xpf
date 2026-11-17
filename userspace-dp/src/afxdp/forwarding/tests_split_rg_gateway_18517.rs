@@ -143,8 +143,8 @@ fn find_route_v6<'a>(state: &'a ForwardingState, table: &str, dst: &str) -> &'a 
 /// `tenant-y.inet.0` (the FIXTURE assertion proves that divergence is
 /// present). A `tenant-y` static via 10.77.0.254 must NOT bind ifindex 40:
 /// that prefix belongs to the default instance (#4446 cross-VRF wrong
-/// egress). Also pins the partition the binding relies on: a row is in
-/// `connected_v*_peer_owned` exactly when it is withheld from transit.
+/// egress). Also pins the mark: a row is in `connected_v*_peer_owned` exactly
+/// when its unit is peer-owned (#19171: and it stays in transit too).
 /// FAIL-ON-REVERT: bind through `connected_lpm_ifindex_v4/v6` (the ledger)
 /// again and the tenant static's member binds ifindex 40 in both families.
 #[test]
@@ -202,8 +202,10 @@ fn bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517() {
         v6.next_hops
     );
 
-    // The partition: peer-owned rows are exactly reth0.80's, each with its
-    // own table, and none of them is also a transit row.
+    // The mark: peer-owned rows are exactly reth0.80's, each with its own
+    // table. #19171 re-base: they are now ALSO transit rows (before: never),
+    // so the tenant static's binding is judged by transit LPM in its own
+    // table, which the assertions above pin unchanged.
     let peer4: Vec<(i32, &str)> = state
         .connected_v4_peer_owned
         .iter()
@@ -216,8 +218,8 @@ fn bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517() {
         .collect();
     assert_eq!(peer4, vec![(12, "inet.0")]);
     assert_eq!(peer6, vec![(12, "inet6.0")]);
-    assert!(state.connected_v4.iter().all(|row| row.ifindex != 12));
-    assert!(state.connected_v6.iter().all(|row| row.ifindex != 12));
+    assert!(state.connected_v4.iter().any(|row| row.ifindex == 12 && row.table == "inet.0"));
+    assert!(state.connected_v6.iter().any(|row| row.ifindex == 12 && row.table == "inet6.0"));
 }
 
 /// #18517 round-3 LOW: equal-length peer-owned rows in ONE table tie-break
@@ -229,6 +231,10 @@ fn bare_gateway_never_binds_a_non_peer_owned_ledger_row_18517() {
 /// 2001:559:8585:80::1 must bind ifindex 7 in both families.
 /// FAIL-ON-REVERT: drop the `.then(a.ifindex.cmp(&b.ifindex))` tie-break in
 /// `sort_connected` and the stable sort keeps snapshot order, binding 12.
+/// #19171: the peer-owned rows now stay in transit, so the binding is the
+/// transit LPM, and the tie-break that decides it is the transit sort's.
+/// #19171: the peer-owned rows now stay in transit, so the binding is the
+/// transit LPM, and the tie-break that decides it is the transit sort's.
 #[test]
 fn equal_length_peer_owned_rows_bind_the_lowest_ifindex_18517() {
     let mut snapshot = split_node_snapshot();

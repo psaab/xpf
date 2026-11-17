@@ -164,23 +164,29 @@ fn stored_forward_line(sessions: &SessionTable, key: &crate::session::SessionKey
 }
 
 /// Premise (the live 08:29:07 / 10:49:02 deltas): with the peer's numbering
-/// the import stores a local line on the WAN gateway VLAN, not the reth0.80
-/// egress the translation was minted for and not a fabric redirect. This is
-/// the line the reverse hit judged. IPv4 and IPv6.
+/// the import stored a local line on the WAN gateway VLAN, not the reth0.80
+/// egress the translation was minted for and not a fabric redirect. That was
+/// the line the reverse hit judged.
+///
+/// #19171 re-base and rename (was `..._stores_wan_gateway_line_18691`): the
+/// peer-owned WAN prefix now stays in transit, so the import stores the
+/// connected reth0.80 line, the egress the translation was minted for. The
+/// trigger #18691 guarded no longer arises from imports. IPv4 and IPv6.
 #[test]
-fn lan_owner_idle_import_stores_wan_gateway_line_18691() {
+fn lan_owner_idle_import_stores_the_connected_wan_line_18691() {
     for family in [Family::V4, Family::V6] {
         let (sessions, forwarding, _) = lan_owner_import(family, false);
         let key = exported_forward(&forwarding, family).key;
         let (_, _, origin) = sessions.entry_with_origin(&key).expect("forward row");
         assert_eq!(origin, SessionOrigin::SyncImport, "{family:?}");
         let line = stored_forward_line(&sessions, &key);
+        // #19171 re-base: the peer-owned WAN prefix now stays in transit, so the import resolves the WAN server on its connected unit reth0.80 (14, where the translation was minted), not by the withheld FIB's gateway line reth0.50 (13).
         assert!(
             matches!(
                 line.disposition,
                 ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
-            ) && line.egress_ifindex == WAN_GATEWAY_UNIT_IFINDEX,
-            "premise: the split FIB answers via the WAN gateway VLAN ({family:?}): {line:?}"
+            ) && line.egress_ifindex == WAN_UNIT_IFINDEX,
+            "premise (#19171): the import stores the connected reth0.80 line ({family:?}): {line:?}"
         );
     }
 }
@@ -423,10 +429,11 @@ fn activation_refresh_heals_the_line_and_keeps_the_flow_18691() {
     for family in [Family::V4, Family::V6] {
         let (mut sessions, split_forwarding, now_secs) = lan_owner_import(family, false);
         let key = exported_forward(&split_forwarding, family).key;
+        // #19171 re-base: the peer-owned WAN prefix now stays in transit, so the import resolves the WAN server on its connected unit reth0.80 (14, where the translation was minted), not by the withheld FIB's gateway line reth0.50 (13).
         assert_eq!(
             stored_forward_line(&sessions, &key).egress_ifindex,
-            WAN_GATEWAY_UNIT_IFINDEX,
-            "premise: imported under the split FIB ({family:?})"
+            WAN_UNIT_IFINDEX,
+            "premise (#19171): imported under the split FIB on reth0.80 ({family:?})"
         );
         let owner_forwarding = fw1_owner_forwarding();
         apply_commands(
@@ -469,8 +476,12 @@ fn activation_refresh_heals_the_line_and_keeps_the_flow_18691() {
 /// refresh waits as transition debt (#9720). Ignored until that issue is
 /// fixed; it asserts the behaviour the fix must produce. Un-ignored on
 /// 36acce9efb it fails with `(snat_revoked, closes, len) = (1, 1, 0)`.
+///
+/// #19171: un-ignored. The import now stores the connected reth0.80 line
+/// (above), which is valid once RG1 is active, so a reply in that window has
+/// no stale line to judge (measured on #19171 v2 at cd35ac79e8, and pinned
+/// here on the FIB-level fix).
 #[test]
-#[ignore = "#18705: a reply between the HA store and RefreshOwnerRGS judges the stale line"]
 fn activation_before_refresh_keeps_the_flow_18691() {
     let (mut sessions, _, now_secs) = lan_owner_import(Family::V4, false);
     let owner_forwarding = fw1_owner_forwarding();
@@ -512,10 +523,11 @@ fn lan_owner_readdressed_translation_leaves_only_via_the_fabric_18691() {
         None,
     );
     let key = exported_forward(&forwarding, Family::V4).key;
+    // #19171 re-base: the peer-owned WAN prefix now stays in transit, so the import resolves the WAN server on its connected unit reth0.80 (14, where the translation was minted), not by the withheld FIB's gateway line reth0.50 (13).
     assert_eq!(
         stored_forward_line(&sessions, &key).egress_ifindex,
-        WAN_GATEWAY_UNIT_IFINDEX,
-        "premise: the split-FIB gateway line"
+        WAN_UNIT_IFINDEX,
+        "premise (#19171): the connected reth0.80 line"
     );
     let out = lan_ack(&mut sessions, &forwarding, &split_ha(now_secs), 1);
     assert_eq!(out.session_hit, 1, "the LAN packet must hit the row");

@@ -1458,18 +1458,48 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
     let active_map = BTreeMap::from([(1, active_ha_runtime(now_secs))]);
     let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
 
-    let raw = lookup_forwarding_resolution(&state, dst).resolution;
-    assert_eq!(
-        raw.disposition,
-        ForwardingDisposition::ClusterTerminalHAInactive,
-        "fixture must surface the cluster terminal, got {:?}",
-        raw.disposition
-    );
+    // #19171 re-base. The destination is inside the peer-owned WAN prefix,
+    // which now stays in transit: the FIB answers Connected on that unit
+    // (before: the stamped cluster terminal), and HA plus the converter give
+    // the same delivered outcome, a fabric redirect.
+    let connected = lookup_forwarding_resolution(&state, dst).resolution;
     assert!(
-        raw.source_ifindex > 0,
-        "the FIB must stamp the would-be egress, got {}",
-        raw.source_ifindex
+        matches!(
+            connected.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        ) && connected.egress_ifindex == 12,
+        "#19171: the in-prefix destination answers its peer-owned unit, got {connected:?}"
     );
+    let delivered = redirect_via_fabric_if_needed_at(
+        &state,
+        &inactive_map,
+        now_secs,
+        enforce_ha_resolution_snapshot(&state, &inactive_map, now_secs, connected),
+        24,
+        None,
+    );
+    assert_eq!(
+        delivered.disposition,
+        ForwardingDisposition::FabricRedirect,
+        "#19171: the delivered outcome is the fabric redirect, as the rescue below"
+    );
+    // No destination inside a peer-owned prefix reaches the stamped terminal
+    // any more (a #19171 Stage B deletion candidate). The converters'
+    // contract for one is still pinned, on the stamp this FIB used to give.
+    let raw = ForwardingResolution {
+        disposition: ForwardingDisposition::ClusterTerminalHAInactive,
+        local_ifindex: 0,
+        egress_ifindex: 0,
+        tx_ifindex: 0,
+        tunnel_endpoint_id: 0,
+        next_hop: None,
+        neighbor_mac: None,
+        src_mac: None,
+        tx_vlan_id: 0,
+        source_ifindex: 12,
+        route_mtu: 0,
+        transport_route_mtu: 0,
+    };
 
     // Locally-owned at demotion time: demotes to DiscardRoute, and the
     // demotion must PRESERVE the provenance stamp.
@@ -1528,9 +1558,13 @@ fn demoted_cluster_terminal_discard_route_rescues_via_fabric_16216() {
 /// #15742 live shape: the WAN interface itself carries the connected
 /// 172.16.80.0/24 and 2001:559:8585:80::/64 prefixes, and the probe targets
 /// (172.16.80.200, 2001:559:8585:80::200) are inside them. Go marks the
-/// RG1 row ConnectedRGPeerOwned on the split node. Rust must suppress only
-/// connected_v4/v6 transit for that row so LPM reaches the pref-5 default,
-/// HA-demotes it, and fabric-redirects. Local addresses remain installed.
+/// RG1 row ConnectedRGPeerOwned on the split node.
+///
+/// #19171 re-base: the row now STAYS in transit (before: suppressed, so LPM
+/// reached the pref-5 default). The targets answer Connected on the
+/// peer-owned WAN unit, HA demotes that egress, and the delivered outcome,
+/// the fabric redirect, is unchanged. The mark is kept in
+/// `connected_v*_peer_owned`. Local addresses remain installed.
 #[test]
 fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     let mut snapshot = nat_snapshot_with_fabric();
@@ -1593,21 +1627,27 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
     });
 
     let state = build_forwarding_state(&snapshot);
-    assert!(
-        !state.connected_v4.iter().any(|entry| {
-            entry.ifindex == 12 && entry.prefix.contains(Ipv4Addr::new(172, 16, 80, 200))
-        }),
-        "peer-owned v4 connected prefix remained in transit FIB"
-    );
-    assert!(
-        !state.connected_v6.iter().any(|entry| {
-            entry.ifindex == 12
-                && entry
-                    .prefix
-                    .contains(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200))
-        }),
-        "peer-owned v6 connected prefix remained in transit FIB"
-    );
+    // #19171: in transit AND marked (before: absent from transit).
+    for (transit, marked) in [
+        (
+            state.connected_v4.iter().any(|entry| {
+                entry.ifindex == 12 && entry.prefix.contains(Ipv4Addr::new(172, 16, 80, 200))
+            }),
+            state.connected_v4_peer_owned.iter().any(|entry| entry.ifindex == 12),
+        ),
+        (
+            state.connected_v6.iter().any(|entry| {
+                entry.ifindex == 12
+                    && entry
+                        .prefix
+                        .contains(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200))
+            }),
+            state.connected_v6_peer_owned.iter().any(|entry| entry.ifindex == 12),
+        ),
+    ] {
+        assert!(transit, "#19171: the peer-owned connected prefix stays in the transit FIB");
+        assert!(marked, "#19171: and keeps its peer-owned mark");
+    }
     // Interface-SNAT moves the WAN host address to interface_nat_v4;
     // either local map proves local-delivery state was preserved.
     assert!(
@@ -1627,15 +1667,16 @@ fn split_rg_connected_wan_prefix_does_not_shadow_default_15742() {
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
     ] {
-        let blocked = enforce_ha_resolution(
-            &state,
-            &inactive,
-            lookup_forwarding_resolution(&state, dst).resolution,
+        let raw = lookup_forwarding_resolution(&state, dst).resolution;
+        assert_eq!(
+            raw.egress_ifindex, 12,
+            "#19171: split live-shape target {dst} answers its own peer-owned unit, not the default"
         );
+        let blocked = enforce_ha_resolution(&state, &inactive, raw);
         assert_eq!(
             blocked.disposition,
             ForwardingDisposition::HAInactive,
-            "split live-shape target {dst} must demote through the default"
+            "split live-shape target {dst} must demote on the peer-owned unit"
         );
         let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
         assert_eq!(
@@ -12512,18 +12553,21 @@ fn split_rg_live_shape_no_forwarding_default_fabric_redirects_15742() {
         IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)),
         IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200)),
     ] {
+        // #19171 re-base: the target is inside the peer-owned WAN prefix,
+        // which now stays in transit. It answers Connected on that unit
+        // (before: the cluster terminal, ClusterTerminalHAInactive), HA
+        // demotes it to HAInactive, and the delivered outcome is the same
+        // fabric redirect.
         let raw = lookup_forwarding_resolution(&state, dst).resolution;
-        assert_eq!(
-            raw.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "live-shape lookup must surface cluster terminal for {dst}, got {:?}",
-            raw.disposition
+        assert!(
+            matches!(raw.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor) && raw.egress_ifindex == 12,
+            "live-shape lookup answers the peer-owned WAN unit for {dst}, got {raw:?}"
         );
         let blocked = enforce_ha_resolution(&state, &inactive, raw);
         assert_eq!(
             blocked.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "live-shape demotion must survive HA enforcement for {dst}, got {:?}",
+            ForwardingDisposition::HAInactive,
+            "live-shape demotion for {dst}, got {:?}",
             blocked.disposition
         );
         let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
@@ -12633,21 +12677,25 @@ fn terminal_attribution_table_scoped_lpm_15917() {
     let dst4 = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
     let dst6 = IpAddr::V6(Ipv6Addr::new(0x2001, 0x559, 0x8585, 0x80, 0, 0, 0, 0x200));
     for dst in [dst4, dst6] {
+        // #19171 re-base: the discriminator moves from the terminal's
+        // `source_ifindex` to the Connected answer's `egress_ifindex`
+        // (the peer-owned rows now stay in transit, table-scoped exactly
+        // as before); HA gives HAInactive (before: ClusterTerminalHAInactive)
+        // and the delivered fabric redirect is unchanged.
         let raw = lookup_forwarding_resolution(&state, dst).resolution;
-        assert_eq!(
-            raw.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "default-table lookup must surface cluster terminal for {dst}"
+        assert!(
+            matches!(raw.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor),
+            "default-table lookup answers Connected for {dst}, got {raw:?}"
         );
         assert_eq!(
-            raw.source_ifindex, 12,
-            "default-table terminal attribution for {dst} must be the table-local WAN ifindex 12, not the cross-VRF tenant ifindex 31"
+            raw.egress_ifindex, 12,
+            "default-table answer for {dst} must be the table-local WAN ifindex 12, not the cross-VRF tenant ifindex 31"
         );
         let blocked = enforce_ha_resolution(&state, &ha, raw);
         assert_eq!(
             blocked.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "peer-owned WAN attribution must survive HA enforcement for {dst}"
+            ForwardingDisposition::HAInactive,
+            "peer-owned WAN egress demotes for {dst}"
         );
         let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
         assert_eq!(
@@ -12665,20 +12713,19 @@ fn terminal_attribution_table_scoped_lpm_15917() {
             Some(table),
         )
         .resolution;
-        assert_eq!(
-            raw.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "tenant-table lookup must surface cluster terminal for {dst} in {table}"
+        assert!(
+            matches!(raw.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor),
+            "tenant-table lookup answers Connected for {dst} in {table}, got {raw:?}"
         );
         assert_eq!(
-            raw.source_ifindex, 31,
-            "tenant-table terminal attribution for {dst} must be the tenant ifindex 31, not the default-table WAN ifindex 12"
+            raw.egress_ifindex, 31,
+            "tenant-table answer for {dst} must be the tenant ifindex 31, not the default-table WAN ifindex 12"
         );
         let blocked = enforce_ha_resolution(&state, &ha, raw);
         assert_eq!(
             blocked.disposition,
-            ForwardingDisposition::ClusterTerminalHAInactive,
-            "peer-owned RG3 attribution must survive HA enforcement for {dst}"
+            ForwardingDisposition::HAInactive,
+            "peer-owned RG3 egress demotes for {dst}"
         );
         let redirected = redirect_via_fabric_if_needed(&state, blocked, 24, None);
         assert_eq!(
@@ -12753,14 +12800,14 @@ fn terminal_attribution_same_table_lpm_15917() {
         (3, active_ha_runtime(now_secs)),
     ])));
     let narrow_dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    // #19171 re-base: both prefixes now stay in transit, so LPM itself
+    // picks the narrow /24 (the discriminator moves from the terminal's
+    // `source_ifindex` to the Connected answer's `egress_ifindex`).
     let raw = lookup_forwarding_resolution(&state, narrow_dst).resolution;
+    assert!(matches!(raw.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor), "narrow target answers Connected, got {raw:?}");
     assert_eq!(
-        raw.disposition,
-        ForwardingDisposition::ClusterTerminalHAInactive
-    );
-    assert_eq!(
-        raw.source_ifindex, 12,
-        "narrow /24 terminal attribution must beat the broad /16"
+        raw.egress_ifindex, 12,
+        "the narrow /24 must beat the broad /16"
     );
     let blocked = enforce_ha_resolution(&state, &ha, raw);
     assert_eq!(
@@ -12770,19 +12817,21 @@ fn terminal_attribution_same_table_lpm_15917() {
     );
     let broad_dst = IpAddr::V4(Ipv4Addr::new(172, 16, 90, 200));
     let raw = lookup_forwarding_resolution(&state, broad_dst).resolution;
+    assert!(matches!(raw.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor), "broad-only target answers Connected, got {raw:?}");
     assert_eq!(
-        raw.disposition,
-        ForwardingDisposition::ClusterTerminalHAInactive
+        raw.egress_ifindex, 41,
+        "broad-only answer must be the /16 interface"
     );
-    assert_eq!(
-        raw.source_ifindex, 41,
-        "broad-only terminal attribution must pick the /16 interface"
-    );
+    // #19171 re-base, a behaviour change: the fixture marks RG3's /16
+    // peer-owned while HA says RG3 is ACTIVE here, the FIB-lags-HA state.
+    // Before, the withheld /16 left only the terminal, a plain drop. Now
+    // the row is present and HA judges it live: RG3 is active, so this
+    // node forwards on its own interface.
     let blocked = enforce_ha_resolution(&state, &ha, raw);
-    assert_eq!(
-        blocked.disposition,
-        ForwardingDisposition::DiscardRoute,
-        "locally active RG3 attribution must keep the plain terminal drop"
+    assert!(
+        matches!(blocked.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor)
+            && blocked.egress_ifindex == 41,
+        "a locally active RG3 forwards on its own /16 interface, got {blocked:?}"
     );
 }
 
@@ -13011,22 +13060,21 @@ fn terminal_attribution_equal_prefix_tie_lowest_ifindex_15917() {
         (3, inactive_ha_runtime(now_secs)),
     ])));
     let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200));
+    // #19171 re-base: both equal-length rows now stay in transit, and the
+    // transit sort breaks the tie to the LOWEST ifindex (the #17053
+    // canonical rule, now applied to transit too). The discriminator moves
+    // from the terminal's `source_ifindex` to the answer's `egress_ifindex`.
     let raw = lookup_forwarding_resolution(&state, dst).resolution;
+    assert!(matches!(raw.disposition, ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor), "tie lookup answers Connected, got {raw:?}");
     assert_eq!(
-        raw.disposition,
-        ForwardingDisposition::ClusterTerminalHAInactive,
-        "tie lookup must surface the cluster terminal, got {:?}",
-        raw.disposition
-    );
-    assert_eq!(
-        raw.source_ifindex, 17,
+        raw.egress_ifindex, 17,
         "equal-length same-table tie must pick the lowest ifindex (17), not hash/insertion order"
     );
     let blocked = enforce_ha_resolution(&state, &ha, raw);
     assert_eq!(
         blocked.disposition,
-        ForwardingDisposition::ClusterTerminalHAInactive,
-        "tie winner is peer-owned, so the demotion must survive HA enforcement"
+        ForwardingDisposition::HAInactive,
+        "tie winner is peer-owned, so HA demotes it"
     );
     assert_eq!(
         redirect_via_fabric_if_needed(&state, blocked, 42, None).disposition,
@@ -13044,11 +13092,21 @@ fn peer_owned_vip_local_delivery_gets_ifindex_15950() {
         }
     }
     let state = build_forwarding_state(&snapshot);
+    // #19171 re-base: the premise was that the peer-owned row is absent from
+    // transit, so `local_ifindex` could come only from the by-ifindex
+    // fallback. The row now stays in transit; the property (the VIP
+    // attributes to its interface, and HA gates its local delivery) is
+    // unchanged, and is pinned below.
     assert!(
         state
             .connected_v4
             .iter()
-            .all(|e| e.host != Ipv4Addr::new(10, 0, 61, 1))
+            .any(|e| e.host == Ipv4Addr::new(10, 0, 61, 1) && e.ifindex == 24)
+            && state
+                .connected_v4_peer_owned
+                .iter()
+                .any(|e| e.host == Ipv4Addr::new(10, 0, 61, 1)),
+        "#19171: the peer-owned row stays in transit, marked"
     );
     let res =
         lookup_forwarding_resolution(&state, IpAddr::V4(Ipv4Addr::new(10, 0, 61, 1))).resolution;
@@ -13081,7 +13139,10 @@ fn peer_owned_vip_local_delivery_gets_ifindex_15950() {
         "got {res6:?}"
     );
     assert_eq!(res6.local_ifindex, 24);
-    assert!(state.connected_v4.iter().all(|e| e.ifindex != 24));
+    assert!(
+        state.connected_v4.iter().any(|e| e.ifindex == 24),
+        "#19171: the peer-owned row stays in transit"
+    );
 }
 
 #[test]
@@ -13354,15 +13415,21 @@ fn connected_beats_operator_discard_only_when_cluster_terminal_present_16270() {
     };
     let dst = IpAddr::V4(Ipv4Addr::new(172, 16, 80, 100));
     // Owed for the covering prefix: connected /24 beats the discard.
+    // #19171 re-base: the "owed" shape (a covering peer-owned prefix
+    // SUPPRESSED from transit while a cluster terminal exists) no longer
+    // arises. The peer-owned /24 stays in transit, so longest-prefix match
+    // decides: the more specific /25 operator discard stands, exactly as on
+    // the settled table and the control below. Before, #16270's
+    // connected-win let the /24 beat it (ForwardCandidate on 12). That arm
+    // now never fires (a #19171 Stage B deletion).
     let owed = build(true, true);
     let raw = lookup_forwarding_resolution(&owed, dst).resolution;
     assert_eq!(
         raw.disposition,
-        ForwardingDisposition::ForwardCandidate,
-        "republication-owed for the covering prefix: connected /24 must beat the /25 operator discard, got {:?}",
+        ForwardingDisposition::DiscardRoute,
+        "#19171: the more specific /25 operator discard stands over the peer-owned /24, got {:?}",
         raw.disposition
     );
-    assert_eq!(raw.egress_ifindex, 12);
     // Mixed/settled table: cluster-terminal present, covering prefix
     // settled locally (in transit) — operator discard must stand.
     let settled = build(true, false);

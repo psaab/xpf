@@ -285,9 +285,11 @@ fn a_demote_after_the_withholding_publish_never_stores_the_wan_egress_19171() {
         &key,
     )
     .resolution;
-    assert!(
-        is_local_wan(&fresh),
-        "FIXTURE: with the prefix withheld, the FIB answers the LAN client with the WAN ({fresh:?})"
+    // #19171 re-base: the peer-owned LAN row now stays in transit, so the FIB
+    // answers the LAN client on its own interface (before: the WAN default).
+    assert_eq!(
+        fresh.egress_ifindex, LAN,
+        "FIXTURE (#19171): the FIB answers the LAN client on the LAN ({fresh:?})"
     );
     let stored = demote(&mut sessions, &key, &after);
     assert_eq!(
@@ -328,18 +330,24 @@ fn a_stale_wan_reply_before_the_demote_is_converted_19171() {
     let stored = install_local_reverse(&mut sessions, &key);
     let state = forwarding(true);
     let reply = reply(&state, &key, stored, true, false, WAN, false);
-    // #16217's exact answer, byte-for-byte: the derivation must leave its
-    // domain (a non-fabric-link reverse hit on a non-redirect stored value)
-    // untouched.
-    let converted = crate::afxdp::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
+    // #19171 re-base. Before, the withheld FIB answered the client by the
+    // WAN, and #16217's conversion redirected the reply, stamping the
+    // reverse's EGRESS zone (LAN). The LAN row now stays in transit, so the
+    // client answers on the LAN, HA demotes it, and the standard fabric
+    // composition redirects it, stamping the reply's ARRIVAL zone (WAN): the
+    // stamp every HA-inactive reply redirect carries, and the one the
+    // receiving owner is pinned with
+    // (`lan_node_unnatted_fabric_reply_keeps_forwarding_18531`). Same fabric
+    // egress, next hop and peer MAC; only the stamped zone differs.
+    let redirected = crate::afxdp::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
         &state,
-        reverse_metadata(&state).egress_zone,
+        reverse_metadata(&state).ingress_zone,
     )
     .expect("FIXTURE: the zone-encoded redirect resolves");
     assert_eq!(
-        reply, converted,
-        "a stale WAN-arrival reply to a client whose RG is the peer's is #16217's conversion, \
-         exactly (reply={reply:?})"
+        reply, redirected,
+        "a stale WAN-arrival reply to a client whose RG is the peer's crosses the fabric, \
+         stamped with its arrival zone (reply={reply:?})"
     );
 }
 
@@ -727,9 +735,11 @@ fn a_forward_hit_to_a_peer_owned_lan_server_never_leaves_by_the_wan_19171() {
     let looked_up =
         lookup_forwarding_resolution_for_session_without_cache(&after, &neighbors, &flow, stored)
             .resolution;
-    assert!(
-        is_local_wan(&looked_up),
-        "FIXTURE: with the prefix withheld the FIB answers the server with the WAN ({looked_up:?})"
+    // #19171 re-base: the peer-owned LAN row stays in transit, so the FIB
+    // answers the server on the LAN (before: the WAN default).
+    assert_eq!(
+        looked_up.egress_ifindex, LAN,
+        "FIXTURE (#19171): the FIB answers the server on the LAN ({looked_up:?})"
     );
     let forward = reresolve_stored_session(
         &after,
@@ -1101,7 +1111,10 @@ fn both_active() -> BTreeMap<i32, HAGroupRuntime> {
 /// The forwarding state and HA view of each ownership state.
 #[derive(Clone, Copy, Debug)]
 enum State {
-    /// The peer owns RG2 and the FIB withholds its prefix (the split node).
+    /// The peer owns RG2 and its prefix is marked peer-owned (the split node).
+    /// Before #19171's FIB-level fix the mark WITHHELD the prefix from the
+    /// transit FIB; it now stays in transit, so this state's FIB answers
+    /// equal `PeerPresent`'s and HA alone makes the difference.
     PeerWithheld,
     /// The peer owns RG2 but the FIB still holds its prefix (the honest FIB).
     PeerPresent,
@@ -1356,22 +1369,23 @@ fn forward_import(
     (decision.resolution, metadata.owner_rg_id)
 }
 
-/// The split node converges to the honest-FIB answer, caller by caller; the
-/// hit arm's reverse keeps #16217's exact redirect.
+/// The split node converges to the honest-FIB answer, caller by caller. The
+/// hit arm's reverse crosses the fabric stamped with its arrival zone
+/// (#19171: through HA, no longer #16217's egress-zone conversion).
 #[test]
 fn every_caller_on_the_split_node_gives_its_honest_fib_answer_19171() {
     let reverse = matrix_session(CLIENT, true, 40_300);
     let forward = matrix_session(LAN_HOST, false, 40_301);
     let (split, _) = state_of(State::PeerWithheld);
-    let converted = crate::afxdp::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
+    let redirected = crate::afxdp::forwarding::resolve_zone_encoded_fabric_redirect_by_id(
         &split,
-        reverse.2.egress_zone,
+        reverse.2.ingress_zone,
     )
     .expect("FIXTURE: the zone-encoded redirect resolves");
     assert_eq!(
         hit(State::PeerWithheld, &reverse, false),
-        converted,
-        "hit/reverse: #16217's exact redirect"
+        redirected,
+        "hit/reverse: the fabric redirect stamped with the reply's arrival zone (#19171)"
     );
     for (caller, split_answer, honest_answer) in [
         (
@@ -1519,16 +1533,19 @@ fn a_split_view_cannot_ping_pong_a_reply_over_the_fabric_19171() {
 fn a_persisted_and_relabelled_wan_row_is_healed_by_the_next_refresh_19171() {
     let reverse = matrix_session(CLIENT, true, 40_340);
     let (split, _) = state_of(State::PeerWithheld);
-    let polluted = lookup_forwarding_resolution_for_session_without_cache(
+    // #19171 re-base: the withheld FIB that produced this row is gone (the
+    // LAN row stays in transit), so the leftover is built from what it used
+    // to answer: the WAN default route's answer, here for an off-link
+    // destination no connected row covers.
+    let polluted = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
         &split,
         &matrix_neighbors(),
-        &flow(&reverse.0),
-        reverse.1,
+        IpAddr::V4(Ipv4Addr::new(198, 51, 100, 1)),
     )
     .resolution;
     assert!(
         is_local_wan(&polluted),
-        "FIXTURE: the polluted row is the WAN answer ({polluted:?})"
+        "FIXTURE: the polluted row is the WAN default route's answer ({polluted:?})"
     );
     let polluted_session = (
         reverse.0.clone(),
@@ -1695,14 +1712,13 @@ fn an_answer_on_the_withheld_rows_own_interface_is_adopted_19171() {
     let fib =
         lookup_forwarding_resolution_for_session_without_cache(&state, &neighbors, &flow, stored)
             .resolution;
+    // #19171 re-base: the peer-owned subnet stays in transit, so the FIB
+    // answers the host on its connected interface, the host itself as next
+    // hop (before: the default route's gateway bound to that row).
     assert_eq!(
-        (fib.disposition, fib.egress_ifindex, fib.next_hop),
-        (
-            ForwardingDisposition::ForwardCandidate,
-            WAN,
-            Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 1)))
-        ),
-        "FIXTURE: the FIB answers the withheld-subnet host by the gateway bound to that row ({fib:?})"
+        (fib.egress_ifindex, fib.next_hop),
+        (WAN, Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 77)))),
+        "FIXTURE (#19171): the FIB answers the peer-owned-subnet host on its connected interface ({fib:?})"
     );
     let mut sessions = SessionTable::new();
     super::commands::handle_upsert_synced(

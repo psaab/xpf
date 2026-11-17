@@ -218,6 +218,13 @@ fn arm_scope_guards_18566() {
 /// redirect, so the arm must not accept an HAInactive answer. The third
 /// shape judges with stamp owner RG2 (active), so the stamp-owner guard
 /// cannot mask a candidate-disposition defect.
+///
+/// #19171 re-base: the "withheld" shapes marked the row peer-owned while HA
+/// already had RG2 active (the FIB lagging HA). The marked row now stays in
+/// transit, so the FIB answers the LAN and the live HA state (RG2 active)
+/// re-homes in all three shapes. Before, the two marked shapes kept the
+/// redirect. The property this cell exists for, the arm agreeing with the
+/// slow path, is asserted unchanged.
 #[test]
 fn arm_agrees_with_slow_path_rehome_18566() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
@@ -291,15 +298,23 @@ fn arm_agrees_with_slow_path_rehome_18566() {
             "withheld={withheld} rg1_active={}: the cache arm (evict={arm_evicts}) must agree with the slow path (keeps redirect={slow_keeps_redirect}, {slow:?})",
             ha.get(&1).is_some_and(|g| g.active)
         );
-        if withheld {
-            assert!(slow_keeps_redirect, "premise: with the row withheld the slow path keeps the redirect");
-        }
+        // #19171: RG2 is active in every shape, and a marked row is in
+        // transit, so the slow path re-homes even with the row marked.
+        assert!(
+            !slow_keeps_redirect,
+            "#19171 (marked={withheld}): RG2 is active, so the slow path re-homes ({slow:?})"
+        );
         if std::ptr::eq(ha, &ha_rg1_down) {
+            // #19171 re-base: before, the withheld FIB answered via the WAN
+            // and RG1 down made that HAInactive. The LAN row is now in
+            // transit, so the fresh answer is the LAN, and RG2 is active.
             let looked_up = enforce_ha_resolution_snapshot(&state, ha, now_secs, looked_up);
-            assert_eq!(
-                looked_up.disposition,
-                ForwardingDisposition::HAInactive,
-                "premise: with RG1 down the fresh answer is HAInactive ({looked_up:?})"
+            assert!(
+                matches!(
+                    looked_up.disposition,
+                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+                ) && looked_up.egress_ifindex == 24,
+                "#19171: with RG1 down the fresh answer is the active LAN ({looked_up:?})"
             );
         }
     }
