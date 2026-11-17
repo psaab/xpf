@@ -2,7 +2,7 @@ use super::*;
 use super::parse::{embedded_reply_key, parse_embedded_v4};
 use super::outer_error_atomic;
 use super::return_resolution::{
-    embedded_icmp_quoted_reply_resolution, embedded_icmp_return_resolution,
+    ReplyReverse, embedded_icmp_quoted_reply_resolution, embedded_icmp_return_resolution,
 };
 
 /// IPv4-outer branch of `try_embedded_icmp_nat_match_from_frame`.
@@ -141,7 +141,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         // no-op.
         let original_dst = fwd.key.dst_ip;
         let original_dst_port = fwd.key.dst_port;
-        let resolution = embedded_icmp_return_resolution(
+        let (resolution, reply_reverse) = embedded_icmp_return_resolution(
             ctx,
             &fwd.key,
             fwd.decision,
@@ -163,6 +163,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         let (_, fwd_egress_zone) =
             crate::afxdp::poll_descriptor::related_forward_zones(&fwd.metadata);
         return EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
+            reply_reverse,
             nat,
             original_src,
             original_src_port,
@@ -279,6 +280,9 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     // on the match so the poll arms can refund it on every post-match
     // non-delivery terminal (TTL-expire, CoS drop, policy-refuse).
     let budget_key = resolved.key.as_ref(query_key).clone();
+    // #19164 v3 (Codex P2-2): a forward quote matched through the reverse half
+    // hands that reverse to the poll arm, as the forward-half arm does.
+    let matched = resolved.clone();
     let sl = resolved.lookup;
     // #10672: an as-is hit on the REVERSE half means the quote IS the reply
     // wire packet (server → client) — the error is about the reply, so it is
@@ -343,8 +347,9 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
     } else {
         false
     };
-    let resolution = if outbound_snat {
-        match &forward_companion {
+    // #19164 v3: only a FORWARD quote carries the matched reverse.
+    let (resolution, reply_reverse) = if outbound_snat {
+        let resolution = match &forward_companion {
             Some((_, companion)) => companion.decision.resolution,
             None => embedded_icmp_quoted_reply_resolution(
                 ctx,
@@ -352,11 +357,18 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
                 emb_src,
                 now_ns,
             ),
-        }
+        };
+        (resolution, None)
     } else if sl.metadata.is_reverse && !via_reply_key {
-        embedded_icmp_quoted_reply_resolution(ctx, &reverse_key, emb_src, now_ns)
+        (
+            embedded_icmp_quoted_reply_resolution(ctx, &reverse_key, emb_src, now_ns),
+            None,
+        )
     } else if sl.metadata.is_reverse {
-        sl.decision.resolution
+        (
+            sl.decision.resolution,
+            Some(ReplyReverse::new(matched, query_key)),
+        )
     } else {
         embedded_icmp_return_resolution(ctx, &embedded_key, sl.decision, emb_src, now_ns)
     };
@@ -392,6 +404,7 @@ pub(in crate::afxdp::icmp_embed) fn match_outer_v4(
         fwd_egress_zone
     };
     EmbeddedMatchOutcome::Match(EmbeddedIcmpMatch {
+        reply_reverse,
         nat: match_nat,
         original_src: emb_src,
         original_src_port: hdr.src_port,

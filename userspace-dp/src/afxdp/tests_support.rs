@@ -771,6 +771,7 @@ pub(super) fn icmpv6_te_match_fixture(
     client_port: u16,
 ) -> EmbeddedIcmpMatch {
     EmbeddedIcmpMatch {
+        reply_reverse: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V6(snat_ip)),
             rewrite_src_port: Some(snat_port),

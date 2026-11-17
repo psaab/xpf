@@ -74,10 +74,39 @@ fn domain_scoped_fallback_resolution(
         .resolution
 }
 
+/// #19164 v3: a matched reverse session, handed to the poll arm so the error's
+/// return route is the verdict a REPLY on that reverse would get
+/// (`session_glue::reverse_reply_resolution`), with the HA state and arrival the
+/// matcher does not have.
+#[derive(Clone, Debug)]
+pub(in crate::afxdp) struct ReplyReverse {
+    /// The matched reverse, as the session lookup returned it.
+    pub(in crate::afxdp) hit: crate::afxdp::shared_ops::ResolvedSessionLookup,
+    /// The flow a reply on it carries: the reverse's query key.
+    pub(in crate::afxdp) flow: SessionFlow,
+}
+
+impl ReplyReverse {
+    pub(in crate::afxdp) fn new(
+        hit: crate::afxdp::shared_ops::ResolvedSessionLookup,
+        reverse_key: &SessionKey,
+    ) -> Self {
+        Self {
+            hit,
+            flow: SessionFlow {
+                src_ip: reverse_key.src_ip,
+                dst_ip: reverse_key.dst_ip,
+                forward_key: reverse_key.clone(),
+            },
+        }
+    }
+}
+
 /// Resolve the forwarding back to the original (pre-NAT) client for
-/// an embedded ICMP error. Tries the reverse-key session lookup first
-/// (matches the live session's egress resolution if still cached),
-/// then falls back to a domain-scoped route + dynamic-neighbor lookup
+/// an embedded ICMP error. When the reverse session is found it returns the
+/// stored resolution together with the matched reverse (#19164 v3); the poll
+/// arm then replaces the stored value by the reply's own verdict. Otherwise it
+/// falls back to a domain-scoped route + dynamic-neighbor lookup
 /// against the original source (#15771: never the default table for a
 /// VRF flow).
 ///
@@ -90,7 +119,7 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
     forward_decision: SessionDecision,
     original_src: IpAddr,
     now_ns: u64,
-) -> ForwardingResolution {
+) -> (ForwardingResolution, Option<ReplyReverse>) {
     let reverse_key = reverse_session_key(forward_key, forward_decision.nat);
     if let Some(reverse) = probe_session_across_scopes_with_wire_indexes(
         ctx.sessions,
@@ -100,9 +129,13 @@ pub(in crate::afxdp::icmp_embed) fn embedded_icmp_return_resolution(
         &reverse_key,
         now_ns,
     ) {
-        return reverse.lookup.decision.resolution;
+        let stored = reverse.lookup.decision.resolution;
+        return (stored, Some(ReplyReverse::new(reverse, &reverse_key)));
     }
-    domain_scoped_fallback_resolution(ctx, forward_key, Some(forward_decision), original_src)
+    (
+        domain_scoped_fallback_resolution(ctx, forward_key, Some(forward_decision), original_src),
+        None,
+    )
 }
 
 /// #10672: resolve the forwarding for an ICMP error quoting a REPLY packet —

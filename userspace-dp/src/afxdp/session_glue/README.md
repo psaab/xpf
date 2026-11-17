@@ -117,6 +117,30 @@ for a destination whose RG is the peer's.
 The caller matrix in `demote_connected_owner_19171_tests.rs` pins every
 covered writer under each ownership state.
 
+## One reply verdict for replies and ICMP errors (#19164)
+
+`reverse_reply_resolution` (`resolve.rs`) is the session-hit arm's
+stored-session re-resolution, moved out of the arm by code motion only. In
+order, it runs:
+1. the lookup variant: #9951 leak revocation, then cache-free on a stale stamp,
+   synced for a peer-synced hit, else cached;
+2. `reresolve_stored_session`;
+3. the hit arm's #16217 departed-destination conversion.
+
+It has two callers:
+- the session-hit arm, for every packet hit;
+- the embedded-ICMP poll arm (`poll_descriptor/embedded_icmp.rs`), for an error
+  that quotes a FORWARD packet of a session. The error then returns by exactly
+  the route a reply on that reverse would take. Its arrival is mapped onto the
+  reply's (`EmbeddedIcmpArrival`), and the verdict replaces the ICMP
+  finalization, so HA runs once.
+
+The hit arm keeps its own post-processing (the #9752 purge flag and the
+deferred writes). A change to the reply's stored-session re-resolution belongs
+in this function, so the ICMP return cannot drift from it.
+`tests_icmp_reply_equivalence_19164.rs` pins the equivalence through the
+production poll pipeline.
+
 ## Command ingest is budgeted (`apply_worker_commands`, #7201)
 
 `apply_worker_commands` is the worker's consumer for its

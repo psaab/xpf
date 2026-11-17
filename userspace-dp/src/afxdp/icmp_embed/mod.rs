@@ -11,6 +11,40 @@
 //! a borrow bundle threaded through all four embedded-ICMP NAT
 //! match arms.
 //!
+//! **Return path (#19164).** An ICMP error that quotes a FORWARD packet of a
+//! session goes back by the route a REPLY on that session's reverse takes.
+//! - The matcher hands the matched reverse to the poll arm
+//!   (`EmbeddedIcmpMatch::reply_reverse`, a `ReplyReverse`). It does so from
+//!   both forward-quote arms: the forward half matched (then the reverse is
+//!   probed by key), and the reverse half matched directly through the reply
+//!   key.
+//! - The poll arm resolves the return with
+//!   `session_glue::reverse_reply_resolution`. That is the function the reply's
+//!   session-hit arm calls, so the error gets every stage the reply gets: the
+//!   lookup variant (#9951 leak revocation, cache-free on a stale stamp,
+//!   synced, cached), the alias handoff (#18531), prefer-local, HA, the fabric
+//!   composition, the retain verdict (#15958b/#16524), the connected-owner
+//!   derivation (#19171), and #16217.
+//! - The error's arrival is mapped onto the reply's
+//!   (`poll_descriptor::EmbeddedIcmpArrival`): its fabric-ingress flag, whether
+//!   it came in on the fabric link (anti-loop), and the HA startup grace. It is
+//!   never `fabric_adopted`: an error is not a packet the #16217 adoption gate
+//!   proved.
+//! - HA runs once. The reply's verdict is already HA-judged, so it replaces
+//!   `finalize_embedded_icmp_resolution_parts` instead of feeding it. The
+//!   #16053 owner-RG promotion and the accounting read that verdict.
+//! - Everything else still finalizes the matched resolution: a quote of a reply
+//!   packet, an outbound-SNAT match, NAT64, and the no-session domain-scoped
+//!   fallback.
+//!
+//! Before #19164 the error used the stored reverse resolution verbatim. After an
+//! RG activation an import-time FabricRedirect sent it to the demoted peer, and
+//! after a FIB or neighbor change it left by the old route or MAC. Two
+//! re-resolutions private to this module (rounds 1 and 2) each missed part of
+//! the reply pipeline, so v3 removed the private copy instead of extending it.
+//! `tests_icmp_reply_equivalence_19164.rs` drives an error and a reply through
+//! the production poll pipeline on each shape and compares where they leave.
+//!
 //! Wrapper functions in this file delegate directly to children via
 //! qualified-path calls (NOT `pub(super) use ...`) — that pattern
 //! would trigger E0364 on `pub(super)` child items, as documented
@@ -25,6 +59,7 @@ mod nat_match_v4;
 mod nat_match_v6;
 mod parse;
 mod return_resolution;
+pub(in crate::afxdp) use self::return_resolution::ReplyReverse;
 mod session_match;
 // #9901 (F-077): the quoted-L4 floor counter lives in the private `parse`
 // submodule; the status vertical (`afxdp/coordinator/status.rs`) reads it
@@ -82,6 +117,12 @@ pub(super) struct EmbeddedIcmpMatch {
     /// error, including its already-re-NAT'd fabric hand-off at the peer,
     /// #13772) keeps #10666's PMTUD-only scope.
     pub(super) quoted_is_reply: bool,
+    /// #19164 v3: the matched reverse of a FORWARD quote. The poll arm resolves
+    /// the error's return route as the reply's own verdict on it
+    /// (`session_glue::reverse_reply_resolution`, HA applied once) instead of
+    /// finalizing `resolution`. `None` for a reply quote, an outbound-SNAT
+    /// match, NAT64, and the no-session fallback.
+    pub(super) reply_reverse: Option<ReplyReverse>,
     /// #10667: the F-077 gating key this match was charged against. The
     /// poll arms refund it via
     /// `SessionTable::refund_icmp_error_not_delivered` on every post-match
@@ -1258,7 +1299,8 @@ mod return_resolution_15771 {
             plain_decision(),
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .0;
         assert_tenant(&resolution, "return v4");
     }
 
@@ -1273,7 +1315,8 @@ mod return_resolution_15771 {
             plain_decision(),
             IpAddr::V6(v6_target()),
             1_000,
-        );
+        )
+        .0;
         assert_tenant(&resolution, "return v6");
     }
 
@@ -1321,7 +1364,8 @@ mod return_resolution_15771 {
             decision,
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .0;
         assert_tenant(&resolution, "stamped return v4");
     }
 
@@ -1341,7 +1385,8 @@ mod return_resolution_15771 {
             decision,
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .0;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::TableUnavailable,
@@ -1381,7 +1426,8 @@ mod return_resolution_15771 {
             plain_decision(),
             IpAddr::V4(v4_target()),
             1_000,
-        );
+        )
+        .0;
         assert_eq!(
             resolution.disposition,
             ForwardingDisposition::ForwardCandidate

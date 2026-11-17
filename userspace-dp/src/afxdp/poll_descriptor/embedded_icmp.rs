@@ -71,6 +71,21 @@ pub(in crate::afxdp) enum EmbeddedIcmpReversal {
 }
 
 
+/// #19164 v3 (D1): the arrival facts of an embedded ICMP error, mapped onto the
+/// `FabricArrival::Packet` a reply arriving the same way would carry:
+/// - `fabric_ingress`: the session fabric-ingress flag the hit arm receives
+///   (`fabric_ingress_for_session`);
+/// - `fabric_link_ingress`: arrival on the fabric link itself (the retain verdict
+///   and #16217 are then skipped, anti-loop);
+/// - the HA startup grace. Never `fabric_adopted`: an error is not a session
+///   packet the #16217 adoption gate proved.
+#[derive(Clone, Copy, Debug, Default)]
+pub(in crate::afxdp) struct EmbeddedIcmpArrival {
+    pub(in crate::afxdp) fabric_ingress: bool,
+    pub(in crate::afxdp) fabric_link_ingress: bool,
+    pub(in crate::afxdp) ha_startup_grace_until_secs: u64,
+}
+
 /// Attempt the generic embedded-ICMP NAT reversal for a non-query ICMP error
 /// on the flowless poll path. Returns [`EmbeddedIcmpReversal`] telling the
 /// caller how the descriptor was consumed. Invoked for every classified ICMP
@@ -103,6 +118,7 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     now_secs: u64,
     ingress_zone_override: Option<u32>,
     ambiguous_zone: Option<u32>,
+    arrival: EmbeddedIcmpArrival,
 ) -> EmbeddedIcmpReversal {
     #[cfg(feature = "debug-log")]
     let icmpv6_trace = meta.protocol == PROTO_ICMPV6
@@ -167,14 +183,51 @@ pub(in crate::afxdp) fn try_reverse_embedded_icmp_error(
     // Fabric finalization must NOT consult the withheld claimed zone: a
     // non-owner FabricRedirect is adjudicated on the peer, and passing the
     // claim here would stamp it into the redirect before owner proof.
-    let icmp_resolution = finalize_embedded_icmp_resolution_parts(
-        worker_ctx.forwarding,
-        worker_ctx.ha_state,
-        now_secs,
-        meta.ingress_ifindex as i32,
-        icmp_match.resolution,
-        arrival_zone,
-    );
+    // #19164 v3 (D2): a FORWARD quote that matched a reverse session returns by
+    // the verdict a REPLY on that reverse gets (`reverse_reply_resolution`: the
+    // lookup variant, the alias handoff, prefer-local, HA, fabric composition,
+    // the retain verdict, the #19171 derivation, #16217). That verdict is
+    // already HA-judged, so it replaces the finalization rather than feeding
+    // it: HA runs once. Every other match finalizes its resolution as before.
+    let icmp_resolution = match icmp_match.reply_reverse.take() {
+        Some(reverse) => {
+            let resolved_key = reverse.hit.key.as_ref(&reverse.flow.forward_key);
+            crate::afxdp::session_glue::reverse_reply_resolution(
+                sessions,
+                worker_ctx.forwarding,
+                worker_ctx.ha_state,
+                worker_ctx.dynamic_neighbors,
+                now_secs,
+                &reverse.hit.lookup,
+                resolved_key,
+                reverse.hit.origin,
+                reverse
+                    .hit
+                    .shared_entry
+                    .as_ref()
+                    .map(|entry| entry.leak_incarnation),
+                &reverse.flow,
+                sessions.forwarding_resolution_is_stale(reverse.hit.lookup.forwarding_generation),
+                reverse.hit.lookup.decision,
+                crate::afxdp::session_glue::FabricArrival::Packet {
+                    fabric_ingress: arrival.fabric_ingress,
+                    fabric_link_ingress: arrival.fabric_link_ingress,
+                    ingress_ifindex: meta.ingress_ifindex as i32,
+                    ha_startup_grace_until_secs: arrival.ha_startup_grace_until_secs,
+                    fabric_adopted: false,
+                    adopted_recovery: None,
+                },
+            )
+        }
+        None => finalize_embedded_icmp_resolution_parts(
+            worker_ctx.forwarding,
+            worker_ctx.ha_state,
+            now_secs,
+            meta.ingress_ifindex as i32,
+            icmp_match.resolution,
+            arrival_zone,
+        ),
+    };
     let icmp_resolution =
         restamp_embedded_fabric_redirect(worker_ctx.forwarding, meta, icmp_resolution, arrival_zone);
     // #16053: promote the withheld ambiguous claim ONLY on this packet's

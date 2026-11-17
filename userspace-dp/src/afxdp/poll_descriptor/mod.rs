@@ -80,7 +80,8 @@ mod session_hit_authority;
 
 use debug_log_throttle::{policy_deny_debug_log_allowed, session_miss_debug_log_allowed};
 pub(in crate::afxdp) use embedded_icmp::{
-    EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy, queued_embedded_icmp_identity,
+    EmbeddedIcmpArrival, EmbeddedIcmpReversal, enforce_queued_embedded_icmp_policy,
+    queued_embedded_icmp_identity,
     related_forward_zones, try_reverse_embedded_icmp_error,
 };
 use flow_cache_hit::{FlowCacheOutcome, InlineTxBindings, InlineTxTarget, stage_flow_cache_hit};
@@ -9633,6 +9634,12 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                             now_secs,
                             ingress_zone_override,
                             ambiguous_zone,
+                            // #19164 v3 (D1): the arrival a reply would carry.
+                            EmbeddedIcmpArrival {
+                                fabric_ingress: fabric_ingress_for_session,
+                                fabric_link_ingress,
+                                ha_startup_grace_until_secs,
+                            },
                         ) {
                             EmbeddedIcmpReversal::Queued {
                                 related_admit,

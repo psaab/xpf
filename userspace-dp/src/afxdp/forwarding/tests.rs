@@ -3886,6 +3886,7 @@ fn embedded_icmp_to_inactive_owner_rg_uses_zone_encoded_fabric_redirect() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let ha_state = BTreeMap::from([(2, inactive_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
     let icmp_match = EmbeddedIcmpMatch {
+        reply_reverse: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
@@ -3954,6 +3955,7 @@ fn embedded_icmp_no_route_uses_zone_encoded_fabric_redirect() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let ha_state = BTreeMap::new();
     let icmp_match = EmbeddedIcmpMatch {
+        reply_reverse: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
@@ -4022,6 +4024,7 @@ fn embedded_icmp_discard_route_uses_zone_encoded_fabric_redirect() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let ha_state = BTreeMap::new();
     let icmp_match = EmbeddedIcmpMatch {
+        reply_reverse: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
@@ -4086,6 +4089,7 @@ fn embedded_icmp_from_fabric_does_not_redirect_back_to_fabric() {
     let state = build_forwarding_state(&nat_snapshot_with_fabric());
     let ha_state = BTreeMap::from([(2, inactive_ha_runtime(monotonic_nanos() / 1_000_000_000))]);
     let icmp_match = EmbeddedIcmpMatch {
+        reply_reverse: None,
         nat: NatDecision {
             rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
             ..NatDecision::default()
