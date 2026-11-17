@@ -804,6 +804,13 @@ type Manager struct {
 	// controlRequestHook replaces requestLocked in unit tests that exercise
 	// manager state transitions without opening a Unix control socket.
 	controlRequestHook func(ControlRequest, *ProcessStatus) error
+	// controlLockedTransportHook replaces the control-socket I/O AFTER
+	// controlReqMu is held and the HA inventory re-expired (#19103 fold 2),
+	// so a cell can hold the real queue. Unit-test seam; nil in production.
+	controlLockedTransportHook func(ControlRequest) (ControlResponse, error)
+	// controlQueueHook runs just before a control request takes controlReqMu
+	// (#19103 fold 2). Unit-test seam; nil in production.
+	controlQueueHook func(ControlRequest)
 
 	// sessionRequestHook replaces the session-socket round trip in unit tests
 	// (mirror of controlRequestHook, which only covers requestLocked and never

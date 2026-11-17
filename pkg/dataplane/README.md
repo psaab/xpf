@@ -422,12 +422,20 @@ every helper publisher. Two did not:
   A deadline is recorded for every Active the overlay authorized, even one
   about to pass. Two samples let a deadline fall between them, and the
   snapshot carried an Active with no deadline.
-- **The deadline is re-checked after the session queue.** Both the degraded
-  arm and the locked watchdog session arm pass the deadlines to
-  `requestHAWatchdogSessionAtPathForGeneration`, which expires them after
-  acquiring `sessionMu` (`expireHAGroups`). A request built just before the
-  deadline can wait there past it, and time moves none of the generation
-  fences.
+- **The deadline is re-checked after EVERY sender's queue (fold 2).**
+  - Both session arms pass the deadlines to
+    `requestHAWatchdogSessionAtPathForGeneration`, which expires them after
+    acquiring `sessionMu` (`expireHAGroups`).
+  - The control-socket inventory publishers (`syncHAStateLocked`,
+    `UpdateRGActive`) carry them on the request (`haActiveUntil`, never on
+    the wire). The shared control primitive re-expires after acquiring
+    `controlReqMu` (`reexpireHAInventory`), and each publisher records the
+    inventory it actually SENT.
+  - A request built just before the deadline can wait in either queue past
+    it (an owner-RG export holds the control queue for seconds), and time
+    moves none of the generation fences.
+  - A census (`TestEveryHAInventorySendCarriesItsDeadlines19103`) fails on
+    any inventory send that bypasses this.
 - **No per-call allocation for expired entries.** `effectiveHAGroupMapAtLocked`
   returns the cluster truth when no entry counts for the helper. Expired
   entries are NOT deleted when their expiry is delivered:
