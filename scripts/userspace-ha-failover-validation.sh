@@ -1302,7 +1302,7 @@ recent_interval_metric() {
 		printf 'recent iperf3 event stream: capture unavailable\n' >&2
 		return 2
 	fi
-	if ! recent_file=$(mkdir -p /var/worktrees/.cache/tmpdir && mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/ha-recent-iperf.XXXXXX"); then
+	if ! recent_file=$({ [ -n "${TMPDIR:-}" ] || mkdir -p /var/worktrees/.cache/tmpdir; } && mktemp "${TMPDIR:-/var/worktrees/.cache/tmpdir}/ha-recent-iperf.XXXXXX"); then
 		printf 'recent iperf3 event stream: local capture unavailable\n' >&2
 		return 2
 	fi

@@ -18,7 +18,7 @@ ok()   { pass=$((pass+1)); printf '  ok   %s\n' "$1"; }
 bad()  { fail=$((fail+1)); printf '  FAIL %s\n' "$1"; }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1: want [$3] got [$2]"; fi; }
 
-WORK=$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp -d); trap 'rm -rf "$WORK"' EXIT
+WORK=$({ [ -n "${TMPDIR:-}" ] || mkdir -p /var/worktrees/.cache/tmpdir; } && TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}" mktemp -d); trap 'rm -rf "$WORK"' EXIT
 
 # A throwaway module with one PASSING and one FAILING test, so a run has a
 # failing name that is NOT the target — the shape case 5 needs.
@@ -415,7 +415,7 @@ fi
 # XPF_RESIDUE_EXTRA_STATE_PATHS (which can only add paths), and the "go" is a
 # stand-in that passes and then writes, rewrites in place or deletes a file
 # in it. The clean stand-in is the control: same harness, no state change.
-SW=$(mktemp -d "${TMPDIR:-/tmp}/gtj-state.XXXXXX")
+SW=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/gtj-state.XXXXXX")
 mkdir -p "$SW/state"; printf 'seed\n' > "$SW/state/xpf.sources"
 mk_fakego() { # $1 name, $2 shell action on "$SW/state"
 	cat > "$SW/$1" <<EOT
@@ -537,7 +537,7 @@ done
 # descriptor the command does not inherit; every reader reads only an
 # explicit clean (or not-run) as clean.
 . "$here/testguard-state-verdict.sh"
-VD=$(mktemp -d "${TMPDIR:-/tmp}/gtj-verdict.XXXXXX")
+VD=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/gtj-verdict.XXXXXX")
 vrow() { # $1 label, $2 want, $3 content (printf %b) or @absent / @dir
 	rm -rf "$VD/v"
 	case $3 in
@@ -675,7 +675,7 @@ rm -rf "$SW"
 # its ordinary FAIL status (1, not VOID 3) and say which package was
 # truncated. The control prints "signal: hangup" inside an indented test log,
 # which is not cmd/go's report.
-SG=$(mktemp -d "${TMPDIR:-/tmp}/gtj-signal.XXXXXX")
+SG=$(mktemp -d "${TMPDIR:-/var/worktrees/.cache/tmpdir}/gtj-signal.XXXXXX")
 cat > "$SG/killed" <<'EOT'
 #!/bin/sh
 printf '=== RUN   TestA\n--- PASS: TestA (0.00s)\n=== RUN   TestB\nsignal: hangup\nFAIL\tfake/pkg\t0.012s\n'

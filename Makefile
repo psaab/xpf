@@ -797,7 +797,7 @@ test-miri-census-lib:
 # being a gate). The per-struct signal is reviewable in the artifact diff.
 .PHONY: audit-structs
 audit-structs:
-	@mkdir -p /var/worktrees/.cache/tmpdir; tmp=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); trap 'rm -f "$$tmp"' EXIT; \
+	@mkdir -p "$$TMPDIR"; tmp=$$(mktemp); trap 'rm -f "$$tmp"' EXIT; \
 	bash scripts/refactoring-audit-structs.sh > "$$tmp" || { \
 		echo "ERROR: scripts/refactoring-audit-structs.sh failed."; exit 1; }; \
 	if [ ! -s "$$tmp" ]; then \
@@ -814,7 +814,7 @@ audit-structs:
 
 .PHONY: audit-check
 audit-check:
-	@mkdir -p /var/worktrees/.cache/tmpdir; tmp=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); com=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); gen=$$(TMPDIR=/var/worktrees/.cache/tmpdir mktemp); \
+	@mkdir -p "$$TMPDIR"; tmp=$$(mktemp); com=$$(mktemp); gen=$$(mktemp); \
 	trap 'rm -f "$$tmp" "$$com" "$$gen"' EXIT; \
 	bash scripts/refactoring-audit.sh > "$$tmp" || { \
 		echo "ERROR: scripts/refactoring-audit.sh failed."; \
@@ -2059,35 +2059,35 @@ COS_IFINDEX ?= 5
 	test-fairness-cos-class-sweep test-fairness-cos-throughput-headroom cos-fairness-eval
 test-cos-simul-load:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-cos-simul-load #11769" -- \
-		bash -c 'art=$$(mktemp -d /tmp/cos-simul-load.XXXXXX); export ART="$$art"; exec ./test/incus/harness-result.sh run \
+		bash -c 'art=$$(mkdir -p "$$TMPDIR" && mktemp -d "$$TMPDIR/cos-simul-load.XXXXXX"); export ART="$$art"; exec ./test/incus/harness-result.sh run \
 		--gate cos-simul-load-smoke --adapter cos-gate --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		--artifacts "$$art" -- ./test/incus/cos-simul-load-smoke.sh'
 
 test-cos-gate1:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-cos-gate1 #11769" -- \
-		bash -c 'art=$$(mktemp -d /tmp/cos-gate1.XXXXXX); export ART="$$art"; exec ./test/incus/harness-result.sh run \
+		bash -c 'art=$$(mkdir -p "$$TMPDIR" && mktemp -d "$$TMPDIR/cos-gate1.XXXXXX"); export ART="$$art"; exec ./test/incus/harness-result.sh run \
 		--gate cos-gate1-small-four-alone --adapter cos-gate --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		--artifacts "$$art" -- ./test/incus/cos-gate1-small-four-alone.sh'
 
 test-cos-be-contention:
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-cos-be-contention #11769" -- \
-		bash -c 'art=$$(mktemp -d /tmp/cos-be-contention.XXXXXX); export ARTIFACT_ROOT="$$art"; exec ./test/incus/harness-result.sh run \
+		bash -c 'art=$$(mkdir -p "$$TMPDIR" && mktemp -d "$$TMPDIR/cos-be-contention.XXXXXX"); export ARTIFACT_ROOT="$$art"; exec ./test/incus/harness-result.sh run \
 		--gate cos-be-contention-harness --adapter cos-gate --env $(HARNESS_ENV) --cluster \
 		--require-helper-attestation \
 		--artifacts "$$art" -- ./test/incus/cos-be-contention-harness.sh'
 
 cos-fairness-eval:
 	@set -eu; \
-	mkdir -p /var/worktrees/.cache/tmpdir; \
+	mkdir -p "$$TMPDIR"; \
 	if [ ! -x "$(FAIRNESS_EVAL)" ]; then \
 		if [ "$(FAIRNESS_EVAL)" != "$(COS_FAIRNESS_CARGO_TARGET)/release/fairness-eval" ]; then \
 			echo "FAIRNESS_EVAL is not executable: $(FAIRNESS_EVAL)" >&2; exit 2; \
 		fi; \
 		pinned=$$(sh userspace-dp/build_support/dp-toolchain.sh userspace-dp/rust-toolchain.toml "$(CARGO)"); \
 		stamp=$$(sh userspace-dp/build_support/linked-libs-stamp.sh); \
-		CARGO_TARGET_DIR=$(COS_FAIRNESS_CARGO_TARGET) TMPDIR=/var/worktrees/.cache/tmpdir \
+		CARGO_TARGET_DIR=$(COS_FAIRNESS_CARGO_TARGET) TMPDIR="$$TMPDIR" \
 			XPF_LINKED_LIBS_STAMP=$$stamp $(CARGO) +$$pinned build \
 			--manifest-path userspace-dp/Cargo.toml --release --bin fairness-eval; \
 	fi
@@ -2095,7 +2095,7 @@ cos-fairness-eval:
 test-fairness-cos-class-sweep: cos-fairness-eval
 	@test -n "$(METRICS_URL)" || { echo "set METRICS_URL to a reachable active-primary metrics proxy" >&2; exit 2; }
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-fairness-cos-class-sweep #11769" -- \
-		bash -c 'source ./test/incus/cluster-env.sh; art=$$(mktemp -d /tmp/fairness-cos-sweep.XXXXXX); exec env \
+		bash -c 'source ./test/incus/cluster-env.sh; art=$$(mkdir -p "$$TMPDIR" && mktemp -d "$$TMPDIR/fairness-cos-sweep.XXXXXX"); exec env \
 		COS_IFINDEX="$(COS_IFINDEX)" METRICS_URL="$(METRICS_URL)" FAIRNESS_EVAL="$(FAIRNESS_EVAL)" ARTIFACT_ROOT="$$art" \
 		IPERF_LAUNCH_ARG_0=/usr/bin/incus IPERF_LAUNCH_ARG_1=exec \
 		IPERF_LAUNCH_ARG_2="$$CLUSTER_LAN_HOST" IPERF_LAUNCH_ARG_3=-- \
@@ -2107,7 +2107,7 @@ test-fairness-cos-class-sweep: cos-fairness-eval
 test-fairness-cos-throughput-headroom: cos-fairness-eval
 	@test -n "$(METRICS_URL)" || { echo "set METRICS_URL to a reachable active-primary metrics proxy" >&2; exit 2; }
 	BPFRX_CLUSTER_ENV=$(CLUSTER_ENV) ./test/incus/with-cluster.sh "test-fairness-cos-throughput-headroom #11769" -- \
-		bash -c 'source ./test/incus/cluster-env.sh; art=$$(mktemp -d /tmp/fairness-cos-headroom.XXXXXX); exec env \
+		bash -c 'source ./test/incus/cluster-env.sh; art=$$(mkdir -p "$$TMPDIR" && mktemp -d "$$TMPDIR/fairness-cos-headroom.XXXXXX"); exec env \
 		COS_IFINDEX="$(COS_IFINDEX)" METRICS_URL="$(METRICS_URL)" FAIRNESS_EVAL="$(FAIRNESS_EVAL)" ARTIFACT_ROOT="$$art" \
 		IPERF_LAUNCH_ARG_0=/usr/bin/incus IPERF_LAUNCH_ARG_1=exec \
 		IPERF_LAUNCH_ARG_2="$$CLUSTER_LAN_HOST" IPERF_LAUNCH_ARG_3=-- \

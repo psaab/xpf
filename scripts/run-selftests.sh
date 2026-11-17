@@ -249,6 +249,7 @@ test/incus/mirror-census-selftest.sh
 scripts/next-deb-version.sh
 scripts/next-deb-version-selftest.sh
 "
+shn_err="${TMPDIR:-/var/worktrees/.cache/tmpdir}/xpf-selftest-shn.$$"
 for s in $SH_SCRIPTS; do
 	[ -f "$s" ] || continue
 	case $(head -1 "$s") in
@@ -259,15 +260,17 @@ for s in $SH_SCRIPTS; do
 		skipl "$interp -n $s ($interp not installed)"
 		continue
 	fi
-	mkdir -p /var/worktrees/.cache/tmpdir
-	if "$interp" -n "$s" 2>/var/worktrees/.cache/tmpdir/xpf-selftest-shn.$$; then
+	# #19040: the workstation default only when TMPDIR is unset; a runner lane
+	# sets TMPDIR and has no /var/worktrees.
+	if [ -z "${TMPDIR:-}" ]; then mkdir -p /var/worktrees/.cache/tmpdir; fi
+	if "$interp" -n "$s" 2>"$shn_err"; then
 		passl "$interp -n $s"
 	else
 		faill "$interp -n $s"
-		sed 's/^/      /' /var/worktrees/.cache/tmpdir/xpf-selftest-shn.$$
+		sed 's/^/      /' "$shn_err"
 	fi
 done
-rm -f /var/worktrees/.cache/tmpdir/xpf-selftest-shn.$$
+rm -f "$shn_err"
 
 # ── 2. optional shellcheck lint (SKIP if not installed) ──
 hdr "shellcheck (optional)"

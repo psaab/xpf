@@ -584,7 +584,7 @@ iperf_metrics() {
 		printf 'ERROR:%s\n' "$err"
 		return 0
 	fi
-	local_json="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
+	local_json="$({ [ -n "${TMPDIR:-}" ] || mkdir -p /var/worktrees/.cache/tmpdir; } && TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}" mktemp)"
 	if ! run_host "cat ${path}" >"${local_json}"; then
 		rm -f "${local_json}"
 		printf 'ERROR:failed to fetch iperf3 JSON output from cluster host\n'
@@ -889,7 +889,7 @@ validate_iperf_ports
 default_iperf_timeout
 validate_iperf_runtime_knobs
 
-summary_file="$(mkdir -p /var/worktrees/.cache/tmpdir && TMPDIR=/var/worktrees/.cache/tmpdir mktemp)"
+summary_file="$({ [ -n "${TMPDIR:-}" ] || mkdir -p /var/worktrees/.cache/tmpdir; } && TMPDIR="${TMPDIR:-/var/worktrees/.cache/tmpdir}" mktemp)"
 COS_OFF_MATRIX_PRECHECKED=0
 cleanup() { rm -f "$summary_file"; }
 trap cleanup EXIT

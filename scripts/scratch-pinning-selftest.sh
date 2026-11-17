@@ -85,7 +85,11 @@ echo "ok: audited $(printf '%s\n' "$FILES" | wc -l) files for forbidden defaults
 # Positive pins.
 grep -q 'TMPDIR ?= /var/worktrees/.cache/tmpdir' "$root/Makefile" || { echo "FAIL: Makefile TMPDIR default missing"; fail=1; }
 grep -q 'GOTMPDIR ?= /wtgt' "$root/Makefile" || { echo "FAIL: Makefile GOTMPDIR default missing or not the short /wtgt root (#16494)"; fail=1; }
-grep -q 'CARGO_TARGET_DIR ?= /var/worktrees/.cache/cargo' "$root/Makefile" || { echo "FAIL: Makefile CARGO_TARGET_DIR default missing"; fail=1; }
+# The EFFECTIVE default, read through make with the variable unset: #18839
+# (cd42a4572d) moved the literal behind CARGO_TARGET_DIR_SHARED with the same
+# value, and a grep for the old line read that as "missing".
+ctd_default=$(cd "$root" && env -u CARGO_TARGET_DIR make -s --no-print-directory --eval 'xpf-print-cargo-target-dir: ; @echo $(CARGO_TARGET_DIR)' xpf-print-cargo-target-dir 2>/dev/null)
+[ "$ctd_default" = /var/worktrees/.cache/cargo ] || { echo "FAIL: Makefile CARGO_TARGET_DIR default is '$ctd_default', not /var/worktrees/.cache/cargo"; fail=1; }
 grep -q 'TMPDIR=/wtgt' "$root/Makefile" || { echo "FAIL: memlock TMPDIR not pinned to the short root"; fail=1; }
 grep -q 'GOTMPDIR:-/wtgt' "$root/scripts/run-selftests.sh" || { echo "FAIL: run-selftests GOTMPDIR default missing or not the short /wtgt root (#16494)"; fail=1; }
 grep -q 'TMPDIR:-/var/worktrees/.cache/tmpdir' "$root/scripts/run-selftests.sh" || { echo "FAIL: run-selftests TMPDIR default missing"; fail=1; }
@@ -117,7 +121,12 @@ done
 # canary that stops binding reds here too. If /wtgt cannot be created
 # (unprivileged host without the dir), the positive leg SKIPs loudly
 # rather than falling back to a long root; the negative leg still runs.
-mkdir -p /var/worktrees/.cache/tmpdir /var/worktrees/.cache/go-build /var/worktrees/.cache/cargo || { echo "FAIL: cannot create scratch dirs"; fail=1; }
+# #19040: create a workstation default only where its variable is unset; a
+# runner lane sets TMPDIR, GOCACHE and CARGO_TARGET_DIR and has no
+# /var/worktrees for this user to create.
+[ -n "${TMPDIR:-}" ] || mkdir -p /var/worktrees/.cache/tmpdir || { echo "FAIL: cannot create scratch dir /var/worktrees/.cache/tmpdir"; fail=1; }
+[ -n "${GOCACHE:-}" ] || mkdir -p /var/worktrees/.cache/go-build || { echo "FAIL: cannot create scratch dir /var/worktrees/.cache/go-build"; fail=1; }
+[ -n "${CARGO_TARGET_DIR:-}" ] || mkdir -p /var/worktrees/.cache/cargo || { echo "FAIL: cannot create scratch dir /var/worktrees/.cache/cargo"; fail=1; }
 GO=${GO:-go}
 canary_out=""
 if mkdir -p /wtgt 2>/dev/null; then
@@ -129,7 +138,10 @@ if mkdir -p /wtgt 2>/dev/null; then
 else
   echo "SKIP: cannot create /wtgt; sunpath canary positive leg not run (create /wtgt writable to enable it)"
 fi
-longroot=/var/worktrees/.cache/go-tmp-canary-longroot-16494
+# Any root past the budget reds the canary (a 28-char root already overruns
+# it); this one sits under TMPDIR when set (#19040) and is at least 51 chars
+# either way.
+longroot="${TMPDIR:-/var/worktrees/.cache}/go-tmp-canary-longroot-16494"
 mkdir -p "$longroot" || { echo "FAIL: cannot create long canary root"; fail=1; }
 if canary_out=$(GOTMPDIR="$longroot" TMPDIR="$longroot" GOCACHE="${GOCACHE:-/var/worktrees/.cache/go-build}" "$GO" run ./scripts/sunpath-canary 2>&1); then
   echo "FAIL: sunpath canary unexpectedly binds under long root $longroot: $canary_out"; fail=1
@@ -137,5 +149,24 @@ else
   echo "ok: sunpath canary reds under long root ($longroot): $canary_out"
 fi
 rmdir "$longroot" 2>/dev/null || true
+# #19040: the workstation tmpdir default is created ONLY when TMPDIR is unset,
+# and a set TMPDIR is never overridden. A runner lane sets TMPDIR and has no
+# /var/worktrees; an unconditional `mkdir -p /var/worktrees/.cache/tmpdir`
+# failed there and a forced `TMPDIR=/var/worktrees/... mktemp` wrote outside
+# the lane, so selftests went red on every runner. Allowed forms carry their
+# guard on the same line: `[ -n "${TMPDIR:-}" ] || mkdir -p ...` or
+# `if [ -z "${TMPDIR:-}" ]; then mkdir -p ...`.
+scratch_unguarded=$(cd "$root" && grep -rnE --include='*.sh' --include='Makefile' \
+  'mkdir -p /var/worktrees/\.cache/tmpdir|TMPDIR=/var/worktrees/\.cache/tmpdir +mktemp' scripts test Makefile 2>/dev/null |
+  grep -vE '\[ -n "\$\{TMPDIR:-\}" \] \|\||-z "\$\{TMPDIR:-\}"' |
+  grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' |
+  grep -v '^scripts/scratch-pinning-selftest\.sh:' || true)
+if [ -n "$scratch_unguarded" ]; then
+  echo "FAIL: the workstation tmpdir default is created or forced without a TMPDIR-unset guard (#19040):"
+  printf '%s\n' "$scratch_unguarded" | head -10
+  fail=1
+else
+  echo "ok: every /var/worktrees/.cache/tmpdir default is guarded by an unset TMPDIR (#19040)"
+fi
 echo "scratch-pinning-selftest: fail=$fail"
 exit $fail
