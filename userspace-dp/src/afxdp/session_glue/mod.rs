@@ -106,6 +106,12 @@ mod deleted_first_policy_purge_9526_tests;
 #[cfg(test)]
 #[path = "pbr_install_table_9752_tests.rs"]
 mod pbr_install_table_9752_tests;
+#[cfg(test)]
+#[path = "demote_connected_owner_19171_tests.rs"]
+mod demote_connected_owner_19171_tests;
+#[cfg(test)]
+#[path = "demote_connected_owner_19171_bench_tests.rs"]
+mod demote_connected_owner_19171_bench_tests;
 // #4800: publish + sibling-replication contention accounting for the
 // new-flow-install ceiling harness. Kept in its own file rather than
 // appended to `tests.rs` (already ~7k lines).

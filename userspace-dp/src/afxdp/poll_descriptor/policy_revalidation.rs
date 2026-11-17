@@ -2655,7 +2655,7 @@ fn reverse_companion_from_source(
 /// marked. When a stale forward FIB route is resolved and permitted, that
 /// route resolution is persisted without stamping the forward policy verdict;
 /// the forward half retains its existing policy freshness semantics.
-fn resolve_current_forward_companion(
+pub(in crate::afxdp) fn resolve_current_forward_companion(
     forwarding: &ForwardingState,
     ha_state: &BTreeMap<i32, HAGroupRuntime>,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,
