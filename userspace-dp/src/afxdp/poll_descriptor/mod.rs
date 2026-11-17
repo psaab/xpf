@@ -52,6 +52,9 @@ mod prerouting_dnat;
 mod prerouting_scope;
 
 mod policy_revalidation;
+// #19171: the caller matrix drives the forward-companion revalidation directly.
+#[cfg(test)]
+pub(in crate::afxdp) use self::policy_revalidation::resolve_current_forward_companion;
 pub(in crate::afxdp) use policy_revalidation::{
     ROUTE_CHANGE_UNREJUDGED_SESSIONS_TOTAL,
     should_alarm_route_change,
