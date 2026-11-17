@@ -5576,6 +5576,20 @@ resign could delete a NEWER tenure's address. `stableLLTenure`
     one removes.
 - the plain handler resign and the bootstrap relinquish keep the VRRP
   barrier alone as their fence, as before fold 3.
+- **Known residual (#19177).** `pending` records resign IDs without their
+  tenures, so a hand-off can go to a resign that can no longer remove. The
+  sequence:
+  - resign R1 captures tenure 1 and is delayed before its release;
+  - a MASTER activation adds the address (tenure 2);
+  - resign R2's release runs first and hands the removal to the still
+    pending R1 (`errStableLLHandedOn`);
+  - R1 then finds tenure 2 and returns `errStableLLSuperseded`.
+
+  Neither deletes the address, so it stays on the resigned node until the
+  reconcile pass removes it (2 s cadence). A helper-down fence waiting on R2
+  reports a failure meanwhile. Accepted at landing; #19177 tracks the fix
+  (successor accounting per tenure) and the VRRP cell's gate, which can
+  consume the startup BACKUP rather than the forced resign's.
 In the target shape no handler write happens, so the release alone decides the
 ack.
 
