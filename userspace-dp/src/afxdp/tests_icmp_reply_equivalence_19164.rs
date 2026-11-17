@@ -287,7 +287,9 @@ struct Row<'a> {
     reply_mac: Option<[u8; 6]>,
 }
 
-fn run_row(row: &Row<'_>) {
+/// Runs one row. A broken premise panics (the fixture is wrong, on any tree);
+/// a mismatch is returned, so a test reports every failing variant.
+fn run_row(row: &Row<'_>) -> Result<(), String> {
     let ctx = format!("{} ({:?})", row.name, row.family);
     let mut reply_sessions = (row.setup)();
     let reply = send(
@@ -311,10 +313,18 @@ fn run_row(row: &Row<'_>) {
         icmp_error_frame(row.forwarding, row.family, row.port, row.arrival),
         row.neighbor_generation,
     );
-    assert_eq!(
-        error, reply,
-        "{ctx}: an ICMP error quoting the forward packet must leave where the reply does (#19164)"
-    );
+    if error == reply {
+        Ok(())
+    } else {
+        Err(format!(
+            "{ctx}: an ICMP error quoting the forward packet must leave where the reply does \
+             (#19164): error {error:?}, reply {reply:?}"
+        ))
+    }
+}
+
+fn assert_rows(failures: Vec<String>) {
+    assert!(failures.is_empty(), "{} row(s) failed:\n{}", failures.len(), failures.join("\n"));
 }
 
 fn imported_pair(forwarding: &ForwardingState, ha: &BTreeMap<i32, HAGroupRuntime>, family: Family) -> SessionTable {
@@ -346,6 +356,7 @@ fn icmp_error_follows_the_reply_after_lan_activation_19164() {
     let owner = fw1_owner_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
+    let mut failures = Vec::new();
     for (family, withheld) in [
         (Family::V4, false),
         (Family::V6, false),
@@ -371,7 +382,7 @@ fn icmp_error_follows_the_reply_after_lan_activation_19164() {
             }
             sessions
         };
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: if withheld { "LAN activation, withheld import" } else { "LAN activation" },
             family,
             setup: &setup,
@@ -382,18 +393,23 @@ fn icmp_error_follows_the_reply_after_lan_activation_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 0, 1],
             reply_mac: Some(CLIENT_MAC),
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
-/// Guard (r23 P1). The split node keeps the stored FabricRedirect: the FIB
-/// answers the client by the WAN default, and the reply's retain verdict keeps
-/// the fabric. So must the error.
+/// RED-ON-BASE, and r23's P1. On the split node the FIB answers the LAN client
+/// by the WAN default (the LAN prefix is withheld, #15742). The import stores
+/// that WAN answer on the reverse, and the reply crosses the fabric to the LAN
+/// owner by #16217's departed-destination conversion. The error must cross
+/// too. The base finalized the stored WAN answer and dropped the error; round 1
+/// of #19164 sent it out the WAN to the client's private address (r23 P1).
 #[test]
 fn icmp_error_keeps_the_replys_fabric_redirect_on_the_split_node_19164() {
     let split = split_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let ha = split_node_ha(now_secs);
+    let mut failures = Vec::new();
     for family in [Family::V4, Family::V6] {
         let fib = crate::afxdp::forwarding::lookup_forwarding_resolution_with_dynamic(
             &split,
@@ -406,7 +422,7 @@ fn icmp_error_keeps_the_replys_fabric_redirect_on_the_split_node_19164() {
             "fixture: the split FIB withholds the LAN prefix ({family:?}: {fib:?})"
         );
         let setup = || imported_pair(&split, &ha, family);
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: "split node",
             family,
             setup: &setup,
@@ -417,8 +433,9 @@ fn icmp_error_keeps_the_replys_fabric_redirect_on_the_split_node_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 1, 0],
             reply_mac: None,
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
 /// Guard (Codex P1). The node holds only the forward-wire alias of a flow whose
@@ -433,6 +450,7 @@ fn icmp_error_on_an_alias_is_handed_to_the_peer_like_the_reply_19164() {
     let now_ns = monotonic_nanos();
     let now_secs = now_ns / 1_000_000_000;
     let activated = split_node_ha(now_secs);
+    let mut failures = Vec::new();
     for (family, refresh_first) in [
         (Family::V4, true),
         (Family::V4, false),
@@ -458,7 +476,7 @@ fn icmp_error_on_an_alias_is_handed_to_the_peer_like_the_reply_19164() {
             }
             sessions
         };
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: if refresh_first { "alias, refresh first" } else { "alias, reply first" },
             family,
             setup: &setup,
@@ -469,19 +487,22 @@ fn icmp_error_on_an_alias_is_handed_to_the_peer_like_the_reply_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 1, 0],
             reply_mac: None,
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
-/// D1 anti-loop. A reply that reaches the alias-only owner OVER THE FABRIC is
-/// dropped, never bounced back (#18531). An error redirected the same way must
-/// not be bounced either.
+/// RED-ON-BASE, and D1's anti-loop. A reply that reaches the alias-only owner
+/// OVER THE FABRIC is dropped, never bounced back (#18531). An error redirected
+/// the same way must not be bounced either. The base bounced it back over the
+/// fabric to the peer that sent it.
 #[test]
 fn icmp_error_over_the_fabric_is_not_bounced_like_the_reply_19164() {
     let window = rg_taking_node_forwarding();
     let owner = fw1_owner_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let activated = split_node_ha(now_secs);
+    let mut failures = Vec::new();
     for family in [Family::V4, Family::V6] {
         let canonical = exported_forward(&window, family);
         let setup = || {
@@ -490,7 +511,7 @@ fn icmp_error_over_the_fabric_is_not_bounced_like_the_reply_19164() {
             import_alias_only_of(&mut sessions, &window, &window_ha(now_secs), &canonical);
             sessions
         };
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: "alias, fabric arrival",
             family,
             setup: &setup,
@@ -501,8 +522,9 @@ fn icmp_error_over_the_fabric_is_not_bounced_like_the_reply_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 0, 0],
             reply_mac: None,
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
 /// RED-ON-BASE (Codex P2-2). Only the reverse half is held, so the error's
@@ -515,6 +537,7 @@ fn icmp_error_matched_through_the_reverse_half_follows_the_reply_19164() {
     let owner = fw1_owner_forwarding();
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
+    let mut failures = Vec::new();
     for family in [Family::V4, Family::V6] {
         let setup = || {
             let mut sessions = SessionTable::new();
@@ -523,7 +546,7 @@ fn icmp_error_matched_through_the_reverse_half_follows_the_reply_19164() {
             assert_eq!(sessions.len(), 1, "fixture: only the reverse half ({family:?})");
             sessions
         };
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: "reverse half only",
             family,
             setup: &setup,
@@ -534,8 +557,9 @@ fn icmp_error_matched_through_the_reverse_half_follows_the_reply_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 0, 1],
             reply_mac: Some(CLIENT_MAC),
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
 /// RED-ON-BASE. The client's route moves: a /32 (/128) now sends it through a
@@ -546,6 +570,7 @@ fn icmp_error_follows_the_reply_after_a_route_move_19164() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
     let before = fw1_owner_forwarding();
+    let mut failures = Vec::new();
     for family in [Family::V4, Family::V6] {
         let mut moved = owner_forwarding_with(vec![route(
             family,
@@ -558,7 +583,7 @@ fn icmp_error_follows_the_reply_after_a_route_move_19164() {
             crate::afxdp::types::NeighborEntry { mac: MOVED_GATEWAY_MAC },
         );
         let setup = || imported_pair(&before, &all_active, family);
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: "route move",
             family,
             setup: &setup,
@@ -569,8 +594,9 @@ fn icmp_error_follows_the_reply_after_a_route_move_19164() {
             neighbor_generation: 2,
             reply_tx: [1, 0, 0],
             reply_mac: None,
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
 /// RED-ON-BASE. The client's MAC changes (same subnet, same egress). The reply
@@ -580,6 +606,7 @@ fn icmp_error_follows_the_reply_after_a_neighbor_mac_change_19164() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
     let before = fw1_owner_forwarding();
+    let mut failures = Vec::new();
     for family in [Family::V4, Family::V6] {
         let mut after = fw1_owner_forwarding();
         after.neighbors.insert(
@@ -587,7 +614,7 @@ fn icmp_error_follows_the_reply_after_a_neighbor_mac_change_19164() {
             crate::afxdp::types::NeighborEntry { mac: NEW_CLIENT_MAC },
         );
         let setup = || imported_pair(&before, &all_active, family);
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: "neighbor MAC change",
             family,
             setup: &setup,
@@ -598,8 +625,9 @@ fn icmp_error_follows_the_reply_after_a_neighbor_mac_change_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 0, 1],
             reply_mac: Some(NEW_CLIENT_MAC),
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
 /// RED-ON-BASE, and D2 ("HA once"). The operator discards the client's /32
@@ -612,11 +640,12 @@ fn icmp_error_drops_where_the_reply_drops_on_a_discard_route_19164() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
     let before = fw1_owner_forwarding();
+    let mut failures = Vec::new();
     for family in [Family::V4, Family::V6] {
         let discarded =
             owner_forwarding_with(vec![route(family, host_prefix(client(family)), None, true)]);
         let setup = || imported_pair(&before, &all_active, family);
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: "discard route",
             family,
             setup: &setup,
@@ -627,8 +656,9 @@ fn icmp_error_drops_where_the_reply_drops_on_a_discard_route_19164() {
             neighbor_generation: 2,
             reply_tx: [0, 0, 0],
             reply_mac: None,
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
 
 /// The lookup variant of a LOCAL reverse. A priming reply makes the imported
@@ -643,6 +673,7 @@ fn icmp_error_takes_the_replys_lookup_variant_for_a_local_reverse_19164() {
     let now_secs = monotonic_nanos() / 1_000_000_000;
     let all_active = owner_ha(now_secs);
     let before = fw1_owner_forwarding();
+    let mut failures = Vec::new();
     for (family, stale) in [
         (Family::V4, true),
         (Family::V4, false),
@@ -677,7 +708,7 @@ fn icmp_error_takes_the_replys_lookup_variant_for_a_local_reverse_19164() {
             );
             sessions
         };
-        run_row(&Row {
+        failures.extend(run_row(&Row {
             name: if stale { "local reverse, stale stamp" } else { "local reverse, current stamp" },
             family,
             setup: &setup,
@@ -688,6 +719,7 @@ fn icmp_error_takes_the_replys_lookup_variant_for_a_local_reverse_19164() {
             neighbor_generation: if stale { 2 } else { 1 },
             reply_tx: if stale { [1, 0, 0] } else { [0, 0, 1] },
             reply_mac: None,
-        });
+        }).err());
     }
+    assert_rows(failures);
 }
