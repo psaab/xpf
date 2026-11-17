@@ -721,6 +721,7 @@ func (m *Manager) statusLoop(ctx context.Context, firstPassNow bool) {
 					m.killWedgedHelperLocked(pollResultTime)
 				}
 			}
+
 			// #16653: a concurrent mutator applied a newer helper status
 			// while this poll was off-lock. The stale reply must not overwrite
 			// that state or service status-dependent work. Poll-health
