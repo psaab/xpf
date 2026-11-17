@@ -86,14 +86,42 @@ func scanSeams(root string) (map[seamID]*seam, error) {
 		}
 		rel, _ := filepath.Rel(root, p)
 		rel = filepath.ToSlash(rel)
-		for _, decl := range f.Decls {
-			fd, ok := decl.(*ast.FuncDecl)
-			if !ok || !isSeamName(fd.Name.Name) {
-				continue
-			}
-			id := seamID{dir: path.Dir(rel), recv: recvTypeName(fd.Recv), name: fd.Name.Name}
+		add := func(recv, name string, pos token.Pos) {
+			id := seamID{dir: path.Dir(rel), recv: recv, name: name}
 			if _, seen := seams[id]; !seen {
-				seams[id] = &seam{id: id, file: rel, line: fset.Position(fd.Pos()).Line}
+				seams[id] = &seam{id: id, file: rel, line: fset.Position(pos).Line}
+			}
+		}
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if isSeamName(d.Name.Name) {
+					add(recvTypeName(d.Recv), d.Name.Name, d.Pos())
+				}
+			case *ast.GenDecl:
+				// An interface's method set declares seams too (fold of
+				// Codex on b7g, N3): pkg/daemon's dhcpApplier carries
+				// ApplyFailedForTesting. Keyed by the interface type.
+				for _, spec := range d.Specs {
+					ts, ok := spec.(*ast.TypeSpec)
+					if !ok {
+						continue
+					}
+					it, ok := ts.Type.(*ast.InterfaceType)
+					if !ok || it.Methods == nil {
+						continue
+					}
+					for _, m := range it.Methods.List {
+						if _, isFunc := m.Type.(*ast.FuncType); !isFunc {
+							continue // an embedded interface or a type term
+						}
+						for _, n := range m.Names {
+							if isSeamName(n.Name) {
+								add(ts.Name.Name, n.Name, n.Pos())
+							}
+						}
+					}
+				}
 			}
 		}
 		return nil
