@@ -305,7 +305,10 @@ func TestRibGroupWindowGateVRFOnlyAndMainImport11397(t *testing.T) {
 		if err != nil {
 			t.Fatalf("VRF-only group must not consume phase-one leak slots: %v", err)
 		}
-		if !hasWarningContaining(cfg.Warnings, "Phase 2 deferral") {
+		// #17705 reworded this warning on purpose; "Phase 2 deferral" became
+		// "…direct VRF-to-VRF route import is not installed (Phase 2)…"
+		// (the phrase #17705's own #3876 cell pins). #19185.
+		if !hasWarningContaining(cfg.Warnings, "direct VRF-to-VRF route import is not installed (Phase 2)") {
 			t.Fatalf("VRF-only import must retain its Phase 2 warning, got %v", cfg.Warnings)
 		}
 	})

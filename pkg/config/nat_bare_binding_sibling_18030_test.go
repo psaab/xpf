@@ -213,9 +213,14 @@ func TestNATBareST0BareBindSiblingRejected18031(t *testing.T) {
 
 // TestNATBareST0SameUnitSharingPreserved18030: two VPNs sharing the SAME
 // unit (both `bind-interface st0.0`) are NOT siblings — the shared unit is
-// the only binding-derived unit, so the bare scope still folds to st0.0 and
-// commits. A description-only st0 stanza plus a single unit-0 binding
-// (#18024 doctrine) folds too instead of staying inert-bare.
+// the only binding-derived unit, so the bare scope still folds to st0.0.
+// That fold is #18030's property. Since #17779 the strict path REJECTS the
+// shared if_id for a different reason (the runtime capture plan quarantines
+// any if_id with more than one VPN claimant), so the property is pinned on
+// the tolerant path, which keeps the fold and warns (#19185; research:
+// https://github.com/psaab/xpf/issues/19185#issuecomment-6938383698).
+// A description-only st0 stanza plus a single unit-0 binding (#18024
+// doctrine) folds too instead of staying inert-bare.
 func TestNATBareST0SameUnitSharingPreserved18030(t *testing.T) {
 	sharing := append(bareNATBase16827(),
 		"set security ike gateway gw-a address 198.51.100.1",
@@ -230,12 +235,31 @@ func TestNATBareST0SameUnitSharingPreserved18030(t *testing.T) {
 		"set security nat source rule-set snat-shared rule r1 match source-address 10.0.0.0/8",
 		"set security nat source rule-set snat-shared rule r1 then source-nat pool pool1",
 	)
-	cfg, err := CompileConfig(buildBindIfaceTree(t, sharing...))
+	const sharedIfID17779 = "share secure-tunnel bind-interface(s) st0.0"
+	// Strict: rejected for the #17779 capture-owner reason, not as a sibling.
+	_, err := CompileConfig(buildBindIfaceTree(t, sharing...))
+	if err == nil || !strings.Contains(err.Error(), sharedIfID17779) || !strings.Contains(err.Error(), "#17779") {
+		t.Fatalf("strict: same-unit sharing must be rejected by the #17779 shared-if_id gate, got %v", err)
+	}
+	// Tolerant: boots, keeps the fold, and warns for #17779 only.
+	cfg, err := CompileConfigLenient(buildBindIfaceTree(t, sharing...))
 	if err != nil {
-		t.Fatalf("multi-VPN same-unit sharing must compile: %v", err)
+		t.Fatalf("tolerant: same-unit sharing must not hard-fail: %v", err)
 	}
 	if got := cfg.Security.NAT.Source[0].FromInterface; got != "st0.0" {
 		t.Fatalf("shared-unit bare scope = %q, want st0.0", got)
+	}
+	warned17779 := false
+	for _, w := range cfg.Warnings {
+		if strings.Contains(w, sharedIfID17779) && strings.Contains(w, "#17779") {
+			warned17779 = true
+		}
+		if strings.Contains(w, `from interface "st0" not defined`) {
+			t.Fatalf("same-unit sharing was treated as a sibling veto: %q", w)
+		}
+	}
+	if !warned17779 {
+		t.Fatalf("tolerant: want the #17779 shared-if_id warning, got %v", cfg.Warnings)
 	}
 
 	descriptionOnly := append(bareNATBase16827(),

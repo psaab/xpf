@@ -79,6 +79,17 @@ func TestRIBareSecureTunnelUnitDualClaim11060(t *testing.T) {
 		"set interfaces st0 unit 0 family inet address 192.0.2.1/24",
 		"set interfaces st0 unit 1 family inet address 198.51.100.1/24",
 		"set security ipsec vpn V bind-interface st0.0",
+		// A complete VPN, so these cells measure only the #11060 ownership
+		// gates they are named for (#19185): a key (#14139 missing-PSK gate),
+		// an inline IP endpoint (#15989 gateway-less-PSK gate), and a
+		// local-address on a main-table interface (#14393 drops an inline-
+		// endpoint VPN with no mappable source once a virtual-router exists,
+		// which also changes the st0.0 device the tolerant cell reads).
+		"set interfaces ge-0/0/0 unit 0 family inet address 198.18.0.1/24",
+		"set security zones security-zone untrust interfaces ge-0/0/0.0",
+		"set security ipsec vpn V gateway 203.0.113.1",
+		"set security ipsec vpn V local-address 198.18.0.1",
+		"set security ipsec vpn V pre-shared-key ascii-text fixture-secret",
 		"set security zones security-zone vpn interfaces st0.0",
 	}
 	conflictLines := append(append([]string{}, base...),
