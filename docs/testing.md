@@ -232,6 +232,21 @@ The script also prepares the runner environment:
   `XPF_TEST_RUNNER_WAIT_S` seconds (default 7200) for the runner to resume,
   then exits 75.
 
+Lanes are reclaimed whole (#19196). Every runner runs
+`/usr/local/sbin/xpf-lane-sweep` (`scripts/runner-lane-sweep.sh`) hourly from
+`xpf-lane-sweep.timer`, installed by `scripts/provision-testrunner.sh` in every
+scope (`--toolchains-only` updates a running runner).
+- **When a lane goes:** only when nothing under it changed for 6 h AND no
+  process has its cwd or an open fd under it. The newest file decides, never a
+  per-file age, which would delete old sources from under an active build.
+- **How:** the lane is renamed aside and checked again before it is deleted.
+  Symlinked lanes and mount points are skipped.
+- **Log:** removals go to the journal and `/var/log/xpf-lane-sweep.log`.
+- **`--cleanup-on-success`:** `scripts/vm-test-run.sh --cleanup-on-success`
+  removes the lane right after a command that exits 0 (its output is already
+  back), with the same in-use check. A failing run keeps its lane for
+  inspection.
+
 The synced tree has no `.git`, so anything derived from `git describe` or a
 commit count reads as `unknown`/`0` on a runner. A test whose premise depends
 on those values must pin them, as `deploy-lib-selftest.sh`'s `older-only`

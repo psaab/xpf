@@ -46,9 +46,17 @@
 # observation, not a barrier). Old versions stay; reclaiming them is the
 # manual step in docs/testing.md, on a drained runner.
 #
-# --toolchains-only installs and publishes only the two Go toolchains and the
-# profile entry, skipping apt, rustup and the account setup: use it to bring
-# an already provisioned runner up to date; it is safe with lanes running.
+# --toolchains-only installs and publishes only the two Go toolchains, the
+# profile entry and the lane sweep, skipping apt, rustup and the account
+# setup: use it to bring an already provisioned runner up to date; it is safe
+# with lanes running.
+#
+# Every scope installs the whole-lane idle sweep: scripts/runner-lane-sweep.sh
+# as /usr/local/sbin/xpf-lane-sweep, run hourly by xpf-lane-sweep.timer. It
+# removes a /work/<lane> only when nothing under it changed for 6 h AND no
+# process has its cwd or an open fd under it, and logs each removal to the
+# journal and /var/log/xpf-lane-sweep.log. Before it, nothing reclaimed lanes:
+# udp:xpf-testrunner4 reached 100% with 62 lanes (2026-11-17).
 # --print-versions prints the derived versions and touches nothing. A runner
 # that is not RUNNING (a FROZEN one is paused by a gate cell) is refused with
 # exit 75 and left alone.
@@ -99,6 +107,7 @@ case "${1:-}" in
 	fi
 	echo "provision-testrunner: $runner ($scope): go $go_ver, deadcode go $dc_ver"
 	incus file push "$0" "$runner/root/provision-testrunner.sh"
+	incus file push --mode 0755 "$(dirname "$0")/runner-lane-sweep.sh" "$runner/usr/local/sbin/xpf-lane-sweep"
 	incus exec "$runner" --env XPF_GO_VERSION="$go_ver" --env XPF_DEADCODE_GO_VERSION="$dc_ver" \
 		--env XPF_PROVISION_SCOPE="$scope" -- bash /root/provision-testrunner.sh
 	# The acceptance check, run the way vm-test-run.sh runs a lane: a login
@@ -157,6 +166,35 @@ publish_link() {
 # rename_into_place <src> <dst>: the one rename (a hook for the selftest).
 rename_into_place() { mv -T "$1" "$2"; }
 
+# write_lane_sweep_units <unit dir>: the hourly whole-lane idle sweep
+# (scripts/runner-lane-sweep.sh, pushed as /usr/local/sbin/xpf-lane-sweep).
+write_lane_sweep_units() {
+	cat >"$1/xpf-lane-sweep.service" <<'UNIT'
+# Written by scripts/provision-testrunner.sh. Removes a /work/<lane> only when
+# nothing under it changed for 6 h and no process has its cwd or an fd there.
+[Unit]
+Description=Remove idle xpf test-runner lanes (scripts/runner-lane-sweep.sh)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xpf-lane-sweep --root /work --idle-s 21600
+Nice=19
+IOSchedulingClass=idle
+UNIT
+	cat >"$1/xpf-lane-sweep.timer" <<'UNIT'
+# Written by scripts/provision-testrunner.sh.
+[Unit]
+Description=Hourly sweep of idle xpf test-runner lanes
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+UNIT
+}
+
 [[ "${BASH_SOURCE[0]}" == "$0" ]] || return 0
 
 # In the VM, as root.
@@ -208,5 +246,12 @@ if [[ "$scope" == full ]]; then
 	install -d -m 1777 /wtgt
 	echo "xpf-testrunner: provisioned $(date -u +%FT%TZ)" > /etc/xpf-testrunner
 fi
+# The whole-lane idle sweep, in every scope (see the header).
+[[ -x /usr/local/sbin/xpf-lane-sweep ]] || { echo "provision-testrunner: /usr/local/sbin/xpf-lane-sweep was not pushed; run this from the workstation with --runner" >&2; exit 2; }
+mkdir -p /work
+write_lane_sweep_units /etc/systemd/system
+systemctl daemon-reload
+systemctl enable --now xpf-lane-sweep.timer
+systemctl is-enabled xpf-lane-sweep.timer
 go version
 "/usr/lib/go-$dc_ver/bin/go" version

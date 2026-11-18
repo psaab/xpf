@@ -374,6 +374,10 @@ run_bash scripts/go-deadcode-gate-selftest.sh
 # #19152: a runner's Go toolchain is replaced only on a drained runner, and
 # never left missing (hermetic: functions sourced, download stubbed).
 run_bash scripts/provision-testrunner-selftest.sh
+# #19196: the whole-lane idle sweep the runners run hourly. Hermetic: a fake
+# /work; real processes of the test stand in for a lane's cwd and fd users;
+# five mutants.
+run_bash scripts/runner-lane-sweep-selftest.sh
 run_bash scripts/no-git-stash-selftest.sh
 run_shell scripts/scratch-pinning-selftest.sh
 # #14647: the affected-Go-test selector must seed from non-Go paths and

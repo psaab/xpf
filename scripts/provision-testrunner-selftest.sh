@@ -98,5 +98,23 @@ if mutant install-deletes-old 's|^\tmv -T "$stage/go" "$dir"$|\trm -rf "$(dirnam
 	run_cells "$tmp/install-deletes-old.sh" >"$tmp/m2.txt"
 	[[ "$(result upgrade "$tmp/m2.txt")" != "go1.25.0 old=go1.24.9" ]] && ok "mutation install-deletes-old: the upgrade cell loses the old tree" || bad "mutation install-deletes-old: the upgrade cell still passes"
 fi
+# The lane-sweep units: hourly, running the pushed sweep with the 6 h whole-
+# lane idle rule on /work, and installed for timers.target.
+units=$(mktemp -d "${TMPDIR:-/tmp}/provision-units.XXXXXX")
+(
+	# shellcheck source=provision-testrunner.sh
+	source "$here/provision-testrunner.sh"
+	write_lane_sweep_units "$units"
+)
+if grep -qx 'ExecStart=/usr/local/sbin/xpf-lane-sweep --root /work --idle-s 21600' "$units/xpf-lane-sweep.service" &&
+	grep -qx 'Type=oneshot' "$units/xpf-lane-sweep.service" &&
+	grep -qx 'OnUnitActiveSec=1h' "$units/xpf-lane-sweep.timer" &&
+	grep -qx 'WantedBy=timers.target' "$units/xpf-lane-sweep.timer"; then
+	ok "the lane-sweep units run the sweep hourly with the 6 h whole-lane rule on /work"
+else
+	bad "the lane-sweep units: $(cat "$units"/xpf-lane-sweep.* | tr '\n' '|')"
+fi
+rm -rf "$units"
+
 echo "provision-testrunner selftest: ${pass} passed, ${fail} failed"
 [[ "$fail" -eq 0 ]]

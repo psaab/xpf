@@ -38,6 +38,13 @@
 #              The default lane name gets a -git suffix, so the git leg never
 #              thrashes the plain lane's build. Refused with --no-sync and in a
 #              mutation lane.
+#   --cleanup-on-success
+#              after a command that exits 0 (its output is already back on
+#              the workstation), remove the lane on the runner with
+#              scripts/runner-lane-sweep.sh --lane <name> --idle-s 0, which
+#              still keeps a lane another process is using. A failing run
+#              keeps its lane for inspection. Without it, idle lanes go after
+#              6 h (the runner's hourly xpf-lane-sweep.timer).
 #   --mutation mark this lane as a mutation lane: XPF_MUTATION_LANE=1 is set
 #              in the lane, and --with-git is refused. Also set by
 #              XPF_MUTATION_LANE=1 in the caller's environment (scripts/mutate.sh
@@ -190,6 +197,7 @@ allow_unproven_root=0
 allow_xpf_state=0
 with_git=0
 mutation=0
+cleanup_on_success=0
 [[ -n "${XPF_MUTATION_LANE:-}" ]] && mutation=1
 while [[ $# -gt 0 ]]; do
 	case "$1" in
@@ -202,6 +210,7 @@ while [[ $# -gt 0 ]]; do
 	--allow-xpf-state) allow_xpf_state=1; shift ;;
 	--with-git) with_git=1; shift ;;
 	--mutation) mutation=1; shift ;;
+	--cleanup-on-success) cleanup_on_success=1; shift ;;
 	--) shift; break ;;
 	# The whole leading comment block, however long it grows (a fixed line
 	# range went stale twice as the header grew).
@@ -1039,6 +1048,18 @@ else
 	echo "vm-test-run: paused-for=${paused}s (workstation ${w_s}s, runner monotonic ${g_s}s, heartbeat gaps ${h_s}s) (#19142)" >&2
 	if [[ "$paused" -gt 0 ]]; then
 		echo "vm-test-run: this run was paused or stalled for about ${paused}s: a timeout or timing-sensitive result from it is VOID unless re-run clean (#19142)" >&2
+	fi
+fi
+# --cleanup-on-success: the whole-lane sweep for this one lane, as root on the
+# runner (it keeps a lane with a process cwd or fd under it).
+if [[ "$cleanup_on_success" -eq 1 ]]; then
+	if [[ "$rc" -eq 0 ]]; then
+		if ! incus exec "$runner" -- bash -s -- --root /work --lane "$name" --idle-s 0 \
+			--log /var/log/xpf-lane-sweep.log <"$(dirname "$0")/runner-lane-sweep.sh" >&2; then
+			echo "vm-test-run: warning: could not clean up ${base} on ${runner}" >&2
+		fi
+	else
+		echo "vm-test-run: kept ${base} on ${runner} for inspection: the command exited ${rc} (--cleanup-on-success)" >&2
 	fi
 fi
 exit "$rc"

@@ -131,6 +131,17 @@ cat)
 systemd-detect-virt) echo kvm; exit 0 ;;
 su) [[ "${2:-}" == - && "${3:-}" == runner && "${4:-}" == -c ]] || exit 91; body=$5 ;;
 bash)
+	if [[ "${2:-}" == -s ]]; then
+		# --cleanup-on-success: the lane sweep, fed on stdin, with /work and
+		# its log mapped into the sandbox.
+		shift 2
+		args=()
+		for a in "$@"; do
+			a=${a//\/work/$MOCK_ROOT/work}
+			args+=("${a//\/var\/log\//$MOCK_ROOT/}")
+		done
+		exec bash -s "${args[@]}"
+	fi
 	if [[ "${2:-}" == -c ]]; then
 		# #19142: the VM-proof probe answers MOCK_VM_PROOF (default present);
 		# any other one-shot command (the clock read) runs as it is.
@@ -1000,6 +1011,47 @@ if mutant git-no-export 's/^\[\[ "\$mutation" -eq 1 \]\] && env_prefix+=.*$/true
 	rc=$(pause_run "$tmp/git-no-export.sh" gm5 'echo "M=${XPF_MUTATION_LANE:-}" >/work/lane/tmp/gm5.txt' --mutation)
 	if [[ "$(cat "$tmp/work/lane/tmp/gm5.txt" 2>/dev/null)" != M=1 ]]; then ok "mutation git-no-export: the export cell fails"; else bad "mutation git-no-export: the export cell still passes"; fi
 fi
+
+# ── --cleanup-on-success (the whole-lane sweep for this one lane) ──────────
+# cl_run <script> <tag> <command>: a --no-sync run in lane "cl".
+cl_run() {
+	local under=$1 tag=$2 command=$3 rc=0
+	mkdir -p "$tmp/work/cl/src" "$tmp/work/cl/tmp"
+	(cd "$tmp/repo" && env PATH="$tmp/bin:$PATH" MOCK_ROOT="$tmp" \
+		bash "$under" --runner mock:runner --name cl --no-sync --cleanup-on-success -- "$command") \
+		>"$tmp/$tag.out" 2>"$tmp/$tag.err" || rc=$?
+	echo "$rc"
+}
+rc=$(cl_run "$script" cl1 'true')
+if [[ "$rc" == 0 && ! -e "$tmp/work/cl" ]] && grep -q 'removed cl ' "$tmp/cl1.err"; then
+	ok "--cleanup-on-success removes the lane after a command that exits 0"
+else
+	bad "--cleanup-on-success after success (rc $rc): lane $([[ -e "$tmp/work/cl" ]] && echo kept || echo gone): $(tr '\n' '|' <"$tmp/cl1.err")"
+fi
+rc=$(cl_run "$script" cl2 'exit 3')
+if [[ "$rc" == 3 && -d "$tmp/work/cl" ]] && grep -q 'kept /work/cl on mock:runner for inspection: the command exited 3' "$tmp/cl2.err"; then
+	ok "--cleanup-on-success keeps the lane of a failing command, status kept"
+else
+	bad "--cleanup-on-success after failure (rc $rc): $(tr '\n' '|' <"$tmp/cl2.err")"
+fi
+(cd "$tmp/work/cl/src" && exec sleep 60) &
+cl_holder=$!
+sleep 0.3
+rc=$(cl_run "$script" cl3 'true')
+kill "$cl_holder" 2>/dev/null; wait "$cl_holder" 2>/dev/null || true # 143: we killed it
+if [[ "$rc" == 0 && -d "$tmp/work/cl" ]] && grep -q 'kept cl: .*in use' "$tmp/cl3.err"; then
+	ok "--cleanup-on-success keeps a lane another process is using"
+else
+	bad "--cleanup-on-success with a user (rc $rc): $(tr '\n' '|' <"$tmp/cl3.err")"
+fi
+# A mutant copy runs from $tmp, and --cleanup-on-success reads the sweep beside
+# the running script.
+cp "$here/runner-lane-sweep.sh" "$tmp/runner-lane-sweep.sh"
+if mutant cleanup-any-status 's/^\tif \[\[ "\$rc" -eq 0 \]\]; then$/\tif true; then/'; then
+	rc=$(cl_run "$tmp/cleanup-any-status.sh" cm1 'exit 3')
+	if [[ ! -d "$tmp/work/cl" ]]; then ok "mutation cleanup-any-status: the failing-command cell fails"; else bad "mutation cleanup-any-status: the lane survived"; fi
+fi
+rm -rf "$tmp/work/cl"
 
 echo "vm-test-run selftest: ${pass} passed, ${fail} failed, ${skip} skipped"
 [[ "$fail" -eq 0 ]]
