@@ -15556,3 +15556,64 @@ fn queue_warm_pass_never_probes_a_destination_on_an_unrelated_interface_19171() 
         "its gateway is warmed on the /32's egress, got {items:?}"
     );
 }
+
+/// #19171 fold 1 (r23): the warm pass's RG gate judges the COVERING row's RG.
+/// A synced session to a client in a peer-owned /24 (egress 82, RG3) queues no
+/// on-link probe while RG3 is inactive here, though the client is DIRECT. Once
+/// RG3 activates, the same pass warms it on 82.
+#[test]
+fn queue_warm_pass_holds_a_peer_owned_direct_destination_until_its_rg_activates_19171() {
+    let (mut coord, rx) = warm_test_coordinator(2);
+    coord.forwarding.egress.insert(
+        82,
+        EgressInterface {
+            bind_ifindex: 82,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 0,
+            redundancy_group: 3,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    coord.forwarding.ifindex_to_name.insert(82, "ge-0-0-3".to_string());
+    coord.forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+        prefix: PrefixV4::from_net("10.66.0.0/24".parse().unwrap()),
+        host: Ipv4Addr::new(10, 66, 0, 1),
+        ifindex: 82,
+        tunnel_endpoint_id: 0,
+        table: "inet.0".to_string(),
+    });
+    coord.forwarding.connected_v4.sort_by(|a, b| b.prefix.prefix_len().cmp(&a.prefix.prefix_len()));
+    let client = IpAddr::V4(Ipv4Addr::new(10, 66, 0, 2));
+    let mut key = f4_key();
+    key.dst_ip = client;
+    let mut entry = import_entry_9718(&key, 4102);
+    entry.decision.resolution.egress_ifindex = 82;
+    lock_shared_recover(&coord.sessions.synced).insert(key, entry);
+    let drain = |rx: &Receiver<WarmItem>| {
+        let mut items = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            items.push((item.ifindex, item.hop));
+        }
+        items
+    };
+    coord.queue_warm_pass(true);
+    let held = drain(&rx);
+    assert!(
+        !held.iter().any(|(_, hop)| *hop == client),
+        "RG3 inactive here: no on-link probe for its client, got {held:?}"
+    );
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    coord.ha.rg_runtime.store(Arc::new(BTreeMap::from([
+        (2, warm_active_ha_runtime(now_secs)),
+        (3, warm_active_ha_runtime(now_secs)),
+    ])));
+    coord.queue_warm_pass(true);
+    let warmed = drain(&rx);
+    assert!(
+        warmed.contains(&(82, client)),
+        "RG3 active: the client is warmed on its covering row's interface, got {warmed:?}"
+    );
+}

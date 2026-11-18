@@ -308,3 +308,81 @@ fn link_local_gateway_binds_on_the_split_node_as_on_the_owner_19171() {
         }
     }
 }
+
+/// Lane C3: the provenance test takes the MOST specific covering connected
+/// prefix, whatever the row order. Rows are listed broad /16 first (as an
+/// unsorted state would have them), with the narrow /24 after it and a /20
+/// route. For a target inside the /24, the /20 is NOT more specific than its
+/// covering connected prefix; first-match on the /16 would say it is.
+#[test]
+fn more_specific_route_than_connected_uses_the_most_specific_covering_row_19171() {
+    let mut state = ForwardingState::default();
+    for (cidr, host, ifindex) in [
+        ("172.16.0.0/16", Ipv4Addr::new(172, 16, 0, 1), 8),
+        ("172.16.80.0/24", Ipv4Addr::new(172, 16, 80, 1), 12),
+    ] {
+        state.connected_v4.push(ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(cidr.parse().expect("prefix")),
+            host,
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        });
+    }
+    state.routes_v4.insert(
+        "inet.0".to_string(),
+        vec![RouteEntryV4::single(
+            PrefixV4::from_net("172.16.80.0/20".parse().expect("prefix")),
+            8,
+            0,
+            Some(Ipv4Addr::new(172, 16, 0, 254)),
+            false,
+            String::new(),
+            5,
+        )],
+    );
+    assert!(
+        !more_specific_route_than_connected(&state, IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200)), None),
+        "a /20 is not more specific than the /24 covering the target"
+    );
+}
+
+/// Lane C3, v6 twin: rows broad /48 first, the narrow /64 after it, and a /56
+/// route. For a target inside the /64 the /56 is not more specific.
+#[test]
+fn more_specific_route_than_connected_uses_the_most_specific_covering_row_v6_19171() {
+    let mut state = ForwardingState::default();
+    for (cidr, host, ifindex) in [
+        ("2001:559:8585::/48", "2001:559:8585::6", 8),
+        ("2001:559:8585:80::/64", "2001:559:8585:80::8", 12),
+    ] {
+        state.connected_v6.push(ConnectedRouteV6 {
+            prefix: PrefixV6::from_net(cidr.parse().expect("prefix")),
+            host: host.parse().expect("host"),
+            scope: 0,
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: "inet6.0".to_string(),
+        });
+    }
+    state.routes_v6.insert(
+        "inet6.0".to_string(),
+        vec![RouteEntryV6::single(
+            PrefixV6::from_net("2001:559:8585::/56".parse().expect("prefix")),
+            8,
+            0,
+            Some("2001:559:8585::fe".parse().expect("gateway")),
+            false,
+            String::new(),
+            5,
+        )],
+    );
+    assert!(
+        !more_specific_route_than_connected(
+            &state,
+            IpAddr::V6("2001:559:8585:80::200".parse().expect("target")),
+            None
+        ),
+        "a /56 is not more specific than the /64 covering the target"
+    );
+}

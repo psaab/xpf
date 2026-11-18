@@ -9362,3 +9362,58 @@ fn production_build_populates_zone_low16_index_18518() {
         );
     }
 }
+
+/// #19171 fold 1 (r24, claim 2a, the table side). A split-node refresh now
+/// computes HAInactive for a stored FabricRedirect reverse whose destination
+/// is peer-owned. `refresh_owner_rgs` does not rewrite a row to HAInactive,
+/// and so does not re-stamp its liveness: the row keeps its FabricRedirect AND
+/// its idle clock. The re-stamp is the hold-clock reset the refresh documents
+/// as wrong for a non-forwarding row. Before #19171 the retained FabricRedirect
+/// counted as forwarding and was re-stamped.
+///
+/// The published BPF row is the same REDIRECT either way: it carries no
+/// disposition. A row carrying traffic is re-stamped by its own hits, so only
+/// an IDLE row's aging changes: the #2120 HOLD/AGE gate now judges it on its
+/// own clock.
+#[test]
+fn split_refresh_keeps_an_ha_inactive_judged_redirect_row_and_its_idle_clock_19171() {
+    let forwarding = fw0_forwarding_15958b();
+    let now_ns = monotonic_nanos();
+    let now_secs = now_ns / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, active_rg(now_secs)), (2, inactive_rg(now_secs))]);
+    let mut sessions = fw0_both_halves_sessions_15958b(&forwarding, now_ns);
+    let mut reverse_keys = Vec::new();
+    sessions.iter_with_origin(|key, decision, metadata, _origin| {
+        if metadata.is_reverse {
+            assert_eq!(
+                decision.resolution.disposition,
+                ForwardingDisposition::FabricRedirect,
+                "FIXTURE: the reverse is stored as a FabricRedirect"
+            );
+            reverse_keys.push(key.clone());
+        }
+    });
+    assert!(!reverse_keys.is_empty(), "FIXTURE: reverse rows exist");
+    let before: Vec<_> = reverse_keys.iter().map(|key| sessions.last_seen_ns(key)).collect();
+    crate::afxdp::session_glue::handle_refresh_owner_rgs_for_test(
+        &mut sessions,
+        crate::afxdp::bpf_map::SteeringMap::unshared_for_test(-1),
+        &forwarding,
+        &ha_state,
+        &Arc::new(ShardedNeighborMap::default()),
+        vec![1, 2],
+        now_ns + 5_000_000_000,
+        now_secs + 5,
+    );
+    let after: Vec<_> = reverse_keys.iter().map(|key| sessions.last_seen_ns(key)).collect();
+    assert_eq!(after, before, "the refresh does not re-stamp an HAInactive-judged row's idle clock");
+    sessions.iter_with_origin(|_key, decision, metadata, _origin| {
+        if metadata.is_reverse {
+            assert_eq!(
+                decision.resolution.disposition,
+                ForwardingDisposition::FabricRedirect,
+                "the table row keeps its FabricRedirect"
+            );
+        }
+    });
+}

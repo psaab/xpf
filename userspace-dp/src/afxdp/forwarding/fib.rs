@@ -2319,11 +2319,15 @@ pub(in crate::afxdp) fn more_specific_route_than_connected(
     match target {
         IpAddr::V4(ip) => {
             let table = table.unwrap_or("inet.0");
+            // The MOST specific covering connected prefix, independent of row
+            // order (lane C3): nested connected prefixes in one table must not
+            // let a shorter one decide.
             let Some(connected_len) = state
                 .connected_v4
                 .iter()
-                .find(|row| row.table == table && row.prefix.contains(ip))
+                .filter(|row| row.table == table && row.prefix.contains(ip))
                 .map(|row| row.prefix.prefix_len())
+                .max()
             else {
                 return false;
             };
@@ -2335,11 +2339,15 @@ pub(in crate::afxdp) fn more_specific_route_than_connected(
         }
         IpAddr::V6(ip) => {
             let table = table.unwrap_or("inet6.0");
+            // The MOST specific covering connected prefix, independent of row
+            // order (lane C3): nested connected prefixes in one table must not
+            // let a shorter one decide.
             let Some(connected_len) = state
                 .connected_v6
                 .iter()
-                .find(|row| row.table == table && row.prefix.contains(ip))
+                .filter(|row| row.table == table && row.prefix.contains(ip))
                 .map(|row| row.prefix.prefix_len())
+                .max()
             else {
                 return false;
             };
