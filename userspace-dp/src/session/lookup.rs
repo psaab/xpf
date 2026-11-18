@@ -796,6 +796,10 @@ impl SessionTable {
 
     /// #16042: [`Self::lookup_with_origin_with_payload`] carrying the
     /// parsed segment ack so the SYN-ACK / completing-ACK gates validate it.
+    /// #19175 fold 1: test-only. Its one production caller, the Owner replay
+    /// (`apply_deferred_owner_hit_with_ack`), now calls the lookup core
+    /// directly to learn whether it made close progress.
+    #[cfg(test)]
     pub fn lookup_with_origin_with_ack(
         &mut self,
         key: &SessionKey,
@@ -858,12 +862,17 @@ impl SessionTable {
         &mut self,
         query: &SessionQuery<'_>,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
-        self.lookup_with_origin_inner(query)
+        self.lookup_with_origin_inner(query, &mut None)
     }
 
+    /// `closed`: #19175 fold 1. Set to the matched row's canonical key when
+    /// this lookup made TCP close progress (`stamp_tcp_close`), so the Owner
+    /// replay can tell its caller which close to publish to the shared map.
+    /// Written only inside the state-transition block, never per packet.
     fn lookup_with_origin_inner(
         &mut self,
         query: &SessionQuery<'_>,
+        closed: &mut Option<SessionKey>,
     ) -> SessionExpiryProbe<(SessionLookup, SessionOrigin)> {
         let key = query.key;
         let now_ns = query.now_ns;
@@ -1160,8 +1169,12 @@ impl SessionTable {
             } else {
                 None
             };
+            let close_progress = propagate.close;
             self.propagate_tcp_state_to_companion(&actual_key, now_ns, propagate);
             self.emit_session_state_update(&actual_key, close_class_before, handshake_state_before);
+            if close_progress {
+                *closed = Some(actual_key.clone());
+            }
             // #16223: a serving completion/promotion here is the
             // node-level proof sibling replicas key on — stamp it so
             // replica tables on other workers (and this table's GC)
@@ -1294,6 +1307,12 @@ impl SessionTable {
     }
 
     /// #16042: Owner replay carrying the parsed segment ack.
+    ///
+    /// #19175 fold 1: returns the canonical key of the matched row when this
+    /// replay made TCP close progress (the first RST, or a FIN in a direction
+    /// not yet FINed), else `None`. The caller publishes that close to the
+    /// shared map (`session_glue::replay_owner_hit`); the table itself has no
+    /// shared-map handle.
     pub fn apply_deferred_owner_hit_with_ack(
         &mut self,
         key: &SessionKey,
@@ -1301,8 +1320,13 @@ impl SessionTable {
         tcp_flags: u8,
         payload_len: u32,
         ack: Option<u32>,
-    ) {
-        let _ = self.lookup_with_origin_with_ack(key, now_ns, tcp_flags, payload_len, ack);
+    ) -> Option<SessionKey> {
+        let mut closed = None;
+        let _ = self.lookup_with_origin_inner(
+            &SessionQuery::with_ack(key, now_ns, tcp_flags, payload_len, ack),
+            &mut closed,
+        );
+        closed
     }
 
 

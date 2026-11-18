@@ -930,6 +930,10 @@ pub(in crate::afxdp) struct ResolvedFlowSessionDecision {
     /// it installed a row without this packet's TCP FIN or RST
     /// (`apply_deferred_shared_materialization`), so the poll site's Owner
     /// replay applies that close on the installed row as for a local hit.
+    /// Fold 1: the reverse synthesis sets it too, for a reply FIN or RST it
+    /// installed R without (`session_glue/resolve.rs`). The replay
+    /// (`session_glue::replay_owner_hit`) then also publishes the close to
+    /// the shared maps.
     pub(in crate::afxdp) authority_deferred: bool,
     /// #13938: carried through from [`ResolvedSessionLookup::authority_deferred`].
     /// The poll site replays the complete hit mutation only after an Owner

@@ -790,6 +790,39 @@ impl TcpCloseClass {
             _ => None,
         }
     }
+
+    /// #19175 fold 1: the order a shared row's close class may only rise in:
+    /// open (and any unknown byte) < CLOSING < TIME_WAIT < RESET. That is
+    /// the wire value for the known classes.
+    #[inline]
+    pub(crate) fn wire_rank(wire: u8) -> u8 {
+        Self::from_wire(wire).map_or(0, Self::to_wire)
+    }
+}
+
+/// #19175 fold 1: one row's close, as an Owner replay leaves it, for the
+/// shared-map restamp (`shared_ops::restamp_shared_close_classes`). The
+/// identity (`session_id`, `nat`) is the incarnation the restamp may write:
+/// a shared row naming any other is left alone.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SharedClosePublication {
+    pub(crate) key: SessionKey,
+    pub(crate) session_id: u64,
+    pub(crate) nat: NatDecision,
+    /// The row's close class on the HA wire (nonzero: the row is closing).
+    pub(crate) close_class: u8,
+    /// A forward row also owns the shared NAT and forward-wire aliases.
+    pub(crate) is_reverse: bool,
+}
+
+/// #19175 fold 1 (Codex P2-2): the close bits of a row a materialize is
+/// about to replace with the same incarnation
+/// (`SessionTable::same_incarnation_close_progress`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CarriedCloseProgress {
+    pub(crate) reset: bool,
+    pub(crate) fin_own: bool,
+    pub(crate) fin_peer: bool,
 }
 
 /// #10888: the TCP handshake phase carried across HA independently of close
@@ -4553,6 +4586,100 @@ impl SessionTable {
             .unwrap_or(0)
     }
 
+    /// #19175 fold 1: the close an Owner replay just applied, as the shared
+    /// map must carry it. `matched` is the canonical key the replay reported
+    /// (`apply_deferred_owner_hit_with_ack`). Returns that row and its
+    /// companion (`reverse_session_key`), each only when it is in this table,
+    /// closing, and carries a session id: the companion is the row F17 just
+    /// closed. A companion that lives only in shared or on a sibling is not
+    /// published here (its identity is not in hand; see
+    /// `session_glue::replay_owner_hit`). Cold: one call per close transition.
+    pub(crate) fn shared_close_publications(
+        &self,
+        matched: &SessionKey,
+    ) -> [Option<SharedClosePublication>; 2] {
+        let publication = |key: &SessionKey| {
+            self.entry_by_key(key).and_then(|entry| {
+                (entry.closing && entry.session_id != 0).then(|| SharedClosePublication {
+                    key: key.clone(),
+                    session_id: entry.session_id,
+                    nat: entry.decision.nat,
+                    close_class: entry.tcp_close_class_wire(),
+                    is_reverse: entry.metadata.is_reverse,
+                })
+            })
+        };
+        let Some(hit) = publication(matched) else {
+            return [None, None];
+        };
+        let companion = reverse_session_key(matched, hit.nat);
+        let companion = publication(&companion);
+        [Some(hit), companion]
+    }
+
+    /// #19175 fold 1 (Codex P2-2): the close state of the row under `key`
+    /// when it is the incarnation (`session_id`, `nat`) a materialize is
+    /// about to re-install and it is closing. A zero id names no incarnation
+    /// and yields `None`. The materialize carries it onto the re-installed
+    /// row (`carry_close_progress`), so a same-incarnation re-install cannot
+    /// reopen a close this worker already applied.
+    pub(crate) fn same_incarnation_close_progress(
+        &self,
+        key: &SessionKey,
+        session_id: u64,
+        nat: NatDecision,
+    ) -> Option<CarriedCloseProgress> {
+        if session_id == 0 {
+            return None;
+        }
+        let entry = self.entry_by_key(key)?;
+        (entry.closing && entry.session_id == session_id && entry.decision.nat == nat).then_some(
+            CarriedCloseProgress {
+                reset: entry.reset,
+                fin_own: entry.fin_own,
+                fin_peer: entry.fin_peer,
+            },
+        )
+    }
+
+    /// #19175 fold 1 (Codex P2-2): OR a same-incarnation close
+    /// (`same_incarnation_close_progress`, read before the re-install) into
+    /// the row now under `key`, and put it on the resulting close window
+    /// from its install anchor. Close state is sticky per incarnation: the
+    /// re-install takes the shared row's close class, which carries no FIN
+    /// direction for CLOSING (`upsert_synced_with_origin`), so without this a
+    /// retransmitted FIN would read as fresh progress and F17 would move the
+    /// companion's close deadline again. No-op when nothing changes.
+    pub(crate) fn carry_close_progress(
+        &mut self,
+        key: &SessionKey,
+        carried: CarriedCloseProgress,
+        now_ns: u64,
+    ) {
+        let timeouts = self.timeouts;
+        let Some(entry) = self.entry_by_key_mut(key) else {
+            return;
+        };
+        let before = (entry.closing, entry.reset, entry.fin_own, entry.fin_peer);
+        entry.closing = true;
+        entry.reset |= carried.reset;
+        entry.fin_own |= carried.fin_own;
+        entry.fin_peer |= carried.fin_peer;
+        if before == (entry.closing, entry.reset, entry.fin_own, entry.fin_peer) {
+            return;
+        }
+        // #16489: a row this carry makes CLOSING baselines at its seeded
+        // packet total, as a closing import does (`upsert_synced_with_origin`),
+        // so pre-close volume cannot read as post-close activity. Counters
+        // fold onto the forward half, so only a forward row holds them.
+        if !before.0 && !entry.metadata.is_reverse {
+            entry.closing_counters_seen =
+                entry.counters.fwd_packets.saturating_add(entry.counters.rev_packets);
+        }
+        entry.expires_after_ns = tcp_close_window_for_entry(entry, &timeouts);
+        self.push_to_wheel(key, now_ns);
+    }
+
     /// #10888: the live entry's handshake state for Open/Update sync deltas.
     #[inline]
     pub(crate) fn handshake_state_wire_for(&self, key: &SessionKey) -> u8 {
@@ -6815,6 +6942,20 @@ impl SessionTable {
     #[cfg(test)]
     pub(crate) fn closing_counters_seen_for_test(&self, key: &SessionKey) -> Option<u64> {
         self.entry_by_key(key).map(|e| e.closing_counters_seen)
+    }
+
+    /// #19175 fold 1: put the entry under `key` past its strict idle
+    /// deadline (`last_seen_ns` + `expires_after_ns` < now) without waiting
+    /// for wall time, so the next lookup reads `IdleCrossed` while the wheel
+    /// has not yet removed it (the one-direction-active shape: only the hit
+    /// half is refreshed). Returns whether the entry exists.
+    #[cfg(test)]
+    pub(crate) fn idle_cross_for_test(&mut self, key: &SessionKey, now_ns: u64) -> bool {
+        self.entry_by_key_mut(key).is_some_and(|entry| {
+            entry.last_seen_ns = now_ns.saturating_sub(2_000);
+            entry.expires_after_ns = 1_000;
+            true
+        })
     }
 
     /// Unified session update function replacing promote_synced,

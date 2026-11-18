@@ -108,6 +108,95 @@ pub(in crate::afxdp) fn apply_deferred_forwarding_revalidation(
     }
 }
 
+/// #13938 Owner replay of a session hit, run by the poll path only after
+/// this packet's authority verdict names it an Owner, and then (#19175 fold
+/// 1, Codex P2-1) the shared-map publication of any close it applied.
+///
+/// The replay (`apply_deferred_owner_hit_with_ack`) is the one local-hit
+/// state machine: refresh, handshake, `stamp_tcp_close`, F17, the HA Update,
+/// the close relay, the #16489 baseline. It reports the matched canonical
+/// key only when the packet made close progress. Then, and only then, the
+/// close is published to shared: the matched row and, when it is in this
+/// table, the companion F17 just closed (`shared_close_publications`),
+/// each by an incarnation-safe, monotonic restamp
+/// (`shared_ops::restamp_shared_close_classes`).
+///
+/// Why here, after the replay, and not inside it or in the emit: the table
+/// holds no shared-map handle, and this is the first point where both the
+/// closed rows and the shared maps are in hand. It runs after the deferred
+/// promotion, which published the pre-replay (still open) rows
+/// (`promote.rs`, `publish_shared_session`), so the restamp is the later
+/// writer and raises those rows. The same holds for a local hit and for a
+/// row this packet materialized or synthesized, which owe their close to
+/// this replay (`authority_deferred`).
+///
+/// Not published: a companion that is not in this table (it lives only in
+/// shared, or on a sibling that applies the #18520 relay to its table
+/// alone). Its incarnation is not in hand here, and a reverse row's shared
+/// id need not equal its forward's.
+#[expect(clippy::too_many_arguments, reason = "#19175: the replay's packet inputs plus the three shared maps the close is published to")]
+pub(in crate::afxdp) fn replay_owner_hit(
+    sessions: &mut SessionTable,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    key: &SessionKey,
+    now_ns: u64,
+    tcp_flags: u8,
+    payload_len: u32,
+    ack: Option<u32>,
+) {
+    let Some(closed) =
+        sessions.apply_deferred_owner_hit_with_ack(key, now_ns, tcp_flags, payload_len, ack)
+    else {
+        return;
+    };
+    let [hit, companion] = sessions.shared_close_publications(&closed);
+    #[cfg(test)]
+    run_close_publish_hook();
+    match (hit, companion) {
+        (Some(hit), Some(companion)) => {
+            crate::afxdp::shared_ops::restamp_shared_close_classes(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                &[hit, companion],
+            );
+        }
+        (Some(hit), None) => {
+            crate::afxdp::shared_ops::restamp_shared_close_classes(
+                shared_sessions,
+                shared_nat_sessions,
+                shared_forward_wire_sessions,
+                std::slice::from_ref(&hit),
+            );
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLOSE_PUBLISH_HOOK_19175: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+/// #19175 fold 1 test seam: run `hook` once, on this thread, between the
+/// Owner replay's close and its shared publication (a shared replacement
+/// that lands in that window).
+#[cfg(test)]
+pub(in crate::afxdp) fn set_close_publish_hook_for_test(hook: impl FnOnce() + 'static) {
+    CLOSE_PUBLISH_HOOK_19175.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_close_publish_hook() {
+    let hook = CLOSE_PUBLISH_HOOK_19175.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 /// #17063: test-only convenience over the production
 /// `resolve_flow_session_decision_with_conntrack_and_payload_and_ack`
 /// entry point. It carries no packet frame (payload honestly 0, ack
@@ -819,6 +908,30 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
             now_ns,
         )?
     };
+    // #19175 fold 1 (F2, folds #19186): a reply's FIN or RST is not stamped by
+    // this install. The synthesis runs inside the resolve, before the packet's
+    // authority verdict, and stamps outside the local-hit state machine: the
+    // close never reached F (no F17), no HA Update or close relay ran, and the
+    // row constructor recorded a FIN as `fin_peer` (it infers the FIN's
+    // direction from `metadata.is_reverse`, right only for a forward
+    // install's companion; here the FIN is R's own). Codex-d: reachable on an
+    // ESTABLISHED flow, when R crossed its strict idle deadline (one-way
+    // traffic refreshes only the hit half) and the lookup's `IdleCrossed`
+    // falls through to the forward NAT match. So R installs, publishes and
+    // replicates OPEN (the flags less FIN and RST: ACK, PSH and the rest
+    // still set its timeout class), and the resolution owes the close to the
+    // poll site's #13938 Owner replay (`authority_deferred` below), which
+    // applies it after the verdict with R's direction (`fin_own`), runs F17,
+    // the Update, the relay and the #16489 baseline, and publishes the close
+    // to shared (`replay_owner_hit`). A non-Owner verdict, or a packet a
+    // transit guard drops before the replay arm, applies no close, as for a
+    // local hit.
+    let owes_close = close_owed_to_owner_replay(protocol, tcp_flags);
+    let install_tcp_flags = if owes_close {
+        tcp_flags & !(crate::tcp_flags::TCP_FIN | crate::tcp_flags::TCP_RST)
+    } else {
+        tcp_flags
+    };
     let (resolved, reverse_installed) = install_reverse_session_from_forward_match(
         sessions,
         session_map,
@@ -837,7 +950,7 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         now_secs,
         ha_startup_grace_until_secs,
         protocol,
-        tcp_flags,
+        install_tcp_flags,
     );
 
     let mut decision = resolved.decision;
@@ -891,12 +1004,12 @@ adopted_recovery: Option<AdoptedRecovery>,) -> Option<ResolvedFlowSessionDecisio
         // max_sessions.
         created: reverse_installed,
         install_failed: !reverse_installed,
-        // #10636: reverse-synthesized from a forward match (close, if any,
-        // was stamped at install); never a deferred local hit. #19175 moved
-        // a MATERIALIZED shared hit's close to the Owner replay; this install
-        // was left as it is (it runs before the verdict and publishes and
-        // replicates the packet's flags; see docs/log/19175.md).
-        authority_deferred: false,
+        // #10636: reverse-synthesized from a forward match; never a deferred
+        // local hit. #19175 fold 1: the install left this packet's FIN or RST
+        // out (above), so the resolution owes it to the Owner replay. Only
+        // for a row actually installed: a refused install (the table full)
+        // has nothing to replay onto, and its close is lost as before.
+        authority_deferred: reverse_installed && owes_close,
         deferred_synced_promotion: None,
         promotion_deferred: false,
         materialize_divergence: crate::afxdp::session_glue::MaterializeDivergence::None,

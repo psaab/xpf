@@ -680,10 +680,22 @@ pub(in crate::afxdp) fn materialize_current_shared_under_permit(
         install.tcp_flags = packet_tcp_flags;
     }
     install.persistent_lease_hold = acquired_persistent_hold;
+    // #19175 fold 1 (Codex P2-2): a close this worker already applied to the
+    // SAME incarnation it is about to replace (the fabric wire placeholder
+    // arm re-materializes its replica on every packet; an adopted install
+    // may replace a local row) survives the re-install. The install
+    // reconstructs close state from the shared class alone, which carries no
+    // FIN direction for CLOSING, so a retransmitted FIN would otherwise read
+    // as fresh progress and F17 would move the companion's close deadline.
+    let carried_close =
+        sessions.same_incarnation_close_progress(&replica_key, replica_session_id, replica_decision.nat);
     let materialized = sessions.upsert_synced_with_origin(
         install,
         allow_replace_local,
     );
+    if materialized && let Some(carried_close) = carried_close {
+        sessions.carry_close_progress(&replica_key, carried_close, now_ns);
+    }
     if materialized {
         // The install replaced and discarded the incumbent table entry. Its
         // exact local reference is no longer owned, even when the new entry

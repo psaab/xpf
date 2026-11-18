@@ -744,6 +744,13 @@ impl SessionTable {
                 // flags, so that companion records the observed FIN as `fin_peer`,
                 // not as its own FIN. A fresh install still cannot infer a FIN
                 // from any other direction.
+                // #19175 fold 1 (#19186): the reverse synthesis
+                // (`install_reverse_session_from_forward_match`) also builds a
+                // reverse row here, from the REPLY, whose FIN would be the
+                // row's OWN and so was misrecorded as `fin_peer`. It no longer
+                // passes a FIN or RST (the resolver strips them); the #13938
+                // Owner replay applies the reply's close afterwards through
+                // `stamp_tcp_close`, which sets `fin_own` on the row it hit.
                 fin_own: matches!(protocol, PROTO_TCP)
                     && has_fin(tcp_flags)
                     && !metadata.is_reverse,

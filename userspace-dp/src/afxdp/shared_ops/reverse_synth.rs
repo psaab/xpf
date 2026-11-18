@@ -689,6 +689,13 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     enforced
 }
 
+/// Install, publish and replicate the reverse half R synthesized from a
+/// forward NAT match. `tcp_flags` seeds R's state on all three legs (the
+/// worker row, the shared row and the sibling `UpsertSynced`). #19175 fold
+/// 1: the production resolver passes them WITHOUT the reply's FIN or RST
+/// (`session_glue/resolve.rs`): this runs before the packet's authority
+/// verdict, so R lands open everywhere and the close is applied afterwards
+/// by the Owner replay and published to shared by `replay_owner_hit`.
 pub(in crate::afxdp) fn install_reverse_session_from_forward_match(
     sessions: &mut SessionTable,
     session_map: SteeringMap<'_>,

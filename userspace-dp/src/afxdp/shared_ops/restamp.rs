@@ -332,6 +332,107 @@ pub(in crate::afxdp) fn restamp_shared_rev_packets(
         }
     }
 }
+
+/// #19175 fold 1 (Codex P2-1): publish an Owner replay's TCP close to the
+/// shared maps. Before this, no close a worker applied ever reached them:
+/// the replay and the cross-worker relay consumer mutate worker tables
+/// only, and a promotion in the same packet publishes the pre-replay row.
+/// So a shared row stayed open after its flow closed, and two readers act
+/// on that class:
+/// - a same-tuple SYN on a worker without the local closed row takes the
+///   closing-incarnation path only for a shared class != 0
+///   (`probe_closing_syn_candidate`); otherwise it resolves and reuses the
+///   old incarnation's session and NAT;
+/// - a materialize installs the shared class (`upsert_synced_with_origin`).
+///
+/// Each publication raises its row's class in `shared_sessions` and, for a
+/// forward row, the clones `publish_shared_session` keeps under its NAT
+/// aliases (`shared_nat_sessions`: the reply wire tuple and the canonical
+/// reply tuple) and its forward-wire alias (`shared_forward_wire_sessions`).
+///
+/// Incarnation-safe: a row is written only when it is this publication's
+/// incarnation, by the strict rule (`raise_shared_close_class`): its own
+/// key (an alias whose slot another forward row took is skipped), the same
+/// NAT decision, and the same NONZERO session id. A zero shared id is the
+/// unknown/legacy sentinel and proves nothing (#19063's rule, stricter than
+/// `promote::same_synced_incarnation`), so such a row keeps its class. A
+/// newer incarnation that replaced the row between the close and this call
+/// is therefore never closed by the old one. Monotonic: the class only
+/// rises (`TcpCloseClass::wire_rank`), so a late call cannot lower a class
+/// a peer import or another worker raised.
+///
+/// Lock order: each map is taken alone, in turn, and released before the
+/// next (`shared_sessions`, `shared_nat_sessions`,
+/// `shared_forward_wire_sessions`); none is nested and no install permit is
+/// held, so it adds no edge to the node-wide order. Cost: runs only on a
+/// close transition, at most three lock acquisitions and six keyed gets.
+/// Returns how many rows it raised.
+pub(in crate::afxdp) fn restamp_shared_close_classes(
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    publications: &[crate::session::SharedClosePublication],
+) -> usize {
+    let mut raised = 0;
+    {
+        let mut sessions = lock_shared_recover(shared_sessions);
+        for publication in publications {
+            if let Some(entry) = sessions.get_mut(&publication.key) {
+                raised += usize::from(raise_shared_close_class(entry, publication));
+            }
+        }
+    }
+    if !publications.iter().any(|publication| !publication.is_reverse) {
+        return raised;
+    }
+    {
+        let mut nat_sessions = lock_shared_recover(shared_nat_sessions);
+        for publication in publications.iter().filter(|publication| !publication.is_reverse) {
+            let wire = crate::session::reverse_session_key(&publication.key, publication.nat);
+            let canonical = crate::session::reverse_canonical_key(&publication.key, publication.nat);
+            if let Some(entry) = nat_sessions.get_mut(&wire) {
+                raised += usize::from(raise_shared_close_class(entry, publication));
+            }
+            if canonical != wire
+                && let Some(entry) = nat_sessions.get_mut(&canonical)
+            {
+                raised += usize::from(raise_shared_close_class(entry, publication));
+            }
+        }
+    }
+    {
+        let mut wire_sessions = lock_shared_recover(shared_forward_wire_sessions);
+        for publication in publications.iter().filter(|publication| !publication.is_reverse) {
+            let wire_key = crate::session::forward_wire_key(&publication.key, publication.nat);
+            if wire_key != publication.key
+                && let Some(entry) = wire_sessions.get_mut(&wire_key)
+            {
+                raised += usize::from(raise_shared_close_class(entry, publication));
+            }
+        }
+    }
+    raised
+}
+
+/// #19175 fold 1: raise one shared row (canonical or alias clone) to the
+/// publication's close class, only when it is the publication's
+/// incarnation (see [`restamp_shared_close_classes`]) and the class rises.
+#[inline]
+fn raise_shared_close_class(
+    entry: &mut SyncedSessionEntry,
+    publication: &crate::session::SharedClosePublication,
+) -> bool {
+    let rank = crate::session::TcpCloseClass::wire_rank;
+    let same_incarnation = entry.key == publication.key
+        && entry.decision.nat == publication.nat
+        && entry.session_id != 0
+        && entry.session_id == publication.session_id;
+    if !same_incarnation || rank(publication.close_class) <= rank(entry.tcp_close_class) {
+        return false;
+    }
+    entry.tcp_close_class = publication.close_class;
+    true
+}
 /// #19063: the restore fence's node-level serving evidence, bound to the
 /// incarnation. A restamp raises `last_served_ns` only on a row that carries
 /// the SOURCE copy's session id: the forward row, or its reverse companion,

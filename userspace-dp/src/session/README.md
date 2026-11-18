@@ -573,9 +573,61 @@ applies the packet's close through this lookup, after the promotion, exactly
 as for a row already in the table: `stamp_tcp_close` sees real progress, and
 the propagation, the Update, the relay and the baseline seed all come from
 here. A packet whose materialize is dropped (#19153 `Drop`) closes nothing.
-The reverse-synthesis install (`shared_ops/reverse_synth.rs`, no local or
-shared reverse at all) still stamps the close at install; `docs/log/19175.md`
-has why.
+The HA peer hears the close at most once, and only when THIS node owns the
+half after the packet (a promotion in the same packet, or a locally owned
+row): a half still peer-synced afterwards (a `Deferred` or `NotCurrent`
+promotion, a `FabricRedirect` row on a non-owner) announces nothing, exactly
+as a local hit on it does. Residuals: a dropped (#19153 `Drop`) RST is lost,
+since RSTs are not retransmitted (#19153's own trade-off); a REFUSED
+materialize (a busy permit, or a #10582 local incumbent) forwards the FIN/RST
+with no local record and owes no replay, a µs window.
+
+**Synthesized reverse halves too (#19175 fold 1, #19186).** The reverse
+synthesis (`shared_ops/reverse_synth.rs::install_reverse_session_from_forward_match`)
+installs R from a forward NAT match when the reply's lookup misses. That is
+reachable on an ESTABLISHED flow: an R past its strict idle deadline (one-way
+traffic refreshes only the half it hits; the #4380 retention runs later, in
+the wheel) reads `IdleCrossed`, which the shared-ops lookup turns into a miss.
+The install used to stamp the reply's FIN or RST itself, before the authority
+verdict: F was never told, no Update or relay ran, and the row constructor
+recorded a FIN as R's `fin_peer` (it infers the FIN's direction from
+`is_reverse`, which is right only for a forward install's companion). Now the
+resolver installs, publishes and replicates R with the reply's flags less FIN
+and RST, and sets `authority_deferred`, so the same Owner replay applies the
+close after the verdict with R's own direction (`stamp_tcp_close` sets
+`fin_own` on the row it hit) and runs F17, the Update, the relay and the
+baseline. A non-Owner verdict, or a packet a transit guard drops first,
+applies no close, as for a local hit.
+
+**Shared close publication (#19175 fold 1).** No close a worker applied ever
+reached the shared maps: this lookup and the #18520 relay consumer mutate the
+worker table only, and a promotion in the same packet publishes the
+pre-replay (open) row. Two readers act on the shared class: a same-tuple SYN
+on a worker without the local closed row takes the closing-incarnation path
+only for a nonzero shared class (`probe_closing_syn_candidate`), and a
+materialize installs the shared class. So the Owner replay now reports the
+matched canonical key when it made close progress
+(`apply_deferred_owner_hit_with_ack` returns it), and the caller,
+`session_glue::replay_owner_hit`, publishes the matched row and, when it is
+in this table, the companion F17 just closed (`shared_close_publications`)
+through `shared_ops::restamp_shared_close_classes`: the canonical row plus a
+forward row's NAT and forward-wire alias clones, written only for the same
+incarnation (same key, NAT and NONZERO session id), and only upward
+(open < CLOSING < TIME_WAIT < RESET). A companion held only in shared or on a
+sibling is not published (its identity is not in hand). Each map is locked
+alone and no permit is held; it runs only on a close transition.
+
+**Same-incarnation re-install keeps its close (#19175 fold 1).** A
+materialize that replaces this worker's row of the SAME incarnation (the
+fabric wire placeholder arm re-materializes its replica on every packet)
+carries the replaced row's close bits onto the re-installed one
+(`same_incarnation_close_progress`, `carry_close_progress`). The shared
+CLOSING class says neither FIN direction (see the import rules below), so
+the publication alone would leave the row's own FIN off the re-install, and a
+retransmitted FIN would read as fresh progress: F17 would move the
+companion's fixed close deadline (its RST fuse or TIME_WAIT window) again.
+The re-installed row's own idle anchor is still the install's (pre-existing on
+that arm).
 
 A missing companion (a `FabricRedirect` flow with no local reverse entry,
 or a half already independently reaped) is a no-op — the same fail-open
@@ -2786,7 +2838,9 @@ A TCP session that closed on the node that owns it used to stay OPEN on the peer
     FINed and a guess would misclassify the other side's later FIN.
   The expiry comes from `tcp_close_window_ns`. A materialized shared hit keeps
   the class too. Its installing packet's own FIN or RST is not stamped by the
-  install; the Owner replay applies it through the lookup (#19175).
+  install; the Owner replay applies it through the lookup (#19175), and
+  publishes the resulting class back to the shared rows (#19175 fold 1,
+  "Shared close publication" above).
 
 - **Companions, promote and resends.** The class must survive every path that
   re-installs or re-sends the session, not only the first import.

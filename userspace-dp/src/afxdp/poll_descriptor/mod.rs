@@ -3190,15 +3190,22 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         // Owner-only: a permitted foreign Forward must not
                         // keep any session-state mutation primitive.
                         // #19175: also a FIN/RST whose shared hit this
-                        // packet materialized above: the install left the
-                        // close out and set `authority_deferred`, so the
-                        // close is applied here, after the promotion, with
-                        // the same progress test, companion propagation, HA
-                        // Update and close relay as a local hit's.
+                        // packet materialized above, or whose reply this
+                        // packet's reverse synthesis installed: the install
+                        // left the close out and set `authority_deferred`,
+                        // so the close is applied here, after the promotion,
+                        // with the same progress test, companion
+                        // propagation, HA Update and close relay as a local
+                        // hit's. Fold 1: a close the replay applied is then
+                        // published to the shared maps (`replay_owner_hit`).
                         if foreign_arrival_zone.is_none() && resolved.authority_deferred {
                             // #16042: the Owner replay validates the parsed ack.
                             let ack = pending_tcp_seq_note.map(|(_, ack, _, _)| ack);
-                            sessions.apply_deferred_owner_hit_with_ack(
+                            crate::afxdp::session_glue::replay_owner_hit(
+                                sessions,
+                                worker_ctx.shared_sessions,
+                                worker_ctx.shared_nat_sessions,
+                                worker_ctx.shared_forward_wire_sessions,
                                 &resolved.key,
                                 now_ns,
                                 meta.tcp_flags,
@@ -3395,7 +3402,14 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                             let session_id = resolved.session_id;
                             // #8125: resolved from the same entry, so the row's
                             // `Timeout:` column reports the window in force.
-                            let timeout_secs = resolved.timeout_secs;
+                            // #19175 fold 1: a synthesized reply whose FIN or
+                            // RST the Owner replay applied after the install
+                            // is on its close window now; read it again.
+                            let timeout_secs = if resolved.authority_deferred {
+                                sessions.timeout_secs_for(&resolved.key)
+                            } else {
+                                resolved.timeout_secs
+                            };
                             publish_bpf_conntrack_entry_with_source_nat(
                                 conntrack_v4_fd,
                                 conntrack_v6_fd,
@@ -4759,6 +4773,28 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                             // materialized (its resolved key).
                             sessions.mark_fabric_established_for_wire(&flow.forward_key, now_ns);
                             sessions.mark_fabric_established_for_wire(&resolved.key, now_ns);
+                            // #19175 fold 1 (F2): this site keeps only the
+                            // decision, but a reverse synthesis in this
+                            // resolve installed R (`created`) without the
+                            // reply's FIN or RST and owes it to the Owner
+                            // replay. Before fold 1 that install stamped the
+                            // close itself, so apply it here rather than
+                            // drop it. Only that shape: a local hit cannot
+                            // reach this site (the session-hit resolve above
+                            // would have returned it).
+                            if resolved.created && resolved.authority_deferred {
+                                crate::afxdp::session_glue::replay_owner_hit(
+                                    sessions,
+                                    worker_ctx.shared_sessions,
+                                    worker_ctx.shared_nat_sessions,
+                                    worker_ctx.shared_forward_wire_sessions,
+                                    &resolved.key,
+                                    now_ns,
+                                    meta.tcp_flags,
+                                    tcp_payload_len(packet_frame, meta),
+                                    None,
+                                );
+                            }
                             resolved.decision
                         } else {
                         telemetry.counters.session_misses += 1;
