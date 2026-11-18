@@ -40,7 +40,9 @@ func TestContentFreeSystemLoginWarns_6972(t *testing.T) {
 // filtered out before it is ever read.
 func TestGrantingSystemLoginDoesNotWarn_6972(t *testing.T) {
 	for _, src := range []string{
-		"system { login { user alice { class ops; } } }",
+		// #15717 (8b8ed41b9c) rejects a user whose class is not defined, so
+		// the granting user names a class the same stanza defines (#18847).
+		"system { login { class ops { permissions view; } user alice { class ops; } } }",
 		"system { login { class ops { permissions view; } } }",
 	} {
 		t.Run(src, func(t *testing.T) {

@@ -1156,12 +1156,16 @@ func TestElisionSuppressedAValidation8879(t *testing.T) {
 			"ECMP / consistent-hash load-balancing is silently disabled"},
 		// THIRD instance (#8943). Same shape, security-relevant: a
 		// destination-NAT rule naming a pool that does not exist.
+		// The zone is defined in all three spellings: since #15001
+		// (306f84dc92) an undefined NAT `from zone` is refused at commit,
+		// which refused the control and let both bad spellings fail for the
+		// zone instead of the pool (#18847).
 		{"security nat destination",
-			`security { nat { destination { rule-set rs1 { from zone untrust; rule r1 { ` +
+			`security { zones { security-zone untrust; } nat { destination { rule-set rs1 { from zone untrust; rule r1 { ` +
 				`match { destination-address 10.9.0.0/24; } then { destination-nat pool no-such-pool-7717; } } } } } }`,
-			`security { nat destination { rule-set rs1 { from zone untrust; rule r1 { ` +
+			`security { zones { security-zone untrust; } nat destination { rule-set rs1 { from zone untrust; rule r1 { ` +
 				`match { destination-address 10.9.0.0/24; } then { destination-nat pool no-such-pool-7717; } } } } }`,
-			`security { nat { destination { pool ok-pool-7717 { address 10.9.0.9/32; } ` +
+			`security { zones { security-zone untrust; } nat { destination { pool ok-pool-7717 { address 10.9.0.9/32; } ` +
 				`rule-set rs1 { from zone untrust; rule r1 { match { destination-address 10.9.0.0/24; } ` +
 				`then { destination-nat pool ok-pool-7717; } } } } } }`,
 			"destination NAT silently does not translate"},

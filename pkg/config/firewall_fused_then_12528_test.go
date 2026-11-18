@@ -358,6 +358,23 @@ func TestFirewallFusedThenDisplaySetRoundTrip12528(t *testing.T) {
 	}
 }
 
+// The packed `from is-fragment destination-port 53` control used to assert
+// both leaves compile. Since #15258 (e4a067242c) is-fragment combined with a
+// port match is refused as a never-match: trailing fragments carry no L4
+// header. The refusal NAMES the port, so it still proves the packed run's
+// tail reached the compiler; a second leaf after is-fragment is a positive
+// control in "packed term is-fragment then protocol" (#18847).
+func TestFirewallFusedIsFragmentPortRefused12528(t *testing.T) {
+	tree, perrs := NewParser(`firewall { family inet { filter F { term T { from is-fragment destination-port 53; then accept; } } } }`).Parse()
+	if len(perrs) > 0 {
+		t.Fatalf("parse: %v", perrs)
+	}
+	_, err := CompileConfig(tree)
+	if err == nil || !strings.Contains(err.Error(), "is-fragment match is combined with a port match") {
+		t.Fatalf("packed is-fragment + destination-port must be refused as a never-match (#15258), got %v", err)
+	}
+}
+
 func TestFirewallFusedThenPositiveControls12528(t *testing.T) {
 	type want struct {
 		action FilterAction
@@ -388,8 +405,6 @@ func TestFirewallFusedThenPositiveControls12528(t *testing.T) {
 			"inet", "F", "T", want{action: FilterActionDiscard, frag: true}},
 		{"packed from is-fragment protocol udp", hier(`firewall { family inet { filter F { term T { from is-fragment protocol udp; then discard; } } } }`),
 			"inet", "F", "T", want{action: FilterActionDiscard, frag: true, protos: "udp"}},
-		{"packed from is-fragment destination-port 53", hier(`firewall { family inet { filter F { term T { from is-fragment destination-port 53; then accept; } } } }`),
-			"inet", "F", "T", want{action: FilterActionAccept, frag: true, dports: "53"}},
 		{"term named is-fragment", hier(`firewall { family inet { filter F { term is-fragment { from { is-fragment; } then { discard; } } } } }`),
 			"inet", "F", "is-fragment", want{action: FilterActionDiscard, frag: true}},
 		{"term named is-fragment flat", flat("set firewall family inet filter F term is-fragment from is-fragment", "set firewall family inet filter F term is-fragment then discard"),

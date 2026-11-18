@@ -16,5 +16,7 @@ set class-of-service interfaces ge-0/0/2 unit 80 scheduler-map edge-map
 set class-of-service interfaces ge-0/0/2 unit 80 classifiers dscp wan-classifier
 set class-of-service interfaces ge-0/0/2 unit 80 classifiers ieee-802.1 wan-pcp
 set class-of-service interfaces ge-0/0/2 unit 80 rewrite-rules dscp wan-rewrite
+set interfaces ge-0/0/2 vlan-tagging
+set interfaces ge-0/0/2 unit 80 vlan-id 80
 set interfaces ge-0/0/2 unit 80 family inet address 10.0.80.1/24
 set system dataplane-type userspace

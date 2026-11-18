@@ -110,9 +110,12 @@ var slotEscPolicyOptions = []string{
 
 // slotEscPolicyOptionsASPath adds the as-path definition the #7471 reference
 // gate requires, so the `good` value commits clean and the row measures the
-// SLOT ESCAPE rather than the reference gate.
+// SLOT ESCAPE rather than the reference gate. The regex carries no trailing
+// space: since #17177 (f21aca56c7) a padded value is refused at commit, which
+// broke this control. "^65000$" is a Junos pattern the #15007 translator
+// accepts (aspath_translate_15007_test.go) (#18847).
 var slotEscPolicyOptionsASPath = append(append([]string{}, slotEscPolicyOptions...),
-	`set policy-options as-path AP1 "^65000 "`,
+	`set policy-options as-path AP1 "^65000$"`,
 )
 
 var slotEscBGP = append(append([]string{}, slotEscPolicyOptions...),

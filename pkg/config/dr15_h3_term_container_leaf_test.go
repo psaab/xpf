@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // #14418 (DR15-H3): a group term CONTAINER adopted beside an inline PACKED
 // term leaf. sameKeyedContainers9802 matches containers only, so the inline
@@ -154,13 +157,14 @@ func TestDR15H3FirewallCrossShapeOneTermDiscard14418(t *testing.T) {
 // Controls: both-packed and both-braced spellings must agree with cross-shape.
 
 func TestDR15H3ControlsAgree14418(t *testing.T) {
-	// Both-packed routing control: leaf-branch already merges into ONE t1
-	// (measured on master: group protocol bgp unions, group accept survives
-	// on that path). Pin only the merged-single-term invariant so this control
-	// does not encode a precedence the leaf path never had; the cross-shape
-	// fix must not disturb it.
+	// Both-packed routing control: leaf-branch already merges into ONE t1.
+	// Pin only the merged-single-term invariant so this control does not
+	// encode a precedence the leaf path never had; the cross-shape fix must
+	// not disturb it. The group supplies only a condition: since #14425
+	// (fd5cc4f394) a group `then accept` merged into a local `then reject` is
+	// a conflicting-terminal commit error, pinned below (#18847).
 	bothPackedRouting := `
-groups { g1 { policy-options { policy-statement P { term t1 from protocol bgp then accept; } } } }
+groups { g1 { policy-options { policy-statement P { term t1 from protocol bgp; } } } }
 policy-options { policy-statement P { term t1 from route-filter 10.0.0.0/8 orlonger then reject; term t2 { then accept; } } }
 apply-groups g1;
 `
@@ -180,9 +184,9 @@ apply-groups g1;
 		t.Errorf("both-packed routing: merged t1 lost a match side: proto=%v rf=%v", t1.FromProtocols, t1.RouteFilters)
 	}
 
-	// Both-braced routing.
+	// Both-braced routing: the group supplies only a condition (see above).
 	bothBracedRouting := `
-groups { g1 { policy-options { policy-statement P { term t1 { then accept; } } } } }
+groups { g1 { policy-options { policy-statement P { term t1 { from { protocol bgp; } } } } } }
 policy-options { policy-statement P { term t1 { from { route-filter 10.0.0.0/8 orlonger; } then reject; } term t2 { then accept; } } }
 apply-groups g1;
 `
@@ -196,6 +200,33 @@ apply-groups g1;
 	}
 	if n != 1 || t1 == nil || t1.Action != "reject" {
 		t.Errorf("both-braced routing: n=%d t1=%v, want 1/reject", n, t1)
+	}
+	if t1 != nil && (len(t1.FromProtocols) == 0 || len(t1.RouteFilters) == 0) {
+		t.Errorf("both-braced routing: merged t1 lost a match side: proto=%v rf=%v", t1.FromProtocols, t1.RouteFilters)
+	}
+
+	// The conflicting merge itself, in both shapes: a group `then accept`
+	// merged into a local `then reject` is refused at commit (#14425), never
+	// silently resolved to one action.
+	for name, src := range map[string]string{
+		"packed": `
+groups { g1 { policy-options { policy-statement P { term t1 from protocol bgp then accept; } } } }
+policy-options { policy-statement P { term t1 from route-filter 10.0.0.0/8 orlonger then reject; term t2 { then accept; } } }
+apply-groups g1;
+`,
+		"braced": `
+groups { g1 { policy-options { policy-statement P { term t1 { then accept; } } } } }
+policy-options { policy-statement P { term t1 { from { route-filter 10.0.0.0/8 orlonger; } then reject; } term t2 { then accept; } } }
+apply-groups g1;
+`,
+	} {
+		tree, perrs := NewParser(src).Parse()
+		if len(perrs) > 0 {
+			t.Fatalf("%s conflicting routing: parse: %v", name, perrs)
+		}
+		if _, err := CompileConfig(tree); err == nil || !strings.Contains(err.Error(), "conflicting terminal actions") {
+			t.Errorf("%s conflicting routing: a merged accept+reject term must be refused (#14425), got %v", name, err)
+		}
 	}
 
 	// Both-packed firewall: the leaf-merge produces ONE term whose `then`

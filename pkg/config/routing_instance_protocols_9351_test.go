@@ -591,16 +591,15 @@ func TestPerInstanceBGPNeighbourElidedSpellingHasNoGateToDisarm9351(t *testing.T
 			t.Fatalf("BRACED peer-as must be legitimate in both passes (skipPass=%v): %v", skip, err)
 		}
 	}
-	_, offErr := compile(elidedAS, true)
-	if offErr == nil {
-		t.Errorf("with the pass DISABLED the elided peer-as should be dropped and REJECTED; " +
-			"an acceptance here means the reading below is not measuring what it claims")
-	} else if !strings.Contains(offErr.Error(), "missing/invalid peer-as") {
-		// Assert the MESSAGE, not merely the failure: a rejection for some other
-		// reason would score this cell green while the gate under discussion is
-		// silent.
-		t.Errorf("the pass-disabled rejection must name the MISSING VALUE, which is what makes "+
-			"this a benign disarm rather than a real one; got %q", offErr)
+	// Since #14409 (c927186fe3) the compiler reads a packed neighbor line
+	// itself: applyBGPNeighborProps9192 expands the neighbor's own tail via
+	// packedBodyChildren. So the normalizer pass is no longer load-bearing at
+	// these sites, and with it DISABLED the elided peer-as is carried and
+	// accepted too. The earlier "dropped and rejected" leg measured the
+	// pre-#14409 compiler (#18847). Both legs must now carry the value.
+	if _, offErr := compile(elidedAS, true); offErr != nil {
+		t.Errorf("with the pass DISABLED the elided peer-as must still be read by the compiler "+
+			"(#14409 packed neighbor tail) and accepted; got %v", offErr)
 	}
 	if _, err := compile(elidedAS, false); err != nil {
 		t.Errorf("with the pass ENABLED the elided peer-as must survive and the same gate accept: %v", err)
@@ -639,9 +638,9 @@ func TestPerInstanceBGPNeighbourElidedSpellingHasNoGateToDisarm9351(t *testing.T
 		t.Fatalf("CONTROL: braced export/import = %q/%q, want pol1/pol1", be, bi)
 	}
 	eOff, _ := compile(elided, true)
-	if ex, _ := neighbourPolicies(eOff); ex != "" {
-		t.Errorf("with the pass DISABLED the elided export should be DROPPED (that is the #9351 "+
-			"defect and what makes the pass load-bearing here); got %q", ex)
+	if ex, _ := neighbourPolicies(eOff); ex != "pol1" {
+		t.Errorf("with the pass DISABLED the elided export must still reach the neighbour: since "+
+			"#14409 the compiler reads the packed neighbor tail itself; got %q, braced gives %q", ex, be)
 	}
 	eOn, _ := compile(elided, false)
 	if ex, _ := neighbourPolicies(eOn); ex != "pol1" {

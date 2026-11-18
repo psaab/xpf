@@ -226,7 +226,17 @@ func TestReopenedTrafficSelectorIsRejectedAndReported8704(t *testing.T) {
 // working configuration. This is why the walk scopes `seen` to the immediate
 // holder rather than to the rule.
 func TestSameSelectorNameInTwoVPNsIsNotADuplicate8704(t *testing.T) {
-	const twoVPN = `security { ipsec { vpn v1 { bind-interface st0; traffic-selector ts1 { local-ip 10.0.0.0/24; remote-ip 10.1.0.0/24; } } vpn v2 { bind-interface st0; traffic-selector ts1 { local-ip 10.2.0.0/24; remote-ip 10.3.0.0/24; } } } }`
+	// Each VPN is complete and on its own unit, so the only thing this
+	// control can trip on is the selector-name scope. The fixture used to put
+	// both VPNs on `st0` with no key and no endpoint; since #14139
+	// (f016b89af6) a PSK VPN needs a key, since #15989 (2082a45442) a
+	// gateway, and since #17779 (4b878ef74a) two VPNs on one if_id are
+	// refused (#18847).
+	const twoVPN = `security { ipsec { ` +
+		`vpn v1 { bind-interface st0.0; gateway 198.51.100.1; pre-shared-key ascii-text k1-fixture; ` +
+		`traffic-selector ts1 { local-ip 10.0.0.0/24; remote-ip 10.1.0.0/24; } } ` +
+		`vpn v2 { bind-interface st0.1; gateway 198.51.100.2; pre-shared-key ascii-text k2-fixture; ` +
+		`traffic-selector ts1 { local-ip 10.2.0.0/24; remote-ip 10.3.0.0/24; } } } }`
 	tree, errs := NewParser(twoVPN).Parse()
 	if len(errs) > 0 {
 		t.Fatalf("parse: %v", errs)

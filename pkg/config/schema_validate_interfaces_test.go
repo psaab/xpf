@@ -103,13 +103,14 @@ var interfacesLeafMatrix = []interfacesLeafCase{
 		reject:   []string{"0", "41", "-1", "asd", ""},
 	},
 	{
-		// xpf requires the prefix (netlink.ParseAddr contract): a bare
-		// Junos-style virtual-address is advertised but never installed.
+		// #16558 (418018528f) accepts the Junos bare spelling on purpose:
+		// a bare virtual-address gains the enclosing unit's prefix at
+		// compile, so it is installed, not just advertised (#18847).
 		name:     "vrrp-virtual-address",
 		leaf:     "virtual-address",
 		template: "set interfaces ge-0-0-0 unit 0 family inet address 10.0.1.10/24 vrrp-group 1 virtual-address %s",
-		accept:   []string{"10.0.1.1/24", "10.0.1.1/32"},
-		reject:   []string{"10.0.1.1", "2001:db8::1/64", "asd", ""},
+		accept:   []string{"10.0.1.1/24", "10.0.1.1/32", "10.0.1.1"},
+		reject:   []string{"2001:db8::1/64", "asd", ""},
 	},
 	{
 		// #2384 — IPv6 vrrp-group under family inet6. Same wire byte as
@@ -121,14 +122,15 @@ var interfacesLeafMatrix = []interfacesLeafCase{
 		reject:   []string{"0", "256", "-1", "asd", ""},
 	},
 	{
-		// #2384 — the inet6 virtual-address must be a v6 CIDR; a v4
-		// address (or bare IP) is rejected by ValidateIPv6CIDR. This is
-		// the mirror of vrrp-virtual-address with the family flipped.
+		// #2384 — the inet6 virtual-address must be IPv6; a v4 address is
+		// rejected. The mirror of vrrp-virtual-address with the family
+		// flipped, so the bare v6 spelling is accepted too (#16558,
+		// 418018528f: it gains the enclosing unit prefix) (#18847).
 		name:     "vrrp6-virtual-address",
 		leaf:     "virtual-address",
 		template: "set interfaces ge-0-0-0 unit 0 family inet6 address 2001:db8::10/64 vrrp-group 1 virtual-address %s",
-		accept:   []string{"2001:db8::1/64", "fe80::1/64", "::1/128"},
-		reject:   []string{"2001:db8::1", "10.0.1.1/24", "::ffff:10.0.1.1/96", "asd", ""},
+		accept:   []string{"2001:db8::1/64", "fe80::1/64", "::1/128", "2001:db8::1"},
+		reject:   []string{"10.0.1.1/24", "::ffff:10.0.1.1/96", "asd", ""},
 	},
 	{
 		name:     "tunnel-source",

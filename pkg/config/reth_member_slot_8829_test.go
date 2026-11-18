@@ -86,8 +86,12 @@ func TestInterfaceSlotParsesBothSpellings8829(t *testing.T) {
 // fix turns a misresolving config into an unbootable one, which is the #8814
 // shape.
 func TestAlignmentGateSeesBothSpellings8829(t *testing.T) {
+	// `node 0` is the leaf the compiler reads. The fixture used to spell it
+	// `node-id 0`, which nothing read: it was dropped silently, and the
+	// default node 0 hid that, until #16456 (088d3c99ab) refused unknown
+	// chassis cluster statements (#18847).
 	mk := func(iface string) string {
-		return `chassis { cluster { node-id 0; reth-count 1; ` +
+		return `chassis { cluster { node 0; reth-count 1; ` +
 			`authentication-key "s3cret-cluster-key-value"; } ` +
 			`device-map { interface ` + iface + ` { pci 0000:01:00.0; } } }`
 	}
