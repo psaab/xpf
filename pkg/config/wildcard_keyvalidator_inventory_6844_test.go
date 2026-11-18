@@ -90,6 +90,10 @@ func TestWildcardTypedLeafKeyValidatorRuleIsWired_6844(t *testing.T) {
 		{"file", `system { syslog { file audit { "daemon;auth" info; } } }`},
 		{"host", `system { syslog { host 192.0.2.10 { "daemon;auth" info; } } }`},
 		{"user", `system { syslog { user root { "daemon;auth" info; } } }`},
+		// #15709 (05db1c7b19) declared the top-level `console` destination
+		// with the same syslogFacilitySeverityLeaf, so its facility identity
+		// is gated too (#18847).
+		{"console", `system { syslog { console { "daemon;auth" info; } } }`},
 	} {
 		t.Run(dest.stanza, func(t *testing.T) {
 			p := NewParser(dest.src)
@@ -122,6 +126,9 @@ func TestWildcardTypedLeafKeyValidatorRuleIsWired_6844(t *testing.T) {
 // should be a deliberate edit here rather than a surprise.
 func TestWildcardTypedLeafKeyValidatorInventory_6844(t *testing.T) {
 	want := []string{
+		// #15709 (05db1c7b19): the top-level console destination shares the
+		// facility leaf, and its identity gate is intended (#18847).
+		"system syslog console <wildcard-key>",
 		"system syslog file <wildcard-key>",
 		"system syslog host <wildcard-key>",
 		"system syslog user <wildcard-key>",

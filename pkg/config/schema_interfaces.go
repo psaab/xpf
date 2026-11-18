@@ -377,9 +377,14 @@ var schemaInterfaces = &schemaNode{desc: "Interface configuration", wildcard: &s
 							valueType:     ValueCIDR,
 							valueDesc:     "IPv6 prefix a delegated IA_PD prefix must be contained by to be accepted despite ULA/overlap (#12533)",
 							valueExamples: []string{"fd00:1234::/48", "2001:db8:1::/48"},
-							keyValidator:  ValidateIPv6CIDR,
-							validator:     ValidateIPv6CIDR,
-							children:      nil, refuseNonLeafBlockChildren: true,
+							// No keyValidator: on a NAMED typed leaf the walker
+							// never runs one (schema_walk.go gates it on
+							// !exactMatch), so it was dead metadata that the
+							// #16163 census flags as valueType+keySlot. The
+							// value slot, packed and block, is `validator`
+							// (#18847).
+							validator: ValidateIPv6CIDR,
+							children:  nil, refuseNonLeafBlockChildren: true,
 						},
 					}},
 					"client-identifier": {desc: "Client identifier", children: map[string]*schemaNode{
