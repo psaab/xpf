@@ -281,6 +281,28 @@ var mixedChildIsAModifierBlock = map[string]string{
 // entries create a second object rather than a second value.
 // ---------------------------------------------------------------------------
 var notAValueList = map[string]string{
+	// #18847: `then next term`. #16533 (387703c99b) DECLARED it (`next` with a
+	// valueless `term` child) so packed `then` tails stop dropping it, which
+	// made the four filter families' site comparable here for the first time.
+	// It is a FLAG -- NextTerm bool, args:0 -- not a value list. VERIFIED WHERE
+	// THE EXTRA TOKENS LAND, on all four families (family any, inet, inet6 and
+	// the bare `firewall filter`), braced spelling:
+	//
+	//	then { next term; }                 strict OK      NextTerm=true
+	//	then { next term junk1; }           strict REFUSED "unknown `then` action"
+	//	then { next term [ junk1 junk2 ]; } strict REFUSED "unknown `then` action"
+	//
+	// and the flat spellings (`set ... then next term junk1` and the bracketed
+	// list) are refused the same way (flat measured on family inet). On the
+	// tolerant path every spelling keeps
+	// NextTerm=true and discards the junk. No operator can commit a "list" here,
+	// so the D-spelling "drop" the gate reports is junk being discarded, not a
+	// lost value.
+	"firewall family any filter <*> term <*> then next term":   "args:0 flag (#16533); extra tokens are REFUSED at strict commit in every spelling, verified (#18847)",
+	"firewall family inet filter <*> term <*> then next term":  "args:0 flag (#16533); extra tokens are REFUSED at strict commit in every spelling, verified (#18847)",
+	"firewall family inet6 filter <*> term <*> then next term": "args:0 flag (#16533); extra tokens are REFUSED at strict commit in every spelling, verified (#18847)",
+	"firewall filter <*> term <*> then next term":              "args:0 flag (#16533); extra tokens are REFUSED at strict commit in every spelling, verified (#18847)",
+
 	// #9235: the three `security flow aging` thresholds. These became comparable
 	// to this gate for the FIRST TIME when #9235 taught compileFlow to expand
 	// `aging`'s flat run — previously the run sat unsplit on the node's Keys and
