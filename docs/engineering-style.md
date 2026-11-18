@@ -2080,6 +2080,9 @@ they repeatedly bite:
   lock's cluster ONLY (#19165). A fixed map takes the lock tuple to that
   cluster's env file, and the targets resolve from it in a clean
   environment, ignoring any inherited `FW0`/`FW1`/`INCUS_REMOTE`.
+  The map is keyed on the FULL canonical lock/owner/epoch paths. Any other
+  tuple is refused, except in a hermetic selftest with a mock incus
+  (`XPF_WITH_CLUSTER_TEST_MODE=1`).
   - `BPFRX_CLUSTER_ENV` unset: the wrapper exports the lock's env file.
   - Set to another cluster's file: the cell is refused.
   - Empty (the legacy local cluster): allowed only with the default tuple.

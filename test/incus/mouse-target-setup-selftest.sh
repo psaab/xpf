@@ -119,7 +119,7 @@ chmod +x "${TMP}/bin/incus"
 mkdir -p "${TMP}/lock"
 LOCK_ENV=(XPF_CLUSTER_LOCK="${TMP}/lock/lock" XPF_CLUSTER_OWNER="${TMP}/lock/owner"
           XPF_CLUSTER_EPOCH="${TMP}/lock/epoch" XPF_CLUSTER_EPOCH_STATE_DIR="${TMP}/lock"
-          XPF_CLUSTER_BUILD_PROBE=0)
+          XPF_CLUSTER_BUILD_PROBE=0 XPF_WITH_CLUSTER_TEST_MODE=1) # #19165: private tuple + stub incus
 run_up() { # run_up [ENV=VAL ...] -> prints the recorded unit payload; rc in ${TMP}/rc
     local ilog="${TMP}/incus.log" elog="${TMP}/exec.log" rc
     : > "$ilog"; : > "$elog"; : > "${elog}.ref"

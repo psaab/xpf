@@ -72,15 +72,58 @@ shift
 #     does NOT police variables a command reads on its own (FW0, FW1,
 #     CLUSTER_LAN_HOST, HOST, …): under the lock protocol those are the
 #     command author's responsibility.
-# A private lock path (the selftests) names no cluster: its targets resolve
-# from the caller's BPFRX_CLUSTER_ENV (or the default), still ignoring
-# inherited target overrides.
-case "$(basename -- "$XPF_CLUSTER_LOCK")" in
-xpf-cluster.lock) LOCK_CLUSTER=loss ;;
-xpf-cluster-tcp.lock) LOCK_CLUSTER=tcp ;;
-xpf-cluster-udp.lock) LOCK_CLUSTER=udp ;;
-*) LOCK_CLUSTER= ;;
-esac
+#   - The map is keyed on the FULL canonical lock/owner/epoch paths (the three
+#     tuples in CLAUDE.md), compared after realpath. A basename match is not
+#     enough: `…/xpf-cluster-loss.lock` is not loss's mutex (codex-c, #19165).
+#     Any other tuple is refused before the wrapper's first incus action,
+#     unless the caller is a hermetic selftest (XPF_WITH_CLUSTER_TEST_MODE=1
+#     with a mocked `incus` on PATH; see xpf_with_cluster_test_mode_ok).
+#     A selftest may also set XPF_WITH_CLUSTER_TEST_ROOT to lay the three
+#     canonical tuples out under a private directory. It is honoured only in
+#     test mode with a mock incus, and then every other tuple is refused as
+#     in production, so the selftest exercises the real map and refusal.
+XPF_WITH_CLUSTER_CANONICAL_ROOT=/var/worktrees/.cache/tmpdir
+xpf_with_cluster_tuple_cluster() {
+	local root lock owner epoch cl suffix
+	root="$(realpath -m -- "$XPF_WITH_CLUSTER_CANONICAL_ROOT")"
+	lock="$(realpath -m -- "$XPF_CLUSTER_LOCK")"
+	owner="$(realpath -m -- "$XPF_CLUSTER_OWNER")"
+	epoch="$(realpath -m -- "$XPF_CLUSTER_EPOCH")"
+	for cl in loss tcp udp; do
+		suffix="-${cl}"
+		[[ "$cl" == loss ]] && suffix=
+		if [[ "$lock" == "${root}/xpf-cluster${suffix}.lock" &&
+			"$owner" == "${root}/xpf-cluster${suffix}.owner" &&
+			"$epoch" == "${root}/xpf-cluster-state/epoch${suffix}" ]]; then
+			printf '%s\n' "$cl"
+			return 0
+		fi
+	done
+	return 0
+}
+# Test mode is accepted only when `incus` resolves to a MOCK: not a compiled
+# binary and not the system incus (resolved from the standard system PATH).
+xpf_with_cluster_test_mode_ok() {
+	local mock sys
+	[[ "${XPF_WITH_CLUSTER_TEST_MODE:-}" == 1 ]] || return 1
+	mock="$(command -v incus 2>/dev/null)" || mock=
+	if [[ -z "$mock" || ! -f "$mock" ]]; then
+		echo "[with-cluster] REFUSED: XPF_WITH_CLUSTER_TEST_MODE=1 needs a mocked incus on PATH, and none resolves (#19165)" >&2
+		return 1
+	fi
+	mock="$(realpath -- "$mock")"
+	sys="$(PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin && hash -r && command -v incus 2>/dev/null)" || sys=
+	if [[ -n "$sys" && "$mock" == "$(realpath -- "$sys")" ]] || [[ "$(head -c 4 -- "$mock" 2>/dev/null)" == $'\x7fELF' ]]; then
+		echo "[with-cluster] REFUSED: XPF_WITH_CLUSTER_TEST_MODE=1 but incus resolves to a real binary (${mock}), not a mock (#19165)" >&2
+		return 1
+	fi
+	return 0
+}
+if [[ "${XPF_WITH_CLUSTER_TEST_MODE:-}" == 1 && -n "${XPF_WITH_CLUSTER_TEST_ROOT:-}" ]]; then
+	xpf_with_cluster_test_mode_ok || exit 2
+	XPF_WITH_CLUSTER_CANONICAL_ROOT="$XPF_WITH_CLUSTER_TEST_ROOT"
+fi
+LOCK_CLUSTER="$(xpf_with_cluster_tuple_cluster)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 lock_env_refuse() {
 	echo "[with-cluster] REFUSED: $*; the wrapper would act on firewalls the lock does not cover. Use the lock tuple and BPFRX_CLUSTER_ENV of the same cluster, or leave BPFRX_CLUSTER_ENV unset (#19165)" >&2
@@ -115,6 +158,16 @@ fi
 # code-r1 F1). Cells are processes by contract.
 if xpf_cluster_lock_held; then
 	exec env -- "$@"
+fi
+
+# #19165: past this point the wrapper acts on instances (the build probe, the
+# VM-target guard). A tuple that is not one of the three canonical ones names
+# no cluster; refuse it unless this is a hermetic selftest with a mock incus.
+# (The reentrant case above does no wrapper action of its own.)
+if [[ -z "$LOCK_CLUSTER" ]] &&
+	{ [[ "$XPF_WITH_CLUSTER_CANONICAL_ROOT" != /var/worktrees/.cache/tmpdir ]] || ! xpf_with_cluster_test_mode_ok; }; then
+	echo "[with-cluster] REFUSED: lock tuple (XPF_CLUSTER_LOCK=${XPF_CLUSTER_LOCK} XPF_CLUSTER_OWNER=${XPF_CLUSTER_OWNER} XPF_CLUSTER_EPOCH=${XPF_CLUSTER_EPOCH}) is not one of the canonical loss/tcp/udp tuples under ${XPF_WITH_CLUSTER_CANONICAL_ROOT}; the wrapper cannot tell which cluster it covers. Export all three paths of ONE cluster's tuple (CLAUDE.md) (#19165)" >&2
+	exit 2
 fi
 
 # #19165: this cell's OWN targets, resolved before the lock is taken from the

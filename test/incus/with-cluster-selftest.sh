@@ -41,6 +41,9 @@ export XPF_CLUSTER_EPOCH="$T/epoch"
 # samples it at acquire/release; these cases are about the LOCK).
 export XPF_CLUSTER_BUILD_PROBE=0
 export XPF_CLUSTER_OWNER="$T/owner"
+# #19165: a private lock tuple is refused unless the caller declares itself a
+# hermetic selftest with a mock incus on PATH (the stub above).
+export XPF_WITH_CLUSTER_TEST_MODE=1
 
 PASS=0
 ok()   { PASS=$((PASS + 1)); echo "PASS ($PASS): $*"; }
@@ -206,27 +209,32 @@ XPF_CLUSTER_LOCK_TIMEOUT=99999999999999999999 "$WC" "case-j huge" -- true \
 ok "timeout env normalizes base-10 and degrades absurd values safely"
 
 # ── #19165: the wrapper's OWN targets come from the held lock's cluster.
-#    wc_cell <tag> <lock-cluster> [VAR=val ...] -- <cmd...>: one cell under
-#    that cluster's canonical lock name in $T/<tag>, with the build probe ON
-#    and every incus call logged to $T/<tag>/incus.log; prints the status.
+#    wc_cell <tag> <loss|tcp|udp> [-u VAR ...] [VAR=val ...] -- <cmd...>: one
+#    cell whose lock tuple is that cluster's CANONICAL tuple laid out under the
+#    private test root $T/<tag> (XPF_WITH_CLUSTER_TEST_ROOT), with the build
+#    probe ON and every incus call logged to $T/<tag>/incus.log; prints the
+#    status. VAR=val entries come after the default tuple, so a cell can
+#    override any of its paths.
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 UDP_ENV="${REPO_ROOT}/test/incus/udp-userspace-cluster.env"
 LOSS_ENV="${REPO_ROOT}/test/incus/loss-userspace-cluster.env"
 wc_cell() {
-	local tag=$1 cl=$2; shift 2
-	local -a vars=()
-	while [[ $# -gt 0 && "$1" != -- ]]; do vars+=("$1"); shift; done
+	local tag=$1 cl=$2 sfx=; shift 2
+	[[ "$cl" == loss ]] || sfx="-$cl"
+	local -a opts=() vars=()
+	while [[ $# -gt 0 && "$1" != -- ]]; do
+		if [[ "$1" == -u ]]; then opts+=("$1" "$2"); shift 2; else vars+=("$1"); shift; fi
+	done
 	shift
-	mkdir -p "$T/$tag"
+	mkdir -p "$T/$tag/xpf-cluster-state"
 	set +e
-	env "${vars[@]}" XPF_CLUSTER_LOCK="$T/$tag/xpf-cluster-${cl}.lock" XPF_CLUSTER_OWNER="$T/$tag/owner" \
-		XPF_CLUSTER_EPOCH="$T/$tag/epoch" XPF_CLUSTER_BUILD_PROBE=1 INCUS_CALL_LOG="$T/$tag/incus.log" \
+	env "${opts[@]}" XPF_WITH_CLUSTER_TEST_ROOT="$T/$tag" XPF_CLUSTER_LOCK="$T/$tag/xpf-cluster${sfx}.lock" \
+		XPF_CLUSTER_OWNER="$T/$tag/xpf-cluster${sfx}.owner" XPF_CLUSTER_EPOCH="$T/$tag/xpf-cluster-state/epoch${sfx}" \
+		XPF_CLUSTER_BUILD_PROBE=1 INCUS_CALL_LOG="$T/$tag/incus.log" "${vars[@]}" \
 		"$WC" "case-$tag" -- "$@" >"$T/$tag.out" 2>&1
 	echo $?
 	set -e
 }
-# wrapper_touched <tag>: the instances the wrapper's own guard and build probe
-# addressed (the command below touches none).
 wrapper_touched() { sed -E 's/(loss|tcp|udp): /\1:/g' "$T/$1/incus.log" 2>/dev/null | grep -oE '(loss|tcp|udp):[a-z0-9-]+|xpf-fw[01]' | sort -u | tr '\n' ' '; }
 # (k) the INCIDENT: a udp lock tuple with BPFRX_CLUSTER_ENV unset. The guard
 #     and probe now act on udp only, and the command gets the udp env file.
@@ -257,5 +265,34 @@ rc=$(wc_cell n2 udp BPFRX_CLUSTER_ENV= -- touch "$T/n2/ran")
 rc=$(cd "$REPO_ROOT" && wc_cell o udp BPFRX_CLUSTER_ENV=test/incus/udp-userspace-cluster.env -- touch "$T/o/ran")
 [[ $rc -eq 0 && -e "$T/o/ran" ]] || fail "(o) relative udp env path: rc=$rc: $(tr '\n' '|' <"$T/o.out")"
 ok "#19165: the wrapper's own guard and probe act on the held lock's cluster only (incident shape, mismatched env refused, inherited overrides ignored, legacy local pairing, relative env path)"
+# (p) a tuple that is not one of the three canonical ones names no cluster and
+#     is refused before the wrapper's first incus action (codex-c: a basename
+#     like xpf-cluster-loss.lock is NOT loss's mutex xpf-cluster.lock).
+#     p0: outside test mode, a private path; the test root is NOT honoured
+#     there, so even a canonical layout under it is refused.
+#     p1: under the test root, loss's look-alike basename.
+#     p2: a mixed tuple (udp lock, loss owner and epoch).
+#     p3: the right basename in another directory.
+p_refused() { # <tag> <rc>: refused, nothing run, no incus call, no owner
+	[[ $2 -eq 2 && ! -e "$T/$1/ran" && -z "$(wrapper_touched "$1")" && ! -s "$T/$1/xpf-cluster.owner" && ! -s "$T/$1/xpf-cluster-udp.owner" ]] &&
+		grep -q 'REFUSED: lock tuple .* is not one of the canonical loss/tcp/udp tuples' "$T/$1.out"
+}
+rc=$(wc_cell p0 loss XPF_WITH_CLUSTER_TEST_MODE= -- touch "$T/p0/ran")
+p_refused p0 "$rc" || fail "(p0) canonical layout under a test root, outside test mode: rc=$rc touched=[$(wrapper_touched p0)]: $(tr '\n' '|' <"$T/p0.out")"
+rc=$(wc_cell p1 loss XPF_CLUSTER_LOCK="$T/p1/xpf-cluster-loss.lock" -- touch "$T/p1/ran")
+p_refused p1 "$rc" || fail "(p1) xpf-cluster-loss.lock: rc=$rc touched=[$(wrapper_touched p1)]: $(tr '\n' '|' <"$T/p1.out")"
+rc=$(wc_cell p2 udp XPF_CLUSTER_OWNER="$T/p2/xpf-cluster.owner" XPF_CLUSTER_EPOCH="$T/p2/xpf-cluster-state/epoch" -- touch "$T/p2/ran")
+p_refused p2 "$rc" || fail "(p2) mixed udp/loss tuple: rc=$rc touched=[$(wrapper_touched p2)]: $(tr '\n' '|' <"$T/p2.out")"
+mkdir -p "$T/p3/elsewhere"
+rc=$(wc_cell p3 udp XPF_CLUSTER_LOCK="$T/p3/elsewhere/xpf-cluster-udp.lock" -- touch "$T/p3/ran")
+p_refused p3 "$rc" || fail "(p3) canonical basename, other directory: rc=$rc touched=[$(wrapper_touched p3)]: $(tr '\n' '|' <"$T/p3.out")"
+# (q) test mode is accepted only with a MOCK incus: a compiled binary named
+#     incus first on PATH is refused before anything runs or is locked.
+mkdir -p "$T/q/bin" && cp "$(type -P true)" "$T/q/bin/incus"
+rc=$(wc_cell q udp PATH="$T/q/bin:$PATH" -- touch "$T/q/ran")
+[[ $rc -eq 2 && ! -e "$T/q/ran" && ! -s "$T/q/xpf-cluster-udp.owner" ]] &&
+	grep -q 'incus resolves to a real binary' "$T/q.out" ||
+	fail "(q) test mode with a compiled incus: rc=$rc: $(tr '\n' '|' <"$T/q.out")"
+ok "#19165: only the three canonical lock tuples map to a cluster; any other tuple is refused before an incus action, and test mode needs a mock incus"
 
 echo "ALL ${PASS} CASES PASS"

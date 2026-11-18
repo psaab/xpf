@@ -365,7 +365,7 @@ run_case() {
 	if FBF_FAKE_SCENARIO="$scenario" FBF_FAKE_STATE_DIR="$state" \
 		XPF_CLUSTER_LOCK="${state}/cluster.lock" XPF_CLUSTER_OWNER="${state}/cluster.owner" \
 		XPF_CLUSTER_EPOCH="${state}/cluster.epoch" XPF_CLUSTER_EPOCH_STATE_DIR="$state" \
-		XPF_CLUSTER_BUILD_PROBE=0 FBF_FAILOVER_DEADLINE=1 \
+		XPF_CLUSTER_BUILD_PROBE=0 XPF_WITH_CLUSTER_TEST_MODE=1 FBF_FAILOVER_DEADLINE=1 \
 		PATH="${TMP_DIR}/bin:${PATH}" bash "$HARNESS" >"$output" 2>&1; then
 		rc=0
 	else

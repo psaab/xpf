@@ -334,6 +334,9 @@ export XPF_CLUSTER_EPOCH="$T/epoch"
 # samples it at acquire/release; these cases are about the LOCK).
 export XPF_CLUSTER_BUILD_PROBE=0
 export XPF_CLUSTER_OWNER="$T/owner"
+# #19165: with-cluster.sh refuses a non-canonical lock tuple unless the caller
+# is a hermetic selftest with a mock incus on PATH (the fake below).
+export XPF_WITH_CLUSTER_TEST_MODE=1
 
 # Fake `incus` on PATH: succeeds so the helper's incus-admin sg branch
 # is never taken (keeps the test hermetic — no group juggling, no real
