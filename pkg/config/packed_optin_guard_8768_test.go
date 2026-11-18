@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -96,7 +97,157 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 		"filter f2 { term t0 { then accept; } } } " +
 		"family inet6 { filter f6 { term t0 { then accept; } } " +
 		"filter f7 { term t0 { then accept; } } } } "
+	// #18847 (lane T): nine containers had opted in with no fixture here.
+	// Each reader marshals the WHOLE owning section, so any divergence
+	// between the packed and braced arms is visible, not just a chosen field.
+	ifc18847 := "interfaces { ge-0/0/1 { unit 0 { family inet { address 192.0.2.1/24; } family inet6 { address 2001:db8:1::1/64; } } } " +
+		"ge-0/0/2 { unit 0 { family inet { address 198.51.100.1/24; } family inet6 { address 2001:db8:2::1/64; } } } } "
+	js18847 := func(v interface{}) string {
+		b, err := json.Marshal(v)
+		if err != nil {
+			return "<marshal " + err.Error() + ">"
+		}
+		return string(b)
+	}
 	return map[string]packedOptInCase8768{
+		// #9553 opted the relay containers in.
+		"forwarding-options/dhcp-relay": {
+			prefix: ifc18847 + "forwarding-options { ",
+			open:   "dhcp-relay",
+			closer: " }",
+			stmts: map[string]string{
+				"server-group":        "server-group sg1 192.0.2.10",
+				"active-server-group": "active-server-group sg1",
+				"group":               "group g1 interface ge-0/0/1.0",
+			},
+			second: map[string]string{
+				"server-group":        "server-group sg2 192.0.2.11",
+				"active-server-group": "active-server-group sg2",
+				"group":               "group g2 interface ge-0/0/2.0",
+			},
+			read: func(c *Config) string { return js18847(c.ForwardingOptions.DHCPRelay) },
+		},
+		"forwarding-options/dhcp-relay/group": {
+			prefix: ifc18847 + "forwarding-options { dhcp-relay { server-group sg1 { 192.0.2.10; } server-group sg2 { 192.0.2.11; } ",
+			open:   "group g1",
+			closer: " } }",
+			stmts: map[string]string{
+				"active-server-group": "active-server-group sg1",
+				"interface":           "interface ge-0/0/1.0",
+			},
+			second: map[string]string{
+				"active-server-group": "active-server-group sg2",
+				"interface":           "interface ge-0/0/2.0",
+			},
+			read: func(c *Config) string { return js18847(c.ForwardingOptions.DHCPRelay) },
+		},
+		"forwarding-options/dhcp-relay/dhcpv6/group": {
+			prefix: ifc18847 + "forwarding-options { dhcp-relay { dhcpv6 { server-group s6 { 2001:db8::10; } server-group s7 { 2001:db8::11; } ",
+			open:   "group g6",
+			closer: " } } }",
+			// A v6 relay group compiles to NOTHING without its active server
+			// group (measured: V6 stays nil), so it rides in both arms.
+			always: "active-server-group s6",
+			stmts: map[string]string{
+				"interface": "interface ge-0/0/1.0",
+			},
+			second: map[string]string{
+				"interface": "interface ge-0/0/2.0",
+			},
+			read: func(c *Config) string {
+				// "" is ABSENT to the always-requirement check.
+				if c.ForwardingOptions.DHCPRelay == nil || c.ForwardingOptions.DHCPRelay.V6 == nil {
+					return ""
+				}
+				return js18847(c.ForwardingOptions.DHCPRelay.V6)
+			},
+		},
+		// #15691 opted the DHCP server pools in.
+		"system/services/dhcp-local-server/group/pool": {
+			prefix: "system { services { dhcp-local-server { group g1 { ",
+			open:   "pool p1",
+			closer: " } } } }",
+			stmts: map[string]string{
+				"dns-server":     "dns-server 10.0.0.53",
+				"static-binding": "static-binding 00:11:22:33:44:55 fixed-address 10.0.0.50",
+			},
+			second: map[string]string{
+				"dns-server":     "dns-server 10.0.0.54",
+				"static-binding": "static-binding 00:11:22:33:44:66 fixed-address 10.0.0.51",
+			},
+			read: func(c *Config) string { return js18847(c.System.DHCPServer) },
+		},
+		"system/services/dhcpv6-local-server/group/pool": {
+			prefix: "system { services { dhcpv6-local-server { group g1 { ",
+			open:   "pool p1",
+			closer: " } } } }",
+			stmts: map[string]string{
+				"dns-server":     "dns-server 2001:db8::53",
+				"static-binding": "static-binding 00:11:22:33:44:55 fixed-address 2001:db8:10::50",
+			},
+			second: map[string]string{
+				"dns-server":     "dns-server 2001:db8::54",
+				"static-binding": "static-binding 00:11:22:33:44:66 fixed-address 2001:db8:10::51",
+			},
+			read: func(c *Config) string { return js18847(c.System.DHCPServer) },
+		},
+		// #15672 named address books.
+		"security/address-book/*": {
+			prefix: "security { address-book { ",
+			open:   "b1",
+			closer: " } }",
+			stmts: map[string]string{
+				"address":     "address a1 10.0.0.1/32",
+				"address-set": "address-set s1 address a1",
+			},
+			second: map[string]string{
+				"address":     "address a2 10.0.0.2/32",
+				"address-set": "address-set s2 address a1",
+			},
+			read: func(c *Config) string { return js18847(c.Security.NamedAddressBooks) },
+		},
+		// Unit filter bindings.
+		"interfaces/*/unit/family/inet/filter": {
+			prefix: fwFilters + "interfaces { ge-0/0/0 { unit 0 { family inet { ",
+			open:   "filter",
+			closer: " } } } }",
+			stmts: map[string]string{
+				"input":  "input f1",
+				"output": "output f2",
+			},
+			second: map[string]string{
+				"input":  "input f2",
+				"output": "output f1",
+			},
+			read: func(c *Config) string { return js18847(c.Interfaces) },
+		},
+		"interfaces/*/unit/family/inet6/filter": {
+			prefix: fwFilters + "interfaces { ge-0/0/0 { unit 0 { family inet6 { ",
+			open:   "filter",
+			closer: " } } } }",
+			stmts: map[string]string{
+				"input":  "input f6",
+				"output": "output f7",
+			},
+			second: map[string]string{
+				"input":  "input f7",
+				"output": "output f6",
+			},
+			read: func(c *Config) string { return js18847(c.Interfaces) },
+		},
+		// #16865 opted `family iso` in for its NET `address`. (iso, address)
+		// is NOT admitted to the compact-normalize scope, so this guard has
+		// no admitted leaf to compare here, and a fixture for a non-admitted
+		// leaf would be a false claim of coverage (see stmts above). The
+		// packed and braced `family iso address` spellings are pinned by
+		// isis_net_lo0_16865_test.go instead.
+		"interfaces/*/unit/family/iso": {
+			prefix: "interfaces { lo0 { unit 0 { family ",
+			open:   "iso",
+			closer: " } } }",
+			stmts:  map[string]string{},
+			read:   func(c *Config) string { return js18847(c.Interfaces) },
+		},
 		"interfaces/*/unit/family/inet": {
 			prefix: fwFilters + "interfaces { ge-0/0/0 { unit 0 { ",
 			open:   "family inet",
@@ -480,6 +631,8 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				"key":             "key 42",
 				"ttl":             "ttl 64",
 				"keepalive-retry": "keepalive-retry 3",
+				// #18847: admitted since; a flag, so no second instance.
+				"clear-dont-fragment-bit": "clear-dont-fragment-bit",
 			},
 			second: map[string]string{
 				"source":          "source 10.0.0.9",
@@ -502,6 +655,8 @@ func packedOptInCases8768() map[string]packedOptInCase8768 {
 				"key":             "key 42",
 				"ttl":             "ttl 64",
 				"keepalive-retry": "keepalive-retry 3",
+				// #18847: admitted since; a flag, so no second instance.
+				"clear-dont-fragment-bit": "clear-dont-fragment-bit",
 			},
 			second: map[string]string{
 				"source":          "source 10.0.0.9",
@@ -1162,6 +1317,19 @@ func TestPackedOptInHoldsForEveryLeafPair8768(t *testing.T) {
 		//
 		// So this head is strictly BETTER than master here and still unequal.
 		// Recorded as diverging, not as fixed.
+		//
+		// #18847 (lane T): the relay `group` is args:1 WITH children, so a
+		// packed dhcp-relay run cannot be cut through it and the group's multi
+		// `interface` absorbs the rest. Measured at this branch, whose
+		// dhcp-relay code is master's:
+		//
+		//	packed  dhcp-relay group g1 interface ge-0/0/1.0 server-group sg1 192.0.2.10;
+		//	          -> group g1 Interfaces=[ge-0/0/1.0 server-group sg1 192.0.2.10], no server group
+		//	braced  -> server group sg1 [192.0.2.10]; group g1 Interfaces=[ge-0/0/1.0]
+		//
+		// Delete with the d2 nested-elision work, like the entries above.
+		"forwarding-options/dhcp-relay group+server-group":        true,
+		"forwarding-options/dhcp-relay group+active-server-group": true,
 	}
 	sawDivergence := map[string]bool{}
 
@@ -1778,8 +1946,8 @@ func tunnelRead8904(perUnit bool) func(*Config) string {
 					out += "|<nil>"
 					continue
 				}
-				out += fmt.Sprintf("|src=%s dst=%s mode=%s key=%d ttl=%d kar=%d",
-					tn.Source, tn.Destination, tn.Mode, tn.Key, tn.TTL, tn.KeepaliveRetry)
+				out += fmt.Sprintf("|src=%s dst=%s mode=%s key=%d ttl=%d kar=%d cdf=%v",
+					tn.Source, tn.Destination, tn.Mode, tn.Key, tn.TTL, tn.KeepaliveRetry, tn.ClearDontFragmentBit)
 			}
 		}
 		return out
