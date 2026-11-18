@@ -4164,144 +4164,110 @@ Gated end-to-end on `set chassis cluster dhcp-lease-synchronization`
 (`config.ClusterConfig.DHCPLeaseSync`); standalone / knob-off renders the Kea
 config bit-identical to pre-#2239 (no control-socket, no hook).
 
-## RETH member-shim debt (#19140)
+## RETH member-shim debt and the peer-driven takeover (#19140)
 
-`RethMemberShimMonitorIface` (`__reth-member-shim__`) is the election debt the
-daemon installs on a data RG whose RETH member has positively lost its XDP
-shim (`pkg/daemon/README.md`, "A primary whose RETH data member lost its XDP
-shim yields the RG"). The link stays up, so the interface monitor charges
-nothing, and #19110 readiness gates only a standby's promotion. Without this
-debt, a primary at full weight black-holed that member's transit
-indefinitely.
+`RethMemberShimMonitorIface` (`__reth-member-shim__`) is the debt the daemon
+installs on a data RG whose RETH member has positively lost its XDP shim
+(`pkg/daemon/README.md`, "A RETH data member that lost its XDP shim: the peer
+takes the RG"). The link stays up, so the interface monitor charges nothing,
+and #19110 readiness gates only a standby's promotion. Without this debt, a
+primary at full weight black-holed that member's transit indefinitely.
 
-- **Cost `RethMemberShimMonitorCost` = 254, the arm floor.** It joins the
-  floor MAX group in `monitorDebtTotalLocked`, with the dataplane-arm and
-  startup-sync debts, so it composes to weight 1 and never stacks to 0. A
-  lone owner keeps the RG; one broken RETH member must not resign every RETH
-  and RG0. It is in `reservedMonitorNames`, so a config apply's monitor
-  reconcile cannot drop it.
-- **The #12164 yield is keyed on FLOOR debt.** `floorDebtLocked` is arm debt
-  plus member-shim debt. It is used by the preempt yield
-  (`verifiedArmDebtPeer`), the non-preempt yield and the committed-transfer
-  pin release. A charged owner yields only to a peer with GREATER raw weight
-  that wins the scaled ordering and holds a live echo lease.
-- **The receiver-side sticky hold stays keyed on ARM debt only.** When the
-  new owner is charged too, both nodes are at the floor and equally broken.
-  Releasing the hold would let raw preempt move the RG back for nothing.
-  Cell `TestMemberShimBothChargedAfterYieldStays19140`.
-- **The member-shim yield needs the peer's readiness (`floorYieldDebtLocked`).**
-  The heartbeat's `takeoverReady` is weight-only, and a peer can be not-ready
-  at weight 255 for a reason that installs no floor debt. Several such reasons
-  leave it unable to forward the RG, or a whole RETH of it (table below). So
-  each heartbeat carries a MAC-covered `XPFR` readiness section
-  (`heartbeat_wire.go`). It holds the sender's readiness-evaluation stamp
-  (fold 2, below), then a 256-bit bitmap of the data RGs whose `rg.Ready` is
-  false on the sender, never RG0. A sender of this build emits it on EVERY
-  frame, so its absence means an older sender.
-  - The receiver records it per frame (`PeerGroupState.takeoverNotReady`): a
-    frame without it clears it, and peer loss drops it.
-  - A member-shim owner yields only to a peer that does not flag the RG.
-  - **The readiness must come from an EVALUATION that started after the
-    charge** (fold 2). A yield on readiness older than the charge hands the
-    RG to a peer that may already be not-ready, and three orderings were
-    found:
-    - the charge's own election runs against the peer's last installed
-      frame;
-    - a frame the peer BUILT before its not-ready edge ARRIVES after the
-      charge. A later receipt proves nothing (codex-d), and HMAC and
-      anti-replay admit such a frame;
-    - a frame the peer built AFTER receiving a post-charge heartbeat still
-      copies its CACHED `rg.Ready`, which only its daemon's reconcile pass
-      (about 2 s) refreshes. So a valid post-charge echo can carry a
-      pre-charge value (codex-c, and r23's P3-A). The consequence is worse
-      than a degraded handoff. The peer promotes NORMALLY on the stale
-      value, its arm debt then ties it at the floor with this node, nothing
-      moves (#12164 needs a heavier peer, and the sticky hold holds), and
-      the WHOLE RG black-holes, where before only one RETH member was
-      broken.
+**The owner only carries the debt.** It never yields on it.
+- **No weight.** `monitorDebtTotalLocked` skips the key, so the RG keeps its
+  weight (`RethMemberShimMonitorCost` = 1 only marks the debt present). It is
+  NOT the arm floor: election treats a peer at weight 1 as unable to serve and
+  promotes over it whatever its own readiness ("peer yielded at the arm-debt
+  floor", `peerYieldedOwnership`, the committed-pin release). A cell built at
+  weight 1 promoted an UNREADY requester after an aborted transfer, with no
+  commit. That is the handoff this design removes.
+- **Visible.** It stays in the RG's monitor failures (`show chassis cluster
+  status`), and it is in `reservedMonitorNames`, so a config apply's monitor
+  reconcile cannot drop it. The #8338 survival cell judges every reserved debt
+  by its PRESENCE in the monitor failures as well as by weight: weight alone
+  cannot see a weightless debt being deleted.
+- **On the wire.** Every heartbeat carries one reserved monitor entry per
+  charged RG (`memberShimWireMonitorsLocked`), placed with the planned-shutdown
+  markers ahead of the #14704 monitor cap. An older receiver lists it as a down
+  peer monitor and does nothing else with it.
 
-    The fix is CAUSAL, with no time constant:
-    - the daemon's readiness pass calls `BeginReadinessEvaluation` BEFORE it
-      computes anything. That captures the latest heartbeat of ours the
-      peer has received;
-    - after every RG's `SetRGReady`, the pass calls
-      `CompleteReadinessEvaluation`;
-    - from then on, the XPFR section carries that stamp
-      (`ReadinessEvalSeq`), but only while the frame echoes the same
-      session;
-    - the charge records this node's heartbeat sequence
-      (`memberShimChargedAtSeq`, from `hbCounter`), and the yield needs the
-      peer's stamp past it, in the session its frame echoes, with the RG
-      unflagged (`memberShimPeerReadyAfterChargeLocked`).
+**The healthy peer requests the RG** (`member_shim_takeover_19140.go`). After
+each admitted peer heartbeat's election, next to the #18715 retry, a node
+evaluates one chain per RG:
+- **The episode** (the chain lives while it holds): the peer is alive, its
+  latest frame carries the marker for the RG, and this node is not primary for
+  it. When it ends, the chain ends.
+- **The request** goes only when this node is SECONDARY with no operator or
+  upgrade hold, the peer is PRIMARY, this node carries NO member-shim debt of
+  its own and is above the arm floor (no arm debt, startup-sync hold or worse),
+  it is takeover-ready (the matured `IsReadyForTakeover` gate), no aborted
+  transfer is pending (#18715 owns that), and no transfer is in progress.
+- **Through the ordinary transfer** (`requestPeerFailover`, not as an operator
+  command): the live transfer-readiness callback at the reservation, the
+  #18559 make-before-break pre-activation, the owner's #5640 fence before its
+  applied ack, the commit-time readiness re-check, and the abort path. The node
+  about to take over judges its OWN readiness when it acts. Nothing the peer
+  advertises about readiness is read.
+- **Throttled.** A quiet period (two heartbeat timeouts) before the first
+  attempt, one attempt in flight, then 5 s doubling to 30 s after a refusal.
+  The backoff lives on the episode's chain, so a requester whose own readiness
+  flaps between attempts does not reset it. At the minimum spacing an attempt
+  costs the owner one transfer request, one session-sync barrier and one helper
+  `rg_active` write every 5 s, inside the control-socket budget.
+- **The owner's debt clearing mid-request.** Before anything is sent (the
+  reservation's admission), the attempt is abandoned and nothing reaches the
+  owner. Once the owner has fenced and acked, the transfer completes to the
+  ready requester: aborting would bounce the RG through the owner's fence
+  twice.
+- **An operator action** on the RG (any failover or reset, which moves its
+  operator epoch) ends the chain, and an in-flight attempt refuses to commit.
+  A new chain starts with a new quiet period.
+- **Peer loss or restart** ends every chain, with the other peer-incarnation
+  authority (`clearPeerIncarnationAuthorityLocked`). Removing the RG from the
+  config ends its chain in UpdateConfig's removal loop (the #8435 incarnation
+  boundary, which the struct-enumerating census enforces).
 
-    The peer's readiness VALUE therefore comes from an evaluation that
-    started after it received a post-charge heartbeat. The removed
-    mechanisms are not kept beside it: fold 1's receipt counter, and a
-    time-span hold tried on the way to this fix.
-  - **Residual: the member-shim reason is node-global** (r23 P3-1, #19176).
-    One shim-less or UNVERIFIED member on the peer makes `rg.Ready` false
-    for EVERY data RG, so a peer that could serve this RG still withholds
-    the yield. It fails safe: the incumbent keeps the RG. #19176 scopes the
-    reason per RG.
-  - **Member-shim debt stays at the floor** (r23 P2-1).
-    `monitorDebtTotalLocked` adds ordinary monitor debt to the floor MAX, so
-    member-shim (254) plus any partial interface or ip-monitor debt used to
-    reach weight 0. A lone owner then resigned, black-holing every RETH, and
-    with a peer the weight-0 resign bypassed this yield. When member-shim is
-    the only floor debt and the additive debt alone is below 255, the total
-    stops at 254 (weight 1). An additive debt of 255 on its own still
-    resigns. Cell: `TestMemberShimPlusPartialMonitorDebtStaysAtTheFloor19140`.
-  - Arm debt ignores the flag and keeps #12164's never-strands contract
-    (`TestNonPreemptArmDebtYieldNeverStrandsUnreadyPeer12164`): a node with
-    no armed dataplane forwards nothing.
-  - **Older peers.** An older peer sends no section, so there is no stamp to
-    check. It is held to the fold-1 echo rule (a frame echoing a post-charge
-    heartbeat) and reads as ready. A mixed-version pair therefore keeps the
-    #12164 behaviour: the yield goes, and a not-ready peer promotes degraded
-    through `peerYieldedOwnership`. The table below is that residual.
-  - **Why a section and not a reserved monitor entry.** An older receiver
-    would list a reserved monitor entry as a DOWN peer monitor, and the monitor
-    section is capped at 255 entries.
-  - **Compatibility.** The section sits after `XPFT`, before the fixed-tail
-    epoch and auth trailers, so older readers never parse it.
-  - **Frame size.** A maximal keyed frame (255 groups, all data RGs flagged,
-    the stamp, echo, clock, epoch, auth) is at most 1448 of the 1472-byte
-    bound before monitors: the 1440 measured for fold 1, plus the 8-byte
-    stamp.
+**Outcomes.**
+- Two equally broken nodes: neither requests, and the RG stays where it is.
+- A lone owner, or an owner whose peer predates #19140: no request, so the
+  owner keeps the RG, the conservative default.
+- An older owner sends no marker, so a new peer never requests.
+- A committed takeover is an ordinary completed transfer and pins both roles
+  (`transferCommitRolePinned`): the old owner stays secondary while the new
+  owner is primary, even under preempt and after its own debt clears. The RG
+  goes back by an operator reset or failover, or by this takeover running the
+  other way when the new owner is charged in turn. A debtor never preempts on
+  its own anyway: #19110 makes its shim-less member a readiness reason.
 
-  Cells: `readiness_section_19140_test.go`. They cover the round trip, the
-  real pre-section decoder, MAC coverage, the maximal frame, the sender
-  flagging data RGs only, the receiver's per-frame bit with RG0 ignored, and
-  the yield toward a flagged peer, an older peer and under arm debt, and after
-  the peer becomes ready. They also cover a charge that lands while the owner's
-  latest frame predates the peer's not-ready edge
-  (`stale-frame-at-charge-keeps`), and a frame built before that edge but
-  delivered after the charge
-  (`TestInFlightFrameFromBeforeTheEdgeCannotTakeTheRG19140`).
-
-| Peer not-ready reason (readiness-only: no floor debt, peer at weight 255) | Source | Class |
-|---|---|---|
-| `userspace helper not running` (intentional stop or respawn) | `pkg/dataplane/userspace/manager_ha.go:923` | 2: cannot forward the RG |
-| `helper not enabled`, `forwarding unsupported` | `manager_ha.go:926`, `:932` | 2 |
-| `forwarding not armed`, `dataplane not active` | `manager_ha.go:936`, `:939` | 2 |
-| `XSK liveness failed` / `not proven` | `manager_ha.go:942`, `:945` | 2 |
-| `HA state clear` / `replay pending` | `manager_ha.go:1005`, `:1008` | 2 (inferred: HA inventory not converged) |
-| `vip interface X not found` / `down` (direct mode) | `pkg/daemon/daemon_ha_vip.go:78`, `:82` | 2: that RETH |
-| interface-monitor `X missing` / `down` at a partial weight | `pkg/cluster/monitor.go:1756`, `:1762` | 2: that RETH |
-| legacy VRRP instance not built | `pkg/daemon/daemon_ha_userspace_readiness.go:253` | 2 |
-| the peer's own shim-less member, inside its 10 s grace | `missing_data_member_19110.go` readiness | 2: that RETH (transient) |
-| `fabric forwarding path not ready` | `pkg/daemon/daemon_ha.go:1669-1671` | 1: forwards locally |
-| session mirror, repair overflow, inventory debt, snapshot retry | `manager_ha.go:952`, `:965`, `:968`/`:972`, `:983`/`:988` | 1: forwards, state may be stale |
-
+**Residuals.**
+- **R1 (r23), now on the requester's own state.** The requester's readiness is
+  its own cached verdicts: a helper that wedges without exiting still reads
+  ready until its health detection notices, and a positive member verdict is
+  accepted up to `memberVerdictMaxAge` (3 s), as codex-d found. This is the
+  same gate an operator transfer uses, re-checked at the commit. It is no
+  longer a value advertised by another node. r23's R2 (the stamping pass's
+  window) went with the stamp.
+- **The requester's member-shim reason is node-global** (#19176). One
+  shim-less or unverified member on the requester makes `rg.Ready` false for
+  every data RG, so it requests none. It fails safe: the owner keeps the RG.
 - **The #18715 ownerless re-promotion guard stays arm-only.** A node with one
   broken RETH member reclaiming an ownerless RG beats leaving it ownerless;
   #19110 readiness still gates it.
 
-Cells: `member_shim_debt_19140_test.go`, E1 to E9 (yield to a healthy peer,
-two charged nodes do not move, never stranded, lone owner keeps, floor
-composition, the yield holds while the debt does, a healthy primary never
-yields to a charged standby and its healthy-standby twin, both charged after
-a yield stays, the committed-owner hand-back).
+**History.** Four rounds made the OWNER yield on the peer's advertised
+readiness (a received frame, then an echoed post-charge heartbeat, then an
+`XPFR` readiness section with an evaluation stamp). Each round moved the
+staleness one layer down, the last to the cached inputs of the evaluation
+itself. The user chose to remove the mechanism (`docs/log/19140.md`). The
+`XPFR` section never shipped, so it was removed without a compatibility shim.
+
+Cells: `member_shim_debt_19140_test.go`, P1 to P9. They drive two real
+Managers both ways through the #18715 transfer harness: the takeover as one
+transfer, the owner keeping the RG without a request (old requester, old
+owner), a charged requester never requesting, the requester's readiness
+(unready, refused live, lapsing after the ack), the owner recovering before
+the request, the backoff across a readiness flap, the takeover running the
+other way, a lone owner, and the debt moving no weight.
 
 ## A clamped monitor weight is visible to the operator (#6589)
 

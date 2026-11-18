@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"math"
 	"net"
-	"slices"
 	"sort"
 	"strconv"
 	"syscall"
@@ -643,25 +642,12 @@ func (m *Manager) buildHeartbeat() *HeartbeatPacket {
 		})
 	}
 
-	// #19140: every data RG whose takeover readiness is false. RG0 is never
-	// flagged: it carries no RETH and is never a member-shim yield target.
-	// Fold 2: the section rides on EVERY frame, with the stamp of the last
-	// readiness evaluation that started after this node received the peer
-	// session it echoes here (0 when none did).
-	pkt.ReadinessSection = true
-	if m.readyEvalSession != 0 && m.readyEvalSession == pkt.PeerHeartbeatSession {
-		pkt.ReadinessEvalSeq = m.readyEvalSeq
-	}
-	for _, rg := range m.groups {
-		if rg.GroupID != 0 && !rg.Ready {
-			pkt.TakeoverNotReady = append(pkt.TakeoverNotReady, wireRGID(rg.GroupID))
-		}
-	}
-	slices.Sort(pkt.TakeoverNotReady)
-
 	// #18540: the planned-shutdown resign markers go FIRST, so the
 	// monitor-section cap (#14704) can never truncate them away.
 	pkt.Monitors = append(pkt.Monitors, m.plannedShutdownWireMonitorsLocked()...)
+	// #19140: the member-shim debt markers, also ahead of the cap. The peer
+	// requests a marked RG it can serve; the marker itself moves nothing.
+	pkt.Monitors = append(pkt.Monitors, m.memberShimWireMonitorsLocked()...)
 	// Include local interface monitor statuses.
 	for _, ls := range localStatuses {
 		pkt.Monitors = append(pkt.Monitors, HeartbeatMonitor{
@@ -871,17 +857,10 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 		localSession = m.LocalProcessToken()
 		localSequence = m.hbCounter.Load()
 	}
-	var notReady map[uint8]bool // #19140: built once per frame, below
 	for _, g := range pkt.Groups {
 		// #8337: key by the LOCAL config id the wire byte resolves to, which is
 		// how every reader of m.peerGroups indexes it.
 		localID := m.localRGIDForWireByte(g.GroupID)
-		if notReady == nil {
-			notReady = make(map[uint8]bool, len(pkt.TakeoverNotReady))
-			for _, id := range pkt.TakeoverNotReady {
-				notReady[id] = true
-			}
-		}
 		peerSession, peerSequence := uint64(0), uint64(0)
 		peerEchoSession, peerEchoSequence := uint64(0), uint64(0)
 		if echoSupported {
@@ -921,9 +900,6 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 			heartbeatEchoLeaseUntil:   leaseUntil,
 			peerWasPrimaryThisSession: wasPrimary || NodeState(g.State) == StatePrimary,
 			takeoverReady:             int(g.Weight) > maxRedundancyGroupWeight-DataplaneArmMonitorCost,
-			takeoverNotReady:          localID != 0 && notReady[g.GroupID],
-			readinessAware:            pkt.ReadinessSection,
-			readinessEvalSeq:          pkt.ReadinessEvalSeq,
 		}
 	}
 	// Apply pending transfer-commit overrides + expire transfer-grace
@@ -968,6 +944,8 @@ func (m *Manager) handlePeerHeartbeat(pkt *HeartbeatPacket) {
 	// #18715: after the election has applied this frame, so the retry
 	// condition reads the post-election roles.
 	m.evaluateAbortedTransferRetriesLocked(now)
+	// #19140: same placement, same reason.
+	m.evaluateMemberShimTakeoversLocked(now)
 }
 
 // handlePeerTimeout is called when the peer heartbeat timeout expires.
@@ -1532,6 +1510,7 @@ func (m *Manager) clearPeerIncarnationAuthorityLocked(reason string) {
 	// Peer loss also ends every hold below, the drain pin included, so no
 	// ownerless prior hold is left to restore.
 	m.cancelAllAbortedTransferRetriesLocked(reason)
+	m.cancelAllMemberShimTakeoversLocked(reason) // #19140: same incarnation rule
 	clear(m.ownerlessPriorHolds)
 	for _, rg := range m.groups {
 		if rg.ManualFailover {

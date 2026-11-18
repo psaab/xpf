@@ -211,20 +211,6 @@ type Manager struct {
 	clusterID       int
 	groups          map[int]*RedundancyGroupState
 	monitorWeights  map[monitorKey]int // per-RG per-interface monitor weights
-	// memberShimChargedAtSeq is, per RG charged with the #19140 RETH
-	// member-shim debt, this node's heartbeat sequence (hbCounter) when the
-	// debt was installed. The member-shim yield reads the peer's readiness
-	// only from a frame that ECHOES a later local sequence: the peer built it
-	// after receiving a heartbeat this node sent after the charge
-	// (floorYieldDebtLocked). Guarded by mu.
-	memberShimChargedAtSeq map[int]uint64
-	// readyEvalSession/readyEvalSeq stamp this node's last COMPLETED
-	// readiness evaluation with the peer heartbeat (session, sequence) it had
-	// received when that evaluation started (#19140 fold 2). buildHeartbeat
-	// sends the sequence in the XPFR section while it echoes that session.
-	// Guarded by mu.
-	readyEvalSession uint64
-	readyEvalSeq     uint64
 	// Advances on local RG creation and every primary-role transition; guarded by mu.
 	mastershipGen   uint64
 	mu              sync.RWMutex
@@ -907,6 +893,13 @@ type Manager struct {
 	// abortedTransferRetryLaunchFn starts one retry attempt; nil runs it on
 	// its own goroutine. Tests capture it to run attempts deterministically.
 	abortedTransferRetryLaunchFn func(func())
+	// memberShimTakeovers is the requester-side #19140 chain, one per RG:
+	// this healthy node requests an RG its peer owns with RETH member-shim
+	// debt (member_shim_takeover_19140.go). Under m.mu.
+	memberShimTakeovers map[int]*memberShimTakeover
+	// memberShimTakeoverLaunchFn starts one attempt; nil runs it on its own
+	// goroutine. Tests capture it to run attempts deterministically.
+	memberShimTakeoverLaunchFn func(func())
 
 	// stopped is set by Stop() to mark the manager quiesced. It guards the
 	// per-RG hold-timer closure (readiness.go) so a takeover-hold timer that

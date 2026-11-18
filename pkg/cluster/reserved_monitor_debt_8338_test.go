@@ -37,16 +37,25 @@ func TestReservedMonitorDebtSurvivesConfigCommit8338(t *testing.T) {
 			// exactly what `applyTransitElectionDebt(false, false)` does. The helper
 			// crash-loop debt uses its full resignation cost.
 			cost := DataplaneArmMonitorCost
-			if iface == HelperCrashLoopMonitorIface {
+			switch iface {
+			case HelperCrashLoopMonitorIface:
 				cost = HelperCrashLoopMonitorCost
+			case RethMemberShimMonitorIface:
+				cost = RethMemberShimMonitorCost
 			}
 			m.SetMonitorWeight(0, iface, true, cost)
 			before := m.GroupStates()
-			if len(before) == 0 || before[0].Weight == 255 {
+			// #19140: "installed" is the debt's PRESENCE in the RG's monitor
+			// failures. The member-shim debt is a marker that moves no
+			// weight, so for it a weight comparison would pass with the
+			// debt deleted. Every other reserved debt must ALSO lower the
+			// weight, as before.
+			if len(before) == 0 || !listedFailure8338(before[0], iface) ||
+				(iface != RethMemberShimMonitorIface && before[0].Weight == 255) {
 				t.Fatalf("precondition: the debt must be INSTALLED before the commit "+
-					"(weight %v). A fixture that commits without it, or while armed, "+
+					"(listed=%v weight %v). A fixture that commits without it, or while armed, "+
 					"passes on the broken code by having nothing to delete",
-					before[0].Weight)
+					len(before) > 0 && listedFailure8338(before[0], iface), before[0].Weight)
 			}
 			penalised := before[0].Weight
 
@@ -55,6 +64,11 @@ func TestReservedMonitorDebtSurvivesConfigCommit8338(t *testing.T) {
 			drainEvents(m, 8)
 
 			after := m.GroupStates()
+			if !listedFailure8338(after[0], iface) {
+				t.Fatalf("reserved monitor debt %q was wiped by an unrelated config "+
+					"commit: it is no longer listed in the RG's monitor failures %v (#8338)",
+					iface, after[0].MonitorFails)
+			}
 			if after[0].Weight != penalised {
 				t.Fatalf("reserved monitor debt %q was wiped by an unrelated config "+
 					"commit: weight %d -> %d. The node still carries the condition the "+
@@ -64,6 +78,16 @@ func TestReservedMonitorDebtSurvivesConfigCommit8338(t *testing.T) {
 			}
 		})
 	}
+}
+
+// listedFailure8338 reports whether iface is among rg's monitor failures.
+func listedFailure8338(rg RedundancyGroupState, iface string) bool {
+	for _, f := range rg.MonitorFails {
+		if f == iface {
+			return true
+		}
+	}
+	return false
 }
 
 // #8338 OVER-CORRECTION CONTROL, and it is the one that matters most: getting

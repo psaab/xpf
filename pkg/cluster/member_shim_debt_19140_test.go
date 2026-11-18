@@ -1,56 +1,128 @@
 package cluster
 
 import (
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/psaab/xpf/pkg/config"
 )
 
-// #19140: the RETH member-shim debt sits at the arm floor (weight 1, never 0)
-// and joins the #12164 floor-debt yield. These cells pin the election side:
-// E1 a charged primary yields to a healthy ready peer; E2 two charged nodes do
-// not move; E3 (readiness_section_19140_test.go) a flagged not-ready peer gets
-// no yield, an older peer the #12164 behaviour;
-// E4 a lone owner keeps it; E5 arm and member-shim debt compose to weight 1, not 0; E6 the yielded
-// RG is not re-taken by raw-priority preempt while the debt holds; E7 a healthy
-// primary never yields to a charged standby, and a healthy standby still
-// preempts normally.
+// #19140: peer-driven takeover. The owner only CARRIES its member-shim debt
+// (a reserved heartbeat marker, no weight). A healthy secondary that sees
+// the marker requests the RG through the ordinary transfer protocol, on its own
+// readiness at the moment it acts. These cells drive two real Managers wired
+// both ways through the #18715 transfer harness (retryPair18715), so either
+// node can request and every request runs requestPeerFailover end to end.
 
-func memberShimPair19140(t *testing.T, preempt bool, ownerPri, peerPri int) (owner, peer *Manager) {
+// shimPair19140 is node 0 (a, the initial owner at the higher priority) and
+// node 1 (b). ab carries b's requests to a; ba carries a's requests to b.
+type shimPair19140 struct {
+	t      *testing.T
+	a, b   *Manager
+	ab, ba *retryPair18715
+	// stripAMarker drops a's member-shim marker from the frames b receives:
+	// an owner that predates #19140.
+	stripAMarker bool
+}
+
+func memberShimPair19140(t *testing.T, preempt bool, aPri, bPri int) (a, b *Manager) {
 	t.Helper()
 	cfg := &config.ClusterConfig{
 		ControlInterface: "em0",
 		RedundancyGroups: []*config.RedundancyGroup{{
-			ID: 1, Preempt: preempt, NodePriorities: map[int]int{0: ownerPri, 1: peerPri},
+			ID: 1, Preempt: preempt, NodePriorities: map[int]int{0: aPri, 1: bPri},
 		}},
 	}
-	owner, peer = NewManager(0, 1), NewManager(1, 1)
-	owner.UpdateConfig(cfg)
-	peer.UpdateConfig(cfg)
-	owner.takeoverHoldTime, peer.takeoverHoldTime = 0, 0
-	owner.SetRGReady(1, true, nil)
-	peer.SetRGReady(1, true, nil)
-	owner.SetMonitorWeight(1, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
-	peer.SetMonitorWeight(1, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
-	t.Cleanup(func() { owner.Stop(); peer.Stop() })
-	return owner, peer
+	a, b = NewManager(0, 1), NewManager(1, 1)
+	a.UpdateConfig(cfg)
+	b.UpdateConfig(cfg)
+	a.takeoverHoldTime, b.takeoverHoldTime = 0, 0
+	a.SetRGReady(1, true, nil)
+	b.SetRGReady(1, true, nil)
+	a.SetMonitorWeight(1, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+	b.SetMonitorWeight(1, DataplaneArmMonitorIface, false, DataplaneArmMonitorCost)
+	t.Cleanup(func() { a.Stop(); b.Stop() })
+	return a, b
+}
+
+func newShimPair19140(t *testing.T, preempt bool) *shimPair19140 {
+	t.Helper()
+	a, b := memberShimPair19140(t, preempt, 200, 100)
+	p := &shimPair19140{t: t, a: a, b: b}
+	ok := func(int, bool) error { return nil }
+	p.ab = newRetryPair18715(t, a, b)
+	p.ab.fence = ok
+	p.ba = newRetryPair18715(t, b, a)
+	p.ba.fence = ok
+	b.mu.Lock()
+	b.memberShimTakeoverLaunchFn = func(fn func()) { p.ab.pending = append(p.ab.pending, fn) }
+	b.mu.Unlock()
+	a.mu.Lock()
+	a.memberShimTakeoverLaunchFn = func(fn func()) { p.ba.pending = append(p.ba.pending, fn) }
+	a.mu.Unlock()
+	exchangeElection12164(a, b)
+	if !a.IsLocalPrimary(1) || b.IsLocalPrimary(1) {
+		t.Fatal("precondition: a primary, b secondary")
+	}
+	return p
+}
+
+// fastShim19140 shrinks the quiet period and the backoff for a test.
+func fastShim19140(t *testing.T, quiet, minB, maxB time.Duration) {
+	t.Helper()
+	oq, omin, omax := memberShimTakeoverQuietOverride, memberShimTakeoverBackoffMin, memberShimTakeoverBackoffMax
+	memberShimTakeoverQuietOverride, memberShimTakeoverBackoffMin, memberShimTakeoverBackoffMax = quiet, minB, maxB
+	t.Cleanup(func() {
+		memberShimTakeoverQuietOverride, memberShimTakeoverBackoffMin, memberShimTakeoverBackoffMax = oq, omin, omax
+	})
 }
 
 func chargeMemberShim19140(m *Manager, on bool) {
 	m.SetMonitorWeight(1, RethMemberShimMonitorIface, on, RethMemberShimMonitorCost)
 }
 
-// rounds19140 exchanges heartbeats and counts ownership transitions and
-// dual-primary rounds.
-func rounds19140(owner, peer *Manager, n int) (transitions, dual int) {
-	last := [2]bool{owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)}
+func (p *shimPair19140) frameFromA() *HeartbeatPacket {
+	pkt := p.a.buildHeartbeat()
+	if p.stripAMarker {
+		kept := pkt.Monitors[:0]
+		for _, mon := range pkt.Monitors {
+			if mon.Interface != RethMemberShimMonitorIface {
+				kept = append(kept, mon)
+			}
+		}
+		pkt.Monitors = kept
+	}
+	return pkt
+}
+
+// exchange delivers one heartbeat each way, launching (not running) any
+// attempt either node starts.
+func (p *shimPair19140) exchange() {
+	p.a.handlePeerHeartbeat(p.b.buildHeartbeat())
+	p.b.handlePeerHeartbeat(p.frameFromA())
+}
+
+// runPending runs every launched attempt, in order.
+func (p *shimPair19140) runPending() {
+	for _, q := range []*retryPair18715{p.ab, p.ba} {
+		for len(q.pending) > 0 {
+			fn := q.pending[0]
+			q.pending = q.pending[1:]
+			fn()
+		}
+	}
+}
+
+// rounds runs n exchange+run rounds, 2 ms apart, counting ownership
+// transitions and dual-primary rounds.
+func (p *shimPair19140) rounds(n int) (transitions, dual int) {
+	last := [2]bool{p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1)}
 	for range n {
-		owner.handlePeerHeartbeat(peer.buildHeartbeat())
-		evaluate19140(owner)
-		peer.handlePeerHeartbeat(owner.buildHeartbeat())
-		evaluate19140(peer)
-		now := [2]bool{owner.IsLocalPrimary(1), peer.IsLocalPrimary(1)}
+		p.exchange()
+		p.runPending()
+		now := [2]bool{p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1)}
 		if now != last {
 			transitions++
 		}
@@ -58,8 +130,29 @@ func rounds19140(owner, peer *Manager, n int) (transitions, dual int) {
 			dual++
 		}
 		last = now
+		time.Sleep(2 * time.Millisecond)
 	}
 	return transitions, dual
+}
+
+// roundsFor runs rounds for at least d.
+func (p *shimPair19140) roundsFor(d time.Duration) (transitions, dual int) {
+	end := time.Now().Add(d)
+	for time.Now().Before(end) {
+		tr, du := p.rounds(1)
+		transitions += tr
+		dual += du
+	}
+	return transitions, dual
+}
+
+func (p *shimPair19140) chainAttempts(m *Manager) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if c := m.memberShimTakeovers[1]; c != nil {
+		return c.attempts
+	}
+	return 0
 }
 
 func modes19140() []struct {
@@ -72,50 +165,233 @@ func modes19140() []struct {
 	}{{"preempt", true}, {"non-preempt", false}}
 }
 
-// E1.
-func TestMemberShimDebtYieldsToHealthyReadyPeer19140(t *testing.T) {
+// P1: a healthy secondary requests the RG of an owner carrying member-shim
+// debt, through ONE transfer (a request the owner served, then a commit), and
+// the RG then stays put: no second request either way, no preempt back.
+func TestHealthyPeerRequestsAShimlessOwnersRG19140(t *testing.T) {
 	for _, mode := range modes19140() {
 		t.Run(mode.name, func(t *testing.T) {
-			owner, peer := memberShimPair19140(t, mode.preempt, 200, 100)
-			exchangeElection12164(owner, peer)
-			if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
-				t.Fatal("precondition: owner primary, peer secondary")
+			fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+			p := newShimPair19140(t, mode.preempt)
+			chargeMemberShim19140(p.a, true)
+			if got := rgWeight9842(t, p.a, 1).Weight; got != 255 {
+				t.Fatalf("charged owner weight = %d, want 255: the debt is a marker, not weight", got)
 			}
-			chargeMemberShim19140(owner, true)
-			if got := rgWeight9842(t, owner, 1).Weight; got != 1 {
-				t.Fatalf("charged owner weight = %d, want the floor 1", got)
+			tr, dual := p.rounds(10)
+			if p.a.IsLocalPrimary(1) || !p.b.IsLocalPrimary(1) || tr != 1 || dual != 0 {
+				t.Fatalf("a=%v b=%v transitions=%d dual=%d: the healthy peer must take the RG once",
+					p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), tr, dual)
 			}
-			tr, dual := rounds19140(owner, peer, 10)
-			if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) || tr != 1 || dual != 0 {
-				t.Fatalf("owner=%v peer=%v transitions=%d dual=%d: a shim-less primary must yield once to a healthy ready peer",
-					owner.IsLocalPrimary(1), peer.IsLocalPrimary(1), tr, dual)
+			if p.ab.attempts != 1 || p.ab.commits != 1 {
+				t.Fatalf("requests=%d commits=%d: the takeover must be one ordinary transfer", p.ab.attempts, p.ab.commits)
+			}
+			tr, dual = p.rounds(30)
+			if p.a.IsLocalPrimary(1) || !p.b.IsLocalPrimary(1) || tr != 0 || dual != 0 ||
+				p.ab.attempts != 1 || p.ba.attempts != 0 {
+				t.Fatalf("a=%v b=%v transitions=%d dual=%d requests b->a=%d a->b=%d: the RG must stay with the healthy node",
+					p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), tr, dual, p.ab.attempts, p.ba.attempts)
 			}
 		})
 	}
 }
 
-// E2.
-func TestMemberShimDebtOnBothNodesDoesNotMove19140(t *testing.T) {
+// P2: the owner never yields on its own debt. A peer that does not run the
+// trigger (a build that predates #19140) never requests, so the owner keeps
+// the RG: the conservative default. And a new requester facing
+// an owner that sends no marker never requests either.
+func TestOwnerKeepsTheRGWithoutAPeerRequest19140(t *testing.T) {
 	for _, mode := range modes19140() {
-		t.Run(mode.name, func(t *testing.T) {
-			owner, peer := memberShimPair19140(t, mode.preempt, 200, 100)
-			exchangeElection12164(owner, peer)
-			chargeMemberShim19140(peer, true)
-			owner.handlePeerHeartbeat(peer.buildHeartbeat())
-			chargeMemberShim19140(owner, true)
-			tr, dual := rounds19140(owner, peer, 10)
-			if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) || tr != 0 || dual != 0 {
-				t.Fatalf("owner=%v peer=%v transitions=%d dual=%d: two equally charged nodes must not move the RG",
-					owner.IsLocalPrimary(1), peer.IsLocalPrimary(1), tr, dual)
+		t.Run(mode.name+"/old-requester", func(t *testing.T) {
+			fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+			p := newShimPair19140(t, mode.preempt)
+			p.b.mu.Lock()
+			p.b.memberShimTakeoverLaunchFn = func(func()) {} // never acts
+			p.b.mu.Unlock()
+			chargeMemberShim19140(p.a, true)
+			tr, dual := p.rounds(30)
+			if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) || tr != 0 || dual != 0 {
+				t.Fatalf("a=%v b=%v transitions=%d dual=%d: without a peer request the owner must keep the RG",
+					p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), tr, dual)
+			}
+		})
+		t.Run(mode.name+"/old-owner", func(t *testing.T) {
+			fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+			p := newShimPair19140(t, mode.preempt)
+			p.stripAMarker = true
+			chargeMemberShim19140(p.a, true)
+			tr, _ := p.rounds(30)
+			if !p.a.IsLocalPrimary(1) || tr != 0 || p.ab.attempts != 0 || p.chainAttempts(p.b) != 0 {
+				t.Fatalf("a=%v transitions=%d requests=%d: no marker must mean no request",
+					p.a.IsLocalPrimary(1), tr, p.ab.attempts)
 			}
 		})
 	}
 }
 
-// E3 lives in readiness_section_19140_test.go: the yield toward a not-ready
-// peer depends on the peer's heartbeat readiness section.
+// P3: a requester with floor debt of its own never requests: two equally
+// broken nodes leave the RG where it is, with no request and no ping-pong.
+func TestChargedRequesterNeverRequests19140(t *testing.T) {
+	debts := []struct {
+		name  string
+		apply func(m *Manager)
+	}{
+		{"member-shim", func(m *Manager) { chargeMemberShim19140(m, true) }},
+		{"dataplane-arm", func(m *Manager) {
+			m.SetMonitorWeight(1, DataplaneArmMonitorIface, true, DataplaneArmMonitorCost)
+		}},
+	}
+	for _, mode := range modes19140() {
+		for _, d := range debts {
+			t.Run(mode.name+"/"+d.name, func(t *testing.T) {
+				fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+				p := newShimPair19140(t, mode.preempt)
+				d.apply(p.b)
+				chargeMemberShim19140(p.a, true)
+				tr, dual := p.rounds(30)
+				if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) || tr != 0 || dual != 0 ||
+					p.ab.attempts != 0 || p.ba.attempts != 0 || p.chainAttempts(p.b) != 0 {
+					t.Fatalf("a=%v b=%v transitions=%d dual=%d requests=%d/%d attempts=%d: a charged requester must not request",
+						p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), tr, dual, p.ab.attempts, p.ba.attempts, p.chainAttempts(p.b))
+				}
+			})
+		}
+	}
+}
 
-// E4.
+// P4: the requester's own readiness gates every attempt.
+//   - not-ready: an unready requester starts no attempt at all, so the moment
+//     it becomes ready the takeover follows within the quiet period, not after
+//     a backoff a refused attempt would have armed;
+//   - live-refusal: the live transfer-readiness callback refuses at the
+//     reservation, nothing reaches the owner, and the owner keeps the RG;
+//   - lapse-after-ack: readiness lapses after the owner fenced and acked. The
+//     commit's re-check refuses, the transfer aborts, and the owner is restored
+//     with no dual-primary round.
+func TestRequesterReadinessGatesTheTakeover19140(t *testing.T) {
+	t.Run("not-ready", func(t *testing.T) {
+		fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+		p := newShimPair19140(t, false)
+		p.b.SetRGReady(1, false, []string{"userspace data interface ge-7-0-2 has no XDP shim attached (not-attached)"})
+		chargeMemberShim19140(p.a, true)
+		p.rounds(20)
+		if !p.a.IsLocalPrimary(1) || p.chainAttempts(p.b) != 0 || p.ab.attempts != 0 {
+			t.Fatalf("a=%v attempts=%d requests=%d: an unready requester must not start an attempt",
+				p.a.IsLocalPrimary(1), p.chainAttempts(p.b), p.ab.attempts)
+		}
+		p.b.SetRGReady(1, true, nil)
+		p.rounds(5)
+		if p.a.IsLocalPrimary(1) || !p.b.IsLocalPrimary(1) {
+			t.Fatalf("a=%v b=%v: once ready, the requester must take the RG without a backoff",
+				p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1))
+		}
+	})
+	t.Run("live-refusal", func(t *testing.T) {
+		fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+		p := newShimPair19140(t, false)
+		p.b.SetTransferReadinessFunc(func(int) (bool, []string) {
+			return false, []string{"helper not serving the RG"}
+		})
+		chargeMemberShim19140(p.a, true)
+		tr, dual := p.rounds(20)
+		if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) || tr != 0 || dual != 0 || p.ab.attempts != 0 {
+			t.Fatalf("a=%v b=%v transitions=%d dual=%d requests=%d: a live-unready requester must send nothing",
+				p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), tr, dual, p.ab.attempts)
+		}
+	})
+	t.Run("lapse-after-ack", func(t *testing.T) {
+		fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+		p := newShimPair19140(t, false)
+		p.ab.inFlight = func(int) {
+			p.b.SetRGReady(1, false, []string{"userspace data interface ge-7-0-2 has no XDP shim attached (not-attached)"})
+		}
+		chargeMemberShim19140(p.a, true)
+		_, dual := p.rounds(20)
+		if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) || dual != 0 || p.ab.attempts != 1 || p.ab.commits != 0 {
+			t.Fatalf("a=%v b=%v dual=%d requests=%d commits=%d: a lapse after the ack must abort and restore the owner",
+				p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), dual, p.ab.attempts, p.ab.commits)
+		}
+	})
+}
+
+// P5: the owner's debt clears after the requester launched an attempt but
+// before its reservation. The attempt is abandoned with nothing sent and the
+// owner keeps the RG.
+func TestOwnerRecoversBeforeTheRequest19140(t *testing.T) {
+	fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+	p := newShimPair19140(t, false)
+	chargeMemberShim19140(p.a, true)
+	for range 10 {
+		p.exchange()
+		if len(p.ab.pending) > 0 {
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if len(p.ab.pending) != 1 {
+		t.Fatalf("setup: the requester launched %d attempts, want 1", len(p.ab.pending))
+	}
+	chargeMemberShim19140(p.a, false)
+	p.b.handlePeerHeartbeat(p.frameFromA())
+	p.runPending()
+	if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) || p.ab.attempts != 0 {
+		t.Fatalf("a=%v b=%v requests=%d: a recovered owner must receive no request",
+			p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), p.ab.attempts)
+	}
+	tr, _ := p.rounds(20)
+	if tr != 0 || p.ab.attempts != 0 {
+		t.Fatalf("transitions=%d requests=%d after the owner recovered", tr, p.ab.attempts)
+	}
+}
+
+// P6: throttling. Every request is refused by the owner's fence. One attempt
+// is in flight at a time, the next waits out the backoff, and a requester
+// whose own readiness flaps between attempts does not reset that backoff.
+func TestMemberShimTakeoverBacksOff19140(t *testing.T) {
+	fastShim19140(t, time.Millisecond, 400*time.Millisecond, 400*time.Millisecond)
+	p := newShimPair19140(t, false)
+	p.ab.fence = func(int, bool) error { return errors.New("rg_active=false refused by the helper") }
+	chargeMemberShim19140(p.a, true)
+	p.roundsFor(100 * time.Millisecond)
+	if p.ab.attempts != 1 {
+		t.Fatalf("requests=%d in the first 100 ms, want exactly 1", p.ab.attempts)
+	}
+	p.b.SetRGReady(1, false, []string{"flap"})
+	p.rounds(2)
+	p.b.SetRGReady(1, true, nil)
+	p.roundsFor(150 * time.Millisecond)
+	if p.ab.attempts != 1 {
+		t.Fatalf("requests=%d inside the backoff after a readiness flap, want still 1", p.ab.attempts)
+	}
+	p.roundsFor(400 * time.Millisecond)
+	if p.ab.attempts != 2 {
+		t.Fatalf("requests=%d after the backoff, want 2", p.ab.attempts)
+	}
+	if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) {
+		t.Fatalf("a=%v b=%v: refused requests must leave the owner in place", p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1))
+	}
+}
+
+// P7: after the takeover, the new owner is charged in turn and the old owner
+// has recovered. The takeover runs the other way through the same protocol,
+// so the commit pin never strands the RG on a charged node.
+func TestTakeoverRunsTheOtherWay19140(t *testing.T) {
+	fastShim19140(t, time.Millisecond, time.Hour, time.Hour)
+	p := newShimPair19140(t, true)
+	chargeMemberShim19140(p.a, true)
+	p.rounds(10)
+	if p.a.IsLocalPrimary(1) || !p.b.IsLocalPrimary(1) {
+		t.Fatal("precondition: b took the RG")
+	}
+	chargeMemberShim19140(p.a, false)
+	chargeMemberShim19140(p.b, true)
+	tr, dual := p.rounds(10)
+	if !p.a.IsLocalPrimary(1) || p.b.IsLocalPrimary(1) || tr != 1 || dual != 0 || p.ba.attempts != 1 || p.ba.commits != 1 {
+		t.Fatalf("a=%v b=%v transitions=%d dual=%d requests=%d commits=%d: the recovered node must take the RG back",
+			p.a.IsLocalPrimary(1), p.b.IsLocalPrimary(1), tr, dual, p.ba.attempts, p.ba.commits)
+	}
+}
+
+// P8: a lone owner keeps the RG, at its weight.
 func TestMemberShimDebtLoneOwnerKeepsRG19140(t *testing.T) {
 	m := NewManager(0, 1)
 	m.UpdateConfig(&config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{{
@@ -127,144 +403,47 @@ func TestMemberShimDebtLoneOwnerKeepsRG19140(t *testing.T) {
 	}
 	chargeMemberShim19140(m, true)
 	if !m.IsLocalPrimary(1) {
-		t.Fatal("a lone owner with member-shim debt resigned the RG; it must keep it at the floor")
+		t.Fatal("a lone owner with member-shim debt resigned the RG; it must keep it")
 	}
-	if got := rgWeight9842(t, m, 1).Weight; got != 1 {
-		t.Fatalf("lone owner weight = %d, want 1", got)
+	if got := rgWeight9842(t, m, 1).Weight; got != 255 {
+		t.Fatalf("lone owner weight = %d, want 255", got)
 	}
 }
 
-// E5.
-func TestMemberShimAndArmDebtComposeToTheFloor19140(t *testing.T) {
+// P9: the member-shim debt is listed with the RG's monitor failures (and so
+// in `show chassis cluster status`) but monitorDebtTotalLocked ignores it: it
+// moves no weight, alone or beside other debt. At the arm floor it would
+// inherit the election paths that promote a peer at that floor whatever its
+// readiness (P4 lapse-after-ack is the end-to-end form of that defect).
+func TestMemberShimDebtMovesNoWeight19140(t *testing.T) {
 	m := NewManager(0, 1)
 	m.UpdateConfig(&config.ClusterConfig{RedundancyGroups: []*config.RedundancyGroup{{
 		ID: 1, NodePriorities: map[int]int{0: 200},
 	}}})
 	t.Cleanup(m.Stop)
-	m.SetMonitorWeight(1, DataplaneArmMonitorIface, true, DataplaneArmMonitorCost)
 	chargeMemberShim19140(m, true)
-	if got := rgWeight9842(t, m, 1).Weight; got != 1 {
-		t.Fatalf("arm + member-shim weight = %d, want the floor 1 (they share the MAX group, never stack to 0)", got)
+	m.mu.RLock()
+	total := m.monitorDebtTotalLocked(m.groups[1])
+	m.mu.RUnlock()
+	if total != 0 {
+		t.Fatalf("monitorDebtTotalLocked = %d with only member-shim debt, want 0", total)
 	}
-	if !m.IsLocalPrimary(1) {
-		t.Fatal("arm + member-shim debt resigned a lone owner")
+	if out := m.FormatStatus(); !strings.Contains(out, RethMemberShimMonitorIface) {
+		t.Fatalf("show chassis cluster status does not list %s:\n%s", RethMemberShimMonitorIface, out)
 	}
-}
-
-// E6: preempt, the charged higher-priority node yields and then must not
-// re-take the RG by raw priority while its debt holds. Once the debt clears,
-// ordinary preempt moves it back (a planned move).
-func TestMemberShimYieldHoldsWhileDebtStays19140(t *testing.T) {
-	owner, peer := memberShimPair19140(t, true, 200, 100)
-	exchangeElection12164(owner, peer)
-	chargeMemberShim19140(owner, true)
-	rounds19140(owner, peer, 10)
-	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) {
-		t.Fatal("precondition: the charged owner yielded")
+	rg := rgWeight9842(t, m, 1)
+	if rg.Weight != 255 {
+		t.Fatalf("member-shim alone: weight = %d, want 255", rg.Weight)
 	}
-	tr, dual := rounds19140(owner, peer, 20)
-	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) || tr != 0 || dual != 0 {
-		t.Fatalf("owner=%v peer=%v transitions=%d dual=%d: the yielded RG flapped back while the debt held",
-			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1), tr, dual)
+	listed := false
+	for _, f := range rg.MonitorFails {
+		listed = listed || f == RethMemberShimMonitorIface
 	}
-	chargeMemberShim19140(owner, false)
-	rounds19140(owner, peer, 20)
-	if !owner.IsLocalPrimary(1) || peer.IsLocalPrimary(1) {
-		t.Fatalf("owner=%v peer=%v: after the debt cleared, preempt should move the RG back to the higher-priority owner",
-			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1))
+	if !listed {
+		t.Fatalf("monitor failures %v: the debt must stay visible", rg.MonitorFails)
 	}
-}
-
-// E7: a healthy primary at 255 never yields to a charged standby, even one
-// with higher priority under preempt. The twin shows that the same standby,
-// healthy and ready, still preempts normally, so E7 cannot pass by disabling
-// yields altogether.
-func TestHealthyPrimaryNeverYieldsToChargedStandby19140(t *testing.T) {
-	for _, mode := range modes19140() {
-		t.Run(mode.name+"/charged-standby", func(t *testing.T) {
-			owner, standby := memberShimPair19140(t, mode.preempt, 100, 200)
-			// The standby is charged and not ready before it ever wins.
-			chargeMemberShim19140(standby, true)
-			standby.SetRGReady(1, false, []string{"userspace data interface ge-7-0-2 has no XDP shim attached (not-attached)"})
-			owner.SetGroupStateForTesting(1, StatePrimary)
-			standby.SetGroupStateForTesting(1, StateSecondary)
-			tr, dual := rounds19140(owner, standby, 10)
-			if !owner.IsLocalPrimary(1) || standby.IsLocalPrimary(1) || tr != 0 || dual != 0 {
-				t.Fatalf("owner=%v standby=%v transitions=%d dual=%d: a healthy primary yielded to a charged standby",
-					owner.IsLocalPrimary(1), standby.IsLocalPrimary(1), tr, dual)
-			}
-		})
+	m.SetMonitorWeight(1, "ge-0-0-1", true, 100)
+	if got := rgWeight9842(t, m, 1).Weight; got != 155 {
+		t.Fatalf("member-shim + 100 interface debt: weight = %d, want 155", got)
 	}
-	t.Run("preempt/healthy-standby-twin", func(t *testing.T) {
-		owner, standby := memberShimPair19140(t, true, 100, 200)
-		owner.SetGroupStateForTesting(1, StatePrimary)
-		standby.SetGroupStateForTesting(1, StateSecondary)
-		rounds19140(owner, standby, 10)
-		if owner.IsLocalPrimary(1) || !standby.IsLocalPrimary(1) {
-			t.Fatalf("owner=%v standby=%v: a healthy, ready, higher-priority standby must still preempt",
-				owner.IsLocalPrimary(1), standby.IsLocalPrimary(1))
-		}
-	})
-}
-
-// E8: preempt, the charged owner yielded; then the NEW owner is charged too.
-// Both are at the floor and equally broken, so the RG stays where it is
-// (as in E2), not moved back to the higher-priority node by raw preempt.
-func TestMemberShimBothChargedAfterYieldStays19140(t *testing.T) {
-	owner, peer := memberShimPair19140(t, true, 200, 100)
-	exchangeElection12164(owner, peer)
-	chargeMemberShim19140(owner, true)
-	rounds19140(owner, peer, 10)
-	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) {
-		t.Fatal("precondition: the charged owner yielded")
-	}
-	chargeMemberShim19140(peer, true)
-	tr, dual := rounds19140(owner, peer, 20)
-	if owner.IsLocalPrimary(1) || !peer.IsLocalPrimary(1) || tr != 0 || dual != 0 {
-		t.Fatalf("owner=%v peer=%v transitions=%d dual=%d: with both nodes charged the RG must stay, not move back",
-			owner.IsLocalPrimary(1), peer.IsLocalPrimary(1), tr, dual)
-	}
-}
-
-// E9: a committed owner (after an operator transfer, behind the role pin) that
-// loses a member's shim hands back to the healthy old owner, as the #12164 arm
-// debt does. Kills a pin branch keyed on arm debt only.
-func TestCommittedOwnerWithMemberShimDebtHandsBack19140(t *testing.T) {
-	oldOwner, newOwner := armDebtPair12164(t)
-	newOwner.SetPeerFailoverFunc(func(id int) (uint64, error) {
-		_, err := oldOwner.ManualFailover(id)
-		return 19140, err
-	})
-	newOwner.SetPeerFailoverCommitFunc(func(id int, requestID uint64) error {
-		return oldOwner.FinalizePeerTransferOut(id)
-	})
-	if err := newOwner.RequestPeerFailover(1); err != nil {
-		t.Fatal(err)
-	}
-	newOwner.mu.Lock()
-	newOwner.peerTransferCommitGraceUntil[1] = time.Now().Add(-time.Second)
-	newOwner.mu.Unlock()
-	oldOwner.mu.Lock()
-	oldOwner.localTransferOutHoldUntil[1] = time.Now().Add(-time.Second)
-	oldOwner.mu.Unlock()
-	exchangeElection12164(oldOwner, newOwner)
-	if oldOwner.IsLocalPrimary(1) || !newOwner.IsLocalPrimary(1) {
-		t.Fatal("precondition: the transfer settled on the new owner")
-	}
-	chargeMemberShim19140(newOwner, true)
-	// Fold 2: the healthy peer's readiness must come from an evaluation that
-	// started after the charge, so the exchange runs its daemon's readiness
-	// pass per received frame (rounds19140), as production does.
-	rounds19140(newOwner, oldOwner, 4)
-	if newOwner.IsLocalPrimary(1) || !oldOwner.IsLocalPrimary(1) {
-		t.Fatalf("the committed owner kept the RG at the member-shim floor over a healthy peer: new=%s/%d old=%s/%d",
-			newOwner.GroupState(1).State, newOwner.GroupState(1).Weight,
-			oldOwner.GroupState(1).State, oldOwner.GroupState(1).Weight)
-	}
-}
-
-// evaluate19140 is one readiness pass of m's daemon (#19140 fold 2): it stamps
-// m's CURRENT readiness with the latest peer heartbeat m has received.
-func evaluate19140(m *Manager) {
-	m.CompleteReadinessEvaluation(m.BeginReadinessEvaluation())
 }

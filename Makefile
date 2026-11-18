@@ -1973,7 +1973,7 @@ test-ha-crash:
 		--require-helper-attestation \
 		-- ./test/incus/test-ha-crash.sh
 
-# #19140: a primary whose RETH data member loses its XDP shim yields the RG.
+# #19140: a primary's RETH data member loses its XDP shim; the peer requests the RG.
 # Pre-registered criteria in docs/log/19140.md. MEMBER_SHIM_ARGS selects a
 # variant: --both, --lone or --standby (empty: the main arm).
 MEMBER_SHIM_ARGS ?=

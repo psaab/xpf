@@ -116,8 +116,6 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 					delete(m.monitorWeights, k)
 				}
 			}
-			// #19140: the member-shim charge point goes with the debt above.
-			delete(m.memberShimChargedAtSeq, id)
 			// Purge the per-RG GARP count so a same-id re-add that omits an
 			// explicit gratuitous-arp-count does not inherit this incarnation's
 			// stale count (#6027). garpCounts is only WRITTEN when the config
@@ -177,6 +175,7 @@ func (m *Manager) updateConfig(cfg *config.ClusterConfig, source clusterConfigUp
 			delete(m.remoteTransferOutLeaseChannel, id)
 			m.clearAbortedPeerTransferLocked(id)
 			m.cancelAbortedTransferRetryLocked(id, "redundancy group removed")
+			m.cancelMemberShimTakeoverLocked(id, "redundancy group removed") // #19140
 			delete(m.operatorEpoch, id)
 			delete(m.ownerlessPriorHolds, id)
 			delete(m.groups, id)

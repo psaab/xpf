@@ -841,21 +841,6 @@ type PeerGroupState struct {
 	// that has genuinely finished arming advertises its real weight.
 	// Not a new wire field.
 	takeoverReady bool
-	// takeoverNotReady is the #19140 readiness section of the peer's latest
-	// frame: the peer reported this data RG's takeover readiness (rg.Ready)
-	// false. Per frame: a frame without the bit (or without the section,
-	// an older sender included) clears it, and peer loss drops peerGroups
-	// whole. Only the RETH member-shim yield reads it; the #12164 arm-debt
-	// yield deliberately does not (a node with no armed dataplane yields to
-	// a heavier peer whatever that peer's readiness).
-	takeoverNotReady bool
-	// readinessAware reports that the frame carried the XPFR section, which
-	// every sender of the #19140 build emits. False means an older peer.
-	readinessAware bool
-	// readinessEvalSeq is the frame's readiness-evaluation stamp: the
-	// heartbeat sequence of THIS node's that the peer had received when its
-	// last readiness evaluation started (#19140 fold 2).
-	readinessEvalSeq uint64
 }
 
 // heartbeatSender sends periodic heartbeat packets.

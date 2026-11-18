@@ -448,7 +448,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 			// RG0 (config authority, no data VIP) is excluded: demoting
 			// it would move config authority and auto-confirm a pending
 			// commit (#12164 N5).
-			if rg.GroupID != 0 && m.floorYieldDebtLocked(rg.GroupID, peerGroup) &&
+			if rg.GroupID != 0 && m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
 				peerGroup.State == StateSecondary &&
 				peerWeight > localWeight &&
 				(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
@@ -516,7 +516,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 	// re-promotes the yielded higher-priority node on the next heartbeat,
 	// causing a primary/secondary flap and dual-primary window.
 	verifiedArmDebtPeer := rg.GroupID != 0 &&
-		m.floorYieldDebtLocked(rg.GroupID, peerGroup) &&
+		m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
 		(peerGroup.State == StatePrimary || peerGroup.State == StateSecondary) &&
 		peerWeight > localWeight &&
 		(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
@@ -567,10 +567,6 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		time.Now().Before(peerGroup.heartbeatEchoLeaseUntil)
 	if rg.Preempt && rg.State != StatePrimary && rg.armDebtYielded && armDebtPeerLive {
 		if peerGroup.State == StatePrimary &&
-			// #19140: deliberately the ARM debt only, not floor debt. When
-			// the new owner falls to the floor too (both nodes' RETH member
-			// shim-less), releasing this hold would let raw preempt move the
-			// RG back to an equally broken node: a failover for nothing.
 			(m.dataplaneArmDebtLocked(rg.GroupID) == 0 || peerWeight > localWeight) {
 			return electNoChange, "Arm-debt yield holds while peer remains primary"
 		}
@@ -681,7 +677,7 @@ func (m *Manager) electRG(rg *RedundancyGroupState, peerGroup *PeerGroupState) (
 		// This arm-debt rule therefore applies only to positive-weight peers.
 		// RG0 is excluded: demotion would move config authority and
 		// auto-confirm a pending commit (#12164 N5).
-		if rg.GroupID != 0 && m.floorYieldDebtLocked(rg.GroupID, peerGroup) &&
+		if rg.GroupID != 0 && m.dataplaneArmDebtLocked(rg.GroupID) > 0 &&
 			(peerGroup.State == StatePrimary || peerGroup.State == StateSecondary) &&
 			peerWeight > localWeight &&
 			(peerEff > localEff || (peerEff == localEff && m.peerNodeID < m.nodeID)) &&
@@ -1192,13 +1188,6 @@ func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int
 			}
 		}
 		if !found {
-			if iface == RethMemberShimMonitorIface {
-				// #19140: a fresh charge; see floorYieldDebtLocked.
-				if m.memberShimChargedAtSeq == nil {
-					m.memberShimChargedAtSeq = make(map[int]uint64)
-				}
-				m.memberShimChargedAtSeq[rgID] = m.hbCounter.Load()
-			}
 			rg.MonitorFails = append(rg.MonitorFails, iface)
 			sort.Strings(rg.MonitorFails)
 			slog.Warn("cluster: interface monitor failure",
@@ -1207,9 +1196,6 @@ func (m *Manager) SetMonitorWeight(rgID int, iface string, down bool, weight int
 	} else {
 		// Remove from failures and delete stored weight.
 		delete(m.monitorWeights, key)
-		if iface == RethMemberShimMonitorIface {
-			delete(m.memberShimChargedAtSeq, rgID)
-		}
 		for i, f := range rg.MonitorFails {
 			if f == iface {
 				rg.MonitorFails = append(rg.MonitorFails[:i], rg.MonitorFails[i+1:]...)
@@ -1236,96 +1222,16 @@ func (m *Manager) HasMonitorDebt(rgID int, iface string) bool {
 	return m.monitorWeights[monitorKey{rgID: rgID, iface: iface}] > 0
 }
 
+// memberShimDebtLocked reports whether this node carries the #19140 RETH
+// member-shim debt on rgID. Caller holds m.mu.
+func (m *Manager) memberShimDebtLocked(rgID int) bool {
+	return m.monitorWeights[monitorKey{rgID: rgID, iface: RethMemberShimMonitorIface}] > 0
+}
+
 // dataplaneArmDebtLocked returns the authoritative arm-monitor debt. Marker
 // presence in MonitorFails is not sufficient because a configured cost may be 0.
 func (m *Manager) dataplaneArmDebtLocked(rgID int) int {
 	return m.monitorWeights[monitorKey{rgID: rgID, iface: DataplaneArmMonitorIface}]
-}
-
-// floorYieldDebtLocked reports whether this node carries debt that says "my
-// dataplane cannot serve the RG" AND that lets it yield to peer, a verified
-// heavier peer the caller has already qualified (#12164, #19140):
-//   - the dataplane-arm debt always does: a node with no armed dataplane
-//     forwards nothing, so it yields whatever the peer's readiness (#12164,
-//     never-strands; TestNonPreemptArmDebtYieldNeverStrandsUnreadyPeer12164);
-//   - the RETH member-shim debt does only toward a peer that does NOT flag
-//     the RG not-ready in its heartbeat readiness section. A member-shim
-//     owner still forwards its other RETHs, and the peer may be not-ready
-//     for a reason that leaves it unable to forward the RG at all, without
-//     any floor debt to show it (the class table in pkg/cluster/README.md).
-//     An older peer sends no readiness section and so reads as ready: the
-//     #12164 semantics, for mixed versions only.
-//
-// The startup-sync hold is NOT floor debt here: it delays a takeover, it does
-// not say the owner is broken. Caller holds m.mu.
-func (m *Manager) floorYieldDebtLocked(rgID int, peer *PeerGroupState) bool {
-	if m.dataplaneArmDebtLocked(rgID) > 0 {
-		return true
-	}
-	return m.monitorWeights[monitorKey{rgID: rgID, iface: RethMemberShimMonitorIface}] > 0 &&
-		m.memberShimPeerReadyAfterChargeLocked(rgID, peer)
-}
-
-// memberShimPeerReadyAfterChargeLocked reports whether the peer's latest frame
-// shows the RG takeover-ready per a readiness EVALUATION that started after
-// this node's member-shim charge (#19140 fold 2, codex-c and r23).
-//
-// Neither a later receipt nor a later echo is enough. The bitmap copies the
-// peer's cached rg.Ready, which only its daemon's reconcile pass (about 2 s)
-// refreshes, so a frame that echoes a post-charge heartbeat can still carry a
-// pre-charge value. A yield on that value hands the RG to a peer whose helper
-// may already be stopped: it promotes on the stale value, its arm debt then
-// ties it at the floor, nothing moves, and the WHOLE RG black-holes. So a
-// sender of this build stamps every frame with the sequence of OUR heartbeat
-// it had received when its last readiness evaluation STARTED
-// (readinessEvalSeq). The yield needs that stamp past the charge, in the
-// session the frame echoes.
-//
-// An OLDER peer sends no section. It keeps the documented mixed-version
-// residual: the fold-1 echo rule. Caller holds m.mu.
-func (m *Manager) memberShimPeerReadyAfterChargeLocked(rgID int, peer *PeerGroupState) bool {
-	if peer == nil || peer.heartbeatEchoSession != m.LocalProcessToken() {
-		return false
-	}
-	charged := m.memberShimChargedAtSeq[rgID]
-	if !peer.readinessAware {
-		return peer.heartbeatEchoSequence > charged // mixed-version residual
-	}
-	return !peer.takeoverNotReady && peer.readinessEvalSeq > charged
-}
-
-// ReadinessEvaluation identifies the peer heartbeat this node had received when
-// a readiness evaluation started (#19140 fold 2).
-type ReadinessEvaluation struct {
-	session, seq uint64
-}
-
-// BeginReadinessEvaluation is called at the START of a readiness evaluation
-// pass, before any readiness is computed. It captures the latest peer
-// heartbeat received, so the stamp provably precedes the evaluation.
-func (m *Manager) BeginReadinessEvaluation() ReadinessEvaluation {
-	if m == nil {
-		return ReadinessEvaluation{}
-	}
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return ReadinessEvaluation{session: m.latestPeerHeartbeatSession, seq: m.latestPeerHeartbeatSequence}
-}
-
-// CompleteReadinessEvaluation records e as the stamp of the evaluation pass
-// that just published every RG's readiness (SetRGReady). Frames built from
-// now on carry it. An older stamp never replaces a newer one in the same
-// session.
-func (m *Manager) CompleteReadinessEvaluation(e ReadinessEvaluation) {
-	if m == nil || e.session == 0 {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if e.session == m.readyEvalSession && e.seq <= m.readyEvalSeq {
-		return
-	}
-	m.readyEvalSession, m.readyEvalSeq = e.session, e.seq
 }
 
 // SetStartupSyncHold installs or clears the #16741 startup-sync-hold
@@ -1401,14 +1307,18 @@ const startupSyncHoldMonitorCost = maxRedundancyGroupWeight - 1
 // black-hole the RG's traffic on that RETH indefinitely (#19110 removed the
 // background re-attach). The daemon's transit-gate tick sets this per RG after
 // a grace (pkg/daemon, member_shim_debt_19140.go).
+//
+// The debt moves nothing by itself: it carries NO weight, and the owner never
+// yields on it. It is listed with the RG's monitor failures and rides the
+// heartbeat as a reserved monitor marker (memberShimWireMonitorsLocked). A
+// HEALTHY peer that sees the marker requests the RG through the ordinary
+// transfer protocol on its own live readiness (member_shim_takeover_19140.go).
 const RethMemberShimMonitorIface = "__reth-member-shim__"
 
-// RethMemberShimMonitorCost is the arm floor, like DataplaneArmMonitorCost:
-// enough to lose to a healthy, takeover-ready peer through the floor-debt
-// yield (floorDebtLocked), never enough to reach weight 0. One broken RETH
-// member must not make a lone owner resign the RG (other RETHs and RG0 still
-// work), and two equally broken nodes must not flap.
-const RethMemberShimMonitorCost = maxRedundancyGroupWeight - 1
+// RethMemberShimMonitorCost is the value stored for the debt. It only marks
+// the debt present: monitorDebtTotalLocked skips this key, so the RG's weight
+// is unchanged (a lone owner keeps the RG at its weight).
+const RethMemberShimMonitorCost = 1
 
 // HelperCrashLoopMonitorIface is the election-debt key for a userspace helper
 // that has exhausted its restart backoff. Unlike ordinary dataplane-arm debt,
@@ -1486,33 +1396,24 @@ func (m *Manager) recalcWeight(rg *RedundancyGroupState) {
 // while an explicit full debt (255) on either reserved key still resigns the
 // RG. Every other monitor debt remains additive. Caller must hold m.mu.
 func (m *Manager) monitorDebtTotalLocked(rg *RedundancyGroupState) int {
-	totalLost, holdLost, nonShimHold := 0, 0, 0
+	totalLost, holdLost := 0, 0
 	for _, iface := range rg.MonitorFails {
 		weight := m.monitorWeights[monitorKey{rgID: rg.GroupID, iface: iface}]
 		switch iface {
-		case DataplaneArmMonitorIface, startupSyncHoldMonitorIface, RethMemberShimMonitorIface:
+		case DataplaneArmMonitorIface, startupSyncHoldMonitorIface:
 			if weight > holdLost {
 				holdLost = weight
 			}
-			if iface != RethMemberShimMonitorIface && weight > nonShimHold {
-				nonShimHold = weight
-			}
+		case RethMemberShimMonitorIface:
+			// #19140: a marker the peer reads, never weight. At the arm
+			// floor (weight 1) it would inherit the election paths that
+			// promote a peer at that floor whatever the peer's readiness,
+			// and the RG could move outside the transfer protocol.
 		default:
 			totalLost += weight
 		}
 	}
-	total := totalLost + holdLost
-	// #19140 (r23 P2-1): member-shim debt is a FLOOR (weight 1), never a
-	// resignation. Added to ANY partial monitor or ip-monitor debt it reached
-	// weight 0, so a lone owner resigned (black-holing every RETH, not just
-	// the shim-less one) and, with a peer, the weight-0 resign bypassed the
-	// XPFR-qualified yield. When member-shim is the only floor debt and the
-	// additive debt alone is below 255, the total stops at the floor. An
-	// additive debt that reaches 255 on its own still resigns, as before.
-	if nonShimHold == 0 && holdLost > 0 && totalLost < 255 && total > RethMemberShimMonitorCost {
-		total = RethMemberShimMonitorCost
-	}
-	return total
+	return totalLost + holdLost
 }
 
 // reconcileMonitorDebtsLocked realigns each RG's installed interface-monitor

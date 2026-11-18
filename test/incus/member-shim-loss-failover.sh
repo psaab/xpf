@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-# #19140 smoke: a primary whose RETH data member loses its XDP shim yields the
-# RG to a healthy peer.
+# #19140 smoke: when a primary's RETH data member loses its XDP shim, the
+# healthy peer requests the RG through the ordinary transfer protocol.
 #
 # The pass criteria are PRE-REGISTERED in docs/log/19140.md (P1-P7, the
-# --both/--lone/--standby variants, the VOID conditions). This script scores
+# --both/--lone/--standby variants, the VOID conditions; re-registered for the
+# peer-driven redesign in the 2026-11-17 04:13Z entry). This script scores
 # them; it does not decide them.
+#
+# A committed takeover is an ordinary transfer and PINS the roles: node0 stays
+# secondary after its debt clears, and the move back is an operator action
+# (P5, P7 notes in the log). The script never expects an automatic move-back.
 #
 # The injection is operator-style: one node, `bpftool link detach` of the
 # member's XDP link (the link stays UP, exactly the #19140 shape), no clock
@@ -52,9 +57,9 @@ RG2_TARGET="${RG2_TARGET:-$LAN_VIP4}"
 GRACE=10                # memberShimDebtGrace
 CLEAR_HOLD=10           # memberShimClearHold
 TOL=2                   # +/- on the grace and clear-hold (P2, P7)
-MOVE_AFTER_DEBT=3       # P3: the move within 3 s of the debt
-MOVE_DEADLINE=15        # P3: and by 15 s after injection at most
-LOSS_BOUND=16           # P4: total RG1-path loss from injection
+MOVE_AFTER_DEBT=5       # P3: the move within 5 s of the debt
+MOVE_DEADLINE=17        # P3: and by 17 s after injection at most
+LOSS_BOUND=18           # P4: total RG1-path loss from injection
 NO_FLAP=60              # P5 and the variants' hold
 P1_BOUND=3              # P1: the ERROR within 3 s
 RG2_GAP_BOUND=1         # P6: RG2-only path, no gap over 1 s
@@ -274,13 +279,19 @@ done
 FINAL_OWNER=$(owner_of_rg "$RG")
 
 ERR_RE='has no XDP shim attached'
-DEBT_RE='charging the RG member-shim election debt'
+DEBT_RE='charging the RG member-shim debt'
+REQ_RE='requests the RG through the transfer protocol'
+COMMIT_RE='member-shim takeover committed'
+SERVE_RE='remote failover request from peer'
 err0=$(journal_since 0 "$T0" "$ERR_RE" | first_stamp)
 debt0=$(journal_since 0 "$T0" "$DEBT_RE")
 debt1=$(journal_since 1 "$T0" "$DEBT_RE")
 debt0_rg=$(grep -E "rg=$RG( |$)" <<<"$debt0" | first_stamp)
 debt0_other=$(grep -E "rg=(0|$OTHER_RG)( |$)" <<<"$debt0" | first_stamp)
 debt1_rg=$(grep -E "rg=$RG( |$)" <<<"$debt1" | first_stamp)
+req1_rg=$(journal_since 1 "$T0" "$REQ_RE" | grep -E "rg=$RG( |$)" | first_stamp)
+commit1_rg=$(journal_since 1 "$T0" "$COMMIT_RE" | grep -E "rg=$RG( |$)" | first_stamp)
+serve0_rg=$(journal_since 0 "$T0" "$SERVE_RE" | grep -E "rg=$RG( |$)" | first_stamp)
 
 in_band() { awk -v x="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(x >= lo && x <= hi) }'; }
 
@@ -299,13 +310,14 @@ main)
 	else
 		fail "P2 debt on RG$RG at ${debt0_rg:+$(elapsed "$T0" "$debt0_rg")s}${debt0_rg:-never}; other RGs: ${debt0_other:-none}"
 	fi
-	# P3
+	# P3: the move, in time, AND by the peer-requested transfer
 	if [[ -n "$MOVED_AT" && -n "$debt0_rg" ]] &&
 		in_band "$(elapsed "$debt0_rg" "$MOVED_AT")" -1 "$MOVE_AFTER_DEBT" &&
-		in_band "$(elapsed "$T0" "$MOVED_AT")" 0 "$MOVE_DEADLINE"; then
-		pass "P3 RG$RG moved to node1 $(elapsed "$debt0_rg" "$MOVED_AT")s after the debt ($(elapsed "$T0" "$MOVED_AT")s after injection)"
+		in_band "$(elapsed "$T0" "$MOVED_AT")" 0 "$MOVE_DEADLINE" &&
+		[[ -n "$req1_rg" && -n "$commit1_rg" && -n "$serve0_rg" ]]; then
+		pass "P3 RG$RG moved to node1 $(elapsed "$debt0_rg" "$MOVED_AT")s after the debt ($(elapsed "$T0" "$MOVED_AT")s after injection), by node1's request"
 	else
-		fail "P3 RG$RG move: ${MOVED_AT:+$(elapsed "$T0" "$MOVED_AT")s after injection}${MOVED_AT:-no move}"
+		fail "P3 RG$RG move: ${MOVED_AT:+$(elapsed "$T0" "$MOVED_AT")s after injection}${MOVED_AT:-no move}; node1 request=${req1_rg:-none} commit=${commit1_rg:-none}; node0 served=${serve0_rg:-none}"
 	fi
 	# P4
 	gap=$(max_gap_after "$WORK/rg1.txt" "$T0")
@@ -322,10 +334,10 @@ main)
 	fi
 	;;
 both)
-	if [[ -z "$MOVED_AT" && "$FINAL_OWNER" == 0 && -n "$debt0_rg" && -n "$debt1_rg" ]]; then
-		pass "both: no move and no flap for ${NO_FLAP}s; debt on both nodes"
+	if [[ -z "$MOVED_AT" && "$FINAL_OWNER" == 0 && -n "$debt0_rg" && -n "$debt1_rg" && -z "$req1_rg" ]]; then
+		pass "both: no move and no flap for ${NO_FLAP}s; debt on both nodes; no request"
 	else
-		fail "both: moved=${MOVED_AT:-no} final=$FINAL_OWNER debt node0=${debt0_rg:-none} node1=${debt1_rg:-none}"
+		fail "both: moved=${MOVED_AT:-no} final=$FINAL_OWNER debt node0=${debt0_rg:-none} node1=${debt1_rg:-none} request=${req1_rg:-none}"
 	fi
 	;;
 lone)

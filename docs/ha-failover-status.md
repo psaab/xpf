@@ -1095,26 +1095,21 @@ thing standing between those two states.
 
 A primary whose RETH data member lost its XDP shim kept full weight and
 black-holed that member's transit until a commit (#19110 removed the
-background re-attach). The daemon now charges the RG a floor debt
-(`__reth-member-shim__`, weight 1) after 10 s of positive missing evidence. The
-RG then yields to a healthy peer; a lone owner keeps it
-(`pkg/daemon/README.md`). Smoke: `make test-member-shim-loss`, with criteria
-pre-registered in `docs/log/19140.md`.
+background re-attach). The daemon now charges the RG a member-shim debt
+(`__reth-member-shim__`) after 10 s of positive missing evidence. The debt
+carries no weight and the owner never yields on it: it is a reserved marker on
+the owner's heartbeat. A healthy peer that sees it requests the RG through the
+ordinary transfer protocol (the operator-transfer gates, #5640 fence and
+make-before-break), judged on its own live readiness. A lone owner, or one
+whose peer predates #19140, keeps the RG (`pkg/cluster/README.md`, "RETH
+member-shim debt and the peer-driven takeover"). Smoke:
+`make test-member-shim-loss`, with criteria pre-registered in
+`docs/log/19140.md`.
 
-**Wire note.** The heartbeat gains an `XPFR` section, which a sender of this
-build emits on every frame. It is MAC-covered and holds:
-- the sender's readiness-evaluation stamp: the heartbeat sequence of the
-  RECEIVER's that the sender had received when its last readiness evaluation
-  started;
-- a bitmap of the sender's not-ready data RGs.
-
-It sits after `XPFT` and before the epoch and auth trailers. There is no HA
-protocol version bump: older readers never parse it. The member-shim yield
-needs the peer not to flag the RG AND a stamp past the charge, so the
-readiness it reads was evaluated after the charge (#19140 fold 2). With an
-older peer (no section), the yield follows the fold-1 echo rule and #12164,
-and may hand the RG to a peer that is not ready for a reason that installs no
-floor debt (`pkg/cluster/README.md`, "RETH member-shim debt").
+**Wire note.** No new section: the marker is one reserved monitor entry per
+charged RG, in the existing heartbeat monitor list. An older receiver lists it
+as a down peer monitor and does nothing with it. There is no HA protocol
+version bump.
 
 ### P0: Barrier delivery during bulk sync — FIXED (PR #407)
 

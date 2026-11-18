@@ -10,8 +10,8 @@ import (
 	dpuserspace "github.com/psaab/xpf/pkg/dataplane/userspace"
 )
 
-// #19140: a primary whose RETH data member positively lost its XDP shim gives
-// the RG to a healthy peer.
+// #19140: a primary whose RETH data member positively lost its XDP shim lets a
+// healthy peer take the RG.
 //
 // #19110 makes such a member a takeover-readiness reason, which stops a
 // STANDBY from taking the RG. It does nothing for the current PRIMARY: the
@@ -22,15 +22,15 @@ import (
 // removed the background re-attach).
 //
 // This producer runs on the transit-gate tick (1 s, reassertTransitGate). It
-// charges cluster.RethMemberShimMonitorIface, at the arm floor (weight 1, never
-// 0), to every RG that owns a RETH whose local member has been POSITIVELY
-// missing for memberShimDebtGrace. The #12164 floor-debt yield then hands the
-// RG to a peer that is heavier, wins the scaled ordering, holds a live echo
-// lease and passes its own readiness gate (which, by #19110, refuses a peer
-// whose member is shim-less too). A lone owner keeps the RG at weight 1 with an
-// ERROR. A standby is charged too, so two equally broken nodes tie at the
-// floor and nothing moves; a healthy primary never yields to a charged
-// standby, because the yield needs the PEER to be heavier.
+// charges cluster.RethMemberShimMonitorIface to every RG that owns a RETH whose
+// local member has been POSITIVELY missing for memberShimDebtGrace. The debt
+// carries no weight and the owner never yields on it: it is a marker on this
+// node's heartbeat. A healthy peer that sees it requests the RG through the
+// ordinary transfer protocol on its own live readiness (which, by #19110,
+// refuses a peer whose member is shim-less too; pkg/cluster
+// member_shim_takeover_19140.go). A lone owner, or one whose peer predates
+// #19140, keeps the RG with an ERROR. A standby is charged too and then never
+// requests, so two equally broken nodes leave the RG where it is.
 //
 // Evidence rules (#19110's readiness classification, read lock-free through
 // DataMemberShimVerdict):
@@ -243,8 +243,7 @@ func (d *Daemon) setMemberShimDebt(rg int, on bool, why string, st *dpuserspace.
 			member, detail = st.LinuxName, st.Detail
 		}
 		slog.Error("cluster: a RETH data member of this redundancy group has no XDP shim; charging the RG "+
-			"member-shim election debt (weight 1): the RG yields to a healthy, takeover-ready peer if there is "+
-			"one, and a lone owner keeps it",
+			"member-shim debt: a healthy, takeover-ready peer requests the RG, and without one this node keeps it",
 			"rg", rg, "member", member, "detail", detail,
 			"missing_for", memberShimNow().Sub(since).Round(time.Second), "issue", "#19140")
 		return
