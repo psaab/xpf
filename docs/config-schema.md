@@ -5610,6 +5610,27 @@ explicitly, because "read Keys as well as Children" is the wrong generalisation.
 The property is *read the side the operand is actually on*, and a fix that only
 ever adds a Keys read will miss this one.
 
+**#19190, a later ALG member.** #16814 let every accepted-but-inert ALG
+sub-statement "own" the rest of its packed line, including a token named
+`disable`. So `set security alg ftp allow-mismatch-ip-address disable`, one
+line with a bodiless flag first, committed clean and compiled `FTPDisable:
+false`: the ALG stayed **ENABLED** (dns and sip likewise). The inert
+statements now carry a value ARITY (`algInertFlags19190` /
+`algInertValued19190`):
+- a bodiless flag owns no following token;
+- a valued statement owns exactly its value, and a literal `disable` is never
+  that value (no Junos valued ALG statement takes it), so `doctoring disable`
+  is a value-less doctoring followed by the class's disable;
+- every other inert statement (a container such as `traceoptions`, or one
+  whose Junos arity is not recorded) still owns the rest of its line and body.
+
+So after a flag, or after a valued statement's value, `disable` is the class's
+and compiles exactly like the split spelling, in both the hierarchical and
+flat-set packed shapes. `traceoptions flag disable` remains a traceoptions
+body. Strict admission applies the same rule (`validateALGTokens19190`): a
+token after a bodiless flag that is not class-level is now an unknown keyword
+instead of a swallowed "body".
+
 **One reader, not two (`tcpMSSOptionNodes`).** `tcp-mss` had two independent
 Children walks — the compiler's and the range validator's — which is precisely
 how the two halves drift. The packed leaf is now surfaced as a synthetic option
