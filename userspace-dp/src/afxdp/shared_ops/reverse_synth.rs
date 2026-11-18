@@ -652,10 +652,13 @@ pub(in crate::afxdp) fn reverse_resolution_for_session_in_table_gated(
     // instead of keeping the HA terminal. Unknown destination owner
     // (dest_rg == 0) is not peer-ownership and never converts;
     // locally-owned destinations keep the ordinary enforced path.
+    // #19171 fold 1: not when a route more specific than the covering
+    // connected prefix serves the target; that route is the answer.
     if !fabric_ingress
         && forward_is_fabric_redirect
         && dest_rg > 0
         && !destination_owner_known_active
+        && !super::forwarding::more_specific_route_than_connected(forwarding, target_ip, table)
         && let Some(redirect) =
             super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, ingress_zone)
     {

@@ -916,6 +916,21 @@ fn rehome_or_retain_fabric_redirect_inner(
     if candidate.disposition == ForwardingDisposition::FabricRedirect {
         return candidate;
     }
+    // #19171 fold 1 (codex-e P2-2): a local candidate for a target that a route
+    // more specific than its covering connected prefix serves is that route
+    // (connected wins every tie since #19171), whatever the connected owner's
+    // state. It replaces the stored redirect.
+    if let Some(target) = target
+        && matches!(
+            candidate.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )
+        && candidate.egress_ifindex > 0
+        && !super::forwarding::ingress_is_fabric(forwarding, candidate.egress_ifindex)
+        && super::forwarding::more_specific_route_than_connected(forwarding, target, table)
+    {
+        return candidate;
+    }
     if destination_owner_active {
         if let Some(target) = target {
             let connected_ifindex = connected_ifindex_for_target_in_table(forwarding, target, table);

@@ -2300,6 +2300,58 @@ pub(in crate::afxdp) enum ConnectedSources {
     RowsThenLedger,
 }
 
+/// #19171 fold 1 (codex-e P2-2): does a route STRICTLY more specific than the
+/// connected prefix covering `target` exist in the lookup table? Since #19171
+/// a destination inside a connected prefix, peer-owned or not, answers that
+/// prefix's interface unless a more specific route wins longest-prefix match
+/// (connected wins ties). So when this is true, a local candidate on another
+/// interface is that operator or learned route, not the default-route
+/// mis-resolution the destination-owner compensations (#16217, the
+/// #15958b/#18659/#18672 retain, #18566, the reverse-synth fabric arm) were
+/// built to catch, and they must leave it standing. False when no connected
+/// prefix covers the target. `table` is the install table; `None` is the
+/// default table.
+pub(in crate::afxdp) fn more_specific_route_than_connected(
+    state: &ForwardingState,
+    target: IpAddr,
+    table: Option<&str>,
+) -> bool {
+    match target {
+        IpAddr::V4(ip) => {
+            let table = table.unwrap_or("inet.0");
+            let Some(connected_len) = state
+                .connected_v4
+                .iter()
+                .find(|row| row.table == table && row.prefix.contains(ip))
+                .map(|row| row.prefix.prefix_len())
+            else {
+                return false;
+            };
+            state.routes_v4.get(table).is_some_and(|routes| {
+                routes
+                    .iter()
+                    .any(|route| route.prefix.prefix_len() > connected_len && route.prefix.contains(ip))
+            })
+        }
+        IpAddr::V6(ip) => {
+            let table = table.unwrap_or("inet6.0");
+            let Some(connected_len) = state
+                .connected_v6
+                .iter()
+                .find(|row| row.table == table && row.prefix.contains(ip))
+                .map(|row| row.prefix.prefix_len())
+            else {
+                return false;
+            };
+            state.routes_v6.get(table).is_some_and(|routes| {
+                routes
+                    .iter()
+                    .any(|route| route.prefix.prefix_len() > connected_len && route.prefix.contains(ip))
+            })
+        }
+    }
+}
+
 /// #17053: canonical connected-prefix LPM dispatcher — the single
 /// source of truth for connected attribution. Longest prefix wins;
 /// equal-length ties pick the LOWEST ifindex (#10645 precedent), so

@@ -55,7 +55,13 @@ pub(in crate::afxdp) fn reverse_hit_departed_destination_redirect(
         && ha_state
             .get(&dest_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs));
-    if dest_rg > 0 && !destination_local {
+    // #19171 fold 1 (codex-e P2-2): a route more specific than the covering
+    // connected prefix makes this local answer a legitimate route, not the
+    // withheld FIB's default-route mis-resolution; it stands.
+    if dest_rg > 0
+        && !destination_local
+        && !super::forwarding::more_specific_route_than_connected(forwarding, resolution_target, table)
+    {
         super::forwarding::resolve_zone_encoded_fabric_redirect_by_id(forwarding, egress_zone)
     } else {
         None
@@ -1532,6 +1538,43 @@ pub(in crate::afxdp) fn fabric_adopted_resolution(
     enforced
 }
 
+
+/// #19171 fold 1 (codex-e P2-1): the judgment a packet's stored-session
+/// re-resolution applies to a non-redirect answer, for a producer that
+/// resolved a route OUTSIDE that pipeline (the reverse PBR re-selection on a
+/// session hit). Live HA judges the answer's egress; a peer-owned one becomes
+/// `HAInactive`, then the fabric redirect, or stays `HAInactive` (a drop) when
+/// the packet arrived on the fabric link. Since #19171 a peer-owned connected
+/// prefix answers a raw lookup with that peer-owned interface, so a raw answer
+/// must never reach TX or the neighbor probe unjudged.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn judge_packet_route(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    resolution: ForwardingResolution,
+    ingress_ifindex: i32,
+    ha_startup_grace_until_secs: u64,
+    fabric_link_ingress: bool,
+    redirect_zone: u32,
+) -> ForwardingResolution {
+    let enforced = enforce_session_ha_resolution(
+        forwarding,
+        ha_state,
+        now_secs,
+        resolution,
+        ingress_ifindex,
+        ha_startup_grace_until_secs,
+    );
+    redirect_session_via_fabric_if_needed_at(
+        forwarding,
+        ha_state,
+        now_secs,
+        enforced,
+        fabric_link_ingress,
+        redirect_zone,
+    )
+}
 
 pub(in crate::afxdp) fn enforce_session_ha_resolution(forwarding: &ForwardingState,
 ha_state: &BTreeMap<i32, HAGroupRuntime>,

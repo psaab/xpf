@@ -967,6 +967,9 @@ fn tunneled_hit_stays_pinned(stored: ForwardingResolution, fresh: ForwardingReso
     )
 }
 
+/// #19171 fold 1: the returned `resolution` is the RAW re-selected route. The
+/// poll caller judges it (`session_glue::judge_packet_route`: HA, then the
+/// fabric-arrival composition) before persisting or using it.
 pub(super) fn revalidate_static_pbr_route_on_session_hit(
     forwarding: &ForwardingState,
     dynamic_neighbors: &Arc<ShardedNeighborMap>,

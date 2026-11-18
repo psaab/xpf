@@ -688,7 +688,10 @@ fn cached_flow_decision_invalid_reason_inner(
         now_secs,
         resolution,
         destination_owner_rg,
-    ) {
+    ) && !more_specific_route_than_connected(forwarding, target_ip, install_table)
+    {
+        // #19171 fold 1: a route more specific than the covering connected
+        // prefix is a legitimate route, as on the slow path's #16217 test.
         return Some(CachedDecisionInvalid::ForwardCandidateEgressDeparted);
     }
     if enforce_ha_resolution_snapshot(forwarding, ha_state, now_secs, resolution) != resolution {
@@ -1067,7 +1070,13 @@ fn fabric_redirect_rehome_agrees(
         return false;
     }
     let destination_owner_rg = destination_owner_rg();
+    // #19171 fold 1: the slow path's rehome keeps a local candidate that a
+    // route more specific than the covering connected prefix serves, whatever
+    // that prefix's owner; this arm must agree, or a cached redirect would
+    // keep sending the flow over the fabric.
+    let more_specific = more_specific_route_than_connected(forwarding, target_ip, install_table);
     if destination_owner_rg > 0
+        && !more_specific
         && !fabric_redirect_destination_now_local(
             ha_state,
             now_secs,
@@ -1112,7 +1121,7 @@ fn fabric_redirect_rehome_agrees(
         && ha_state
             .get(&candidate_egress_rg)
             .is_some_and(|group| group.is_forwarding_active(now_secs));
-    let candidate_matches_destination = if destination_owner_rg > 0 {
+    let candidate_matches_destination = if destination_owner_rg > 0 && !more_specific {
         let connected = crate::afxdp::session_glue::connected_ifindex_for_target_in_table(
             forwarding,
             target_ip,

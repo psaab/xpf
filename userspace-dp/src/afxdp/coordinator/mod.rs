@@ -1976,41 +1976,38 @@ impl Coordinator {
                     .nat
                     .rewrite_dst
                     .unwrap_or(entry.key.dst_ip);
-                // Only a destination the FIB serves DIRECTLY (covered by
-                // a connected prefix on its egress) is its own next-hop;
-                // gateway-routed destinations are covered by the route
-                // walk above and must not be probed on-link.
-                let direct = match target {
-                    IpAddr::V4(ip) => snapshot
-                        .connected_v4
-                        .iter()
-                        .any(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip)),
-                    IpAddr::V6(ip) => snapshot
-                        .connected_v6
-                        .iter()
-                        .any(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip)),
-                };
+                // Only a destination the FIB serves DIRECTLY is its own
+                // next-hop; gateway-routed destinations are covered by the
+                // route walk above and must not be probed on-link.
+                // #19171 fold 1 (codex-e P3-1): judge that by the session's
+                // own answer, resolved in its installing table, and warm it
+                // on the egress THAT answer names. "Some connected row covers
+                // it" was not enough once peer-owned prefixes stay in transit:
+                // a host under one, served by a more specific route through
+                // another interface, was probed on the stored, unrelated
+                // egress. The enqueue's RG gate judges the answer's egress.
+                let table = crate::afxdp::session_glue::install_table_name_for_session(
+                    snapshot,
+                    entry.decision,
+                    target,
+                );
+                let answer = crate::afxdp::forwarding::lookup_forwarding_resolution_in_table_with_dynamic(
+                    snapshot,
+                    &self.neighbors.dynamic,
+                    target,
+                    table,
+                )
+                .resolution;
+                let direct = matches!(
+                    answer.disposition,
+                    ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+                ) && answer.egress_ifindex > 0
+                    && answer.tunnel_endpoint_id == 0
+                    && answer.next_hop == Some(target);
                 if !direct {
                     continue;
                 }
-                let egress_ifindex = match entry.decision.resolution.egress_ifindex {
-                    egress if egress > 0 => egress,
-                    _ => match target {
-                        IpAddr::V4(ip) => snapshot
-                            .connected_v4
-                            .iter()
-                            .find(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip))
-                            .map(|row| row.ifindex)
-                            .unwrap_or(0),
-                        IpAddr::V6(ip) => snapshot
-                            .connected_v6
-                            .iter()
-                            .find(|row| row.tunnel_endpoint_id == 0 && row.prefix.contains(ip))
-                            .map(|row| row.ifindex)
-                            .unwrap_or(0),
-                    },
-                };
-                enqueue(egress_ifindex, target);
+                enqueue(answer.egress_ifindex, target);
             }
         }
     }

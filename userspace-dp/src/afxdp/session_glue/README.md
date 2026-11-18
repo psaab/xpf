@@ -81,6 +81,12 @@ used to compute a retained `FabricRedirect`.
   `HAInactive` on the LAN unit, where it used to store `FabricRedirect` intent.
   Both fail closed.
 
+**A more specific route stands (#19171 fold 1).** With the rows present, a
+local candidate for a destination inside an inactive owner's connected prefix
+can only be a route strictly more specific than that prefix. So the
+rehome/retain verdict, #16217's reverse-hit conversion and the reverse-synth arm
+consult `more_specific_route_than_connected` and keep that candidate.
+
 The #15958b cells re-pin the stored value and assert the delivered outcome
 (`fw0_refresh_then_reply_19171`). Stage B removes the guards that can no longer
 fire.

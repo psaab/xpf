@@ -3233,6 +3233,25 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                         } else {
                             None
                         };
+                        // #19171 fold 1 (codex-e P2-1): the re-selected route
+                        // is a RAW FIB answer, and a peer-owned connected
+                        // prefix now answers it with the peer-owned interface.
+                        // Judge it as any re-resolved session route is judged
+                        // (HA, then the fabric-arrival composition) before it
+                        // is persisted or used.
+                        let stale_pbr_route = stale_pbr_route.map(|mut route| {
+                            route.resolution = crate::afxdp::session_glue::judge_packet_route(
+                                worker_ctx.forwarding,
+                                worker_ctx.ha_state,
+                                now_secs,
+                                route.resolution,
+                                meta.ingress_ifindex as i32,
+                                ha_startup_grace_until_secs,
+                                fabric_link_ingress,
+                                resolved.metadata.ingress_zone,
+                            );
+                            route
+                        });
                         // #3073: re-count established packets on the admitting
                         // policy's counter. The cold path counts packet 1 in
                         // `apply_frag_deny_override_and_count`; this covers
