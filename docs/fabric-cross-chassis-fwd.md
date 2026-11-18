@@ -1720,6 +1720,11 @@ Every caller of the FIB gets that answer; none needs a correction of its own.
   unit is peer-owned. Only the readers that must never treat a peer-held
   address as this node's read it: the ICMP Frag-Needed/Packet-Too-Big source
   fallback (`build_frag_needed_v4`, `build_packet_too_big_v6`).
+  The mark follows ownership only at the next FIB rebuild, which an RG edge
+  schedules (a routes overlay plus a FIB generation bump). In that window, a
+  node that just lost the RG may still pick the peer's VIP as a PTB source.
+  That is the pre-#19171 window, unchanged. Routing and gateway binding read
+  the transit rows and live HA, never the mark.
 - **Equal-length transit rows break ties to the lowest ifindex** (the #17053
   canonical rule), not snapshot order.
 
@@ -1756,6 +1761,15 @@ Its answer now gets the same HA and fabric-arrival judgment
 (`judge_packet_route`) before it is stored or used. The neighbor warm pass
 warms a destination only when the session's own answer is direct, on that
 answer's egress.
+
+WireGuard transit is judged on the SELECTED peer's outer egress, at the poll
+path's HA net and at the flow-cache hit (`wg_transit_selected_peer_inactive_rg`;
+see `docs/wireguard-interop.md`). The session-level gate keys on the default
+gateway and could not see a peer endpoint inside a peer-owned prefix.
+
+Every production reference to a raw FIB lookup is pinned, with how its answer is
+judged, by `raw_lookup_census_19171.rs`. A new unclassified caller fails the
+build's tests.
 
 Census, cells, mutants and cost: `docs/log/19171.md`.
 
