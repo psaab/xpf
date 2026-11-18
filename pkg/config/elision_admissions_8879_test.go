@@ -1420,7 +1420,14 @@ func TestDepth2UnadmittedPopulation8929(t *testing.T) {
 	// MEASURED TO DROP (#8938). Named rather than counted so that fixing one
 	// reds this cell and forces its removal — a list that outlives its reason
 	// is the failure this campaign keeps finding.
-	knownDropping := []string{}
+	//
+	// #19201 (lane T, #18847): `bgp multihop` measured to DROP a dimension:
+	// braced `protocols { bgp { multihop { ttl 3; } } }` -> neighbor TTL 3,
+	// doubly elided `protocols bgp multihop { ttl 3; }` -> TTL 64 (bare
+	// multihop's default), EMPTY row -> 0. Not a plain admission (the elided
+	// spelling is partly READ, not empty-equivalent), so it stays in the
+	// population, named here until #19201 lands.
+	knownDropping := []string{"bgp multihop"}
 	// UNIT: PAIRS, not sites. #8929 first said 51 by counting a slice that
 	// double-counted `family inet6`, which appears under two different
 	// top-level stanzas. The predicate is keyed on (mid, head) and knows
@@ -1478,7 +1485,18 @@ func TestDepth2UnadmittedPopulation8929(t *testing.T) {
 	// doubly-elided spellings of every protocol (the wider #8823 cell covers
 	// the two intermediate spellings too). These pairs therefore read SAME,
 	// not drops, and belong in the population lower bound.
-	wantPopulation = 30
+	//
+	// #18847 (lane T) moved 30 -> 37. Eight pairs entered between 295706da30
+	// and master 3f55f21714 (population diffed at both commits, none left).
+	// Each was MEASURED braced vs doubly elided against an EMPTY row:
+	//   SAME, non-vacuous: alg pptp, ntp peer, syslog archive, syslog console,
+	//     syslog time-format.
+	//   ntp authentication-key: the knob is INERT; both spellings raise the
+	//     "not enforced" advisory, so nothing operational differs.
+	//   bgp multihop: DROPS the ttl dimension (#19201) -> knownDropping above.
+	//   zones functional-zone: DROPPED to the EMPTY row -> admitted by #19194,
+	//     so it is NOT in this count.
+	wantPopulation = 37
 
 	parentAdmitted := func(mid string) bool {
 		for stanza := range setSchema.children {
@@ -1520,8 +1538,8 @@ func TestDepth2UnadmittedPopulation8929(t *testing.T) {
 	// catches an entry that should have been REMOVED and is blind to one that
 	// was removed silently (a bad merge, a tidy-up). Measured: deleting an
 	// entry left this cell green until this assertion was added.
-	if len(knownDropping) != 0 {
-		t.Errorf("knownDropping has %d entries, want 0. #8938 measured 26 of the "+
+	if len(knownDropping) != 1 {
+		t.Errorf("knownDropping has %d entries, want 1 (`bgp multihop`, #19201). #8938 measured 26 of the "+
 			"50 dropping; the `nat` and `flow` families went in with #8943 and "+
 			"the remaining 13 landed after, so the list is now EMPTY and every "+
 			"measured drop has been admitted. ADDING one is only correct if a "+
