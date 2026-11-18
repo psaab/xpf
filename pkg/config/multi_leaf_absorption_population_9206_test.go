@@ -320,7 +320,31 @@ func TestMultiLeafAbsorptionPopulation9206(t *testing.T) {
 	// #15053: arming root-authentication + login user authentication brings
 	// their six ssh-* multi leaves inside a closed world (+12 structural
 	// including groups rehosts, +6 distinct).
-	const wantAbsorbing, wantDistinct = 110, 64
+	// #18847 (lane T): 110 -> 132 absorbing, 64 -> 75 distinct. The site lists
+	// were DIFFED at 686fa2f33e (which set 110) and master 3f55f21714: 21
+	// distinct sites entered (plus their 21 `groups` rehosts) and 10 left.
+	// Each new site was measured through configstore.CheckText, as the GREW
+	// note asks: the absorbing line `<leaf> <value> xpfbogus9206 v1` against
+	// its valid twin.
+	//   REFUSED AT COMMIT by value/reference validation (16): address-book
+	//     <b> {address, address-set address, address-set address-set, attach
+	//     zone}; ike and ipsec gateway address; proxy-ndp interface address;
+	//     functional-zone management host-inbound-traffic {protocols,
+	//     system-services}, also under interfaces <i>; nat64 rule-set {from
+	//     zone, from routing-instance, match source-address,
+	//     source-address-name}; port-mirroring input egress (refused outright:
+	//     not modelled).
+	//   ABSORBED, benign by design (3): system services ssh {ciphers,
+	//     key-exchange, macs}. Algorithm SPELLING is left to sshd's reload
+	//     check (#4305), and filterSSHAlgorithmsErr gates injection shapes, so
+	//     an absorbed token is exactly a misspelled algorithm.
+	//   ABSORBED, missing reference validation (2): security-zone white-list
+	//     and port-mirroring input ingress interface. An undefined name commits
+	//     even unpacked, so absorption only exposes the gap; filed as #19202.
+	//   LEFT (10, improvements): address-book global x3 (renamed to named
+	//     books, #15672); login user and root-authentication ssh-{dsa,ed25519,
+	//     rsa} x6 (no longer absorb); nat source pool port range.
+	const wantAbsorbing, wantDistinct = 132, 75
 	if absorbing != wantAbsorbing || distinct != wantDistinct {
 		t.Errorf("#9206: %d sites absorb at the schema walk (%d excluding `groups` "+
 			"rehosts), want %d (%d).\n  %s\n\n"+
