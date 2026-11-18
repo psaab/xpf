@@ -10080,6 +10080,35 @@ it is now pinned by an end-to-end measurement in BOTH states. The two witnesses
 remaining on the blind side (`/security/ike/gateway`, `/security/ipsec/vpn`) are
 deep containers, so criterion 1 keeps them blind for the foreseeable future and
 makes them durable anchors.
+
+### #18847 / #19195: 21 new members, measured one by one
+
+The census grew 118 -> 139 between its baseline and master `3f55f21714`. Each new
+member was measured end to end at `configstore.CheckText`: the valid body, then
+the same body with `xpfbogus 5` placed **inside the member's own braces**. (A
+first probe inserted the marker at the fixture's first brace, which for every
+group-level BGP fixture is `group g {`, so it measured the group body and
+over-reported 12 members as blind. Place the marker explicitly.)
+- **3 were really blind:**
+  - `routing-options generate route`, global and routing-instance (only
+    `policy` and `discard` are modelled), is now armed (#19195);
+  - `system syslog time-format` is now armed (#19195);
+  - `system ntp authentication-key` stays OPEN by design. The whole knob is
+    inert (no chrony keyfile; its advisory says NTP authentication is not
+    enforced), and arming it was measured to refuse the one-line Junos form
+    `authentication-key 5 type md5 value <secret>`.
+  Arming the shared generate-route node also takes the global path out of the
+  blind baseline.
+- **18 are blind by the census predicate but closed by a validator**, so they
+  joined the blind baseline with their reasons:
+  - `multihop` x6 (`validateBGPMultihop16679`);
+  - `prefix-limit teardown` x8 (its tail validator);
+  - `ntp peer`;
+  - the dhcpv6 relay group;
+  - dhcp/dhcpv6 pool `address-range` x2.
+- **13 members entered already inside a closed world** (OSPF/OSPFv3 auth,
+  named address books, the security root, PKI), so the armed baseline moved
+  60 -> 76 with those and the 3 newly armed.
 ## The #8939 residue: flat-run losses on the LENIENT path (#9235)
 
 #8939 drove the operator-typed flat-run losses to zero. The residue was eighteen

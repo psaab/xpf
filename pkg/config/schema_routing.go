@@ -175,7 +175,9 @@ var schemaRoutingOptions = &schemaNode{desc: "Routing options", children: map[st
 		}},
 	}},
 	"generate": {desc: "Generated routes", children: map[string]*schemaNode{
-		"route": {desc: "Generated route", args: 1, placeholder: "<destination>",
+		// #19195: closedWorld. Only `policy` and `discard` are modelled; any
+		// other keyword in the body used to commit clean and be ignored.
+		"route": {desc: "Generated route", args: 1, placeholder: "<destination>", closedWorld: true,
 			keyValueType: ValueCIDR, keyValueDesc: "Generated route destination prefix (CIDR, e.g. 10.0.0.0/8 or 2001:db8::/32)",
 			keyValueExamples: []string{"10.0.0.0/8", "192.168.0.0/16", "2001:db8::/32"},
 			keyValidator:     ValidateRouteDestination,

@@ -210,7 +210,8 @@ var instanceNameBlindBaseline9091 = []string{
 	"/routing-instances/*/routing-options/static/route",
 	"/routing-instances/*/routing-options/static/route/next-hop",
 	"/routing-instances/*/routing-options/static/route/qualified-next-hop",
-	"/routing-options/generate/route",
+	// #19195: "/routing-options/generate/route" left here; generate route is
+	// armed (closedWorld) in both the global and routing-instance grammar.
 	"/routing-options/rib",
 	"/routing-options/rib/static/route",
 	"/routing-options/rib/static/route/next-hop",
@@ -247,6 +248,43 @@ var instanceNameBlindBaseline9091 = []string{
 	"/system/services/dhcpv6-local-server/group/interface",
 	"/system/services/dhcpv6-local-server/group/pool",
 	"/system/services/dynamic-dns/provider",
+	// #18847 / #19195 (lane T, measured 2026-11-18 at configstore.CheckText
+	// with `xpfbogus 5` placed in the member's OWN body): these 18 are
+	// schema-blind by this census's predicate, but a node or tail VALIDATOR
+	// refuses an unknown keyword in the body, so none commits clean. They are
+	// validator-closed, not open-world:
+	//   - multihop (validateBGPMultihop16679 "unknown statement"; #16679),
+	//     at top, group and neighbor level, global and routing-instance:
+	"/protocols/bgp/multihop",
+	"/protocols/bgp/group/multihop",
+	"/protocols/bgp/group/neighbor/multihop",
+	"/routing-instances/*/protocols/bgp/multihop",
+	"/routing-instances/*/protocols/bgp/group/multihop",
+	"/routing-instances/*/protocols/bgp/group/neighbor/multihop",
+	//   - prefix-limit teardown (ValidateBGPPrefixLimitTeardownTail15010
+	//     "unexpected trailing token"; #15010):
+	"/protocols/bgp/group/family/inet/unicast/prefix-limit/teardown",
+	"/protocols/bgp/group/family/inet6/unicast/prefix-limit/teardown",
+	"/protocols/bgp/group/neighbor/family/inet/unicast/prefix-limit/teardown",
+	"/protocols/bgp/group/neighbor/family/inet6/unicast/prefix-limit/teardown",
+	"/routing-instances/*/protocols/bgp/group/family/inet/unicast/prefix-limit/teardown",
+	"/routing-instances/*/protocols/bgp/group/family/inet6/unicast/prefix-limit/teardown",
+	"/routing-instances/*/protocols/bgp/group/neighbor/family/inet/unicast/prefix-limit/teardown",
+	"/routing-instances/*/protocols/bgp/group/neighbor/family/inet6/unicast/prefix-limit/teardown",
+	//   - ntp peer ("unknown modifier"; #15709):
+	"/system/ntp/peer",
+	//   - ntp authentication-key: BLIND (measured: an unknown keyword commits
+	//     clean) but the whole knob is INERT (#15709: no chrony keyfile; the
+	//     advisory says NTP authentication is not enforced), so nothing is
+	//     lost. Arming it was measured to refuse the one-line Junos form
+	//     `authentication-key 5 type md5 value <secret>`
+	//     (TestNTPFullJunosAuthFormWarnsStripped14596). Kept open.
+	"/system/ntp/authentication-key",
+	//   - dhcpv6 relay group (the RFC 8415 relay-subset validator; #9553):
+	"/forwarding-options/dhcp-relay/dhcpv6/group",
+	//   - pool address-range (tail validator "expected low or high"; #15691):
+	"/system/services/dhcp-local-server/group/pool/address-range",
+	"/system/services/dhcpv6-local-server/group/pool/address-range",
 }
 
 // instanceNameBlindCeiling9091 is derived so the two can never disagree.
@@ -344,6 +382,32 @@ var instanceNameArmedBaseline9091 = []string{
 	"/security/nat/static/rule-set",
 	"/security/nat/static/rule-set/rule",
 	"/security/screen/ids-option",
+	// #18847 (lane T, 2026-11-18): 13 containers that entered the census
+	// already INSIDE a closed world (the remedy, moving deliberately), plus 4
+	// armed by #19195:
+	//   OSPF/OSPFv3 auth (#15136 565ded80fb, #17680):
+	"/protocols/ospf/area/virtual-link/authentication/md5",
+	"/protocols/ospf/area/virtual-link/authentication/simple-password",
+	"/protocols/ospf3/area/interface/authentication/md5",
+	"/protocols/ospf3/area/interface/authentication/simple-password",
+	"/routing-instances/*/protocols/ospf/area/virtual-link/authentication/md5",
+	"/routing-instances/*/protocols/ospf/area/virtual-link/authentication/simple-password",
+	"/routing-instances/*/protocols/ospf3/area/interface/authentication/md5",
+	"/routing-instances/*/protocols/ospf3/area/interface/authentication/simple-password",
+	//   named address books (#15672 d555361869):
+	"/security/address-book/*/address-set",
+	//   under the #10078 closed security root:
+	"/security/flow/traceoptions/file",
+	"/security/log/stream/host",
+	"/security/nat/source/rule-set/rule/then/source-nat/pool",
+	//   PKI (#15752 bf262aa649):
+	"/security/pki/ca-profile",
+	//   #19195: closedWorld on generate route (global + routing-instance) and
+	//   syslog time-format, each measured accepting `xpfbogus 5` at CheckText
+	//   before arming:
+	"/routing-options/generate/route",
+	"/routing-instances/*/routing-options/generate/route",
+	"/system/syslog/time-format",
 }
 
 var instanceNameArmedFloor9091 = len(instanceNameArmedBaseline9091)

@@ -267,6 +267,12 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 				"source-address":   {desc: "Source address for this peer", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, validator: ValidateIPAddress, children: nil},
 			}},
 		"trusted-key": {desc: "Trusted authentication key id", args: 1, multi: true, placeholder: "<key-id>", valueType: ValueInteger, validator: ValidateIntegerMin(1), refuseNonLeafBlockChildren: true, children: nil},
+		// #19195: deliberately NOT closedWorld. The whole knob is inert (xpf
+		// writes no chrony keyfile; systemInertKnobWarnings says NTP
+		// authentication is not enforced), so an unknown keyword in the body
+		// loses nothing. Closing it was measured to refuse the legitimate
+		// one-line Junos form `authentication-key 5 type md5 value <secret>`
+		// (TestNTPFullJunosAuthFormWarnsStripped14596).
 		"authentication-key": {desc: "NTP authentication key", args: 1, placeholder: "<key-id>", children: map[string]*schemaNode{
 			"type":  {desc: "Key type", args: 1, placeholder: "<type>", children: nil},
 			"value": {desc: "Key value", args: 1, placeholder: "<value>", children: nil},
@@ -346,7 +352,8 @@ var schemaSystem = &schemaNode{desc: "System configuration", children: map[strin
 			wildcard: syslogFacilitySeverityLeaf(),
 			children: syslogDestinationModifiers(nil)},
 		"source-address": {desc: "Default source address for syslog hosts", args: 1, placeholder: "<ip>", valueType: ValueIPAddress, validator: ValidateIPAddress, children: nil},
-		"time-format": {desc: "Syslog timestamp format", args: 1, placeholder: "<format>", children: map[string]*schemaNode{
+		// #19195: closedWorld, leaf-complete (year, millisecond).
+		"time-format": {desc: "Syslog timestamp format", args: 1, placeholder: "<format>", closedWorld: true, children: map[string]*schemaNode{
 			"year":        {desc: "Include year in timestamp", children: nil},
 			"millisecond": {desc: "Include milliseconds in timestamp", children: nil},
 		}},
