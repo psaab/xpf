@@ -19,7 +19,15 @@ cat >"$TMP_DIR/bin/incus" <<'FAKE_INCUS'
 #!/usr/bin/env bash
 set -euo pipefail
 
+# #19189: with-cluster.sh runs the #18038 VM-target guard
+# (test/incus/vm-target-guard.sh) on both firewalls before the harness. Its
+# `list --format json` must name the instance as a virtual-machine; any other
+# list keeps the old empty answer.
 if [[ ${1:-} == list ]]; then
+	if [[ " $* " == *" --format json "* ]]; then
+		if [[ ${2:-} == *: ]]; then name=${3:-}; else name=${2#*:}; fi
+		printf '[{"name":"%s","type":"virtual-machine"}]\n' "$name"
+	fi
 	exit 0
 fi
 if [[ ${1:-} == file ]]; then
@@ -31,6 +39,26 @@ shift 2
 [[ ${1:-} == -- ]] && shift
 command=${1:-}
 shift || true
+
+# #19189: the rest of the guard -- the boot ID, the shim directories, the
+# mark-vm helper and the boot-proof unit. None of these is a harness command,
+# so answering them here hides nothing the cases below check.
+case "$command" in
+cat)
+	if [[ ${1:-} == /proc/sys/kernel/random/boot_id ]]; then
+		echo 00000000-0000-4000-8000-000000000001
+		exit 0
+	fi
+	;;
+mkdir | /usr/local/sbin/xpf-testguard-mark-vm.sh)
+	exit 0
+	;;
+systemctl)
+	case "${1:-}" in
+	daemon-reload | enable) exit 0 ;;
+	esac
+	;;
+esac
 
 baseline_config() {
 	cat <<'EOF'
@@ -386,7 +414,7 @@ run_case() {
 				&& ! grep -Fq 'committing FBF two-upstream fixture' "$output"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> missing return route is VOID before mutation\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> absent peer return route must void before mutation (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> absent peer return route must void before mutation (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 		baseline-drop)
@@ -394,7 +422,7 @@ run_case() {
 				&& grep -Eq '[0-9]+ passed, [1-9][0-9]* failed' <<<"$summary"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> healthy-leg drop rejected\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> baseline drop must fail measured forwarding (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> baseline drop must fail measured forwarding (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 		wrong-egress)
@@ -402,7 +430,7 @@ run_case() {
 				&& grep -Fq 'marked IPv4 requests did not arrive from ISP-B gateway MAC' "$output"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> replies with wrong healthy-leg next hop rejected\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> wrong healthy-leg next hop must fail (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> wrong healthy-leg next hop must fail (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 		no-transition)
@@ -410,7 +438,7 @@ run_case() {
 				&& grep -Eq '[0-9]+ passed, [1-9][0-9]* failed' <<<"$summary"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> disabled ip-monitoring transition rejected\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> missing fallback transition must fail (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> missing fallback transition must fail (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 		fallback-drop)
@@ -418,7 +446,7 @@ run_case() {
 				&& grep -Eq '[0-9]+ passed, [1-9][0-9]* failed' <<<"$summary"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> fallback blackhole rejected\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> dropped fallback traffic must fail (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> dropped fallback traffic must fail (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 		wrong-source)
@@ -427,7 +455,7 @@ run_case() {
 				&& grep -Eq '[0-9]+ passed, [1-9][0-9]* failed' <<<"$summary"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> stale ISP-B source rejected after route transition\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> wrong fallback egress source must fail (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> wrong fallback egress source must fail (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 		ownership-refused)
@@ -437,7 +465,7 @@ run_case() {
 				&& grep -Eq '[0-9]+ passed, [1-9][0-9]* failed' <<<"$summary"; then
 				pass=$((pass + 1)); printf 'ok   %-26s -> unowned latest commit is not rolled back\n' "$scenario"
 			else
-				fail=$((fail + 1)); printf 'FAIL %-26s -> unowned latest commit must block rollback (exit %s)\n' "$scenario"; cat "$output"
+				fail=$((fail + 1)); printf 'FAIL %-26s -> unowned latest commit must block rollback (exit %s)\n' "$scenario" "$rc"; cat "$output"
 			fi
 			;;
 	esac
