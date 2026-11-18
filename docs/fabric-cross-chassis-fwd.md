@@ -1743,6 +1743,20 @@ republication debt; the #15958b transient retain (a FIB that lags HA);
 the #18517 bare-gateway fallback. The paragraphs below describe the withheld
 FIB as it was when they were written.
 
+**A more specific route still wins (fold 1).** The destination-owner
+compensations (#16217's reply conversion, the #15958b/#18659/#18672 retain, the
+flow-cache arms, reverse synthesis) were built for the withheld FIB's
+default-route mistake. Now a local answer for a destination inside a peer-owned
+prefix can only be a route more specific than that prefix, so each consults
+`more_specific_route_than_connected` and leaves such a route standing.
+
+**Every producer is judged (fold 1).** The reverse PBR re-selection on a session
+hit re-resolves in a newly selected table outside the stored-session pipeline.
+Its answer now gets the same HA and fabric-arrival judgment
+(`judge_packet_route`) before it is stored or used. The neighbor warm pass
+warms a destination only when the session's own answer is direct, on that
+answer's egress.
+
 Census, cells, mutants and cost: `docs/log/19171.md`.
 
 ## Split node keeps statics whose gateway is peer-owned (#18517)
