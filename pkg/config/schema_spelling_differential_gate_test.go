@@ -281,6 +281,35 @@ var mixedChildIsAModifierBlock = map[string]string{
 // entries create a second object rather than a second value.
 // ---------------------------------------------------------------------------
 var notAValueList = map[string]string{
+	// #18847: four single-value zone leaves, `screen` and `description` on a
+	// security-zone and on functional-zone management. VERIFIED WHERE THE
+	// EXTRA TOKENS LAND (runner probe on 06c743e22e):
+	//
+	//	screen [ s1 ];              strict OK       ScreenProfile=s1
+	//	screen [ s1 s2 ];           strict REFUSED  (lenient: binding dropped, warned)
+	//	screen { s1; } / { s1; s2; } strict REFUSED  (lenient: binding dropped, warned)
+	//	screen s1 s2;               strict REFUSED
+	//	screen s1; screen s2;       strict OK       ScreenProfile=s2 (last wins)
+	//
+	// and the same for description. No multi-value spelling commits, so the
+	// B-spelling "drop" the gate reports is malformed input refused, not a
+	// lost list member.
+	"security zones security-zone <*> screen":               "single value; every multi-value spelling is REFUSED at strict commit, verified (#18847)",
+	"security zones security-zone <*> description":          "single value; every multi-value spelling is REFUSED at strict commit, verified (#18847)",
+	"security zones functional-zone management screen":      "single value; every multi-value spelling is REFUSED at strict commit, verified (#18847)",
+	"security zones functional-zone management description": "single value; every multi-value spelling is REFUSED at strict commit, verified (#18847)",
+	// #18847: `tcp-no-flag` is a valueless screen flag. Any token after it is
+	// REFUSED at strict commit in every spelling ("`tcp no-flag x1` is not a
+	// supported screen option"), verified by the same probe.
+	"security screen ids-option <*> tcp tcp-no-flag": "args:0 flag; any token after it is REFUSED at strict commit in every spelling, verified (#18847)",
+	// #18847: `active-server-group` names ONE server group. `[ G1 G2 ]` and
+	// `G1 G2` commit and compile exactly like `G1` alone: G2 is DISCARDED, the
+	// #8939 malformed-input shape, scoped out there and here. The repeat form
+	// is last-wins, and the block form is not read (the group then fails the
+	// #11693 active-server-group-required gate at strict). Verified by the same
+	// probe.
+	"forwarding-options dhcp-relay active-server-group": "args:1, one server group; extra tokens are DISCARDED (A/F) and the block form is unread and refused via #11693, verified (#18847)",
+
 	// #18847: `then next term`. #16533 (387703c99b) DECLARED it (`next` with a
 	// valueless `term` child) so packed `then` tails stop dropping it, which
 	// made the four filter families' site comparable here for the first time.
