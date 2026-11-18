@@ -813,6 +813,13 @@ func TestAdmittedDropsAreReadSomewhere8879(t *testing.T) {
 		"security pre-id-default-policy":   "pre-id session logging is inert; no pre-identification admit path exists",
 		"interface-routes rib-group":       "global main-to-instance import is unsupported and rejected at strict commit",
 		"routing-options interface-routes": "global main-to-instance import is unsupported and rejected at strict commit",
+		// #18847 (lane T): three stanzas became accepted-but-INERT by design
+		// after this list was written. Each raises a deliberate advisory, and
+		// the product has no runtime for it, so their elision drops lose only
+		// that advisory:
+		"license autoupdate":                  "no licensing runtime; `system license autoupdate url` is accepted but NOT applied (fd06005c8b, #15782)",
+		"system license":                      "no licensing runtime; the license stanza is accepted but NOT applied (fd06005c8b, #15782)",
+		"services application-identification": "AppID is port+protocol catalog matching with no L7 engine; its children are accepted-only (b3186f72d4, #16079; presence compiled by #18849)",
 	}
 	inertMarkers := []string{
 		"inert", "no runtime effect", "no effect", "accepted-only",
@@ -855,7 +862,7 @@ func TestAdmittedDropsAreReadSomewhere8879(t *testing.T) {
 	for pair := range got {
 		if _, ok := knownNotRead[pair]; !ok {
 			t.Errorf("%q now raises an accepted-but-inert advisory and was not "+
-				"one of the three rows #8879's re-derived ratio is built on. "+
+				"one of the rows #8879's re-derived ratio is built on. "+
 				"Either a stanza became inert or a new advisory changed what "+
 				"this measures -- the ratio must be re-derived, not adjusted.", pair)
 		}
