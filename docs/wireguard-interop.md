@@ -587,6 +587,33 @@ the route at the tunnel-manager layer, so a non-1500 underlay relies on
 either the operator `mtu` statement or the Rust egress guard as the
 authoritative backstop.
 
+### HA judges the SELECTED peer's outer egress (#19171)
+
+The session-level WireGuard HA gate (`enforce_ha_resolution_snapshot`, #13980)
+keys on the decision's outer next hop. For transit that decision resolves the
+ZEROED endpoint destination (#2837), so its next hop is the transport table's
+default gateway, not the route to the peer AllowedIPs selects per packet. A peer
+reached through a different interface was therefore never judged. Since #19171
+the transit FIB keeps peer-owned connected prefixes. A peer endpoint inside one
+resolved to that peer-owned interface, and the packet was encapsulated and sent
+on an interface this node does not own.
+
+`frame::wg_transit_selected_peer_inactive_rg` judges the same per-packet
+selection the dispatch (#6308/#6345) and the encapsulated bytes (#5292) use:
+the selected peer's outer egress RG must be forwarding-active here. It runs in
+two places:
+
+- **The poll path's HA safety net.** An inactive peer RG makes the packet
+  HAInactive. The net then carries it to the owner over the fabric on a direct
+  arrival, where the owner encapsulates it, and refuses it on a fabric-link
+  arrival.
+- **The flow-cache hit validation.** An inactive peer RG evicts the cached
+  decision, attributed as `PostHitEnforceChanged`.
+
+A standalone node (no HA inventory) is not gated. The same judgment covers a
+peer reached by a static route over a peer-owned interface, a gap that predates
+#19171.
+
 ### DSCP/ECN propagation (#2303 encap, #2315 GRE decap, #7758 WG host encap)
 
 **Encap (#2303, completed for WG in #7758).** GRE and WG encap copy the

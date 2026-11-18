@@ -22,6 +22,7 @@ pub(in crate::afxdp) use generated::generated_reply_session_key;
 pub(in crate::afxdp) use wg::{
     WgPtbOutcome, consume_wg_outer_ptb, wg_selected_peer_outer,
     wg_transit_egress_physical_egress_ifindex,
+    wg_transit_selected_peer_inactive_rg,
 };
 
 // #6308: the WG transit-egress DISPATCH physical-egress SSOT, re-exported so

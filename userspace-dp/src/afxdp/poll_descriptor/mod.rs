@@ -10443,7 +10443,30 @@ pub(super) fn poll_binding_process_descriptor_in_view(
                 // Only redirect when the egress maps to a known RG.
                 // HAInactive with unknown ownership (rg=0) means unresolved
                 // — those should NOT be fabric-redirected.
-                let egress_rg = if decision.resolution.disposition
+                //
+                // #19171 (raw-lookup census U1): a WireGuard transit packet is
+                // judged on its SELECTED peer's outer egress, which the
+                // session-level gate cannot see (it keys on the default
+                // gateway). An inactive peer RG makes it HAInactive here, so
+                // this net carries it to the owner over the fabric on a direct
+                // arrival, and refuses it on a fabric-link arrival.
+                let wg_selected_peer_inactive_rg =
+                    crate::afxdp::frame::wg_transit_selected_peer_inactive_rg(
+                        &decision,
+                        worker_ctx.forwarding,
+                        worker_ctx.ha_state,
+                        now_secs,
+                        packet_frame,
+                        meta.addr_family,
+                        meta.l3_offset,
+                        Some(worker_ctx.dynamic_neighbors),
+                    );
+                if wg_selected_peer_inactive_rg.is_some() {
+                    decision.resolution.disposition = ForwardingDisposition::HAInactive;
+                }
+                let egress_rg = if let Some(rg) = wg_selected_peer_inactive_rg {
+                    rg
+                } else if decision.resolution.disposition
                     == ForwardingDisposition::ClusterTerminalHAInactive
                 {
                     // #15742: cluster-terminal resolutions zero their egress;

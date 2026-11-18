@@ -789,6 +789,12 @@ mod tests_split_new_flow_19178;
 #[path = "tests_pbr_peer_owned_19171.rs"]
 mod tests_pbr_peer_owned_19171;
 #[cfg(test)]
+#[path = "tests_wg_selected_peer_ha_19171.rs"]
+mod tests_wg_selected_peer_ha_19171;
+#[cfg(test)]
+#[path = "raw_lookup_census_19171.rs"]
+mod raw_lookup_census_19171;
+#[cfg(test)]
 #[path = "tests_more_specific_route_19171.rs"]
 mod tests_more_specific_route_19171;
 #[cfg(test)]

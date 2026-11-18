@@ -329,6 +329,25 @@ pub(super) fn stage_flow_cache_hit(
                 reason
             }
         };
+        // #19171 (raw-lookup census U1): a cached WireGuard transit decision is
+        // judged on its SELECTED peer's outer egress, which the decision
+        // revalidation above cannot see (the session-level gate keys on the
+        // default gateway). An inactive peer RG evicts the entry like any
+        // HA enforcement change; the slow path then carries the packet to the
+        // owner over the fabric (or refuses a fabric-link arrival).
+        let invalid_reason = invalid_reason.or_else(|| {
+            crate::afxdp::frame::wg_transit_selected_peer_inactive_rg(
+                &cached.decision,
+                worker_ctx.forwarding,
+                worker_ctx.ha_state,
+                now_secs,
+                packet_frame,
+                meta.addr_family,
+                meta.l3_offset,
+                Some(worker_ctx.dynamic_neighbors),
+            )
+            .map(|_| crate::afxdp::forwarding::CachedDecisionInvalid::EnforceChanged)
+        });
         // #16222 DISC (scratch observability, debug-log builds only):
         // per-tuple dump for starved-tuple diagnosis — seeded decision
         // kind, stamp owner RG, stored resolution, cache outcome per

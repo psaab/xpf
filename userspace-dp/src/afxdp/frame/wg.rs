@@ -618,6 +618,59 @@ pub(in crate::afxdp) fn wg_transit_egress_physical_egress_ifindex(
     ))
 }
 
+/// #19171 (raw-lookup census U1): the HA judgment of a WireGuard transit
+/// packet's SELECTED peer. Returns the outer-egress RG when that RG is
+/// inactive here, else `None`.
+///
+/// The session-level gate (`enforce_ha_resolution_snapshot`'s WireGuard arm)
+/// keys on the decision's outer next hop. A transit decision resolves the
+/// endpoint row's unspecified destination, so that next hop is the transport
+/// table's DEFAULT gateway, not the route to the peer AllowedIPs selects per
+/// packet. A peer reached through another interface was never judged. Since
+/// #19171 a peer-owned connected prefix answers the peer route with the
+/// peer-owned interface, so a peer endpoint inside one transmitted there.
+///
+/// This uses the same per-packet selection the dispatch and the encapsulated
+/// bytes use (`wg_transit_egress_physical_egress_ifindex`). An empty HA map
+/// is a standalone node (no gate), as in enforce. Non-tunnel and
+/// non-forwardable decisions return `None` before any lookup.
+#[expect(clippy::too_many_arguments, reason = "#19171: mirrors the dispatch helper plus HA")]
+#[inline]
+pub(in crate::afxdp) fn wg_transit_selected_peer_inactive_rg(
+    decision: &SessionDecision,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    now_secs: u64,
+    inner_frame: &[u8],
+    inner_addr_family: u8,
+    inner_l3_offset: u16,
+    dynamic_neighbors: Option<&Arc<ShardedNeighborMap>>,
+) -> Option<i32> {
+    if decision.resolution.tunnel_endpoint_id == 0
+        || ha_state.is_empty()
+        || !matches!(
+            decision.resolution.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )
+    {
+        return None;
+    }
+    let peer_egress = wg_transit_egress_physical_egress_ifindex(
+        decision,
+        forwarding,
+        inner_frame,
+        inner_addr_family,
+        inner_l3_offset,
+        dynamic_neighbors,
+    )?;
+    let rg = crate::afxdp::forwarding::owner_rg_for_flow(forwarding, peer_egress);
+    (rg > 0
+        && !ha_state
+            .get(&rg)
+            .is_some_and(|group| group.is_forwarding_active(now_secs)))
+    .then_some(rg)
+}
+
 pub(in crate::afxdp) struct WgEncapCommit {
     pub(in crate::afxdp) peer_pubkey: [u8; 32],
     pub(in crate::afxdp) outcome: crate::afxdp::wg::EncapOutcome,
