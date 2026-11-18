@@ -1012,6 +1012,12 @@ func compactNormalizeInScope(containerKeyword, head string) bool {
 	}
 	switch containerKeyword + " " + head {
 	case "zones security-zone",
+		// #19194: the doubly-elided `security zones functional-zone management
+		// { ... }` compiled to exactly what an EMPTY config produces (measured,
+		// lane T #18847): the management zone and its interfaces vanished on a
+		// clean commit. It satisfies the admission rule: elided == EMPTY today,
+		// so no reader consumes the tail. Added by #15668 (661366b4b2).
+		"zones functional-zone",
 		"security-zone screen",
 		"security-zone description",
 		"security-zone interfaces",

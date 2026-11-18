@@ -295,6 +295,19 @@ var knownBlindScopePairs8852 = map[string]string{
 	// not a clearance.
 	"inet sampling":  "plain-container",
 	"inet6 sampling": "plain-container",
+	// #19194 admitted ("zones","functional-zone"): the doubly-elided `security
+	// zones functional-zone management { ... }` compiled to the EMPTY row, so
+	// the management zone and its interfaces vanished on a clean commit
+	// (measured, lane T #18847). The head is a plain container (args:0, child
+	// management, no wildcard), so the census emits no site for it and arm 2
+	// adjudicates nothing.
+	//
+	// COVERED THERE IS NOT ADJUDICATED HERE: TestFunctionalZoneDoublyElided
+	// CompilesLikeBraced19194 compares the compiled Security section elided
+	// against braced, with an EMPTY row so SAME is not vacuous. This entry
+	// records only that arm 2 is blind to the pair. A boundary, not a
+	// clearance.
+	"zones functional-zone": "plain-container",
 	// issue 8858. Unlike the two confirmed-broken entries above, this pair's
 	// fold IS repaired and measured -- but by its own cells, not by arm 2, and
 	// a pair leaves this list only when arm 2 starts generating a site for it.
