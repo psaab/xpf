@@ -947,7 +947,7 @@ impl SessionTable {
         if prev.decision.install_table_domain == 0 && prev.decision.install_table_check == 0 {
             return None;
         }
-        let same = wire_session_id == 0 || prev.session_id == 0 || wire_session_id == prev.session_id;
+        let same = same_install_incarnation(wire_session_id, prev.session_id);
         same.then(|| {
             (
                 prev.decision.install_table_domain,
@@ -956,11 +956,30 @@ impl SessionTable {
         })
     }
 
+    /// Install a synced/replica row, replacing any same-key row. Callers that
+    /// bind a #9951 leak incarnation to the row use
+    /// [`Self::upsert_synced_with_origin_and_leak`]; this form installs the
+    /// row with none (the stamp `remove_entry` cleared stays cleared).
     #[inline]
     pub fn upsert_synced_with_origin(
         &mut self,
         req: SessionInstall,
         allow_replace_local: bool,
+    ) -> bool {
+        self.upsert_synced_with_origin_and_leak(req, allow_replace_local, 0)
+    }
+
+    /// [`Self::upsert_synced_with_origin`], stamping `leak_incarnation`
+    /// (#9951; 0 = none) on the installed row. The stamp is applied here, not
+    /// by the caller after the install, because #19173's epoch carry compares
+    /// it: a replacement that changes the row's leak incarnation is a new
+    /// incarnation for the flow cache (`replacement_keeps_incarnation`).
+    #[inline]
+    pub(crate) fn upsert_synced_with_origin_and_leak(
+        &mut self,
+        req: SessionInstall,
+        allow_replace_local: bool,
+        leak_incarnation: u64,
     ) -> bool {
         let SessionInstall {
             key,
@@ -1142,8 +1161,10 @@ impl SessionTable {
         ) {
             return false;
         }
-        let _previous = self.remove_entry(&key, RemovalKind::Replace);
-        let epoch = self.next_epoch();
+        // #19173: the replaced row's leak stamp, read before `remove_entry`
+        // clears it, for the epoch-carry compare below.
+        let previous_leak_incarnation = self.leak_incarnation(&key).unwrap_or(0);
+        let previous = self.remove_entry(&key, RemovalKind::Replace);
         // #5212 (completes the #4915 follow-up): ADOPT the originating node's
         // session id when it rides the HA session-sync wire, so a session that
         // opens on the primary and closes on the standby after a failover
@@ -1189,7 +1210,7 @@ impl SessionTable {
                 (metadata.inactivity_timeout_ns.is_none(), false, false)
             };
         let opening_override_ns = self.opening_override_for(metadata.ingress_zone);
-        let record = SessionRecord {
+        let mut record = SessionRecord {
             key: key.clone(),
             entry: SessionEntry {
                 decision,
@@ -1199,7 +1220,9 @@ impl SessionTable {
                 policy_generation: 0,
                 metadata: metadata.clone(),
                 origin,
-                install_epoch: epoch,
+                // #19173: set below, once the row is built: carried from the
+                // replaced row or freshly minted. 0 is never stored.
+                install_epoch: 0,
                 last_seen_ns: preserved_last_seen_ns.unwrap_or(now_ns),
                 last_packet_seen_ns: preserved_last_packet_seen_ns.unwrap_or(0),
                 // #2465: a re-imported synced entry stamps its creation instant
@@ -1350,6 +1373,30 @@ impl SessionTable {
                 persistent_lease_hold,
             },
         };
+        // #19173 fold (r24 P3-1): a replacement whose forwarding inputs are
+        // all equal to the replaced row's, under the same incarnation
+        // identity, keeps that row's install epoch, so a flow-cache entry
+        // seeded from it keeps hitting. Periodic identical re-imports
+        // (primary liveness, every 1-10 s per live session; UpsertLocal
+        // refreshes) would otherwise evict every cached flow they back
+        // once per interval. Any other replacement mints a new epoch and
+        // the fused probe refuses the old entry. Import time only; the hit
+        // path still compares one u64.
+        record.entry.install_epoch = match previous.as_ref() {
+            Some(prev)
+                if replacement_keeps_incarnation(
+                    prev,
+                    previous_leak_incarnation,
+                    &record.entry,
+                    leak_incarnation,
+                    protocol,
+                    wire_session_id,
+                ) =>
+            {
+                prev.install_epoch
+            }
+            _ => self.next_epoch(),
+        };
         // #6297: route every slab insert through `insert_record` so the
         // live-extent high-watermark (the budgeted refresh walk's bound) is
         // advanced to cover this new slot.
@@ -1358,6 +1405,8 @@ impl SessionTable {
         let index_key = key.clone();
         self.key_to_handle.insert(key, handle);
         self.index_forward_nat_key(&index_key, handle, decision, &metadata);
+        // #9951: the caller's leak incarnation for this row (0 stamps none).
+        self.stamp_leak_incarnation(&index_key, leak_incarnation);
         // #965: schedule the synced entry for expiration check.
         self.push_to_wheel(&index_key, now_ns);
         // #10310: a WorkerLocalImport is a local replica of an already
@@ -1720,4 +1769,221 @@ impl SessionTable {
         }
         demoted_keys
     }
+}
+
+/// #9752 round 3 / #19173: the incarnation-identity rule for a same-key
+/// re-import. A wire session id names the originating incarnation; 0 names
+/// none (a legacy peer, or a locally generated replica such as a local-tunnel
+/// `UpsertLocal`, which mints a fresh node-local id on every install). Two
+/// rows are the same incarnation unless BOTH ids are known and differ.
+/// Single-sourced for both consumers: `preserved_install_table_for` (keep the
+/// stored installing table under a (0,0) resend) and
+/// `replacement_keeps_incarnation` (keep the stored install epoch).
+#[inline]
+pub(crate) fn same_install_incarnation(wire_session_id: u64, stored_session_id: u64) -> bool {
+    wire_session_id == 0 || stored_session_id == 0 || wire_session_id == stored_session_id
+}
+
+/// #19173 fold (r24 P3-1): whether a same-key replacement built by
+/// `upsert_synced_with_origin_and_leak` may keep the replaced row's
+/// `install_epoch`, the token a flow-cache entry binds at seed time and the
+/// fused probe compares on every hit. Keeping it keeps the entry hitting, so
+/// it is allowed only when the replacement is the SAME incarnation (the
+/// identity rule) AND equal in every input the cache seed captures from the
+/// row or the slow path that produced the seed reads from it. Evaluated once
+/// per import, never on the hit path.
+///
+/// Every `SessionEntry` and `SessionMetadata` field is named (no `..`), so a
+/// new field fails to compile until it is classified here.
+///
+/// Compared (any difference mints a new epoch):
+/// - `session_id`, through [`same_install_incarnation`] on the WIRE id (the
+///   id the new row is installed under is a fresh alloc when the wire
+///   carries none, so the stored ids would always differ for those rows);
+/// - the whole `SessionDecision`: resolution (disposition, egress and TX
+///   ifindex, next hop, neighbor and source MAC, VLAN, tunnel endpoint,
+///   source ifindex, route MTUs), the NAT decision, and the installing-table
+///   stamp (domain and check), the input the defect was about;
+/// - every `SessionMetadata` field: zones and their vintage checks, ingress
+///   identity (ifindex, VLANs), NAT scope and NAT64 reverse, owner RG (the
+///   seed's stamp owner and the HA fence), fabric ingress, direction and
+///   alias provenance, policy id, session logging, the idle timeout, the
+///   policy counter index (a term of `tun_origin_forward`) and the bound
+///   policy counter, by identity (`policy_counter.is_some()` bypasses the
+///   #10612 replay fence; the seed replays the bound handle);
+/// - `source_nat_static`: SNAT provenance, which SNAT revalidation reads;
+/// - `origin`: TUN provenance and the peer-synced/local split steer the
+///   slow path (`tun_origin_forward`, promotion, the export filters);
+/// - the #9951 leak incarnation the row carries (`previous_leak` /
+///   `next_leak`; raw, so any change mints);
+/// - `fabric_established`: the #16217 adoption mark the slow path reads
+///   (`fabric_established_decision_for_wire_at`) to seed an adopted entry;
+/// - for TCP, the close class and the handshake stage as the wire encodes
+///   them (`tcp_close_class_wire`, `tcp_handshake_state_wire`), i.e.
+///   `closing`, `reset`, `fin_own`, `fin_peer`, `established`,
+///   `handshake_pending` and `syn_ack_first`. The probe reads these live, but
+///   a replacement can move them backwards, which no in-place write does.
+///
+/// Not compared, with the reason a difference cannot make the entry's
+/// cached decision wrong:
+/// - `install_epoch`: the field being decided;
+/// - the local revalidation stamps `forwarding_generation`,
+///   `source_nat_revalidated`, `policy_generation`, `filter_revalidated`,
+///   `input_policers`, `policy_revalidated_gen`, `app_id_catalog_epoch`,
+///   `policy_scheduler_expired`, `policy_revalidation_kind`: every
+///   replacement resets them to "unvalidated" by design. The entry was
+///   seeded from a slow path that validated the replaced row; with every
+///   compared input equal, revalidating the replacement re-derives the same
+///   verdict under the generations the entry's own `FlowCacheStamp` fences,
+///   exactly as an unreplaced row's stamp goes stale only under those fences;
+/// - non-TCP `established`: the idle-class promotion bit (expiry only); a
+///   re-import resets it for app-timeout UDP while the row was promoted in
+///   place, so comparing it would mint on every such import;
+/// - liveness and expiry clocks the probe and the expiry walk read live:
+///   `last_seen_ns`, `last_packet_seen_ns`, `created_ns`, `expires_after_ns`,
+///   `wheel_tick`, `held_wheel_*`, `first_held_ns`, `seen_rg_epoch`;
+/// - accounting and evidence: `counters`, `closing_counters_seen`,
+///   `node_served_*`, `observed_tos`, `observed_tcp_flags`,
+///   `last_icmp_error_tat`;
+/// - #18520 relay bookkeeping, never a forwarding input: `handshake_relayed`,
+///   `served_here`;
+/// - TCP sequence tracking, read live by the probe's ACK validation and reset
+///   by every replacement (the slow path sees the same reset row):
+///   `tcp_rcv_nxt`, `tcp_peer_rcv_nxt`, `tcp_peer_rcv_nxt_seen`,
+///   `tcp_rcv_wnd`, `tcp_seq_seen`, `tcp_peer_ack_end`, `tcp_window_scale`,
+///   `tcp_syn_seen`, `tcp_ws_negotiated`;
+/// - `persistent_lease_hold`: NAT lease reference bookkeeping the import's
+///   hold accounting owns (#16615/#17683); no forwarding input.
+///
+/// #9856 export: carrying cannot hide a change or skip an export. The
+/// owner-RG export walk reads each row's content at visit time and uses the
+/// epoch only as "existed at the kick"; the replacement reuses the replaced
+/// row's slab slot (the slab hands back the slot `remove_entry` just freed),
+/// so a carried row is, to the export and to the tombstone filter, the
+/// never-replaced row. A changed row never carries.
+fn replacement_keeps_incarnation(
+    previous: &SessionEntry,
+    previous_leak: u64,
+    next: &SessionEntry,
+    next_leak: u64,
+    protocol: u8,
+    wire_session_id: u64,
+) -> bool {
+    let SessionEntry {
+        decision,
+        forwarding_generation: _,
+        source_nat_revalidated: _,
+        source_nat_static,
+        policy_generation: _,
+        metadata,
+        origin,
+        install_epoch: _,
+        last_seen_ns: _,
+        last_packet_seen_ns: _,
+        created_ns: _,
+        expires_after_ns: _,
+        // TCP close class: compared below through `tcp_close_class_wire`.
+        closing: _,
+        fin_own: _,
+        fin_peer: _,
+        reset: _,
+        // TCP handshake stage: compared below through
+        // `tcp_handshake_state_wire`; non-TCP `established` is not compared.
+        established: _,
+        handshake_pending: _,
+        syn_ack_first: _,
+        handshake_relayed: _,
+        served_here: _,
+        wheel_tick: _,
+        held_wheel_tick: _,
+        held_wheel_last_seen_ns: _,
+        held_wheel_expires_after_ns: _,
+        held_wheel_first_held_ns: _,
+        filter_revalidated: _,
+        input_policers: _,
+        policy_revalidated_gen: _,
+        app_id_catalog_epoch: _,
+        policy_scheduler_expired: _,
+        policy_revalidation_kind: _,
+        seen_rg_epoch: _,
+        first_held_ns: _,
+        counters: _,
+        closing_counters_seen: _,
+        node_served_seen_local: _,
+        node_served_seen_shared: _,
+        node_served_seen_shared_session_id: _,
+        node_served_seen_shared_generation: _,
+        node_served_last_change_ns: _,
+        observed_tos: _,
+        observed_tcp_flags: _,
+        // Identity: judged on the wire id below.
+        session_id: _,
+        last_icmp_error_tat: _,
+        tcp_rcv_nxt: _,
+        tcp_peer_rcv_nxt: _,
+        tcp_peer_rcv_nxt_seen: _,
+        tcp_rcv_wnd: _,
+        tcp_seq_seen: _,
+        tcp_peer_ack_end: _,
+        tcp_window_scale: _,
+        tcp_syn_seen: _,
+        tcp_ws_negotiated: _,
+        fabric_established,
+        persistent_lease_hold: _,
+    } = next;
+    let SessionMetadata {
+        ingress_zone,
+        egress_zone,
+        ingress_zone_check,
+        egress_zone_check,
+        ingress_ifindex,
+        ingress_vlan_id,
+        forward_ingress_vlan_id,
+        nat_scope_ifindex,
+        owner_rg_id,
+        fabric_ingress,
+        is_reverse,
+        forward_wire_alias_origin,
+        nat64_reverse,
+        log_session_init,
+        log_session_close,
+        policy_id,
+        inactivity_timeout_ns,
+        policy_counter_idx,
+        policy_counter,
+    } = metadata;
+    let was = &previous.metadata;
+    same_install_incarnation(wire_session_id, previous.session_id)
+        && *decision == previous.decision
+        && *ingress_zone == was.ingress_zone
+        && *egress_zone == was.egress_zone
+        && *ingress_zone_check == was.ingress_zone_check
+        && *egress_zone_check == was.egress_zone_check
+        && *ingress_ifindex == was.ingress_ifindex
+        && *ingress_vlan_id == was.ingress_vlan_id
+        && *forward_ingress_vlan_id == was.forward_ingress_vlan_id
+        && *nat_scope_ifindex == was.nat_scope_ifindex
+        && *owner_rg_id == was.owner_rg_id
+        && *fabric_ingress == was.fabric_ingress
+        && *is_reverse == was.is_reverse
+        && *forward_wire_alias_origin == was.forward_wire_alias_origin
+        && *nat64_reverse == was.nat64_reverse
+        && *log_session_init == was.log_session_init
+        && *log_session_close == was.log_session_close
+        && *policy_id == was.policy_id
+        && *inactivity_timeout_ns == was.inactivity_timeout_ns
+        && *policy_counter_idx == was.policy_counter_idx
+        && match (policy_counter, &was.policy_counter) {
+            (Some(next), Some(prev)) => std::sync::Arc::ptr_eq(next, prev),
+            (None, None) => true,
+            _ => false,
+        }
+        && *source_nat_static == previous.source_nat_static
+        && *origin == previous.origin
+        && next_leak == previous_leak
+        && *fabric_established == previous.fabric_established
+        && (protocol != PROTO_TCP
+            || (next.tcp_close_class_wire() == previous.tcp_close_class_wire()
+                && next.tcp_handshake_state_wire(protocol)
+                    == previous.tcp_handshake_state_wire(protocol)))
 }

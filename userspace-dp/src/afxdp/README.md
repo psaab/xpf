@@ -2383,15 +2383,31 @@ only while every one of these holds:
   AND is the incarnation the entry was seeded from (#19173). The seed
   (`stage_flow_cache_seed`) stamps `FlowCacheEntry::backing_install_epoch`
   from the record's write-once `install_epoch`; a same-key replacement
-  (`UpsertSynced`, `UpsertLocal`, a local re-install) mints a new epoch,
-  and the probe refuses the stale incarnation before any accounting
-  (`ProbeHitVerdict::Replaced`, counted under the existing
+  (`UpsertSynced`, `UpsertLocal`, a local re-install) mints a new epoch
+  unless it is an identical re-import of the same incarnation, which
+  carries the old one (`replacement_keeps_incarnation`,
+  `session/install.rs`), and the probe refuses a stale incarnation before
+  any accounting (`ProbeHitVerdict::Replaced`, counted under the existing
   `post_hit_session_dead_no_record` arm: a dedicated arm's extra counter
   slot shifted `FlowCache`/`BindingLiveState` and cost the whole
   established hit about 6 ns, so it was folded). In-place row updates
-  never move the epoch, so a steady flow keeps hitting. Design, the in-place-writer analysis and numbers:
+  never move the epoch, so a steady flow keeps hitting. Design, the
+  in-place-writer analysis, the carry's field list and numbers:
   `session/README.md` "Flow-cache hits bind to the row's incarnation" and
   `docs/log/19173.md`.
+- **Replaced-row refusals, counted cold.** A refused hit is evicted and
+  attributed by the out-of-line `#[cold]` `evict_refused_cache_hit`
+  (`flow_cache_hit.rs`; the established hit carries only the call). Its
+  `Replaced` arm also calls `flow_cache::note_flow_cache_replaced_eviction`,
+  which bumps the process-global `FLOW_CACHE_REPLACED_EVICTIONS` (no field
+  in `FlowCache`, `BindingLiveState` or any other hot struct, so no layout
+  shift). Moving the refusal out of line measured 4 ns closer to the tip
+  than counting inline (`docs/log/19173.md`). The
+  Coordinator exports it (`flow_cache_replaced_evictions_total`) as
+  `ProcessStatus.flow_cache_replaced_evictions` and Prometheus
+  `xpf_userspace_flow_cache_replaced_evictions_total`. It is the replaced
+  subset of the per-binding `post_hit_session_dead_no_record` arm: the
+  difference is the genuine no-record (#18656 moved-session) count.
 
 The entry grows by one `u64` for the token; its layout and the
 per-hit cost are recorded in `docs/log/19173.md`.

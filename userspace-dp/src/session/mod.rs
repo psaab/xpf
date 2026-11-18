@@ -8940,6 +8940,12 @@ mod moved_session_probe_18656_tests;
 #[path = "cache_incarnation_19173_tests.rs"]
 mod cache_incarnation_19173_tests;
 
+// #19173 fold (r24 P3-1): an identical re-import keeps the install epoch;
+// any forwarding-input change mints a new one.
+#[cfg(test)]
+#[path = "reimport_carry_19173_tests.rs"]
+mod reimport_carry_19173_tests;
+
 // #18780: bounded per-call expiry work (reap/pop budget + backlog
 // continuation) and lazy node-served evidence on the expire pass.
 #[cfg(test)]

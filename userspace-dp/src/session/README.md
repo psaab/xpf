@@ -1581,13 +1581,55 @@ before #19173 the slot kept serving the decision seeded from the OLD row
 with no TTL.
 
 - **Token.** `SessionEntry::install_epoch`, the per-table counter
-  `next_epoch` stamps at every install and every `upsert_synced_with_origin`
-  (both constructors of a row). It moves on every replacement, a same-id
-  re-import included, and is write-once per incarnation (#9856): no
-  in-place writer (`refresh_in_place`, `demote_owner_rg`, the revalidation
-  persists, the probe, `lookup_with_origin`) touches it. 0 is never
-  minted, so it is `PROBE_ANY_INCARNATION`; `u64::MAX` is
-  `PROBE_NO_BACKING_ROW`.
+  `next_epoch` stamps at every local install and every
+  `upsert_synced_with_origin` (both constructors of a row). It moves on
+  every replacement that is a new incarnation or changes a forwarding
+  input; an IDENTICAL re-import keeps it (the epoch carry below). It is
+  write-once per incarnation (#9856): no in-place writer
+  (`refresh_in_place`, `demote_owner_rg`, the revalidation persists, the
+  probe, `lookup_with_origin`) touches it. 0 is never minted, so it is
+  `PROBE_ANY_INCARNATION`; `u64::MAX` is `PROBE_NO_BACKING_ROW`.
+- **Epoch carry on an identical re-import (fold, r24 P3-1).**
+  `upsert_synced_with_origin_and_leak` builds the replacing row, then keeps
+  the replaced row's epoch when `replacement_keeps_incarnation` holds: the
+  two are the same incarnation by `same_install_incarnation` (both wire
+  session ids known and different = a new incarnation; a zero wire id, as
+  a local-tunnel `UpsertLocal` sends, names none), and every input the
+  cache seed captures or its slow path reads from the row is equal: the
+  whole `SessionDecision` (resolution, NAT, installing-table stamp), every
+  `SessionMetadata` field (the bound policy counter by `Arc` identity),
+  `source_nat_static`, `origin`, the #9951 leak incarnation the row
+  carries (the install now stamps it, so it can compare it),
+  `fabric_established`, and for TCP the wire close class and handshake
+  stage. Every `SessionEntry`/`SessionMetadata` field is named in that
+  function, so a new field does not compile until it is classified; the
+  not-compared side (local revalidation stamps a replacement resets by
+  design, clocks, counters, relay bits, TCP sequence tracking, the lease
+  hold) carries its reason there. Import time only; the hit path still
+  compares one `u64`. The local install path always mints.
+  - **#9856 export cursor.** The owner-RG export walk uses
+    `install_epoch <= kick_epoch` as "existed at the kick" and reads each
+    row's content at visit time; tombstones use the same predicate. A
+    replacement reuses the slab slot `remove_entry` just freed, so a
+    carried row is, to the walk and to the tombstone filter, the
+    never-replaced row: carrying can only keep in the export a row that
+    existed at the kick (a minting replacement drops such a row if the
+    walk has not reached it yet, as it always has), never hide a change
+    (a changed row never carries, and the walk does not diff) and never
+    skip one.
+    `current_epoch()` (the kick) does not move on a carry. Pinned by
+    `identical_reimport_keeps_the_epoch_and_the_slot_19173`.
+  - **Where it does not engage.** On a split-RG non-owner the first
+    slow-path packet of a redirected flow persists the HA-derived
+    `FabricRedirect` into the row (#12265 Owner-persist,
+    `apply_deferred_forwarding_revalidation`), and every primary-liveness
+    re-import writes back the raw local `ForwardCandidate`. The decision
+    differs, so the compare mints and the redirected flow still pays one
+    slow-path packet per liveness interval (measured, `docs/log/19173.md`).
+    Carrying there needs a rule for the row's locally derived resolution,
+    which is an open design question (same log). Production TUN-origin
+    rows back no cache entry, so their `UpsertLocal` refresh cadence costs
+    no cache misses on any tree.
 - **Seed.** `stage_flow_cache_seed` stamps
   `FlowCacheEntry::backing_install_epoch` from
   `backing_install_epoch_for_cache_hit(key, now)`, after the packet's own
@@ -1608,11 +1650,14 @@ with no TTL.
   built and measured: its extra counter slot shifted the `FlowCache` and
   `BindingLiveState` layouts and cost the whole established hit +6.25 ns
   per packet, against -3.90 ns for the same fix without it
-  (`docs/log/19173.md`). The trade-off: Prometheus and the CLI cannot tell
-  a replaced row from a missing one, so a replacement storm, or a seed and
-  probe that disagree on the row (a re-seed that never sticks), reads as a
-  no-record storm, the #18656 signature. `ProbeHitVerdict::Replaced`
-  still separates them in the session layer and its cells.
+  (`docs/log/19173.md`). The fold restores the separation without a
+  layout cost: the out-of-line `#[cold]` refusal handler
+  (`evict_refused_cache_hit`, `afxdp/poll_descriptor/flow_cache_hit.rs`)
+  also bumps the process-global `FLOW_CACHE_REPLACED_EVICTIONS`
+  (`afxdp/flow_cache.rs`, outside every hot struct) on `Replaced`, exported as `ProcessStatus.flow_cache_replaced_evictions` and
+  `xpf_userspace_flow_cache_replaced_evictions_total`. It is the replaced
+  SUBSET of the per-binding no-record arm, so no-record minus replaced is
+  the genuine #18656 moved-session signature.
 - **What the slow path then does.** A replacing row arrives with an
   unvalidated filter stamp, so on a direct (non-foreign) arrival its first
   hit runs the #7212/#10467 route revalidation, which re-derives the
@@ -1623,10 +1668,13 @@ with no TTL.
   the re-seed resolves A's egress. Foreign (fabric-zone) arrivals, which
   skip the route revalidation, never seed the cache.
 - **Cost of a replacement.** One slow-path packet per cached flow per
-  replacement, a no-op re-import included. Periodic replacements: primary
-  liveness re-imports on the peer-synced side (adaptive, at most one scan
-  per second), TUN-origin `UpsertLocal` refreshes (every 1 s for UDP, 5 s
-  for TCP), sibling replication at flow setup and on promotion.
+  replacement that mints (a new incarnation or a changed input); an
+  identical re-import costs none. Periodic replacements: primary liveness
+  re-imports on the peer-synced side (adaptive scan, bounded to [1 s,
+  10 s], `pkg/cluster/sync.go`), TUN-origin `UpsertLocal` refreshes
+  (every 1 s for UDP, 5 s for TCP; no cache-backed rows), sibling
+  replication at flow setup and on promotion. On a split-RG non-owner
+  the liveness re-imports still mint (above).
 
 In-place rewriters do not move the token; each relies on another fence:
 
@@ -1640,14 +1688,24 @@ In-place rewriters do not move the token; each relies on another fence:
 | `rebind_policy_pair`, `rebind_zones_pair`, `rebind_forward_egress_zone` | Commit-time (`adopt_rotated_forwarding`, #8356 revalidation): config generation fence. |
 
 Cells: `session/cache_incarnation_19173_tests.rs` (refusal before any
-write; every replacement moves the epoch; in-place updates do not; the
-accessor resolves like the probe for direct, reverse and wire keys; the
-no-row sentinel), `afxdp/tests_flow_cache_incarnation_19173.rs` (the
-issue's repro on the poll path for `UpsertSynced` and `UpsertLocal`; the
-identical re-import control; ten in-place-updating hits stay hits), and
+write; every new incarnation moves the epoch; in-place updates do not; the
+accessor resolves like the probe for direct, reverse, reverse-translated
+alias and wire keys; an ambiguous wire tuple binds no row and the probe
+agrees; the no-row sentinel), `session/reimport_carry_19173_tests.rs` (an
+identical re-import keeps the epoch, the slab slot and the epoch counter;
+a zero wire id carries; non-forwarding differences carry; a table that
+changes each compared input, one per row, mints every time; a local
+re-install always mints), `afxdp/tests_flow_cache_incarnation_19173.rs`
+(the issue's repro on the poll path for `UpsertSynced` and `UpsertLocal`;
+the identical re-import control; ten in-place-updating hits stay hits),
 `afxdp/tests_flow_cache_incarnation_19173_arm.rs` (the seed binds the
-served row; a replaced hit is one no-record eviction; the re-seed binds
-the replacing row).
+served row; a replaced hit is one no-record eviction and one replaced
+count; the re-seed binds the replacing row; an identical `UpsertSynced` or
+`UpsertLocal` re-import keeps the cache hit), and
+`afxdp/poll_descriptor/flow_cache_hit_tests.rs`
+`sessionless_seed_is_not_served_after_a_row_appears_19173` (a seed whose
+key resolved no row is refused once a row appears). The re-import churn
+measurement is `afxdp/tests_flow_cache_reimport_churn_19173.rs`.
 Numbers and the writer analysis: `docs/log/19173.md`.
 
 ## Static input-filter revalidation stamp (#7212)

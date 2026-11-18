@@ -145,8 +145,7 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
     // publisher). Every other field (id, close/handshake state,
     // counters, SNAT provenance) is the replica's carried value.
     // Snapshot the post-install reads first: `into_session_install`
-    // consumes the replica, and the lookup/stamp below still need them.
-    let replica_key = replica.key.clone();
+    // consumes the replica, and the install and lookup below still need them.
     let replica_decision = replica.decision;
     let replica_metadata = replica.metadata.clone();
     let replica_session_id = replica.session_id;
@@ -156,9 +155,13 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
     install.origin = shared.origin.materialized_shared_hit_origin();
     install.tcp_flags = tcp_flags;
     install.persistent_lease_hold = acquired_persistent_hold;
-    let materialized = sessions.upsert_synced_with_origin(
+    // #19173: the install stamps the replica's leak incarnation itself, so
+    // its epoch carry compares it with the replaced row's. A refused install
+    // stamps nothing (the incumbent's provenance is untouched).
+    let materialized = sessions.upsert_synced_with_origin_and_leak(
         install,
         fabric_adopted,
+        replica_leak_incarnation,
     );
     if materialized {
         // The install replaced and discarded the incumbent table entry. Its
@@ -180,14 +183,8 @@ fabric_adopted: bool,) -> (SessionLookup, bool) { if let Some(shared) = resolved
         );
     }
     // A refused shared repair must not mutate the incumbent local row's
-    // leak provenance. The stamp is evidence for the materialized replica
-    // only; failed clobber attempts return install_failed instead.
-    if materialized
-        && let Some(incarnation) =
-            (replica_leak_incarnation != 0).then_some(replica_leak_incarnation)
-    {
-        sessions.stamp_leak_incarnation(&replica_key, incarnation);
-    }
+    // leak provenance: the install above stamps the replica's leak
+    // incarnation only when it installed (#19173 moved the stamp into it).
     return (
         SessionLookup {
             decision: replica_decision,

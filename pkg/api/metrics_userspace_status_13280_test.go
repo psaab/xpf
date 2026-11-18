@@ -35,6 +35,7 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		SessionDeleteReplicaDropped:        26,
 		SessionDeleteReplicaDropRepaired:   27,
 		TupleGatePoisonRecoveries:          35,
+		FlowCacheReplacedEvictions:         36,
 		S5Reinject: &dpuserspace.S5ReinjectStatus{
 			Reinjected:         28,
 			CompletedPermitted: 29,
@@ -59,10 +60,11 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 	// both already present in the prior 36) + 3 split-brain counters + 3
 	// HATransitionDropped labels + 2 HATransitionStaleSkipped labels + 7
 	// WG-uncovered outcomes + 1 WG queue-poison counter + #18281
-	// (668ab4cdc4) TupleGate poison counter (+1) + 1 S5 reinjected + 4 S5
-	// completion outcomes = 37. The stale 36 omitted only the #18281 series.
-	if len(got) != 37 {
-		t.Fatalf("emitted %d metrics, want 37 counters / labeled series / gauges", len(got))
+	// (668ab4cdc4) TupleGate poison counter (+1) + #19173 flow-cache
+	// replaced evictions (+1) + 1 S5 reinjected + 4 S5 completion outcomes =
+	// 38. The stale 36 omitted only the #18281 series.
+	if len(got) != 38 {
+		t.Fatalf("emitted %d metrics, want 38 counters / labeled series / gauges", len(got))
 	}
 	// #15104: the four ambiguity gauges carry live values, not counters.
 	for _, gauge := range []struct {
@@ -111,6 +113,7 @@ func TestUserspaceOperationalAndHACountersEmit13280(t *testing.T) {
 		{c.userspaceSessionDeleteReplicaDropped, 26},
 		{c.userspaceSessionDeleteReplicaDropRepaired, 27},
 		{c.userspaceTupleGatePoison, 35},
+		{c.userspaceFlowCacheReplacedEvictions, 36},
 		{c.userspaceS5Reinject, 28},
 	} {
 		assertCounterClose(t, got, counter.desc, nil, counter.value)

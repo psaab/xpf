@@ -325,6 +325,9 @@ pub(crate) fn project_status(state: &mut ServerState) {
         state.afxdp.peer_delete_refused_local_owned_total();
     state.status.shared_session_poison_recoveries =
         state.afxdp.shared_session_poison_recoveries_total();
+    // #19173: replaced-row flow-cache refusals (process-global, cold).
+    state.status.flow_cache_replaced_evictions =
+        state.afxdp.flow_cache_replaced_evictions_total();
     // #9900 F-091/F-092: TX completion skew (over-delivery), invalid
     // completions dropped, duplicate completions dropped, and invalid fill
     // offsets dropped. All four are kernel-fault signals: zero in a healthy

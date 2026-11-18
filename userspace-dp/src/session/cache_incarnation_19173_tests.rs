@@ -41,6 +41,16 @@ fn import(table: &mut SessionTable, key: &SessionKey, now: u64) {
     assert!(table.upsert_synced(key.clone(), decision(), metadata(), now, PROTO_TCP, TCP_ACK, false));
 }
 
+/// A re-import of `key` that changes a forwarding input (the egress), so it
+/// is a new incarnation (the #19173 fold keeps the epoch only for an
+/// identical one, `reimport_carry_19173_tests.rs`).
+fn import_changed(table: &mut SessionTable, key: &SessionKey, now: u64) {
+    let mut d = decision();
+    d.resolution.egress_ifindex += 1;
+    d.resolution.tx_ifindex += 1;
+    assert!(table.upsert_synced(key.clone(), d, metadata(), now, PROTO_TCP, TCP_ACK, false));
+}
+
 /// A replaced record is refused before ANY write: no accounting, no
 /// keepalive, no packet stamp, no served-here bit, no rollback undo. The
 /// replacing incarnation is served; `PROBE_ANY_INCARNATION` skips the check.
@@ -51,9 +61,9 @@ fn replaced_record_is_refused_before_any_write_19173() {
     let now = 10 * SEC;
     import(&mut table, &key, now);
     let seeded = epoch(&table, &key);
-    import(&mut table, &key, now + SEC);
+    import_changed(&mut table, &key, now + SEC);
     let live = epoch(&table, &key);
-    assert_ne!(live, seeded, "premise: a re-import is a new incarnation");
+    assert_ne!(live, seeded, "premise: a changed re-import is a new incarnation");
     let before = table.entry_by_key_quiet(&key).expect("row").clone();
     let t = now + 600 * SEC;
     assert_eq!(probe(&mut table, &key, seeded, t), ProbeHitVerdict::Replaced);
@@ -67,21 +77,24 @@ fn replaced_record_is_refused_before_any_write_19173() {
     assert_eq!(probe(&mut table, &key, PROBE_ANY_INCARNATION, t + SEC), ProbeHitVerdict::Live);
 }
 
-/// The token moves on EVERY same-key replacement: a same-id identical
-/// re-import, a new-id re-import, a local re-install over a synced row, and
-/// a delete followed by a re-install. Epoch 0 (`PROBE_ANY_INCARNATION`) is
-/// never minted.
+/// The token moves on every same-key replacement that is a NEW incarnation:
+/// a same-id re-import that changes a forwarding input, a new-id re-import,
+/// a local re-install over a synced row, and a delete followed by a
+/// re-install. (A same-id IDENTICAL re-import keeps it since the #19173
+/// fold: `reimport_carry_19173_tests.rs`.) Epoch 0
+/// (`PROBE_ANY_INCARNATION`) is never minted.
 #[test]
-fn every_replacement_moves_the_install_epoch_19173() {
+fn every_new_incarnation_moves_the_install_epoch_19173() {
     let mut table = SessionTable::new();
     let key = key_v4();
     let now = 10 * SEC;
     import(&mut table, &key, now);
     let mut seen = vec![epoch(&table, &key)];
     assert_ne!(seen[0], PROBE_ANY_INCARNATION);
-    // Same wire id, same content: still a Replace.
+    // Same wire id, a changed forwarding input.
     let mut req = table.synced_entry_for(&key).expect("row").into_session_install(now + SEC);
     req.session_id = table.session_id_for(&key);
+    req.decision.resolution.egress_ifindex += 1;
     assert!(table.upsert_synced_with_origin(req, false));
     seen.push(epoch(&table, &key));
     // A different wire id.
@@ -158,10 +171,126 @@ fn seed_accessor_resolves_like_the_probe_19173() {
     let mut unknown = forward.clone();
     unknown.src_port ^= 1;
     assert_eq!(table.backing_install_epoch_for_cache_hit(&unknown, t), None);
-    // Replace the canonical forward row: the wire tuple's hit is refused.
+    // An identical re-import of the canonical forward row keeps its
+    // incarnation (#19173 fold), so the wire tuple's hit is still served.
     let wire_bound = table.backing_install_epoch_for_cache_hit(&wire, t).expect("wire");
     assert!(table.upsert_synced(forward.clone(), d, metadata(), t, PROTO_TCP, TCP_ACK, false));
-    assert_eq!(probe(&mut table, &wire, wire_bound, t + SEC), ProbeHitVerdict::Replaced);
+    assert_eq!(probe(&mut table, &wire, wire_bound, t + SEC), ProbeHitVerdict::Live);
+    // A changed one (another egress, same NAT so the same wire tuple) is a
+    // new incarnation: the wire tuple's hit is refused.
+    let mut changed = d;
+    changed.resolution.egress_ifindex += 1;
+    assert!(table.upsert_synced(forward.clone(), changed, metadata(), t, PROTO_TCP, TCP_ACK, false));
+    assert_eq!(probe(&mut table, &wire, wire_bound, t + 2 * SEC), ProbeHitVerdict::Replaced);
+}
+
+/// codex-c (inspected, now pinned): a reverse row whose NAT moves its
+/// translated tuple is reached through the reverse-translated alias index.
+/// The seed-time accessor and the probe resolve the SAME row through that
+/// alias: the accessor binds the reverse row's epoch, the probe serves it,
+/// an identical re-import of the reverse row keeps serving it, and a changed
+/// one is refused.
+#[test]
+fn reverse_translated_alias_resolves_like_the_probe_19173() {
+    let mut table = SessionTable::new();
+    let forward = key_v4();
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(40000),
+        ..crate::nat::NatDecision::default()
+    };
+    let mut d = decision();
+    d.nat = nat;
+    let now = 10 * SEC;
+    assert!(table.upsert_synced(forward.clone(), d, metadata(), now, PROTO_TCP, TCP_ACK, false));
+    let reverse = reverse_session_key(&forward, nat);
+    let mut rmeta = metadata();
+    rmeta.is_reverse = true;
+    assert!(table.upsert_synced(reverse.clone(), d, rmeta.clone(), now, PROTO_TCP, TCP_ACK, false));
+    let alias = translated_session_key(&reverse, nat);
+    assert_ne!(alias, reverse, "premise: the reverse row's NAT moves its translated tuple");
+    assert_ne!(alias, forward);
+    assert!(table.key_to_handle.get(&alias).is_none(), "premise: the alias is no row's key");
+    let (handle, via_alias) = table.resolve_lookup_handle(&alias).expect("alias resolves");
+    assert!(via_alias, "premise: resolved through the reverse-translated alias index");
+    assert_eq!(Some(&handle), table.key_to_handle.get(&reverse), "premise: to the reverse row");
+    let t = now + SEC;
+    let bound = table.backing_install_epoch_for_cache_hit(&alias, t).expect("alias binds");
+    assert_eq!(bound, epoch(&table, &reverse), "the accessor binds the reverse row");
+    assert_eq!(probe(&mut table, &alias, bound, t), ProbeHitVerdict::Live);
+    assert_eq!(probe(&mut table, &alias, bound.wrapping_add(1), t), ProbeHitVerdict::Replaced);
+    // Identical re-import of the reverse row: still the same incarnation.
+    assert!(table.upsert_synced(reverse.clone(), d, rmeta.clone(), t, PROTO_TCP, TCP_ACK, false));
+    assert_eq!(probe(&mut table, &alias, bound, t + SEC), ProbeHitVerdict::Live);
+    // Changed (another egress, same NAT so the same alias): refused.
+    let mut changed = d;
+    changed.resolution.egress_ifindex += 1;
+    assert!(table.upsert_synced(reverse.clone(), changed, rmeta, t, PROTO_TCP, TCP_ACK, false));
+    assert_eq!(probe(&mut table, &alias, bound, t + 2 * SEC), ProbeHitVerdict::Replaced);
+    assert_eq!(
+        table.backing_install_epoch_for_cache_hit(&alias, t + 2 * SEC),
+        Some(epoch(&table, &reverse)),
+        "a re-seed binds the replacing reverse row through the alias"
+    );
+}
+
+/// codex-c (inspected, now pinned): an AMBIGUOUS wire tuple (two live forward
+/// rows translate to it, #14382) resolves no row for the seed and no row for
+/// the probe, so the seed binds `PROBE_NO_BACKING_ROW` and its hit is a
+/// no-record refusal, never first-wins. When the ambiguity collapses (one row
+/// goes away) the wire tuple resolves the survivor: the sentinel-bound entry
+/// is refused as `Replaced` (it was computed without that row), and a re-seed
+/// binds the survivor.
+#[test]
+fn ambiguous_wire_tuple_binds_no_row_and_the_probe_agrees_19173() {
+    let mut table = SessionTable::new();
+    let nat = crate::nat::NatDecision {
+        rewrite_src: Some(IpAddr::V4(Ipv4Addr::new(172, 16, 80, 8))),
+        rewrite_src_port: Some(40000),
+        ..crate::nat::NatDecision::default()
+    };
+    let mut d = decision();
+    d.nat = nat;
+    let now = 10 * SEC;
+    let first = key_v4();
+    let mut second = key_v4();
+    second.src_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
+    let wire = forward_wire_key(&first, nat);
+    assert_eq!(forward_wire_key(&second, nat), wire, "premise: one wire tuple");
+    assert!(table.upsert_synced(first.clone(), d, metadata(), now, PROTO_TCP, TCP_ACK, false));
+    assert!(table.upsert_synced(second.clone(), d, metadata(), now, PROTO_TCP, TCP_ACK, false));
+    let t = now + SEC;
+    assert_eq!(
+        table.find_forward_wire_match_expiry(&wire, t),
+        SessionExpiryProbe::Absent,
+        "premise: two live candidates make the wire tuple ambiguous"
+    );
+    assert_eq!(table.backing_install_epoch_for_cache_hit(&wire, t), None, "the seed binds no row");
+    let mut canonical = None;
+    let verdict = table.probe_hit_deferring_state_update_with_ack_rollback_verdict_lazy(
+        &wire,
+        PROBE_NO_BACKING_ROW,
+        t,
+        1514,
+        TCP_ACK | TCP_PSH,
+        1448,
+        0,
+        || None,
+        true,
+        &mut canonical,
+    );
+    assert_eq!(verdict, ProbeHitVerdict::NoRecord, "the probe agrees: no row, no first-wins");
+    assert_eq!(canonical, None);
+    // The ambiguity collapses: the wire tuple now names the survivor.
+    table.delete(&second);
+    let survivor = table.backing_install_epoch_for_cache_hit(&wire, t).expect("unique now");
+    assert_eq!(survivor, epoch(&table, &first));
+    assert_eq!(
+        probe(&mut table, &wire, PROBE_NO_BACKING_ROW, t + SEC),
+        ProbeHitVerdict::Replaced,
+        "the entry seeded while the tuple was ambiguous must not be served the survivor"
+    );
+    assert_eq!(probe(&mut table, &wire, survivor, t + SEC), ProbeHitVerdict::Live);
 }
 
 /// A seed that resolved no row binds `PROBE_NO_BACKING_ROW`, which no

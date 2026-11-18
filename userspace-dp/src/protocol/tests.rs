@@ -792,6 +792,37 @@ fn process_status_shared_session_poison_recoveries_roundtrip() {
     assert_eq!(legacy.shared_session_poison_recoveries, 0);
 }
 
+// #19173 fold (r24 P3-2): round-trip + backward-compat pin for the
+// replaced-row flow-cache refusal counter. The wire key feeds
+// pkg/dataplane/userspace/protocol_status.go and the Prometheus counter
+// `xpf_userspace_flow_cache_replaced_evictions_total`. A key rename on either
+// side decodes silently as zero, which reads as "no replacements", so the tag
+// is pinned on both sides (Go: `TestFlowCacheReplacedEvictionsStatusWire19173`).
+#[test]
+fn process_status_flow_cache_replaced_evictions_roundtrip_19173() {
+    let status = ProcessStatus {
+        flow_cache_replaced_evictions: 19173,
+        ..Default::default()
+    };
+    let value: serde_json::Value =
+        serde_json::to_value(&status).expect("serialize ProcessStatus to Value");
+    assert_eq!(value["flow_cache_replaced_evictions"], 19173);
+    let back: ProcessStatus = serde_json::from_value(value).expect("deserialize ProcessStatus");
+    assert_eq!(back.flow_cache_replaced_evictions, 19173);
+
+    // An older helper's payload (key absent) decodes with a zero default.
+    let mut legacy_value =
+        serde_json::to_value(ProcessStatus::default()).expect("serialize default ProcessStatus");
+    legacy_value
+        .as_object_mut()
+        .expect("ProcessStatus serializes to an object")
+        .remove("flow_cache_replaced_evictions")
+        .expect("new key present before strip");
+    let legacy: ProcessStatus =
+        serde_json::from_value(legacy_value).expect("older payload decodes");
+    assert_eq!(legacy.flow_cache_replaced_evictions, 0);
+}
+
 // #2315: round-trip + backward-compat pin for the GRE-decap RFC 6040
 // §4.2 illegal-combination drop counter. The wire key feeds
 // pkg/dataplane/userspace/protocol.go and the Prometheus counter

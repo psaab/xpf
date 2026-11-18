@@ -746,6 +746,8 @@ type xpfCollector struct {
 	userspaceWGUncoveredPacketsTotal *prometheus.Desc
 	userspaceWGUncoveredQueuePoison  *prometheus.Desc
 	userspaceTupleGatePoison         *prometheus.Desc
+	// #19173: replaced-row flow-cache refusals.
+	userspaceFlowCacheReplacedEvictions *prometheus.Desc
 	// #13300: userspace maps-sync failure and watchdog telemetry.
 	userspaceRSTSuppressionDegraded  *prometheus.Desc
 	userspaceRSTSuppressionFailures  *prometheus.Desc

@@ -552,6 +552,7 @@ pub(crate) fn run() -> Result<(), String> {
             ha_transition_refresh_stale_skipped: 0,
             peer_delete_refused_local_owned: 0,
             shared_session_poison_recoveries: 0,
+            flow_cache_replaced_evictions: 0,
             tx_completion_skew: 0,
             tx_completion_invalid: 0,
             tx_completion_duplicate: 0,

@@ -594,6 +594,7 @@ var collectorDescUserspaceStatus13280 = []int{
 	xpfCollectorDescFieldIndex("userspaceWGUncoveredPacketsTotal"),
 	xpfCollectorDescFieldIndex("userspaceWGUncoveredQueuePoison"),
 	xpfCollectorDescFieldIndex("userspaceTupleGatePoison"),
+	xpfCollectorDescFieldIndex("userspaceFlowCacheReplacedEvictions"),
 }
 
 // initUserspaceIoUring13292Descriptors (metrics_descriptors_userspace_io_uring_13292.go).

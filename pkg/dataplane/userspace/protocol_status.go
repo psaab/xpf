@@ -690,6 +690,14 @@ type ProcessStatus struct {
 	// xpf_userspace_shared_session_poison_recoveries_total. Decodes to 0
 	// for an older helper that does not send the key.
 	SharedSessionPoisonRecoveries uint64 `json:"shared_session_poison_recoveries,omitempty"`
+	// #19173: flow-cache hits the helper refused because the backing key
+	// resolved another incarnation of its session row than the one the
+	// cache entry was seeded from (a same-key replacement that changed a
+	// forwarding input). The replaced subset of the per-binding
+	// post_hit_session_dead_no_record eviction arm. Surfaced as
+	// xpf_userspace_flow_cache_replaced_evictions_total. Decodes to 0 for an
+	// older helper that does not send the key.
+	FlowCacheReplacedEvictions uint64 `json:"flow_cache_replaced_evictions,omitempty"`
 
 	// #9900 F-092: TX completions reaped beyond outstanding_tx (kernel
 	// over-delivery, including completions drained at gauge 0). Surfaced as

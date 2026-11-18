@@ -128,4 +128,9 @@ func (c *xpfCollector) initUserspaceStatus13280Descriptors() {
 		"TupleGate lock poison recoveries (#17201).",
 		nil, nil,
 	)
+	c.userspaceFlowCacheReplacedEvictions = prometheus.NewDesc(
+		"xpf_userspace_flow_cache_replaced_evictions_total",
+		"Flow-cache hits refused because the backing session row was replaced by another incarnation since the entry was seeded; the replaced subset of the post_hit_session_dead_no_record eviction arm (#19173).",
+		nil, nil,
+	)
 }

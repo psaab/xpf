@@ -739,23 +739,16 @@ pub(super) fn stage_flow_cache_hit(
         };
         let probe_session_key = probe_wire_canonical.as_ref().unwrap_or(&flow.forward_key);
         if !probe_verdict.is_live() {
-            let arm = match (ttl_would_expire, probe_verdict) {
-                (true, _) => crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDead,
-                (false, crate::session::ProbeHitVerdict::IdleCrossed) => {
-                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadIdleCrossed
-                }
-                // #19173: `Replaced` (the key resolved another incarnation
-                // than the seed's) folds into the no-record arm: the
-                // seeded record is gone. A dedicated arm cost ~6 ns per
-                // established hit in layout shift (docs/log/19173.md).
-                (false, _) => {
-                    crate::afxdp::flow_cache::FlowCacheEvictionArm::PostHitSessionDeadNoRecord
-                }
-            };
-            flow_state
-                .flow_cache
-                .invalidate_slot(&flow.forward_key, meta.ingress_ifindex as i32);
-            flow_state.flow_cache.reclassify_hit_as_miss_arm(arm);
+            // #19173 fold: the refusal is cold; its attribution and the
+            // replaced-row count live out of line so the established hit
+            // carries only the call.
+            evict_refused_cache_hit(
+                flow_state,
+                &flow.forward_key,
+                meta.ingress_ifindex as i32,
+                ttl_would_expire,
+                probe_verdict,
+            );
             return FlowCacheOutcome::FallThrough;
         }
         // #3779: TTL/hop-limit check BEFORE any egress side effect. The slow
@@ -1469,3 +1462,34 @@ mod flow_cache_hit_tests;
 #[cfg(test)]
 #[path = "mirror_wiring_7091_tests.rs"]
 mod mirror_wiring_7091_tests;
+
+/// #18656/#19173: evict a cache entry the fused probe refused and attribute
+/// the eviction. The TTL liveness-only probe does not attribute
+/// (`post_hit_session_dead`); an idle-crossed record has its own arm; a
+/// missing record and (#19173) a replaced incarnation share the no-record
+/// arm, and the replaced subset is also counted in the cold process-global
+/// `FLOW_CACHE_REPLACED_EVICTIONS` (a dedicated arm cost ~6 ns per
+/// established hit in layout shift, docs/log/19173.md). Out of line and cold:
+/// it never runs on an established hit.
+#[cold]
+#[inline(never)]
+fn evict_refused_cache_hit(
+    flow_state: &mut WorkerFlowCacheState,
+    key: &crate::session::SessionKey,
+    ingress_ifindex: i32,
+    ttl_would_expire: bool,
+    verdict: crate::session::ProbeHitVerdict,
+) {
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+    let arm = match (ttl_would_expire, verdict) {
+        (true, _) => Arm::PostHitSessionDead,
+        (false, crate::session::ProbeHitVerdict::IdleCrossed) => Arm::PostHitSessionDeadIdleCrossed,
+        (false, crate::session::ProbeHitVerdict::Replaced) => {
+            crate::afxdp::flow_cache::note_flow_cache_replaced_eviction();
+            Arm::PostHitSessionDeadNoRecord
+        }
+        (false, _) => Arm::PostHitSessionDeadNoRecord,
+    };
+    flow_state.flow_cache.invalidate_slot(key, ingress_ifindex);
+    flow_state.flow_cache.reclassify_hit_as_miss_arm(arm);
+}

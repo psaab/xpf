@@ -792,6 +792,16 @@ pub(crate) struct ProcessStatus {
     /// Additive / defaulted for backward compatibility.
     #[serde(rename = "shared_session_poison_recoveries", default)]
     pub shared_session_poison_recoveries: u64,
+    /// #19173 fold (r24 P3-2): flow-cache hits refused because the backing
+    /// key resolved another incarnation of its row than the one the entry
+    /// was seeded from (`afxdp::flow_cache::FLOW_CACHE_REPLACED_EVICTIONS`).
+    /// The replaced SUBSET of the per-binding
+    /// `post_hit_session_dead_no_record` eviction arm, so the two separate a
+    /// replacement storm from a #18656 moved-session (no-record) storm.
+    /// Additive / defaulted for compatibility with older helpers. Surfaced
+    /// as `xpf_userspace_flow_cache_replaced_evictions_total`.
+    #[serde(rename = "flow_cache_replaced_evictions", default)]
+    pub flow_cache_replaced_evictions: u64,
     /// #2170/#7398: stale-generation session INSTALLS refused by the helper's
     /// in-memory `SyncedSessionEntry` guard (the delayed-stale-install
     /// variant). The authoritative guard is the Go cluster apply layer; this

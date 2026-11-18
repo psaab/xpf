@@ -726,6 +726,10 @@ mod tests_flow_cache_incarnation_19173_arm;
 #[cfg(test)]
 #[path = "tests_flow_cache_hit_bench_19173.rs"]
 mod tests_flow_cache_hit_bench_19173;
+// #19173 fold (r24 P3-1) MEASUREMENT: identical re-import churn.
+#[cfg(test)]
+#[path = "tests_flow_cache_reimport_churn_19173.rs"]
+mod tests_flow_cache_reimport_churn_19173;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;

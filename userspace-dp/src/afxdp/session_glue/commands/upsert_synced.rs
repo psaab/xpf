@@ -195,7 +195,6 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         entry.source_nat_static,
     );
     let pptp_call_ids = entry.pptp_call_ids;
-    let leak_key = entry.key.clone();
     let previous_persistent_hold_16615 = sessions.persistent_lease_hold_for(&key);
     let reservation_target_changed = previous_reservation.as_ref().is_some_and(
         |(prev_decision, prev_metadata, _)| {
@@ -256,10 +255,13 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         acquired_persistent_hold = true;
     }
     entry.persistent_lease_hold = persistent_hold_for_install;
-    if sessions.upsert_synced_with_origin(entry.into_session_install(now_ns), allow_replace_local) {
-        if leak_incarnation != 0 {
-            sessions.stamp_leak_incarnation(&leak_key, leak_incarnation);
-        }
+    // #19173: the install stamps the leak incarnation itself, so its epoch
+    // carry can compare it with the replaced row's.
+    if sessions.upsert_synced_with_origin_and_leak(
+        entry.into_session_install(now_ns),
+        allow_replace_local,
+        leak_incarnation,
+    ) {
         // #18550: on the node that forwards this entry's owner RG
         // (`!allow_replace_local`: the owner RG is locally forwarding-active,
         // or the owner RG is 0 and any RG is forwarding-active here), an

@@ -57,6 +57,15 @@ impl super::Coordinator {
         crate::afxdp::bpf_map::tuple_gate_poison_recoveries()
     }
 
+    /// #19173 fold (r24 P3-2): flow-cache hits refused because the backing
+    /// row was replaced by another incarnation since the seed (the replaced
+    /// subset of the `post_hit_session_dead_no_record` eviction arm).
+    /// Process-global atomic, read directly like the TupleGate twin above.
+    /// Surfaced as `xpf_userspace_flow_cache_replaced_evictions_total`.
+    pub fn flow_cache_replaced_evictions_total(&self) -> u64 {
+        crate::afxdp::flow_cache::flow_cache_replaced_evictions()
+    }
+
     pub fn dynamic_neighbor_status(&self) -> (usize, u64) {
         let entries = self.neighbors.dynamic.len();
         let generation = self.neighbors.generation.load(Ordering::Relaxed);

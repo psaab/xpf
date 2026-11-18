@@ -349,12 +349,12 @@ impl Fixture {
         entry
     }
 
-    fn row_a_session_id(&self) -> u64 {
+    pub(super) fn row_a_session_id(&self) -> u64 {
         self.sessions.session_id_for(&key())
     }
 
     /// Apply worker commands through the production dispatcher.
-    fn apply(&mut self, commands: Vec<WorkerCommand>) -> Vec<SessionKey> {
+    pub(super) fn apply(&mut self, commands: Vec<WorkerCommand>) -> Vec<SessionKey> {
         let queue = Arc::new(Mutex::new(VecDeque::from(commands)));
         crate::afxdp::session_glue::apply_worker_commands(
             &queue,
@@ -473,9 +473,11 @@ fn upsert_local_replacement_is_not_served_the_old_rows_cached_egress_19173() {
 
 /// Control twin (the issue's): B is A re-imported as is (default stamp,
 /// same session id). The row still resolves via E1 and so does every
-/// segment. A replacement is a new incarnation, so it may cost the flow at
-/// most ONE slow-path segment (the re-seed); the entry is hit again after
-/// that. GREEN on ebb32e817b (there, the slot is simply kept).
+/// segment. At 50aa029860 every replacement was a new incarnation and cost
+/// the flow ONE slow-path segment (the re-seed); since the fold an identical
+/// re-import keeps the incarnation and costs none (pinned strictly by
+/// `identical_reimport_keeps_the_cache_hit_19173`). "At most once" holds on
+/// every tree. GREEN on ebb32e817b (there, the slot is simply kept).
 #[test]
 fn identical_reimport_keeps_the_egress_and_re_seeds_at_most_once_19173() {
     let mut fx = Fixture::seeded();

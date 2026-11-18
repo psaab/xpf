@@ -8974,6 +8974,123 @@ fn wire_keyed_hit_without_record_counts_no_record_arm_18656() {
     assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadIdleCrossed as usize], 0);
 }
 
+/// #19173 fold (r24 P3-3): a SESSIONLESS seed, end to end. The production
+/// seed (`stage_flow_cache_seed`) runs against a table where the packet's key
+/// resolves no row, so it binds `PROBE_NO_BACKING_ROW`; a row for the key is
+/// then installed (here by the harness, as a later install or import would);
+/// the production hit stage must NOT serve the decision the seed computed
+/// without that row. It refuses it as `Replaced`: a no-record eviction and
+/// one count in the cold replaced counter. Kills the mutant that binds
+/// `PROBE_ANY_INCARNATION` when the seed resolves no row (the probe would
+/// then accept the newly installed row and the hit would be Consumed).
+///
+/// Same-run control: the identical seed taken while the row EXISTS binds
+/// that row's epoch and is served. Both tables are fresh and install the
+/// row once, so the row the hit stage sees has the epoch the control bound
+/// (asserted, not assumed).
+#[test]
+fn sessionless_seed_is_not_served_after_a_row_appears_19173() {
+    use crate::afxdp::flow_cache::FlowCacheEvictionArm as Arm;
+
+    let fixture = LiveCallSiteFixture::new(MirrorTargetQueue::WithRoom);
+    let frame = tcp_v4_ack_frame();
+    let meta = test_meta(&frame);
+    let key = test_key();
+    let flow = Some(SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    });
+    let next_hop = cached_entry().decision.resolution.next_hop.expect("next hop");
+    let live_mac = cached_entry().decision.resolution.neighbor_mac.expect("neighbor MAC");
+    fixture
+        .dynamic_neighbors
+        .insert((EGRESS_IFINDEX, next_hop), NeighborEntry { mac: live_mac });
+    let worker_ctx = fixture.worker_ctx();
+    let neighbor_epoch_snapshot = fixture.dynamic_neighbors.snapshot_shard_epochs();
+    let policy_counter: Option<Arc<crate::policy::PolicyRuleCounter>> = None;
+    let seed_against = |sessions: &crate::session::SessionTable| -> FlowCacheEntry {
+        let mut flow_cache = FlowCache::new();
+        stage_flow_cache_seed(
+            &mut flow_cache,
+            &flow,
+            meta,
+            ValidationState::default(),
+            cached_entry().decision,
+            None,
+            0,
+            Some(TEST_TRUST_ZONE_ID),
+            false,
+            false,
+            0,
+            &policy_counter,
+            crate::filter::TermMatchExtra::default(),
+            None,
+            None,
+            0,
+            0,
+            false,
+            false,
+            &neighbor_epoch_snapshot,
+            sessions,
+            1_000_000,
+            &worker_ctx,
+        );
+        let seeded: Vec<_> = flow_cache.entries.iter().flatten().cloned().collect();
+        assert_eq!(seeded.len(), 1, "premise: the production seed cached the flow");
+        seeded.into_iter().next().expect("one entry")
+    };
+
+    // The row the hit stage's harness installs (`StageSeed::default`).
+    let install = |sessions: &mut crate::session::SessionTable| {
+        assert!(sessions.install_with_protocol(
+            key.clone(),
+            cached_entry().decision,
+            cached_entry().metadata,
+            1_000_000,
+            PROTO_TCP,
+            0x10,
+        ));
+    };
+
+    // Control: seeded while the row exists, then served.
+    let mut with_row = crate::session::SessionTable::new();
+    install(&mut with_row);
+    let bound = seed_against(&with_row);
+    let row_epoch = with_row
+        .backing_install_epoch_for_cache_hit(&key, 1_000_000)
+        .expect("row");
+    assert_eq!(bound.backing_install_epoch, row_epoch, "control: the seed binds the row");
+    let control = run_stage_seeded(&fixture, &frame, meta, bound, 0, StageSeed::default());
+    assert!(
+        matches!(control.outcome, FlowCacheOutcome::Consumed),
+        "control: the row-bound entry is served from the cache"
+    );
+
+    // The defect shape: seeded with NO row, then a row appears.
+    let sessionless = seed_against(&crate::session::SessionTable::new());
+    assert_eq!(
+        sessionless.backing_install_epoch,
+        crate::session::PROBE_NO_BACKING_ROW,
+        "a seed whose key resolves no row binds the no-row sentinel"
+    );
+    let replaced_before =
+        crate::afxdp::flow_cache::FLOW_CACHE_REPLACED_EVICTIONS_THIS_THREAD.with(|count| count.get());
+    let run = run_stage_seeded(&fixture, &frame, meta, sessionless, 0, StageSeed::default());
+    assert!(
+        matches!(run.outcome, FlowCacheOutcome::FallThrough),
+        "#19173: the sessionless-seeded decision was served after a row appeared"
+    );
+    assert_eq!(run.flow_cache_tallies, (0, 1, 1));
+    assert_eq!(run.flow_cache_evictions_by_arm[Arm::PostHitSessionDeadNoRecord as usize], 1);
+    assert_eq!(
+        crate::afxdp::flow_cache::FLOW_CACHE_REPLACED_EVICTIONS_THIS_THREAD.with(|count| count.get())
+            - replaced_before,
+        1,
+        "the refusal is a Replaced verdict (a row exists), counted once"
+    );
+}
+
 /// #18656 attribution: an idle-crossed record with no companion progress
 /// is counted under the idle-crossed sub-arm.
 #[test]

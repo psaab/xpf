@@ -652,6 +652,7 @@ func TestCollectorDescriptorCoverage(t *testing.T) {
 		"xpf_userspace_worker_command_queue_poison_recoveries_total",       // #1807 poison recoveries
 		"xpf_userspace_worker_command_queue_drops_total",                   // #6929 per-worker command-queue capacity drops
 		"xpf_userspace_shared_session_poison_recoveries_total",             // #2402/#6641 shared-session poison recoveries
+		"xpf_userspace_flow_cache_replaced_evictions_total",                // #19173 replaced-row flow-cache refusals
 		// #18529: handshake-relay loss and separate lock-contention pair.
 		"xpf_userspace_handshake_relay_outbox_drops_total",
 		"xpf_userspace_handshake_relay_refused_total",

@@ -1112,6 +1112,47 @@ pub(super) enum FlowCacheEvictionArm {
 
 pub(super) const FLOW_CACHE_EVICTION_ARM_COUNT: usize = 22;
 
+/// #19173 fold (r24 P3-2): flow-cache hits refused because the backing key
+/// resolved ANOTHER incarnation of its row than the one the entry was seeded
+/// from (`ProbeHitVerdict::Replaced`). Each is also counted under the
+/// `post_hit_session_dead_no_record` eviction arm, so this is the replaced
+/// SUBSET of that arm: no-record minus this is the genuine no-record count
+/// (the #18656 moved-session signature).
+///
+/// Process-global and cold on purpose: a dedicated eviction arm grew the
+/// per-binding eviction array inside `FlowCache`/`BindingLiveState` and cost
+/// the whole established hit about 6 ns per packet in layout shift
+/// (docs/log/19173.md). This lives outside every hot struct and is written
+/// only on the refusal path (`note_flow_cache_replaced_eviction`). Exported
+/// as `ProcessStatus.flow_cache_replaced_evictions` and the Prometheus
+/// counter `xpf_userspace_flow_cache_replaced_evictions_total`.
+pub(in crate::afxdp) static FLOW_CACHE_REPLACED_EVICTIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only per-thread mirror of [`FLOW_CACHE_REPLACED_EVICTIONS`], so a
+    /// cell can assert an exact count while other cells bump the global.
+    pub(in crate::afxdp) static FLOW_CACHE_REPLACED_EVICTIONS_THIS_THREAD: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Count one `Replaced` refusal. Out of line and cold; called only from the
+/// hit stage's out-of-line refusal handler (`evict_refused_cache_hit`).
+#[cold]
+#[inline(never)]
+pub(in crate::afxdp) fn note_flow_cache_replaced_eviction() {
+    FLOW_CACHE_REPLACED_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+    #[cfg(test)]
+    FLOW_CACHE_REPLACED_EVICTIONS_THIS_THREAD.with(|count| count.set(count.get() + 1));
+}
+
+/// The status surface's read of [`FLOW_CACHE_REPLACED_EVICTIONS`]
+/// (`Coordinator::flow_cache_replaced_evictions_total`).
+pub(in crate::afxdp) fn flow_cache_replaced_evictions() -> u64 {
+    FLOW_CACHE_REPLACED_EVICTIONS.load(Ordering::Relaxed)
+}
+
 impl FlowCacheEvictionArm {
     pub(super) const ALL: [Self; FLOW_CACHE_EVICTION_ARM_COUNT] = [
         Self::LookupGeneration,
