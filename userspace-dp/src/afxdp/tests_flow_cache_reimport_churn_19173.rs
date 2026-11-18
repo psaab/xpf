@@ -13,6 +13,11 @@
 // Every packet goes through the production poll function and every
 // re-import through the production worker-command dispatcher.
 //
+// #19191 moved the two procedures into `split_rg_churn` / `upsert_local_churn`
+// (unchanged steps, still no fix-only API) so the asserting cells in
+// `tests_flow_cache_ha_resolution_carry_19191.rs` run exactly what the
+// measurement prints; docs/log/19191.md has the three-tree numbers.
+//
 // Shapes:
 // - split_rg: fw1 of the captured loss-cluster split snapshot holds the LAN
 //   RG and not the WAN RG. N established SNAT flows imported from the WAN
@@ -45,11 +50,11 @@ const ROUNDS: usize = 5;
 
 /// Per-round tallies on the ingress binding's flow cache.
 #[derive(Debug, Default, Clone, Copy)]
-struct Round {
-    packets: u64,
-    hits: u64,
-    no_record_evictions: u64,
-    evictions: u64,
+pub(super) struct Round {
+    pub(super) packets: u64,
+    pub(super) hits: u64,
+    pub(super) no_record_evictions: u64,
+    pub(super) evictions: u64,
 }
 
 fn tallies(cache: &FlowCache) -> (u64, u64, u64) {
@@ -84,14 +89,14 @@ fn report(shape: &str, control: Round, rounds: &[Round]) {
 // split_rg
 // ---------------------------------------------------------------------------
 
-fn split_forward(forwarding: &ForwardingState, i: u16) -> SyncedSessionEntry {
+pub(super) fn split_forward(forwarding: &ForwardingState, i: u16) -> SyncedSessionEntry {
     let mut entry = exported_forward(forwarding, Family::V4);
     entry.key.src_port = SPORT + i;
     entry.session_id = (1u64 << 48) | (19173 << 8) | u64::from(i);
     entry
 }
 
-fn split_pair(
+pub(super) fn split_pair(
     forwarding: &ForwardingState,
     ha: &BTreeMap<i32, HAGroupRuntime>,
     i: u16,
@@ -113,7 +118,7 @@ fn split_pair(
     [forward, reverse]
 }
 
-fn split_lan_ack(
+pub(super) fn split_lan_ack(
     bindings: &mut Vec<BindingWorker>,
     sessions: &mut SessionTable,
     forwarding: &ForwardingState,
@@ -148,12 +153,21 @@ fn split_lan_ack(
 #[test]
 #[ignore = "MEASUREMENT: #19173 re-import churn, split-RG non-owner; prints only"]
 fn reimport_churn_split_rg_19173() {
+    let (control, rounds) = split_rg_churn(FLOWS, ROUNDS);
+    report("split_rg", control, &rounds);
+}
+
+/// The split_rg procedure: `flows` imported pairs, every flow seeded into the
+/// LAN binding's cache, a control round with no re-import, then `rounds`
+/// rounds of (primary-liveness re-import of every pair, one LAN packet per
+/// flow). Returns the control round and the per-round tallies.
+pub(super) fn split_rg_churn(flows: u16, rounds_n: usize) -> (Round, Vec<Round>) {
     let forwarding = fw1_owner_forwarding();
     let ha = split_ha(monotonic_nanos() / 1_000_000_000);
     let mut sessions = SessionTable::new();
     sessions.set_forwarding_revalidation_gen(7, 9);
     let mut commands = Vec::new();
-    for i in 0..FLOWS {
+    for i in 0..flows {
         commands.extend(split_pair(&forwarding, &ha, i, SessionOrigin::SyncImport));
     }
     apply_commands(
@@ -162,24 +176,24 @@ fn reimport_churn_split_rg_19173() {
         &ha,
         commands.into_iter().map(WorkerCommand::UpsertSynced).collect(),
     );
-    assert_eq!(sessions.len(), 2 * FLOWS as usize, "fixture: every pair imported");
+    assert_eq!(sessions.len(), 2 * flows as usize, "fixture: every pair imported");
     let mut bindings = bindings();
     // Seed: the first LAN packet of each flow is fabric-redirected (TX on the
     // fabric binding) and seeds the cache.
     let mut fabric_tx = 0;
-    for i in 0..FLOWS {
+    for i in 0..flows {
         let tx = split_lan_ack(&mut bindings, &mut sessions, &forwarding, &ha, i);
         assert!(tx > fabric_tx, "premise: flow {i} is fabric-redirected");
         fabric_tx = tx;
     }
     let run_round = |sessions: &mut SessionTable, bindings: &mut Vec<BindingWorker>| {
         let (hits0, nr0, ev0) = tallies(&bindings[LAN].flow.flow_cache);
-        for i in 0..FLOWS {
+        for i in 0..flows {
             split_lan_ack(bindings, sessions, &forwarding, &ha, i);
         }
         let (hits1, nr1, ev1) = tallies(&bindings[LAN].flow.flow_cache);
         Round {
-            packets: u64::from(FLOWS),
+            packets: u64::from(flows),
             hits: hits1 - hits0,
             no_record_evictions: nr1 - nr0,
             evictions: ev1 - ev0,
@@ -187,11 +201,11 @@ fn reimport_churn_split_rg_19173() {
     };
     // Control: no re-import, every flow is served from the cache.
     let control = run_round(&mut sessions, &mut bindings);
-    assert_eq!(control.hits, u64::from(FLOWS), "premise: steady state is cache-served: {control:?}");
+    assert_eq!(control.hits, u64::from(flows), "premise: steady state is cache-served: {control:?}");
     let mut rounds = Vec::new();
-    for _ in 0..ROUNDS {
+    for _ in 0..rounds_n {
         let mut liveness = Vec::new();
-        for i in 0..FLOWS {
+        for i in 0..flows {
             liveness.extend(split_pair(&forwarding, &ha, i, SessionOrigin::SyncLiveness));
         }
         apply_commands(
@@ -200,10 +214,10 @@ fn reimport_churn_split_rg_19173() {
             &ha,
             liveness.into_iter().map(WorkerCommand::UpsertSynced).collect(),
         );
-        assert_eq!(sessions.len(), 2 * FLOWS as usize, "re-import keeps every pair");
+        assert_eq!(sessions.len(), 2 * flows as usize, "re-import keeps every pair");
         rounds.push(run_round(&mut sessions, &mut bindings));
     }
-    report("split_rg", control, &rounds);
+    (control, rounds)
 }
 
 // ---------------------------------------------------------------------------
@@ -273,13 +287,21 @@ fn local_apply(sessions: &mut SessionTable, forwarding: &ForwardingState, comman
 #[test]
 #[ignore = "MEASUREMENT: #19173 re-import churn, UpsertLocal refresh; prints only"]
 fn reimport_churn_upsert_local_19173() {
+    let (control, rounds) = upsert_local_churn(FLOWS, ROUNDS);
+    report("upsert_local", control, &rounds);
+}
+
+/// The upsert_local procedure: `flows` cache-backed rows, a control round,
+/// then `rounds` rounds of (`UpsertLocal` refresh of every row with no wire
+/// id, one segment per flow).
+pub(super) fn upsert_local_churn(flows: u16, rounds_n: usize) -> (Round, Vec<Round>) {
     let forwarding = build_forwarding_state(&nat_snapshot());
     let mut sessions = SessionTable::new();
     sessions.set_forwarding_revalidation_gen(7, 9);
     let mut binding = BindingWorker::new_for_mirror_test(0, 0, LOCAL_LAN_IFINDEX as i32, 0);
     binding.interface = Arc::<str>::from("reth1.0");
     let mut now_ns = monotonic_nanos();
-    for i in 0..FLOWS {
+    for i in 0..flows {
         let key = local_key(i);
         let flow = SessionFlow {
             src_ip: key.src_ip,
@@ -353,29 +375,29 @@ fn reimport_churn_upsert_local_19173() {
         ));
     }
     // Seed: first segment per flow takes the slow path and seeds.
-    for i in 0..FLOWS {
+    for i in 0..flows {
         now_ns += 1_000_000;
         local_send(&mut binding, &mut sessions, &forwarding, now_ns, i);
     }
     let run_round = |binding: &mut BindingWorker, sessions: &mut SessionTable, now_ns: &mut u64| {
         let (hits0, nr0, ev0) = tallies(&binding.flow.flow_cache);
-        for i in 0..FLOWS {
+        for i in 0..flows {
             *now_ns += 1_000_000;
             local_send(binding, sessions, &forwarding, *now_ns, i);
         }
         let (hits1, nr1, ev1) = tallies(&binding.flow.flow_cache);
         Round {
-            packets: u64::from(FLOWS),
+            packets: u64::from(flows),
             hits: hits1 - hits0,
             no_record_evictions: nr1 - nr0,
             evictions: ev1 - ev0,
         }
     };
     let control = run_round(&mut binding, &mut sessions, &mut now_ns);
-    assert_eq!(control.hits, u64::from(FLOWS), "premise: steady state is cache-served: {control:?}");
+    assert_eq!(control.hits, u64::from(flows), "premise: steady state is cache-served: {control:?}");
     let mut rounds = Vec::new();
-    for _ in 0..ROUNDS {
-        let refresh: Vec<WorkerCommand> = (0..FLOWS)
+    for _ in 0..rounds_n {
+        let refresh: Vec<WorkerCommand> = (0..flows)
             .map(|i| {
                 let mut entry = sessions.synced_entry_for(&local_key(i)).expect("row");
                 // The local-tunnel refresh carries no wire session id.
@@ -384,8 +406,8 @@ fn reimport_churn_upsert_local_19173() {
             })
             .collect();
         local_apply(&mut sessions, &forwarding, refresh);
-        assert_eq!(sessions.len(), FLOWS as usize, "refresh keeps every row");
+        assert_eq!(sessions.len(), flows as usize, "refresh keeps every row");
         rounds.push(run_round(&mut binding, &mut sessions, &mut now_ns));
     }
-    report("upsert_local", control, &rounds);
+    (control, rounds)
 }

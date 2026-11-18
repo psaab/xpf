@@ -730,6 +730,11 @@ mod tests_flow_cache_hit_bench_19173;
 #[cfg(test)]
 #[path = "tests_flow_cache_reimport_churn_19173.rs"]
 mod tests_flow_cache_reimport_churn_19173;
+// #19191: split-RG liveness re-imports keep cached redirected flows (the
+// identical-except-HA-resolution carry), its true twin, and the HA cells.
+#[cfg(test)]
+#[path = "tests_flow_cache_ha_resolution_carry_19191.rs"]
+mod tests_flow_cache_ha_resolution_carry_19191;
 #[cfg(test)]
 #[path = "tests_named_pre_l3_10498.rs"]
 mod tests_named_pre_l3_10498;

@@ -2386,8 +2386,16 @@ only while every one of these holds:
   (`UpsertSynced`, `UpsertLocal`, a local re-install) mints a new epoch
   unless it is an identical re-import of the same incarnation, which
   carries the old one (`replacement_keeps_incarnation`,
-  `session/install.rs`), and the probe refuses a stale incarnation before
-  any accounting (`ProbeHitVerdict::Replaced`, counted under the existing
+  `session/install.rs`), or (#19191) an HA import that differs from the row
+  only by this node's own current HA judgment: on a split-RG non-owner the
+  row keeps the `FabricRedirect` the slow path persisted, its validated
+  forwarding stamp and its epoch across the periodic liveness re-imports of
+  the raw local candidate (`ha_resolution_carry_applies`; the handler states
+  the judgment through `direct_arrival_rederivation`, which runs
+  `reresolve_stored_session`). A kept redirect is still fenced by every
+  check in this list on an HA or generation change (`docs/log/19191.md`).
+  The probe refuses a stale incarnation before any accounting
+  (`ProbeHitVerdict::Replaced`, counted under the existing
   `post_hit_session_dead_no_record` arm: a dedicated arm's extra counter
   slot shifted `FlowCache`/`BindingLiveState` and cost the whole
   established hit about 6 ns, so it was folded). In-place row updates

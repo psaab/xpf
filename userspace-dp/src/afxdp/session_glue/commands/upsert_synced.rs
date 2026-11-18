@@ -32,6 +32,42 @@ pub(in crate::afxdp) fn synced_source_nat_zone_pair<'a>(
     (!from.is_empty() && !to.is_empty()).then_some((from.as_str(), to.as_str()))
 }
 
+#[cfg(test)]
+thread_local! {
+    static HA_RESOLUTION_CARRY_DISABLED_19191: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+/// #19191 TRUE twin, test builds only: while the guard lives, THIS thread's
+/// HA import handler states no HA judgment, so every import installs exactly
+/// as under the #19173 rule (option B). Release builds have no switch.
+#[cfg(test)]
+pub(in crate::afxdp) struct HaResolutionCarryDisabledForTest(());
+
+#[cfg(test)]
+impl HaResolutionCarryDisabledForTest {
+    pub(in crate::afxdp) fn new() -> Self {
+        HA_RESOLUTION_CARRY_DISABLED_19191.with(|disabled| disabled.set(true));
+        Self(())
+    }
+}
+
+#[cfg(test)]
+impl Drop for HaResolutionCarryDisabledForTest {
+    fn drop(&mut self) {
+        HA_RESOLUTION_CARRY_DISABLED_19191.with(|disabled| disabled.set(false));
+    }
+}
+
+#[inline(always)]
+fn ha_resolution_carry_disabled_for_test() -> bool {
+    #[cfg(test)]
+    let disabled = HA_RESOLUTION_CARRY_DISABLED_19191.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    let disabled = false;
+    disabled
+}
+
 /// Apply `WorkerCommand::UpsertSynced`: re-resolve the synced
 /// forward session with local egress (regardless of HA state — #326),
 /// upsert into the session table, and publish the kernel session-map
@@ -69,6 +105,9 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     // neighbor fallback would reuse the peer's egress/MAC on NoRoute.
     let mut allow_replace_local =
         synced_entry_allows_local_replace(ha_state, entry.metadata.owner_rg_id, now_secs);
+    // #19191: this node's HA judgment of the import, stated below when the
+    // import stores an unenforced local candidate.
+    let mut local_ha_rederivation = None;
     if !entry.metadata.is_reverse {
         // #9752 round 3: resolve with the EFFECTIVE stamp. A (0,0) re-import
         // over a stamped stored entry is an old sender's resend, and the
@@ -135,6 +174,43 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
         }
         if re_resolved.disposition != ForwardingDisposition::HAInactive {
             entry.decision.resolution = re_resolved;
+        }
+        // #19191: on a node where the owner RG is not forwarding-active, the
+        // import stores the raw local candidate unenforced (above), while the
+        // slow path persists the HA-derived redirect into the row on its
+        // first packet (#12265 Owner-persist). Every periodic re-import
+        // (primary liveness, 1-10 s) then differed from the row by that
+        // judgment alone and minted a new install epoch, evicting every
+        // cached redirected flow once per interval. State the judgment, under
+        // THIS command's HA snapshot, so the install can keep the row's
+        // resolution when that is the only difference. Stated only for the
+        // raw lookup itself (not the #326 peer-candidate fallback) and only
+        // when it derives a FabricRedirect; the install checks the rest
+        // (`ha_resolution_carry_applies`).
+        if !is_active
+            && entry.decision.resolution == raw_resolved
+            && matches!(
+                raw_resolved.disposition,
+                ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+            )
+            && !ha_resolution_carry_disabled_for_test()
+        {
+            let derived = direct_arrival_rederivation(
+                forwarding,
+                ha_state,
+                dynamic_neighbors,
+                now_secs,
+                &key,
+                &entry.decision,
+                &entry.metadata,
+                raw_resolved,
+            );
+            if derived.disposition == ForwardingDisposition::FabricRedirect {
+                local_ha_rederivation = Some(crate::session::LocalHaRederivation {
+                    from: raw_resolved,
+                    to: derived,
+                });
+            }
         }
     }
     // #9951: a zero token carries no leak provenance and is recomputed locally
@@ -256,11 +332,16 @@ pub(in crate::afxdp::session_glue) fn handle_upsert_synced(
     }
     entry.persistent_lease_hold = persistent_hold_for_install;
     // #19173: the install stamps the leak incarnation itself, so its epoch
-    // carry can compare it with the replaced row's.
-    if sessions.upsert_synced_with_origin_and_leak(
+    // carry can compare it with the replaced row's. #19191: with this node's
+    // HA judgment, an import that differs from the row only by it keeps the
+    // row's resolution. The publish below still names `entry_decision`: the
+    // session-map row it writes depends on the resolution only through
+    // `LocalDelivery`, which neither a carried row nor its import holds.
+    if sessions.upsert_synced_import(
         entry.into_session_install(now_ns),
         allow_replace_local,
         leak_incarnation,
+        local_ha_rederivation,
     ) {
         // #18550: on the node that forwards this entry's owner RG
         // (`!allow_replace_local`: the owner RG is locally forwarding-active,

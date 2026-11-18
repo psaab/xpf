@@ -981,6 +981,22 @@ impl SessionTable {
         allow_replace_local: bool,
         leak_incarnation: u64,
     ) -> bool {
+        self.upsert_synced_import(req, allow_replace_local, leak_incarnation, None)
+    }
+
+    /// [`Self::upsert_synced_with_origin_and_leak`], with the HA import
+    /// handler's statement of this node's own HA judgment of the import
+    /// (#19191). With `Some`, an import that differs from the row it replaces
+    /// ONLY by that judgment keeps the row's resolution, its forwarding
+    /// stamp and its install epoch ([`ha_resolution_carry_applies`]); with
+    /// `None` the install is exactly the #19173 rule.
+    pub(crate) fn upsert_synced_import(
+        &mut self,
+        req: SessionInstall,
+        allow_replace_local: bool,
+        leak_incarnation: u64,
+        local_ha_rederivation: Option<LocalHaRederivation>,
+    ) -> bool {
         let SessionInstall {
             key,
             decision,
@@ -1373,6 +1389,25 @@ impl SessionTable {
                 persistent_lease_hold,
             },
         };
+        // #19191: an import that differs from the row it replaces only by
+        // this node's own HA judgment (the row holds the HA-derived
+        // FabricRedirect the slow path persisted, the import the raw local
+        // candidate it was derived from) keeps the row's resolution and its
+        // forwarding stamp. The compare below then sees the row's own
+        // resolution and decides the epoch on every other field.
+        let imported_resolution = record.entry.decision.resolution;
+        let carried_resolution = previous.as_ref().filter(|prev| {
+            ha_resolution_carry_applies(
+                prev,
+                &record.entry,
+                local_ha_rederivation.as_ref(),
+                self.forwarding_revalidation_gen,
+            )
+        });
+        if let Some(prev) = carried_resolution {
+            record.entry.decision.resolution = prev.decision.resolution;
+            record.entry.forwarding_generation = prev.forwarding_generation;
+        }
         // #19173 fold (r24 P3-1): a replacement whose forwarding inputs are
         // all equal to the replaced row's, under the same incarnation
         // identity, keeps that row's install epoch, so a flow-cache entry
@@ -1382,20 +1417,28 @@ impl SessionTable {
         // once per interval. Any other replacement mints a new epoch and
         // the fused probe refuses the old entry. Import time only; the hit
         // path still compares one u64.
-        record.entry.install_epoch = match previous.as_ref() {
-            Some(prev)
-                if replacement_keeps_incarnation(
-                    prev,
-                    previous_leak_incarnation,
-                    &record.entry,
-                    leak_incarnation,
-                    protocol,
-                    wire_session_id,
-                ) =>
-            {
-                prev.install_epoch
-            }
-            _ => self.next_epoch(),
+        let kept_epoch = previous.as_ref().and_then(|prev| {
+            replacement_keeps_incarnation(
+                prev,
+                previous_leak_incarnation,
+                &record.entry,
+                leak_incarnation,
+                protocol,
+                wire_session_id,
+            )
+            .then_some(prev.install_epoch)
+        });
+        if carried_resolution.is_some() && kept_epoch.is_none() {
+            // #19191: the import differs in a field other than the HA-derived
+            // resolution (NAT, installing table, metadata, identity, ...), so
+            // it is a new incarnation and installs its own decision,
+            // unvalidated, exactly as without the carry.
+            record.entry.decision.resolution = imported_resolution;
+            record.entry.forwarding_generation = ForwardingGenerationStamp::default();
+        }
+        record.entry.install_epoch = match kept_epoch {
+            Some(epoch) => epoch,
+            None => self.next_epoch(),
         };
         // #6297: route every slab insert through `insert_record` so the
         // live-extent high-watermark (the budgeted refresh walk's bound) is
@@ -1784,6 +1827,69 @@ pub(crate) fn same_install_incarnation(wire_session_id: u64, stored_session_id: 
     wire_session_id == 0 || stored_session_id == 0 || wire_session_id == stored_session_id
 }
 
+/// #19191: the HA import handler's statement of this node's own HA judgment
+/// of an import, for [`SessionTable::upsert_synced_import`].
+///
+/// On a node where the import's owner RG is not forwarding-active, the
+/// handler stores the raw local candidate unenforced (#326: ready at
+/// activation), while the slow path persists the HA-derived resolution into
+/// the row on its first packet (#12265 Owner-persist). This states both
+/// halves: `from` is the import's resolution, the raw local lookup itself;
+/// `to` is what the stored-session pipeline derives from it for an ordinary
+/// direct arrival under the HA state the handler ran with
+/// (`afxdp::session_glue::direct_arrival_rederivation`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LocalHaRederivation {
+    pub(crate) from: ForwardingResolution,
+    pub(crate) to: ForwardingResolution,
+}
+
+/// #19191: whether an import that would replace `previous` with `next` differs
+/// from it ONLY by this node's HA-derived resolution, so the row may keep its
+/// own resolution and forwarding stamp. The epoch is then decided by
+/// [`replacement_keeps_incarnation`] on the row with that resolution kept, so
+/// every other field (NAT, installing table, metadata, identity, origin, leak
+/// stamp, adoption mark, TCP state) must still be equal.
+///
+/// All of these must hold:
+/// - the handler stated a judgment, and it is about THIS import's resolution
+///   (`from` equals it, egress, next hop and MACs included);
+/// - HA class: `from` is a pre-HA local candidate (`ForwardCandidate` or
+///   `MissingNeighbor`), `to` is a `FabricRedirect`. Nothing else is ever
+///   kept, so the carry can keep a redirect but never a local forward, and
+///   `HAInactive` / `ClusterTerminalHAInactive` rows (never cached) are not
+///   carried;
+/// - `to` equals the row's resolution field for field (fabric egress and TX
+///   ifindex, peer MAC, source MAC, VLAN, MTUs): the HA state the handler ran
+///   with still derives exactly what the row holds;
+/// - the row's forwarding stamp is VALID and equals the table's current,
+///   valid generation: this node derived the row's resolution (slow-path
+///   persist, HA refresh or local install; nothing else stamps it) under the
+///   current config, FIB and neighbor generations. A default (never
+///   validated) or older stamp never carries a resolution difference. The
+///   import's raw egress and next hop are not compared with the row (the
+///   redirect no longer names them); under the same generation they are the
+///   same lookup of the same flow, NAT and installing table.
+fn ha_resolution_carry_applies(
+    previous: &SessionEntry,
+    next: &SessionEntry,
+    judgment: Option<&LocalHaRederivation>,
+    current_generation: ForwardingGenerationStamp,
+) -> bool {
+    let Some(judgment) = judgment else {
+        return false;
+    };
+    judgment.from == next.decision.resolution
+        && matches!(
+            judgment.from.disposition,
+            ForwardingDisposition::ForwardCandidate | ForwardingDisposition::MissingNeighbor
+        )
+        && judgment.to.disposition == ForwardingDisposition::FabricRedirect
+        && judgment.to == previous.decision.resolution
+        && current_generation.valid
+        && previous.forwarding_generation == current_generation
+}
+
 /// #19173 fold (r24 P3-1): whether a same-key replacement built by
 /// `upsert_synced_with_origin_and_leak` may keep the replaced row's
 /// `install_epoch`, the token a flow-cache entry binds at seed time and the
@@ -1835,7 +1941,11 @@ pub(crate) fn same_install_incarnation(wire_session_id: u64, stored_session_id: 
 ///   seeded from a slow path that validated the replaced row; with every
 ///   compared input equal, revalidating the replacement re-derives the same
 ///   verdict under the generations the entry's own `FlowCacheStamp` fences,
-///   exactly as an unreplaced row's stamp goes stale only under those fences;
+///   exactly as an unreplaced row's stamp goes stale only under those fences.
+///   (#19191: a row that keeps its HA-derived resolution keeps its
+///   `forwarding_generation` with it, see [`ha_resolution_carry_applies`];
+///   `next` already holds both when this runs, so the decision compare
+///   above sees the kept resolution.);
 /// - non-TCP `established`: the idle-class promotion bit (expiry only); a
 ///   re-import resets it for app-timeout UDP while the row was promoted in
 ///   place, so comparing it would mint on every such import;

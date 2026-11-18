@@ -1584,7 +1584,9 @@ with no TTL.
   `next_epoch` stamps at every local install and every
   `upsert_synced_with_origin` (both constructors of a row). It moves on
   every replacement that is a new incarnation or changes a forwarding
-  input; an IDENTICAL re-import keeps it (the epoch carry below). It is
+  input; an IDENTICAL re-import keeps it (the epoch carry below), and so
+  does one that differs only by this node's HA-derived resolution
+  (#19191, below). It is
   write-once per incarnation (#9856): no in-place writer
   (`refresh_in_place`, `demote_owner_rg`, the revalidation persists, the
   probe, `lookup_with_origin`) touches it. 0 is never minted, so it is
@@ -1619,17 +1621,40 @@ with no TTL.
     skip one.
     `current_epoch()` (the kick) does not move on a carry. Pinned by
     `identical_reimport_keeps_the_epoch_and_the_slot_19173`.
-  - **Where it does not engage.** On a split-RG non-owner the first
-    slow-path packet of a redirected flow persists the HA-derived
-    `FabricRedirect` into the row (#12265 Owner-persist,
-    `apply_deferred_forwarding_revalidation`), and every primary-liveness
-    re-import writes back the raw local `ForwardCandidate`. The decision
-    differs, so the compare mints and the redirected flow still pays one
-    slow-path packet per liveness interval (measured, `docs/log/19173.md`).
-    Carrying there needs a rule for the row's locally derived resolution,
-    which is an open design question (same log). Production TUN-origin
-    rows back no cache entry, so their `UpsertLocal` refresh cadence costs
-    no cache misses on any tree.
+  - **The split-RG non-owner: the HA resolution carry (#19191).** There
+    the first slow-path packet of a redirected flow persists the
+    HA-derived `FabricRedirect` into the row with a validated forwarding
+    stamp (#12265 Owner-persist, `apply_deferred_forwarding_revalidation`),
+    while every primary-liveness re-import writes back the raw local
+    `ForwardCandidate` (the handler stores it unenforced, #326). Under the
+    rule above alone the decision differs, the compare mints, and every
+    cached redirected flow paid one slow-path packet per liveness interval
+    (option B, measured 64 of 64 flows per round). `handle_upsert_synced`
+    now states this node's own HA judgment of the import
+    (`LocalHaRederivation`: the raw candidate `from`, and `to`, what
+    `reresolve_stored_session` derives from it for an ordinary direct
+    arrival under the command's HA snapshot) and installs through
+    `upsert_synced_import`. `ha_resolution_carry_applies` then lets the
+    replacing row keep the replaced row's resolution AND forwarding stamp
+    only when: `from` is exactly the import's resolution and a pre-HA
+    candidate (`ForwardCandidate` / `MissingNeighbor`); `to` is a
+    `FabricRedirect` equal, field for field, to the row's resolution; and
+    the row's stamp is valid and equal to the table's current, valid
+    generation (this node's own derivation; a default or older stamp
+    never carries). `replacement_keeps_incarnation` then runs on the row
+    with that resolution kept, so NAT, the installing table and every
+    other compared field must still be equal; if they are not, the import's
+    own resolution and a default stamp go back in and the install mints.
+    Only a redirect is ever kept, never a local forward, and only while
+    the import's own HA snapshot still derives it; every HA transition
+    fences the cache entry (RG epoch, lease, per-hit verdict) and rewrites
+    the row in place (RefreshOwnerRGS scans every peer-synced row,
+    DemoteOwnerRGS the demoted RG's), independent of the import. Measured
+    0 evictions per round (master 0, option B 64). The condition, the
+    stamp handling, the HA-safety trace and the cells:
+    `docs/log/19191.md`. Production TUN-origin rows back no cache entry,
+    so their `UpsertLocal` refresh cadence costs no cache misses on any
+    tree.
 - **Seed.** `stage_flow_cache_seed` stamps
   `FlowCacheEntry::backing_install_epoch` from
   `backing_install_epoch_for_cache_hit(key, now)`, after the packet's own
@@ -1674,7 +1699,8 @@ with no TTL.
   10 s], `pkg/cluster/sync.go`), TUN-origin `UpsertLocal` refreshes
   (every 1 s for UDP, 5 s for TCP; no cache-backed rows), sibling
   replication at flow setup and on promotion. On a split-RG non-owner
-  the liveness re-imports still mint (above).
+  the liveness re-imports keep the persisted redirect and carry (#19191,
+  above).
 
 In-place rewriters do not move the token; each relies on another fence:
 
@@ -1706,7 +1732,14 @@ count; the re-seed binds the replacing row; an identical `UpsertSynced` or
 `sessionless_seed_is_not_served_after_a_row_appears_19173` (a seed whose
 key resolved no row is refused once a row appears). The re-import churn
 measurement is `afxdp/tests_flow_cache_reimport_churn_19173.rs`.
-Numbers and the writer analysis: `docs/log/19173.md`.
+Numbers and the writer analysis: `docs/log/19173.md`. #19191's carry:
+`session/ha_resolution_carry_19191_tests.rs` (the carry keeps the
+redirect, stamp, epoch and slot; every other resolution difference and
+every non-resolution change mints and installs the import) and
+`afxdp/tests_flow_cache_ha_resolution_carry_19191.rs` (the 64-flow
+measurement as a cell with its true twin; activation before and after
+RefreshOwnerRGS, an import after activation, demote and re-carry, a
+generation change, a NAT change).
 
 ## Static input-filter revalidation stamp (#7212)
 

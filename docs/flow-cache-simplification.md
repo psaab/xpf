@@ -46,8 +46,10 @@ The current cache is still:
     epoch, the live HA/fabric verdict on the cached decision, and a live
     backing session that is the same incarnation the entry was seeded
     from (#19173: `backing_install_epoch` against the row's write-once
-    `install_epoch`; an identical re-import keeps the epoch, and a refused
-    replaced row is counted in `xpf_userspace_flow_cache_replaced_evictions_total`).
+    `install_epoch`; an identical re-import keeps the epoch, as does a
+    split-RG re-import that differs only by this node's HA-derived redirect
+    (#19191), and a refused replaced row is counted in
+    `xpf_userspace_flow_cache_replaced_evictions_total`).
     The full current list is in `userspace-dp/src/afxdp/README.md`, "What
     a flow-cache hit validates".
 

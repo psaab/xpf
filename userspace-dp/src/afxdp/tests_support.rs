@@ -4650,6 +4650,46 @@ pub(super) fn txn_run_multi_binding_with_shared_maps(
     config_generation: u64,
     neighbor_generation: u64,
 ) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
+    txn_run_multi_binding_with_rg_epochs(
+        bindings,
+        ingress_index,
+        sessions,
+        forwarding,
+        ha_state,
+        frame,
+        meta,
+        shared_sessions,
+        shared_nat_sessions,
+        shared_forward_wire_sessions,
+        shared_owner_rg_indexes,
+        config_generation,
+        neighbor_generation,
+        None,
+    )
+}
+
+/// As `txn_run_multi_binding_with_shared_maps`, with the worker's RG epoch
+/// array supplied by the caller (`None`: a fresh all-zero array, as before),
+/// so a cell can bump an RG's epoch between packets the way an HA
+/// transition does (`ha/state.rs`) and see the flow cache's epoch fence
+/// fire on a cache that persists across packets (#19191).
+#[expect(clippy::too_many_arguments, reason = "test harness")]
+pub(super) fn txn_run_multi_binding_with_rg_epochs(
+    bindings: &mut Vec<BindingWorker>,
+    ingress_index: usize,
+    sessions: &mut SessionTable,
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    frame: &[u8],
+    meta: UserspaceDpMeta,
+    shared_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_nat_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_forward_wire_sessions: &Arc<Mutex<FastMap<SessionKey, SyncedSessionEntry>>>,
+    shared_owner_rg_indexes: &SharedSessionOwnerRgIndexes,
+    config_generation: u64,
+    neighbor_generation: u64,
+    caller_rg_epochs: Option<&[AtomicU32; MAX_RG_EPOCHS]>,
+) -> (BatchCounters, DebugPollCounters, Option<Vec<u8>>) {
     let meta_len = std::mem::size_of::<UserspaceDpMeta>();
     let frame_offset = 128usize;
     let meta_offset = frame_offset - meta_len;
@@ -4695,7 +4735,8 @@ pub(super) fn txn_run_multi_binding_with_shared_maps(
     let last_resolution = Arc::new(Mutex::new(None));
     let peer_worker_commands: Vec<Arc<Mutex<VecDeque<WorkerCommand>>>> = Vec::new();
 
-    let rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
+    let fresh_rg_epochs: [AtomicU32; MAX_RG_EPOCHS] = std::array::from_fn(|_| AtomicU32::new(0));
+    let rg_epochs = caller_rg_epochs.unwrap_or(&fresh_rg_epochs);
     let pptp_control = Arc::new(crate::session::pptp_control::PptpControlInbox::default());
     let local_tunnel_deliveries: Arc<ArcSwap<BTreeMap<i32, LocalTunnelDelivery>>> =
         Arc::new(ArcSwap::from_pointee(BTreeMap::new()));
@@ -4724,7 +4765,7 @@ pub(super) fn txn_run_multi_binding_with_shared_maps(
         last_resolution: &last_resolution,
         peer_worker_commands: &peer_worker_commands,
         worker_commands_by_id: crate::afxdp::empty_worker_commands_by_id(),
-        rg_epochs: &rg_epochs,
+        rg_epochs,
         cold_path_sample_mask: 0xff,
     };
     let mut screen = ScreenState::new();

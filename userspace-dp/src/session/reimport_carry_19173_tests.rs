@@ -14,12 +14,12 @@ use crate::tcp_flags::{TCP_ACK, TCP_FIN, TCP_PSH};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::Arc;
 
-const SEC: u64 = 1_000_000_000;
+pub(super) const SEC: u64 = 1_000_000_000;
 /// The wire session id of the base row (a peer-minted id, nonzero).
-const WIRE_ID: u64 = (1 << 48) | 19173;
+pub(super) const WIRE_ID: u64 = (1 << 48) | 19173;
 
 /// The base re-import: an Established TCP peer import with a wire id.
-fn base(now: u64) -> SessionInstall {
+pub(super) fn base(now: u64) -> SessionInstall {
     SessionInstall {
         key: key_v4(),
         decision: decision(),
@@ -136,16 +136,15 @@ fn non_forwarding_differences_keep_the_epoch_19173() {
     assert_eq!(replace(with_counter(10 * SEC), 7, no_mark, next, 7), Token::Kept);
 }
 
-/// THE table: change one forwarding-relevant input per row; every row must
-/// mint a new epoch. Each row names the compared term it exercises, so a
-/// mutant that drops that term from `replacement_keeps_incarnation` reds the
-/// row with its name.
-#[test]
-fn any_forwarding_input_change_mints_a_new_epoch_19173() {
-    let now = 10 * SEC;
-    let v6 = |s: &str| s.parse::<Ipv6Addr>().expect("v6");
-    type Change = fn(&mut SessionInstall);
-    let rows: Vec<(&str, Change)> = vec![
+/// One forwarding-relevant change to a re-import.
+pub(super) type Change = fn(&mut SessionInstall);
+
+/// THE table's single-field changes: one compared input of the base re-import
+/// per row, named by the compared term it exercises. Shared with #19191's
+/// `ha_resolution_carry_19191_tests.rs`, which replays every row that is not
+/// a resolution field under the HA resolution carry.
+pub(super) fn forwarding_input_changes() -> Vec<(&'static str, Change)> {
+    vec![
         ("decision.resolution.disposition", |i: &mut SessionInstall| {
             i.decision.resolution.disposition = crate::afxdp::ForwardingDisposition::FabricRedirect
         }),
@@ -198,7 +197,18 @@ fn any_forwarding_input_change_mints_a_new_epoch_19173() {
         ("tcp close class (a stated wire close class)", |i: &mut SessionInstall| {
             i.tcp_close_class = TcpCloseClass::TimeWait.to_wire()
         }),
-    ];
+    ]
+}
+
+/// THE table: change one forwarding-relevant input per row; every row must
+/// mint a new epoch. Each row names the compared term it exercises, so a
+/// mutant that drops that term from `replacement_keeps_incarnation` reds the
+/// row with its name.
+#[test]
+fn any_forwarding_input_change_mints_a_new_epoch_19173() {
+    let now = 10 * SEC;
+    let v6 = |s: &str| s.parse::<Ipv6Addr>().expect("v6");
+    let rows = forwarding_input_changes();
     let mut kept = Vec::new();
     let mut checked = 0usize;
     for (name, change) in &rows {

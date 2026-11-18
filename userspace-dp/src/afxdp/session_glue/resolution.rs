@@ -865,6 +865,56 @@ pub(in crate::afxdp) fn reresolve_stored_session(
     }
 }
 
+/// #19191: what the slow path would persist (#12265 Owner-persist) for the
+/// row `decision` describes, on its first ordinary DIRECT arrival: a
+/// non-fabric, non-adopted packet outside the HA startup grace, whose stale
+/// forwarding stamp makes the hit re-resolve from `looked_up` (the
+/// cache-free lookup). It runs [`reresolve_stored_session`] itself, so it
+/// cannot drift from the packet path; only the arrival facts are fixed.
+///
+/// The HA import handler states the result to the install
+/// (`LocalHaRederivation`) when it stores an unenforced local candidate. An
+/// arrival that differs from this one (a fabric or adopted arrival, a tunnel
+/// ingress in the startup grace) can persist something else; the install
+/// then finds the row unequal to this derivation and does not carry, which
+/// costs one re-seed, never a wrong decision.
+#[expect(clippy::too_many_arguments, reason = "#17200: wide dataplane signature; census in docs/log/17200.md")]
+pub(in crate::afxdp) fn direct_arrival_rederivation(
+    forwarding: &ForwardingState,
+    ha_state: &BTreeMap<i32, HAGroupRuntime>,
+    dynamic_neighbors: &Arc<ShardedNeighborMap>,
+    now_secs: u64,
+    key: &SessionKey,
+    decision: &SessionDecision,
+    metadata: &SessionMetadata,
+    looked_up: ForwardingResolution,
+) -> ForwardingResolution {
+    let flow = SessionFlow {
+        src_ip: key.src_ip,
+        dst_ip: key.dst_ip,
+        forward_key: key.clone(),
+    };
+    reresolve_stored_session(
+        forwarding,
+        ha_state,
+        dynamic_neighbors,
+        now_secs,
+        decision,
+        metadata,
+        key,
+        resolution_target_for_session(&flow, *decision),
+        looked_up,
+        FabricArrival::Packet {
+            fabric_ingress: false,
+            fabric_link_ingress: false,
+            ingress_ifindex: metadata.ingress_ifindex as i32,
+            ha_startup_grace_until_secs: 0,
+            fabric_adopted: false,
+            adopted_recovery: None,
+        },
+    )
+}
+
 /// RI-scoped re-home (round-5): the connected-interface test runs
 /// in the session's installing table.
 ///

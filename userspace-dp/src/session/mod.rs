@@ -1151,6 +1151,8 @@ pub(crate) use handshake_relay::{
 // #7342: the read path's close/promotion signal bundle, applied to the
 // forward<->reverse companion by `propagate_tcp_state_to_companion` below.
 pub(crate) use lookup::{ExportWalkOutcome, ForwardNatMatchLookup, SeqVerdict};
+// #19191: the HA import handler's statement for `upsert_synced_import`.
+pub(crate) use install::LocalHaRederivation;
 #[cfg(test)]
 pub(crate) use install::PMechInstallPlan;
 #[cfg(test)]
@@ -8945,6 +8947,12 @@ mod cache_incarnation_19173_tests;
 #[cfg(test)]
 #[path = "reimport_carry_19173_tests.rs"]
 mod reimport_carry_19173_tests;
+
+// #19191: an import that differs from the row only by this node's HA-derived
+// resolution keeps the row's resolution, stamp and epoch; nothing else does.
+#[cfg(test)]
+#[path = "ha_resolution_carry_19191_tests.rs"]
+mod ha_resolution_carry_19191_tests;
 
 // #18780: bounded per-call expiry work (reap/pop budget + backlog
 // continuation) and lazy node-served evidence on the expire pass.
