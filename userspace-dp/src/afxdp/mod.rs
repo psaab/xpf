@@ -786,6 +786,12 @@ mod tests_split_rg_failback_18531;
 #[path = "tests_split_new_flow_19178.rs"]
 mod tests_split_new_flow_19178;
 #[cfg(test)]
+#[path = "tests_pbr_peer_owned_19171.rs"]
+mod tests_pbr_peer_owned_19171;
+#[cfg(test)]
+#[path = "tests_more_specific_route_19171.rs"]
+mod tests_more_specific_route_19171;
+#[cfg(test)]
 #[path = "tests_lan_owner_idle_import_18691.rs"]
 mod tests_lan_owner_idle_import_18691;
 #[cfg(test)]

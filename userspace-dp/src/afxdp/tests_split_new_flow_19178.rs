@@ -126,9 +126,11 @@ fn admit(v6: bool, permit: Permit, peer_owned: bool) -> Admission {
     }
 }
 
-/// RED on the base. With only `wan -> lan` permitted, the split node admits the
-/// new flow (it was judged WAN -> LAN) and sends it to the LAN owner over the
-/// fabric (`ge-0/0/0`, ifindex 21). The base judged it WAN -> WAN and denied it.
+/// RED on the base. With only `wan -> lan` permitted, the split node does not
+/// policy-judge the new flow (it becomes a fabric redirect, which local transit
+/// admission never judges) and sends it to the LAN owner over the fabric
+/// (`ge-0/0/0`, ifindex 21); the owner judges it WAN -> LAN (the joined cells
+/// below). The base judged it WAN -> WAN here and denied it.
 #[test]
 fn split_new_flow_to_a_peer_owned_server_is_judged_in_its_zone_and_crosses_the_fabric_19178() {
     for v6 in [false, true] {
@@ -139,7 +141,7 @@ fn split_new_flow_to_a_peer_owned_server_is_judged_in_its_zone_and_crosses_the_f
                 policy_deny: 0,
                 forwards: vec![(ForwardingDisposition::FabricRedirect, 21)],
             },
-            "v6={v6}: admitted as WAN -> LAN and fabric-redirected to the owner"
+            "v6={v6}: not denied here; fabric-redirected to the owner"
         );
     }
 }
@@ -252,5 +254,144 @@ fn owner_new_flow_to_its_lan_server_is_delivered_locally_19178() {
             },
             "v6={v6}: delivered locally on the LAN"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// codex-e P3-2: the two halves JOINED by the producer's real frame. The split
+// node's redirected SYN is captured as transmitted and fed, unmodified, to the
+// owner, so the fabric stamp it carries is what the owner judges by.
+// ---------------------------------------------------------------------------
+
+/// The fabric MAC the split node addresses its redirects to
+/// (`nat_snapshot_with_fabric`'s peer): the owner's own fabric MAC.
+const OWNER_FABRIC_MAC: [u8; 6] = [0x00, 0xaa, 0xbb, 0xcc, 0xdd, 0xee];
+
+fn three_bindings() -> Vec<BindingWorker> {
+    let mut wan = BindingWorker::new_for_mirror_test(0, 0, 12, 0);
+    wan.interface = Arc::<str>::from("ge-0-0-0.80");
+    let mut fabric = BindingWorker::new_for_mirror_test(1, 0, 21, 0);
+    fabric.interface = Arc::<str>::from("ge-0-0-0");
+    let mut lan = BindingWorker::new_for_mirror_test(2, 0, 24, 0);
+    lan.interface = Arc::<str>::from("ge-0-0-1");
+    vec![wan, fabric, lan]
+}
+
+fn tx(bindings: &[BindingWorker]) -> [u64; 3] {
+    let tx = |b: &BindingWorker| b.live.tx_packets.load(std::sync::atomic::Ordering::Relaxed);
+    [tx(&bindings[0]), tx(&bindings[1]), tx(&bindings[2])]
+}
+
+/// The split node's redirected SYN, as transmitted on the fabric binding.
+fn split_redirected_frame(v6: bool, permit: Permit) -> Vec<u8> {
+    let forwarding = build_forwarding_state(&snapshot(permit, true));
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, rg(true, now_secs)), (2, rg(false, now_secs))]);
+    let (frame, mut meta) = if v6 {
+        let frame = build_txn_tcp_frame_v6(WAN_CLIENT6, LAN_SERVER6, 40000, 443, TCP_FLAG_SYN, WAN_UNIT_MAC);
+        let mut meta = txn_meta_v6(12, frame.len());
+        meta.flow_src_addr = WAN_CLIENT6.octets();
+        meta.flow_dst_addr = LAN_SERVER6.octets();
+        (frame, meta)
+    } else {
+        let frame =
+            build_txn_tcp_syn_frame_v4(WAN_CLIENT4, LAN_SERVER4, 40000, 443, TCP_FLAG_SYN, WAN_UNIT_MAC);
+        let mut meta = txn_meta_v4(12, TCP_FLAG_SYN, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&WAN_CLIENT4.octets());
+        meta.flow_dst_addr[..4].copy_from_slice(&LAN_SERVER4.octets());
+        (frame, meta)
+    };
+    meta.ingress_vlan_id = 80;
+    meta.flow_src_port = 40000;
+    meta.flow_dst_port = 443;
+    let mut bindings = three_bindings();
+    let mut sessions = SessionTable::new();
+    let shared = Arc::new(Mutex::new(FastMap::default()));
+    let (_batch, _dbg, egress) = txn_run_multi_binding_at_generations(
+        &mut bindings, 0, &mut sessions, &forwarding, &ha_state, &frame, meta, &shared, 7, 1,
+    );
+    assert_eq!(tx(&bindings), [0, 1, 0], "v6={v6}: the split node sends it only over the fabric");
+    let egress = egress.expect("the redirected frame is captured");
+    let [_, _, hi, lo] = forwarding.zone_name_to_id["wan"].to_be_bytes();
+    assert_eq!(
+        egress[6..12],
+        [0x02, 0xbf, 0x72, FABRIC_ZONE_MAC_MAGIC, hi, lo],
+        "v6={v6}: the producer stamps the WAN zone, the arrival zone"
+    );
+    assert_eq!(egress[0..6], OWNER_FABRIC_MAC, "v6={v6}: addressed to the owner's fabric MAC");
+    egress
+}
+
+/// The owner receiving that frame verbatim on its fabric binding. Its own
+/// fabric MAC is the one the split node addressed. `owner_active` false is
+/// the anti-loop view: the receiver does not own the LAN RG either.
+fn owner_receives(frame: &[u8], v6: bool, permit: Permit, owner_active: bool) -> (u64, [u64; 3]) {
+    let mut snapshot = snapshot(permit, !owner_active);
+    for fabric in &mut snapshot.fabrics {
+        fabric.local_mac = "00:aa:bb:cc:dd:ee".to_string();
+        fabric.peer_mac = "02:bf:72:ff:00:01".to_string();
+    }
+    for iface in &mut snapshot.interfaces {
+        if iface.ifindex == 21 {
+            iface.hardware_addr = "00:aa:bb:cc:dd:ee".to_string();
+        }
+    }
+    let forwarding = build_forwarding_state(&snapshot);
+    let now_secs = monotonic_nanos() / 1_000_000_000;
+    let ha_state = BTreeMap::from([(1, rg(false, now_secs)), (2, rg(owner_active, now_secs))]);
+    let mut meta = if v6 {
+        let mut meta = txn_meta_v6(21, frame.len());
+        meta.flow_src_addr = WAN_CLIENT6.octets();
+        meta.flow_dst_addr = LAN_SERVER6.octets();
+        meta
+    } else {
+        let mut meta = txn_meta_v4(21, TCP_FLAG_SYN, frame.len() as u16);
+        meta.flow_src_addr[..4].copy_from_slice(&WAN_CLIENT4.octets());
+        meta.flow_dst_addr[..4].copy_from_slice(&LAN_SERVER4.octets());
+        meta
+    };
+    meta.tcp_flags = TCP_FLAG_SYN;
+    meta.flow_src_port = 40000;
+    meta.flow_dst_port = 443;
+    let mut bindings = three_bindings();
+    let mut sessions = SessionTable::new();
+    let shared = Arc::new(Mutex::new(FastMap::default()));
+    let (_batch, dbg, _egress) = txn_run_multi_binding_at_generations(
+        &mut bindings, 1, &mut sessions, &forwarding, &ha_state, frame, meta, &shared, 7, 1,
+    );
+    (dbg.policy_deny, tx(&bindings))
+}
+
+/// Joined: the owner admits the split node's real redirected SYN as WAN -> LAN
+/// (only `wan -> lan` permits) and delivers it on its LAN.
+#[test]
+fn joined_owner_admits_the_redirected_new_flow_by_its_stamp_19178() {
+    for v6 in [false, true] {
+        let frame = split_redirected_frame(v6, Permit::WanToLan);
+        let (deny, tx) = owner_receives(&frame, v6, Permit::WanToLan, true);
+        assert_eq!((deny, tx), (0, [0, 0, 1]), "v6={v6}: admitted WAN -> LAN, delivered on the LAN");
+    }
+}
+
+/// Joined: with only `wan -> wan` permitted, the owner denies the real
+/// redirected SYN, because its stamp makes it WAN -> LAN.
+#[test]
+fn joined_owner_denies_the_redirected_new_flow_when_only_wan_to_wan_permits_19178() {
+    for v6 in [false, true] {
+        let frame = split_redirected_frame(v6, Permit::WanToWan);
+        let (deny, tx) = owner_receives(&frame, v6, Permit::WanToWan, true);
+        assert!(deny > 0 && tx == [0, 0, 0], "v6={v6}: denied, nothing sent: deny={deny} tx={tx:?}");
+    }
+}
+
+/// Joined anti-loop: a receiver that does not own the LAN RG either (a
+/// transient split view on both nodes) refuses the redirected SYN. It never
+/// sends it back over the fabric, nor out its LAN.
+#[test]
+fn joined_inactive_receiver_refuses_the_redirected_new_flow_19178() {
+    for v6 in [false, true] {
+        let frame = split_redirected_frame(v6, Permit::WanToLan);
+        let (_deny, tx) = owner_receives(&frame, v6, Permit::WanToLan, false);
+        assert_eq!(tx, [0, 0, 0], "v6={v6}: refused, never bounced");
     }
 }

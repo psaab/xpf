@@ -15484,3 +15484,75 @@ fn coordinator_recovery_publish_advances_pptp_epoch_15966r7() {
         0
     );
 }
+
+/// #19171 fold 1 (codex-e P3-1): a shared destination under a connected /24
+/// (on egress 82) that a more specific /32 serves through a gateway on egress
+/// 80. The warm pass used to call it DIRECT because some connected row covers
+/// it, and probed the destination itself on the session's stored egress, 80,
+/// an unrelated interface. Resolved in its table, the answer is the /32 via
+/// 172.16.90.1, so only that gateway is warmed.
+#[test]
+fn queue_warm_pass_never_probes_a_destination_on_an_unrelated_interface_19171() {
+    let (mut coord, rx) = warm_test_coordinator(2);
+    coord.forwarding.egress.insert(
+        82,
+        EgressInterface {
+            bind_ifindex: 82,
+            vlan_id: 0,
+            mtu: 1500,
+            src_mac: [0; 6],
+            zone_id: 0,
+            redundancy_group: 1,
+            primary_v4: None,
+            primary_v6: None,
+        },
+    );
+    for (cidr, host, ifindex) in [
+        ("172.16.80.0/24", Ipv4Addr::new(172, 16, 80, 8), 82),
+        ("172.16.90.0/24", Ipv4Addr::new(172, 16, 90, 8), 80),
+    ] {
+        coord.forwarding.connected_v4.push(crate::afxdp::ConnectedRouteV4 {
+            prefix: PrefixV4::from_net(cidr.parse().unwrap()),
+            host,
+            ifindex,
+            tunnel_endpoint_id: 0,
+            table: "inet.0".to_string(),
+        });
+    }
+    coord.forwarding.connected_v4.sort_by(|a, b| b.prefix.prefix_len().cmp(&a.prefix.prefix_len()));
+    coord
+        .forwarding
+        .routes_v4
+        .get_mut("inet.0")
+        .expect("FIXTURE: inet.0")
+        .insert(
+            0,
+            RouteEntryV4::single(
+                PrefixV4::from_net("172.16.80.200/32".parse().unwrap()),
+                80,
+                0,
+                Some(Ipv4Addr::new(172, 16, 90, 1)),
+                false,
+                String::new(),
+                5,
+            ),
+        );
+    let mut key = f4_key();
+    key.dst_ip = "172.16.80.200".parse().unwrap();
+    let mut entry = import_entry_9718(&key, 4101);
+    entry.decision.resolution.egress_ifindex = 80;
+    lock_shared_recover(&coord.sessions.synced).insert(key, entry);
+    coord.queue_warm_pass(false);
+    let mut items: Vec<(i32, IpAddr)> = Vec::new();
+    while let Ok(item) = rx.try_recv() {
+        items.push((item.ifindex, item.hop));
+    }
+    assert!(
+        !items.iter().any(|(_, hop)| *hop == IpAddr::V4(Ipv4Addr::new(172, 16, 80, 200))),
+        "the /32-served destination is not direct: never probed itself, got {items:?}"
+    );
+    assert!(
+        items.contains(&(80, IpAddr::V4(Ipv4Addr::new(172, 16, 90, 1)))),
+        "its gateway is warmed on the /32's egress, got {items:?}"
+    );
+}

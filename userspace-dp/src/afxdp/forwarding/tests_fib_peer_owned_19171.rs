@@ -7,7 +7,7 @@
 
 use super::super::forwarding_build::*;
 use super::super::test_fixtures::*;
-use super::tests_split_rg_gateway_18517::{address, find_route_v4, route, split_node_snapshot};
+use super::tests_split_rg_gateway_18517::{address, find_route_v4, find_route_v6, route, split_node_snapshot};
 use super::*;
 use crate::InterfaceSnapshot;
 
@@ -263,4 +263,48 @@ fn leak_target_claimed_only_by_a_peer_owned_prefix_resolves_its_unit_19171() {
         ) && answer.egress_ifindex == 34,
         "the leak target's peer-owned connected prefix answers, got {answer:?}"
     );
+}
+
+/// Census row 4, the IPv6 link-local edge (codex-e). A bare link-local gateway
+/// binds only when the table's universe-scope v6 rows collapse to ONE egress.
+/// Peer-owned rows now count, so the split node binds exactly as the owner
+/// node does:
+/// - two candidates (LAN and WAN v6 rows): ambiguous on both;
+/// - one candidate (the LAN v6 address removed): the WAN unit on both.
+///
+/// Before #19171 the split node, blind to its peer-owned WAN row, bound the
+/// LAN uniquely in the first shape and nothing in the second.
+#[test]
+fn link_local_gateway_binds_on_the_split_node_as_on_the_owner_19171() {
+    for one_candidate in [false, true] {
+        let build = |split: bool| {
+            let mut snapshot = if split { split_node_snapshot() } else { nat_snapshot_with_fabric() };
+            if one_candidate {
+                for iface in &mut snapshot.interfaces {
+                    if iface.name == "reth1.0" {
+                        iface.addresses.retain(|a| a.family != "inet6");
+                    }
+                }
+            }
+            snapshot
+                .routes
+                .push(route("inet6", "inet6.0", "2001:db8:40::/48", &["fe80::1"], 5));
+            let state = build_forwarding_state(&snapshot);
+            find_route_v6(&state, "inet6.0", "2001:db8:40::/48")
+                .next_hops
+                .iter()
+                .map(|nh| nh.ifindex)
+                .collect::<Vec<_>>()
+        };
+        let (split, owner) = (build(true), build(false));
+        assert_eq!(split, owner, "one_candidate={one_candidate}: the split node binds as the owner does");
+        if one_candidate {
+            assert_eq!(split, vec![12], "the single candidate is the (peer-owned) WAN unit");
+        } else {
+            assert!(
+                split.iter().all(|ifindex| *ifindex == 0),
+                "two candidates are ambiguous: no egress is bound, got {split:?}"
+            );
+        }
+    }
 }
